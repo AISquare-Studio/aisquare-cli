@@ -231,7 +231,60 @@ def test_migrations_reach_the_current_schema_version() -> None:
         version = raw.execute("PRAGMA user_version").fetchone()[0]
     finally:
         raw.close()
-    assert version == SCHEMA_VERSION == 14  # v11 fleet, v12 metric, v13 converges, v14 forgotten_at
+    # v11 fleet, v12 metric, v13 converges, v14 forgotten_at, v15 persona
+    assert version == SCHEMA_VERSION == 15
+
+
+def test_a_v14_store_upgrades_to_v15_with_nullable_persona_columns() -> None:
+    """P2's step (docs/plans/spawn-personas.md §7): rows that existed at v14 survive,
+    both tables gain a ``persona`` that reads NULL, and a start that names no
+    persona keeps the one a row already records."""
+    from datetime import UTC, datetime
+
+    from aisquare.models import TeamSession
+
+    db = _at_version(14)
+    raw = sqlite3.connect(str(db))
+    try:
+        raw.execute(
+            "INSERT INTO team_session (id, project_id, started_at, last_seen_at) "
+            "VALUES ('sess-old', 'prj_old', '2026-01-01T00:00:00+00:00', "
+            "'2026-01-01T00:00:00+00:00')"
+        )
+        raw.execute(
+            "INSERT INTO fleet_agent (id, project_id, label, role, pane_id, cwd, created_at) "
+            "VALUES ('agt_old', 'prj_old', 'coder-1', 'coder', '%1', '/tmp', "
+            "'2026-01-01T00:00:00+00:00')"
+        )
+        raw.commit()
+    finally:
+        raw.close()
+
+    store = open_store()
+    try:
+        old_session = store.get_session("sess-old")
+        old_agent = store.get_fleet_agent("agt_old")
+        now = datetime(2026, 9, 15, tzinfo=UTC)
+        fresh = TeamSession(id="sess-new", project_id="prj_old", started_at=now, last_seen_at=now)
+        store.upsert_session(fresh.model_copy(update={"persona": "skeptic"}))
+        restarted = store.upsert_session(fresh)
+    finally:
+        store.close()
+
+    raw = sqlite3.connect(str(db))
+    try:
+        version = raw.execute("PRAGMA user_version").fetchone()[0]
+        nullable = {
+            table: {row[1]: row[3] for row in raw.execute(f"PRAGMA table_info({table})")}
+            for table in ("team_session", "fleet_agent")
+        }
+    finally:
+        raw.close()
+    assert version == SCHEMA_VERSION
+    assert nullable["team_session"]["persona"] == 0 and nullable["fleet_agent"]["persona"] == 0
+    assert old_session is not None and old_session.persona is None
+    assert old_agent is not None and old_agent.persona is None
+    assert restarted.persona == "skeptic"
 
 
 def test_the_metric_check_constraints_mirror_the_python_vocabularies() -> None:

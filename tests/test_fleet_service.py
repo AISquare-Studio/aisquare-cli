@@ -488,6 +488,87 @@ def test_spawn_manager_builds_the_launch_command_and_records_the_row(
         assert store.fleet_agent_by_label(project.id, "manager") == agent
 
 
+def test_spawn_with_a_persona_carries_it_to_launch_and_records_it(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    receipt = fleet_service.spawn(project, "tester", persona="skeptic")
+
+    command = _command(tmux)
+    assert command[4:6] == ["launch", "tester"]
+    assert _flag(command, "--persona") == "skeptic"
+    assert command.index("--persona") < command.index("--name")
+    assert receipt.agent.persona == "skeptic"
+    assert receipt.notes == []
+    with store_session() as store:
+        stored = store.fleet_agent_by_label(project.id, receipt.agent.label)
+    assert stored is not None and stored.persona == "skeptic"
+
+
+def test_spawn_without_a_persona_passes_no_flag_and_records_none(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    receipt = fleet_service.spawn(project, "tester")
+
+    assert "--persona" not in _command(tmux)
+    assert receipt.agent.persona is None
+
+
+def test_spawn_refuses_an_unknown_persona_before_any_window_worktree_or_row(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    with pytest.raises(fleet_service.FleetError) as caught:
+        fleet_service.spawn(project, "coder", persona="nope")
+
+    assert "known: careful, mentor, minimalist, skeptic" in str(caught.value)
+    assert tmux.spawned == []
+    assert not (project.root / ".aisquare-worktrees").exists()
+    with store_session() as store:
+        assert store.fleet_agents(project.id, live_only=False) == []
+
+
+def test_spawn_uses_the_roles_default_persona_and_a_flag_beats_it(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from aisquare.core.config import FleetRoleSettings
+
+    _settings(monkeypatch, roles={"coder": FleetRoleSettings(persona="minimalist")})
+
+    by_default = fleet_service.spawn(project, "coder")
+    by_flag = fleet_service.spawn(project, "coder", persona="careful")
+
+    assert _flag(_command(tmux, 0), "--persona") == "minimalist"
+    assert by_default.agent.persona == "minimalist" and by_default.notes == []
+    assert _flag(_command(tmux, 1), "--persona") == "careful"
+    assert by_flag.agent.persona == "careful" and by_flag.notes == []
+
+
+def test_a_stale_default_persona_refuses_naming_the_config_key(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from aisquare.core.config import FleetRoleSettings
+
+    _settings(monkeypatch, roles={"coder": FleetRoleSettings(persona="retired")})
+
+    with pytest.raises(fleet_service.FleetError) as caught:
+        fleet_service.spawn(project, "coder")
+
+    assert "[fleet.roles.coder].persona = 'retired'" in str(caught.value)
+    assert "known: careful, mentor, minimalist, skeptic" in str(caught.value)
+    assert tmux.spawned == []
+
+
+def test_a_persona_written_for_other_roles_is_a_receipt_note_never_a_refusal(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    receipt = fleet_service.spawn(project, "coder", worktree=False, persona="skeptic")
+
+    assert receipt.agent.persona == "skeptic"
+    assert receipt.notes == [
+        "persona skeptic is written for tester, reviewer, runner, not coder — "
+        "spawned with it anyway"
+    ]
+
+
 def test_spawn_with_an_account_carries_the_callers_environment_into_the_window(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:

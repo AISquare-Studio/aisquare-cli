@@ -23,6 +23,7 @@ from __future__ import annotations
 import os
 import re
 import shutil
+from pathlib import Path
 from typing import Annotated
 
 import typer
@@ -30,9 +31,11 @@ from rich.text import Text
 
 from aisquare.cli.common import fail
 from aisquare.core import claude_accounts as claude_accounts_core
-from aisquare.core import harness
+from aisquare.core import harness, personas
 from aisquare.core.config import load_config
 from aisquare.core.console import stderr_console
+from aisquare.core.workspace import git_common_root
+from aisquare.models import ProjectInfo
 from aisquare.services import claude_accounts as claude_accounts_service
 from aisquare.services import explainability as explainability_service
 from aisquare.services import explainability_ops
@@ -88,6 +91,20 @@ def _role_ok(role: str) -> bool:
     return role in ROLES or bool(_SEAT.match(role)) or role in _declared_roles()
 
 
+def _check_persona(name: str, project: ProjectInfo | None) -> None:
+    """Refuse a persona this project cannot resolve, before anything starts (§3.7).
+
+    The project's root is the board's; with no board row (an unreadable store) it
+    is the git repository around the working directory, as ``aisquare persona``
+    reads it.
+    """
+    root = project.root if project is not None else git_common_root(Path.cwd())
+    try:
+        personas.resolve(name, root)
+    except personas.PersonaError as exc:
+        fail(str(exc), error="unknown_persona", ref=name)
+
+
 def _exec(binary: str, argv: list[str], env: dict[str, str]) -> None:
     """Replace this process with the agent (indirection so tests can intercept)."""
     os.execve(binary, argv, env)
@@ -128,6 +145,15 @@ def launch(
             "in as (see `aisquare accounts`). Sets CLAUDE_CONFIG_DIR and CLAUDE_CODE_TMPDIR "
             "over the role's binding.",
             metavar="SLOT",
+        ),
+    ] = None,
+    persona: Annotated[
+        str | None,
+        typer.Option(
+            "--persona",
+            help="Persona this session runs as (see `aisquare persona list`): exported as "
+            "AISQUARE_PERSONA and briefed once, at session start.",
+            metavar="NAME",
         ),
     ] = None,
 ) -> None:
@@ -185,7 +211,15 @@ def launch(
             style="dim",
         )
 
+    if persona is not None:
+        _check_persona(persona, project)
+
     env = {**os.environ, "AISQUARE_ROLE": role}
+    if persona is not None:
+        # The name travels, never the body: argv is visible in `ps` and a body
+        # can be thousands of characters. The session-start hook resolves it and
+        # renders the briefing (docs/plans/spawn-personas.md §3.2).
+        env["AISQUARE_PERSONA"] = persona
     # The role's bound spec plus this launch's overrides, carried verbatim.
     # Resolved even with no flag, so a bound role launches correctly without
     # the operator remembering to say anything.

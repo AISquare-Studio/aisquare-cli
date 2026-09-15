@@ -179,15 +179,17 @@ aisquare fleet spawn manager
 aisquare fleet spawn coder --label coder-auth --task tsk_01k9q8p3
 aisquare fleet spawn tester --no-worktree
 aisquare fleet spawn reviewer --permission-mode acceptEdits
+aisquare fleet spawn coder --persona skeptic
 aisquare fleet spawn coder --bin claude2 --prompt "start from the failing test" -- --model opus
 ```
 
 Starts an agent in the project's tmux session — a window running
 `aisquare launch <role> …` — with the role's permission flags and a session id
 minted *before* launch, records it, and prints a receipt:
-`✓ spawned coder-auth (agt_…) → asq-amber-otter %7`. Anything the receipt
-should tell you — a label that had to be suffixed, a worktree or branch that
-already existed, an agent that did not come up before its prompt was typed —
+`✓ spawned coder-auth (agt_…) → asq-amber-otter %7`, ending `· persona skeptic`
+when the agent runs as one. Anything the receipt should tell you — a label that
+had to be suffixed, a worktree or branch that already existed, an agent that did
+not come up before its prompt was typed, a persona written for other roles —
 follows as a `⚠` line.
 
 | Flag | Meaning | Default |
@@ -199,14 +201,18 @@ follows as a `⚠` line.
 | `--permission-mode M` | Claude Code permission mode | the role's setting: `auto` |
 | `--bin B` | the agent executable | the role's binding, else `claude` |
 | `--prompt TEXT` | first message typed once the agent is up | none |
+| `--persona NAME` | the persona the agent runs as ([docs/personas.md](personas.md)): passed to `launch`, briefed once at session start, recorded on the row | the role's `[fleet.roles.<role>].persona`, else none |
 | `--as SESSION` | the acting session — a manager passes its own, so the row records who spawned it | `user` |
 | `-- <agent args>` | everything after the options goes to the agent, as with `aisquare launch` | — |
 
 Refused, with the reason in the message: a second `manager`, more agents than
 `max_agents_per_project`, `--worktree` in a project that is not a git
-repository, an unknown role. A known role is one of `aisquare launch`'s roles, a
-numbered seat of one (`coder2`), or a role bound with `team bind` — the same rule
-`aisquare launch` applies, public as `services.fleet.role_ok`.
+repository, an unknown role, a persona the project does not have (the known
+names are listed; a stale `[fleet.roles.<role>].persona` default names its key).
+All of these are checked before any window exists. A known role is one of
+`aisquare launch`'s roles, a numbered seat of one (`coder2`), or a role bound with
+`team bind` — the same rule `aisquare launch` applies, public as
+`services.fleet.role_ok`.
 
 ### `fleet ls` / `fleet status`
 
@@ -216,7 +222,7 @@ aisquare fleet ls --all
 aisquare fleet status --project amber-otter
 ```
 
-One row per agent — label, role, state chip, `(worktree)`, the detail behind
+One row per agent — label, role, state chip, `(worktree)`, `· <persona>`, the detail behind
 the state, the pane id — under a header naming the project, its codename and
 its tmux session. `ls` shows live agents; `--all` (`-a`) includes the ones that
 have ended. `status` is the same data, always live only.
@@ -478,6 +484,14 @@ extra_args = []                           # --chrome is the role's own default; 
 permission_mode = "auto"
 worktree = false
 extra_args = []
+```
+
+A role may also name a default persona — every spawn of that role runs as it
+unless `--persona` names another:
+
+```toml
+[fleet.roles.coder]
+persona = "minimalist"                    # checked at spawn: a name the project lacks refuses, naming this key
 ```
 
 A role the file omits gets the built-in shape (`auto`, no worktree, no extra

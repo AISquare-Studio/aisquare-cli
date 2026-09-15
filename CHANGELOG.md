@@ -6,7 +6,65 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **The documented-commands guard no longer fails the checkout that runs the
+  fleet.** `test_the_document_list_has_not_gone_stale` walks the whole
+  repository for markdown with commands in a fenced block, and a root checkout
+  that hosts coder worktrees under `.aisquare-worktrees/` holds one full copy of
+  every document per agent — so `make check` from the root failed, reporting
+  each worktree's README.md and docs pages as unlisted copies of themselves,
+  while every real document passed (measured on `rc/hackathon-v1` with two
+  coder worktrees; from a clean checkout or inside a worktree it passed). The
+  sweep now never enters the fleet's `worktree_dir` (the `[fleet]` default) or
+  any directory holding a `.git` *file* — a linked worktree wherever it was put
+  — the way `core/snapshot.py` already ignores `**/.aisquare-worktrees/**`. It
+  prunes as it walks, so it no longer reads every agent's `.venv` to throw the
+  result away. The guard's rules and its document list are unchanged, and the
+  positive control stays: the same fenced page at the repo's own level is still
+  reported.
+
 ### Added
+- **Run an agent as a persona.** `aisquare launch <role> --persona NAME` and
+  `aisquare fleet spawn <role> --persona NAME` — default: the role's new
+  `[fleet.roles.<role>].persona` — start an agent as someone. The name is checked
+  before anything starts (an unknown one is refused with the known names; a stale
+  config default names its key) and travels as `AISQUARE_PERSONA`, never the body.
+  The SessionStart hook records it on the board row (store v15:
+  `team_session.persona`, `fleet_agent.persona`) and adds the persona's block to
+  the team briefing once, after the role cycle and the lane rule. A session
+  without a persona gets byte-identical text — pinned against the base in
+  `tests/test_persona_briefing.py` — the per-prompt delta and `aisquare board`
+  carry no persona text, and a persona that can no longer be loaded costs one
+  line, never the team block. The board's session line reads `persona:<name>`,
+  `fleet ls` shows `· <name>`, a spawn receipt ends `· persona <name>`, and a
+  persona written for other roles is a receipt note, not a refusal. Found on
+  the way: saving config dropped an unknown key INSIDE a `[fleet.roles.<role>]`
+  or `[explainability.targets.<name>]` entry, because those tables were
+  replaced wholesale; from this build on each kept entry is merged field by
+  field, so a later build's role key survives this one.
+- **Personas — and a persona is a Claude Code skill.** `aisquare persona`
+  (`list`, `show`, `new`, `edit`, `rm`, `validate`, `import`, `export`, every
+  reporting verb with `--json`) manages how an agent works — a skeptic, a mentor,
+  a minimalist — as `<name>/SKILL.md` directories in three layers: the project
+  (`<repo>/.aisquare/personas`), the user (`$AISQUARE_HOME/personas`) and four
+  bundled ones (`skeptic`, `mentor`, `minimalist`, `careful`), the higher layer
+  winning and `list` saying what it shadows. The same directory is `/name` in
+  Claude Code: `persona import` copies a skill in byte for byte (a skill
+  directory, a `.claude/agents` file, a Cursor rule, stdin, or a skill by name
+  from `import --list`) with a `.persona.json` recording source and sha256, and
+  `persona export --skill --user|--project` copies one out into Claude Code's
+  skills. A round trip is byte-identical. `persona show` prints exactly the
+  block an agent will be briefed with: the body, sanitised, fenced so it cannot
+  close its own block, and one sentence saying a persona never overrides a
+  role's cycle, the lane rule, a task's contract or evidence. A body over 4,000
+  characters warns and over 12,000 is refused; a directory that does not load is
+  listed, never fatal. Something that is not a skill is refused as
+  `not_recognised` until the LLM import path lands. **PyYAML** is now a core
+  dependency — a skill's frontmatter is full YAML and an interchange format may
+  not refuse a valid one — read with `safe_load` only and imported inside the
+  parser: `python -X importtime -c "import aisquare.cli.app"` shows no `yaml`.
+  Spawning an agent as a persona comes next. Plan:
+  `docs/plans/spawn-personas.md`; guide: `docs/personas.md`.
 - **The Spawn dialog, in `asq`.** `＋ spawn agent` under a project used to
   toast "the spawn dialog is not built yet"; it now opens a form over the same
   `services.fleet.spawn` the CLI runs, headed with the project's name and

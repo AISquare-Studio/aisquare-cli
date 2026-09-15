@@ -17,6 +17,7 @@ import json
 import os
 import re
 import sqlite3
+from collections.abc import Callable
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -1246,6 +1247,21 @@ def _shared_row_banner(
     )
 
 
+def _optional_block(build: Callable[[], str]) -> str:
+    """A non-critical session-start/heartbeat block, isolated (finding 2).
+
+    The task assignment and work-brief context are additive: an exception in
+    either — a brief row a newer build wrote that this one can't validate, a
+    damaged meta value, a failed store read — must NOT discard the board banner
+    and teammate delta the session actually depends on. So each fails open to ''
+    instead of blanking the whole hook output.
+    """
+    try:
+        return build()
+    except Exception:
+        return ""
+
+
 def hook_session_start(
     session_id: str,
     cwd: Path | None,
@@ -1305,8 +1321,8 @@ def hook_session_start(
 
         return (
             board_context
-            + _startup_task_assignment(store, project, session)
-            + session_context(store, project.id, session.id, session.role)
+            + _optional_block(lambda: _startup_task_assignment(store, project, session))
+            + _optional_block(lambda: session_context(store, project.id, session.id, session.role))
         )
 
 
@@ -1343,11 +1359,16 @@ def _startup_task_assignment(
     lapsed = holder is not None and expiry is not None and expiry <= _now()
     owned = holder is not None and task.status == "doing" and not lapsed
     state = f"[{task.status}" + (f" @{short_id(holder)}" if owned and holder else "") + "]"
+    # Finding 15: a task contract has no length limit, so bound what is injected on
+    # every session start/resume — the full detail stays in `asq task show`.
+    detail = task.detail or "Missing; request clarification before work."
+    if len(detail) > 1500:
+        detail = f"{detail[:1500]}… (+{len(detail) - 1500} chars; `asq task show {task.id}`)"
     lines = [
         "\n<aisquare-assignment>",
         "This explicit assignment overrides generic 'task next' instructions above.",
         f"Task {task.id} {state}: {task.title}",
-        f"Contract: {task.detail or 'Missing; request clarification before work.'}",
+        f"Contract: {detail}",
         f"Dependencies: {', '.join(task.needs) or 'none'}",
     ]
     if task.status in ("review", "done", "dropped"):
@@ -1435,8 +1456,10 @@ def hook_prompt_heartbeat(
                     store.recent_events(project.id, limit=_BOARD_EVENTS),
                     me=session,
                 )
-                + _startup_task_assignment(store, project, session)
-                + session_context(store, project.id, session.id, session.role)
+                + _optional_block(lambda: _startup_task_assignment(store, project, session))
+                + _optional_block(
+                    lambda: session_context(store, project.id, session.id, session.role)
+                )
             )
         # Same check as session_start, on the path that actually runs every turn.
         # It must survive the empty-delta early return below: a collision warning

@@ -280,3 +280,29 @@ def test_the_built_wheel_ships_the_native_modules(tmp_path: Path) -> None:
         "services/command_reports",
     ):
         assert f"aisquare/{module}.py" in names
+
+
+def test_a_broken_work_block_does_not_blank_the_session_start(
+    work: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Finding 2: an exception in the task assignment or work-brief context must
+    drop only that block, never the board banner the session depends on."""
+    from aisquare.services import work_briefs as wb
+
+    def boom(*args: object, **kwargs: object) -> str:
+        raise RuntimeError("a brief row a newer build wrote, unreadable here")
+
+    monkeypatch.setattr(wb, "session_context", boom)
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
+    out = team.hook_session_start("s-iso", work, "startup")
+    assert out, "the board banner must survive a broken work block"
+    assert "<aisquare-work>" not in out, "only the failed block is dropped, not the whole output"
+
+
+def test_prune_fails_closed_when_evidence_protection_is_unknown() -> None:
+    """Finding 4: if the set of evidence-backing reports cannot be determined
+    (protected_report_ids returns None), pruning deletes NO reports."""
+    ids = [reports.run_command(_python(f"print({n})")).id for n in range(4)]
+    removed = reports.prune_reports(keep=1, protect=None)
+    assert all(rid not in removed for rid in ids), "no report deleted when protection is unknown"
+    assert all(reports.load_report(rid).id == rid for rid in ids)

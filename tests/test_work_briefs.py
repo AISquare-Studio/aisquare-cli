@@ -467,3 +467,16 @@ def test_re_sending_an_identical_requirement_value_is_a_noop(work: Path) -> None
     assert same.revision == rev, "identical requirement text must not bump the revision"
     changed = briefs.update(brief.id, changes={"R1": "Valid login opens the dashboard page"})
     assert changed.revision == rev + 1, "a real change still bumps the revision"
+
+
+def test_an_oversized_check_is_clipped_in_session_context(work: Path) -> None:
+    """Finding 15: a huge --check value must not be injected verbatim on every
+    session start; it is clipped, with a pointer to the full brief."""
+    brief = briefs.create("Login", ["Valid login opens dashboard"])
+    huge = "x" * 300_000
+    briefs.update(brief.id, checks={"R1": huge})
+    with store_session() as store:
+        context = briefs.session_context(store, brief.project_id, "s-clip", "coder")
+    assert huge not in context, "the oversized check must not reach the session verbatim"
+    assert len(context) < 12_000, "session context stays bounded"
+    assert "asq brief show" in context

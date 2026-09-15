@@ -193,19 +193,22 @@ def list_reports() -> list[CommandReport]:
     return sorted(result, key=lambda item: item.finished_at, reverse=True)
 
 
-def protected_report_ids() -> set[str]:
+def protected_report_ids() -> set[str] | None:
     """Reports that back recorded requirement evidence; retention must keep them.
 
     Imported lazily: work_briefs imports this module, and a store problem while
-    reading evidence must not stop a command from running, so an unreadable
-    board protects nothing rather than raising here.
+    reading evidence must not stop a command from running, so it must not raise.
+    Finding 4: an unreadable board returns ``None`` — "protection unknown" — NOT
+    an empty set. Deleting an evidence report on a transient read failure flips a
+    VERIFIED brief to NOT VERIFIED for good, so ``prune_reports`` fails closed on
+    ``None`` and deletes no reports at all.
     """
     try:
         from aisquare.services.work_briefs import referenced_report_ids
 
         return referenced_report_ids()
     except Exception:
-        return set()
+        return None
 
 
 def _pid_alive(pid: int) -> bool:
@@ -244,32 +247,35 @@ def _prune_orphaned_pending(root: Path) -> list[str]:
 
 
 def prune_reports(
-    *, keep: int = RETAIN_REPORTS, days: int = RETAIN_DAYS, protect: Collection[str] = ()
+    *, keep: int = RETAIN_REPORTS, days: int = RETAIN_DAYS, protect: Collection[str] | None = ()
 ) -> list[str]:
     """Remove completed owned records only, never unfinished concurrent runs.
 
     ``protect`` names reports that back recorded requirement evidence: deleting
     one would flip a VERIFIED brief to NOT VERIFIED, so those never count
-    against ``keep`` and never expire here.
+    against ``keep`` and never expire here. ``protect=None`` means protection
+    could not be determined (finding 4): fail closed — delete no reports at all,
+    only orphaned pending dirs (crashed runs, never evidence).
     """
     if keep < 0 or days < 0:
         raise ValueError("Retention values must be non-negative.")
-    cutoff = time.time() - days * 86400
-    protected = set(protect)
     removed: list[str] = []
-    kept = 0
-    for report in list_reports():
-        if report.id in protected:
-            continue
-        if kept >= keep or report.finished_at.timestamp() < cutoff:
-            path = _directory(report.id)
-            try:
-                shutil.rmtree(path)
-            except FileNotFoundError:
-                continue  # another runner pruned the same old completed report
-            removed.append(report.id)
-        else:
-            kept += 1
+    if protect is not None:
+        cutoff = time.time() - days * 86400
+        protected = set(protect)
+        kept = 0
+        for report in list_reports():
+            if report.id in protected:
+                continue
+            if kept >= keep or report.finished_at.timestamp() < cutoff:
+                path = _directory(report.id)
+                try:
+                    shutil.rmtree(path)
+                except FileNotFoundError:
+                    continue  # another runner pruned the same old completed report
+                removed.append(report.id)
+            else:
+                kept += 1
     root = reports_dir()
     if root.is_dir() and not root.is_symlink():
         removed.extend(_prune_orphaned_pending(root))

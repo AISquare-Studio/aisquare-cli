@@ -780,6 +780,17 @@ def set_mode(mode: str, *, cwd: Path | None = None) -> str:
     return mode
 
 
+def _clip(text: str, limit: int = 500) -> str:
+    """Bound one injected field so a single oversized value cannot blow the
+    session-start hook budget (finding 15). The full text is always available
+    through `asq brief show`.
+    """
+    text = text.strip()
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit]}… (+{len(text) - limit} chars; `asq brief show`)"
+
+
 def session_context(store: ContextStore, project_id: str, session_id: str, role: str) -> str:
     """One shared direct/fleet entry point.
 
@@ -827,7 +838,7 @@ def session_context(store: ContextStore, project_id: str, session_id: str, role:
                 break
             lines.append(
                 f"{requirement.id} r{requirement.revision} [{requirement.source_revision}]: "
-                f"{requirement.text}; check: {requirement.expected_check or 'define'}"
+                f"{_clip(requirement.text)}; check: {_clip(requirement.expected_check or 'define')}"
             )
         lines.append(f"Full contract and corrections: `asq brief show {brief.id}`.")
         if sum(len(line) for line in lines) > 7000:

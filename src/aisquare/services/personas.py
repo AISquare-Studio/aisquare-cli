@@ -352,19 +352,54 @@ def shadows(persona: Persona, root: Path | None) -> list[Layer]:
     return found
 
 
+def _target(name: str, root: Path | None, layer: Layer | None) -> tuple[Layer, Path]:
+    """The directory an edit acts on: ``layer``'s copy, or by default the winner's."""
+    if layer is None:
+        return locate(name, root)
+    if layer == "bundled":
+        return layer, core.BUNDLED_DIR / name
+    return layer, _layer_dir(layer, root) / name
+
+
+def save(name: str, text: str, *, root: Path | None, layer: Layer | None = None) -> Persona:
+    """Write ``text`` as the persona's SKILL.md — the one writer behind
+    ``persona edit`` and the UI's editor (§4.4).
+
+    The text is held to the recognised test and the caps first: a
+    :class:`PersonaError` leaves the old file byte-identical. Bundled personas
+    are refused. The write is staged beside the file and renamed over it.
+    """
+    layer, directory = _target(name, root, layer)
+    if layer == "bundled":
+        raise _bundled_refusal(name, "edited")
+    if not (_is_skill_name(name) and directory.is_dir()):
+        raise PersonaError(
+            f"no {layer} persona named '{name}' ({directory.parent})", code="unknown_persona"
+        )
+    skill = directory / core.SKILL_FILE
+    try:
+        core.parse_skill(text, name=name, path=directory, layer=layer)
+    except PersonaError as exc:
+        raise PersonaError(
+            f"{exc.rule} — not saved; {skill} is unchanged",
+            path=skill,
+            line=exc.line,
+            code=exc.code,
+        ) from None
+    _replace_file(skill, text.encode("utf-8"))
+    return core.load(directory, layer=layer)
+
+
 def edit(name: str, *, root: Path | None, layer: Layer | None = None) -> Persona | None:
-    """Open the persona's SKILL.md in ``$EDITOR`` via ``core.editor.edit_text``.
+    """Open the persona's SKILL.md in ``$EDITOR`` via ``core.editor.edit_text``,
+    then :func:`save` the result.
 
     ``None`` when nothing changed (or the editor exited non-zero). Text that
     fails the recognised test or a cap raises :class:`PersonaError` and the old
     file stays byte-identical. ``layer`` picks a layer's copy; by default, the
     winner's.
     """
-    if layer is None:
-        layer, directory = locate(name, root)
-    else:
-        directory = _layer_dir(layer, root) if layer != "bundled" else core.BUNDLED_DIR
-        directory = directory / name
+    layer, directory = _target(name, root, layer)
     if layer == "bundled":
         raise _bundled_refusal(name, "edited")
     skill = directory / core.SKILL_FILE
@@ -375,17 +410,7 @@ def edit(name: str, *, root: Path | None, layer: Layer | None = None) -> Persona
     after = edit_text(before)
     if after is None or after == before:
         return None
-    try:
-        core.parse_skill(after, name=name, path=directory, layer=layer)
-    except PersonaError as exc:
-        raise PersonaError(
-            f"{exc.rule} — the edit was not saved; {skill} is unchanged",
-            path=skill,
-            line=exc.line,
-            code=exc.code,
-        ) from None
-    _replace_file(skill, after.encode("utf-8"))
-    return core.load(directory, layer=layer)
+    return save(name, after, root=root, layer=layer)
 
 
 def remove(name: str, *, layer: Layer, root: Path | None) -> Path:

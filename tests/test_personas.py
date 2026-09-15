@@ -436,6 +436,41 @@ def test_an_edit_that_breaks_the_rules_keeps_the_old_bytes(monkeypatch: pytest.M
     assert service.edit("mine", root=None) is None
 
 
+def test_save_writes_valid_text_and_returns_the_reloaded_persona() -> None:
+    directory = _write_skill(_user_layer(), "mine")
+    text = (directory / "SKILL.md").read_text(encoding="utf-8").replace("precise", "exact")
+
+    saved = service.save("mine", text, root=None)
+
+    assert (directory / "SKILL.md").read_bytes() == text.encode("utf-8")
+    assert (saved.name, saved.layer, saved.path) == ("mine", "user", directory)
+    assert saved.body.startswith("Be exact.")
+    assert sorted(path.name for path in directory.iterdir()) == ["SKILL.md"]
+
+
+def test_save_refuses_invalid_text_and_leaves_the_file_byte_identical() -> None:
+    directory = _write_skill(_user_layer(), "mine")
+    before = (directory / "SKILL.md").read_bytes()
+
+    with pytest.raises(PersonaError) as caught:
+        service.save("mine", "---\ndescription: fine\n---\n" + "x" * 12_001, root=None)
+
+    assert caught.value.code == "too_large"
+    assert "not saved" in str(caught.value)
+    assert (directory / "SKILL.md").read_bytes() == before
+    assert sorted(path.name for path in directory.iterdir()) == ["SKILL.md"]
+
+
+def test_save_refuses_a_bundled_persona() -> None:
+    before = (core.BUNDLED_DIR / "skeptic" / "SKILL.md").read_bytes()
+
+    with pytest.raises(PersonaError) as caught:
+        service.save("skeptic", "---\ndescription: mine now\n---\nBody.\n", root=None)
+
+    assert caught.value.code == "bundled_read_only"
+    assert (core.BUNDLED_DIR / "skeptic" / "SKILL.md").read_bytes() == before
+
+
 def _import_lines(code: str) -> list[str]:
     result = subprocess.run(
         [sys.executable, "-X", "importtime", "-c", code],

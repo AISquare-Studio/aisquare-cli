@@ -222,6 +222,10 @@ SEAMS: dict[str, Seam] = {
     "aisquare/core/source_revision.py::_gitlink": Seam(
         EXCLUDED, "`git ls-files -s` for the commit a submodule entry records; no model"
     ),
+    "aisquare/core/source_revision.py::_git_ls": Seam(
+        EXCLUDED,
+        "`git ls-files` (tracked/untracked) to enumerate source for the fingerprint; no model",
+    ),
     "aisquare/services/command_reports.py::run_command": Seam(
         EXCLUDED,
         "the user's explicit command, with its original environment and semantics; "

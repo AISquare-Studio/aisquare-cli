@@ -128,12 +128,12 @@ session, once it has joined) and delivers the briefing the way `fleet tell`
 delivers anything: typed into the agent when it is waiting, filed as a board note
 addressed to it when it is busy — the receipt says `typed` or `noted`. The board
 gets one `persona_attached` line, with the name and never the body. Because the
-session-start hook reads the fleet row whenever `AISQUARE_PERSONA` is not set, the
-agent is briefed with the persona again after a `/clear` or a restart; a persona
-named by the variable still wins, and the fleet row wins over one a session
-recorded earlier. Attaching another persona replaces it, and the agent is told
-which one it replaces.
-
+session-start hook reads the fleet row first, the agent is briefed with the
+persona again after a `/clear` or a restart. That includes an agent spawned with
+`--persona`, whose `AISQUARE_PERSONA` holds only the value it was launched with.
+The variable applies when the agent has no fleet row, or a row with no persona,
+and either one wins over a persona a session recorded earlier. Attaching another
+persona replaces it, and the agent is told which one it replaces.
 In `asq`, the Spawn dialog (`＋ spawn agent` under a project) asks for the
 persona right after who runs the agent — role, account, binary — with the role's
 default preselected and the persona's description under the field; `(none)`
@@ -308,6 +308,12 @@ records engine, model and `condensed` in `.persona.json`.
 engine = "auto"               # auto | manager | api | off — off refuses every conversion
 api_model = "claude-opus-5"   # the api engine's model; the manager rides the manager's ladder
 ```
+
+If `config.toml` cannot be read, a conversion is refused with
+`config_unreadable`, naming only the error's class. A broken file may be the
+one that says `engine = "off"`, so its defaults are not assumed. Fix the file, or
+pass `--engine` to choose an engine for that one import; the output then says
+the config was not read.
 
 ### Export a persona
 

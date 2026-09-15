@@ -612,3 +612,15 @@ def test_attach_refusals_report_the_fleets_error_codes(
 
     assert (code, payload["error"]) == (1, "no_such_agent")
     assert "no live agent 'coder-9'" in payload["detail"]
+
+
+def test_import_help_names_the_config_table_behind_both_defaults(runner: CliRunner) -> None:
+    """Rich reads a bare `[persona.import]` as a style tag and drops it: `(default:  engine)`."""
+    result = runner.invoke(
+        app, ["persona", "import", "--help"], env={"NO_COLOR": "1", "COLUMNS": "200"}
+    )
+
+    assert result.exit_code == 0, result.output
+    page = " ".join(result.output.split())
+    assert "(default: [persona.import] engine)" in page
+    assert "(default: [persona.import] api_model)" in page

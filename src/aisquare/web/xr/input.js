@@ -377,8 +377,20 @@ export class Input {
   bindKeys() {
     const ARROWS = new Set(['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown']);
 
+    // Push-to-talk keys, compared case-insensitively so a hold begun or released
+    // with Shift down (which delivers 'T', not 't') is still push-to-talk. A
+    // keyup that does not match latches the mic on until voice's 55 s cap sends
+    // the whole capture as a prompt — the failure this set exists to prevent.
+    const isTalkKey = (event) => event.key === 't' || event.key === 'T';
+
     addEventListener('keydown', (event) => {
       if (event.metaKey || event.ctrlKey || event.altKey) return;
+      if (isTalkKey(event)) {
+        // `repeat` is the autorepeat that fires while a key is held down;
+        // push-to-talk must start once, not sixty times.
+        if (!event.repeat) this.emit('talkStart', { source: 'key' });
+        return;
+      }
       // Arrows scroll the document by default, which would fight the overlay.
       if (ARROWS.has(event.key)) event.preventDefault();
 
@@ -425,17 +437,12 @@ export class Input {
         case '=':
           this.emit('radius', { delta: KEY_STEP.radius });
           break;
-        case 't':
-          // `repeat` is the autorepeat that fires while a key is held down;
-          // push-to-talk must start once, not sixty times.
-          if (!event.repeat) this.emit('talkStart', { source: 'key' });
-          break;
         default:
       }
     });
 
     addEventListener('keyup', (event) => {
-      if (event.key === 't') this.emit('talkEnd', { source: 'key' });
+      if (isTalkKey(event)) this.emit('talkEnd', { source: 'key' });
     });
 
     // A key held while the tab loses focus never delivers its keyup, which

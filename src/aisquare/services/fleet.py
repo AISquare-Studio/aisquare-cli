@@ -40,7 +40,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import ModuleType
 
-from aisquare.core import codenames, harness, selfcli
+from aisquare.core import codenames, harness, paths, selfcli
 from aisquare.core.config import FleetRoleSettings, FleetSettings, load_config
 from aisquare.core.ids import new_agent_id
 from aisquare.core.store import AmbiguousIdError, ContextStore, store_session
@@ -968,6 +968,8 @@ def spawn(
         )
     agent_id = new_agent_id()
     flags: list[str] = []
+    if resolved_task_id is not None:
+        flags += ["--task", resolved_task_id]
     if resolution.source != "default":
         # `launch` re-resolves the binary inside the window — and the window's
         # environment is the long-lived tmux SERVER's, which never carries
@@ -992,7 +994,10 @@ def spawn(
         flags += ["--account", account]
     flags += ["--name", picked]
     command = selfcli.argv_for(["launch", role, *flags, *role_args, *extra])
-    env = {"AISQUARE_FLEET_AGENT": agent_id}
+    env = {
+        "AISQUARE_FLEET_AGENT": agent_id,
+        "AISQUARE_HOME": str(paths.aisquare_home().resolve()),
+    }
     if config.disable_native_agent_teams:
         env["CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"] = "0"
     if account is not None:
@@ -1027,8 +1032,53 @@ def spawn(
     stored = _record(
         agent, project, srv, wanted=label, notes=notes, cap=config.max_agents_per_project
     )
-    if prompt:
-        _type_prompt(srv, stored.pane_id, prompt, notes)
+    kickoff = prompt
+    if kickoff is None and resolved_task_id is not None:
+        # Finding 10: the kickoff follows the task's ACTUAL status, exactly as the
+        # session-start <aisquare-assignment> block does. It must never tell a
+        # coder to "claim it" for a blocked, in-review, done or dropped task — a
+        # blocked-task claim would bypass the three-failures re-planning stop and
+        # contradict the assignment block the same session receives.
+        show = (
+            f"Work on assigned board task {resolved_task_id}. Read it with "
+            f"aisquare --json task show {resolved_task_id}."
+        )
+        status = task.status if task is not None else "todo"
+        # Ownership the way the assignment block reads it: a `doing` task whose
+        # lease is live belongs to that session, and this new agent must not be
+        # told to claim it; a lapsed lease is claimable again.
+        holder = task.claimed_by if task is not None else None
+        expiry = task.claim_expires_at if task is not None else None
+        lapsed = holder is not None and expiry is not None and expiry <= _now()
+        owned = status == "doing" and holder is not None and not lapsed
+        if status == "blocked":
+            kickoff = (
+                f"{show} This task is BLOCKED after failed checks; do not claim it. "
+                "Report what would unblock it, and stop."
+            )
+        elif status in ("review", "done", "dropped"):
+            kickoff = (
+                f"{show} This task is {status}; do not claim or edit it. Inspect it and its "
+                "evidence, report and stop."
+            )
+        elif owned and holder is not None:
+            kickoff = (
+                f"{show} This task is owned by session {holder[:TASK_SHORT]}; do not claim it. "
+                "Inspect it and its evidence, report and stop."
+            )
+        elif harness.base_role(role) == "coder":
+            kickoff = (
+                f"{show} Follow your role's work cycle and report the result on that task. "
+                "Claim it before editing; if another worker owns it or dependencies are unmet, "
+                "report that and do not duplicate work."
+            )
+        else:
+            kickoff = (
+                f"{show} Inspect it and its evidence, preserve its existing ownership and do not "
+                "claim it; follow your role's work cycle and report the result on that task."
+            )
+    if kickoff:
+        _type_prompt(srv, stored.pane_id, kickoff, notes)
     return SpawnReceipt(agent=stored, asked_label=label, tmux_session=tmux_session, notes=notes)
 
 

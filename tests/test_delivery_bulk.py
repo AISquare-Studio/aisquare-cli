@@ -292,6 +292,9 @@ def test_bulk_concurrent_writes_never_lose_a_confirmed_write(tmp_path: Path) -> 
 # real leak.
 
 
+@pytest.mark.skipif(
+    not Path("/proc/self/environ").is_file(), reason="process ownership probe needs Linux /proc"
+)
 def test_the_probe_ignores_a_shell_that_merely_mentions_the_daemon(tmp_path: Path) -> None:
     """The self-match that made the old probe flaky, reproduced deliberately.
 
@@ -328,6 +331,9 @@ def test_the_probe_ignores_a_shell_that_merely_mentions_the_daemon(tmp_path: Pat
         decoy.wait(timeout=10)
 
 
+@pytest.mark.skipif(
+    not Path("/proc/self/environ").is_file(), reason="process ownership probe needs Linux /proc"
+)
 def test_the_probe_still_catches_a_daemon_that_is_really_ours(tmp_path: Path) -> None:
     """And it must still fail the storm if a daemon genuinely leaks.
 

@@ -16,6 +16,8 @@ from __future__ import annotations
 import json
 import os
 import re
+import sqlite3
+from collections.abc import Callable
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -25,7 +27,7 @@ from aisquare.core import brain, harness, insights, orchestrator, workspace
 from aisquare.core import claude_accounts as claude_accounts_core
 from aisquare.core.config import FleetSettings, load_config
 from aisquare.core.ids import new_event_id, new_task_id
-from aisquare.core.store import ContextStore, store_session, unmet_needs
+from aisquare.core.store import AmbiguousIdError, ContextStore, store_session, unmet_needs
 from aisquare.models import ProjectInfo, TaskStatus, TeamEvent, TeamSession, TeamTask
 from aisquare.services import distill as distill_service
 
@@ -1011,7 +1013,13 @@ def _finish_task(
         if task is None:
             raise KeyError(ref)
         session = _resolve_session(store, session_ref)
-        updated = store.set_task_status(task.id, status)
+        if status == "done":
+            from aisquare.services.work_briefs import task_gate
+
+            revision_snapshot = task_gate(store, task)
+            updated = store.finish_verified_task(task.id, revision_snapshot)
+        else:
+            updated = store.set_task_status(task.id, status)
         text = updated.title if note is None else f"{updated.title} — {note}"
         event = _emit(
             store,
@@ -1239,6 +1247,21 @@ def _shared_row_banner(
     )
 
 
+def _optional_block(build: Callable[[], str]) -> str:
+    """A non-critical session-start/heartbeat block, isolated (finding 2).
+
+    The task assignment and work-brief context are additive: an exception in
+    either — a brief row a newer build wrote that this one can't validate, a
+    damaged meta value, a failed store read — must NOT discard the board banner
+    and teammate delta the session actually depends on. So each fails open to ''
+    instead of blanking the whole hook output.
+    """
+    try:
+        return build()
+    except Exception:
+        return ""
+
+
 def hook_session_start(
     session_id: str,
     cwd: Path | None,
@@ -1287,13 +1310,142 @@ def hook_session_start(
             session = store.update_session(session.id, role=role)
         # Presence is board state, not feed traffic: /clear cycles, resumes and
         # ephemeral `claude -p` children would otherwise spam join/left pairs.
-        return collision + _render_board(
+        board_context = collision + _render_board(
             project,
             store.team_sessions(project.id),
             store.team_tasks(project.id),
             store.recent_events(project.id, limit=_BOARD_EVENTS),
             me=session,
         )
+        from aisquare.services.work_briefs import session_context
+
+        bound_ref = _launch_bound_task_ref(store, project, session)
+        return (
+            board_context
+            + _optional_block(lambda: _startup_task_assignment(store, project, session, bound_ref))
+            + _optional_block(
+                lambda: session_context(
+                    store, project.id, session.id, session.role, task_id=bound_ref
+                )
+            )
+        )
+
+
+def _launch_bound_task_ref(
+    store: ContextStore, project: ProjectInfo, session: TeamSession
+) -> str | None:
+    """The task this SESSION was launched with, or None if it only inherited it.
+
+    Finding 13: the assignment was keyed on the ``AISQUARE_TASK_ID`` env var
+    alone, and every process started from inside an assigned agent inherits it —
+    a ``claude -p`` helper, a ``team spawn --exec`` child. Those register as
+    their own board session but read the parent's task, so they were told "this
+    task is owned by <parent>; do not claim it" and, once the parent's lease
+    lapsed, "Claim THIS task" — and the claim succeeded, taking the parent's
+    work.
+
+    So the assignment is bound to the launched SESSION's identity, not to
+    inheritance. ``launch`` stamps ``AISQUARE_TASK_SESSION`` with the exact
+    session id it starts the agent on (the one it pins or the one the fleet
+    passed it), and the fleet records that same session on the agent's row. A
+    session that matches neither inherited the variable from a parent and is not
+    the assignee — it gets nothing. A fleet row for this session (whatever task
+    it names) also identifies a launched agent, so the row/env disagreement can
+    still be reported as a mismatch rather than silently dropped.
+    """
+    ref = os.environ.get("AISQUARE_TASK_ID")
+    if not ref:
+        return None
+    if os.environ.get("AISQUARE_TASK_SESSION") == session.id:
+        return ref
+    if any(
+        agent.session_id == session.id for agent in store.fleet_agents(project.id, live_only=True)
+    ):
+        return ref
+    return None
+
+
+def _startup_task_assignment(
+    store: ContextStore, project: ProjectInfo, session: TeamSession, ref: str | None
+) -> str:
+    """The explicit launch task wins over generic work-pool instructions.
+
+    ``ref`` is the task this session was LAUNCHED with (``_launch_bound_task_ref``),
+    already filtered so an inheriting child never reaches here (finding 13). A
+    fleet row may not have been persisted yet when the child starts; its absence
+    is not an error, and if present its task must match this assignment. Claims
+    remain the existing atomic task command, never an implicit startup write.
+    """
+    if not ref:
+        return ""
+    stop = "STOP and report; do not pick another."
+    try:
+        task = store.get_task(ref)
+    except AmbiguousIdError:
+        # A hand-exported prefix; the board, cycle and rules above still stand.
+        return f"\nAssigned task {ref!r} is ambiguous on this board. {stop}"
+    except (sqlite3.Error, OSError, ValueError) as exc:
+        return f"\nAssigned task {ref!r} could not be read ({exc}). {stop}"
+    if task is None or task.project_id != project.id:
+        return f"\nAssigned task unavailable on this board. {stop}"
+    for agent in store.fleet_agents(project.id, live_only=True):
+        if agent.session_id == session.id and agent.task_id != task.id:
+            return f"\nFleet/startup assignment mismatch. {stop}"
+    # The instruction follows the task's ACTUAL state. This block is re-injected on
+    # every resume, so "claim it" must not be said to a session that already holds
+    # it, nor about work another live session owns or that is already finished.
+    holder = task.claimed_by
+    expiry = task.claim_expires_at
+    lapsed = holder is not None and expiry is not None and expiry <= _now()
+    owned = holder is not None and task.status == "doing" and not lapsed
+    state = f"[{task.status}" + (f" @{short_id(holder)}" if owned and holder else "") + "]"
+    # Finding 15: a task contract has no length limit, so bound what is injected on
+    # every session start/resume — the full detail stays in `asq task show`.
+    detail = task.detail or "Missing; request clarification before work."
+    if len(detail) > 1500:
+        detail = f"{detail[:1500]}… (+{len(detail) - 1500} chars; `asq task show {task.id}`)"
+    lines = [
+        "\n<aisquare-assignment>",
+        "This explicit assignment overrides generic 'task next' instructions above.",
+        f"Task {task.id} {state}: {task.title}",
+        f"Contract: {detail}",
+        f"Dependencies: {', '.join(task.needs) or 'none'}",
+    ]
+    if task.status in ("review", "done", "dropped"):
+        lines.append(
+            f"This task is {task.status}. Do not claim or edit it; inspect its evidence, "
+            "report and stop."
+        )
+    elif task.status == "blocked":
+        lines.append(
+            "This task is blocked. Do not claim it; report what would unblock it, and stop."
+        )
+    elif owned and holder == session.id:
+        lines.append(
+            "This task is already yours; do not claim it again. Continue the work and "
+            "report the result on it."
+        )
+    elif owned and holder is not None:
+        owner = store.get_session(holder)
+        who = f"{short_id(holder)} ({owner.role if owner else 'unknown role'})"
+        lines.append(f"This task is owned by {who}. Do not claim it; report and stop.")
+    else:
+        if lapsed and holder is not None:
+            lines.append(f"Its claim by {short_id(holder)} lapsed; it is claimable again.")
+        else:
+            lines.append("This task is unclaimed.")
+        if base_role(session.role) == "coder":
+            lines += [
+                f"Claim THIS task: `asq task claim {task.id} --as {short_id(session.id)}`.",
+                "If dependencies are unmet or the claim is refused, report and stop.",
+            ]
+        else:
+            lines.append("Inspect THIS task and its evidence. Preserve its existing ownership.")
+    lines += [
+        "Do not silently choose another task. Report the result on this task.",
+        "</aisquare-assignment>",
+    ]
+    return "\n".join(lines)
 
 
 def hook_prompt_heartbeat(
@@ -1334,12 +1486,25 @@ def hook_prompt_heartbeat(
                     effort=harness.clean_effort(effort),
                 )
             )
-            return _render_board(
-                project,
-                store.team_sessions(project.id),
-                store.team_tasks(project.id),
-                store.recent_events(project.id, limit=_BOARD_EVENTS),
-                me=session,
+            from aisquare.services.work_briefs import session_context
+
+            bound_ref = _launch_bound_task_ref(store, project, session)
+            return (
+                _render_board(
+                    project,
+                    store.team_sessions(project.id),
+                    store.team_tasks(project.id),
+                    store.recent_events(project.id, limit=_BOARD_EVENTS),
+                    me=session,
+                )
+                + _optional_block(
+                    lambda: _startup_task_assignment(store, project, session, bound_ref)
+                )
+                + _optional_block(
+                    lambda: session_context(
+                        store, project.id, session.id, session.role, task_id=bound_ref
+                    )
+                )
             )
         # Same check as session_start, on the path that actually runs every turn.
         # It must survive the empty-delta early return below: a collision warning

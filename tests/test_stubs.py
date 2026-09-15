@@ -120,6 +120,24 @@ IMPLEMENTED: set[tuple[str, ...]] = {
     *(("agents", command) for command in ("list", "scan", "status", "connect", "disconnect")),
     *(("accounts", command) for command in ("list", "usage", "add", "remove", "run")),
     *(("metrics", command) for command in ("show", "list")),
+    ("exec",),
+    *(
+        ("brief", command)
+        for command in (
+            "create",
+            "list",
+            "show",
+            "update",
+            "link",
+            "evidence",
+            "finding",
+            "check",
+            "export",
+            "mode",
+        )
+    ),
+    *(("reports", command) for command in ("show", "list", "stats", "prune")),
+    *((group, "focus") for group in ("context", "ctx")),
 }
 
 

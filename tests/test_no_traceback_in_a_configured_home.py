@@ -110,7 +110,9 @@ def configured_home(isolated_home: Path, runner: CliRunner) -> Path:
 #: held to nothing but argument parsing while the file read as though it held
 #: ninety-seven to the property — a test narrower than the property it is named
 #: for, in the file written to close that class.
-USAGE_ONLY: set[str] = set()
+#: `exec` has no argument to fill: the command comes after `--`. It is
+#: exercised by its dedicated test instead.
+USAGE_ONLY: set[str] = {"exec"}
 
 
 def _swept() -> list[tuple[str, list[str]]]:

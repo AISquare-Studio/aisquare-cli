@@ -210,10 +210,14 @@ from aisquare.services.ci_contract import HookRequest, observed_now, wire_sessio
 from aisquare.core.ids import new_trace_id
 
 request = HookRequest(
-    trigger="prompt_submit", run_id="run_4561e2c4cd5f5318b86d",
-    session_id=wire_session_id("live-probe-1"), trace_id=new_trace_id(),
+    trigger="prompt_submit",
+    run_id="run_4561e2c4cd5f5318b86d",
+    session_id=wire_session_id("live-probe-1"),
+    trace_id=new_trace_id(),
     project_ref="AISquare-Studio/aisquare-cli@feat/collective-intelligence",
-    snapshot_ref=None, prompt="agent run", client_safety_ms=60_000,
+    snapshot_ref=None,
+    prompt="agent run",
+    client_safety_ms=60_000,
     client_observed_at=observed_now(),
 )
 call = ci_client.call(request, url=ci_client.endpoint() + "/v1/hook")

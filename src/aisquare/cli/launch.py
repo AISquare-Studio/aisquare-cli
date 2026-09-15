@@ -23,6 +23,7 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import sqlite3
 from typing import Annotated
 
 import typer
@@ -33,6 +34,13 @@ from aisquare.core import claude_accounts as claude_accounts_core
 from aisquare.core import harness
 from aisquare.core.config import load_config
 from aisquare.core.console import stderr_console
+from aisquare.core.store import (
+    AmbiguousIdError,
+    StoreUnopenable,
+    is_corrupt_error,
+    is_locked_error,
+    store_session,
+)
 from aisquare.services import claude_accounts as claude_accounts_service
 from aisquare.services import explainability as explainability_service
 from aisquare.services import explainability_ops
@@ -130,6 +138,9 @@ def launch(
             metavar="SLOT",
         ),
     ] = None,
+    task: Annotated[
+        str | None, typer.Option("--task", help="Board task assigned to this session (id prefix).")
+    ] = None,
 ) -> None:
     """Launch an agent session already attached to this project's team board.
 
@@ -202,6 +213,53 @@ def launch(
             style="dim",
         )
     env.update(profile.env)
+    # An assignment belongs to this launch, never to whichever manager's shell
+    # happened to launch it. The session-start briefing reads this exact id, and
+    # the session-identity pairing below (finding 13) binds it to THIS agent so a
+    # child that inherits the variable is not assigned the same task.
+    env.pop("AISQUARE_TASK_ID", None)
+    env.pop("AISQUARE_TASK_SESSION", None)
+    if task is not None:
+        if project is None:
+            # The board is unreadable (activate() already fell open above). A
+            # damaged/locked store costs the board row, never the launch (the same
+            # doctrine as the config and proxy reads, and the reason
+            # test_launch_survives_a_damaged_store exists) — so launch WITHOUT the
+            # assignment rather than leaving `fleet spawn --task` dead on a wedged
+            # store at 08:05.
+            stderr_console().print(
+                "board: task not assigned — context.db is unreadable", style="dim"
+            )
+        else:
+            try:
+                with store_session() as store:
+                    assigned = store.get_task(task)
+                if assigned is None or assigned.project_id != project.id:
+                    fail("task does not belong to this project's board", error="invalid_task")
+                env["AISQUARE_TASK_ID"] = assigned.id
+            except AmbiguousIdError:
+                fail(
+                    "task prefix matches several tasks",
+                    error="invalid_task",
+                    hint="use a longer ID prefix",
+                )
+            except sqlite3.Error as exc:
+                # A store that went unreadable between activate() and now is the
+                # same fail-open case: cost the assignment, not the launch. An
+                # ordinary query error (no such table is a defect, not damage)
+                # still refuses.
+                if (
+                    isinstance(exc, StoreUnopenable)
+                    or is_locked_error(exc)
+                    or is_corrupt_error(exc)
+                ):
+                    stderr_console().print(
+                        f"board: task not assigned — context.db unreadable ({exc})", style="dim"
+                    )
+                else:
+                    fail(str(exc), error="invalid_task")
+            except (KeyError, ValueError, OSError) as exc:
+                fail(str(exc), error="invalid_task")
     if account is not None:
         # The account wins over the binding: the flag names an account this
         # launch is FOR, and the binding is the role's standing shape. For the
@@ -332,6 +390,20 @@ def launch(
             # here needs to write one, and why an unpinnable launch still joins.
             env.update(explainability_service.trace_marker(wiring))
     argv = [resolution.binary, *profile.args, *role_args, *ctx.args, *pinned_id]
+    if task is not None and "AISQUARE_TASK_ID" in env:
+        # Finding 13: bind the task to THIS launch's session id so only the agent
+        # we start here is assigned it — a child that later inherits
+        # AISQUARE_TASK_ID (a `claude -p` helper, `team spawn --exec`) is a
+        # different session and gets no assignment. Reuse whatever id the launch
+        # already runs on: a `--session-id` in the args (the fleet passes one) or
+        # the traced pin above. When nothing pinned one — an untraced --task
+        # launch — mint one so there IS an identity to bind to; a binary that
+        # cannot take --session-id gets no binding, and the assignment is dropped
+        # rather than leaked to whatever process inherits the variable.
+        identity = explainability_service.plan_session_identity(resolution.binary, argv[1:])
+        if identity.session_id is not None:
+            env["AISQUARE_TASK_SESSION"] = identity.session_id
+            argv += list(identity.inject_args)
     # Text.assemble rather than "[bold]{role}[/bold]": this is the one line that
     # styles a single token instead of the whole line, and it interpolates a
     # role name, a binary path and a project name. A Text carries its styling

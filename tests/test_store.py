@@ -17,7 +17,7 @@ from aisquare.core.store import (
     open_store,
     store_session,
 )
-from aisquare.models import ContextEntry, Pool, ProjectInfo
+from aisquare.models import ContextEntry, Pool, ProjectInfo, TeamEvent
 
 PROJECT = ProjectInfo(id="prj_test", root=Path("/tmp/example-project"), linked_repos=[])
 
@@ -231,7 +231,7 @@ def test_migrations_reach_the_current_schema_version() -> None:
         version = raw.execute("PRAGMA user_version").fetchone()[0]
     finally:
         raw.close()
-    assert version == SCHEMA_VERSION == 14  # v11 fleet, v12 metric, v13 converges, v14 forgotten_at
+    assert version == SCHEMA_VERSION == 15  # v15 adds versioned work briefs
 
 
 def test_the_metric_check_constraints_mirror_the_python_vocabularies() -> None:
@@ -739,3 +739,128 @@ def test_every_shape_of_user_version_11_converges_on_one_schema(
         assert any(t.startswith("metric_v1_orphaned") for t in tables), label
     if shape == "V1ORPHAN":
         assert "metric_v1_orphaned_2" in tables, "a taken orphan name must not wedge the rename"
+
+
+# The #145 family's v15 — origin/feat/145-account-default-priority and the stacked
+# #157-#173 — stamps THE SAME NUMBER this branch uses for ``work_brief``, for the
+# account registry instead. Column shape copied from that branch so the cohort
+# built here is the one that exists on those machines, not a stand-in.
+ACCOUNT_BRANCH_V15_DDL = """
+CREATE TABLE claude_account (
+    slot        INTEGER PRIMARY KEY,
+    config_dir  TEXT NOT NULL,
+    alias       TEXT,
+    position    INTEGER NOT NULL,
+    is_default  INTEGER NOT NULL DEFAULT 0 CHECK (is_default IN (0, 1)),
+    disabled    INTEGER NOT NULL DEFAULT 0 CHECK (disabled IN (0, 1)),
+    created_at  TEXT NOT NULL
+);
+CREATE UNIQUE INDEX claude_account_alias ON claude_account (alias) WHERE alias IS NOT NULL;
+CREATE UNIQUE INDEX claude_account_default ON claude_account (is_default) WHERE is_default = 1;
+CREATE TABLE project_setting (
+    project_id  TEXT NOT NULL REFERENCES project (id),
+    key         TEXT NOT NULL,
+    value       TEXT NOT NULL,
+    set_at      TEXT NOT NULL,
+    PRIMARY KEY (project_id, key)
+);
+ALTER TABLE fleet_agent ADD COLUMN account_slot INTEGER;
+"""
+
+# What a pre-fix build of THIS branch created at 15: the same table, by a bare
+# CREATE. A renumbered ladder would meet it again and wedge on "already exists".
+BARE_WORK_BRIEF_DDL = """
+CREATE TABLE work_brief (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    revision INTEGER NOT NULL,
+    data TEXT NOT NULL
+);
+CREATE INDEX work_brief_project ON work_brief(project_id);
+INSERT INTO work_brief (id, project_id, revision, data)
+    VALUES ('brief_old', 'prj_old', 1, '{"id": "brief_old"}');
+"""
+
+
+def _save_brief(store: ContextStore, brief_id: str, project_id: str) -> None:
+    """A brief written the way the service writes one: through the CAS save."""
+    store.ensure_project(ProjectInfo(id=project_id, root=Path("/tmp") / project_id))
+    store.save_work_brief(
+        brief_id,
+        project_id,
+        1,
+        f'{{"id": "{brief_id}"}}',
+        None,
+        TeamEvent(
+            id=f"evt_{brief_id}",
+            project_id=project_id,
+            kind="brief_created",
+            text="converged",
+            created_at=datetime.now(tz=UTC),
+        ),
+        {},
+    )
+
+
+def test_a_store_the_account_branch_stamped_15_gains_the_work_brief_table() -> None:
+    """Finding 1: ``user_version`` is positional and two branches both took 15.
+
+    A machine that ran a #145-chain build is at 15 with ``claude_account`` and
+    no ``work_brief``. The ladder sees "current" and does nothing, so before
+    the presence step every ``task done`` failed with ``no such table``. The
+    end state is asserted by WRITING a brief and reading it back, and the other
+    branch's table must still be there and usable — converging must add, never
+    replace.
+    """
+    db = _at_version(14, after=ACCOUNT_BRANCH_V15_DDL, stamp=15)
+
+    store = open_store()  # the presence step runs here, whatever the number says
+    try:
+        _save_brief(store, "brief_new", "prj_acct")
+        assert store.get_work_brief("brief_new", "prj_acct") == '{"id": "brief_new"}'
+        assert store.work_briefs("prj_acct") == ['{"id": "brief_new"}']
+    finally:
+        store.close()
+
+    raw = sqlite3.connect(str(db))
+    try:
+        assert raw.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 15
+        raw.execute(
+            "INSERT INTO claude_account (slot, config_dir, position, created_at) "
+            "VALUES (2, '/tmp/acct/2', 1, '2026-01-01T00:00:00+00:00')"
+        )
+        raw.commit()
+        assert raw.execute("SELECT slot FROM claude_account").fetchall() == [(2,)]
+        indexes = {r[0] for r in raw.execute("SELECT name FROM sqlite_master WHERE type = 'index'")}
+    finally:
+        raw.close()
+    assert "work_brief_project" in indexes, "the index converges with its table"
+
+
+def test_a_store_that_already_has_work_brief_survives_the_v15_step() -> None:
+    """The other half of the trap: a bare CREATE at 15 would wedge a store that
+    already has the table (a build of this branch before the DDL was made
+    idempotent, stamped back to 14 by hand, or the renumbered ladder a merge
+    would otherwise need). The rows it holds must come through untouched."""
+    db = _at_version(14, after=BARE_WORK_BRIEF_DDL, stamp=14)
+
+    open_store().close()  # a wedge raises out of here
+
+    raw = sqlite3.connect(str(db))
+    try:
+        assert raw.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+        assert raw.execute("SELECT id, project_id FROM work_brief").fetchall() == [
+            ("brief_old", "prj_old")
+        ]
+    finally:
+        raw.close()
+
+
+def test_a_store_that_has_every_table_pays_no_write_on_open() -> None:
+    """The presence step is a read when there is nothing to do: a store opened
+    read-only by another process must not see a write transaction start."""
+    open_store().close()  # fully migrated
+    db = _db_path()
+    before = db.stat().st_mtime_ns
+    open_store().close()
+    assert db.stat().st_mtime_ns == before, "an idle open wrote to the database file"

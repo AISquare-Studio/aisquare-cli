@@ -488,6 +488,31 @@ _PREPARE: dict[int, Callable[[sqlite3.Connection], None]] = {
 _SCHEMA_V14 = """
 ALTER TABLE project ADD COLUMN forgotten_at TEXT;
 """
+# v15: native work contracts; task links/evidence live in a versioned document.
+# CAS revision and the board event commit together, never a second task queue.
+#
+# IF NOT EXISTS, and ALSO applied by presence in :data:`_CONVERGE_BY_PRESENCE`,
+# because this number was claimed twice while the branches were in flight — the
+# fourth time on this ladder: the #145 family (origin/feat/145-account-default-
+# priority and the stacked #157-#173) stamps ``user_version 15`` for its
+# ``claude_account`` / ``project_setting`` tables. ``_migrate`` compares the
+# version POSITIONALLY, so a store stamped 15 by either line never runs the
+# other's step: a #145 machine opening this build has no ``work_brief`` and
+# every ``task done`` dies with "no such table" (and ``protected_report_ids``
+# reads nothing, so evidence reports get pruned). A plain renumber does not
+# serve the pre-merge stores either: a store that already ran this step at 15
+# would hit a bare ``CREATE TABLE`` again at 16 and become unopenable ("table
+# work_brief already exists"). So the DDL is idempotent, and the table is
+# guaranteed by looking for it rather than by counting.
+_SCHEMA_V15 = """
+CREATE TABLE IF NOT EXISTS work_brief (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    revision INTEGER NOT NULL,
+    data TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS work_brief_project ON work_brief(project_id);
+"""
 # Ordered migrations; index i upgrades the db from user_version i to i+1.
 _MIGRATIONS = (
     _SCHEMA_V1,
@@ -504,8 +529,18 @@ _MIGRATIONS = (
     _SCHEMA_V12,
     _SCHEMA_V13,
     _SCHEMA_V14,
+    _SCHEMA_V15,
 )
 SCHEMA_VERSION = len(_MIGRATIONS)
+
+#: Tables reconciled by PRESENCE on every open, whatever ``user_version`` says:
+#: ``(table name, idempotent DDL that creates it and its indexes)``. The ladder
+#: above is positional, and a number two in-flight branches both claimed is
+#: positional in two different ways at once (see the v15 note). An entry here is
+#: how the branch that merges SECOND makes the first one's stores whole without
+#: renumbering the first one's history: the DDL is applied when the table is
+#: absent and skipped when it is present, so every cohort ends in one shape.
+_CONVERGE_BY_PRESENCE: tuple[tuple[str, str], ...] = (("work_brief", _SCHEMA_V15),)
 
 _PROJECT_COLUMNS = "id, root, linked_repos, codename"
 
@@ -636,6 +671,7 @@ class ContextStore(Protocol):
     def claim_task(self, task_id: str, session_ref: str, lease_until: datetime) -> bool: ...
     def renew_leases(self, session_id: str, lease_until: datetime) -> None: ...
     def set_task_status(self, task_id: str, status: TaskStatus) -> TeamTask: ...
+    def finish_verified_task(self, task_id: str, brief_revisions: dict[str, int]) -> TeamTask: ...
     def release_task(self, task_id: str) -> TeamTask: ...
     def reopen_task(self, task_id: str) -> TeamTask: ...
     def next_task(
@@ -682,6 +718,19 @@ class ContextStore(Protocol):
         self, project_id: str, label: str, *, live_only: bool = True
     ) -> FleetAgent | None: ...
     def end_fleet_agent(self, agent_id: str, *, exit_status: int | None = None) -> FleetAgent: ...
+    def get_work_brief(self, ref: str, project_id: str) -> str | None: ...
+    def work_briefs(self, project_id: str) -> list[str]: ...
+    def all_work_briefs(self) -> list[str]: ...
+    def save_work_brief(
+        self,
+        brief_id: str,
+        project_id: str,
+        revision: int,
+        data: str,
+        expected: int | None,
+        event: TeamEvent,
+        task_statuses: dict[str, str],
+    ) -> None: ...
     def close(self) -> None: ...
 
 
@@ -911,6 +960,116 @@ class SqliteStore:
     def __init__(self, connection: sqlite3.Connection) -> None:
         self._conn = connection
 
+    def get_work_brief(self, ref: str, project_id: str) -> str | None:
+        rows = self._conn.execute(
+            f"SELECT id, data FROM work_brief WHERE project_id = ? "
+            f"AND project_id IN {_VISIBLE_PROJECTS} AND (id = ? OR substr(id, 1, ?) = ?)",
+            (project_id, ref, len(ref), ref),
+        ).fetchall()
+        exact = next((row for row in rows if row["id"] == ref), None)
+        if exact is not None:
+            return str(exact["data"])
+        if len(rows) > 1:
+            raise AmbiguousIdError(ref)
+        return str(rows[0]["data"]) if rows else None
+
+    def work_briefs(self, project_id: str) -> list[str]:
+        return [
+            str(row["data"])
+            for row in self._conn.execute(
+                f"SELECT data FROM work_brief WHERE project_id = ? "
+                f"AND project_id IN {_VISIBLE_PROJECTS} ORDER BY id",
+                (project_id,),
+            ).fetchall()
+        ]
+
+    def all_work_briefs(self) -> list[str]:
+        """Every brief on every board, a FORGOTTEN project's included.
+
+        Report retention protects the reports that recorded evidence names, and a
+        forgotten project's briefs still name theirs: ``project forget`` is a
+        tombstone that comes back when the root registers again, and the evidence
+        it brings back must still find its reports. Reads through the visible-
+        project filter would drop exactly those.
+        """
+        return [
+            str(row["data"])
+            for row in self._conn.execute("SELECT data FROM work_brief ORDER BY id").fetchall()
+        ]
+
+    def save_work_brief(
+        self,
+        brief_id: str,
+        project_id: str,
+        revision: int,
+        data: str,
+        expected: int | None,
+        event: TeamEvent,
+        task_statuses: dict[str, str],
+    ) -> None:
+        """Atomically save contract, finding/reopen effects and factual board event."""
+        with self._conn:
+            if expected is None:
+                self._conn.execute(
+                    "INSERT INTO work_brief(id, project_id, revision, data) VALUES (?, ?, ?, ?)",
+                    (brief_id, project_id, revision, data),
+                )
+            else:
+                changed = self._conn.execute(
+                    "UPDATE work_brief SET revision = ?, data = ? "
+                    "WHERE id = ? AND project_id = ? AND revision = ?",
+                    (revision, data, brief_id, project_id, expected),
+                ).rowcount
+                if changed != 1:
+                    raise ValueError("brief changed concurrently; read the latest brief and retry")
+            for task_id, status in task_statuses.items():
+                if status not in ("todo", "blocked"):
+                    raise ValueError("unsupported brief task transition")
+                # Back to the pool means unowned; blocked keeps its owner, who is the
+                # one that has to see the blocker. A dropped task is never revived.
+                changed = self._conn.execute(
+                    "UPDATE team_task SET status = ?, "
+                    "claimed_by = CASE WHEN ? = 'blocked' THEN claimed_by ELSE NULL END, "
+                    "claim_expires_at = "
+                    "CASE WHEN ? = 'blocked' THEN claim_expires_at ELSE NULL END, "
+                    "updated_at = ? WHERE id = ? AND project_id = ? AND status != 'dropped'",
+                    (status, status, status, _now_iso(), task_id, project_id),
+                ).rowcount
+                if changed != 1:
+                    raise ValueError("linked task disappeared or changed board")
+                # Attributed to the same session as the brief write that caused it.
+                # These are manager wake kinds, and a manager's OWN correction that
+                # reopens its done task must not wake the manager at its next Stop
+                # (and spend a continuation): the wake-up excludes the manager's own
+                # session, which only works if the event names it.
+                self._conn.execute(
+                    "INSERT INTO team_event (id, project_id, session_id, kind, text, task_id, "
+                    "created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        f"{event.id}-{task_id}",
+                        project_id,
+                        event.session_id,
+                        "task_blocked" if status == "blocked" else "task_reopened",
+                        event.text,
+                        task_id,
+                        event.created_at.isoformat(),
+                    ),
+                )
+            self._conn.execute(
+                "INSERT INTO team_event (id, project_id, session_id, kind, text, task_id, "
+                "to_role, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    event.id,
+                    event.project_id,
+                    event.session_id,
+                    event.kind,
+                    event.text,
+                    event.task_id,
+                    event.to_role,
+                    event.created_at.isoformat(),
+                ),
+            )
+
     def add(self, entry: ContextEntry) -> ContextEntry:
         self._conn.execute(
             f"INSERT INTO entry ({_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -1107,6 +1266,7 @@ class SqliteStore:
                 "team_session",
                 "fleet_agent",
                 "metric",
+                "work_brief",
             ):
                 cursor = self._conn.execute(
                     f"DELETE FROM {table} WHERE project_id = ?", (project_id,)
@@ -1126,10 +1286,21 @@ class SqliteStore:
         :data:`_META_BATCH` sessions each (two terms per session): one statement
         per purge was the shape SQLite refused at 500 sessions.
         """
-        removed = self._conn.execute(
-            "DELETE FROM team_meta WHERE key = ? OR key GLOB ?",
-            (f"distill_seq:{project_id}", f"signal/{_glob_prefix(project_id)[:-1]}/*"),
+        work_removed = self._conn.execute(
+            "DELETE FROM team_meta WHERE key = ?", (f"work_mode/{project_id}",)
         ).rowcount
+        for sid in sessions:
+            work_removed += self._conn.execute(
+                "DELETE FROM team_meta WHERE key IN (?, ?, ?)",
+                (f"work_rules/{sid}", f"work_rules_text/{sid}", f"work_rules_role/{sid}"),
+            ).rowcount
+        removed = (
+            work_removed
+            + self._conn.execute(
+                "DELETE FROM team_meta WHERE key = ? OR key GLOB ?",
+                (f"distill_seq:{project_id}", f"signal/{_glob_prefix(project_id)[:-1]}/*"),
+            ).rowcount
+        )
         for start in range(0, len(sessions), _META_BATCH):
             batch = sessions[start : start + _META_BATCH]
             keys = [f"nudge:{sid}" for sid in batch]
@@ -1499,6 +1670,46 @@ class SqliteStore:
             (lease_until.isoformat(), session_id),
         )
         self._conn.commit()
+
+    def finish_verified_task(self, task_id: str, brief_revisions: dict[str, int]) -> TeamTask:
+        """Complete only if contracts have not changed since the evidence check.
+
+        The immediate transaction also catches newly-created briefs or links.
+        A later correction owns the same write lock and atomically reopens done tasks.
+        """
+        with self._conn:
+            self._conn.execute("BEGIN IMMEDIATE")
+            task = self.get_task(task_id)
+            if task is None:
+                raise KeyError(task_id)
+            current = {
+                str(row["id"]): int(row["revision"])
+                for row in self._conn.execute(
+                    "SELECT id, revision FROM work_brief WHERE project_id = ?",
+                    (task.project_id,),
+                ).fetchall()
+            }
+            # Gate on the briefs THIS task was verified against (``brief_revisions``
+            # from ``task_gate``), never on every brief on the board: an unrelated
+            # brief another worker corrects during the fingerprint scan, or a
+            # damaged brief that never referenced this task, must not block its
+            # completion. A brief this task is linked to that changed or vanished
+            # since the check still does.
+            if any(
+                current.get(brief_id) != revision for brief_id, revision in brief_revisions.items()
+            ):
+                raise ValueError(
+                    "requirements changed during verification; read the brief and retry"
+                )
+            self._conn.execute(
+                "UPDATE team_task SET status = 'done', claimed_by = NULL, "
+                "claim_expires_at = NULL, updated_at = ? "
+                "WHERE id = ?",
+                (_now_iso(), task_id),
+            )
+        updated = self.get_task(task_id)
+        assert updated is not None
+        return updated
 
     def set_task_status(self, task_id: str, status: TaskStatus) -> TeamTask:
         task = self.get_task(task_id)
@@ -2208,22 +2419,66 @@ def _migrate(connection: sqlite3.Connection) -> None:
 
     A loser whose script still fails re-reads the version: if another process
     advanced it, that's victory by other means; otherwise the error is real.
+
+    POSITIONAL NUMBERING IS NOT ENOUGH WHILE BRANCHES ARE IN FLIGHT. The ladder
+    says "a store at N has run steps 1..N", which is true only while one line of
+    history hands out numbers. Two branches open at once each take the next free
+    number for their own table (v11 twice, v12 twice, v14 nearly, v15 twice —
+    see the notes on _SCHEMA_V13 and _SCHEMA_V15), and then a store stamped N by
+    one branch is, to the other, a store that has already run a step it never
+    ran: the table is missing and no version bump will ever add it. Renumbering
+    at merge time breaks the other cohort instead — their stores DID run the
+    step, and a bare CREATE at the new number wedges them. So the ladder is
+    followed by :func:`_converge_by_presence`: the tables that collided are
+    looked for by name and created when absent, whatever the number says. That
+    runs on every open and is a single ``sqlite_master`` read when there is
+    nothing to do.
     """
     while True:
         if int(connection.execute("PRAGMA user_version").fetchone()[0]) >= len(_MIGRATIONS):
-            return
+            break
         try:
             connection.execute("BEGIN IMMEDIATE")
             version = int(connection.execute("PRAGMA user_version").fetchone()[0])
             if version >= len(_MIGRATIONS):
                 connection.execute("COMMIT")
-                return
+                break
             prepare = _PREPARE.get(version)
             if prepare is not None:
                 prepare(connection)
             for statement in _statements(_MIGRATIONS[version]):
                 connection.execute(statement)
             connection.execute(f"PRAGMA user_version = {version + 1}")
+            connection.execute("COMMIT")
+        except sqlite3.Error:
+            with contextlib.suppress(sqlite3.Error):
+                connection.execute("ROLLBACK")
+            raise
+    _converge_by_presence(connection)
+
+
+def _table_exists(connection: sqlite3.Connection, table: str) -> bool:
+    query = "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?"
+    return connection.execute(query, (table,)).fetchone() is not None
+
+
+def _converge_by_presence(connection: sqlite3.Connection) -> None:
+    """Create each :data:`_CONVERGE_BY_PRESENCE` table that is absent, whatever the version.
+
+    The one case the ladder cannot see: ``user_version`` already reads current,
+    stamped there by a build whose step N created a DIFFERENT table. Checked by
+    presence, not by version, and only under the same ``BEGIN IMMEDIATE`` the
+    ladder uses, so racing first opens serialise here too — the second one in
+    finds the table and its ``IF NOT EXISTS`` is a no-op. A store that has the
+    table pays one read and no transaction.
+    """
+    for table, ddl in _CONVERGE_BY_PRESENCE:
+        if _table_exists(connection, table):
+            continue
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            for statement in _statements(ddl):
+                connection.execute(statement)
             connection.execute("COMMIT")
         except sqlite3.Error:
             with contextlib.suppress(sqlite3.Error):

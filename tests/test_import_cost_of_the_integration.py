@@ -105,7 +105,11 @@ UNIQUELY_IMPORTED = {
 #: second — and the part that only ever tracked CPython's own reorganisation is
 #: gone. `test_nothing_heavier_than_the_standard_library_is_imported` is the
 #: assertion that catches the failure this file exists for, and it is exact.
+# CPython 3.12 on macOS additionally loads _scproxy through urllib.request to
+# read system proxy configuration. It is stdlib platform glue, not an SDK.
 DRIFTS_BY_INTERPRETER = {"_socket", "array", "socket", "tempfile"}
+if sys.platform == "darwin":
+    DRIFTS_BY_INTERPRETER.add("_scproxy")
 
 #: Everything the diff is permitted to contain, on any interpreter.
 ALLOWED = UNIQUELY_IMPORTED | DRIFTS_BY_INTERPRETER

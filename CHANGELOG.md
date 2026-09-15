@@ -7,6 +7,56 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Work briefs and command reports.** Two separate features with separate
+  controls, neither of which requires the Ponytail, Spec Kit or RTK plugins
+  ([docs/native-workflow.md](docs/native-workflow.md),
+  [docs/command-reports.md](docs/command-reports.md)).
+  - *Work briefs* record what was asked as stable requirements (`R1`, `R2`, …)
+    linked to ordinary board tasks, with evidence per requirement and per task;
+    `asq task done` refuses a linked task without fresh evidence, `asq brief
+    check` exits 1 while anything is missing, failed, blocked or stale, and a
+    correction reopens finished tasks while a task still being worked on keeps
+    its owner. Command evidence is bound to a content fingerprint of the
+    checkout (tracked and nonignored files, submodule commits; not Git HEAD, not
+    `__pycache__`-style generated directories), compared per file so a per-run
+    output the check itself writes (a `pytest --junitxml` report, a `.coverage`)
+    is new output and does not block the pass, while a real edit — and only a
+    real edit — to a pre-existing file makes it stale. Three failures by one task
+    against one
+    requirement revision block that task; a correction restarts the count.
+    Role-specific working rules (`native-1`) reach manager-spawned and directly
+    launched sessions through the shared session-start briefing and follow the
+    session's current role; `asq brief mode off` turns them off for new sessions.
+    Brief writes take `--as SESSION` like the task commands, and the reopen/block
+    events a write causes carry that session, so a manager's own correction no
+    longer wakes the manager at its next Stop; `brief finding` without `--task`
+    lands on the first live linked task, never a dropped duplicate.
+    The `work_brief` table is store schema v15, and it converges by presence as
+    well as by number: the in-flight account-registry branch stamps the same
+    `user_version 15` for its own tables, and `_migrate` compares the number
+    positionally, so a store either line stamped never ran the other's step.
+    The DDL is idempotent and every open creates the table when it is absent,
+    whatever the version says (`test_a_store_the_account_branch_stamped_15_gains_the_work_brief_table`).
+  - *Command reports*: `asq exec -- COMMAND` runs a command exactly once, keeps
+    the original bytes (first 1 MiB per stream) under `~/.aisquare/reports`,
+    gives the agent a shorter report for recognised `git status` and pytest
+    output (progress lines from the collection zone only; `-s`, also inside a
+    cluster such as `-sv`, disables it), and `asq reports show ID --raw` recovers
+    the originals without ever re-running. Interrupts are forwarded to the
+    command's process group and escalate (SIGINT → SIGTERM → SIGKILL) with the
+    interruption recorded; a background process that keeps the pipe open after the
+    command exits (a `setsid`'d helper) no longer blocks the wrapper — capture
+    drains and stops, recording `output_pipes_held_open`; retention (14 days /
+    newest 64) never removes a report that backs recorded evidence, nor one captured with `--project` for evidence but not yet recorded (kept within the retention-days window so a burst of newer commands cannot evict it first).
+  - A **ui-tester** fleet role (browser checks of a changed interface), registered
+    in the Explainability roster with its own standing cycle; `fleet spawn --task`
+    now hands the task to the worker (`AISQUARE_TASK_ID`, a role-aware kickoff
+    typed into the pane, and a session-start `<aisquare-assignment>` block that
+    follows the task's real claim and status). The assignment is bound to the
+    launched session's own id (`AISQUARE_TASK_SESSION`): a `claude -p` helper or
+    a `team spawn --exec` child started from inside the assignee inherits the
+    variable but is a different session, so it gets the ordinary board and is
+    never told to claim the parent's task.
 - **Accounts, in `asq` and on the command line.** A new **Accounts** section in
   the fleet UI's sidebar opens a page with the AISquare sign-in on top and the
   Claude Code accounts under it. The AISquare card runs `aisquare login`'s

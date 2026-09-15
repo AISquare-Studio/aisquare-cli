@@ -27,6 +27,7 @@ launch, session or heartbeat path.
 from __future__ import annotations
 
 import os
+import stat
 from pathlib import Path
 from typing import Any
 
@@ -46,7 +47,7 @@ def _record(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str]]:
         real_replace(src, dst, **kwargs)
 
     def _fsync(fd: int) -> None:
-        kind = "dir" if os.path.isdir(f"/proc/self/fd/{fd}") else "file"
+        kind = "dir" if stat.S_ISDIR(os.fstat(fd).st_mode) else "file"
         events.append(("fsync", kind))
         real_fsync(fd)
 
@@ -97,7 +98,7 @@ def test_a_directory_that_cannot_be_synced_does_not_cost_the_write(
     real_fsync = os.fsync
 
     def _fail_on_directories(fd: int) -> None:
-        if os.path.isdir(f"/proc/self/fd/{fd}"):
+        if stat.S_ISDIR(os.fstat(fd).st_mode):
             raise OSError("this filesystem does not permit directory fsync")
         real_fsync(fd)
 

@@ -156,3 +156,21 @@ def test_team_disabled_still_refuses(
 
     assert result.exit_code != 0, "a disabled team no longer refuses"
     assert not handover, "a disabled team still handed control to an agent"
+
+
+def test_a_damaged_store_does_not_cost_a_task_launch(
+    isolated_home: Path, handover: dict[str, Any]
+) -> None:
+    """`launch --task` (what `fleet spawn --task` runs) must not be dead on a
+    wedged store: it hands over WITHOUT the assignment rather than refusing, the
+    same fail-open bar the plain launch already meets."""
+    CliRunner().invoke(app, ["init", "--yes"], catch_exceptions=False)
+    paths.db_path().write_bytes(CORRUPT)
+
+    result = CliRunner().invoke(
+        app, ["launch", "coder", "--task", "tsk_anything"], catch_exceptions=True
+    )
+
+    assert handover, "a damaged store stopped a --task launch from starting the agent"
+    assert result.exit_code == 0, f"the --task launch reported failure: {result.output}"
+    assert "AISQUARE_TASK_ID" not in handover["env"], "no board means no assignment, not a refusal"

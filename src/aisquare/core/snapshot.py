@@ -48,6 +48,58 @@ class IndexEntry(TypedDict):
     token_count: int
 
 
+class FocusSelection(TypedDict):
+    files: list[str]
+    notice: str
+    index_commit_changed: bool
+
+
+def focus_files(project_id: str, root: Path, query: str, *, limit: int = 12) -> FocusSelection:
+    """Select paths from the existing map, checking live files on every call.
+
+    The map is navigation, never evidence. No stale packed bodies are returned.
+    New/unmapped files remain discoverable with ordinary search. Selection has
+    no second cache to invalidate and does not launch Repomix on a prompt path.
+    """
+    if not 1 <= limit <= 50:
+        raise ValueError("limit must be between 1 and 50")
+    words = set(re.findall(r"[a-z0-9_]+", query.lower())) - {"the", "a", "and", "to", "for"}
+    if not words:
+        raise ValueError("provide task keywords or file names")
+    snap = load(project_id)
+    if snap is None or not snap.index_path.is_file():
+        return {
+            "files": [],
+            "notice": "No snapshot index. Search the live source files.",
+            "index_commit_changed": False,
+        }
+    if snap.index_path.stat().st_size > 8_000_000:
+        raise ValueError("snapshot index is too large to select safely")
+    entries = json.loads(snap.index_path.read_text(encoding="utf-8"))
+    if not isinstance(entries, list):
+        raise ValueError("snapshot index must contain a list of file entries")
+    root = root.resolve()
+    scored: list[tuple[int, str]] = []
+    for entry in entries:
+        if not isinstance(entry, dict) or not isinstance(entry.get("path"), str):
+            continue
+        name = entry["path"]
+        live = (root / name).resolve()
+        if not live.is_relative_to(root) or not live.is_file():
+            continue
+        score = sum(3 * (word in live.name.lower()) + (word in name.lower()) for word in words)
+        if score:
+            scored.append((score, name))
+    selected = sorted(set(scored), key=lambda item: (-item[0], item[1]))[:limit]
+    stale = snap.head_sha != head_sha(root)
+    return {
+        "files": [name for _, name in selected],
+        "index_commit_changed": stale,
+        "notice": "Paths only: read the current source. The index may omit new files; "
+        "use ordinary search if needed. Packed content is not validation evidence.",
+    }
+
+
 #: The built-in budget — ``[snapshot] max_tokens`` at its default. Callers that
 #: honour the operator's config (``services.project``) read the section and pass
 #: it to :func:`generate`; this is what everyone else gets.

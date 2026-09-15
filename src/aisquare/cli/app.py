@@ -17,7 +17,9 @@ from aisquare.cli import (
     accounts,
     agents,
     auth,
+    brief,
     capture,
+    command_reports,
     connectors,
     context,
     enforce,
@@ -148,6 +150,8 @@ app.add_typer(policy.app, name="policy", hidden=True)
 app.add_typer(enforce.app, name="enforce", hidden=True)
 app.add_typer(team.app, name="team")
 app.add_typer(task.app, name="task")
+app.add_typer(brief.app, name="brief")
+command_reports.register(app)
 app.command("note")(team.note)
 app.command("board")(team.board)
 app.command("recall")(team.recall)

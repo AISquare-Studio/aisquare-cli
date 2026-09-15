@@ -24,6 +24,32 @@ from aisquare.services import context as context_service
 
 app = typer.Typer(help="Inspect and edit remembered context (alias: ctx).", no_args_is_help=True)
 
+
+@app.command("focus")
+def focus(
+    query: Annotated[str, typer.Argument(help="Task keywords or file names.")],
+    limit: Annotated[int, typer.Option("--limit", min=1, max=50)] = 12,
+) -> None:
+    """Find relevant live source paths using this project's existing snapshot index."""
+    import json
+    import sqlite3
+
+    from aisquare.core import orchestrator, snapshot
+    from aisquare.core.state import get_state
+
+    try:
+        project = orchestrator.team_project()
+        selected = snapshot.focus_files(project.id, project.root, query, limit=limit)
+    except (ValueError, OSError, sqlite3.Error) as exc:
+        fail(str(exc), error="context_focus_error")
+    if get_state().json_output:
+        typer.echo(json.dumps(selected))
+    else:
+        for path in selected["files"]:
+            typer.echo(path)
+        typer.echo(selected["notice"])
+
+
 EntryId = Annotated[str, typer.Argument(help="Context entry id.")]
 
 

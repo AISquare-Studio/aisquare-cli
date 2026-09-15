@@ -186,7 +186,7 @@ aisquare: the operator attached persona mentor to you — it applies from now on
 You are a mentor. The work matters, and so does the person who reads it after you.
 ```
 
-`(typed)` — the agent was waiting, so the briefing was typed into its pane: the preface names what it replaces, then the mentor block. A busy agent gets it as a board note instead (`noted`). Either way the fleet row records the persona, so a `/clear` or a restart briefs the agent with it again.
+`(typed)` — the agent was waiting, so the briefing was typed into its pane: the preface names what it replaces, then the mentor block. A busy agent gets it as a board note instead (`noted`). Either way the fleet row records the persona. Today a `/clear` or a restart briefs from that row only when `AISQUARE_PERSONA` is not set: this agent was spawned with `--persona calm-reviewer`, so the variable still wins and a `/clear` briefs calm-reviewer again. P20 makes the recorded row win; this sentence is re-checked when it lands.
 
 ### 10. The board and the fleet agree
 

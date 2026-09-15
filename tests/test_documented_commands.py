@@ -101,6 +101,10 @@ REPO = Path(__file__).resolve().parents[1]
 # Every document that shows a reader a command to type. A new .md with commands
 # in it should be added here; the test that guards this list is below.
 DOCUMENTED = (
+    # The hackathon demo runbook: every `sh`-fenced command there is a step the
+    # owner types, run for real before it was pasted, so a flag that leaves the
+    # CLI must fail here rather than in the demo.
+    "docs/plans/hackathon-demo.md",
     "README.md",
     "docs/connecting-your-agents-to-explainability.md",
     "docs/explainability-tracing-boundary.md",
@@ -899,6 +903,10 @@ CENSUS = {
     # `fleet spawn --persona`; twenty-five since P5's "Import anything else";
     # twenty-six since P8's `persona attach`.
     "docs/personas.md": (26, 0),
+    # Measured 2026-09-15 on the day the demo runbook was written: every Track A
+    # command (setup, the persona verbs, the hook, launch, fleet spawn/ls/stop,
+    # persona attach, board) and one classified mention (the `/tmp/aisquare-demo` path).
+    "docs/plans/hackathon-demo.md": (14, 1),
 }
 
 

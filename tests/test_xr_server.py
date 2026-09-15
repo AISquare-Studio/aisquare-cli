@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import json
 import logging
 import socket
@@ -18,7 +19,7 @@ import sqlite3
 import threading
 import time
 from array import array
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
@@ -35,9 +36,11 @@ from aisquare.models import FleetAgent, ProjectInfo, TeamSession
 pytest.importorskip("starlette.testclient", reason="the [xr] extra is not installed")
 
 from starlette.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
 
 from aisquare.services import fleet as fleet_service
 from aisquare.services import mcp_server
+from aisquare.services.xr import protocol as wire
 from aisquare.services.xr import server as xr_server
 from aisquare.services.xr import speech
 from aisquare.services.xr.speech import (
@@ -447,32 +450,101 @@ def _drain_until(connection: Any, kind: str) -> list[dict[str, Any]]:
     raise AssertionError(f"no {kind} frame arrived; saw {[frame.get('t') for frame in seen]}")
 
 
-def _speak(connection: Any, *, frames: int = FRAMES_PER_INTERIM, session: str = CODER) -> None:
-    """A push-to-talk burst: header, ``frames`` binary frames, ``audioEnd``."""
-    connection.send_text(json.dumps({"t": "audio", "session": session, "seq": 0}))
-    for _ in range(frames):
-        connection.send_bytes(FRAME)
+def _burst(connection: Any, frames: list[bytes], *, session: str = CODER, seq: int = 0) -> None:
+    """A push-to-talk burst of exactly these frames, in this order: header, frames, ``audioEnd``."""
+    connection.send_text(json.dumps({"t": "audio", "session": session, "seq": seq}))
+    for frame in frames:
+        connection.send_bytes(frame)
     connection.send_text(json.dumps({"t": "audioEnd", "session": session}))
 
 
-def test_the_default_factory_is_the_real_backend_and_is_replaceable(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The seam, at rest: a live server transcribes for real, a test does not.
+def _voice_frames(frames: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """``frames`` without the poller's deltas.
 
-    Asserted by identity and never called — invoking it here would load a
-    whisper model on whatever machine is running the suite.
+    The poll task runs on its own clock and may put a ``delta`` anywhere in
+    a drained sequence — it did, between an interim and a final, on a py3.11
+    CI runner — so an assertion about the ORDER of voice frames drops them
+    first. What is asserted is what the voice worker sent, in the order it
+    sent it; the deltas are a different task's traffic.
     """
-    assert xr_server.transcriber_factory() is speech.transcriber
+    return [frame for frame in frames if frame.get("t") != "delta"]
 
-    def fake() -> Transcriber:
-        return FakeTranscriber(CANNED)
 
-    monkeypatch.setattr(xr_server, "_factory", speech.transcriber)
-    xr_server.set_transcriber_factory(fake)
-    assert xr_server.transcriber_factory() is fake
-    xr_server.set_transcriber_factory(None)
-    assert xr_server.transcriber_factory() is speech.transcriber, "None restores the real one"
+def _speak(connection: Any, *, frames: int = FRAMES_PER_INTERIM, session: str = CODER) -> None:
+    """A burst of ``frames`` identical silent frames — the common shape, spelled once."""
+    _burst(connection, [FRAME] * frames, session=session)
+
+
+def _final_stt(connection: Any) -> dict[str, Any]:
+    """Drain interims and return the ``stt`` frame with ``final: true``."""
+    frame = json.loads(_until(connection, "stt"))
+    while frame["final"] is False:
+        frame = json.loads(_until(connection, "stt"))
+    return dict(frame)
+
+
+def _note_filed(project_id: str, text: str) -> bool:
+    """Whether a board event with exactly ``text`` exists — what a routed prompt leaves behind."""
+    with store_session() as store:
+        return any(event.text == text for event in store.recent_events(project_id, limit=10))
+
+
+def _eventually(condition: Callable[[], bool], *, within: float = RECEIVE_TIMEOUT_S) -> bool:
+    """Poll ``condition`` until it holds or ``within`` seconds pass.
+
+    For a fact that lives on the server's side of the socket — a transcriber
+    built by the worker task, a note the worker filed after the client left —
+    which no frame the test receives can synchronise with.
+    """
+    deadline = time.monotonic() + within
+    while time.monotonic() < deadline:
+        if condition():
+            return True
+        time.sleep(0.01)
+    return condition()
+
+
+def test_the_real_backend_is_the_default_and_app_state_is_the_one_seam(work_dir: Path) -> None:
+    """The seam, at rest and swapped: a live server transcribes for real, a test does not.
+
+    The default is asserted by identity and never called — invoking it here
+    would load a whisper model on whatever machine is running the suite. The
+    swap is exercised on a RUNNING app, because ``app.state`` is the one
+    documented place to inject a transcriber and a value captured at build
+    time would make that swap silently do nothing. There used to be a second,
+    process-wide seam beside this one; two ways to inject the same object are
+    two places to check to learn which transcriber a socket will get.
+    """
+    project = _seed(work_dir)
+    token = mcp_server.serve_token()
+    from aisquare.services import team as team_service
+
+    team_service.activate(project.root)
+    app = xr_server.build_app(project, token=token)
+    assert app.state.transcriber_factory is speech.transcriber
+
+    built: list[str] = []
+
+    def first() -> Transcriber:
+        built.append("first")
+        return FakeTranscriber("first")
+
+    def second() -> Transcriber:
+        built.append("second")
+        return FakeTranscriber("second")
+
+    app.state.transcriber_factory = first
+    with TestClient(app) as http:
+        with _authed(http, token) as connection:
+            _speak(connection)
+            assert _final_stt(connection)["text"] == "first"
+        app.state.transcriber_factory = second
+        with _authed(http, token) as connection:
+            _speak(connection)
+            assert _final_stt(connection)["text"] == "second", (
+                "the swap was not read per connection"
+            )
+    assert built == ["first", "second"]
 
 
 def test_a_spoken_burst_is_interim_stt_then_one_final_then_a_routed_prompt(
@@ -508,8 +580,66 @@ def test_a_spoken_burst_is_interim_stt_then_one_final_then_a_routed_prompt(
     assert any(CANNED in text for text in texts)
 
     assert len(built) == 1, "one transcriber for the connection"
-    assert bytes(built[0].fed) == FRAME * FRAMES_PER_INTERIM, "every frame arrived, in order"
+    assert bytes(built[0].fed) == FRAME * FRAMES_PER_INTERIM, "every frame arrived"
     assert built[0].finished
+
+
+def _distinct_frames(count: int) -> list[bytes]:
+    """``count`` frames whose payloads differ, so a reordering cannot hide in the join."""
+    return [index.to_bytes(2, "little") * (speech.FRAME_BYTES // 2) for index in range(count)]
+
+
+def test_frames_reach_the_transcriber_in_wire_order_with_distinct_payloads(
+    voice: tuple[TestClient, ProjectInfo, str, list[FakeTranscriber]],
+) -> None:
+    """Order, pinned with frames that can tell each other apart.
+
+    Every other voice test sends identical frames — all-zero ``FRAME`` or a
+    repeated tone — so "every frame arrived, in order" could not detect a
+    reordering: swapping pairs in the server's frame path passed the whole
+    suite. Speech scrambled that way is noise, and a per-frame task dispatch,
+    the obvious way to get decodes off the read loop, would produce exactly
+    that. So these payloads differ, and the join is asserted whole.
+    """
+    http, _project, token, built = voice
+    frames = _distinct_frames(FRAMES_PER_INTERIM)
+    with _authed(http, token) as connection:
+        _burst(connection, frames)
+        assert _final_stt(connection)["text"] == CANNED
+    assert bytes(built[0].fed) == b"".join(frames), "the frames were reordered on the way"
+
+
+def test_frames_that_arrive_during_a_slow_decode_are_fed_as_one_chunk_in_order(
+    work_dir: Path,
+) -> None:
+    """Catching up costs one ``feed``, and it preserves the order it caught up on.
+
+    While the worker is parked in a decode the read loop keeps accepting
+    frames; when the decode returns, everything that arrived meanwhile is
+    handed over as ONE chunk. That is what lets a worker that fell a decode
+    behind catch up, rather than paying one decode per frame it missed for
+    the rest of the press — and it is the one place a reordering could slip
+    in, so the payloads differ and the join is checked.
+    """
+    held = _HeldTranscriber()
+    frames = _distinct_frames(FRAMES_PER_INTERIM)
+    for http, _project, token in _voice(work_dir, lambda: held):
+        with _authed(http, token) as connection:
+            try:
+                connection.send_text(json.dumps({"t": "audio", "session": CODER, "seq": 0}))
+                connection.send_bytes(frames[0])
+                assert held.entered.wait(RECEIVE_TIMEOUT_S), "the first frame never reached feed"
+                for frame in frames[1:]:
+                    connection.send_bytes(frame)
+                connection.send_text(json.dumps({"t": "audioEnd", "session": CODER}))
+            finally:
+                held.release.set()
+            assert _final_stt(connection)["text"] == "held"
+    assert b"".join(held.feeds) == b"".join(frames), "the frames were reordered or lost"
+    assert held.feeds[0] == frames[0]
+    assert len(held.feeds) < len(frames), (
+        f"{len(held.feeds)} feeds for {len(frames)} frames: the backlog was not batched"
+    )
 
 
 def test_a_second_burst_on_one_connection_reuses_the_transcriber(
@@ -594,9 +724,12 @@ def test_a_machine_with_no_speech_backend_says_so_once_and_keeps_the_ring(
     for http, _project, token in _voice(work_dir, missing):
         with _authed(http, token) as connection:
             _speak(connection, frames=10)
+            # The error is the worker's answer, on its own clock; wait for it
+            # before provoking the delta, or a fast poller ends the drain first.
+            answered = _drain_until(connection, "error")
             with store_session() as store:
                 store.mark_attention(CODER)
-            frames = _drain_until(connection, "delta")
+            frames = answered + _drain_until(connection, "delta")
 
     errors = [frame for frame in frames if frame["t"] == "error"]
     assert len(errors) == 1, [frame["t"] for frame in frames]
@@ -632,9 +765,7 @@ def test_the_backend_is_retried_on_the_next_press_not_written_off(
             _speak(connection, frames=5)
             first = json.loads(_until(connection, "error"))
             _speak(connection)
-            final = json.loads(_until(connection, "stt"))
-            while final["final"] is False:
-                final = json.loads(_until(connection, "stt"))
+            final = _final_stt(connection)
     assert first["code"] == "stt_unavailable"
     assert final == {"t": "stt", "text": CANNED, "final": True}
     assert len(attempts) == 2
@@ -744,7 +875,9 @@ def test_an_utterance_opened_and_abandoned_is_capped_by_the_clock(
         assert json.loads(_until(connection, "ack"))["ok"] is True, "fail-open: the socket lives"
 
     assert answer["code"] == "audio_too_long"
+    assert _eventually(lambda: len(built) == 1), "the header asked the worker for a transcriber"
     assert built[0].fed == b"", "the abandoned burst never fed the model it was holding"
+    assert built[0].discarded == 0, "nothing was held, so there was nothing to discard"
 
 
 def test_an_utterance_that_transcribes_to_nothing_is_not_a_prompt(
@@ -759,9 +892,12 @@ def test_an_utterance_that_transcribes_to_nothing_is_not_a_prompt(
     for http, _project, token in _voice(work_dir, lambda: FakeTranscriber("")):
         with _authed(http, token) as connection:
             _speak(connection)
+            # The final is the worker's answer, on its own clock; wait for it
+            # before provoking the delta, or a fast poller ends the drain first.
+            answered = _drain_until(connection, "stt")
             with store_session() as store:
                 store.mark_attention(CODER)
-            frames = _drain_until(connection, "delta")
+            frames = answered + _drain_until(connection, "delta")
 
     stt = [frame for frame in frames if frame["t"] == "stt"]
     assert stt == [{"t": "stt", "text": "", "final": True}]
@@ -776,33 +912,100 @@ def test_a_slow_decode_does_not_stall_the_board_poll(work_dir: Path) -> None:
     proof: on the event loop there would be no poll tick to send it, and this
     test would time out rather than fail on a value.
     """
-    entered = threading.Event()
-    release = threading.Event()
-
-    class SlowTranscriber:
-        def feed(self, pcm: bytes) -> str | None:
-            entered.set()
-            release.wait(RECEIVE_TIMEOUT_S)
-            return None
-
-        def finish(self) -> str:
-            return "held"
-
-    try:
-        for http, _project, token in _voice(work_dir, SlowTranscriber):
-            with _authed(http, token) as connection:
+    held = _HeldTranscriber()
+    for http, _project, token in _voice(work_dir, lambda: held):
+        with _authed(http, token) as connection:
+            try:
                 connection.send_text(json.dumps({"t": "audio", "session": CODER, "seq": 0}))
                 connection.send_bytes(FRAME)
-                assert entered.wait(RECEIVE_TIMEOUT_S), "the frame never reached the transcriber"
+                assert held.entered.wait(RECEIVE_TIMEOUT_S), (
+                    "the frame never reached the transcriber"
+                )
                 with store_session() as store:
                     store.mark_attention(CODER)
                 delta = json.loads(_until(connection, "delta"))
-                assert not release.is_set(), "the decode is still running"
-    finally:
-        # Always, even on a failure: an un-released worker would be joined at
-        # interpreter exit and turn one failing test into a wedged run.
-        release.set()
+                assert not held.release.is_set(), "the decode is still running"
+            finally:
+                # INSIDE the socket's block, and always, even on a failure. The
+                # release used to sit in an outer finally, after TestClient had
+                # exited — and TestClient's exit joins the worker still parked
+                # in the held decode, so every run of this test spent the whole
+                # RECEIVE_TIMEOUT_S in teardown: 15 s, most of the XR suite's
+                # time, protecting nothing on either the passing or the failing
+                # path. Releasing here takes 0.03 s and still unwedges a failure.
+                held.release.set()
     assert [session["state"] for session in delta["changed"]] == ["needs_you"]
+
+
+class _HeldTranscriber:
+    """A transcriber whose first ``feed`` (or ``finish``) blocks until the test says so.
+
+    ``entered`` is set when the call begins — the test's proof that the
+    server is inside the backend — and ``release`` is what lets it return.
+    Later calls do not block, so a burst can be finished after the hold.
+    """
+
+    def __init__(
+        self, *, hold: str = "feed", interim: str | None = None, final: str = "held"
+    ) -> None:
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.hold = hold
+        self.interim = interim
+        self.final = final
+        self.feeds: list[bytes] = []
+        self.discarded = 0
+
+    def _block(self, name: str) -> None:
+        if name == self.hold and not self.entered.is_set():
+            self.entered.set()
+            self.release.wait(RECEIVE_TIMEOUT_S)
+
+    def feed(self, pcm: bytes) -> str | None:
+        self.feeds.append(pcm)
+        self._block("feed")
+        return self.interim
+
+    def finish(self) -> str:
+        self._block("finish")
+        return self.final
+
+    def discard(self) -> None:
+        self.discarded += 1
+
+
+def test_a_typed_prompt_is_answered_while_a_decode_is_still_running(work_dir: Path) -> None:
+    """The read loop never waits on the backend, so typing is not queued behind speech.
+
+    Awaiting each decode inline in the socket's only read loop made every
+    typed prompt, subscribe and ``audioEnd`` wait behind it, and — since the
+    utterance cap is wall-clock time since the header — let intake fall
+    behind real time until the poller dropped a press that was in contract
+    (measured on the real stack: a 46.6 s press got ``audio_too_long`` at
+    60.3 s, 14 s after release). The worker is what separates the two, and
+    this is the observable half: an ``ack`` for a typed prompt arrives while
+    the transcriber is provably still inside ``feed``.
+    """
+    held = _HeldTranscriber()
+    for http, project, token in _voice(work_dir, lambda: held):
+        from aisquare.services import team as team_service
+
+        team_service.activate(project.root)
+        with _authed(http, token) as connection:
+            try:
+                connection.send_text(json.dumps({"t": "audio", "session": CODER, "seq": 0}))
+                connection.send_bytes(FRAME)
+                assert held.entered.wait(RECEIVE_TIMEOUT_S), (
+                    "the frame never reached the transcriber"
+                )
+                connection.send_text(
+                    json.dumps({"t": "prompt", "session": CODER, "text": "typed meanwhile"})
+                )
+                ack = json.loads(_until(connection, "ack"))
+                assert not held.release.is_set(), "the decode is still running"
+            finally:
+                held.release.set()
+    assert ack["ok"] is True and "board note" in ack["detail"], ack
 
 
 TONE = b"\x40\x1f\xc0\xe0" * (speech.FRAME_BYTES // 4)
@@ -820,14 +1023,13 @@ free of :data:`_POISON`'s byte pair.
 _POISON = b"\xad\xde"
 """One sample (0xdead) a :func:`_strict_decode` refuses to transcribe.
 
-A stand-in for "the backend threw mid-utterance", which used to be reachable
-with an odd-length frame and no longer is — see
-``test_an_odd_frame_anywhere_is_transcribed_not_failed``. The failure it
-provokes is the real one, not a patched method: ``BufferedTranscriber`` calls
-``_reset()`` only AFTER ``_decode`` returns, so a decode that raises leaves the
-poisoned bytes in the buffer and every later decode on that object raises too.
-That is what makes dropping the object the fix and reusing it a permanent loss
-of voice.
+A stand-in for "the backend threw mid-utterance". The failure it provokes is
+the real one, not a patched method: ``BufferedTranscriber`` calls ``_reset()``
+only AFTER ``_decode`` returns, so a decode that raises leaves the poisoned
+bytes in the buffer and every later decode on that object raises too. That is
+what makes dropping the object the fix and reusing it a permanent loss of
+voice — and what makes it different from an odd frame, which never reaches
+the decoder at all (see the ``audio_misaligned`` test below).
 """
 
 
@@ -840,7 +1042,10 @@ def _strict_decode(pcm: bytes) -> str:
     installed — which is what CI's ``[dev,xr]`` job runs — and ``array``, which
     raises on exactly the same lengths for exactly the same reason, stands in
     under ``[dev]``. The property is pinned in both, rather than skipped in one.
+    Every chunk it was handed is recorded in :data:`_DECODED`, so a test can
+    also assert what was NOT decoded.
     """
+    _DECODED.append(pcm)
     try:
         import numpy
     except ImportError:
@@ -850,6 +1055,10 @@ def _strict_decode(pcm: bytes) -> str:
     if _POISON in pcm:
         raise ValueError("the backend refuses this audio")
     return "real words"
+
+
+_DECODED: list[bytes] = []
+"""Every chunk :func:`_strict_decode` was handed, cleared by :func:`_real_voice`."""
 
 
 def _real_voice(
@@ -862,6 +1071,7 @@ def _real_voice(
     one it already had.
     """
     built: list[BufferedTranscriber] = []
+    _DECODED.clear()
 
     def factory() -> BufferedTranscriber:
         made = BufferedTranscriber(_strict_decode)
@@ -870,14 +1080,6 @@ def _real_voice(
 
     for http, project, token in _voice(work_dir, factory):
         yield http, project, token, built
-
-
-def _burst(connection: Any, frames: list[bytes], *, session: str = CODER) -> None:
-    """A push-to-talk burst of exactly these frames, in this order."""
-    connection.send_text(json.dumps({"t": "audio", "session": session, "seq": 0}))
-    for frame in frames:
-        connection.send_bytes(frame)
-    connection.send_text(json.dumps({"t": "audioEnd", "session": session}))
 
 
 def _tone_frames(*, odd_at: int | None = None, poison_at: int | None = None) -> list[bytes]:
@@ -890,38 +1092,60 @@ def _tone_frames(*, odd_at: int | None = None, poison_at: int | None = None) -> 
     return frames
 
 
-def _final_stt(connection: Any) -> dict[str, Any]:
-    """Drain interims and return the ``stt`` frame with ``final: true``."""
-    frame = json.loads(_until(connection, "stt"))
-    while frame["final"] is False:
-        frame = json.loads(_until(connection, "stt"))
-    return dict(frame)
-
-
 @pytest.mark.parametrize("where", [0, FRAMES_PER_INTERIM // 2, FRAMES_PER_INTERIM])
-def test_an_odd_frame_anywhere_is_transcribed_not_failed(work_dir: Path, where: int) -> None:
-    """A frame that ends mid-sample costs nothing — not the sentence, not the next one.
+def test_an_odd_frame_anywhere_is_answered_once_and_costs_the_burst_not_the_model(
+    work_dir: Path, where: int
+) -> None:
+    """A frame that is not a whole number of samples is a protocol error: one ``audio_misaligned``.
 
-    ``_on_audio_frame``'s docstring tells a client author the frame size is
-    their business and any size will do. It is true only because ``feed``
-    carries the trailing odd byte into the next chunk; concatenated raw, one
-    639-byte frame flips the buffer's parity permanently and every decode after
-    it raises, which reaches the operator as a bare ``stt_failed`` for a
-    sentence they now have to say again with no clue why.
+    A websocket delivers whole messages, so an odd-length frame is a client
+    that lost or added a byte, and every sample after it is the wrong pair.
+    The server briefly carried that byte into the next frame instead; a
+    stand-in decoder that checked alignment then measured "8000/16319
+    samples mis-paired" in a final transcript that was filed as a board note
+    with ``ok``. So the burst is dropped, once, like ``audio_unexpected`` —
+    and unlike a backend crash it costs the loaded model nothing, because
+    the bad frame never reached the decoder.
 
     First frame, mid-utterance and the last frame before ``audioEnd`` are all
-    tested because they fail differently: the first is the one the gate sees,
-    and the last is the only one that can reach ``finish`` without an interim
-    having decoded first.
+    tested because they differ: the first is refused before anything was
+    buffered, the middle one after an interim may already have gone out, and
+    the last is the only one that could otherwise reach ``finish``.
     """
-    for http, _project, token, built in _real_voice(work_dir):
+    for http, project, token, built in _real_voice(work_dir):
+        from aisquare.services import team as team_service
+
+        team_service.activate(project.root)
         with _authed(http, token) as connection:
             _burst(connection, _tone_frames(odd_at=where))
-            final = _final_stt(connection)
-            assert final["text"] == "real words", f"the odd byte cost the sentence: {final}"
+            with store_session() as store:
+                store.mark_attention(CODER)
+            frames = _drain_until(connection, "delta")
+            errors = [frame for frame in frames if frame["t"] == "error"]
+            assert [error["code"] for error in errors] == ["audio_misaligned"], frames
+            assert f"{speech.FRAME_BYTES + 1}-byte" in errors[0]["message"]
+            after_error = frames[frames.index(errors[0]) + 1 :]
+            assert not [f for f in after_error if f["t"] in ("stt", "ack")], (
+                f"the dropped burst was still transcribed or routed: {after_error}"
+            )
+
+            # The socket still works, and it is the TYPED path that proves it:
+            # its ack is read by the text it filed, not by being the next ack.
             connection.send_text(json.dumps({"t": "prompt", "session": CODER, "text": "after"}))
-            assert json.loads(_until(connection, "ack"))["ok"] is True
-        assert len(built) == 1, "a clean utterance keeps the model it loaded"
+            ack = json.loads(_until(connection, "ack"))
+            assert ack["ok"] is True, ack
+            with store_session() as store:
+                texts = [event.text for event in store.recent_events(project.id, limit=10)]
+            assert "after" in texts, "the typed prompt after the bad burst was not filed"
+
+            # And the next burst is clean, on the SAME transcriber: the dropped
+            # burst's audio was discarded, not decoded and not prepended.
+            _burst(connection, _tone_frames())
+            assert _final_stt(connection)["text"] == "real words"
+        assert len(built) == 1, f"the misaligned frame cost a model reload: built={len(built)}"
+        assert len(_DECODED[-1]) == len(TONE) * (FRAMES_PER_INTERIM + 1), (
+            "the final decode included audio from the dropped burst"
+        )
 
 
 @pytest.mark.parametrize("where", [0, FRAMES_PER_INTERIM // 2, FRAMES_PER_INTERIM])
@@ -938,7 +1162,7 @@ def test_a_backend_failure_anywhere_does_not_poison_the_next_utterance(
     The final assertion is the one that actually pins it. The wire cannot show
     whether the connection reused an object or built a new one, so a test that
     only checked the second transcript would pass against a
-    ``_forget_transcriber`` that did nothing on any day the poison happened to
+    ``_fail_burst`` that kept the object on any day the poison happened to
     fall outside what the second decode was handed.
     """
     for http, _project, token, built in _real_voice(work_dir):
@@ -999,11 +1223,35 @@ def test_two_clients_keep_their_own_transcriber_and_their_own_utterance(
         _speak(first)
         second.send_bytes(FRAME)
         assert json.loads(_until(second, "error"))["code"] == "audio_unexpected"
-        final = json.loads(_until(first, "stt"))
-        while final["final"] is False:
-            final = json.loads(_until(first, "stt"))
+        final = _final_stt(first)
     assert final["text"] == CANNED
     assert len(built) == 1, "the stray-frame client never needed a transcriber"
+
+
+def test_a_binary_first_frame_is_refused_with_auth_failed_and_closed_4401(
+    client: tuple[TestClient, ProjectInfo, str],
+) -> None:
+    """A first frame that is not an auth at all — not even text — gets the same answer.
+
+    ``receive_text`` raises ``KeyError`` for a binary message, and when the
+    auth read and the parse shared one ``try``, that ``KeyError`` was caught
+    as "the frame did not parse". Splitting them left it on the receive, where
+    it fell into the "client vanished" branch: no frame, no close code, the
+    transport dropped. The shipped client reads that as a transient and
+    reconnects forever instead of reporting the failure.
+    """
+    http, _project, _token = client
+    with http.websocket_connect("/ws") as connection:
+        connection.send_bytes(FRAME)
+        answer = json.loads(_text(connection))
+        with pytest.raises(WebSocketDisconnect) as closed:
+            connection.receive_text()
+    assert answer == {
+        "t": "error",
+        "code": "auth_failed",
+        "message": "the first frame must be a valid auth token",
+    }
+    assert closed.value.code == wire.CLOSE_AUTH_FAILED
 
 
 def test_a_client_that_never_authenticates_is_closed_with_auth_timeout(
@@ -1062,6 +1310,238 @@ def _until(connection: Any, kind: str) -> str:
         if json.loads(raw).get("t") == kind:
             return str(raw)
     raise AssertionError(f"no {kind} frame arrived")
+
+
+def test_a_burst_with_no_audio_frames_is_stt_empty_not_a_quiet_press(
+    voice: tuple[TestClient, ProjectInfo, str, list[FakeTranscriber]],
+) -> None:
+    """A header followed by ``audioEnd`` with nothing between is a dead microphone, and is named.
+
+    The shipped client sends the header before its first frame and the
+    ``audioEnd`` after a 250 ms drain, so a capture graph that rendered
+    nothing — a suspended ``AudioContext``, a tap released before the
+    worklet's first render — produces exactly this wire. Answering it with
+    the same empty final ``stt`` a silent room gets left the operator
+    re-pressing into the same dead graph with nothing anywhere saying why.
+    ``audio_bytes == 0`` is known at close, so it is answered as the fault it
+    is: one ``stt_empty`` error, no ``stt`` frame, nothing routed.
+    """
+    http, _project, token, built = voice
+    with _authed(http, token) as connection:
+        _burst(connection, [])
+        answered = _voice_frames(_drain_until(connection, "error"))
+        with store_session() as store:
+            store.mark_attention(CODER)
+        after = _drain_until(connection, "delta")
+
+    assert [frame["t"] for frame in answered] == ["error"], answered
+    assert answered[0]["code"] == "stt_empty"
+    assert "no audio arrived" in answered[0]["message"]
+    assert [frame["t"] for frame in after] == ["delta"], (
+        f"the error was not the whole answer: {after}"
+    )
+    assert _eventually(lambda: len(built) == 1)
+    assert not built[0].finished, "nothing was buffered, so nothing was decoded"
+
+
+def test_a_header_during_an_open_burst_ends_it_like_audioend_and_keeps_the_model(
+    voice: tuple[TestClient, ProjectInfo, str, list[FakeTranscriber]],
+) -> None:
+    """Trigger bounce: ``audio`` seq 0, frames, ``audio`` seq 1, ``audioEnd``. Nothing is lost.
+
+    The shipped client produces this wire on a quick re-press, because
+    release clears its capturing flag before the worklet's flush has sent
+    ``audioEnd``. The server used to discard the open burst silently (one
+    log line nothing prints) and drop the cached transcriber, forcing a
+    model rebuild on the read loop; a replay then yielded an interim and an
+    empty final with no ack. Now the second header ends burst #1 exactly as
+    its own ``audioEnd`` would have — final ``stt``, routed, acked — and the
+    late ``audioEnd`` closes burst #2, which had no frames and says so.
+    """
+    http, project, token, built = voice
+    from aisquare.services import team as team_service
+
+    team_service.activate(project.root)
+    with _authed(http, token) as connection:
+        connection.send_text(json.dumps({"t": "audio", "session": CODER, "seq": 0}))
+        for _ in range(FRAMES_PER_INTERIM):
+            connection.send_bytes(FRAME)
+        connection.send_text(json.dumps({"t": "audio", "session": CODER, "seq": 1}))
+        connection.send_text(json.dumps({"t": "audioEnd", "session": CODER}))
+        # Up to burst #2's answer, which is the LAST voice frame: the worker
+        # answers bursts in wire order, so everything #1 produced is before it.
+        # Deltas are the poller's, on its own clock, and are not part of the
+        # order being asserted — one landed between the interim and the final
+        # on a py3.11 runner and ended a drain-until-delta early.
+        frames = _voice_frames(_drain_until(connection, "error"))
+
+    kinds = [(frame["t"], frame.get("code") or frame.get("final")) for frame in frames]
+    assert kinds == [
+        ("stt", False),
+        ("stt", True),
+        ("ack", None),
+        ("error", "stt_empty"),
+    ], kinds
+    assert frames[1]["text"] == CANNED, "burst #1's sentence was lost"
+    assert frames[2]["ok"] is True
+    assert len(built) == 1, "the re-press cost a model reload"
+    assert bytes(built[0].fed) == FRAME * FRAMES_PER_INTERIM
+
+
+def test_a_cap_that_trips_during_a_decode_is_still_answered_exactly_once(
+    work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The poller drops the burst while ``feed`` is in flight: no stale interim, no second error.
+
+    The poller is the connection's only clock, and it can trip the cap while
+    the worker is parked in a decode. When that decode returns, its interim
+    belongs to a burst the client has already been told to abandon — the
+    shipped client repaints on any ``stt`` and aborts a NEW press on any
+    ``stt_failed`` that arrives late — so the worker re-reads the burst's
+    state after every thread call and sends nothing for a dropped one.
+    Reproduced at production cadence before the check: ``audio_too_long``
+    followed by an interim in 11 of 12 runs.
+    """
+    held = _HeldTranscriber(interim="stale words from a dropped burst")
+    for http, _project, token in _voice(work_dir, lambda: held):
+        with _authed(http, token) as connection:
+            try:
+                connection.send_text(json.dumps({"t": "audio", "session": CODER, "seq": 0}))
+                connection.send_bytes(FRAME)
+                assert held.entered.wait(RECEIVE_TIMEOUT_S), "the frame never reached feed"
+                # The cap falls to zero only now, with the decode held: no
+                # frame arrives after this, so it is the POLLER's clock that
+                # trips it, against a worker parked inside `feed`.
+                monkeypatch.setattr(xr_server, "MAX_UTTERANCE_S", 0.0)
+                dropped = json.loads(_until(connection, "error"))
+            finally:
+                held.release.set()
+            with store_session() as store:
+                store.mark_attention(CODER)
+            frames = _drain_until(connection, "delta")
+
+    assert dropped["code"] == "audio_too_long"
+    assert [frame["t"] for frame in frames] == ["delta"], (
+        f"a dropped burst still produced frames after its error: {frames}"
+    )
+    assert held.discarded == 1, "the audio the decode was holding was not discarded"
+
+
+def test_a_committed_burst_is_routed_even_if_the_client_leaves_during_the_final_decode(
+    work_dir: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Releasing the trigger is the commit; a headset that then vanishes has not un-said it.
+
+    With the final ``stt`` sent before the routing, a client gone during
+    ``finish`` raised ``WebSocketDisconnect`` out of the ASGI app — uvicorn's
+    "Exception in ASGI application" traceback, then a second one from the
+    error frame the read loop tried to answer it with — and the sentence
+    never reached the agent, while a typed prompt in the same situation was
+    delivered because it routes before it acks. Now the worker routes first
+    and every send after a disconnect is quiet; the note is on the board and
+    the log has one line at info.
+    """
+    held = _HeldTranscriber(hold="finish", final="route me anyway")
+    with caplog.at_level(logging.INFO, logger="aisquare.services.xr.server"):
+        for http, project, token in _voice(work_dir, lambda: held):
+            from aisquare.services import team as team_service
+
+            team_service.activate(project.root)
+            with _authed(http, token) as connection:
+                _burst(connection, [FRAME])
+                assert held.entered.wait(RECEIVE_TIMEOUT_S), "audioEnd never reached finish"
+            # The socket is closed while finish() is still held; then let it return.
+            held.release.set()
+            assert _eventually(functools.partial(_note_filed, project.id, "route me anyway")), (
+                "the committed sentence was never routed"
+            )
+
+    assert not [record for record in caplog.records if record.levelno > logging.INFO], (
+        f"a client leaving is not an error: {[r.getMessage() for r in caplog.records]}"
+    )
+
+
+def test_a_store_that_cannot_be_read_at_connect_is_an_error_frame_and_a_clean_close(
+    client: tuple[TestClient, ProjectInfo, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A locked or damaged context.db during hello/snapshot: say so, then close 1013.
+
+    Left to escape, the store error was a traceback out of the ASGI app and
+    a transport dropped with no close frame, which a client can only read as
+    a network fault. ``board_unavailable`` says what happened and 1013 ("try
+    again later") says what to do — reconnect with backoff, unlike 4401.
+    """
+    http, _project, token = client
+
+    @contextlib.contextmanager
+    def locked() -> Iterator[Any]:
+        raise sqlite3.OperationalError("database is locked")
+        yield  # pragma: no cover - the generator must be a generator
+
+    monkeypatch.setattr(xr_server, "_store", locked)
+    with http.websocket_connect("/ws") as connection:
+        connection.send_text(json.dumps({"t": "auth", "token": token}))
+        answer = json.loads(_text(connection))
+        with pytest.raises(WebSocketDisconnect) as closed:
+            connection.receive_text()
+    assert answer["t"] == "error"
+    assert answer["code"] == "board_unavailable"
+    assert "database is locked" in answer["message"]
+    assert closed.value.code == xr_server.CLOSE_TRY_AGAIN_LATER
+
+
+def test_a_prompt_the_fleet_filed_as_a_note_is_acked_ok_and_a_delivery_that_raised_is_not(
+    voice: tuple[TestClient, ProjectInfo, str, list[FakeTranscriber]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``ack.ok`` means the text reached the agent by EITHER route, as the Ack docstring says.
+
+    ``fleet.tell`` reports ``delivered=False`` whenever it filed a board note
+    instead of typing — the agent was working, or its pane was not the agent
+    yet — and passing that through as ``ok`` told the operator a prompt that
+    was safely on the board was "not sent", while the no-pane path reported
+    the identical outcome as ok. Only a delivery that raised is a failure.
+    """
+    http, project, token, _built = voice
+    outcomes: list[fleet_service.TellResult | Exception] = [
+        fleet_service.TellResult(False, "it is working — filed as board note #4 to coder-xr"),
+        fleet_service.TellResult(True, "typed into its pane (it was waiting)"),
+        fleet_service.FleetError("tmux is not running"),
+    ]
+
+    def tell(
+        project_arg: ProjectInfo, label: str, text: str, *, sender: str | None = None
+    ) -> fleet_service.TellResult:
+        outcome = outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr(fleet_service, "tell", tell)
+    with store_session() as store:
+        store.upsert_fleet_agent(
+            FleetAgent(
+                id="flt_ack",
+                project_id=project.id,
+                label="coder-xr",
+                role="coder",
+                pane_id="%9",
+                session_id=CODER,
+                cwd=project.root,
+                created_at=datetime.now(tz=UTC),
+            )
+        )
+    acks: list[dict[str, Any]] = []
+    with _authed(http, token) as connection:
+        for _ in range(3):
+            connection.send_text(json.dumps({"t": "prompt", "session": CODER, "text": "go"}))
+            acks.append(json.loads(_until(connection, "ack")))
+
+    assert [(ack["ok"], ack["detail"]) for ack in acks] == [
+        (True, "it is working — filed as board note #4 to coder-xr"),
+        (True, "typed into its pane (it was waiting)"),
+        (False, "tmux is not running"),
+    ], acks
 
 
 # --- the command ----------------------------------------------------------------

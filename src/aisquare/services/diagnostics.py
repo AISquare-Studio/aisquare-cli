@@ -1734,6 +1734,15 @@ _XR_PORT = 8748
 #: exists to catch, and ``find_spec`` answers the real one.
 _XR_MODULES = ("starlette", "uvicorn", "websockets", "faster_whisper")
 
+#: What faster-whisper cannot run without: its inference engine and the ONNX
+#: runtime its VAD loads (``speech._whisper_decode`` decodes with
+#: ``vad_filter=True``, so a missing onnxruntime is a decode that raises on the
+#: first press, not a slower one). Both ship as platform wheels, which is how a
+#: ``pip install`` that reported success still leaves an import that fails —
+#: and that is a FAULT, unlike an extra nobody asked for. Hard requirements of
+#: faster-whisper 1.x (``ctranslate2<5,>=4.0``, ``onnxruntime<2,>=1.14``).
+_XR_BACKEND_MODULES = ("ctranslate2", "onnxruntime")
+
 
 def _xr_port_in_use(port: int, host: str = "127.0.0.1") -> bool:
     """Is something listening on ``port``? A CONNECT, not a bind.
@@ -1762,10 +1771,33 @@ def _whisper_model_dir(model: str) -> Path | None:
     return path if path.is_dir() else None
 
 
+def _whisper_snapshot_loadable(model_dir: Path) -> bool:
+    """Whether a cached model directory holds a snapshot faster-whisper can load.
+
+    The hub cache lays a model out as ``snapshots/<revision>/model.bin`` (plus
+    its config and tokenizer), with the bytes under ``blobs/``. A download that
+    was interrupted leaves the directory in place — so ``is_dir`` reads it as
+    cached — with the weights missing or still ``*.incomplete``; the first
+    push-to-talk then fails to load rather than downloading, which is worse
+    than an empty cache because the row would have said "cached". ``model.bin``
+    is the one file every faster-whisper model has and the one a partial
+    download is missing, so its presence in any snapshot is the test.
+    """
+    try:
+        return any(
+            (snapshot / "model.bin").is_file()
+            for snapshot in (model_dir / "snapshots").iterdir()
+            if snapshot.is_dir()
+        )
+    except OSError:
+        return False
+
+
 def _check_xr(
     has_module: Callable[[str], bool] | None = None,
     port_in_use: Callable[[int], bool] | None = None,
     model_dir: Callable[[str], Path | None] | None = None,
+    model_loadable: Callable[[Path], bool] | None = None,
 ) -> DoctorCheck:
     """Can this machine run ``aisquare xr``: extra installed, port free, model cached.
 
@@ -1776,10 +1808,22 @@ def _check_xr(
     the check exists at all — it is the only one of the three that fails late,
     and the plan's definition of done (§16) asks ``doctor`` to report it.
 
-    WARNS, NEVER FAILS, like ``tmux`` and ``gh``: XR is one optional surface,
-    and a machine that runs every other command is not unhealthy. Read-only and
+    **OK for the absences, warn only for a fault, never fail** — the same line
+    ``browser tools`` draws, and for the same reason it has to be drawn.
+    ``install.sh``'s acceptance criterion is a green ``doctor`` with ``brain``
+    as the only amber row, and ``tests/install/cell.sh`` asserts that exact
+    set on five distributions from a wheel with NO extras and NO model cache.
+    A row that is amber because an optional extra is simply not installed, or
+    because a model nobody has asked for is not yet downloaded, turned every
+    cell red and exited the installer 2 on a machine with nothing wrong with
+    it. So those two are ``ok``, with the install line and the pre-download
+    line in the detail where an operator who wants voice will read them. What
+    WARNS is something that is actually broken and that the operator can act
+    on: 8748 held by another process, a faster-whisper install missing its
+    ctranslate2 or onnxruntime wheel, a cached model directory with no loadable
+    snapshot, or an unsupported model name in the environment. Read-only and
     offline — ``find_spec`` and a stat, plus one loopback connect that touches
-    nothing outside this box. The three seams are injectable for tests; the
+    nothing outside this box. The four seams are injectable for tests; the
     defaults are the real ones.
     """
     name = "xr"
@@ -1787,17 +1831,32 @@ def _check_xr(
         has_module = has_module or _has_module
         port_in_use = port_in_use or _xr_port_in_use
         model_dir = model_dir or _whisper_model_dir
+        model_loadable = model_loadable or _whisper_snapshot_loadable
 
+        # `problems` warn and each carries a fix; `notes` are absences that
+        # stay ok and carry their own line inline; `facts` are what is right.
         problems: list[str] = []
         fixes: list[str] = []
+        notes: list[str] = []
         facts: list[str] = []
 
         missing = [module for module in _XR_MODULES if not has_module(module)]
         if missing:
-            problems.append(f"the xr extra is not installed (no {', '.join(missing)})")
-            fixes.append(xr_speech.INSTALL_FIX)
+            notes.append(
+                f"the xr extra is not installed (no {', '.join(missing)}) — {xr_speech.INSTALL_FIX}"
+            )
         else:
             facts.append("xr extra installed")
+        if has_module("faster_whisper"):
+            broken = [module for module in _XR_BACKEND_MODULES if not has_module(module)]
+            if broken:
+                problems.append(
+                    f"faster-whisper is installed without {', '.join(broken)}, so voice "
+                    "fails at the first press"
+                )
+                fixes.append(
+                    f"Reinstall the extra so its platform wheels land: {xr_speech.INSTALL_FIX}"
+                )
 
         if port_in_use(_XR_PORT):
             problems.append(f"port {_XR_PORT} is in use")
@@ -1819,18 +1878,23 @@ def _check_xr(
                 f"Voice input is command input, where latency dominates: set "
                 f"{xr_speech.ENV_MODEL} to one of {', '.join(xr_speech.ALLOWED_MODELS)}"
             )
-        elif (cached := model_dir(model)) is not None:
-            facts.append(f"whisper model {model} cached ({cached})")
-        else:
-            problems.append(
+        elif (cached := model_dir(model)) is None:
+            notes.append(
                 f"whisper model {model} is not in the Hugging Face cache, so the first "
-                "push-to-talk downloads it"
+                f"push-to-talk downloads it — {xr_speech.download_fix(model)}"
+            )
+        elif not model_loadable(cached):
+            problems.append(
+                f"whisper model {model} is in the cache ({cached}) but has no loadable "
+                "snapshot — an interrupted download"
             )
             fixes.append(xr_speech.download_fix(model))
+        else:
+            facts.append(f"whisper model {model} cached ({cached})")
 
         if problems:
-            return _warn(name, "; ".join([*problems, *facts]), "; ".join(fixes))
-        return _ok(name, "; ".join(facts))
+            return _warn(name, "; ".join([*problems, *notes, *facts]), "; ".join(fixes))
+        return _ok(name, "; ".join([*notes, *facts]))
     except Exception as exc:  # diagnostics must never crash
         # Failing open costs this line its verdict and nothing else: `aisquare
         # xr` checks the extra when it imports, the port when it binds, and the

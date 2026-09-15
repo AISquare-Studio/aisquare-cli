@@ -341,32 +341,75 @@ def test_summary_is_at_most_six_words_of_the_latest_board_event(work_dir: Path) 
     assert projector.SUMMARY_WORDS == 6, "the cap is the plan's number, not a preference"
 
 
-def test_the_summary_spends_its_characters_on_text_not_on_the_event_kind(
+def test_the_summary_spends_its_characters_on_a_verb_and_the_text_not_on_the_kind(
     work_dir: Path,
 ) -> None:
     """Board seq 293, and it is an arithmetic finding rather than a taste one.
 
     A panel at arm's length under §8's 1.5-degree cap-height floor fits about
     THIRTEEN legible characters of summary. The kind used to lead, so all
-    thirteen went to it — ``claimed tsk_…`` — while the state chip beside the
-    panel was already saying the same word. The first thirteen characters are
-    the only ones the operator reads at that size, so this asserts on exactly
-    that prefix rather than on the whole string.
+    thirteen went to it — ``task_claimed…`` — and a task id nobody reads off
+    a wall. The first thirteen characters are the only ones the operator
+    reads at that size, so this asserts on exactly that prefix: one short
+    board-status word, then the title.
     """
     project = team_project(work_dir)
     with store_session() as store:
         store.ensure_project(project)
         _session(store, CODER, project.id, role="coder")
-        _event(store, project.id, CODER, "task_claim", "wiring JWT into the refresh path")
+        _event(store, project.id, CODER, "task_claimed", "wiring JWT into the refresh path")
         snapshot = projector.snapshot(store, project.id)
     summary = snapshot.sessions[0].summary
 
-    assert summary.startswith("wiring JWT"), summary
-    assert "task_claim" not in summary, "the state chip already carries the kind"
-    assert summary[:13] == "wiring JWT in", "the thirteen the operator actually reads"
-    # The cap is unchanged: the client truncates and the FOCUS tier renders the
-    # field whole. Dropping the prefix is not a licence to shrink the promise.
+    assert summary == "doing: wiring JWT into the refresh", summary
+    assert "task_claimed" not in summary, "the kind is a verb, not an identifier"
+    assert summary[:13] == "doing: wiring", "the thirteen the operator actually reads"
+    # The cap is unchanged, verb included: the client truncates and the FOCUS
+    # tier renders the field whole. Dropping the prefix was not a licence to
+    # shrink the promise, and neither is adding the verb.
     assert len(summary.split()) == 6, summary
+
+
+def test_what_happened_to_a_task_survives_in_the_summary(work_dir: Path) -> None:
+    """A claim, a review, a release and a completion must be four different panels.
+
+    ``team.py`` writes the task TITLE as the text of every ``task_*`` event,
+    so a summary made of the text alone rendered a task sent to review the
+    same as one just claimed, and a released one the same as a finished one;
+    the operator read a finished task as still in progress. No other part of
+    the ambient panel carries the kind — the state chip is the session's
+    state, not the event's — so the summary must, and the board's own status
+    words are what it uses.
+    """
+    project = team_project(work_dir)
+    title = "wiring JWT into the refresh path"
+    seen: dict[str, str] = {}
+    with store_session() as store:
+        store.ensure_project(project)
+        _session(store, CODER, project.id, role="coder")
+        for kind in ("task_claimed", "task_review", "task_released", "task_done"):
+            _event(store, project.id, CODER, kind, title)
+            seen[kind] = projector.snapshot(store, project.id).sessions[0].summary
+
+    assert seen == {
+        "task_claimed": "doing: wiring JWT into the refresh",
+        "task_review": "review: wiring JWT into the refresh",
+        "task_released": "released: wiring JWT into the refresh",
+        "task_done": "done: wiring JWT into the refresh",
+    }, seen
+    assert len(set(seen.values())) == 4, "two kinds rendered the same panel"
+
+
+def test_an_event_that_carries_its_own_words_gets_no_verb(work_dir: Path) -> None:
+    """A note, a result or a question is its text; a verb there would only cost characters."""
+    project = team_project(work_dir)
+    with store_session() as store:
+        store.ensure_project(project)
+        _session(store, CODER, project.id, role="coder")
+        _event(store, project.id, CODER, "note", "the suite is green on both extras")
+        snapshot = projector.snapshot(store, project.id)
+
+    assert snapshot.sessions[0].summary == "the suite is green on both"
 
 
 def test_an_event_with_no_text_falls_back_to_its_kind_rather_than_a_blank(

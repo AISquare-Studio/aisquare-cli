@@ -198,7 +198,18 @@ class Transcript(_Wire):
 
 
 class Stt(_Wire):
-    """A speech-to-text result: interim (``final=False``) then final."""
+    """A speech-to-text result: interim (``final=False``) then final.
+
+    Interims are a liveness signal for the focus panel and may show a rolling
+    tail of the burst rather than the whole sentence so far. The final is
+    the whole burst, and it is the SERVER that routes it as a prompt — the
+    client sends no ``prompt`` for voice; an ``ack`` follows the final on the
+    wire. A final with empty ``text`` is a press with no speech in it (a quiet
+    room, a breath, a click): nothing is routed and no ``ack`` follows. A burst
+    in which no audio frame arrived at all is not that; it is answered with
+    an ``error`` ``stt_empty`` instead, because a capture graph that produced
+    nothing is a fault the operator can act on.
+    """
 
     t: Literal["stt"] = "stt"
     text: str
@@ -209,7 +220,29 @@ class Error(_Wire):
     """Something the client asked for did not happen, and why.
 
     ``code`` is the stable half — key on it. ``message`` is for a human
-    reading a console.
+    reading a console. The codes this server sends, grouped by what a client
+    should do with them:
+
+    - ``auth_failed`` (then close 4401): the token was rejected; do not retry
+      with it. ``auth_timeout``: no auth frame arrived in time — a transport
+      problem, not a token one.
+    - ``board_unavailable`` (then close 1013): the board could not be read
+      at connect; reconnect with backoff.
+    - ``bad_message``, ``internal``: the frame did not parse, or a handler
+      raised; the socket stays open.
+    - ``no_such_session``, ``no_transcript``: a subscribe that named a
+      session this board does not have, or one with no transcript on record.
+    - Voice, each sent AT MOST ONCE per burst, after which the rest of that
+      burst is accepted and discarded until the next ``audio`` header:
+      ``stt_unavailable`` (no backend on this machine; the message carries
+      the fix), ``stt_empty`` (the burst ended with no audio frame in it),
+      ``stt_failed`` (the backend raised), ``audio_too_long`` (past
+      ``server.MAX_UTTERANCE_S`` or its byte equivalent),
+      ``audio_misaligned`` (a binary frame whose byte length is not a whole
+      number of samples: the sender lost or added a byte, so the burst is
+      dropped rather than transcribed as byte-shifted noise), and
+      ``audio_unexpected`` (a binary frame with no open burst; latched until
+      the next header). None of these closes the socket.
     """
 
     t: Literal["error"] = "error"
@@ -231,7 +264,14 @@ class Ack(_Wire):
     t: Literal["ack"] = "ack"
     for_: Literal["prompt"] = Field(default="prompt", alias="for")
     session: str
-    ok: bool
+    ok: bool = Field(
+        description=(
+            "True when the text reached the agent by EITHER route — typed into "
+            "its waiting pane, or filed as a board note for its next delta; "
+            "`detail` says which. False only when neither happened: an empty "
+            "prompt, a session not on this board, or a delivery that raised."
+        )
+    )
     detail: str = ""
 
 
@@ -308,7 +348,15 @@ class Audio(_Wire):
 
 
 class AudioEnd(_Wire):
-    """End of a push-to-talk burst: transcribe what was buffered."""
+    """End of a push-to-talk burst: transcribe what was buffered, and route it.
+
+    The server answers with the final ``stt`` and then an ``ack`` for the
+    routed prompt (or ``stt_empty`` if no frame arrived, or nothing beyond an
+    empty final if there was no speech). An ``audio`` header that arrives
+    while a burst is still open ends that burst exactly as this frame would
+    have, and then opens the next one — so a trigger bounce costs neither
+    sentence. An ``audioEnd`` with no open burst is ignored.
+    """
 
     t: Literal["audioEnd"] = "audioEnd"
     session: str = Field(

@@ -106,36 +106,70 @@ def classify(session: TeamSession, *, now: datetime) -> SessionState:
     return "working"
 
 
-def summarize(event: TeamEvent | None) -> str:
-    """A board event's TEXT as at most :data:`SUMMARY_WORDS` words.
+#: The one word a task event keeps in front of its text, by kind. The text of
+#: every ``task_*`` event is the task's TITLE (``team.py`` writes the title, or
+#: ``title — note``), so without a verb "wiring JWT into the refresh path"
+#: reads the same whether the task was just claimed, sent to review, released
+#: or finished — and the operator reads a finished task as still in progress.
+#: The vocabulary is the board's own status words, which the operator already
+#: knows from ``aisquare team task list``; each is short because the verb and
+#: the first word of the title have to share about thirteen legible characters.
+_TASK_VERBS: dict[str, str] = {
+    "task_added": "todo:",
+    "task_claimed": "doing:",
+    "task_review": "review:",
+    "task_done": "done:",
+    "task_released": "released:",
+    "task_blocked": "blocked:",
+    "task_reopened": "reopened:",
+    "task_dropped": "dropped:",
+}
 
-    **The event kind is not in this string, and that is a decision** (board
-    seq 293), not an omission. The cap here is six words, but the ambient tier
-    is a panel at arm's length with a 1.5-degree cap-height floor — §8's floor,
+
+def summarize(event: TeamEvent | None) -> str:
+    """A board event as at most :data:`SUMMARY_WORDS` words; a task event leads with a verb.
+
+    **The event KIND is not spelled out, and that is a decision** (board seq
+    293), not an omission. The cap here is six words, but the ambient tier is
+    a panel at arm's length with a 1.5-degree cap-height floor — §8's floor,
     which exists because passthrough washes out low contrast — and the
     arithmetic of those two numbers is about thirteen legible characters. Six
     words do not fit in thirteen characters, so the client truncates, and
     whatever leads is the whole of what the operator actually reads.
 
-    Leading with the kind spent all thirteen of them on it: ``task_claim
-    tsk_01k4 — wiring JWT`` renders as ``claimed tsk_…`` — a word the state
-    chip beside it already carries, and an id nobody reads off a wall. Leading
-    with the text spends them on ``wiring JWT``. The kind is not lost; it is
-    shown as the chip, which is the part of the panel that is *for* it.
+    Leading with the kind spent all thirteen of them on it: ``task_claimed``
+    plus a task id rendered as ``task_claimed…``, and an id is not something
+    anyone reads off a wall. Leading with the text alone, which this function
+    did for one release, spent them on ``wiring JWT i`` and lost what had
+    HAPPENED to the task: ``team.py`` writes the task title as the text of
+    every ``task_*`` event, so a claim and a review, or a release and a
+    completion, rendered identical panels. No other part of the panel carries
+    it — the state chip is the session's ``working``/``waiting``/``needs_you``,
+    not the event's kind — so the summary has to. A task event therefore leads
+    with one short board-status word (:data:`_TASK_VERBS`): ``doing: wiring
+    JWT`` and ``done: wiring JWT`` are different panels, and the verb costs
+    the title five to nine of the thirteen characters, which is the trade.
+    Every other kind (a note, a result, a question, a decision) carries its
+    own words and gets none.
 
-    The cap stays at six words rather than falling to two, because it is what
-    the protocol promises and the FOCUS tier renders the same field in full —
+    The cap stays at six words, verb included, because it is what the
+    protocol promises and the FOCUS tier renders the same field in full —
     that two-tier split is what §5 and §7 are for. Clipping mid-sentence is
     fine at both sizes: this is a glance target, and the operator who wants the
     rest focuses the panel.
 
     An event with no text at all falls back to its kind, because a blank panel
-    line says less than ``task_claim`` does. That is a fallback and not the old
+    line says less than ``heartbeat`` does. That is a fallback and not the old
     prefix: it can only appear when there is no content to displace.
     """
     if event is None:
         return ""
-    words = event.text.split() or event.kind.split()
+    words = event.text.split()
+    if not words:
+        return " ".join(event.kind.split()[:SUMMARY_WORDS])
+    verb = _TASK_VERBS.get(event.kind)
+    if verb is not None:
+        words = [verb, *words]
     return " ".join(words[:SUMMARY_WORDS])
 
 

@@ -83,15 +83,21 @@ aisquare doctor
 Look for the row named `xr`. On a ready machine it reads:
 
 ```
-✓ xr: xr extra installed; port 8748 free; whisper model base.en cached
+✓ xr: xr extra installed; port 8748 free; whisper model base.en cached (<cache dir>)
 ```
 
-It **warns, never fails** — every other command works without any of this. The
-third fact is the one worth reading before a demo, because it is the only one
-that fails *late*: with no cached model the server starts perfectly and the
-first push-to-talk goes to the network. The fix printed alongside it
-pre-downloads the model; run it on the machine that will be demoing, on its own
-network, not five minutes before.
+It is **ok when something is merely absent** — the extra not installed, the
+model not yet downloaded — with the install line and the pre-download line on
+the row itself, and it **warns only for a fault you can act on**: port 8748 held
+by another process, a faster-whisper install missing its ctranslate2 or
+onnxruntime wheel, a cached model with no loadable snapshot (an interrupted
+download), or an unsupported name in `AISQUARE_XR_WHISPER_MODEL`. It never
+fails: every other command works without any of this, and `install.sh` treats
+any amber row but `brain` as an installer failure. The third fact is the one
+worth reading before a demo, because it is the only one that fails *late*: with
+no cached model the server starts perfectly and the first push-to-talk goes to
+the network. The line printed beside it pre-downloads the model; run it on the
+machine that will be demoing, on its own network, not five minutes before.
 
 To use the larger model, set `AISQUARE_XR_WHISPER_MODEL=small.en` before both
 the download and the run. `base.en` (the default) and `small.en` are the only
@@ -300,7 +306,9 @@ comfortably do while wearing a headset.
 ## If something is wrong
 
 - **No `xr` row in `aisquare doctor`, or it warns** — read the fix it prints;
-  it names the exact command for each of the three facts.
+  it names the exact command for each fault. An ok row that says the extra is
+  not installed or the model is not cached is not a fault, but voice will not
+  work until you run the line on that row.
 - **`navigator.xr` is undefined / no *Enter AR* button** — trap 1. It is almost
   always this.
 - **The chip says `auth failed`** — the bookmark carries a stale token. The
@@ -313,7 +321,13 @@ comfortably do while wearing a headset.
 - **Voice produces nothing at all** — the transcriber refuses to start rather
   than degrading silently, so there is an error with a fix attached; the three
   reasons it can refuse are a missing extra, an unsupported model name in
-  `AISQUARE_XR_WHISPER_MODEL`, and a model that cannot be loaded.
+  `AISQUARE_XR_WHISPER_MODEL`, and a model that cannot be loaded. A press that
+  ends with an `stt_empty` error is a microphone that sent no audio at all (a
+  suspended audio context in the headset browser); a press answered with
+  `audio_misaligned` is a client sending frames that are not a whole number of
+  samples. An empty final `stt` with no error is simply a press with no speech
+  in it — a breath, a click, room tone — which the model's voice-activity gate
+  declines to turn into a prompt.
 - **Voice produces the wrong words** — expected for identifiers (§10). Not a
   configuration problem, and not one to debug live.
 

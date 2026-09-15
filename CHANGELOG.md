@@ -38,6 +38,48 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     file nobody here imports. A `[[tool.mypy.overrides]]` skips them, which
     takes `follow_imports_for_stubs` as well as `follow_imports` — the first
     alone leaves the stub parsed and the run still red.
+  - **Voice (M6, server half).** Between an `audio` header and its `audioEnd`
+    the binary frames go to a per-connection faster-whisper transcriber
+    (`base.en` by default, `AISQUARE_XR_WHISPER_MODEL=small.en` allowed):
+    interim `stt` frames while the operator speaks, then the final `stt`, and
+    the SERVER routes the final text as the prompt — `fleet tell` into a
+    waiting pane or a board note — and answers with the same `ack` a typed
+    prompt gets. Releasing the trigger is the commit; the client sends no
+    `prompt` for voice. Every call into the model runs on a daemon thread from
+    a per-connection worker fed in wire order, so the socket keeps being read
+    (pongs answered, typed prompts and `audioEnd` not queued behind a decode),
+    frames that arrive during a slow decode are fed as one chunk, and Ctrl-C
+    stops the server while a model is still downloading. The model's
+    voice-activity gate decides whether a press had speech in it, so a breath
+    or a click is an empty final and never a prompt. Each burst is answered by
+    at most one error, after which its remaining frames are accepted and
+    discarded: `stt_unavailable` (no backend; the message carries the install
+    or pre-download line), `stt_empty` (no audio frame arrived at all),
+    `stt_failed` (the backend raised), `audio_too_long` (past 60 s or its byte
+    equivalent, counted as frames arrive), `audio_misaligned` (a frame that is
+    not a whole number of samples — the sender lost or added a byte, so the
+    burst is dropped rather than transcribed as byte-shifted noise) and
+    `audio_unexpected` (audio with no open burst). An `audio` header that
+    arrives while a burst is open ends that burst as its `audioEnd` would have
+    and opens the next, so a trigger bounce loses neither sentence. A headset
+    that disconnects after releasing the trigger still gets its sentence
+    routed; one that disconnects mid-burst loses only that burst, quietly. A
+    board that cannot be read at connect is a `board_unavailable` error and a
+    clean close 1013 (try again later) rather than a dropped transport, and a
+    binary first frame is refused like any other non-auth frame (`auth_failed`,
+    close 4401). `ack.ok` is true whenever the text reached the agent by either
+    route and false only when delivery raised. Ambient summaries of task events
+    lead with a board-status verb (`doing:`, `review:`, `done:`, `released:` …)
+    so a claim and a hand-off are different panels.
+  - `doctor` gains an `xr` row — the extra, port 8748 and the cached whisper
+    model on one line, below `browser tools` so it cannot evict an actionable
+    row from the fleet sidebar. Absences are **ok**: an extra nobody installed
+    and a model nobody has downloaded are not faults, and `install.sh` exits 2
+    on any amber row but `brain`, so the row stays green on a base install and
+    carries the install and pre-download lines in its detail instead. It
+    **warns** only for something to act on: 8748 held, a faster-whisper install
+    missing its ctranslate2 or onnxruntime wheel, a cached model directory with
+    no loadable snapshot, or an unsupported `AISQUARE_XR_WHISPER_MODEL`.
   - **The client** (`web/xr/`, plain ES modules, no build step; three.js from a
     CDN). An ambient ring drawn from one shared texture atlas — one texture per
     panel is what tanks the frame rate at ten of them, so the atlas is the
@@ -71,11 +113,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     reload**, which is what you cannot comfortably do in a headset. `auth
     failed` is the one state that stops retrying, since the same token will be
     rejected again.
-  - **`aisquare doctor` grows an `xr` row**, warn-never-fail, answering three
-    preconditions in one line: the extra installed, port 8748 free, and the
-    whisper model cached. The third is the only one that fails late — with no
-    cached model the server starts perfectly and the first push-to-talk goes to
-    the network.
   - **[`docs/xr-demo.md`](docs/xr-demo.md)** is the runbook: the nine demo
     steps, the three traps, the recovery drill, the exact command that puts a
     live session into `needs_you` on demand, and a definition-of-done table

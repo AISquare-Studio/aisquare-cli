@@ -60,10 +60,12 @@ ALLOWED_MODELS = ("base.en", "small.en")
 
 #: How much buffered SPEECH earns an interim decode. The operator needs to see
 #: that the mic is live or they will repeat themselves (§10); one second is
-#: fast enough to answer that, and — because an interim decodes a bounded
-#: window rather than the whole buffer — slow enough that a ``base.en`` decode
-#: on CPU finishes before the next one is due no matter how long the press
-#: runs. That last clause is the one :data:`INTERIM_WINDOW_SECONDS` buys.
+#: fast enough to answer that. Whether a decode finishes before the next one
+#: is due depends on the machine and the model, and the server no longer
+#: depends on it either: its voice worker feeds whatever arrived during a slow
+#: decode as ONE chunk, and this class decodes at most one interim per
+#: ``feed``, so a decoder that is slower than this cadence falls one decode
+#: behind and stays there instead of falling further behind every second.
 INTERIM_SECONDS = 1.0
 INTERIM_BYTES = int(SAMPLE_RATE * SAMPLE_BYTES * INTERIM_SECONDS)
 
@@ -79,20 +81,23 @@ INTERIM_BYTES = int(SAMPLE_RATE * SAMPLE_BYTES * INTERIM_SECONDS)
 #:           40s          860.0s       194.0s
 #:           60s         1890.0s       294.0s   (6.4x less)
 #:
-#: The last row is IN CONTRACT — ``server.MAX_UTTERANCE_S`` is 60 — so at a
-#: typical ~5x-realtime CPU decode rate the unbounded form spent about six
-#: CPU-minutes on one legal press, and since the server's read loop is
-#: sequential the ``audioEnd`` that would end it queued behind the backlog.
-#: Bounded, the same press costs about a CPU-minute: it keeps up in real time
-#: instead of falling further behind the longer the operator talks.
+#: The last row is IN CONTRACT — ``server.MAX_UTTERANCE_S`` is 60 — so the
+#: unbounded form handed the decoder half an hour of audio for one legal press.
+#: Audio-seconds are the honest unit here and NOT wall time: faster-whisper
+#: pads every encoder input to 30 s, so a 4 s window costs the encoder the
+#: same as a 30 s one and the measured wall-time saving on a long press is
+#: 1.1x-1.8x rather than the 6.4x this column suggests. The window still
+#: bounds the decoder's work per interim, which is what makes the cost of a
+#: press linear in its length; keeping intake in real time regardless of the
+#: decode speed is the server's worker's job, not this window's (see
+#: :data:`INTERIM_SECONDS`).
 #:
 #: Four seconds is chosen so that the utterances this path is FOR — a two-to-
-#: four-second command — are decoded whole exactly as before, and so that one
-#: interim at that same ~5x costs ~0.8s, inside the one-second cadence with
-#: headroom. Past the window the panel shows a rolling tail rather than the
-#: whole sentence so far; the interim is a liveness signal, and
-#: :meth:`BufferedTranscriber.finish` still decodes everything, so the
-#: transcript that becomes a prompt is not a window at all.
+#: four-second command — are decoded whole exactly as before. Past the window
+#: the panel shows a rolling tail rather than the whole sentence so far; the
+#: interim is a liveness signal, and :meth:`BufferedTranscriber.finish` still
+#: decodes everything, so the transcript that becomes a prompt is not a window
+#: at all.
 INTERIM_WINDOW_SECONDS = 4.0
 INTERIM_WINDOW_BYTES = int(SAMPLE_RATE * SAMPLE_BYTES * INTERIM_WINDOW_SECONDS)
 
@@ -168,15 +173,24 @@ class Transcriber(Protocol):
     def finish(self) -> str:
         """End the utterance and return the final transcript (``""`` if silent)."""
 
+    def discard(self) -> None:
+        """Forget the utterance so far WITHOUT decoding it; the next ``feed`` starts fresh.
+
+        For a burst the server dropped — past its cap, a misaligned frame, a
+        trigger re-pressed before ``audioEnd`` — where ``finish`` would run a
+        decode over up to a minute of audio for the sole purpose of throwing
+        the answer away, and dropping the object would cost the next press a
+        model load.
+        """
+
 
 def rms(pcm: bytes) -> float:
     """Root-mean-square level of a PCM16LE chunk; 0.0 for an empty one.
 
-    A trailing odd byte is ignored rather than raising: a websocket frame can
-    split anywhere, and a diagnostic-free crash in the audio path would take
-    down a voice prompt for one byte of misalignment. Ignoring it is right HERE
-    and wrong for the buffer — one byte cannot move a level, but it moves every
-    sample after it — so :meth:`BufferedTranscriber.feed` carries it instead.
+    A trailing odd byte is ignored rather than raising, because this is a
+    level meter and one byte cannot move a level. That is right HERE and only
+    here: the buffer is a different matter, and :meth:`BufferedTranscriber.feed`
+    refuses a chunk that is not sample-aligned before it gets this far.
 
     The byteswap is not decoration. ``array("h")`` reads in NATIVE order and
     the wire format is little-endian, so on a big-endian machine every sample
@@ -204,13 +218,13 @@ class BufferedTranscriber:
     a bounded trailing window of it, for the reason on
     :data:`INTERIM_WINDOW_SECONDS`.
 
-    Everything handed to ``decode`` is sample-aligned whatever the caller does
-    with frame boundaries — see :meth:`feed` — because the backend reads the
+    Everything handed to ``decode`` is sample-aligned because every chunk
+    handed to :meth:`feed` must be — see there — and the backend reads the
     bytes as int16 pairs and raises on a buffer that is not a multiple of two.
 
-    Reusable across utterances: :meth:`finish` resets the buffer, so a server
-    can hold ONE of these per client and pay the model load once. That is the
-    expensive part by a wide margin.
+    Reusable across utterances: :meth:`finish` and :meth:`discard` both reset
+    the buffer, so a server can hold ONE of these per client and pay the model
+    load once. That is the expensive part by a wide margin.
     """
 
     def __init__(
@@ -226,7 +240,6 @@ class BufferedTranscriber:
         self._interim_bytes = interim_bytes
         self._window_bytes = window_bytes
         self._buffer = bytearray()
-        self._carry = b""
         self._speaking = False
         self._decoded_at = 0
         self._last = ""
@@ -243,33 +256,34 @@ class BufferedTranscriber:
         operator holding the trigger for a second before they start talking:
         that never reaches the model, which is the whole saving.
 
-        THE ODD BYTE IS CARRIED, NOT DROPPED. A websocket frame can split
-        anywhere, so a chunk may end mid-sample; the trailing byte is held back
-        and prepended to the next one, which loses and duplicates nothing. It
-        cannot be concatenated raw: the buffer is handed to
-        ``numpy.frombuffer(..., dtype=int16)``, which raises on a length that
-        is not a multiple of the sample size, and since the parity never
-        recovers on its own ONE odd frame would kill every decode after it for
-        the rest of the utterance. Dropping the byte instead would be silently
-        wrong in the other direction — every sample after it would be read from
-        the wrong pair of bytes, which is noise, not a missing sample.
+        A CHUNK THAT IS NOT SAMPLE-ALIGNED IS REFUSED, HERE, WITH ``ValueError``.
+        The wire format is int16 pairs and a websocket delivers whole messages,
+        so a chunk with an odd length is not a frame that happened to split —
+        it is a sender that lost or added a byte, and every sample after that
+        byte is the wrong pair. This class briefly carried the odd byte into
+        the next chunk instead; that made the parity problem disappear and
+        turned the misaligned client's speech into byte-shifted noise the
+        model transcribed with confidence and the server routed as a prompt.
+        Raising at the chunk that caused it names the frame; concatenating raw
+        would have raised at the next decode, one interim later, with the
+        whole sentence gone (``numpy.frombuffer`` refuses an odd buffer, and
+        the parity never recovers on its own).
 
         THE INTERIM DECODES A WINDOW, NOT THE WHOLE BUFFER. Whisper has no
         streaming API, so an interim is a re-decode; re-decoding everything
-        makes the cost of one press quadratic in its length, and past a few
-        seconds each interim takes longer than the cadence that asked for it.
-        See :data:`INTERIM_WINDOW_SECONDS`. :meth:`finish` still decodes the
-        whole buffer, so the transcript that becomes a prompt is unaffected.
+        makes the cost of one press quadratic in its length. See
+        :data:`INTERIM_WINDOW_SECONDS`. :meth:`finish` still decodes the whole
+        buffer, so the transcript that becomes a prompt is unaffected. At most
+        ONE interim per call, however large the chunk: a caller that fell
+        behind and hands over several seconds at once gets one decode, not one
+        per second it missed.
         """
         if not pcm:
             return None
-        if self._carry:
-            pcm = self._carry + pcm
-        odd = len(pcm) % SAMPLE_BYTES
-        self._carry = pcm[len(pcm) - odd :] if odd else b""
-        pcm = pcm[: len(pcm) - odd]
-        if not pcm:
-            return None
+        if len(pcm) % SAMPLE_BYTES:
+            raise ValueError(
+                f"a {len(pcm)}-byte chunk is not a whole number of {SAMPLE_BYTES}-byte samples"
+            )
         if not self._speaking:
             if rms(pcm) < self._silence_rms:
                 return None
@@ -278,12 +292,8 @@ class BufferedTranscriber:
         if len(self._buffer) - self._decoded_at < self._interim_bytes:
             return None
         self._decoded_at = len(self._buffer)
-        # Rounded DOWN to a sample boundary: a window that started mid-sample
-        # would hand the decoder the same misaligned bytes the carry exists to
-        # prevent, which is a guess about the caller's window size this does
-        # not need to make.
         start = len(self._buffer) - min(len(self._buffer), self._window_bytes)
-        text = self._decode(bytes(self._buffer[start - start % SAMPLE_BYTES :])).strip()
+        text = self._decode(bytes(self._buffer[start:])).strip()
         # Nothing new is nothing to send. Whisper re-decoding a buffer that
         # grew by a second of silence returns the same string, and forwarding
         # it would repaint the panel for no reason.
@@ -306,9 +316,12 @@ class BufferedTranscriber:
         self._reset()
         return text
 
+    def discard(self) -> None:
+        """Drop the utterance so far. No decode, no call into the backend at all."""
+        self._reset()
+
     def _reset(self) -> None:
         self._buffer = bytearray()
-        self._carry = b""
         self._speaking = False
         self._decoded_at = 0
         self._last = ""
@@ -329,6 +342,7 @@ class FakeTranscriber:
         self.canned = canned
         self.fed = bytearray()
         self.finished = False
+        self.discarded = 0
         self._interim_bytes = interim_bytes
         self._emitted = False
 
@@ -344,6 +358,11 @@ class FakeTranscriber:
         self.finished = True
         self._emitted = False
         return self.canned
+
+    def discard(self) -> None:
+        """Count the discard and re-arm the interim; ``fed`` is kept, because it is the record."""
+        self.discarded += 1
+        self._emitted = False
 
 
 def _whisper_decode(model: str) -> Callable[[bytes], str]:
@@ -376,14 +395,24 @@ def _whisper_decode(model: str) -> Callable[[bytes], str]:
             samples,
             language="en",
             beam_size=1,
-            # Each interim re-decodes the whole buffer, so conditioning on the
-            # previous result would let one early mishearing steer every
-            # decode after it for the rest of the utterance.
+            # Each interim re-decodes a trailing window of the buffer, so
+            # conditioning on the previous result would let one early
+            # mishearing steer every decode after it for the rest of the
+            # utterance.
             condition_on_previous_text=False,
-            # Ours: the RMS gate above already dropped the lead-in silence, and
-            # whisper's own VAD would be a second opinion on audio this module
-            # has already decided about.
-            vad_filter=False,
+            # THE NON-SPEECH GUARD, and the RMS gate is not one. The gate is
+            # one-way and opens on a single 20 ms frame over the threshold —
+            # a breath, a click, the trigger itself — after which everything
+            # is buffered, and whisper decoding near-silence hallucinates:
+            # measured on base.en, a third to a half of breath-and-click
+            # presses came back as "You" or "The The The The…", and small.en
+            # produced "Thank you." over room tone. Since the server routes
+            # the final text as a prompt, each of those was typed into an
+            # agent's pane or filed as a board note. With the VAD on, the same
+            # presses came back empty while the spoken fixture still
+            # transcribed correctly. It is a second opinion by design: the
+            # gate saves decodes, the VAD decides whether there was speech.
+            vad_filter=True,
         )
         return " ".join(str(segment.text).strip() for segment in segments).strip()
 

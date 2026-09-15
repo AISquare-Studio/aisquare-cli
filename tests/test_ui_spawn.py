@@ -36,16 +36,18 @@ from textual.widgets import Button, Input, OptionList, Select, Static, Switch, T
 
 from aisquare.cli.ui import spawn as spawn_module
 from aisquare.cli.ui.app import FleetApp
+from aisquare.cli.ui.attach import AttachTargetScreen, NewAccountRequested
+from aisquare.cli.ui.persona_dialogs import ImportPersonaScreen
 from aisquare.cli.ui.sidebar import SpawnAgent, SpawnRow, agent_row_text
 from aisquare.cli.ui.spawn import (
     LABEL_RULE,
     NO_TASK,
-    PICK_PENDING,
     PickTargetRequested,
     SpawnDialog,
     dice_label,
     role_choices,
 )
+from aisquare.cli.ui.views.accounts import AccountsView
 from aisquare.core import codenames, harness, personas
 from aisquare.core import tmux as tmux_core
 from aisquare.core.config import FleetRoleSettings, load_config, save_config
@@ -65,6 +67,8 @@ from aisquare.models import (
     TeamTask,
 )
 from aisquare.services import fleet as fleet_service
+from aisquare.services import personas as personas_service
+from aisquare.services import settings as settings_service
 from aisquare.services import team as team_service
 
 T = TypeVar("T")
@@ -1071,18 +1075,115 @@ def test_a_preset_account_shows_before_and_after_the_accounts_are_read(
     assert prompts[-1] == "7 (preset)"  # a slot the read did not produce still shows
 
 
-def test_pick_posts_pick_target_requested_and_says_the_picker_is_next(
-    git_project: ProjectInfo,
-) -> None:
-    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
-        await pilot.click("#spawn-pick")
-        await pilot.pause()
-        return [host.picks, host.notices, type(host.screen).__name__]
+async def wait_for_screen(pilot: Pilot[Any], kind: type[Any], seconds: float = 5.0) -> Any:
+    for _ in range(int(seconds / 0.05)):
+        if isinstance(pilot.app.screen, kind):
+            return pilot.app.screen
+        await pilot.pause(0.05)
+    raise AssertionError(f"{kind.__name__} never opened; the screen is {pilot.app.screen!r}")
 
-    picks, notices, screen = drive(git_project, scenario)
-    assert picks == [git_project.id]
-    assert (PICK_PENDING, "information") in notices
-    assert screen == "SpawnDialog"  # nothing else happened
+
+def picker_ids(picker: AttachTargetScreen) -> list[str]:
+    listing = picker.query_one("#picker-list", OptionList)
+    return [listing.get_option_at_index(i).id or "" for i in range(listing.option_count)]
+
+
+def test_pick_opens_the_picker_in_new_order_and_fills_who_runs_it(
+    git_project: ProjectInfo, monkeypatch: pytest.MonkeyPatch, spawns: SpawnRecorder
+) -> None:
+    settings_service.bind_role("coder2", agent_bin="claude2")
+    monkeypatch.setattr(fleet_service, "list_agents", lambda project, *, live_only=True: [])
+
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
+        seen: list[Any] = []
+        await pilot.click("#spawn-pick")
+        picker = await wait_for_screen(pilot, AttachTargetScreen)
+        await settle(pilot)
+        listing = picker.query_one("#picker-list", OptionList)
+        ids = picker_ids(picker)
+        assert listing.highlighted is not None
+        seen.append((picker.attach_intent, ids[0], ids[listing.highlighted], list(host.picks)))
+        await pilot.press("enter")  # the highlighted bind
+        await settle(pilot)
+        seen.append((select(dialog, "role").value, dialog.query_one("#spawn-binary", Input).value))
+        await pilot.pause(0.3)
+        await pilot.click("#spawn-pick")
+        picker = await wait_for_screen(pilot, AttachTargetScreen)
+        await settle(pilot)
+        picker.query_one("#picker-list", OptionList).highlighted = picker_ids(picker).index(
+            "account:2"
+        )
+        await pilot.press("enter")
+        await settle(pilot)
+        seen.append(select(dialog, "account").value)
+        await pilot.click("#spawn-submit")
+        await settle(pilot)
+        return seen
+
+    seen = drive(
+        git_project,
+        scenario,
+        accounts=lambda: overview((1, "me@example.com"), (2, "two@example.com")),
+    )
+    assert seen[0] == ("new", "section:binds", "bind:coder2", [git_project.id])
+    assert seen[1] == ("coder2", "claude2")
+    assert seen[2] == "2"
+    (_project_id, role, kwargs) = spawns.calls[0]
+    assert (role, kwargs["binary"], kwargs["account"]) == ("coder2", "claude2", "2")
+
+
+def test_import_beside_the_persona_select_selects_what_it_imports(
+    git_project: ProjectInfo, monkeypatch: pytest.MonkeyPatch, spawns: SpawnRecorder
+) -> None:
+    def answer(source: str, **_: object) -> personas_service.ImportResult:
+        directory = dict(personas.layer_dirs(None))["user"] / "fresh-one"
+        directory.mkdir(parents=True)
+        (directory / "SKILL.md").write_text("---\ndescription: Fresh.\n---\nWork.\n", "utf-8")
+        loaded = personas.load(directory, layer="user")
+        return personas_service.ImportResult(persona=loaded, engine="copy", source=source)
+
+    monkeypatch.setattr(personas_service, "import_source", answer)
+    monkeypatch.setattr(personas_service, "importable_skills", lambda root: [])
+
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
+        await pilot.click("#spawn-import")
+        importer = await wait_for_screen(pilot, ImportPersonaScreen)
+        await settle(pilot)
+        importer.query_one("#import-source", Input).value = "./fresh-one"
+        await pilot.pause()
+        await pilot.click("#import-submit")
+        await settle(pilot)
+        seen = [
+            type(host.screen).__name__,
+            select(dialog, "persona").value,
+            note(dialog, "#spawn-persona-description"),
+        ]
+        await pilot.click("#spawn-submit")
+        await settle(pilot)
+        return seen
+
+    screen, value, description = drive(git_project, scenario)
+    assert (screen, value, description) == ("SpawnDialog", "fresh-one", "Fresh.")
+    assert spawns.calls[0][2]["persona"] == "fresh-one"
+
+
+def test_new_account_from_the_picker_opens_the_accounts_page_and_starts_its_add_flow(
+    tmp_path: Path, fleet: dict[str, list[FleetAgentStatus]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    register(tmp_path / "alpha", project_id="prj_a")
+    started: list[object] = []
+    monkeypatch.setattr(
+        AccountsView, "begin_claude_sign_in", lambda self, slot: started.append(slot)
+    )
+
+    async def scenario(pilot: Pilot[None], app: RecordingFleetApp) -> str | None:
+        app.post_message(NewAccountRequested())
+        await pilot.pause()
+        await pilot.pause()
+        return app.content.current
+
+    assert drive_app(scenario) == "accounts"
+    assert started == [None]  # a fresh slot's sign-in, the page's own flow
 
 
 def test_a_persona_this_project_lacks_still_shows_and_says_the_spawn_refuses_it(

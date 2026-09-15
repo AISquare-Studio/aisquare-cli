@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import subprocess
 from collections.abc import Callable, Coroutine, Iterator, Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -35,6 +36,7 @@ from textual.widgets import (
     Checkbox,
     DataTable,
     Input,
+    OptionList,
     RadioButton,
     Select,
     Static,
@@ -43,6 +45,14 @@ from textual.widgets import (
 )
 
 from aisquare.cli.ui import persona_dialogs as dialogs
+from aisquare.cli.ui.attach import (
+    SEAT_RULE,
+    AttachTargetScreen,
+    ConfirmAttachScreen,
+    NewAccountRequested,
+    NewBindScreen,
+    Target,
+)
 from aisquare.cli.ui.persona_dialogs import (
     NAME_RULE,
     PARSE_DEBOUNCE,
@@ -53,18 +63,31 @@ from aisquare.cli.ui.persona_dialogs import (
     ImportPersonaScreen,
     NewPersonaScreen,
 )
+from aisquare.cli.ui.spawn import SpawnCompleted, SpawnDialog
 from aisquare.cli.ui.views.personas_tab import (
-    ATTACH_PENDING,
     BUNDLED_REASON,
     AttachRequested,
     PersonasTab,
 )
+from aisquare.core import claude_accounts as accounts_core
 from aisquare.core import personas as core
 from aisquare.core import tmux as tmux_core
 from aisquare.core.personas import Layer, Persona, PersonaError
 from aisquare.core.tmux import Completed
-from aisquare.models import ProjectInfo
+from aisquare.models import (
+    AccountsOverview,
+    ClaudeAccount,
+    ClaudeAccountStatus,
+    ClaudeIdentity,
+    ClaudeInstall,
+    FleetAgent,
+    FleetAgentStatus,
+    ProjectInfo,
+)
+from aisquare.services import claude_accounts as accounts_service
+from aisquare.services import fleet as fleet_service
 from aisquare.services import personas as personas_service
+from aisquare.services import settings as settings_service
 
 T = TypeVar("T")
 SIZE = (160, 50)
@@ -181,6 +204,8 @@ class Host(App[None]):
         self.notices: list[tuple[str, str]] = []
         self.attached: list[tuple[str, str]] = []
         self.results: list[object] = []
+        self.spawned: list[object] = []
+        self.new_accounts = 0
 
     def compose(self) -> ComposeResult:
         if self._project is not None:
@@ -192,6 +217,12 @@ class Host(App[None]):
 
     def on_attach_requested(self, event: AttachRequested) -> None:
         self.attached.append((event.persona, event.intent))
+
+    def on_spawn_completed(self, event: SpawnCompleted) -> None:
+        self.spawned.append(event.receipt)
+
+    def on_new_account_requested(self, event: NewAccountRequested) -> None:
+        self.new_accounts += 1
 
     def notify(
         self,
@@ -374,21 +405,28 @@ def test_an_imported_persona_shows_its_provenance(project: ProjectInfo, tmp_path
 # --- actions ----------------------------------------------------------------------------
 
 
-def test_attach_buttons_post_the_request_with_persona_and_intent(
-    project: ProjectInfo, catalogue: dict[str, Path]
+def test_attach_buttons_post_the_request_and_open_the_picker_for_that_intent(
+    project: ProjectInfo, catalogue: dict[str, Path], targets: list[FleetAgentStatus]
 ) -> None:
-    async def scenario(pilot: Pilot[None], host: Host) -> tuple[list[Any], list[Any]]:
+    async def scenario(pilot: Pilot[None], host: Host) -> list[Any]:
+        seen: list[Any] = []
         await select_row(pilot, host, "user:pair")
         await press(pilot, "#persona-attach-existing")
-        await press(pilot, "#persona-attach-new")
-        host.query_one("#persona-table", DataTable).focus()
-        await pilot.press("a")
+        picker = await wait_for(pilot, AttachTargetScreen)
+        await settle(pilot)
+        seen.append((picker.persona_name, picker.attach_intent, option_ids(picker)[0]))
+        await pilot.press("escape")
         await pilot.pause()
-        return host.attached, host.notices
+        host.query_one("#persona-table", DataTable).focus()
+        await pilot.press("n")
+        picker = await wait_for(pilot, AttachTargetScreen)
+        await settle(pilot)
+        seen.append((picker.persona_name, picker.attach_intent, option_ids(picker)[0]))
+        return [host.attached, seen]
 
-    attached, notices = drive(scenario, project=project)
-    assert attached == [("pair", "existing"), ("pair", "new"), ("pair", "existing")]
-    assert notices.count((ATTACH_PENDING, "information")) == 3
+    attached, seen = drive(scenario, project=project)
+    assert attached == [("pair", "existing"), ("pair", "new")]  # the message seam still holds
+    assert seen == [("pair", "existing", "section:agents"), ("pair", "new", "section:binds")]
 
 
 def test_bundled_rows_disable_edit_and_remove_and_invalid_rows_cannot_be_attached(
@@ -919,3 +957,325 @@ def test_the_dialog_module_calls_the_service_by_attribute() -> None:
     source = Path(dialogs.__file__).read_text(encoding="utf-8")
     for name in ("import_source", "importable_skills", "new", "save", "export"):
         assert f"personas_service.{name}(" in source
+
+
+# --- the target picker (P7) -----------------------------------------------------------------
+
+
+def option_ids(picker: AttachTargetScreen) -> list[str]:
+    listing = picker.query_one("#picker-list", OptionList)
+    return [listing.get_option_at_index(i).id or "" for i in range(listing.option_count)]
+
+
+def option_prompts(picker: AttachTargetScreen) -> dict[str, str]:
+    listing = picker.query_one("#picker-list", OptionList)
+    options = [listing.get_option_at_index(i) for i in range(listing.option_count)]
+    return {option.id or "": str(option.prompt).strip() for option in options}
+
+
+def highlighted_id(picker: AttachTargetScreen) -> str:
+    listing = picker.query_one("#picker-list", OptionList)
+    assert listing.highlighted is not None
+    return listing.get_option_at_index(listing.highlighted).id or ""
+
+
+MANAGED = ClaudeAccount(
+    slot=2, config_dir=Path("/accounts/2"), tmp_dir=Path("/accounts/2/tmp"), managed=True
+)
+
+
+@pytest.fixture
+def targets(project: ProjectInfo, monkeypatch: pytest.MonkeyPatch) -> list[FleetAgentStatus]:
+    """One live agent running mentor, two binds, two account slots — every read a recorder."""
+    agent = FleetAgent(
+        id="agt_01pickerscripted",
+        project_id=project.id,
+        label="coder-auth",
+        role="coder",
+        binary="claude",
+        pane_id="%4",
+        cwd=project.root,
+        created_at=datetime.now(tz=UTC),
+        persona="mentor",
+    )
+    agents = [FleetAgentStatus(agent=agent, state="waiting")]
+    monkeypatch.setattr(
+        fleet_service, "list_agents", lambda target, *, live_only=True: list(agents)
+    )
+    overview = AccountsOverview(
+        claude=ClaudeInstall(installed=True, binary="/usr/bin/claude"),
+        accounts=[
+            ClaudeAccountStatus(
+                account=ClaudeAccount(slot=1, config_dir=Path("/home/me/.claude")),
+                label="default",
+                identity=ClaudeIdentity(email="me@example.com"),
+                signed_in=True,
+                subscription="max",
+            ),
+            ClaudeAccountStatus(
+                account=MANAGED,
+                label="account 2",
+                identity=ClaudeIdentity(email="two@example.com"),
+                signed_in=True,
+            ),
+        ],
+    )
+    monkeypatch.setattr(accounts_service, "overview", lambda: overview)
+    settings_service.bind_role(
+        "coder2", agent_bin="claude2", env={"CLAUDE_CONFIG_DIR": "/x/.claude2"}
+    )
+    settings_service.bind_role("tester1", agent_bin="claude")
+    return agents
+
+
+def picker_for(project: ProjectInfo, intent: str) -> AttachTargetScreen:
+    return AttachTargetScreen(
+        project,
+        persona="pair",
+        intent="existing" if intent == "existing" else "new",
+        accounts=accounts_service.overview,
+    )
+
+
+def test_the_picker_orders_its_sections_by_intent_and_highlights_the_first_target(
+    project: ProjectInfo, targets: list[FleetAgentStatus]
+) -> None:
+    async def scenario(pilot: Pilot[None], host: Host) -> tuple[list[str], str, bool]:
+        picker = host.screen
+        assert isinstance(picker, AttachTargetScreen)
+        return option_ids(picker), highlighted_id(picker), isinstance(host.focused, OptionList)
+
+    existing = drive(scenario, dialog=picker_for(project, "existing"))
+    assert existing == (
+        [
+            "section:agents",
+            "agent:coder-auth",
+            "section:binds",
+            "bind:coder2",
+            "bind:tester1",
+            "section:accounts",
+            "account:1",
+            "account:2",
+        ],
+        "agent:coder-auth",  # Agents first, and focused
+        True,
+    )
+    new_ids, new_highlight, _ = drive(scenario, dialog=picker_for(project, "new"))
+    assert [i for i in new_ids if i.startswith("section:")] == [
+        "section:binds",
+        "section:accounts",
+        "section:agents",
+    ]
+    assert new_highlight == "bind:coder2"
+    assert sorted(new_ids) == sorted(existing[0])  # every section selectable either way
+
+
+def test_the_filter_narrows_every_section_and_agent_rows_carry_the_persona(
+    project: ProjectInfo, targets: list[FleetAgentStatus]
+) -> None:
+    async def scenario(pilot: Pilot[None], host: Host) -> tuple[dict[str, str], list[str]]:
+        picker = host.screen
+        assert isinstance(picker, AttachTargetScreen)
+        prompts = option_prompts(picker)
+        picker.query_one("#picker-filter", Input).value = "two@"
+        await pilot.pause()
+        return prompts, option_ids(picker)
+
+    prompts, filtered = drive(scenario, dialog=picker_for(project, "existing"))
+    assert prompts["agent:coder-auth"] == "coder-auth · coder · waiting · mentor"
+    assert prompts["bind:coder2"] == "coder2 · claude2 · .claude2"
+    assert prompts["bind:tester1"] == "tester1 · claude · this shell's account"
+    assert prompts["account:1"] == "1 · me@example.com · max"
+    assert filtered == [
+        "section:agents",
+        "empty:agents",
+        "section:binds",
+        "empty:binds",
+        "section:accounts",
+        "account:2",
+    ]
+
+
+def test_choosing_an_agent_confirms_then_attaches_and_says_how_it_was_delivered(
+    project: ProjectInfo,
+    catalogue: dict[str, Path],
+    targets: list[FleetAgentStatus],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, str, str]] = []
+
+    def attach(target: ProjectInfo, label: str, name: str) -> fleet_service.AttachReceipt:
+        calls.append((target.id, label, name))
+        agent = targets[0].agent.model_copy(update={"persona": name})
+        return fleet_service.AttachReceipt(
+            agent=agent, persona=name, replaced="mentor", delivered="noted", how="a board note"
+        )
+
+    monkeypatch.setattr(fleet_service, "attach_persona", attach)
+
+    async def scenario(pilot: Pilot[None], host: Host) -> list[Any]:
+        await select_row(pilot, host, "user:pair")
+        await press(pilot, "#persona-attach-existing")
+        await wait_for(pilot, AttachTargetScreen)
+        await settle(pilot)
+        await pilot.press("enter")  # the highlighted agent
+        confirm = await wait_for(pilot, ConfirmAttachScreen)
+        question = shown(confirm.query_one("#attach-question", Static))
+        await press(pilot, "#attach-confirm")
+        await settle(pilot)
+        return [question, host.notices, type(host.screen).__name__]
+
+    question, notices, screen = drive(scenario, project=project)
+    assert question.startswith("Attach pair to coder-auth?") and "It replaces mentor." in question
+    assert calls == [(project.id, "coder-auth", "pair")]
+    assert ("✓ attached pair to coder-auth (noted)", "information") in notices
+    assert screen == "Screen"
+
+
+def test_cancelling_the_attach_confirmation_attaches_nothing(
+    project: ProjectInfo,
+    catalogue: dict[str, Path],
+    targets: list[FleetAgentStatus],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[object] = []
+    monkeypatch.setattr(fleet_service, "attach_persona", lambda *a, **k: calls.append(a))
+
+    async def scenario(pilot: Pilot[None], host: Host) -> None:
+        await select_row(pilot, host, "user:pair")
+        await press(pilot, "#persona-attach-existing")
+        await wait_for(pilot, AttachTargetScreen)
+        await settle(pilot)
+        await pilot.press("enter")
+        await wait_for(pilot, ConfirmAttachScreen)
+        await press(pilot, "#attach-cancel")
+        await settle(pilot)
+
+    drive(scenario, project=project)
+    assert calls == []
+
+
+@pytest.mark.parametrize("pick", ["bind:coder2", "account:2"])
+def test_choosing_a_bind_or_an_account_opens_the_spawn_dialog_preset_with_the_persona(
+    pick: str,
+    project: ProjectInfo,
+    catalogue: dict[str, Path],
+    targets: list[FleetAgentStatus],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spawns: list[tuple[str, dict[str, object]]] = []
+
+    def spawn(target: ProjectInfo, role: str, **kwargs: object) -> fleet_service.SpawnReceipt:
+        spawns.append((role, kwargs))
+        return fleet_service.SpawnReceipt(
+            agent=targets[0].agent, asked_label=None, tmux_session="asq-amber-otter"
+        )
+
+    monkeypatch.setattr(fleet_service, "spawn", spawn)
+
+    async def scenario(pilot: Pilot[None], host: Host) -> list[Any]:
+        await select_row(pilot, host, "user:pair")
+        await press(pilot, "#persona-attach-new")
+        picker = await wait_for(pilot, AttachTargetScreen)
+        await settle(pilot)
+        listing = picker.query_one("#picker-list", OptionList)
+        listing.highlighted = option_ids(picker).index(pick)
+        await pilot.press("enter")
+        dialog = await wait_for(pilot, SpawnDialog)
+        await settle(pilot)
+        shown_values = [
+            dialog.query_one("#spawn-role", Select).value,
+            dialog.query_one("#spawn-binary", Input).value,
+            dialog.query_one("#spawn-account", Select).value,
+            dialog.query_one("#spawn-persona", Select).value,
+        ]
+        await press(pilot, "#spawn-submit")
+        await settle(pilot)
+        return [shown_values, host.spawned]
+
+    shown_values, spawned = drive(scenario, project=project)
+    ((role, kwargs),) = spawns
+    if pick == "bind:coder2":
+        assert shown_values == ["coder2", "claude2", "", "pair"]
+        assert role == "coder2" and kwargs["binary"] == "claude2"
+    else:
+        assert shown_values == ["coder", "", "2", "pair"]
+        assert role == "coder" and kwargs["account"] == "2"
+    assert kwargs["persona"] == "pair"  # a preset is a choice: it is sent
+    assert len(spawned) == 1  # the receipt went on to the shell's receipt path
+
+
+def test_new_bind_checks_seat_and_binary_then_saves_through_bind_role_and_selects_it(
+    project: ProjectInfo, targets: list[FleetAgentStatus], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    saved: list[tuple[str, dict[str, object]]] = []
+    real_bind = settings_service.bind_role
+
+    def bind_role(role: str, **kwargs: Any) -> Any:
+        saved.append((role, kwargs))
+        return real_bind(role, **kwargs)
+
+    monkeypatch.setattr(settings_service, "bind_role", bind_role)
+
+    async def scenario(pilot: Pilot[None], host: Host) -> list[Any]:
+        picker = host.screen
+        assert isinstance(picker, AttachTargetScreen)
+        await press(pilot, "#picker-new-bind")
+        form = await wait_for(pilot, NewBindScreen)
+        save = form.query_one("#bind-save", Button)
+        rule = form.query_one("#bind-rule", Static)
+        seen: list[Any] = []
+        form.query_one("#bind-seat", Input).value = "Bad Seat"
+        await pilot.pause()
+        seen.append((save.disabled, SEAT_RULE in shown(rule)))
+        form.query_one("#bind-seat", Input).value = "coder3"
+        form.query_one("#bind-binary", Input).value = "definitely-not-a-binary-p7"
+        await pilot.pause()
+        seen.append((save.disabled, "is not on your PATH" in shown(rule)))
+        form.query_one("#bind-binary", Input).value = "sh"
+        form.query_one("#bind-account", Select).value = "2"
+        form.query_one("#bind-env", TextArea).insert("EXTRA=1\n")
+        form.query_one("#bind-args", Input).value = "--model opus"
+        await pilot.pause()
+        seen.append(save.disabled)
+        await press(pilot, "#bind-save")
+        await wait_for(pilot, AttachTargetScreen)
+        await settle(pilot)
+        seen.append(highlighted_id(picker))
+        return seen
+
+    seen = drive(scenario, dialog=picker_for(project, "new"))
+    assert seen[0] == (True, True)  # an unknown seat
+    assert seen[1] == (True, True)  # a binary nothing on PATH answers to
+    assert seen[2] is False
+    assert saved == [
+        (
+            "coder3",
+            {
+                "agent_bin": "sh",
+                "env": {**accounts_core.launch_env(MANAGED), "EXTRA": "1"},
+                "args": ["--model", "opus"],
+            },
+        )
+    ]
+    assert seen[3] == "bind:coder3"  # re-read, the new bind selected
+
+
+def test_new_account_hands_over_to_the_accounts_page(
+    project: ProjectInfo, catalogue: dict[str, Path], targets: list[FleetAgentStatus]
+) -> None:
+    async def from_the_picker(pilot: Pilot[None], host: Host) -> list[object]:
+        await press(pilot, "#picker-new-account")
+        return list(host.results)
+
+    assert drive(from_the_picker, dialog=picker_for(project, "new")) == [Target("new-account")]
+
+    async def from_the_tab(pilot: Pilot[None], host: Host) -> int:
+        await select_row(pilot, host, "user:pair")
+        await press(pilot, "#persona-attach-new")
+        await wait_for(pilot, AttachTargetScreen)
+        await settle(pilot)
+        await press(pilot, "#picker-new-account")
+        return host.new_accounts
+
+    assert drive(from_the_tab, project=project) == 1

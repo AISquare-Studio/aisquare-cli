@@ -10,9 +10,9 @@ to convert.
 This guide covers what ships today: the persona catalogue, the
 `aisquare persona` commands — importing anything, a skill or not — running an
 agent as a persona, attaching one to a running agent, and the persona views in
-`asq`: the Personas tab and the Spawn dialog's persona step. The target picker
-that joins them — attach to a running agent or a new one, in two steps — is
-described in `docs/plans/spawn-personas.md` and lands in a later change.
+`asq`: the Personas tab, the Spawn dialog's persona step, and the target
+picker that joins them — attach a persona to a running agent or to a new one, in
+two steps.
 
 ## What a persona is
 
@@ -157,9 +157,8 @@ where it came from (`.persona.json`) and its warnings.
 
 For the selected persona:
 
-- **Attach to existing** (`a`) and **Attach to new** (`n`) ask for a target —
-  a running agent, or a new one. The target picker is not in this build yet;
-  the buttons say so.
+- **Attach to existing** (`a`) and **Attach to new** (`n`) open the target
+  picker — see *Attach in two steps* below.
 - **Edit** (`e`) opens the whole `SKILL.md` in the tab. It is checked as you
   type — the first error, or the warnings — and *Save* is enabled only while it
   parses; it saves through the same writer as `persona edit`, so a refused edit
@@ -183,6 +182,42 @@ full — engine, model, size, frontmatter, body, what it dropped — before *Sav
 keeps it or *Discard* leaves it under `.drafts`. A refusal stays in the form
 with its reason. **+ New** asks for a name, a layer and a description, creates
 the scaffold, and opens it in the editor.
+
+## Attach in two steps
+
+In `asq`, a persona reaches an agent in two steps: pick the persona, then pick
+who runs it.
+
+1. **The persona.** In the project's **Personas** tab, select one and press
+   **Attach to existing** (`a`) or **Attach to new** (`n`).
+2. **Who runs it.** The target picker lists three sections, and the button you
+   pressed decides their order — every section stays selectable either way:
+   - **Agents** — this project's running agents, each with the persona it runs
+     now. Choosing one asks once ("attach skeptic to coder-auth? It replaces
+     mentor."), then attaches exactly as `persona attach` does; the toast says
+     whether the briefing was `typed` into a waiting agent or `noted` on the
+     board for a busy one.
+   - **Binds** — the seats `aisquare team bind` pinned, with the binary and the
+     account each one's environment points at. Choosing one opens the Spawn
+     dialog with that seat as the role, its binary, and the persona filled in.
+   - **Accounts** — the Claude Code account slots. Choosing one opens the Spawn
+     dialog on that slot, with the persona.
+
+   *Attach to existing* puts Agents first; *Attach to new* puts Binds, then
+   Accounts, then Agents. The filter box narrows all three sections at once.
+
+Two buttons under the list make a target on the spot. **+ New bind** is `team
+bind` as a form — a seat (a role, a numbered seat such as `coder2`, or a name
+already bound), a binary that must be on your `PATH`, an account whose
+`CLAUDE_CONFIG_DIR` and `CLAUDE_CODE_TMPDIR` it fills in, more `KEY=VALUE` lines
+and extra args — and the list comes back with the new bind selected. **+ New
+account** takes you to the Accounts page and starts its sign-in for a new slot;
+come back to the Personas tab when it has signed in.
+
+The same picker is the Spawn dialog's **Pick…**: from `＋ spawn agent`, Pick…
+opens it with Binds first and fills the dialog's role, binary or account from
+what you choose, keeping everything else you typed. **Import…** beside the
+dialog's Persona field imports a persona and selects it.
 
 ## Commands
 

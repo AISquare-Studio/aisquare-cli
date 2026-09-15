@@ -45,6 +45,7 @@ from textual.widget import Widget
 from textual.widgets import ContentSwitcher, Footer, Static
 from textual.worker import Worker, WorkerState
 
+from aisquare.cli.ui.attach import NewAccountRequested
 from aisquare.cli.ui.sidebar import (
     AccountsSelected,
     AddProject,
@@ -55,7 +56,7 @@ from aisquare.cli.ui.sidebar import (
     SpawnAgent,
     accounts_summary_text,
 )
-from aisquare.cli.ui.spawn import SpawnDialog
+from aisquare.cli.ui.spawn import SpawnCompleted, SpawnDialog
 from aisquare.cli.ui.terminal import EscapeToSidebar, route_selection_gesture
 from aisquare.cli.ui.theme import ThemePicker, remember_theme, restore_theme
 from aisquare.cli.ui.views.accounts import AccountsChanged, AccountsView, read_session, summarise
@@ -613,6 +614,15 @@ class FleetApp(App[None], inherit_bindings=False):
             self.notify(note, severity="warning", timeout=8, markup=False)
         self.refresh_data()
         self.post_message(AgentSelected(agent.project_id, agent.id))
+
+    def on_spawn_completed(self, event: SpawnCompleted) -> None:
+        """A Spawn dialog opened from a persona's *Attach to new*: the same receipt path."""
+        self.spawn_finished(event.receipt)
+
+    async def on_new_account_requested(self, event: NewAccountRequested) -> None:
+        """The picker's *+ New account*: the Accounts page, its add-account flow started."""
+        await self.on_accounts_selected(AccountsSelected())
+        self.query_one("#accounts", AccountsView).begin_claude_sign_in(None)
 
     async def on_accounts_selected(self, event: AccountsSelected) -> None:
         await self._show(

@@ -7,6 +7,26 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Attach a persona in two steps, from `asq`.** The Personas tab's *Attach to
+  existing* / *Attach to new* open one **target picker**: this project's running
+  **Agents** (each with the persona it runs), the **Binds** `aisquare team bind`
+  pinned (with the binary and the account each environment points at) and the
+  Claude **Accounts** — Agents first for "existing", Binds then Accounts for
+  "new", every section selectable either way, and a filter across all three.
+  Choosing an agent confirms ("it replaces mentor") and calls
+  `fleet_service.attach_persona` in a thread worker; the toast says whether the
+  briefing was `typed` or `noted`. Choosing a bind or an account opens the Spawn
+  dialog preset with the seat, its binary or the slot, and the persona. **+ New
+  bind** is `team bind` as a form, saved through `services.settings.bind_role`,
+  the seat checked by the rule `spawn` applies and the binary by `PATH`, an
+  account filling `CLAUDE_CONFIG_DIR`/`CLAUDE_CODE_TMPDIR` as `launch --account`
+  would; the list re-reads with the new bind selected. **+ New account** opens
+  the Accounts page's own add-account flow. The Spawn dialog's *Pick…* opens the
+  same picker in "new" order and fills its role, binary or account without losing
+  what was typed, and *Import…* beside its Persona field imports a persona and
+  selects it. Measured headless in `tests/test_ui_personas.py` and
+  `tests/test_ui_spawn.py`, with recorders for `list_agents`, `attach_persona`,
+  `spawn`, `bind_role` and the accounts read.
 - **Attach a persona to a running agent.** `aisquare persona attach <name> --to
   <label>` gives a fleet agent that is already running a persona: the name is
   checked first (an unknown one lists the known names before anything is

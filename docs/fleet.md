@@ -107,10 +107,12 @@ tmux can see and its row says so (`no hooks`).
    **`＋ spawn agent`** under a project opens the **Spawn dialog** for that
    project, headed with its name and codename. It reads in two steps. First who
    runs it: role (the fleet's roles plus any role bound with `team bind`;
-   `manager` is greyed out while one runs; *Pick…* beside it will open the target
-   picker, which is not in this build yet), account and binary. Then as whom:
+   `manager` is greyed out while one runs; *Pick…* beside it opens the target
+   picker — a bound teammate or an account fills these fields), account and
+   binary. Then as whom:
    **persona** — `(none)` or one of the project's personas, the role's
-   `[fleet.roles.<role>].persona` preselected, its description shown under it.
+   `[fleet.roles.<role>].persona` preselected, its description shown under it,
+   and *Import…* beside it to bring one in (`docs/personas.md`).
    Then label (prefilled `<role>-1`, or `<role>-<task short id>` once a task is
    picked; 🎲 offers `<role>-<adjective>-<animal>`; a label that breaks the rule
    disables *Spawn* and shows the rule), task (the project's open tasks),

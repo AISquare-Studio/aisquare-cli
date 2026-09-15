@@ -414,9 +414,8 @@ class NewBindScreen(ModalScreen[str | None]):
         """Every rule the form breaks right now, in field order."""
         found: list[str] = []
         seat = self.query_one("#bind-seat", Input).value.strip()
-        # A private on purpose (manager-approved): `_role_ok` IS the rule spawn applies,
-        # and it has no public name yet — calling it beats copying it (plan §10, P7).
-        if not seat or not fleet_service._role_ok(seat):
+        # `role_ok` IS the rule spawn applies, by its public name (P13): ask it, never copy it.
+        if not seat or not fleet_service.role_ok(seat):
             found.append(SEAT_RULE)
         binary = self.query_one("#bind-binary", Input).value.strip() or DEFAULT_BINARY
         if shutil.which(binary) is None:

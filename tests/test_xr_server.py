@@ -35,6 +35,7 @@ pytest.importorskip("starlette.testclient", reason="the [xr] extra is not instal
 from starlette.testclient import TestClient
 
 from aisquare.services import mcp_server
+from aisquare.services.xr import protocol as wire
 from aisquare.services.xr import server as xr_server
 
 CODER = "bbbb2222-0000-0000-0000-000000000000"
@@ -167,14 +168,17 @@ def _rejected(http: TestClient, first_frame: str | None) -> dict[str, Any]:
         return dict(json.loads(_text(connection)))
 
 
-def test_auth_rejects_a_missing_a_wrong_and_a_foreign_token(
+def test_a_rejected_token_is_auth_failed_however_it_is_wrong(
     work_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """One answer for every way of not being authorised.
+    """One answer — ``auth_failed`` — for every way a TOKEN can be wrong.
 
-    The third case is the one worth having: a token is per ``AISQUARE_HOME``,
+    The foreign case is the one worth having: a token is per ``AISQUARE_HOME``,
     so a client holding one minted against a different home — another machine,
-    another checkout, an old install — is refused exactly like a guess.
+    another checkout, an old install — is refused exactly like a guess. All of
+    these are a token that was checked and found wrong, which is the terminal
+    ``auth_failed`` case, told apart below from a handshake that never checked a
+    token at all.
     """
     project = _seed(work_dir)
     mine = mcp_server.serve_token()
@@ -186,7 +190,6 @@ def test_auth_rejects_a_missing_a_wrong_and_a_foreign_token(
 
     with TestClient(xr_server.build_app(project, token=mine)) as http:
         for frame in (
-            None,  # a first frame that is not an auth at all
             json.dumps({"t": "auth", "token": ""}),
             json.dumps({"t": "auth", "token": "not-the-token"}),
             json.dumps({"t": "auth", "token": foreign}),
@@ -198,6 +201,62 @@ def test_auth_rejects_a_missing_a_wrong_and_a_foreign_token(
             answer = _rejected(http, frame)
             assert answer["t"] == "error"
             assert answer["code"] == "auth_failed", frame
+
+
+def test_a_pre_auth_failure_that_checked_no_token_is_retryable(
+    work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stalled or malformed handshake is a RETRYABLE close, not a rejected token.
+
+    The old code answered every pre-auth failure with ``auth_failed`` + close
+    4401 ``retry:false`` — including a first frame that was not an auth at all,
+    and (below) a valid token that simply arrived after the timeout. A client
+    following the contract then gave up permanently on a transient stall. These
+    checked no token, so they are ``auth_timeout``/``auth_invalid`` and close
+    :data:`CLOSE_AUTH_TIMEOUT` (4408), where reconnecting is right.
+    """
+    project = _seed(work_dir)
+    token = mcp_server.serve_token()
+    monkeypatch.setattr(xr_server, "AUTH_TIMEOUT_S", 0.05)
+
+    def close_of(first_frame: str | None) -> tuple[str, int]:
+        with (
+            TestClient(xr_server.build_app(project, token=token)) as http,
+            http.websocket_connect("/ws") as connection,
+        ):
+            if first_frame is not None:
+                connection.send_text(first_frame)
+            answer = json.loads(_text(connection))
+            closing = connection.receive()
+            assert closing["type"] == "websocket.close", closing
+            return answer["code"], int(closing["code"])
+
+    # A first frame that is not an auth message: no token was checked.
+    code, close = close_of(json.dumps({"t": "subscribe", "session": None}))
+    assert code == "auth_invalid" and close == wire.CLOSE_AUTH_TIMEOUT, (code, close)
+    # Not even JSON.
+    code, close = close_of("{not json")
+    assert code == "auth_invalid" and close == wire.CLOSE_AUTH_TIMEOUT, (code, close)
+    # Silence past the timeout — the transient stall the finding is about.
+    code, close = close_of(None)
+    assert code == "auth_timeout" and close == wire.CLOSE_AUTH_TIMEOUT, (code, close)
+
+
+def test_a_wrong_token_still_closes_terminally(work_dir: Path) -> None:
+    """The rejected-token close stays 4401 (``retry:false``): retrying is hopeless."""
+    project = _seed(work_dir)
+    with (
+        TestClient(xr_server.build_app(project, token=mcp_server.serve_token())) as http,
+        http.websocket_connect("/ws") as connection,
+    ):
+        connection.send_text(json.dumps({"t": "auth", "token": "not-the-token"}))
+        answer = json.loads(_text(connection))
+        closing = connection.receive()
+    assert answer["code"] == "auth_failed"
+    assert closing["type"] == "websocket.close", closing
+    assert int(closing["code"]) == wire.CLOSE_AUTH_FAILED, (
+        "a rejected token is the one terminal close"
+    )
 
 
 def test_a_valid_token_gets_hello_then_the_board(
@@ -366,6 +425,80 @@ def test_an_empty_prompt_and_an_unknown_session_are_refused_in_the_ack(
         unknown = json.loads(_until(connection, "ack"))
     assert empty["ok"] is False and "empty" in empty["detail"]
     assert unknown["ok"] is False and "no such session" in unknown["detail"]
+
+
+def test_a_prompt_addressed_by_prefix_reaches_the_live_pane(
+    client: tuple[TestClient, ProjectInfo, str],
+    work_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A prompt by id PREFIX is typed into the session's pane, not filed as a note.
+
+    The prefix fix landed only in ``_subscribe``: ``_prompt`` matched the live
+    fleet agent with ``candidate.session_id == message.session`` — the raw
+    client string — and a prefix never equals the full stored id, so every
+    prefix-addressed prompt found no agent and became a board note, with the ack
+    naming the prefix instead of the session. The prompt path now resolves once
+    and uses ``row.id`` everywhere.
+    """
+    from types import SimpleNamespace
+
+    from aisquare.models import FleetAgent
+    from aisquare.services import fleet as fleet_service
+
+    http, project, token = client
+    now = datetime.now(tz=UTC)
+    with store_session() as store:
+        store.upsert_fleet_agent(
+            FleetAgent(
+                id="flt_1",
+                project_id=project.id,
+                label="coder-1",
+                role="coder",
+                pane_id="%1",
+                session_id=CODER,
+                cwd=work_dir,
+                created_at=now,
+            )
+        )
+    told: list[tuple[str, str]] = []
+
+    def fake_tell(_project: ProjectInfo, label: str, text: str) -> Any:
+        told.append((label, text))
+        return SimpleNamespace(delivered=True, how="typed into the waiting pane")
+
+    monkeypatch.setattr(fleet_service, "tell", fake_tell)
+    with _authed(http, token) as connection:
+        connection.send_text(
+            json.dumps({"t": "prompt", "session": CODER[:8], "text": "run the suite"})
+        )
+        ack = json.loads(_until(connection, "ack"))
+    assert told == [("coder-1", "run the suite")], (
+        f"a prefix must resolve to the pane's full session id; fleet.tell saw {told}"
+    )
+    assert ack["session"] == CODER, "the ack names the RESOLVED session, not the typed prefix"
+    assert ack["ok"] is True and "pane" in ack["detail"]
+
+
+def test_an_ambiguous_prompt_prefix_is_a_refused_ack_not_internal(work_dir: Path) -> None:
+    """An ambiguous prompt prefix is answered in the ack, not as a server fault.
+
+    ``AmbiguousIdError`` escaped ``_prompt`` to ``_read_loop``'s catch-all and
+    reached the client as ``internal`` (and no ack at all), while the same prefix
+    on ``subscribe`` was answered ``ambiguous_session``. The prompt path answers
+    on its own channel — one ack per prompt — with ``ok: false`` and the reason.
+    """
+    project = _seed(work_dir)  # CODER = bbbb2222-...
+    _join(project, SECOND, role="coder")  # bbbb3333-..., so `bbbb` ties on this board
+    token = mcp_server.serve_token()
+    with (
+        TestClient(xr_server.build_app(project, token=token)) as http,
+        _authed(http, token) as connection,
+    ):
+        connection.send_text(json.dumps({"t": "prompt", "session": "bbbb", "text": "hi"}))
+        ack = json.loads(_until(connection, "ack"))
+    assert ack["ok"] is False, ack
+    assert "ambiguous" in ack["detail"] and "bbbb" in ack["detail"], ack["detail"]
 
 
 def test_audio_without_a_speech_backend_says_so(
@@ -671,11 +804,13 @@ def test_a_session_that_joins_after_the_client_connects_gets_a_badge(
     """A late joiner counts from when the client learned of it, not from never.
 
     ``_seed_watermarks`` runs once, at connect, over the sessions that exist
-    then — and ``projector._unread_counts`` skips any id it holds no watermark
-    for. So a session spawned while the operator is wearing the headset had no
-    watermark, was skipped, and reported 0 unread permanently however many
-    events it produced (measured at four), until the operator thought to
-    subscribe to a panel whose badge gave them no reason to.
+    then. A session spawned while the operator is wearing the headset is not in
+    that map, so :func:`projector.sessions` counts it from ``unread_floor`` — the
+    board position this connection started at — which is where the events that
+    announced it and everything it has said since all land. (Before, an
+    un-watermarked session was counted by nobody and read 0 forever, and the
+    poll loop re-seeded watermarks every tick to work around it; the floor
+    default replaced that.)
 
     That is precisely the case the badge exists for: a newly spawned agent
     announcing it is working is a fresh agent shouting for attention with a
@@ -690,7 +825,7 @@ def test_a_session_that_joins_after_the_client_connects_gets_a_badge(
 
     assert badges[-1:] == [3], (
         "a session that joined after this client connected reported "
-        f"{badges or 'no badge at all'} — it has no watermark, so nothing counts it"
+        f"{badges or 'no badge at all'} — it must count from the connection floor"
     )
 
 
@@ -797,6 +932,131 @@ def test_an_ambiguous_id_prefix_is_the_clients_error_not_an_internal_one(
     assert "bbbb" in answer["message"], "and it must say which string was ambiguous"
 
 
+def test_an_empty_or_glob_subscribe_is_a_bad_message_not_a_wildcard(
+    client: tuple[TestClient, ProjectInfo, str],
+) -> None:
+    """An empty or glob-metacharacter subscribe id is refused, not resolved to '*'.
+
+    ``Subscribe.session`` used to be a bare ``str | None``, so ``""`` (or a lone
+    ``*``) passed validation and reached ``get_session``, whose prefix resolver
+    strips those characters and turns them into ``GLOB '*'`` over the whole
+    store — marking a real, arbitrary session read (or, with more than one
+    session, answering ambiguous after the tail was already cancelled). The
+    validator now rejects it at the wire boundary as ``bad_message``, and the
+    socket stays open.
+    """
+    http, _project, token = client
+    with _authed(http, token) as connection:
+        connection.send_text(json.dumps({"t": "subscribe", "session": ""}))
+        empty = json.loads(_until(connection, "error"))
+        connection.send_text(json.dumps({"t": "subscribe", "session": "*"}))
+        glob = json.loads(_until(connection, "error"))
+        # Still alive: a bad ask must not cost the operator their ring.
+        connection.send_text(json.dumps({"t": "subscribe", "session": None}))
+    assert empty["code"] == "bad_message", empty
+    assert glob["code"] == "bad_message", glob
+
+
+def test_a_prefix_unique_on_this_board_resolves_despite_another_board(
+    work_dir: Path,
+) -> None:
+    """A prefix unique here is not answered ambiguous because another board matches.
+
+    ``_subscribe`` resolved through ``get_session``, whose ``GLOB`` fallback spans
+    every project in the shared store, so a prefix unique on this board came back
+    ``ambiguous_session`` because an unrelated project the operator cannot see had
+    a session starting the same way — after the tail was already cancelled.
+    Resolution is now scoped to this project.
+    """
+    transcript = work_dir / "session.jsonl"
+    transcript.write_text(_record("hello from this board"), encoding="utf-8")
+    project = _seed(work_dir, transcript=str(transcript))  # CODER = bbbb2222-...
+    other = team_project(work_dir / "other-board")
+    now = datetime.now(tz=UTC)
+    with store_session() as store:
+        store.ensure_project(other)
+        store.upsert_session(
+            TeamSession(
+                id=SECOND,  # bbbb3333-..., shares the `bbbb` prefix, on ANOTHER board
+                project_id=other.id,
+                role="coder",
+                started_at=now,
+                last_seen_at=now,
+            )
+        )
+    token = mcp_server.serve_token()
+    with (
+        TestClient(xr_server.build_app(project, token=token)) as http,
+        _authed(http, token) as connection,
+    ):
+        connection.send_text(json.dumps({"t": "subscribe", "session": "bbbb"}))
+        frame = json.loads(_until(connection, "transcript"))
+    assert frame["text"] == "hello from this board", (
+        "the prefix is unique on this board, so it must resolve rather than tie "
+        "with a session on a board the operator cannot see"
+    )
+
+
+def test_a_failed_resubscribe_leaves_the_current_tail_running(work_dir: Path) -> None:
+    """A subscribe that cannot resolve must not cancel the transcript already open.
+
+    ``_subscribe`` cancelled the current tail FIRST and resolved second, so an
+    ambiguous prefix (or an id from another board) left the operator with no tail
+    AND an error. Resolution now happens first; the old tail is replaced only once
+    a real session on this board is in hand.
+    """
+    transcript = work_dir / "session.jsonl"
+    transcript.write_text(_record("first line"), encoding="utf-8")
+    project = _seed(work_dir, transcript=str(transcript))  # CODER = bbbb2222-...
+    _join(project, SECOND, role="coder")  # bbbb3333-..., so `bbbb` is ambiguous ON THIS BOARD
+    token = mcp_server.serve_token()
+    with (
+        TestClient(xr_server.build_app(project, token=token)) as http,
+        _authed(http, token) as connection,
+    ):
+        connection.send_text(json.dumps({"t": "subscribe", "session": CODER}))
+        assert json.loads(_until(connection, "transcript"))["text"] == "first line"
+        # A re-subscribe that cannot resolve: it must be an error, and it must
+        # NOT kill the tail that is following CODER.
+        connection.send_text(json.dumps({"t": "subscribe", "session": "bbbb"}))
+        assert json.loads(_until(connection, "error"))["code"] == "ambiguous_session"
+        with transcript.open("a", encoding="utf-8") as handle:
+            handle.write(_record("second line"))
+        followed = json.loads(_until(connection, "transcript"))
+    assert followed["text"] == "second line", (
+        "the CODER tail survived the failed re-subscribe and followed the new record"
+    )
+
+
+def test_a_poll_tick_needs_no_separate_seeding_read(work_dir: Path) -> None:
+    """Seeding a late joiner adds NO per-tick store reads.
+
+    The poll loop used to call ``_seed_late_joiners``, which re-read
+    ``latest_seq`` and the entire session table every tick just to hand new
+    sessions a watermark — taking a tick from five reads to seven. That pass is
+    gone: :func:`projector.sessions` defaults an un-watermarked session to
+    ``unread_floor``, so the only reads a tick makes are the projection's own.
+    """
+    from aisquare.services.xr import projector
+
+    project = _seed(work_dir)
+    _say(project, CODER, 2)
+    with store_session() as store:
+        floor = store.latest_seq(project.id)
+        statements: list[str] = []
+        conn = cast(Any, store)._conn
+        conn.set_trace_callback(lambda stmt: statements.append(str(stmt)))
+        projector.sessions(store, project.id, unread_since={CODER: floor}, unread_floor=floor)
+        conn.set_trace_callback(None)
+    selects = [s for s in statements if s.lstrip().upper().startswith(("SELECT", "WITH"))]
+    assert len(selects) <= 5, (
+        f"a tick reads at most the projection's own selects; got {len(selects)}"
+    )
+    assert not hasattr(xr_server._Connection, "_seed_late_joiners"), (
+        "the per-tick late-joiner re-seed pass is gone; the floor default replaces it"
+    )
+
+
 # --- transcript tails -----------------------------------------------------------
 
 
@@ -887,28 +1147,308 @@ def test_the_transcript_tail_resyncs_when_the_file_shrinks(work_dir: Path) -> No
     assert recorder.of("error") == [], "a resync is recovery, not something to report"
 
 
+def _drive_tail(
+    project: ProjectInfo,
+    row: TeamSession,
+    body: Any,
+) -> _Recorder:
+    """Run one ``_stream_transcript`` against ``recorder`` while ``body`` mutates the file.
+
+    ``body(recorder)`` is an async callable that drives the scenario and returns
+    when it is done; the tail is always cancelled afterwards.
+    """
+    recorder = _Recorder()
+    connection = xr_server._Connection(cast(Any, recorder), project=project, token="unused")
+
+    async def run() -> None:
+        tail = asyncio.create_task(connection._stream_transcript(row))
+        try:
+            await body(recorder)
+        finally:
+            tail.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await tail
+
+    asyncio.run(run())
+    return recorder
+
+
+def test_a_transcript_replaced_by_a_longer_file_is_reread_from_the_start(work_dir: Path) -> None:
+    """A replacement at least as long as the read offset is not read from a stale offset.
+
+    Detection by ``size < offset`` alone misses this: the new file is longer, so
+    the shrink check never fires, and the tail seeks to the old offset — landing
+    inside the new file — and skips every record before it. The inode changes on
+    ``os.replace``, so identity catches the swap and the replacement is read from
+    its first record, with ``reset`` set so the client clears first.
+    """
+    transcript = work_dir / "session.jsonl"
+    transcript.write_text(_record("short one", "short two"), encoding="utf-8")
+    project = _seed(work_dir, transcript=str(transcript))
+    with store_session() as store:
+        row = store.get_session(CODER)
+    assert row is not None
+
+    async def body(recorder: _Recorder) -> None:
+        await _until_frames(recorder, "transcript", 2, "the backlog never replayed")
+        # A DIFFERENT, LONGER file atomically replaces it (new inode).
+        replacement = work_dir / "session.jsonl.new"
+        replacement.write_text(
+            _record("brand new first", "brand new second", "brand new third"), encoding="utf-8"
+        )
+        replacement.replace(transcript)
+        await _until_frames(
+            recorder, "transcript", 5, "the replacement's leading records were skipped"
+        )
+
+    recorder = _drive_tail(project, row, body)
+    texts = [frame["text"] for frame in recorder.of("transcript")]
+    assert texts[:2] == ["short one", "short two"]
+    assert texts[2:] == ["brand new first", "brand new second", "brand new third"], (
+        "every record of the replacement must arrive, including the ones before the old offset"
+    )
+    resets = [frame for frame in recorder.of("transcript") if frame["reset"]]
+    assert [frame["text"] for frame in resets] == ["brand new first"], (
+        "exactly the first frame of the new file carries reset, so the client clears once"
+    )
+    assert recorder.of("transcript")[2]["seq"] == 1, "the sequence restarts with the new file"
+
+
+def test_a_replacement_replays_a_bounded_backlog_not_the_whole_file(work_dir: Path) -> None:
+    """A resync applies the same backlog cap as a fresh subscribe, and flags a reset.
+
+    When the file shrank the old code set ``offset = 0`` and replayed the ENTIRE
+    replacement through one unbounded read — thousands of frames on a large
+    rewrite, seq still climbing, no reset — so the client appended a whole
+    conversation it already had. The resync now reads only the bounded backlog
+    and marks it a restart.
+    """
+    transcript = work_dir / "session.jsonl"
+    transcript.write_text(_record("original"), encoding="utf-8")
+    project = _seed(work_dir, transcript=str(transcript))
+    with store_session() as store:
+        row = store.get_session(CODER)
+    assert row is not None
+
+    # A replacement of many small records, well past TRANSCRIPT_BACKLOG_BYTES.
+    many = _record(*[f"line {index}" for index in range(4000)])
+    assert len(many.encode()) > xr_server.TRANSCRIPT_BACKLOG_BYTES * 4
+
+    async def body(recorder: _Recorder) -> None:
+        await _until_frames(recorder, "transcript", 1, "the backlog never replayed")
+        # Atomically replace it (new inode) with the large file: this is the
+        # resync trigger, and the old code would then replay all 4000 records.
+        replacement = work_dir / "session.jsonl.new"
+        replacement.write_text(many, encoding="utf-8")
+        replacement.replace(transcript)
+        await _until_frames(recorder, "transcript", 2, "the replacement never replayed")
+        # Let a few more ticks pass so an unbounded replay would show itself.
+        await asyncio.sleep(xr_server.poll_interval() * 5)
+
+    recorder = _drive_tail(project, row, body)
+    after = recorder.of("transcript")[1:]
+    assert 0 < len(after) < 4000, (
+        f"the replay must be bounded, not the whole file; got {len(after)}"
+    )
+    assert after[0]["reset"] is True and after[0]["seq"] == 1, "the restart is flagged and reseq'd"
+
+
+def test_the_tail_follows_a_row_repointed_at_a_new_transcript(work_dir: Path) -> None:
+    """A resumed session re-pointed at a new file is followed there, not on the old one.
+
+    The tail copied the path from the row at subscribe and never looked again, so
+    an ``ordinary resume`` that rewrote ``transcript_path`` left the panel reading
+    the old, now-static file forever. Re-reading the row each tick switches files.
+    """
+    first = work_dir / "conv1.jsonl"
+    first.write_text(_record("from the first file"), encoding="utf-8")
+    project = _seed(work_dir, transcript=str(first))
+    with store_session() as store:
+        row = store.get_session(CODER)
+    assert row is not None
+    second = work_dir / "conv2.jsonl"
+
+    async def body(recorder: _Recorder) -> None:
+        await _until_frames(recorder, "transcript", 1, "the first file never replayed")
+        second.write_text(_record("from the second file"), encoding="utf-8")
+        now = datetime.now(tz=UTC)
+        with store_session() as store:
+            store.upsert_session(
+                TeamSession(
+                    id=CODER,
+                    project_id=project.id,
+                    role="coder",
+                    started_at=now,
+                    last_seen_at=now,
+                    transcript_path=str(second),
+                )
+            )
+        await _until_frames(recorder, "transcript", 2, "the tail never switched to the new file")
+
+    recorder = _drive_tail(project, row, body)
+    texts = [frame["text"] for frame in recorder.of("transcript")]
+    assert texts == ["from the first file", "from the second file"], texts
+    assert recorder.of("transcript")[1]["reset"] is True, "switching files clears the panel first"
+
+
+def test_a_rotated_transcript_recovers_rather_than_dying(work_dir: Path) -> None:
+    """A rename-then-create rotation is a gap to wait out, not the end of the tail.
+
+    The path is briefly missing between the rename and the recreate. Ending the
+    tail on the first ``FileNotFoundError`` turned that ordinary gap into a dead
+    panel for the life of the connection; the tail now retries and picks up the
+    recreated file.
+    """
+    transcript = work_dir / "session.jsonl"
+    transcript.write_text(_record("before rotation"), encoding="utf-8")
+    project = _seed(work_dir, transcript=str(transcript))
+    with store_session() as store:
+        row = store.get_session(CODER)
+    assert row is not None
+
+    async def body(recorder: _Recorder) -> None:
+        await _until_frames(recorder, "transcript", 1, "the pre-rotation record never replayed")
+        transcript.rename(work_dir / "session.jsonl.1")  # the path is now missing
+        await asyncio.sleep(xr_server.poll_interval() * 2)  # a tick or two with no file
+        transcript.write_text(_record("after rotation"), encoding="utf-8")  # recreated
+        await _until_frames(recorder, "transcript", 2, "the tail never recovered the new file")
+
+    recorder = _drive_tail(project, row, body)
+    texts = [frame["text"] for frame in recorder.of("transcript")]
+    assert texts == ["before rotation", "after rotation"], texts
+    assert recorder.of("error") == [], "a rotation that comes back is recovery, not an error"
+
+
+def test_a_transcript_that_never_comes_back_is_surfaced(
+    work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A loss that outlasts the grace period is reported, not swallowed forever.
+
+    The old loop returned on the first ``OSError`` with no frame at all, so a
+    permanently-lost transcript looked exactly like a live-but-quiet one. Now the
+    client gets ``transcript_gone`` once the file has been missing longer than
+    :data:`TRANSCRIPT_MISSING_GRACE_S`.
+    """
+    monkeypatch.setattr(xr_server, "TRANSCRIPT_MISSING_GRACE_S", 0.05)
+    transcript = work_dir / "session.jsonl"
+    transcript.write_text(_record("last words"), encoding="utf-8")
+    project = _seed(work_dir, transcript=str(transcript))
+    with store_session() as store:
+        row = store.get_session(CODER)
+    assert row is not None
+
+    async def body(recorder: _Recorder) -> None:
+        await _until_frames(recorder, "transcript", 1, "the record never replayed")
+        transcript.unlink()  # gone for good
+        await _until_frames(recorder, "error", 1, "a permanent loss was never surfaced")
+
+    recorder = _drive_tail(project, row, body)
+    assert [frame["code"] for frame in recorder.of("error")] == ["transcript_gone"]
+
+
+def test_the_backlog_replays_a_final_record_larger_than_the_window(work_dir: Path) -> None:
+    """The backlog always includes the last complete record, even past the budget.
+
+    Reading the last :data:`TRANSCRIPT_BACKLOG_BYTES` and dropping the leading
+    fragment replays NOTHING when the final record fills the whole window — an
+    8 KB tool_result, a long answer — because the window holds only that record's
+    tail and its terminating newline, and dropping the fragment before that
+    newline drops the record. The panel then sits on "waiting for transcript…"
+    until a new record is written. The backlog now walks back far enough to carry
+    the whole last record.
+    """
+    big = "x" * (xr_server.TRANSCRIPT_BACKLOG_BYTES + 1000)
+    transcript = work_dir / "session.jsonl"
+    transcript.write_text(_record("small first", big), encoding="utf-8")
+    project = _seed(work_dir, transcript=str(transcript))
+    with store_session() as store:
+        row = store.get_session(CODER)
+    assert row is not None
+
+    async def body(recorder: _Recorder) -> None:
+        await _until_frames(
+            recorder, "transcript", 1, "a final record larger than the window vanished"
+        )
+
+    recorder = _drive_tail(project, row, body)
+    texts = [frame["text"] for frame in recorder.of("transcript")]
+    assert big in texts, (
+        "the last record must replay even though it is larger than the backlog budget"
+    )
+
+
 # --- push-to-talk bursts --------------------------------------------------------
 
 
-def test_a_burst_that_ends_on_a_different_session_is_refused(
+def test_a_burst_that_ends_on_a_different_session_keeps_the_headers_owner(
     client: tuple[TestClient, ProjectInfo, str],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """``audio`` owns the burst; ``audioEnd`` may not quietly re-address it.
+    """``audio`` owns the burst; a mismatched ``audioEnd`` is logged, not refused.
 
-    The header's ``session`` was discarded and the burst attributed to whatever
-    ``audioEnd`` carried, so ``audio(session=A)`` followed by
-    ``audioEnd(session=B)`` transcribed A's microphone into B's panel and said
-    nothing about it. The schema could not warn anyone either: it requires
-    ``session`` on both frames and documented no relationship between them.
+    The header's ``session`` opened the microphone and the samples were recorded
+    for it, so it wins. Refusing instead (the old ``session_mismatch``) discarded
+    the operator's sentence over a client bookkeeping bug — and worse, a header
+    addressed by PREFIX with an ``audioEnd`` carrying the FULL id (the ids the
+    server's own frames use) disagreed as raw strings and so was refused every
+    single time, though both name the same session. Now the burst is transcribed
+    and the disagreement is logged.
     """
+    import logging
+
     http, _project, token = client
-    with _authed(http, token) as connection:
+    monkeypatch.setattr(xr_server, "TRANSCRIBE", lambda payload: "open the ring")
+    with (
+        caplog.at_level(logging.INFO, logger=xr_server.__name__),
+        _authed(http, token) as connection,
+    ):
         connection.send_text(json.dumps({"t": "audio", "session": CODER, "seq": 0}))
         connection.send_bytes(b"\x00\x01" * 160)
         connection.send_text(json.dumps({"t": "audioEnd", "session": SECOND}))
-        answer = json.loads(_until(connection, "error"))
+        stt = json.loads(_until(connection, "stt"))
 
-    assert answer["code"] == "session_mismatch"
-    assert CODER in answer["message"] and SECOND in answer["message"], (
-        "the operator's speech went somewhere; the error must say where it was aimed"
+    assert stt == {"t": "stt", "text": "open the ring", "final": True}, (
+        "the header owns the burst, so the speech is transcribed rather than dropped"
     )
+    logged = "\n".join(record.getMessage() for record in caplog.records)
+    assert CODER in logged and SECOND in logged, (
+        "the disagreement is not answered, so the log is the only record of it"
+    )
+
+
+def test_a_burst_past_the_cap_is_answered_once_and_not_called_empty(
+    client: tuple[TestClient, ProjectInfo, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A burst over :data:`MAX_AUDIO_BYTES` gets one ``audio_too_long``, not ``stt_empty``.
+
+    The old path dropped an over-cap burst with no frame, silently discarded
+    every later frame, and then answered ``audioEnd`` with ``stt_empty`` "no
+    audio arrived" although megabytes had — telling the operator "no audio" on
+    every retry of a burst that was simply too long. Now the cap is answered once
+    and the eventual ``audioEnd`` says nothing more.
+    """
+    http, _project, token = client
+    seen: list[bytes] = []
+
+    def transcribe(payload: bytes) -> str:
+        seen.append(payload)
+        return "heard"
+
+    monkeypatch.setattr(xr_server, "TRANSCRIBE", transcribe)
+    monkeypatch.setattr(xr_server, "MAX_AUDIO_BYTES", 1000)
+    with _authed(http, token) as connection:
+        connection.send_text(json.dumps({"t": "audio", "session": CODER, "seq": 0}))
+        for _ in range(3):
+            connection.send_bytes(b"\x00" * 400)  # 1200 B > 1000 B cap
+        for _ in range(4):
+            connection.send_bytes(b"\x00" * 400)  # later frames: silently dropped
+        connection.send_text(json.dumps({"t": "audioEnd", "session": CODER}))
+        first = json.loads(_until(connection, "error"))
+        # A second subscribe/None round-trips a frame, proving the socket lives
+        # and that audioEnd produced no stt_empty and no stt behind the error.
+        connection.send_text(json.dumps({"t": "subscribe", "session": None}))
+    assert first["code"] == "audio_too_long", first
+    assert str(1000) in first["message"], "the message must state the cap it hit"
+    assert seen == [], "an over-cap burst never reaches the transcriber"

@@ -54,7 +54,14 @@ MESSAGES: list[tuple[type[Any], dict[str, Any]]] = [
     (wire.Delta, {"t": "delta", "changed": [], "removed": ["ses_1"]}),
     (
         wire.Transcript,
-        {"t": "transcript", "session": "ses_1", "seq": 41, "text": "hello", "final": True},
+        {
+            "t": "transcript",
+            "session": "ses_1",
+            "seq": 41,
+            "text": "hello",
+            "final": True,
+            "reset": False,
+        },
     ),
     (wire.Stt, {"t": "stt", "text": "open the", "final": False}),
     (wire.Error, {"t": "error", "code": "auth_failed", "message": "no"}),
@@ -164,20 +171,54 @@ def test_the_schema_carries_the_binary_audio_format() -> None:
     assert "sample" in audio["alignment"], "an odd byte length shifts every sample after it"
 
 
-def test_the_schema_says_which_close_code_must_not_be_retried() -> None:
-    """4401 is the one close a client must not reconnect through.
+def test_the_published_frame_size_counts_channels() -> None:
+    """``frameBytes`` must include :data:`AUDIO_CHANNELS`, computed independently here.
 
-    Every other close this server can produce is a transport close, where
-    reconnecting with backoff is correct — and reconnect-on-close is what the
-    client is specified to do. A client author who cannot tell the two apart
-    from the schema has to guess, and the guess that costs nothing to write is
-    an infinite retry loop against a token that will never be accepted.
+    A pinned literal a reviewer reads, deliberately NOT ``schema_document``'s own
+    formula: the drift test compares the generator with its committed output, so
+    a ``frameBytes`` that dropped the channel factor would publish 640 for a
+    stereo frame — half its real 1280 — and the two copies would still agree. The
+    recomputation below multiplies the channel count back in, so it disagrees
+    with any generator that leaves it out at any channel count other than one,
+    and it happens to equal 640 today because the format is mono.
+    """
+    audio = wire.schema_document()["audio"]
+    expected = (
+        audio["sampleRateHz"]
+        * (audio["sampleBits"] // 8)
+        * audio["channels"]
+        * audio["frameMs"]
+        // 1000
+    )
+    assert audio["frameBytes"] == expected, (
+        "frameBytes must be samples x bytes x CHANNELS x seconds"
+    )
+    assert wire.AUDIO_FRAME_BYTES == 16_000 * 2 * 1 * 20 // 1000 == 640
+    # The constant is what the schema publishes, and it is the constant that
+    # carries the channel factor — so the format has exactly one home.
+    assert audio["frameBytes"] == wire.AUDIO_FRAME_BYTES
+
+
+def test_the_schema_splits_the_terminal_close_from_the_retryable_one() -> None:
+    """4401 (rejected token) is terminal; 4408 (stalled handshake) is retryable.
+
+    The old contract published only 4401, ``retry:false``, and the server sent
+    it for EVERY pre-auth failure — a valid token that arrived a half-second
+    late, a first frame that was not JSON. A client that followed the contract
+    then gave up permanently on a transient stall, and the ring stayed dark
+    until the printed URL was reopened. The two must be distinguishable from the
+    schema alone, because that is all a second implementer has: the terminal one
+    is the ONLY close a client must not reconnect through.
     """
     codes = wire.schema_document()["closeCodes"]
-    entry = codes[str(wire.CLOSE_AUTH_FAILED)]
+    failed = codes[str(wire.CLOSE_AUTH_FAILED)]
+    timeout = codes[str(wire.CLOSE_AUTH_TIMEOUT)]
     assert wire.CLOSE_AUTH_FAILED == 4401
-    assert entry["retry"] is False, "the machine-readable half is what a client branches on"
-    assert "transport close" in entry["description"], "and it must say what the others are"
+    assert wire.CLOSE_AUTH_TIMEOUT == 4408
+    assert failed["retry"] is False, "a rejected token will be rejected again — do not retry"
+    assert timeout["retry"] is True, "no token was checked, so reconnecting is right"
+    assert wire.CLOSE_AUTH_FAILED != wire.CLOSE_AUTH_TIMEOUT, "a client branches on the number"
+    assert "transport close" in timeout["description"], "and it must say the others are transport"
 
 
 def test_a_negative_burst_ordinal_is_refused() -> None:
@@ -191,6 +232,23 @@ def test_a_negative_burst_ordinal_is_refused() -> None:
     assert wire.parse_client('{"t":"audio","session":"ses_1","seq":7}').seq == 7
     with pytest.raises(Exception, match=r"greater than or equal|seq"):
         wire.parse_client('{"t":"audio","session":"ses_1","seq":-1}')
+
+
+def test_a_subscribe_id_is_rejected_before_it_can_become_a_wildcard() -> None:
+    """An empty or glob-metacharacter session id is refused at the wire boundary.
+
+    ``store``'s prefix resolver STRIPS ``*``/``?``/``[`` before it globs, so an
+    empty string reaches it as ``GLOB '*'`` over every session and the request
+    acts on a real, wrong one. ``None`` is still the legitimate "stop following"
+    value; a real id or prefix (hex, dashes, and the colons an MCP id carries)
+    still parses.
+    """
+    assert wire.parse_client('{"t":"subscribe","session":null}').session is None
+    assert wire.parse_client('{"t":"subscribe","session":"bbbb2222"}').session == "bbbb2222"
+    assert wire.parse_client('{"t":"subscribe","session":"mcp:remote:abc123"}').session
+    for bad in ('""', '"*"', '"?"', '"["', '"a b"'):
+        with pytest.raises(Exception, match=r"pattern|at least 1|string"):
+            wire.parse_client(f'{{"t":"subscribe","session":{bad}}}')
 
 
 # --- projector ------------------------------------------------------------------
@@ -419,59 +477,121 @@ def test_unread_counts_events_since_this_connection_looked(work_dir: Path) -> No
     assert later[0].unread == 2
 
 
-def test_a_badge_keeps_counting_after_the_board_passes_the_scan_depth(work_dir: Path) -> None:
-    """An unread badge answers to what just happened, not to a window pinned at connect.
+def test_a_quiet_badge_survives_a_busy_session_past_the_scan_depth(work_dir: Path) -> None:
+    """A busy session's traffic must not evict a quiet session's unread count.
 
-    :func:`projector._unread_counts` used to read ``events_since(floor,
-    limit=_EVENT_SCAN)``. That query is ``ORDER BY seq ASC``, so it returns the
-    OLDEST ``_EVENT_SCAN`` events past ``floor`` — and ``floor`` is
-    ``min(since.values())``, which watermarks only ever move forward from, so it
-    is pinned where the headset connected. The scanned window was therefore a
-    fixed 500-event slice of the board's past, and once the board moved beyond
-    its far edge nothing that happened afterwards was ever inside it again.
-
-    Every badge on the ring then stops responding to anything except a
-    subscribe, showing a stale number that looks exactly like a measurement.
-    This is the shape an operator meets it in: one busy session fills the scan
-    depth, and then a QUIET one says three things and is never heard.
+    ``_unread_counts`` counts each session from its OWN watermark, not within a
+    single newest-N-of-the-board window. It used to use such a window, and this
+    test posts the events in the order that exposes it: the QUIET events FIRST,
+    then a busy session past the scan depth. With a newest-500 window the quiet
+    three are the oldest on the board and fall out of it, so the badge silently
+    reads 0 though the watermark never moved (the earlier version of this test
+    passed only because it posted the quiet events LAST, where the window still
+    happened to hold them).
     """
     project = team_project(work_dir)
     with store_session() as store:
         store.ensure_project(project)
         _session(store, CODER, project.id, role="coder")
         _session(store, PLANNER, project.id, role="manager")
-        for index in range(projector._EVENT_SCAN + 100):
-            _event(store, project.id, CODER, "note", f"busy {index}")
         for index in range(3):
             _event(store, project.id, PLANNER, "note", f"quiet {index}")
-        counts = projector._unread_counts(store, project.id, {CODER: 0, PLANNER: 0})
+        for index in range(projector._EVENT_SCAN + 100):
+            _event(store, project.id, CODER, "note", f"busy {index}")
+        counts = store.unread_counts(project.id, {CODER: 0, PLANNER: 0}, cap=projector._EVENT_SCAN)
 
     assert counts.get(PLANNER) == 3, (
-        "the planner's three events are the NEWEST on this board; a badge that "
-        "cannot see them is reading a window that stopped moving"
+        "the planner's three events are its own unread, however loud another "
+        "session got afterwards; a badge that cannot see them is reading a "
+        "board-wide window that evicted them"
     )
-    # The depth still bounds the answer. That is a cap, and it behaves like one:
-    # it is reached only by a session with _EVENT_SCAN unread events, where the
-    # ring is saying "a great many" and the exact figure is not what the
-    # operator is about to act on.
-    assert 0 < counts[CODER] <= projector._EVENT_SCAN
+    # The depth still bounds the ANSWER per session — a cap, reached only by a
+    # session that genuinely has _EVENT_SCAN unread events.
+    assert counts[CODER] == projector._EVENT_SCAN
 
 
-def test_a_session_with_no_watermark_is_counted_by_nobody(work_dir: Path) -> None:
-    """The contract the server's late-joiner seeding depends on.
+def test_the_projector_counts_a_watermark_free_session_from_the_floor(work_dir: Path) -> None:
+    """A session the connection never watermarked counts from ``unread_floor``.
 
-    ``_unread_counts`` skips any id absent from ``since``, which is why
-    ``server._seed_late_joiners`` has to exist at all: a session the connection
-    has never watermarked reports nothing, forever, however loudly it works.
-    Pinned here so that the seeding and the skipping cannot drift apart.
+    This is the contract that let the poll loop drop its per-tick re-seeding: a
+    late joiner has no entry in ``unread_since``, and :func:`projector.sessions`
+    defaults it to the connection's start position, so it gets a real badge for
+    everything it has done since it appeared rather than reading 0 forever. (The
+    previous contract was the opposite — an un-watermarked session was counted by
+    nobody — and the server re-seeded every tick to work around it.)
     """
     project = team_project(work_dir)
     with store_session() as store:
         store.ensure_project(project)
         _session(store, CODER, project.id, role="coder")
+        floor = store.latest_seq(project.id)
         _session(store, PLANNER, project.id, role="manager")
         for index in range(3):
             _event(store, project.id, PLANNER, "note", f"loud {index}")
-        counts = projector._unread_counts(store, project.id, {CODER: 0})
+        # CODER is watermarked at the floor; PLANNER (the late joiner) is not.
+        ring = projector.sessions(
+            store, project.id, unread_since={CODER: floor}, unread_floor=floor
+        )
+    badges = {session.id: session.unread for session in ring}
+    assert badges[PLANNER] == 3, "a late joiner counts from the floor, not from never"
+    assert badges[CODER] == 0, "a watermarked session with no new events stays at 0"
 
-    assert PLANNER not in counts, "no watermark, no count — seeding is what fixes this"
+
+def test_sessions_reads_the_event_window_only_once(
+    work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Summaries and unread counting must not each issue ``recent_events``.
+
+    The two used to make the identical ``recent_events(_EVENT_SCAN)`` call, so a
+    board hydrated 1000 rows per poll where 500 would do. The unread pass no
+    longer touches ``recent_events`` at all (it has its own indexed query), and
+    the summary pass reads the window once and it is shared.
+    """
+    project = team_project(work_dir)
+    with store_session() as store:
+        store.ensure_project(project)
+        _session(store, CODER, project.id, role="coder")
+        _event(store, project.id, CODER, "note", "working")
+        calls = {"n": 0}
+        real = store.recent_events
+
+        def counting(*args: Any, **kwargs: Any) -> list[Any]:
+            calls["n"] += 1
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(store, "recent_events", counting)
+        projector.sessions(store, project.id, unread_since={CODER: 0}, unread_floor=0)
+    assert calls["n"] == 1, f"recent_events must be read once per sessions(); it was {calls['n']}"
+
+
+def test_a_prefix_is_resolved_against_this_board_not_the_whole_store(work_dir: Path) -> None:
+    """``get_session_in_project`` scopes a prefix to one project.
+
+    ``get_session``'s ``GLOB`` fallback spans every project sharing the store, so
+    a prefix unique on one board is answered ambiguous because another board has
+    a session starting the same way. Scoping the lookup fixes it, and an exact
+    id from another board does not leak in.
+    """
+    from aisquare.core.store import AmbiguousIdError
+
+    mine = team_project(work_dir)
+    other = team_project(work_dir / "elsewhere")
+    with store_session() as store:
+        store.ensure_project(mine)
+        store.ensure_project(other)
+        _session(store, "bbbb2222-0000-0000-0000-000000000000", mine.id, role="coder")
+        _session(store, "bbbb3333-0000-0000-0000-000000000000", other.id, role="coder")
+
+        # `bbbb` is ambiguous across the whole store (two boards match)...
+        with pytest.raises(AmbiguousIdError):
+            store.get_session("bbbb")
+        # ...but unique on each board, so the scoped resolver answers it.
+        row = store.get_session_in_project(mine.id, "bbbb")
+        assert row is not None and row.project_id == mine.id, "unique on this board — resolves"
+        assert row.id == "bbbb2222-0000-0000-0000-000000000000"
+        # The other board's exact id does not belong to this one.
+        assert store.get_session_in_project(mine.id, "bbbb3333-0000-0000-0000-000000000000") is None
+        # A true within-board tie still raises.
+        _session(store, "bbbb2244-0000-0000-0000-000000000000", mine.id, role="coder")
+        with pytest.raises(AmbiguousIdError):
+            store.get_session_in_project(mine.id, "bbbb22")

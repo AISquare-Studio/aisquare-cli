@@ -38,6 +38,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     file nobody here imports. A `[[tool.mypy.overrides]]` skips them, which
     takes `follow_imports_for_stubs` as well as `follow_imports` — the first
     alone leaves the stub parsed and the run still red.
+  - Review hardening of the badge and transcript paths, each a panel that looked
+    right while being wrong: an unread badge now counts each session from its own
+    watermark rather than a board-wide window, so a busy session no longer
+    silently zeroes a quiet one's badge, and a late joiner counts from the
+    connection's start with no per-tick re-seeding read. The transcript tail
+    follows a session re-pointed at a new file, re-reads a file replaced by one
+    at least as long (by inode, not size alone), replays a final record larger
+    than the backlog window, retries a briefly-missing file rather than dying on
+    it (surfacing `transcript_gone` only on a lasting loss), and marks a restart
+    with `transcript.reset` so the client clears instead of appending a
+    replacement below the old conversation. On the wire: the auth close code
+    splits into 4401 (`auth_failed`, a rejected token, do not retry) and 4408
+    (`auth_timeout`/`auth_invalid`, a stalled or malformed handshake, retry); a
+    subscribe id must be a non-empty non-glob string; a mismatched `audioEnd`
+    keeps the header's session (logged, not refused) and an over-long burst is
+    answered once with `audio_too_long`; and the audio format lives once in
+    `protocol.py`, with `frameBytes` and the burst cap derived from it.
 - **Accounts, in `asq` and on the command line.** A new **Accounts** section in
   the fleet UI's sidebar opens a page with the AISquare sign-in on top and the
   Claude Code accounts under it. The AISquare card runs `aisquare login`'s

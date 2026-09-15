@@ -166,7 +166,7 @@ project · witty-ibis · asq-witty-ibis
   coder-1                  coder      ⏸ waiting  · calm-reviewer  no hooks  %0
 ```
 
-The receipt ends `· persona calm-reviewer`; `fleet ls` shows the agent `⏸ waiting` with `· calm-reviewer`. (The `no board join` note is the stand-in's — a real Claude Code agent joins the board through its hooks.)
+The receipt ends `· persona calm-reviewer`; `fleet ls` shows the agent `⏸ waiting` with `· calm-reviewer`. (The `no board join` note is the stand-in's — a real Claude Code agent joins the board through its hooks.) calm-reviewer lists `coder` in its `persona-roles`, so this spawn is quiet. Spawn a persona whose roles leave the seat out and the receipt adds `⚠ persona <name> is written for <roles>, not <seat> — spawned with it anyway`: pick a persona that lists the seat, or say the advisory out loud as the feature it is.
 
 ### 9. Attach another persona to the RUNNING agent
 
@@ -206,7 +206,7 @@ project · witty-ibis · asq-witty-ibis
   coder-1                  coder      ▶ working  · mentor  no hooks  %0
 ```
 
-One `persona_attached` line naming the old and new persona (never the body), the hook's session from step 6 carrying `persona:calm-reviewer`, and the agent now `· mentor` (`working` for a moment: the typed briefing is fresh output).
+One `persona_attached` line naming the old and new persona (never the body), the hook's session from step 6 carrying `persona:calm-reviewer`, and the agent now `· mentor` (`working` for a moment: the typed briefing is fresh output). Keep step 6 before the attach: the sessions line shows the last hook run, so a no-row control run after step 9 would put a stale persona on the board in the middle of the story.
 
 ### 11. Clean up
 

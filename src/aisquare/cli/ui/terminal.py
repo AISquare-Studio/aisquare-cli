@@ -92,6 +92,8 @@ from aisquare.services import fleet as fleet_service
 CURSOR = Style(reverse=True)
 UNFOCUSED_CURSOR = Style(underline=True)
 PLACEHOLDER = Style(dim=True)
+SCROLL_MARKER = Style(reverse=True, bold=True)
+"""The ``[↑k/history]`` corner marker while the view is in history."""
 NOTICE = Style(dim=True, italic=True)
 
 NO_PANE = "(no agent selected)"
@@ -127,6 +129,22 @@ class TerminalPane(Widget, can_focus=True):
     """Where the resize backoff stops, so an unreachable pane costs ~1 process / 8 s."""
     WHEEL_LINES: int = 3
     """History lines one wheel notch moves."""
+    WHEEL_COALESCE: float = 0.02
+    """Seconds notches are gathered before one tmux call carries them all."""
+    SCROLL_KEYS: ClassVar[dict[str, str]] = {
+        "shift+pageup": "page_up",
+        "shift+pagedown": "page_down",
+        "alt+pageup": "page_up",
+        "alt+pagedown": "page_down",
+        "shift+home": "top",
+        "shift+end": "live",
+    }
+    """Keys that move the view instead of reaching the agent. Claude Code binds
+    none of them. Two spellings per page on purpose: shift+PgUp is the key most
+    terminals use for THEIR scrollback and some never forward it (VTE; Windows
+    Terminal depending on its bindings), and alt+PgUp is rarely claimed by
+    anyone. The wheel is not a given either — reported 2026-09-08 from WSL2 as
+    "scroll not working", with no other way into the history."""
     CACHE_LIMIT: int = 4096
     """Distinct row strings kept as Strips before the cache is emptied."""
 
@@ -167,12 +185,22 @@ class TerminalPane(Widget, can_focus=True):
         self._synced: tuple[str, int, int] | None = None
         self._warned: set[str] = set()
         self._reported_gone = False
+        self._wheel_queue: list[tuple[bool, int, int]] = []
+        """Notches (up?, pane column, pane row) awaiting one forwarding call."""
+        self._wheel_timer: Timer | None = None
+        self._marker: tuple[int, int] | None = None
+        """``(scrollback, history)`` the corner marker last showed, or ``None``."""
 
     # --- what is shown -----------------------------------------------------------------
 
     @property
     def attached(self) -> bool:
         return self.pane_id is not None
+
+    @property
+    def history_size(self) -> int:
+        """tmux's history behind the live screen — 0 until the first frame answers."""
+        return self.facts.history_size if self.facts is not None else 0
 
     def _extended_keys(self) -> bool:
         """Whether this server delivers extended chords (tmux ≥ 3.5), read once.
@@ -202,6 +230,11 @@ class TerminalPane(Widget, can_focus=True):
         self._synced = None
         self._resize_retry = self.RESIZE_RETRY
         self._reported_gone = False
+        self._marker = None
+        self._wheel_queue = []
+        if self._wheel_timer is not None:
+            self._wheel_timer.stop()
+            self._wheel_timer = None
         # A new attach may be a new server — ``ManagerTab`` assigns ``server``
         # then calls this — and a cached "extended chords are fine" from a 3.7
         # server would TYPE ``S-Enter`` into an agent on a 3.4 one. Re-read
@@ -223,6 +256,8 @@ class TerminalPane(Widget, can_focus=True):
     def on_unmount(self) -> None:
         if self._timer is not None:
             self._timer.stop()
+        if self._wheel_timer is not None:
+            self._wheel_timer.stop()
         if self._resize_timer is not None:
             self._resize_timer.stop()
 
@@ -307,6 +342,14 @@ class TerminalPane(Widget, can_focus=True):
                     dirty.add(point[1])
         if notice != self.notice:
             dirty.add(height - 1)
+        # The corner marker: row 0 repaints whenever k or the history it is
+        # measured against moved — including the clamp above, and history that
+        # keeps growing under a frozen scrolled view. Decided HERE, once, rather
+        # than at every site that touches ``scrollback``.
+        marker = (self.scrollback, facts.history_size) if self.scrollback else None
+        if marker != self._marker:
+            dirty.add(0)
+        self._marker = marker
         self._lines = lines
         self._cursor = cursor
         self.facts = facts
@@ -360,7 +403,25 @@ class TerminalPane(Widget, can_focus=True):
         strip = self._strip_for(line).apply_style(base).adjust_cell_length(width, base)
         if self._cursor is not None and self._cursor[1] == y and self._cursor[0] < width:
             strip = self._with_cursor(strip, self._cursor[0])
+        if y == 0 and self.scrollback:
+            strip = self._with_scroll_marker(strip, width)
         return strip
+
+    def _with_scroll_marker(self, strip: Strip, width: int) -> Strip:
+        """``[↑k/history]`` in the top-right corner while the view is in history.
+
+        tmux's own copy-mode indicator, in the same place: without it a scrolled
+        pane is indistinguishable from a live one that happens to be quiet.
+        """
+        marker = f"[↑{self.scrollback}/{self.history_size}]"
+        if len(marker) >= width:
+            return strip
+        return Strip.join(
+            [
+                strip.crop(0, width - len(marker)),
+                Strip([Segment(marker, self.rich_style + SCROLL_MARKER)]),
+            ]
+        )
 
     def _strip_for(self, line: str) -> Strip:
         strip = self._strip_cache.get(line)
@@ -395,6 +456,10 @@ class TerminalPane(Widget, can_focus=True):
             return  # nothing to type into; the app's own bindings stay live
         event.stop()
         event.prevent_default()
+        action = self.SCROLL_KEYS.get(event.key)
+        if action is not None:
+            self._scroll_by_key(action)
+            return
         translation = translate(
             event.key,
             event.character,
@@ -455,18 +520,144 @@ class TerminalPane(Widget, can_focus=True):
         if self.attached:
             event.stop()
             event.prevent_default()
-            self.scroll_history(self.WHEEL_LINES)
+            self._wheel(event, up=True)
 
     def on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:
         if self.attached:
             event.stop()
             event.prevent_default()
-            self.scroll_history(-self.WHEEL_LINES)
+            self._wheel(event, up=False)
+
+    def _scroll_owner(self) -> str:
+        """Who a scroll gesture belongs to: ``history`` (tmux's, this widget's
+        offset), ``program`` (a mouse-tracking program's own transcript) or
+        ``none`` (a fullscreen program that takes neither).
+
+        One decision for the wheel and the scroll keys alike — the review of the
+        routing found the keys bypassing it and pulling stale pre-launch shell
+        lines over a Claude Code pane.
+        """
+        facts = self.facts
+        if self.scrollback or facts is None or facts.in_mode:
+            return "history"
+        if facts.mouse_on:
+            return "program"
+        if facts.alternate_on:
+            return "none"
+        return "history"
+
+    def _wheel(self, event: events.MouseEvent, *, up: bool) -> None:
+        """Route a wheel notch to whoever can act on it.
+
+        Panes look alike from outside and want different things:
+
+        * a view this widget has already scrolled into history is the widget's
+          own — the wheel always brings it back, whatever the program wants;
+        * a pane in tmux copy mode belongs to tmux for the moment — forwarding a
+          mouse event there cancels the mode and delivers nothing (measured on
+          3.7c), so the history offset is used instead;
+        * a program that tracks the mouse (Claude Code's fullscreen TUI turns on
+          ``?1000`` + ``?1006`` and scrolls its own transcript on the wheel) gets
+          the notch as the mouse event it asked for — reported 2026-09-08 as
+          "scroll not working": this widget was scrolling tmux's history, which
+          the alternate screen does not have;
+        * a program on the alternate screen that does NOT track the mouse is
+          told, once, that its own keys are the way: arrow keys would land in a
+          prompt (Claude Code's ``Up`` recalls a previous prompt) and there is no
+          history behind it to scroll;
+        * anything else scrolls tmux's history, as before.
+        """
+        owner = self._scroll_owner()
+        if owner == "none":
+            self._warn_fullscreen()
+            return
+        if owner == "history":
+            self.scroll_history(self.WHEEL_LINES if up else -self.WHEEL_LINES)
+            return
+        self._queue_notches(up, 1, event.x + 1, event.y + 1)
+
+    def _scroll_by_key(self, action: str) -> None:
+        """The scroll keys, through the same owner decision as the wheel.
+
+        On tmux history: a screen per page, the top, live. On a program that
+        owns its own transcript: the same distance as wheel notches, at the
+        pane's centre — the one scroll vocabulary such a program is known to
+        speak. ``top``/``live`` there are ten pages: the program's depth is
+        not knowable from outside.
+        """
+        owner = self._scroll_owner()
+        page = max(1, self.content_size.height - 1)
+        if owner == "none":
+            self._warn_fullscreen()
+            return
+        if owner == "history":
+            distance = {
+                "page_up": page,
+                "page_down": -page,
+                "top": self.history_size,
+                "live": -self.history_size,
+            }[action]
+            self.scroll_history(distance)
+            return
+        notches = max(1, page // self.WHEEL_LINES)
+        if action in ("top", "live"):
+            notches *= 10
+        width, height = self.content_size
+        self._queue_notches(action in ("page_up", "top"), notches, width // 2 + 1, height // 2 + 1)
+
+    def _warn_fullscreen(self) -> None:
+        self._warn_once(
+            "wheel:alternate-screen",
+            "this program is fullscreen and does not take the mouse — scroll it with its own keys",
+        )
+
+    def _queue_notches(self, up: bool, count: int, x: int, y: int) -> None:
+        """Queue ``count`` wheel notches for the program at pane cell ``(x, y)``."""
+        facts = self.facts
+        if facts is None:
+            return
+        # The pane may be taller than the widget between a Resize and its
+        # debounced resize-window: the widget shows the pane's LAST rows, so a
+        # widget row maps to a pane row that many lines further down.
+        offset = max(0, facts.height - self.content_size.height)
+        self._wheel_queue.extend([(up, x, y + offset)] * count)
+        if self._wheel_timer is None:
+            # One tmux client per FLUSH, not per notch: a trackpad flick is 20-50
+            # notches a second, each of which was its own fork+exec.
+            self._wheel_timer = self.set_timer(self.WHEEL_COALESCE, self._flush_wheel, name="wheel")
+
+    def _flush_wheel(self) -> None:
+        """Send every notch queued since the last flush as one tmux call."""
+        self._wheel_timer = None
+        queue, self._wheel_queue = self._wheel_queue, []
+        facts = self.facts
+        if not queue or self.pane_id is None or self.server is None or facts is None:
+            return
+        try:
+            if facts.mouse_sgr:
+                self.server.send_literal(
+                    self.pane_id,
+                    "".join(f"\x1b[<{64 if up else 65};{x};{y}M" for up, x, y in queue),
+                )
+            else:
+                # X10: three bytes after ESC [ M, each 32 + value, one byte each —
+                # so a cell past 223 cannot be expressed and is clamped.
+                payload = b"".join(
+                    b"\x1b[M" + bytes([32 + (64 if up else 65), 32 + min(x, 223), 32 + min(y, 223)])
+                    for up, x, y in queue
+                )
+                self.server.send_bytes(self.pane_id, payload)
+        except TmuxUnavailable:
+            self._fail(TMUX_UNAVAILABLE)
+            return
+        except TmuxError:
+            self._fail(PANE_GONE)
+            return
+        self._schedule(self.FAST_INTERVAL)
 
     def scroll_history(self, delta: int) -> None:
         """Move the view ``delta`` lines up (positive) into history, clamped; 0 is live."""
-        history = self.facts.history_size if self.facts is not None else 0
-        target = max(0, min(history, self.scrollback + delta))
+        target = max(0, min(self.history_size, self.scrollback + delta))
         if target == self.scrollback:
             return
         self.scrollback = target

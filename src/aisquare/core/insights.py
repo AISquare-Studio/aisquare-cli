@@ -56,6 +56,25 @@ RECORD_VERSION = 2
 #: fails if the two ever drift.
 RUN_KEY_ENV_VAR = "AISQUARE_PIPELINE_ID"
 
+#: The Run key this process's launcher OWNS — exported beside
+#: :data:`RUN_KEY_ENV_VAR`, but only when the launcher posted that Run's root
+#: span itself (see ``services.explainability.trace_marker``).
+#:
+#: Spooled because it is the only thing a record can carry that says a root
+#: EXISTS for its spans to hang under. The run key is not that evidence: it
+#: falls back to the board session id below, so every plain session has one.
+#: A sweeper reading THAT as "launched" parents the drain on a root nobody
+#: ever posted, and the gateway, finding no parent, elects the orphan itself
+#: as a pseudo-root — a rootless Run where the plain path had been producing a
+#: well-formed one. Ownership is a different fact from having a key, so it
+#: travels as a different field.
+#:
+#: Duplicated from ``services.explainability.RUN_TRACE_ID_ENV_VAR`` for the
+#: same reason :data:`RUN_KEY_ENV_VAR` is — that module is not importable from
+#: the primary path. ``test_the_owned_run_env_var_matches_the_launcher`` fails
+#: if the two ever drift.
+RUN_TRACE_ID_ENV_VAR = "AISQUARE_RUN_TRACE_ID"
+
 #: Longest text we spool per record. A pasted stack trace or a whole file in a
 #: prompt is not an insight, it is a payload — and the gateway charges for it.
 #: Truncation is marked so nobody reads a cut span as the whole story.
@@ -108,6 +127,17 @@ def run_key(session_id: str | None) -> str | None:
     the whole job. See :data:`RUN_KEY_ENV_VAR`.
     """
     return os.environ.get(RUN_KEY_ENV_VAR, "").strip() or session_id
+
+
+def run_trace_id() -> str | None:
+    """The Run whose root this process's launcher posted, or ``None``.
+
+    No session-id fallback, deliberately — unlike :func:`run_key`. This value
+    answers "does a root span already exist for this Run?", and a fallback
+    would answer yes for every session that has an id, which is the whole
+    mistake it exists to prevent. See :data:`RUN_TRACE_ID_ENV_VAR`.
+    """
+    return os.environ.get(RUN_TRACE_ID_ENV_VAR, "").strip() or None
 
 
 def record_prompt(
@@ -184,6 +214,7 @@ def record_turn(
             "at": datetime.now(tz=UTC).isoformat(),
             "text": "",
             "run_key": run_key(session_id),
+            "run_trace_id": run_trace_id(),
             "event_id": None,
             "session_id": session_id,
             "project_id": project_id,
@@ -225,6 +256,7 @@ def _spool(
             # redaction landing, so this is both halves, not a choice between.
             "text": _outbound(text),
             "run_key": run_key(session_id),
+            "run_trace_id": run_trace_id(),
             "event_id": event_id,
             "session_id": session_id,
             "project_id": project_id,

@@ -849,9 +849,13 @@ EXPLAINABILITY_INBOX_PATH=/home/work/.aisquare/claude_proxy_inbox.db
 > exactly the misattribution the whole correlation spine exists to prevent.
 > Leave it unset and let each launch carry its own identity.
 >
-> The CLI's own markers are `AISQUARE_PIPELINE_ID` and
-> `AISQUARE_TRACE_AGENT_NAME`. They are internal, the launcher sets them per
-> session, and neither belongs in an operator env file.
+> The CLI's own markers are `AISQUARE_PIPELINE_ID`, `AISQUARE_TRACE_AGENT_NAME`
+> and `AISQUARE_RUN_TRACE_ID` — three as of this train, and the authoritative
+> list is `core.spawn.MARKER_ENV_VARS` in the source, not this sentence. (It
+> said two until the third was added; check the tuple before you trust a count
+> written in prose, here or anywhere.) They are internal, the launcher sets them
+> per session, and **none of them belongs in an operator env file** — the rule
+> is the same for all three and for whatever is added next.
 
 Load it **per shell**, never globally:
 
@@ -1467,7 +1471,7 @@ Then make one real traced call and watch the proxy log:
 
 ```bash
 # Shell-agnostic since the POSIX-quoting fix — bash, zsh, sh and dash all work.
-eval "$(aisquare explainability env runner --session-id "$SESSION_ID")"
+eval "$(aisquare explainability env runner --session-id "$SESSION_ID" --post-root)"
 claude -p "reply with the word OK and nothing else"
 ```
 
@@ -1489,6 +1493,29 @@ claude -p "reply with the word OK and nothing else"
 > `subprocess(..., shell=True)` are all fine. Kept as a note rather than
 > deleted because anyone on an **older build** still has the old behaviour, and
 > the symptom is worth recognising.
+
+> **Pass `--post-root` here, and only where the agent starts next.**
+> `explainability env` is print-only by default: it posts no Run root, because
+> it cannot know whether an agent will ever start on the id it printed — a
+> second terminal, a shell rc, a `--json` reader would each leave an empty Run
+> behind. Without the root the session runs on the documented fallback: the
+> proxy keys the Run from `X-Pipeline-Id` and the CLIENT lane opens its own, so
+> the dashboard shows **two Runs for one session** and no `AISQUARE_RUN_TRACE_ID`
+> is exported for the hook's join.
+>
+> These two lines are the one shape where that unknown is settled: `claude` runs
+> on the very next command in the same shell. `--post-root` makes the `eval`
+> post the root exactly as `aisquare launch` does — `traceparent` on the wire,
+> `AISQUARE_RUN_TRACE_ID` exported, one Run. The launch line goes to **stderr**,
+> which is where a command substitution leaves it for you; stdout stays exports
+> only, so the `eval` is unchanged.
+>
+> Same fail-open as everywhere else: a refused root falls back to
+> `X-Pipeline-Id`, a dead proxy to untraced, and neither stops the call. Do
+> **not** add the flag to a bare `eval` you are not about to start an agent
+> from — that is precisely the empty Run the default exists to avoid. The
+> printed `aisquare team spawn` command carries it for you; you never add it
+> there by hand.
 
 **Pass `--session-id`.** **[verified-train]** Without it the pipeline id is a
 fresh random UUID on every invocation — two consecutive calls produced

@@ -17,12 +17,13 @@ keys), ``send-keys -l`` (literal text) and ``load-buffer`` + ``paste-buffer -p``
 stripped: the server inherits the environment of whoever starts it and hands it
 to every window, so an inherited tracing identity here would become every
 agent's identity. Each window's agent takes its own through ``aisquare launch``.
-The whole identity goes — ``core.spawn.IDENTITY_ENV_VARS``, headers AND the
-``AISQUARE_PIPELINE_ID``/``AISQUARE_TRACE_AGENT_NAME`` marker: an agent that
-launches untraced (the default) keeps whatever marker it inherited, and that
-marker alone is what ``core.insights.run_key`` and the hook's session→Run join
-file records under. docs/fleet.md's "the tmux server inherits nothing of a
-tracing identity from whoever started it" is that sentence's contract.
+The whole identity goes — ``core.spawn.IDENTITY_ENV_VARS``, the headers AND
+every name in ``core.spawn.MARKER_ENV_VARS`` (read off the tuple, never listed
+here: it has grown once already): an agent that launches untraced (the default)
+keeps whatever marker it inherited, and that marker alone is what
+``core.insights.run_key`` and the hook's session→Run join file records under.
+docs/fleet.md's "the tmux server inherits nothing of a tracing identity from
+whoever started it" is that sentence's contract.
 
 Verified against tmux 3.7c (``tests/test_tmux.py`` re-verifies the live ones):
 
@@ -159,6 +160,8 @@ _FACTS_FIELDS = (
     "pane_dead_status",
     "pane_in_mode",
     "pane_current_command",
+    "mouse_any_flag",
+    "mouse_sgr_flag",
     "pane_title",
 )
 _FACTS_FORMAT = _SEP.join(f"#{{{name}}}" for name in _FACTS_FIELDS)
@@ -173,6 +176,8 @@ _WINDOW_FIELDS = (
 )
 _WINDOW_FORMAT = _SEP.join(f"#{{{name}}}" for name in _WINDOW_FIELDS)
 _VERSION = re.compile(r"(\d+)\.(\d+)")
+_ABSENT = re.compile(r"no server running on |error connecting to .*\(No such file or directory\)")
+"""tmux's two ways of saying there is no server behind a socket (see ``server_absent``)."""
 #: Characters tmux reads as target separators; a session named with one can be
 #: created but never addressed by name again (``=a.b`` → "can't find pane: b").
 _UNTARGETABLE = frozenset(".:")
@@ -267,6 +272,11 @@ class PaneFacts:
     in_mode: bool
     current_command: str
     title: str
+    mouse_on: bool = False
+    """The program in the pane has turned mouse reporting on (``?1000``/``?1002``/
+    ``?1003``) — it wants the wheel itself. Claude Code's fullscreen TUI does."""
+    mouse_sgr: bool = False
+    """…and asked for SGR encoding (``?1006``), the form every modern program uses."""
 
 
 @dataclass(frozen=True)
@@ -336,6 +346,8 @@ def _facts(line: str) -> PaneFacts:
         in_mode=values["pane_in_mode"] == "1",
         current_command=values["pane_current_command"],
         title=values["pane_title"],
+        mouse_on=values["mouse_any_flag"] == "1",
+        mouse_sgr=values["mouse_sgr_flag"] == "1",
     )
 
 
@@ -593,6 +605,34 @@ class TmuxServer:
             return False
         return completed.returncode == 0
 
+    def server_absent(self) -> bool:
+        """Whether tmux itself says NO SERVER is behind this socket — positive evidence.
+
+        Not the complement of :meth:`answers`. A client exits non-zero for a
+        protocol version mismatch too (the tmux package upgraded in place while
+        the private server keeps running the old binary), and for a wedged
+        server, and for a socket that lives under a different ``TMUX_TMPDIR``
+        than this shell's — in every one of those the agents are alive. Only two
+        answers mean the server is gone, and tmux spells both out on stderr
+        (measured on 3.4): ``no server running on <path>`` (the socket file is
+        there, nothing listens) and ``error connecting to <path> (No such file or
+        directory)`` (the file itself is gone — a reboot swept ``/tmp``). A
+        missing binary is not evidence either way.
+
+        One residual this cannot settle: a shell whose ``TMUX_TMPDIR`` differs
+        from the spawning shell's asks at a path that never had a server, and
+        gets the second message for a fleet that is alive elsewhere. That is why
+        ``fleet reap --server-down`` stays the operator's word — this predicate
+        narrows what the word may act on, it does not replace it.
+        """
+        try:
+            completed = self._runner(self.argv("display-message", "-p", "#{version}"), None)
+        except TmuxUnavailable:
+            return False
+        if completed.returncode == 0:
+            return False
+        return _ABSENT.search(completed.stderr) is not None
+
     def spawn_window(
         self,
         session: str,
@@ -795,6 +835,17 @@ class TmuxServer:
         """
         if text:
             self.run("send-keys", "-t", pane_id, "-l", "--", _data_arg(text))
+
+    def send_bytes(self, pane_id: str, data: bytes) -> None:
+        """Raw bytes, one hex pair per argument (``-H``).
+
+        The one way to put a byte above 0x7f in front of a program: ``-l`` takes
+        a string and tmux re-emits it as UTF-8, so ``chr(0x98)`` arrives as
+        ``C2 98`` — measured on 3.7c, the X10 mouse encoding's column byte for
+        any cell past 95 split in two, with the row byte then read as text.
+        """
+        if data:
+            self.run("send-keys", "-t", pane_id, "-H", *(f"{byte:02x}" for byte in data))
 
     def paste(self, pane_id: str, text: str) -> None:
         """Bracketed paste: the agent sees one paste, not one Enter per line.

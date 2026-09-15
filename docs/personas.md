@@ -126,11 +126,12 @@ session, once it has joined) and delivers the briefing the way `fleet tell`
 delivers anything: typed into the agent when it is waiting, filed as a board note
 addressed to it when it is busy — the receipt says `typed` or `noted`. The board
 gets one `persona_attached` line, with the name and never the body. Because the
-session-start hook reads the fleet row whenever `AISQUARE_PERSONA` is not set, the
-agent is briefed with the persona again after a `/clear` or a restart; a persona
-named by the variable still wins, and the fleet row wins over one a session
-recorded earlier. Attaching another persona replaces it, and the agent is told
-which one it replaces.
+session-start hook reads the fleet row first, the agent is briefed with the
+persona again after a `/clear` or a restart. That includes an agent spawned with
+`--persona`, whose `AISQUARE_PERSONA` holds only the value it was launched with.
+The variable applies when the agent has no fleet row, or a row with no persona,
+and either one wins over a persona a session recorded earlier. Attaching another
+persona replaces it, and the agent is told which one it replaces.
 
 ## Commands
 

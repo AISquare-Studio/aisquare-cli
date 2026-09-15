@@ -115,6 +115,23 @@ records it on the fleet row; without the flag the role's
 `persona-roles` leave the spawned role out is spawned anyway, with a `⚠` note on
 the receipt.
 
+To give an agent that is already running a persona:
+
+```sh
+aisquare persona attach skeptic --to coder-auth
+```
+
+`persona attach` records the persona on the agent's fleet row (and on its board
+session, once it has joined) and delivers the briefing the way `fleet tell`
+delivers anything: typed into the agent when it is waiting, filed as a board note
+addressed to it when it is busy — the receipt says `typed` or `noted`. The board
+gets one `persona_attached` line, with the name and never the body. Because the
+session-start hook reads the fleet row whenever `AISQUARE_PERSONA` is not set, the
+agent is briefed with the persona again after a `/clear` or a restart; a persona
+named by the variable still wins, and the fleet row wins over one a session
+recorded earlier. Attaching another persona replaces it, and the agent is told
+which one it replaces.
+
 ## Commands
 
 Every reporting command takes `--json` before the subcommand

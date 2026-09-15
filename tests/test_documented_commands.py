@@ -896,8 +896,9 @@ CENSUS = {
     # fenced `aisquare persona …` commands, no classified mentions (the layout
     # and the SKILL.md example are `text`/`markdown` fences, which this audit
     # does not read). Twenty since P2 added `launch --persona` and
-    # `fleet spawn --persona`; twenty-five since P5's "Import anything else".
-    "docs/personas.md": (25, 0),
+    # `fleet spawn --persona`; twenty-five since P5's "Import anything else";
+    # twenty-six since P8's `persona attach`.
+    "docs/personas.md": (26, 0),
 }
 
 

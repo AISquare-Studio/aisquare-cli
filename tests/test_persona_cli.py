@@ -485,3 +485,79 @@ def test_a_project_persona_shadows_bundled_and_a_broken_one_is_listed_not_fatal(
     assert skeptic.split()[1] == "project"
     assert skeptic.endswith("Our own skeptic.  (shadows bundled)")
     assert f"✗ {_user_layer() / 'broken'}: no SKILL.md" in rows
+
+
+# --- persona attach (docs/plans/spawn-personas.md §7 "P8") ---------------------------------
+
+
+def _attach_fakes(
+    monkeypatch: pytest.MonkeyPatch, outcome: object
+) -> list[tuple[object, str, str, str | None]]:
+    """The fleet service faked on the module the CLI calls through; returns the calls."""
+    from datetime import UTC, datetime
+
+    from aisquare.models import FleetAgent, ProjectInfo
+    from aisquare.services import fleet as fleet_service
+
+    project = ProjectInfo(id="prj_attach", root=Path("/tmp/attach"), codename="amber-otter")
+    calls: list[tuple[object, str, str, str | None]] = []
+
+    def attach(
+        target: ProjectInfo, label: str, name: str, *, sender: str | None = None
+    ) -> fleet_service.AttachReceipt:
+        calls.append((target, label, name, sender))
+        if isinstance(outcome, Exception):
+            raise outcome
+        agent = FleetAgent(
+            id="agt_coderx",
+            project_id=project.id,
+            label=label,
+            role="coder",
+            pane_id="%7",
+            cwd=project.root,
+            created_at=datetime(2026, 9, 15, tzinfo=UTC),
+            persona=name,
+        )
+        return fleet_service.AttachReceipt(
+            agent=agent,
+            persona=name,
+            replaced="minimalist",
+            delivered="typed",
+            how="typed into its pane (it was waiting)",
+        )
+
+    monkeypatch.setattr(fleet_service, "resolve_project", lambda ref=None, **_: project)
+    monkeypatch.setattr(fleet_service, "attach_persona", attach)
+    return calls
+
+
+def test_attach_prints_the_receipt_and_json_carries_delivered(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = _attach_fakes(monkeypatch, None)
+
+    human = runner.invoke(app, ["persona", "attach", "skeptic", "--to", "coder-x", "--as", "mgr-1"])
+    code, payload = _json(runner, "attach", "skeptic", "--to", "coder-x")
+
+    assert human.exit_code == 0, human.output
+    assert human.stdout.splitlines()[0] == "✓ attached skeptic to coder-x (typed)"
+    assert calls[0][1:] == ("coder-x", "skeptic", "mgr-1")
+    assert code == 0
+    assert (payload["delivered"], payload["replaced"], payload["label"]) == (
+        "typed",
+        "minimalist",
+        "coder-x",
+    )
+
+
+def test_attach_refusals_report_the_fleets_error_codes(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from aisquare.services import fleet as fleet_service
+
+    _attach_fakes(monkeypatch, fleet_service.NoSuchAgent("no live agent 'coder-9' in api"))
+
+    code, payload = _json(runner, "attach", "skeptic", "--to", "coder-9")
+
+    assert (code, payload["error"]) == (1, "no_such_agent")
+    assert "no live agent 'coder-9'" in payload["detail"]

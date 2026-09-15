@@ -173,3 +173,70 @@ def test_a_later_start_without_the_variable_keeps_the_recorded_persona(
     assert _recorded() == "skeptic"
     assert "persona:skeptic" in board
     assert sum(line.startswith("<aisquare-persona ") for line in board.split("\n")) == 1
+
+
+# --- the row fallback for an attached persona (§4.7, §7 "P8") ----------------------------
+
+
+def _fleet_row(work: Path, persona: str | None) -> str:
+    """The ``fleet_agent`` row ``AISQUARE_FLEET_AGENT`` names, carrying ``persona``."""
+    from aisquare.core.orchestrator import team_project
+    from aisquare.models import FleetAgent
+
+    project = team_project(work)
+    with store_session() as store:
+        store.ensure_project(project)
+        agent = store.upsert_fleet_agent(
+            FleetAgent(
+                id="agt_01attachedpersona",
+                project_id=project.id,
+                label="coder-1",
+                role="coder",
+                pane_id="%1",
+                cwd=work,
+                created_at=NOW,
+                persona=persona,
+            )
+        )
+    return agent.id
+
+
+def _blocks(board: str) -> list[str]:
+    return [line for line in board.split("\n") if line.startswith("<aisquare-persona ")]
+
+
+def test_an_attached_persona_on_the_fleet_row_briefs_a_start_without_the_variable(
+    work: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AISQUARE_FLEET_AGENT", _fleet_row(work, "skeptic"))
+
+    board = _start(work)
+
+    assert _blocks(board) == ['<aisquare-persona name="skeptic" layer="bundled">']
+    assert _recorded() == "skeptic"
+
+
+def test_the_variable_beats_the_row_and_the_row_beats_the_session(
+    work: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AISQUARE_PERSONA", "mentor")
+    _start(work)
+    assert _recorded() == "mentor"
+    monkeypatch.setenv("AISQUARE_FLEET_AGENT", _fleet_row(work, "skeptic"))
+
+    variable_wins = _start(work)
+    monkeypatch.delenv("AISQUARE_PERSONA")
+    row_wins = _start(work)
+
+    assert _blocks(variable_wins) == ['<aisquare-persona name="mentor" layer="bundled">']
+    assert _blocks(row_wins) == ['<aisquare-persona name="skeptic" layer="bundled">']
+    assert _recorded() == "skeptic"
+
+
+def test_a_fleet_row_without_a_persona_leaves_the_start_byte_identical(
+    work: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AISQUARE_FLEET_AGENT", _fleet_row(work, None))
+
+    assert _start(work) == PINNED
+    assert _recorded() is None

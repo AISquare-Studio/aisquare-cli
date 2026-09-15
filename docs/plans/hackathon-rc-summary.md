@@ -33,6 +33,14 @@
 | Public `services.fleet.role_ok` | The seat rule the UI relies on has a public name (a wrapper, so it cannot drift). | P13 #192 |
 | `import --list` decides "imported" by provenance | A never-imported skill sharing a bundled name showed `imported`; validator finding, checked against the real collision on the owner's machine. | P16 #195 |
 
+## Before the demo (from the runner's smoke on the merged rc, 13:29)
+
+The demo path holds end to end on the merged branch: import → show → attach to a running agent → spawn a second agent *as* a persona → a session start in the pane's own environment briefs the **attached** persona even when the agent was spawned with `--persona` (the P20 case). Three things to know at the keyboard, none a defect:
+
+1. **Right after an attach the row reads `▶ working` for a beat** — the typed briefing is fresh pane output. Narrate "waiting" a moment later, not on that frame.
+2. **Spawning a persona whose `persona-roles` do not include the seat prints an advisory ⚠** (`mentor … is written for reviewer, coder, manager, not tester — spawned with it anyway`). Correct behaviour; in a demo it reads like a fault. Pick a persona whose roles include the seat (skeptic for tester, mentor or careful for coder), or say the line out loud as the feature it is.
+3. **Run the "no fleet row" control before the attach story**, not after: the board's sessions line shows the last hook invocation, so a control run afterwards leaves `persona:skeptic` on the board mid-narration.
+
 ## What the reviewer needs to know
 
 - **Dependency added:** `pyyaml>=6.0` (core; imported lazily inside the parser) and `types-PyYAML` (dev). Optional extra `llm` = `anthropic>=1`. Nothing else new at import time: `python -X importtime -c "import aisquare.cli.app"` shows no `yaml`, `anthropic` or `persona_import`.

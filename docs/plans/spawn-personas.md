@@ -796,6 +796,9 @@ Loop prompts for the three agents (persona-first, board-driven):
 Live fleet (2026-09-15): `coder3a-1` plays coder-persona-core, `coder3b-1` plays
 coder-spawn-dialog, `runner2-1` is the tester; the `OWNER:` notes on the board
 carry these labels.
+Overnight 2026-09-15 → 16: the owner authorised the manager to merge verified
+PRs into `rc/hackathon-v1` (never `main`, never infra); the decisions are in
+`docs/plans/hackathon-overnight-log.md`.
 
 Tester (`tester-hackathon`): spawned when the first task reaches review; its
 prompt names the worktree and branch to check, because nothing moves a tester

@@ -475,21 +475,29 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   character="p")` and the key table's "printable input is literal" rule sent the
   bare letter. With alt or meta held the chord is the meaning; the character is
   only how the terminal spelt it, and `translate` now says `M-p`. ASCII letters
-  and digits, plus the keys the special-key table already names — alt+space
-  reaches the agent as `M-Space`, which the table could spell all along and
-  never got the chance to. Alt on punctuation stays the character, since through the
-  name table it was dropped (`;`) or became `ESC [`, the control-sequence
-  introducer, and every name this module emits was measured against a real tmux
-  — `M-é` never was. Shift and ctrl keep the existing rule. A modifier tmux
+  only, because that is all a parser ever delivers with an alt token and a
+  character — measured by feeding Textual's own parser the bytes a terminal
+  sends, not against hand-built events, which had promised alt+digit and
+  alt+space chords a legacy terminal cannot produce (its `ESC 1` reaches the
+  parser as `¡` and its `ESC Space` as a plain space, with no alt at all; they
+  are typed as such). `M-1` and `M-Space` are real where the terminal sends the
+  chord itself, under the kitty keyboard protocol, and reach the agent from
+  there. Alt on punctuation stays the character, since through the name table it
+  was dropped (`;`) or became `ESC [`, the control-sequence introducer, and every
+  name this module emits was measured against a real tmux — `M-é` never was. An
+  alt chord on a shifted letter keeps its case (`M-A`; a kitty `meta+P` used to
+  come out as a lowercase `M-p`) except N, O and P, whose `ESC` forms are the
+  SS2, SS3 and DCS introducers a program's key parser joins with the next key —
+  those type the letter. Shift and ctrl keep the existing rule. A modifier tmux
   cannot spell — `super`/`hyper`, which is how macOS Cmd arrives — now drops the
   key instead of falling through to its character, so Cmd+V no longer types a
-  `v`. A digit chord tmux has no name for (`ctrl+alt+1`, `alt+shift+1` — the
-  shifted key is layout-specific) falls back to the character the terminal
-  reported, so it still types what it always typed. Two limits are the parser's
-  and are documented in `docs/fleet.md`: a
-  kitty-protocol terminal reports the text and Textual then drops the `alt`
-  token (so kitty, ghostty, wezterm, foot and macOS Option are the *worse* case
-  here, not the better one), and Escape typed within ~100 ms before a letter
+  `v`. A chord tmux has no name for (`alt+shift+1` — the shifted key is
+  layout-specific) falls back to the character the terminal reported, so it
+  still types what it always typed; one an old server cannot carry is dropped
+  rather than mistyped. The parser's limits are documented in `docs/fleet.md`:
+  a terminal that reports the text a key produced (macOS Option) has the `alt`
+  token dropped by Textual, `ESC b`/`ESC f` are read as ctrl+arrows, ctrl+alt
+  on a letter loses the alt, and Escape typed within ~100 ms before a letter
   reads as that chord.
 - **A spawned agent is told the task it was spawned for.** `fleet spawn --task`
   recorded the task on the agent's row and named the label and branch after it

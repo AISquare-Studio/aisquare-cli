@@ -24,6 +24,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     Role-specific working rules (`native-1`) reach manager-spawned and directly
     launched sessions through the shared session-start briefing and follow the
     session's current role; `asq brief mode off` turns them off for new sessions.
+    The `work_brief` table is store schema v15, and it converges by presence as
+    well as by number: the in-flight account-registry branch stamps the same
+    `user_version 15` for its own tables, and `_migrate` compares the number
+    positionally, so a store either line stamped never ran the other's step.
+    The DDL is idempotent and every open creates the table when it is absent,
+    whatever the version says (`test_a_store_the_account_branch_stamped_15_gains_the_work_brief_table`).
   - *Command reports*: `asq exec -- COMMAND` runs a command exactly once, keeps
     the original bytes (first 1 MiB per stream) under `~/.aisquare/reports`,
     gives the agent a shorter report for recognised `git status` and pytest

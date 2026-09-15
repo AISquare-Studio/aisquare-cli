@@ -184,3 +184,28 @@ def test_a_semicolon_inside_a_trigger_body_does_not_split_the_statement() -> Non
 
     assert len(statements) == 2, statements
     assert "END;" in statements[1]
+
+
+def test_racing_opens_of_a_store_the_other_branch_stamped_15_converge_cleanly() -> None:
+    """Finding 1's presence step under the same race the ladder survives.
+
+    Twelve openers meet a store stamped 15 by the #145 family (their tables,
+    no ``work_brief``). Every one of them finds the table absent at the read,
+    so every one of them reaches the ``BEGIN IMMEDIATE``; the lock serialises
+    them and ``IF NOT EXISTS`` makes the losers' statements no-ops. No error,
+    one table, and a brief written by each opener afterwards.
+    """
+    from tests.test_store import ACCOUNT_BRANCH_V15_DDL, _at_version
+
+    db = _at_version(14, after=ACCOUNT_BRANCH_V15_DDL, stamp=15)
+
+    errors = _race()
+
+    assert errors == [], errors
+    raw = sqlite3.connect(str(db))
+    try:
+        tables = {r[0] for r in raw.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+        assert raw.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+    finally:
+        raw.close()
+    assert {"work_brief", "claude_account", "project_setting"} <= tables

@@ -490,14 +490,28 @@ ALTER TABLE project ADD COLUMN forgotten_at TEXT;
 """
 # v15: native work contracts; task links/evidence live in a versioned document.
 # CAS revision and the board event commit together, never a second task queue.
+#
+# IF NOT EXISTS, and ALSO applied by presence in :data:`_CONVERGE_BY_PRESENCE`,
+# because this number was claimed twice while the branches were in flight — the
+# fourth time on this ladder: the #145 family (origin/feat/145-account-default-
+# priority and the stacked #157-#173) stamps ``user_version 15`` for its
+# ``claude_account`` / ``project_setting`` tables. ``_migrate`` compares the
+# version POSITIONALLY, so a store stamped 15 by either line never runs the
+# other's step: a #145 machine opening this build has no ``work_brief`` and
+# every ``task done`` dies with "no such table" (and ``protected_report_ids``
+# reads nothing, so evidence reports get pruned). A plain renumber does not
+# serve the pre-merge stores either: a store that already ran this step at 15
+# would hit a bare ``CREATE TABLE`` again at 16 and become unopenable ("table
+# work_brief already exists"). So the DDL is idempotent, and the table is
+# guaranteed by looking for it rather than by counting.
 _SCHEMA_V15 = """
-CREATE TABLE work_brief (
+CREATE TABLE IF NOT EXISTS work_brief (
     id TEXT PRIMARY KEY,
     project_id TEXT NOT NULL,
     revision INTEGER NOT NULL,
     data TEXT NOT NULL
 );
-CREATE INDEX work_brief_project ON work_brief(project_id);
+CREATE INDEX IF NOT EXISTS work_brief_project ON work_brief(project_id);
 """
 # Ordered migrations; index i upgrades the db from user_version i to i+1.
 _MIGRATIONS = (
@@ -518,6 +532,15 @@ _MIGRATIONS = (
     _SCHEMA_V15,
 )
 SCHEMA_VERSION = len(_MIGRATIONS)
+
+#: Tables reconciled by PRESENCE on every open, whatever ``user_version`` says:
+#: ``(table name, idempotent DDL that creates it and its indexes)``. The ladder
+#: above is positional, and a number two in-flight branches both claimed is
+#: positional in two different ways at once (see the v15 note). An entry here is
+#: how the branch that merges SECOND makes the first one's stores whole without
+#: renumbering the first one's history: the DDL is applied when the table is
+#: absent and skipped when it is present, so every cohort ends in one shape.
+_CONVERGE_BY_PRESENCE: tuple[tuple[str, str], ...] = (("work_brief", _SCHEMA_V15),)
 
 _PROJECT_COLUMNS = "id, root, linked_repos, codename"
 
@@ -2367,22 +2390,66 @@ def _migrate(connection: sqlite3.Connection) -> None:
 
     A loser whose script still fails re-reads the version: if another process
     advanced it, that's victory by other means; otherwise the error is real.
+
+    POSITIONAL NUMBERING IS NOT ENOUGH WHILE BRANCHES ARE IN FLIGHT. The ladder
+    says "a store at N has run steps 1..N", which is true only while one line of
+    history hands out numbers. Two branches open at once each take the next free
+    number for their own table (v11 twice, v12 twice, v14 nearly, v15 twice —
+    see the notes on _SCHEMA_V13 and _SCHEMA_V15), and then a store stamped N by
+    one branch is, to the other, a store that has already run a step it never
+    ran: the table is missing and no version bump will ever add it. Renumbering
+    at merge time breaks the other cohort instead — their stores DID run the
+    step, and a bare CREATE at the new number wedges them. So the ladder is
+    followed by :func:`_converge_by_presence`: the tables that collided are
+    looked for by name and created when absent, whatever the number says. That
+    runs on every open and is a single ``sqlite_master`` read when there is
+    nothing to do.
     """
     while True:
         if int(connection.execute("PRAGMA user_version").fetchone()[0]) >= len(_MIGRATIONS):
-            return
+            break
         try:
             connection.execute("BEGIN IMMEDIATE")
             version = int(connection.execute("PRAGMA user_version").fetchone()[0])
             if version >= len(_MIGRATIONS):
                 connection.execute("COMMIT")
-                return
+                break
             prepare = _PREPARE.get(version)
             if prepare is not None:
                 prepare(connection)
             for statement in _statements(_MIGRATIONS[version]):
                 connection.execute(statement)
             connection.execute(f"PRAGMA user_version = {version + 1}")
+            connection.execute("COMMIT")
+        except sqlite3.Error:
+            with contextlib.suppress(sqlite3.Error):
+                connection.execute("ROLLBACK")
+            raise
+    _converge_by_presence(connection)
+
+
+def _table_exists(connection: sqlite3.Connection, table: str) -> bool:
+    query = "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?"
+    return connection.execute(query, (table,)).fetchone() is not None
+
+
+def _converge_by_presence(connection: sqlite3.Connection) -> None:
+    """Create each :data:`_CONVERGE_BY_PRESENCE` table that is absent, whatever the version.
+
+    The one case the ladder cannot see: ``user_version`` already reads current,
+    stamped there by a build whose step N created a DIFFERENT table. Checked by
+    presence, not by version, and only under the same ``BEGIN IMMEDIATE`` the
+    ladder uses, so racing first opens serialise here too — the second one in
+    finds the table and its ``IF NOT EXISTS`` is a no-op. A store that has the
+    table pays one read and no transaction.
+    """
+    for table, ddl in _CONVERGE_BY_PRESENCE:
+        if _table_exists(connection, table):
+            continue
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            for statement in _statements(ddl):
+                connection.execute(statement)
             connection.execute("COMMIT")
         except sqlite3.Error:
             with contextlib.suppress(sqlite3.Error):

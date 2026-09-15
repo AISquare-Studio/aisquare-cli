@@ -262,26 +262,42 @@ def gate() -> Gate:
 
 
 def for_prompt(
-    prompt: str | None, *, project: ProjectInfo, session_id: str | None, cwd: Path | None = None
+    prompt: str | None,
+    *,
+    project: ProjectInfo,
+    session_id: str | None,
+    cwd: Path | None = None,
+    began: datetime | None = None,
 ) -> Augmentation:
     """Ask CI what is relevant to ``prompt``; the block to inject rides on the result.
 
     Nothing returned means the turn proceeds exactly as it does today — the
     agent explores as it always has, and the only trace is a row with a reason.
+    ``began`` is the row's ``started_at``: pass the moment the hook was entered
+    so the store work the caller did before consulting CI is not billed to the
+    turn as a late start (see :func:`_event`).
     """
-    return _event("prompt_submit", prompt, project=project, session_id=session_id, cwd=cwd)
+    return _event(
+        "prompt_submit", prompt, project=project, session_id=session_id, cwd=cwd, began=began
+    )
 
 
 def for_session_start(
-    *, project: ProjectInfo, session_id: str | None, cwd: Path | None = None
+    *,
+    project: ProjectInfo,
+    session_id: str | None,
+    cwd: Path | None = None,
+    began: datetime | None = None,
 ) -> Augmentation:
     """Consult CI at session start when the descriptor asks for it.
 
     The outcome is recorded like any other call — a ``session_start`` endpoint
     timing out on every session must be visible in the data, and the cold call
-    is the one most likely to be slow.
+    is the one most likely to be slow. ``began`` as in :func:`for_prompt`.
     """
-    return _event("session_start", None, project=project, session_id=session_id, cwd=cwd)
+    return _event(
+        "session_start", None, project=project, session_id=session_id, cwd=cwd, began=began
+    )
 
 
 def ceiling_for(descriptor: DeliveryDescriptor) -> int:
@@ -300,15 +316,24 @@ def _event(
     project: ProjectInfo,
     session_id: str | None,
     cwd: Path | None,
+    began: datetime | None = None,
 ) -> Augmentation:
     """One hook event, stamped with when it BEGAN.
 
-    The stamp is taken here and applied to whatever comes back, so every one of
-    the gate's early returns and the full round-trip path carry the same
-    ``started_at`` — the moment the developer hit enter, not the moment the
-    exchange finished. ``wall_ms`` is measured from it.
+    The stamp is applied to whatever comes back, so every one of the gate's
+    early returns and the full round-trip path carry the same ``started_at`` —
+    the moment the developer hit enter, not the moment the exchange finished.
+    ``wall_ms`` is measured from it.
+
+    The hook takes the stamp at its own entry and passes it as ``began``: the
+    prompt is recorded and spooled BEFORE CI is consulted, and stamping here,
+    after that store work, recorded a turn as starting however long the store
+    took — tens of milliseconds on a warm laptop, over a hundred on a cold CI
+    runner — and ``wall_ms`` lost exactly that. Stamping here is the fallback
+    for a caller that did not, never the norm.
     """
-    began = datetime.now(tz=UTC)
+    if began is None:
+        began = datetime.now(tz=UTC)
     outcome = _gated_event(trigger, prompt, project=project, session_id=session_id, cwd=cwd)
     return replace(outcome, started_at=began)
 

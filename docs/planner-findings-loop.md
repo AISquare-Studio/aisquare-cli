@@ -74,7 +74,8 @@ place that holds both halves. Each row carries exactly these fields:
 | field | what the loop does with it |
 | --- | --- |
 | `started_at` | the cursor — read rows newer than your last cycle |
-| `pipeline_id` | the Run key; what you resolve against the gateway |
+| `pipeline_id` | the session's correlation id — `agent.run_id` on the Run's root span |
+| `trace_id` | the gateway's Run key itself, when the launcher owned the Run (`null` when the proxy keyed it); `GET /v1/workspaces/{ws}/runs/{trace_id}` reads it back with the workspace key |
 | `session_id` | the board row id; quote it in every task you file |
 | `agent_name` | the studio identity the Run was filed under |
 | `role` | who to route the fix to |

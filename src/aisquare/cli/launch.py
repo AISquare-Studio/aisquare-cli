@@ -39,7 +39,7 @@ from aisquare.services import explainability_ops
 from aisquare.services import team as team_service
 from aisquare.services.team import TeamDisabledError
 
-ROLES = ("planner", "coder", "runner", "tester", "reviewer", "validator", "manager")
+ROLES = ("planner", "coder", "runner", "tester", "reviewer", "validator", "manager", "ui-tester")
 """Roles with a standing work cycle the orchestrator injects on every prompt.
 
 ``tester``, ``reviewer`` and ``manager`` are the fleet's roles
@@ -226,6 +226,22 @@ def launch(
             f"explainability: config unreadable ({exc}) — launching untraced",
             style="dim",
         )
+    # The role's OWN flags (`RoleProfile.default_args`), resolved before the
+    # tracing block because the identity planner below must see every arg the
+    # agent will get. ONE precedence rule, shared with `team spawn`: the role's
+    # defaults sit after the binding's args, and an explicit flag or its
+    # `--no-` opt-out WINS wherever it appears — not because of where these
+    # land in argv, but because `role_defaults` stands down when either
+    # spelling is already in the args it is given.
+    defaults = harness.role_defaults(
+        role, binary=resolution.binary, args=[*profile.args, *ctx.args]
+    )
+    role_args = defaults.args
+    for note in defaults.notes:
+        # A withheld flag is otherwise invisible: the launch succeeds and the
+        # role degrades silently (a ui-tester with no browser reopens every UI
+        # task). Same surface and style as the tracing notes below.
+        stderr_console().print(f"{role}: {note}", style="dim")
     #: Appended to the agent's argv, and empty unless a trace actually happened.
     pinned_id: list[str] = []
     if tracing is not None and tracing.enabled:
@@ -253,9 +269,11 @@ def launch(
                 style="dim",
             )
         # The EFFECTIVE argument list, not just what this invocation typed.
-        # `argv` below is `[binary, *profile.args, *ctx.args, *pinned_id]`, so a
+        # `argv` below is
+        # `[binary, *profile.args, *role_args, *ctx.args, *pinned_id]`, so a
         # role bound with `--session-id`, `--resume` or `--continue` via
-        # `team bind --arg` carries it here without appearing in `ctx.args`.
+        # `team bind --arg` — or handed one by its own `RoleProfile.default_args`
+        # — carries it here without appearing in `ctx.args`.
         # Planning on `ctx.args` alone therefore read those launches as fresh:
         # a bound `--session-id X` got a SECOND `--session-id` appended after
         # it, and a bound `--continue`/`--resume` defeated the deliberate
@@ -264,7 +282,7 @@ def launch(
         # board row and one Run. `team spawn` already passes its profile args
         # (cli/team.py), so this path was the asymmetric one.
         identity = explainability_service.plan_session_identity(
-            resolution.binary, [*profile.args, *ctx.args]
+            resolution.binary, [*profile.args, *role_args, *ctx.args]
         )
         # The ACTIVE target's overrides folded onto the settings the wiring
         # reads. `explainability enable --target prod --proxy-url …` writes
@@ -279,9 +297,10 @@ def launch(
         # never the launch.
         try:
             effective = explainability_ops.effective_settings(tracing)
-            api_key = explainability_ops.resolve_target(tracing).api_key
+            target = explainability_ops.resolve_target(tracing)
+            api_key, gateway_url = target.api_key, target.gateway_url
         except Exception as exc:
-            effective, api_key = tracing, None
+            effective, api_key, gateway_url = tracing, None, None
             stderr_console().print(
                 f"explainability: target unreadable ({exc}) — using the top-level "
                 "settings, untraced if that proxy needs a key",
@@ -293,6 +312,7 @@ def launch(
             session_id=identity.session_id,
             base_env=env,
             api_key=api_key,
+            gateway_url=gateway_url,
         )
         env.update(wiring.env)
         stderr_console().print(f"explainability: {wiring.reason}", style="dim")
@@ -311,7 +331,7 @@ def launch(
             # the join for EVERY binary, wrapper or not — which is why nothing
             # here needs to write one, and why an unpinnable launch still joins.
             env.update(explainability_service.trace_marker(wiring))
-    argv = [resolution.binary, *profile.args, *ctx.args, *pinned_id]
+    argv = [resolution.binary, *profile.args, *role_args, *ctx.args, *pinned_id]
     # Text.assemble rather than "[bold]{role}[/bold]": this is the one line that
     # styles a single token instead of the whole line, and it interpolates a
     # role name, a binary path and a project name. A Text carries its styling

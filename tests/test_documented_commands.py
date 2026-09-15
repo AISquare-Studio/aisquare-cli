@@ -85,6 +85,7 @@ a test enforcing a decision the owner explicitly deferred.
 from __future__ import annotations
 
 import functools
+import os
 import re
 import shlex
 from pathlib import Path
@@ -95,6 +96,7 @@ import typer
 from typer.main import get_command
 
 from aisquare.cli.app import app
+from aisquare.core.config import FleetSettings
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -610,6 +612,15 @@ def test_the_document_list_has_not_gone_stale() -> None:
     like `exec /usr/local/bin/aisquare …` read as containing none, and would
     have escaped while the detector reported everything covered. Two copies of
     one rule, and the copy went stale; there is one now.
+
+    WHOLE MEANS THIS REPOSITORY, NOT EVERY CHECKOUT OF IT UNDER THE ROOT. A root
+    that runs the fleet hosts one full checkout per coder in
+    `.aisquare-worktrees/`, and this test failed there on copies of documents
+    that pass — a guard failing on the machine that runs the fleet is a guard
+    people learn to silence. `_swept_markdown` never enters the fleet's
+    `worktree_dir` or any directory holding a `.git` file (a linked worktree),
+    and `test_the_staleness_detector_skips_the_fleets_worktrees` keeps the
+    positive control: the same page at the repo's own level is still reported.
     """
     unlisted = _staleness_sweep(REPO)
     assert not unlisted, (
@@ -1191,12 +1202,38 @@ def test_a_real_path_is_still_read_as_a_path() -> None:
     )
 
 
+def _swept_markdown(root: Path) -> list[Path]:
+    """Every `.md` under `root` the sweep reads, pruned as the walk descends.
+
+    Pruned, not filtered afterwards: a root checkout that hosts fleet worktrees
+    holds one full checkout — and its `.venv` — per agent, and walking all of
+    them to discard the result is the cost of the bug without its report. A
+    directory is never entered when its name is in `_SWEEP_EXCLUDES`, when it IS
+    the fleet's worktree directory, or when it holds a `.git` FILE: that is a
+    linked git worktree, wherever it was put (a checkout's own `.git` is a
+    directory). `root` itself is never pruned, so the sweep run from inside a
+    worktree still reads that worktree's own documents. Symlinked directories
+    are not followed, as `Path.rglob` did not follow them.
+    """
+    fleet_worktrees = root / FleetSettings().worktree_dir
+    found: list[Path] = []
+    for directory, subdirectories, files in os.walk(root):
+        here = Path(directory)
+        subdirectories[:] = [
+            name
+            for name in subdirectories
+            if name not in _SWEEP_EXCLUDES
+            and here / name != fleet_worktrees
+            and not (here / name / ".git").is_file()
+        ]
+        found.extend(here / name for name in files if name.endswith(".md"))
+    return sorted(found)
+
+
 def _staleness_sweep(root: Path) -> list[str]:
     """The documents the staleness detector would flag under `root`."""
     unlisted: list[str] = []
-    for path in sorted(root.rglob("*.md")):
-        if any(part in _SWEEP_EXCLUDES for part in path.parts):
-            continue
+    for path in _swept_markdown(root):
         relative = path.relative_to(root).as_posix()
         if relative in DOCUMENTED:
             continue
@@ -1249,6 +1286,59 @@ def test_the_staleness_detector_uses_the_same_rule_as_the_extractor(tmp_path: Pa
     assert "docs/timers.md" in _staleness_sweep(tmp_path), (
         "a page whose only commands use an absolute path inside a blockquoted "
         "fence is invisible to the detector, though the extractor reads both"
+    )
+
+
+_FENCED_COMMAND = "Run this:\n\n```sh\naisquare doctor\n```\n"
+
+
+def test_the_staleness_detector_skips_the_fleets_worktrees(tmp_path: Path) -> None:
+    """A root checkout that runs the fleet holds one full checkout per coder.
+
+    Measured on rc/hackathon-v1 with two coder worktrees under
+    `.aisquare-worktrees/`: `make check` from the root failed on
+    `test_the_document_list_has_not_gone_stale`, reporting every README.md and
+    docs page of every worktree as an unlisted copy of itself, while each real
+    document passed. The same layout here, plus the positive control on the
+    same bytes: `docs/guide.md` is not in DOCUMENTED, so at the repo's own
+    level it must still be reported (a root `README.md` would not do — it IS
+    listed, and would pass for the wrong reason).
+    """
+    worktree = tmp_path / FleetSettings().worktree_dir / "coder-auth"
+    (worktree / "docs").mkdir(parents=True)
+    (worktree / ".git").write_text("gitdir: /elsewhere/.git/worktrees/coder-auth\n")
+    (worktree / "README.md").write_text(_FENCED_COMMAND, encoding="utf-8")
+    (worktree / "docs" / "guide.md").write_text(_FENCED_COMMAND, encoding="utf-8")
+
+    assert _staleness_sweep(tmp_path) == [], "a fleet worktree's documents were swept"
+
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "guide.md").write_text(_FENCED_COMMAND, encoding="utf-8")
+    assert _staleness_sweep(tmp_path) == ["docs/guide.md"], (
+        "the repo's own unlisted page must still be reported — skipping worktrees "
+        "must not blind the detector"
+    )
+
+
+def test_the_staleness_detector_skips_a_git_worktree_wherever_it_was_put(tmp_path: Path) -> None:
+    """A linked worktree outside the fleet's directory is recognised by its `.git` FILE.
+
+    `git worktree add` accepts any path, and a checkout's own `.git` is a
+    DIRECTORY — so the file is what tells a nested checkout from a folder that
+    merely has docs in it. The control: the same page under a directory with no
+    `.git` at all is still reported, and so is the swept root's own page when
+    the root is itself a worktree (its `.git` is a file too).
+    """
+    elsewhere = tmp_path / "scratch" / "wt"
+    elsewhere.mkdir(parents=True)
+    (elsewhere / ".git").write_text("gitdir: /elsewhere/.git/worktrees/wt\n")
+    (elsewhere / "notes.md").write_text(_FENCED_COMMAND, encoding="utf-8")
+    (tmp_path / "scratch" / "plain").mkdir()
+    (tmp_path / "scratch" / "plain" / "notes.md").write_text(_FENCED_COMMAND, encoding="utf-8")
+
+    assert _staleness_sweep(tmp_path) == ["scratch/plain/notes.md"]
+    assert _staleness_sweep(elsewhere) == ["notes.md"], (
+        "sweeping FROM a worktree must read that worktree's own documents"
     )
 
 

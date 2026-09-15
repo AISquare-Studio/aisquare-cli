@@ -51,7 +51,7 @@ from aisquare.cli.ui.views.doctor import DoctorView
 from aisquare.cli.ui.views.explainability import ExplainabilityView
 from aisquare.cli.ui.views.personas_tab import PersonasTab
 from aisquare.cli.ui.views.project import ManagerTab, ProjectView
-from aisquare.cli.ui.views.settings import SettingsView
+from aisquare.cli.ui.views.settings import NO_PERSONA, SettingsView
 from aisquare.core import paths
 from aisquare.core import tmux as tmux_core
 from aisquare.core.config import FleetRoleSettings, load_config, save_config
@@ -912,3 +912,31 @@ def test_settings_says_why_it_lists_no_personas_when_the_catalogue_cannot_be_rea
         "[Errno 13] Permission denied: '/repo/.aisquare/personas'"
     )
     assert prompts == ["(none)"]  # no names, and the tab is still up
+
+
+def test_settings_choosing_none_removes_the_roles_persona_from_config_toml(
+    project: ProjectInfo,
+) -> None:
+    config = load_config()
+    config.fleet.roles["coder"] = config.fleet.roles.get("coder", FleetRoleSettings()).model_copy(
+        update={"persona": "skeptic"}
+    )
+    save_config(config)
+
+    async def scenario(pilot: Pilot[None], host: Host) -> list[Any]:
+        host.query_one(ProjectView).active = "tab-settings"
+        await pilot.pause()
+        field = host.query_one("#persona-coder", Select)
+        before = field.value
+        field.value = NO_PERSONA
+        host.query_one("#save-settings", Button).press()
+        await pilot.pause()
+        return [before, list(host.notices)]
+
+    before, notices = drive(project, scenario)
+    assert before == "skeptic"
+    assert any(m.startswith("✓ fleet settings saved") for m, _ in notices), notices
+    raw = paths.config_path().read_text(encoding="utf-8")
+    coder = raw.split("[fleet.roles.coder]", 1)[-1].split("\n[", 1)[0]
+    assert "persona" not in coder  # (none) removes the key rather than writing persona = ""
+    assert load_config().fleet.roles.get("coder", FleetRoleSettings()).persona is None

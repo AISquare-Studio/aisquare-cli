@@ -45,7 +45,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     in the Explainability roster with its own standing cycle; `fleet spawn --task`
     now hands the task to the worker (`AISQUARE_TASK_ID`, a role-aware kickoff
     typed into the pane, and a session-start `<aisquare-assignment>` block that
-    follows the task's real claim and status).
+    follows the task's real claim and status). The assignment is bound to the
+    launched session's own id (`AISQUARE_TASK_SESSION`): a `claude -p` helper or
+    a `team spawn --exec` child started from inside the assignee inherits the
+    variable but is a different session, so it gets the ordinary board and is
+    never told to claim the parent's task.
 - **Accounts, in `asq` and on the command line.** A new **Accounts** section in
   the fleet UI's sidebar opens a page with the AISquare sign-in on top and the
   Claude Code accounts under it. The AISquare card runs `aisquare login`'s

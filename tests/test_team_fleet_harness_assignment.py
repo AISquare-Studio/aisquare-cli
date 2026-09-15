@@ -43,6 +43,10 @@ def _start(work: Path, session: str, role: str, task_id: str, source: str = "sta
     with pytest.MonkeyPatch.context() as env:
         env.setenv("AISQUARE_ROLE", role)
         env.setenv("AISQUARE_TASK_ID", task_id)
+        # `launch --task` binds the assignment to the session it starts the agent
+        # on (finding 13); this helper models that launched agent, so it pairs the
+        # task with its own session id.
+        env.setenv("AISQUARE_TASK_SESSION", session)
         return team.hook_session_start(session, work, source)
 
 
@@ -176,6 +180,43 @@ def test_a_store_error_resolving_the_task_is_a_notice_not_an_empty_context(
     assert f"Assigned task {task.id!r} could not be read" in context
     assert "database is locked" in context
     assert "STOP and report; do not pick another" in context
+
+
+def _inherited(work: Path, session: str, task_id: str, parent: str, source: str = "startup") -> str:
+    """A child (`claude -p`, `team spawn --exec`) that INHERITED the assignee's
+    env: same AISQUARE_TASK_ID and AISQUARE_TASK_SESSION as the parent, but its
+    own distinct board session id."""
+    with pytest.MonkeyPatch.context() as env:
+        env.setenv("AISQUARE_ROLE", "coder")
+        env.setenv("AISQUARE_TASK_ID", task_id)
+        env.setenv("AISQUARE_TASK_SESSION", parent)
+        return team.hook_session_start(session, work, source)
+
+
+def test_an_inheriting_child_gets_no_assignment_and_is_never_told_to_claim(work: Path) -> None:
+    """Finding 13: a `claude -p` helper started inside an assigned coder inherits
+    AISQUARE_TASK_ID, but its session was never bound to the task, so it must get
+    the ordinary board and NO assignment — and once the parent's lease lapses it
+    must still not be told to claim the parent's task."""
+    task, _ = team.add_task("Build login", role="coder", cwd=work, detail="the contract")
+    # The parent coder, launched with --task, is the bound assignee and claims it.
+    assert CLAIM in _start(work, "parent", "coder", task.id)
+    team.claim_task(task.id, session_ref="parent")
+
+    child = _inherited(work, "child-helper", task.id, parent="parent")
+    assert "<aisquare-assignment>" not in child, "the child inherited the task and was assigned it"
+    assert CLAIM not in child and INSPECT not in child
+    assert "Your standing cycle (coder)" in child, "it still gets the ordinary board briefing"
+
+    # Lapse the parent's lease: the pre-fix child was told "Claim THIS task" here.
+    with store_session() as store:
+        expired = (datetime.now(tz=UTC) - timedelta(minutes=5)).isoformat()
+        store._conn.execute(  # type: ignore[attr-defined]
+            "UPDATE team_task SET claim_expires_at = ? WHERE id = ?", (expired, task.id)
+        )
+        store._conn.commit()  # type: ignore[attr-defined]
+    after = _inherited(work, "child-helper", task.id, parent="parent", source="resume")
+    assert CLAIM not in after and "<aisquare-assignment>" not in after
 
 
 # --- the fleet kickoff typed into the pane --------------------------------------------------

@@ -68,7 +68,10 @@ asq brief update BRIEF_ID \
 `asq --json brief show BRIEF_ID` includes the board's `project_id`. The manager
 can launch the implementation worker with `asq fleet spawn coder --task TASK_ID`.
 The worker's startup context names that task and tells it to use the existing
-atomic claim command; it does not silently take the next unrelated task.
+atomic claim command; it does not silently take the next unrelated task. The
+assignment is bound to that worker's own session, so a `claude -p` helper or a
+`team spawn --exec` child it starts inherits the task variable but is not itself
+assigned the task — it gets the ordinary board and is never told to claim it.
 
 Run the project's actual required test command. This example assumes its login
 checks live at `tests/test_login.py`; use the complete checks your contract

@@ -208,8 +208,11 @@ def launch(
         )
     env.update(profile.env)
     # An assignment belongs to this launch, never to whichever manager's shell
-    # happened to launch it. The session-start briefing reads this exact id.
+    # happened to launch it. The session-start briefing reads this exact id, and
+    # the session-identity pairing below (finding 13) binds it to THIS agent so a
+    # child that inherits the variable is not assigned the same task.
     env.pop("AISQUARE_TASK_ID", None)
+    env.pop("AISQUARE_TASK_SESSION", None)
     if task is not None:
         if project is None:
             fail("cannot assign a task without a readable board", error="invalid_task")
@@ -357,6 +360,20 @@ def launch(
             # here needs to write one, and why an unpinnable launch still joins.
             env.update(explainability_service.trace_marker(wiring))
     argv = [resolution.binary, *profile.args, *role_args, *ctx.args, *pinned_id]
+    if task is not None:
+        # Finding 13: bind the task to THIS launch's session id so only the agent
+        # we start here is assigned it — a child that later inherits
+        # AISQUARE_TASK_ID (a `claude -p` helper, `team spawn --exec`) is a
+        # different session and gets no assignment. Reuse whatever id the launch
+        # already runs on: a `--session-id` in the args (the fleet passes one) or
+        # the traced pin above. When nothing pinned one — an untraced --task
+        # launch — mint one so there IS an identity to bind to; a binary that
+        # cannot take --session-id gets no binding, and the assignment is dropped
+        # rather than leaked to whatever process inherits the variable.
+        identity = explainability_service.plan_session_identity(resolution.binary, argv[1:])
+        if identity.session_id is not None:
+            env["AISQUARE_TASK_SESSION"] = identity.session_id
+            argv += list(identity.inject_args)
     # Text.assemble rather than "[bold]{role}[/bold]": this is the one line that
     # styles a single token instead of the whole line, and it interpolates a
     # role name, a binary path and a project name. A Text carries its styling

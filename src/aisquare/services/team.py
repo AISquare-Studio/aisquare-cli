@@ -1319,23 +1319,63 @@ def hook_session_start(
         )
         from aisquare.services.work_briefs import session_context
 
+        bound_ref = _launch_bound_task_ref(store, project, session)
         return (
             board_context
-            + _optional_block(lambda: _startup_task_assignment(store, project, session))
-            + _optional_block(lambda: session_context(store, project.id, session.id, session.role))
+            + _optional_block(lambda: _startup_task_assignment(store, project, session, bound_ref))
+            + _optional_block(
+                lambda: session_context(
+                    store, project.id, session.id, session.role, task_id=bound_ref
+                )
+            )
         )
 
 
-def _startup_task_assignment(
+def _launch_bound_task_ref(
     store: ContextStore, project: ProjectInfo, session: TeamSession
+) -> str | None:
+    """The task this SESSION was launched with, or None if it only inherited it.
+
+    Finding 13: the assignment was keyed on the ``AISQUARE_TASK_ID`` env var
+    alone, and every process started from inside an assigned agent inherits it —
+    a ``claude -p`` helper, a ``team spawn --exec`` child. Those register as
+    their own board session but read the parent's task, so they were told "this
+    task is owned by <parent>; do not claim it" and, once the parent's lease
+    lapsed, "Claim THIS task" — and the claim succeeded, taking the parent's
+    work.
+
+    So the assignment is bound to the launched SESSION's identity, not to
+    inheritance. ``launch`` stamps ``AISQUARE_TASK_SESSION`` with the exact
+    session id it starts the agent on (the one it pins or the one the fleet
+    passed it), and the fleet records that same session on the agent's row. A
+    session that matches neither inherited the variable from a parent and is not
+    the assignee — it gets nothing. A fleet row for this session (whatever task
+    it names) also identifies a launched agent, so the row/env disagreement can
+    still be reported as a mismatch rather than silently dropped.
+    """
+    ref = os.environ.get("AISQUARE_TASK_ID")
+    if not ref:
+        return None
+    if os.environ.get("AISQUARE_TASK_SESSION") == session.id:
+        return ref
+    if any(
+        agent.session_id == session.id for agent in store.fleet_agents(project.id, live_only=True)
+    ):
+        return ref
+    return None
+
+
+def _startup_task_assignment(
+    store: ContextStore, project: ProjectInfo, session: TeamSession, ref: str | None
 ) -> str:
     """The explicit launch task wins over generic work-pool instructions.
 
-    A fleet row may not have been persisted yet when the child starts. Its
-    absence is not an error; if present its identity must match this assignment.
-    Claims remain the existing atomic task command, never an implicit startup write.
+    ``ref`` is the task this session was LAUNCHED with (``_launch_bound_task_ref``),
+    already filtered so an inheriting child never reaches here (finding 13). A
+    fleet row may not have been persisted yet when the child starts; its absence
+    is not an error, and if present its task must match this assignment. Claims
+    remain the existing atomic task command, never an implicit startup write.
     """
-    ref = os.environ.get("AISQUARE_TASK_ID")
     if not ref:
         return ""
     stop = "STOP and report; do not pick another."
@@ -1448,6 +1488,7 @@ def hook_prompt_heartbeat(
             )
             from aisquare.services.work_briefs import session_context
 
+            bound_ref = _launch_bound_task_ref(store, project, session)
             return (
                 _render_board(
                     project,
@@ -1456,9 +1497,13 @@ def hook_prompt_heartbeat(
                     store.recent_events(project.id, limit=_BOARD_EVENTS),
                     me=session,
                 )
-                + _optional_block(lambda: _startup_task_assignment(store, project, session))
                 + _optional_block(
-                    lambda: session_context(store, project.id, session.id, session.role)
+                    lambda: _startup_task_assignment(store, project, session, bound_ref)
+                )
+                + _optional_block(
+                    lambda: session_context(
+                        store, project.id, session.id, session.role, task_id=bound_ref
+                    )
                 )
             )
         # Same check as session_start, on the path that actually runs every turn.

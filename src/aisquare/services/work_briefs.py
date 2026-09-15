@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
@@ -791,11 +790,24 @@ def _clip(text: str, limit: int = 500) -> str:
     return f"{text[:limit]}… (+{len(text) - limit} chars; `asq brief show`)"
 
 
-def session_context(store: ContextStore, project_id: str, session_id: str, role: str) -> str:
+def session_context(
+    store: ContextStore,
+    project_id: str,
+    session_id: str,
+    role: str,
+    *,
+    task_id: str | None = None,
+) -> str:
     """One shared direct/fleet entry point.
 
     A session records its selected rules at its first briefing. Resumes keep
     those rules: changing project mode is a new-session choice.
+
+    ``task_id`` is the task this session was LAUNCHED with, resolved by the hook
+    (``team._launch_bound_task_ref``) so a `claude -p` / `team spawn --exec`
+    child that merely inherited ``AISQUARE_TASK_ID`` does not get the parent's
+    requirements filtered in as if they were its own (finding 13). ``None``
+    shows every brief's requirements, the ordinary unassigned view.
     """
     key = f"work_rules/{session_id}"
     version = store.get_meta(key)
@@ -825,7 +837,6 @@ def session_context(store: ContextStore, project_id: str, session_id: str, role:
     # `mode off` means no native instructions at all; the requirements below are
     # facts about the project and are shown either way.
     # Requirements are factual project state, not a work-mode preference.
-    task_id = os.environ.get("AISQUARE_TASK_ID")
     for data in store.work_briefs(project_id):
         brief = WorkBrief.model_validate_json(data)
         relevant = [r for r in brief.requirements if not task_id or task_id in r.task_ids]

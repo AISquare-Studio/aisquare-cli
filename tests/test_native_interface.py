@@ -217,10 +217,20 @@ def test_launch_task_is_resolved_and_does_not_leak_to_unassigned_children(
     assert result.exit_code == 0, result.output
     assert captured["env"]["AISQUARE_TASK_ID"] == task.id
     assert "--task" not in captured["argv"]
+    # Finding 13: the task is bound to the session id this launch runs the agent
+    # on, so a child that later inherits AISQUARE_TASK_ID is a different session
+    # and is not assigned it. The pairing names the very --session-id in the argv.
+    argv = captured["argv"]
+    assert "--session-id" in argv
+    assert captured["env"]["AISQUARE_TASK_SESSION"] == argv[argv.index("--session-id") + 1]
+    # A launch WITHOUT --task clears both — an inherited assignment is never
+    # carried into an unassigned session.
     monkeypatch.setenv("AISQUARE_TASK_ID", task.id)
+    monkeypatch.setenv("AISQUARE_TASK_SESSION", "some-parent-session")
     result = runner.invoke(app, ["launch", "reviewer"])
     assert result.exit_code == 0, result.output
     assert "AISQUARE_TASK_ID" not in captured["env"]
+    assert "AISQUARE_TASK_SESSION" not in captured["env"]
     captured.clear()
     result = runner.invoke(app, ["launch", "coder", "--task", "tsk_missing"])
     assert result.exit_code == 1

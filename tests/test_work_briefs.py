@@ -227,6 +227,8 @@ def test_startup_assignment_receives_intended_contract_and_matching_requirements
     brief, task = contract(work)
     monkeypatch.setenv("AISQUARE_ROLE", "coder")
     monkeypatch.setenv("AISQUARE_TASK_ID", task)
+    # The launched agent's own session is the one the task is bound to (finding 13).
+    monkeypatch.setenv("AISQUARE_TASK_SESSION", "worker")
     context = team.hook_session_start("worker", work, "startup")
     assert f"Claim THIS task: `asq task claim {task}" in context
     assert "overrides generic 'task next'" in context

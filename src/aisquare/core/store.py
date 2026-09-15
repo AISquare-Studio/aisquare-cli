@@ -36,6 +36,7 @@ from typing import Any, Protocol
 from aisquare.core import paths
 from aisquare.core.ids import new_prompt_id
 from aisquare.models import (
+    CLOSED_STATUSES,
     ContextEntry,
     FleetAgent,
     Pool,
@@ -639,8 +640,18 @@ class ContextStore(Protocol):
     def release_task(self, task_id: str) -> TeamTask: ...
     def reopen_task(self, task_id: str) -> TeamTask: ...
     def next_task(
-        self, project_id: str, *, role: str | None = None, status: TaskStatus = "todo"
+        self,
+        project_id: str,
+        *,
+        role: str | None = None,
+        status: TaskStatus = "todo",
+        prefer: str | None = None,
     ) -> TeamTask | None: ...
+    def task_statuses(self, project_id: str) -> dict[str, str]: ...
+    def adopt_fleet_agent_session(
+        self, agent_id: str, previous: str | None, session_id: str, lease_until: datetime
+    ) -> bool: ...
+    def retire_fleet_assignments(self, task_id: str) -> int: ...
     def open_turn(self, metric: TurnMetric) -> TurnMetric: ...
     def close_turn(self, session_id: str, *, ended_at: datetime) -> TurnMetric | None: ...
     def turn_metrics(
@@ -678,6 +689,7 @@ class ContextStore(Protocol):
     def upsert_fleet_agent(self, agent: FleetAgent) -> FleetAgent: ...
     def get_fleet_agent(self, ref: str) -> FleetAgent | None: ...
     def fleet_agents(self, project_id: str, *, live_only: bool = False) -> list[FleetAgent]: ...
+    def fleet_agent_for_session(self, project_id: str, session_id: str) -> FleetAgent | None: ...
     def fleet_agent_by_label(
         self, project_id: str, label: str, *, live_only: bool = True
     ) -> FleetAgent | None: ...
@@ -850,7 +862,7 @@ def unmet_needs(task: TeamTask, statuses: Mapping[str, str]) -> list[str]:
     A need is satisfied once its task is ``done`` or ``dropped``; anything
     else (including an unknown id) keeps the dependent task waiting.
     """
-    return [need for need in task.needs if statuses.get(need) not in ("done", "dropped")]
+    return [need for need in task.needs if statuses.get(need) not in CLOSED_STATUSES]
 
 
 def _fts_match(query: str) -> str:
@@ -1504,7 +1516,7 @@ class SqliteStore:
         task = self.get_task(task_id)
         if task is None:
             raise KeyError(task_id)
-        if status in ("done", "dropped"):
+        if status in CLOSED_STATUSES:
             # Terminal: clear the claim so the task never *looks* held —
             # a lingering claimed_by invites a bogus "release" back to todo.
             self._conn.execute(
@@ -1569,7 +1581,12 @@ class SqliteStore:
         return updated
 
     def next_task(
-        self, project_id: str, *, role: str | None = None, status: TaskStatus = "todo"
+        self,
+        project_id: str,
+        *,
+        role: str | None = None,
+        status: TaskStatus = "todo",
+        prefer: str | None = None,
     ) -> TeamTask | None:
         """The oldest *ready* task in ``status`` a session of ``role`` could pick up.
 
@@ -1577,14 +1594,22 @@ class SqliteStore:
         only match sessions of that role (or an unfiltered query). A ``todo``
         task is ready only when every task it needs is resolved — so loopers
         never receive work whose prerequisites are still in flight.
+
+        ``prefer`` puts one task first in the order — the one a fleet agent was
+        spawned for — under exactly the same status, role and readiness rules
+        as every other candidate: one predicate, one query, not a copy of it.
         """
         clauses = ["project_id = ?", "status = ?"]
         params: list[str] = [project_id, status]
         if role is not None:
             clauses.append("(role IS NULL OR role = ?)")
             params.append(role)
+        order = "ORDER BY id"
+        if prefer is not None:
+            order = "ORDER BY (id = ?) DESC, id"
+            params.append(prefer)
         rows = self._conn.execute(
-            f"SELECT {_TASK_COLUMNS} FROM team_task WHERE {' AND '.join(clauses)} ORDER BY id",
+            f"SELECT {_TASK_COLUMNS} FROM team_task WHERE {' AND '.join(clauses)} {order}",
             params,
         ).fetchall()
         if not rows:
@@ -1972,6 +1997,83 @@ class SqliteStore:
             (project_id,),
         ).fetchall()
         return [_row_to_fleet_agent(row) for row in rows]
+
+    def fleet_agent_for_session(self, project_id: str, session_id: str) -> FleetAgent | None:
+        """The live fleet row recorded against ``session_id``, if there is one.
+
+        One targeted lookup rather than materialising every live row and
+        scanning: this runs on the session-start hook AND on every ``task next``,
+        including the plain CLI ones that have no fleet row at all and paid for
+        the whole list to find that out (review of #116, round 3).
+        """
+        row = self._conn.execute(
+            f"SELECT {_FLEET_AGENT_COLUMNS} FROM fleet_agent "
+            "WHERE project_id = ? AND session_id = ? AND ended_at IS NULL "
+            "ORDER BY created_at DESC LIMIT 1",
+            (project_id, session_id),
+        ).fetchone()
+        return _row_to_fleet_agent(row) if row is not None else None
+
+    def adopt_fleet_agent_session(
+        self, agent_id: str, previous: str | None, session_id: str, lease_until: datetime
+    ) -> bool:
+        """Move a LIVE fleet row from ``previous`` to ``session_id``, claims and all.
+
+        ``False`` when nothing moved. One transaction for the two facts that must
+        agree: which session the row is, and who holds the tasks that session
+        claimed. A ``/clear`` mints a new session id for the process that is
+        still working them, so every claim the old id holds — the assigned task
+        and any pool task it took, in every status that keeps a claim
+        (``set_task_status`` clears ``claimed_by`` for the closed ones alone) —
+        is re-addressed to the new id. Committed separately they could disagree:
+        a row bound to the new id while the work stayed with the old one, whose
+        lease then ran out under a working agent (review of #135).
+
+        ``previous`` is part of the WHERE (``IS``, so an unbound row matches
+        ``None``): the hook that calls this runs in another process from
+        ``fleet stop`` and from every other hook, so the row must still be the
+        one that was read — ended, or taken by somebody else in between, and
+        nothing moves. A targeted UPDATE, never a whole-row write, for the same
+        reason (a stale snapshot written back resurrected a stopped agent).
+        """
+        try:
+            cursor = self._conn.execute(
+                "UPDATE fleet_agent SET session_id = ? "
+                "WHERE id = ? AND ended_at IS NULL AND session_id IS ?",
+                (session_id, agent_id, previous),
+            )
+            if cursor.rowcount != 1:
+                self._conn.rollback()
+                return False
+            if previous is not None:
+                self._conn.execute(
+                    "UPDATE team_task SET claimed_by = ?, claim_expires_at = ?, updated_at = ? "
+                    "WHERE claimed_by = ? AND status IN ('doing', 'review', 'blocked')",
+                    (session_id, lease_until.isoformat(), _now_iso(), previous),
+                )
+        except Exception:
+            self._conn.rollback()
+            raise
+        self._conn.commit()
+        return True
+
+    def retire_fleet_assignments(self, task_id: str) -> int:
+        """Forget ``task_id`` on every live fleet row spawned for it; how many did.
+
+        An assignment is over when its task is closed. A row that kept naming a
+        done task re-briefed its agent on every later session start — "already
+        done; tell the manager" — and a nudge went out to the manager each time
+        for nothing; reopened and claimed by someone else, the same row ordered
+        a busy agent to stand down (review of #135). The label and the branch
+        still carry the task's id, so nothing the operator sees changes; only
+        what the agent is told next.
+        """
+        cursor = self._conn.execute(
+            "UPDATE fleet_agent SET task_id = NULL WHERE task_id = ? AND ended_at IS NULL",
+            (task_id,),
+        )
+        self._conn.commit()
+        return cursor.rowcount
 
     def fleet_agent_by_label(
         self, project_id: str, label: str, *, live_only: bool = True

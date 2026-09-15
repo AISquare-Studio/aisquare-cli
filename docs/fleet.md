@@ -191,7 +191,35 @@ follows as a `⚠` line.
 
 Refused, with the reason in the message: a second `manager`, more agents than
 `max_agents_per_project`, `--worktree` in a project that is not a git
-repository, an unknown role.
+repository, an unknown role, a `--task` that is already done or dropped.
+
+**What the agent is told.** `fleet spawn` exports `AISQUARE_FLEET_AGENT` — the
+agent's row — onto its window, and the session-start hook joins the session to
+that row and puts an **ASSIGNED TO YOU** block at the top of the briefing: what
+the task's state asks of *this* role. A coder is told to claim a `todo` task
+(unless it still waits on other tasks — then to take pool work until it is
+ready), to carry on with a `doing` task it holds, to do the rework on a task
+back in `review`, to take over a `doing` task whose holder's lease has run out,
+or to stand down and ask the manager when a teammate is live on it right now. A
+verifier (tester, ui-tester, reviewer, validator) is told to verify a task in
+`review` and, in any other state, that it is not yet its turn. `task next` puts
+the assigned task first — for the agent's own session, and for a verifier's
+cycle or the MCP server's `task_next` running under the same window (the order
+only; a claim needs the session). The assignment ends when its task is done or
+dropped: nothing is said about it afterwards.
+
+The row belongs to the *process* in the pane, not to a session id. Claude Code
+mints a new session id on `/clear` and keeps the process, and it hands every
+hook the pid of the process that fired it (`CLAUDE_PID`), which the hook
+compares with the pane's own (`aisquare launch` execs the agent, so tmux's
+`#{pane_pid}` is the agent). So a `/clear` keeps the agent's claims: the
+`SessionEnd` hook sees the reason and the process, and the `SessionStart` that
+follows moves every claim to the new id together with the row, in one store
+transaction. A nested `claude -p` started from the agent's shell inherits
+`AISQUARE_FLEET_AGENT` but not the pid, so it is never briefed on the parent's
+task and never takes its row, whatever start it reports. A binary that exports
+no `CLAUDE_PID` binds its row on first arrival and keeps that session; a
+`/clear` there releases its claims, as any session end does.
 
 ### `fleet ls` / `fleet status`
 
@@ -406,9 +434,12 @@ precedence rule:
 
 > per-spawn flag  >  `[fleet]` config  >  built-in default
 
-**No `[fleet]` setting is read from the environment**: there is no
-`AISQUARE_FLEET_*` variable, and the fleet reads this section from the config
-file alone. The environment layer is real one level down — the model, effort
+**No `[fleet]` setting is read from the environment**: the fleet reads this
+section from the config file alone. (`AISQUARE_FLEET_AGENT` exists, but it is
+not a setting — `fleet spawn` sets it on each window to name the agent's row,
+and the session-start hook reads it to brief the agent on the task it was
+spawned for; see *What the agent is told* under `fleet spawn`.) The environment
+layer is real one level down — the model, effort
 and binary a launch resolves (`AISQUARE_MODEL_<ROLE>` and friends, below) —
 which is the harness's rule, not this one.
 
@@ -603,9 +634,22 @@ tmux -L asq list-sessions
 ```
 
 **Keys.** With a pane focused, every key goes to the agent except the escape
-hatch (`F12`) and the scroll keys below. Printable characters travel as typed; special keys are
-translated into tmux's names (Enter, BSpace, ctrl+c → `C-c`, shift+tab →
-`BTab`, …). Paste is bracketed, so Claude Code sees one paste and not one Enter
+hatch (`F12`), the scroll keys below, ctrl+c while text is highlighted in that
+pane (it copies) and cmd+c, which is only ever the copy. Printable characters
+travel as typed —
+except with alt held on an ASCII letter, where the chord is the meaning (`M-p`,
+so Claude Code's alt+p switches the model; alt+shift+a is `M-A`). Special keys
+are translated into tmux's names (Enter, BSpace, ctrl+c → `C-c` when nothing is
+selected, shift+tab → `BTab`, …), and so are alt+digit and alt+space when the
+terminal reports them as chords rather than as text (`M-1`, `M-Space` — the
+kitty keyboard protocol does, a legacy terminal cannot; see the limits below).
+Where there is no safe name the character still travels: alt+shift+o types an
+`O`, because `ESC O` is the start of an escape sequence to the program reading
+it, not a chord; a chord your tmux is too old to carry is dropped rather than
+mistyped (below 3.5, `ctrl+alt+space` does nothing). The one exception is a
+modifier tmux cannot spell at all — Cmd (super) or hyper — which is dropped
+rather than typed, because Cmd+V is a command and not a request for a `v`.
+Paste is bracketed, so Claude Code sees one paste and not one Enter
 per line. The wheel goes to whoever can use it: a program that tracks the mouse
 (Claude Code's fullscreen TUI does) receives it as its own mouse event and
 scrolls its transcript; a fullscreen program that does not is left alone (its own
@@ -617,12 +661,54 @@ tmux copy mode stays tmux's. The keyboard scrolls too: shift+PgUp / shift+PgDn
 scrollback), shift+Home (the top) and shift+End (live) — through the same
 decision as the wheel, so on a Claude Code pane they scroll Claude's transcript.
 A pane scrolled into tmux history shows `[↑k/history]` in its top-right corner.
+Drag to select text in a pane (double-click selects a word): it is copied to
+your clipboard on release (OSC 52 — your terminal has to accept it; Windows
+Terminal, kitty, wezterm, iTerm2 and foot do), and ctrl+c or cmd+c copies it
+again while the highlight stands — from the pane or from the sidebar — and then
+clears it. Only a left-button drag is a copy, so a right-click over a highlight
+leaves your clipboard alone, and so does a drag somewhere else entirely while a
+highlight stands. The highlight does not outlive what it means: typing or
+pasting into the agent drops it, so does the agent printing something else
+under it, and so does a click, and ctrl+c after any of those is the agent's
+interrupt. A triple click selects nothing, and the pane is never highlighted
+whole: a drag that starts on the agent header and ends below the pane selects
+nothing in it. A drag that crosses the pane's edge — begun on the agent header,
+or released outside it — copies too, one character short of the same gesture
+made inside the pane: the terminal library reports the crossing endpoint
+without the trailing cell, and the highlight stops there too, so what you see
+is what you get. What is copied is always what is shown under the highlight at
+the moment you copy: cut to the columns the pane actually shows, and including
+the `[↑k/history]` marker and the `(exited 0)` notice where those are what the
+row displays. A line tmux soft-wrapped is copied as one line, as tmux's own
+copy mode copies it — the pane asks tmux which rows are wrapped when you copy,
+and falls back to one line per row if the screen moved in between. Tabs are
+copied as the spaces they occupy on screen, and an emoji or a wide glyph is
+always highlighted and copied whole. Under an agent that is still printing that
+means the text at release, not at the press — the same text you can see
+highlighted.
 Modifier
 chords beyond ctrl and alt depend on your *outer* terminal speaking the kitty
 keyboard protocol (kitty, ghostty, wezterm, foot, recent alacritty): in
 VTE-based terminals and Windows Terminal, shift+enter arrives as plain enter
 and the UI never fakes it — `\` then Enter inserts a newline in Claude Code
 everywhere.
+
+The alt chord's limits are the terminal's and Textual's key parser's, not this
+UI's, and they were measured against the parser (`tests/test_keys.py` feeds it
+the bytes a terminal sends). A legacy terminal — xterm, VTE, Windows Terminal,
+tmux — sends `ESC` plus the key: `ESC p` is read as alt+p and becomes `M-p`,
+but `ESC 1` … `ESC 0` and `ESC Space` are read as the glyphs `¡ ™ £ ¢ ∞ § ¶ •
+ª º` and a plain space, with no alt at all, and are typed as such; `ESC b` and
+`ESC f` are read as ctrl+left and ctrl+right; and ctrl+alt on a letter loses
+the alt (ctrl+alt+p reaches the agent as ctrl+p). A terminal speaking the kitty
+keyboard protocol (kitty, ghostty, wezterm, foot, recent alacritty) sends the
+chord itself: alt+1 is `M-1`, alt+space is `M-Space`, ctrl+alt+space is
+`C-M-Space` — unless it reports the text the key produced, as macOS Option
+does (alt+p is a `π`), in which case the parser drops the `alt` token and the
+text is typed. And Escape is what the parser has to tell a legacy alt chord
+from: a letter arriving within ~100 ms of a lone Escape is read as that chord,
+so pressing Esc and immediately typing `p` switches the model instead of
+typing the letter.
 
 ---
 

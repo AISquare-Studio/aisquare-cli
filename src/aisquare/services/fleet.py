@@ -47,6 +47,7 @@ from aisquare.core.store import AmbiguousIdError, ContextStore, store_session
 from aisquare.core.tmux import TmuxError, TmuxServer, TmuxUnavailable, WindowInfo
 from aisquare.core.workspace import active_project
 from aisquare.models import (
+    CLOSED_STATUSES,
     FleetAgent,
     FleetAgentState,
     FleetAgentStatus,
@@ -843,6 +844,13 @@ def _task_for(store: ContextStore, project: ProjectInfo, task_id: str | None) ->
         raise FleetError(f"no task matches {task_id!r}")
     if task.project_id != project.id:
         raise FleetError(f"task {task_id!r} belongs to another project's board")
+    if task.status in CLOSED_STATUSES:
+        # Harmless when the id only named a label; now it reaches the agent as
+        # its assignment, and an agent spawned for finished work would be told
+        # so on arrival and hold a slot for nothing.
+        raise FleetError(
+            f"task {task.id} is {task.status} — spawn for a task that still needs work"
+        )
     return task
 
 

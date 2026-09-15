@@ -771,10 +771,14 @@ def task_gate(store: ContextStore, task: TeamTask) -> dict[str, int]:
             raise ValueError(
                 f"a brief linked to this task is damaged and cannot be read: {exc}"
             ) from None
-        snapshot[brief.id] = brief.revision
         linked = {r.id for r in brief.requirements if task.id in r.task_ids}
         if not linked:
+            # A brief this task is not part of never gates its completion, and
+            # its revision never enters the snapshot — so a later change to it
+            # cannot make ``finish_verified_task`` refuse this task (finding 6 /
+            # the "task done refused when any brief changes" race).
             continue
+        snapshot[brief.id] = brief.revision
         project = store.get_project(task.project_id)
         if project is None:
             raise ValueError("brief project is unavailable")

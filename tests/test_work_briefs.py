@@ -527,3 +527,91 @@ def test_a_check_that_writes_a_per_run_output_file_can_still_pass(work: Path) ->
     result = briefs.check(brief.id)
     assert not result.complete
     assert all(row.status == "stale" for row in result.requirements)
+
+
+def test_task_done_ignores_an_unrelated_or_damaged_brief_on_the_board(
+    work: Path, proof: Path
+) -> None:
+    """Finding 6 + the 'task done refused when any brief changes' race: a brief this
+    task is not part of — a separate lane's brief, or a damaged row that never named
+    it — must not block `task done`, at the gate or in the finish transaction."""
+    brief, task = contract(work)
+    record(brief, task, "R1", proof)
+    record(brief, task, "R2", proof)
+    other, _ = team.add_task("Separate lane", role="coder", cwd=work)
+    side = briefs.create("Side work", ["Independent outcome"])
+    briefs.link(side.id, other.id, ["R1"])
+    with store_session() as store:
+        store.save_work_brief(
+            "brief_damaged",
+            brief.project_id,
+            1,
+            json.dumps({"id": "brief_damaged", "project_id": brief.project_id, "bogus": True}),
+            None,
+            TeamEvent(
+                id=new_event_id(),
+                project_id=brief.project_id,
+                kind="brief_created",
+                text="damaged",
+                created_at=datetime.now(UTC),
+            ),
+            {},
+        )
+    assert team.finish_task(task).status == "done"
+
+
+def test_task_done_survives_an_unrelated_brief_changing_during_the_scan(
+    work: Path, proof: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The counterpart to test_correction_between_gate_and_completion_prevents_done:
+    a correction to a brief THIS task is not linked to, arriving mid-scan, must not
+    refuse the completion (only a change to a linked brief does)."""
+    from aisquare.core.store import ContextStore
+    from aisquare.models import TeamTask
+
+    brief, task = contract(work)
+    record(brief, task, "R1", proof)
+    record(brief, task, "R2", proof)
+    other, _ = team.add_task("Separate lane", role="coder", cwd=work)
+    side = briefs.create("Side work", ["Independent outcome"])
+    briefs.link(side.id, other.id, ["R1"])
+    original_gate = briefs.task_gate
+
+    def racing_gate(store: ContextStore, value: TeamTask) -> dict[str, int]:
+        snapshot = original_gate(store, value)
+        briefs.update(side.id, changes={"R1": "Independent outcome, corrected"})
+        return snapshot
+
+    monkeypatch.setattr(briefs, "task_gate", racing_gate)
+    assert team.finish_task(task).status == "done"
+
+
+def test_an_interrupted_command_that_exits_zero_cannot_be_recorded_as_pass(work: Path) -> None:
+    """Finding 7: a report whose child was interrupted (interrupted_by set) is not a
+    clean pass even when it exited 0 — a distinct case from a nonzero exit, so it
+    must be rejected on the interrupted_by branch alone."""
+    import sys
+
+    from aisquare.services import command_reports
+
+    brief, task = contract(work)
+    report = command_reports.run_command(
+        [sys.executable, "-c", "print('ok')"],
+        cwd=work,
+        project_id=brief.project_id,
+        task_id=task,
+    )
+    assert report.returncode == 0 and report.interrupted_by is None
+    # Forge an operator interrupt on an otherwise-clean exit-0 run: the report's
+    # own digest is recomputed from the file, so this is self-consistent.
+    forged = report.model_copy(update={"interrupted_by": 2})
+    (command_reports.reports_dir() / report.id / "report.json").write_text(forged.model_dump_json())
+    with pytest.raises(ValueError, match="failed or interrupted command"):
+        briefs.record_evidence(
+            brief.id,
+            "R1",
+            task_ref=task,
+            verdict="pass",
+            summary="interrupted but exit 0",
+            report_id=report.id,
+        )

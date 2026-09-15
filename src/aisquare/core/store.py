@@ -1668,7 +1668,15 @@ class SqliteStore:
                     (task.project_id,),
                 ).fetchall()
             }
-            if current != brief_revisions:
+            # Gate on the briefs THIS task was verified against (``brief_revisions``
+            # from ``task_gate``), never on every brief on the board: an unrelated
+            # brief another worker corrects during the fingerprint scan, or a
+            # damaged brief that never referenced this task, must not block its
+            # completion. A brief this task is linked to that changed or vanished
+            # since the check still does.
+            if any(
+                current.get(brief_id) != revision for brief_id, revision in brief_revisions.items()
+            ):
                 raise ValueError(
                     "requirements changed during verification; read the brief and retry"
                 )

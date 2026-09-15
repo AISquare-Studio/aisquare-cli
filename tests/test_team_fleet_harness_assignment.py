@@ -267,3 +267,54 @@ def test_the_kickoff_and_the_session_start_block_agree(
         assert verb in prompt and verb.upper() in block.upper(), role
         assert ("Claim" in prompt) == (CLAIM in block), role
         tmux.typed.clear()
+
+
+def _put_in_state(work: Path, task_id: str, state: str) -> None:
+    """Drive a task into ``state`` the way the board does, from a coder session."""
+    if state == "todo":
+        return
+    _start(work, "holder", "coder", task_id)
+    team.claim_task(task_id, session_ref="holder")
+    if state == "owned":
+        return
+    if state == "lapsed":
+        with store_session() as store:
+            expired = (datetime.now(tz=UTC) - timedelta(minutes=5)).isoformat()
+            store._conn.execute(  # type: ignore[attr-defined]
+                "UPDATE team_task SET claim_expires_at = ? WHERE id = ?", (expired, task_id)
+            )
+            store._conn.commit()  # type: ignore[attr-defined]
+        return
+    if state == "blocked":
+        team.block_task(task_id, reason="needs spec", session_ref="holder")
+        return
+    if state == "review":
+        team.review_task(task_id, session_ref="holder")
+        return
+    with store_session() as store:
+        store.set_task_status(task_id, state)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    "state", ["todo", "owned", "lapsed", "blocked", "review", "done", "dropped"]
+)
+def test_the_kickoff_and_the_block_agree_about_claiming_for_every_task_state(
+    tmux: FakeTmux,  # noqa: F811
+    claude_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+    state: str,
+) -> None:
+    """Finding 10, for every state the board can be in: the typed kickoff and the
+    session-start block are the same instruction. Claimable (todo, a lapsed
+    claim) says claim; owned by a live session, blocked, review, done and dropped
+    say do not claim — the kickoff used to say "claim it" for an owned task."""
+    task = _fleet_task(project, "Wire the auth flow")
+    _put_in_state(project.root, task, state)
+    kickoff = _kickoff(tmux, fleet_service.spawn(project, "coder", task_id=task, worktree=False))
+    block = _assignment(_start(project.root, f"hook-{state}", "coder", task))
+    claimable = state in ("todo", "lapsed")
+    assert ("Claim it" in kickoff) == claimable, (state, kickoff)
+    assert (CLAIM in block) == claimable, (state, block)
+    if not claimable:
+        assert "do not claim" in kickoff.lower(), (state, kickoff)
+        assert "Do not claim" in block, (state, block)

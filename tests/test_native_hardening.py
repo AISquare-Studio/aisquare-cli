@@ -306,3 +306,80 @@ def test_prune_fails_closed_when_evidence_protection_is_unknown() -> None:
     removed = reports.prune_reports(keep=1, protect=None)
     assert all(rid not in removed for rid in ids), "no report deleted when protection is unknown"
     assert all(reports.load_report(rid).id == rid for rid in ids)
+
+
+def _damaged_brief_row(project_id: str, brief_id: str = "brief_damaged") -> None:
+    """A work_brief row this build cannot validate — the shape a newer aisquare writes."""
+    from datetime import UTC, datetime
+
+    from aisquare.core.ids import new_event_id
+    from aisquare.models import TeamEvent
+
+    with store_session() as store:
+        store.save_work_brief(
+            brief_id,
+            project_id,
+            1,
+            json.dumps({"id": brief_id, "project_id": project_id, "from_the_future": True}),
+            None,
+            TeamEvent(
+                id=new_event_id(),
+                project_id=project_id,
+                kind="brief_created",
+                text="newer build",
+                created_at=datetime.now(UTC),
+            ),
+            {},
+        )
+
+
+def test_one_unreadable_brief_costs_its_own_lines_not_the_rules_or_other_briefs(
+    work: Path,
+) -> None:
+    """Finding 2 at the grain of one row: before, a single brief row the hook build
+    could not validate raised out of session_context and the isolation dropped the
+    WHOLE work block — rules included. Now that row costs one notice line."""
+    brief, _ = _contract(work)
+    _damaged_brief_row(brief.project_id)
+    with store_session() as store:
+        context = briefs.session_context(store, brief.project_id, "s-mixed", "coder")
+    assert "Working rules: native-1" in context and "Inspect the affected flow" in context
+    assert brief.id in context and "Valid login opens dashboard" in context
+    assert "could not be read by this build" in context
+
+
+def test_the_heartbeat_join_survives_a_broken_work_block_too(
+    work: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Finding 2's second call site: a session that joins on its first prompt (the
+    heartbeat path) must keep its board briefing when the work block raises."""
+    from aisquare.services import work_briefs as wb
+
+    def boom(*args: object, **kwargs: object) -> str:
+        raise RuntimeError("unreadable brief")
+
+    monkeypatch.setattr(wb, "session_context", boom)
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
+    team.activate(work)
+    out = team.hook_prompt_heartbeat("s-join", work)
+    assert "<aisquare-team>" in out, "the joining session lost its board briefing"
+    assert "<aisquare-work>" not in out
+
+
+def test_a_forgotten_projects_evidence_reports_stay_protected(work: Path) -> None:
+    """Finding 4's last trigger: `project forget` hides the board, and a per-visible-
+    project read of the evidence then lets retention delete the reports the hidden
+    briefs still name — gone for good by the time the root registers again."""
+    brief, task = _contract(work)
+    report = reports.run_command(
+        _python("print('passed')"), project_id=brief.project_id, task_id=task
+    )
+    briefs.record_evidence(
+        brief.id, "R1", task_ref=task, verdict="pass", summary="ran", report_id=report.id
+    )
+    with store_session() as store:
+        store.forget_project(brief.project_id)
+        assert store.get_project(brief.project_id) is None, "the board is hidden"
+    assert report.id in briefs.referenced_report_ids()
+    assert report.id in (reports.protected_report_ids() or set())
+    assert report.id not in reports.prune_reports(keep=0, protect=reports.protected_report_ids())

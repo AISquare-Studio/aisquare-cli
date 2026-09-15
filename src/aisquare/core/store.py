@@ -720,6 +720,7 @@ class ContextStore(Protocol):
     def end_fleet_agent(self, agent_id: str, *, exit_status: int | None = None) -> FleetAgent: ...
     def get_work_brief(self, ref: str, project_id: str) -> str | None: ...
     def work_briefs(self, project_id: str) -> list[str]: ...
+    def all_work_briefs(self) -> list[str]: ...
     def save_work_brief(
         self,
         brief_id: str,
@@ -980,6 +981,20 @@ class SqliteStore:
                 f"AND project_id IN {_VISIBLE_PROJECTS} ORDER BY id",
                 (project_id,),
             ).fetchall()
+        ]
+
+    def all_work_briefs(self) -> list[str]:
+        """Every brief on every board, a FORGOTTEN project's included.
+
+        Report retention protects the reports that recorded evidence names, and a
+        forgotten project's briefs still name theirs: ``project forget`` is a
+        tombstone that comes back when the root registers again, and the evidence
+        it brings back must still find its reports. Reads through the visible-
+        project filter would drop exactly those.
+        """
+        return [
+            str(row["data"])
+            for row in self._conn.execute("SELECT data FROM work_brief ORDER BY id").fetchall()
         ]
 
     def save_work_brief(

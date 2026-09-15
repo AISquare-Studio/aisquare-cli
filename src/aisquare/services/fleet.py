@@ -1044,6 +1044,13 @@ def spawn(
             f"aisquare --json task show {resolved_task_id}."
         )
         status = task.status if task is not None else "todo"
+        # Ownership the way the assignment block reads it: a `doing` task whose
+        # lease is live belongs to that session, and this new agent must not be
+        # told to claim it; a lapsed lease is claimable again.
+        holder = task.claimed_by if task is not None else None
+        expiry = task.claim_expires_at if task is not None else None
+        lapsed = holder is not None and expiry is not None and expiry <= _now()
+        owned = status == "doing" and holder is not None and not lapsed
         if status == "blocked":
             kickoff = (
                 f"{show} This task is BLOCKED after failed checks; do not claim it. "
@@ -1053,6 +1060,11 @@ def spawn(
             kickoff = (
                 f"{show} This task is {status}; do not claim or edit it. Inspect it and its "
                 "evidence, report and stop."
+            )
+        elif owned and holder is not None:
+            kickoff = (
+                f"{show} This task is owned by session {holder[:TASK_SHORT]}; do not claim it. "
+                "Inspect it and its evidence, report and stop."
             )
         elif harness.base_role(role) == "coder":
             kickoff = (

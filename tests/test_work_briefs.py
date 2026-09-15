@@ -680,3 +680,17 @@ def test_a_finding_without_a_task_lands_on_a_live_linked_task_not_a_dropped_one(
     assert result.evidence[-1].task_id == real.id
     assert len(team.list_tasks()) == 2, "no correction task while a live linked task exists"
     assert team.show_task(dup.id).status == "dropped"
+
+
+def test_the_work_block_stays_under_its_budget_for_a_brief_at_the_limits(work: Path) -> None:
+    """Finding 15's residual: the size checks ran BEFORE appending, so one more
+    ~1,000-character line always landed past them. Sixty-four requirements at the
+    field limits, text and checks alike, must stay within the block's budget."""
+    texts = [f"Requirement {n} " + "x" * 1_900 for n in range(64)]
+    brief = briefs.create("Everything", texts)
+    briefs.update(brief.id, checks={f"R{n}": "c" * 2_000 for n in range(1, 65)})
+    with store_session() as store:
+        context = briefs.session_context(store, brief.project_id, "s-budget", "coder")
+    assert "Working rules: native-1" in context
+    assert "More requirements omitted" in context
+    assert len(context) <= briefs._WORK_BLOCK_BUDGET + 200, len(context)

@@ -117,15 +117,17 @@ def referenced_report_ids(store: ContextStore | None = None) -> set[str]:
 
     Report retention consults this so it never deletes the file that backs a
     recorded pass; a missing report would flip a VERIFIED brief to NOT VERIFIED.
+    Read from every ``work_brief`` row rather than per visible project (finding
+    4's last trigger): a forgotten project's evidence still names its reports,
+    and the tombstone lifts the moment its root registers again — by which time
+    a per-visible-project read would have let retention delete them.
     """
-    from aisquare.services import project as projects
 
     def collect(active: ContextStore) -> set[str]:
         found: set[str] = set()
-        for info in projects.list_projects():
-            for data in active.work_briefs(info.id):
-                brief = WorkBrief.model_validate_json(data)
-                found.update(e.report_id for e in brief.evidence if e.report_id is not None)
+        for data in active.all_work_briefs():
+            brief = WorkBrief.model_validate_json(data)
+            found.update(e.report_id for e in brief.evidence if e.report_id is not None)
         return found
 
     if store is not None:
@@ -899,6 +901,14 @@ def set_mode(mode: str, *, cwd: Path | None = None) -> str:
     return mode
 
 
+#: The most the work block may cost in the session-start output. Claude Code caps
+#: hook output at 10,000 characters and truncates the rest, so this block (the
+#: least critical part: the board banner and assignment come first) is held well
+#: under it. Enforced after every append, and the per-field clips below keep one
+#: oversized value from consuming the whole budget in one line.
+_WORK_BLOCK_BUDGET = 7_000
+
+
 def _clip(text: str, limit: int = 500) -> str:
     """Bound one injected field so a single oversized value cannot blow the
     session-start hook budget (finding 15). The full text is always available
@@ -957,22 +967,38 @@ def session_context(
     # `mode off` means no native instructions at all; the requirements below are
     # facts about the project and are shown either way.
     # Requirements are factual project state, not a work-mode preference.
+
+    def size() -> int:
+        return sum(len(line) + 1 for line in lines)
+
     for data in store.work_briefs(project_id):
-        brief = WorkBrief.model_validate_json(data)
+        try:
+            brief = WorkBrief.model_validate_json(data)
+        except ValidationError:
+            # Finding 2 at the grain of one row: a brief this build cannot read (a
+            # newer aisquare wrote it) costs that brief's lines, not the block —
+            # the working rules and every other brief still reach the session.
+            lines.append(
+                "A work brief on this board could not be read by this build; `asq brief list`."
+            )
+            continue
         relevant = [r for r in brief.requirements if not task_id or task_id in r.task_ids]
         if not relevant:
             continue
         lines.append(f"Work brief {brief.id} r{brief.revision}: {brief.title}")
         for requirement in relevant:
-            if sum(len(line) for line in lines) > 5000:
-                lines.append(f"More requirements omitted: `asq brief show {brief.id}`.")
-                break
             lines.append(
                 f"{requirement.id} r{requirement.revision} [{requirement.source_revision}]: "
                 f"{_clip(requirement.text)}; check: {_clip(requirement.expected_check or 'define')}"
             )
+            # Checked AFTER appending (finding 15): a check that ran before could
+            # always be passed by the next ~1,000-character line.
+            if size() > _WORK_BLOCK_BUDGET:
+                lines.pop()
+                lines.append(f"More requirements omitted: `asq brief show {brief.id}`.")
+                break
         lines.append(f"Full contract and corrections: `asq brief show {brief.id}`.")
-        if sum(len(line) for line in lines) > 7000:
+        if size() > _WORK_BLOCK_BUDGET:
             lines.append("More requirements available with `asq brief list` and `asq brief show`.")
             break
     return "\n<aisquare-work>\n" + "\n".join(lines) + "\n</aisquare-work>"

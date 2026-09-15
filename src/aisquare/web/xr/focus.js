@@ -209,7 +209,14 @@ export class FocusPanel {
   }
 
   /** A `{t:"transcript"}` frame for the focused session (§6). */
-  append({ text, seq } = {}) {
+  append({ text, seq, reset = false } = {}) {
+    // `reset: true` marks the first frame after the server started following a
+    // DIFFERENT or REPLACED transcript file: `seq` restarts at 1 and the lines
+    // already on the panel belong to the old file. Clear and reset the watermark
+    // BEFORE the replay guard below — otherwise every frame of the new stream up
+    // to the old high-water mark is discarded as a replay and the panel freezes
+    // on the old file. This is the reconnect fix (`resetSeq`), now mid-stream.
+    if (reset === true) this.resetSeq();
     if (typeof seq === 'number') {
       if (seq <= this.seq) return; // a replay after reconnect
       this.seq = seq;

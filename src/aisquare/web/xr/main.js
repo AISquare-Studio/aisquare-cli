@@ -1149,9 +1149,13 @@ function startLiveFeed() {
    *  - `audio_unexpected` is a stray-frame report, not a burst error: it consumes
    *    no queue entry (that would misattribute the next final) and ends nothing.
    *  - Anything else (`internal`, `no_transcript`, `no_such_session`,
-   *    `ambiguous_session`, `bad_message`, `board_unavailable` — which the
-   *    server follows with close 1013, so net.js reconnects with the token kept —
-   *    and any future code) is shown on the focused panel and the HUD.
+   *    `bad_message`, `board_unavailable` — which the server follows with close
+   *    1013, so net.js reconnects with the token kept — `transcript_gone`, and
+   *    any future code) is shown on the focused panel and the HUD.
+   *    `transcript_gone` means the tail ENDED because the file has been missing
+   *    for more than 5 s, and only a re-subscribe restarts it — so the line also
+   *    says how: re-focus the panel. (`auth_invalid` / `auth_timeout` are the
+   *    transient auth codes; the chip carries their reason through the 4408 close.)
    *
    * `message` is the server's own words, repeated rather than re-worded — it is
    * written for a human, and this client's paraphrase would only drift from it.
@@ -1188,7 +1192,12 @@ function startLiveFeed() {
         showNotice(errored.session, message, { alert: true, ms: 8000, hudToo: true });
       }
     } else {
-      showNotice(focus.sessionId, message, { alert: true, ms: 8000, hudToo: true });
+      // `transcript_gone`: the tail is over, and the operator is the one who can
+      // restart it (a re-subscribe), so say how rather than leaving a panel that
+      // silently stopped updating with a message that only explains why.
+      const line =
+        code === 'transcript_gone' ? `${message} — re-focus the panel to follow it again` : message;
+      showNotice(focus.sessionId, line, { alert: true, ms: 8000, hudToo: true });
     }
   });
 

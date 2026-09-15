@@ -52,10 +52,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   briefing is delivered exactly as `fleet tell` delivers: typed into a waiting
   agent, a board note for a busy one, with the receipt saying `typed` or `noted`
   (`--json` carries `delivered`). Replacing a persona tells the agent which one it
-  replaces. The session-start hook now asks for `AISQUARE_PERSONA`, else the
-  persona on the fleet row `AISQUARE_FLEET_AGENT` names, else keeps the session's
-  own — so an attached persona is briefed again after a `/clear` or a restart,
-  and a session with no persona anywhere still sees byte-identical text.
+  replaces. The session-start hook now asks for the persona on the fleet row
+  `AISQUARE_FLEET_AGENT` names, else `AISQUARE_PERSONA`, else keeps the session's
+  own. So an attached persona is briefed again after a `/clear` or a restart,
+  even for an agent spawned with `--persona`, and a session with no persona
+  anywhere still sees byte-identical text.
 - **Import anything as a persona.** `aisquare persona import` now converts a
   source that is not already a skill — plain text, another tool's JSON or YAML
   persona, a page over `https://` — with an LLM: the fleet's own Claude Code,

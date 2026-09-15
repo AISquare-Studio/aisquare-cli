@@ -219,7 +219,10 @@ Refused, with the reason in the message: a second `manager`, more agents than
 `max_agents_per_project`, `--worktree` in a project that is not a git
 repository, an unknown role, a persona the project does not have (the known
 names are listed; a stale `[fleet.roles.<role>].persona` default names its key).
-All of these are checked before any window exists.
+All of these are checked before any window exists. A known role is one of
+`aisquare launch`'s roles, a numbered seat of one (`coder2`), or a role bound with
+`team bind` — the same rule `aisquare launch` applies, public as
+`services.fleet.role_ok`.
 
 ### `fleet ls` / `fleet status`
 

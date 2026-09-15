@@ -9,6 +9,7 @@ cannot be loaded costs one line, never the team block.
 from __future__ import annotations
 
 import logging
+import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -17,7 +18,8 @@ from typer.testing import CliRunner
 
 from aisquare.cli.app import app
 from aisquare.core import personas
-from aisquare.core.store import store_session
+from aisquare.core.store import ContextStore, store_session
+from aisquare.models import FleetAgent
 from aisquare.services import team as team_service
 
 SID = "11111111-2222-3333-4444-555555555555"
@@ -302,13 +304,46 @@ def test_a_row_that_cannot_be_read_is_logged_and_the_variable_still_applies(
         caplog.at_level(logging.WARNING, logger="aisquare.services.team"),
         store_session() as store,
     ):
-        asked = team_service._asked_persona(store, "prj_row_unreadable")
+        asked, note = team_service._asked_persona(store, "prj_row_unreadable")
 
     assert asked == "mentor"
+    assert note == (
+        "persona: the fleet row could not be read (RuntimeError) "
+        "— started without an attached persona"
+    )
     (record,) = [r for r in caplog.records if r.name == "aisquare.services.team"]
     assert "agt_01unreadable" in record.getMessage()
     assert "prj_row_unreadable" in record.getMessage()
     assert record.exc_info is not None and record.exc_info[0] is RuntimeError
+
+
+def test_a_start_whose_row_cannot_be_read_says_so_in_one_line_and_still_briefs(
+    work: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """P20's amendment: the attached persona must not vanish silently from the briefing."""
+    monkeypatch.setenv("AISQUARE_PERSONA", "mentor")
+    monkeypatch.setenv("AISQUARE_FLEET_AGENT", _fleet_row(work, "skeptic"))
+    real = team_service._fleet_row_named
+    calls: list[str] = []
+
+    def locked_once(store: ContextStore, project_id: str) -> FleetAgent | None:
+        calls.append(project_id)
+        if len(calls) == 1:
+            raise sqlite3.OperationalError("database is locked")
+        return real(store, project_id)
+
+    monkeypatch.setattr(team_service, "_fleet_row_named", locked_once)
+    with caplog.at_level(logging.WARNING, logger="aisquare.services.team"):
+        lines = _start(work).split("\n")
+
+    assert lines[-2] == (
+        "persona: the fleet row could not be read (OperationalError) "
+        "— started without an attached persona"
+    )
+    assert lines[-1] == "</aisquare-team>"
+    assert _blocks("\n".join(lines)) == [MENTOR], "the launch variable still briefs"
+    assert "database is locked" not in "\n".join(lines), "the line names a class, never a value"
+    assert any(r.exc_info for r in caplog.records if r.name == "aisquare.services.team")
 
 
 def test_a_fleet_row_without_a_persona_leaves_the_start_byte_identical(

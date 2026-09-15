@@ -1281,6 +1281,7 @@ def hook_session_start(
         # other session's injected context.
         model = harness.clean_model_id(model)
         effort = harness.clean_effort(effort)
+        asked_persona, persona_note = _asked_persona(store, project.id)
         session = store.upsert_session(
             TeamSession(
                 id=session_id,
@@ -1293,10 +1294,10 @@ def hook_session_start(
                 account=session_account(transcript_path),
                 model=model,
                 effort=effort,
-                # Recorded as ASKED, loadable or not (§3.7): the variable, else an
-                # attached persona on this pane's fleet row (§4.7); asking for none
-                # keeps what the session row already holds (the store's COALESCE).
-                persona=_asked_persona(store, project.id),
+                # Recorded as ASKED, loadable or not (§3.7): this pane's fleet row
+                # persona, else the variable (§4.7, P20); asking for none keeps what
+                # the session row already holds (the store's COALESCE).
+                persona=asked_persona,
             )
         )
         if role is not None and known is not None and known.role != role:
@@ -1312,6 +1313,7 @@ def hook_session_start(
             me=session,
             assigned=assigned,
             briefing=True,
+            persona_note=persona_note,
         )
 
 
@@ -1757,10 +1759,12 @@ def _render_board(
     me: TeamSession | None,
     assigned: Assignment | None = None,
     briefing: bool = False,
+    persona_note: str | None = None,
 ) -> str:
     """The ``<aisquare-team>`` block. ``briefing`` is SessionStart's alone: it adds
     ``me``'s persona after the role cycle — never on the board command, never on a
-    per-prompt path, so no factual surface carries persona text (§3.1)."""
+    per-prompt path, so no factual surface carries persona text (§3.1).
+    ``persona_note`` is the one line saying why no attached persona was read."""
     now = _now()
     lines = ["<aisquare-team>"]
     if me is not None:
@@ -1831,6 +1835,8 @@ def _render_board(
         ]
         if briefing and me.persona:
             lines += _persona_briefing(me.persona, project.root)
+        if briefing and persona_note:
+            lines.append(persona_note)
     lines.append("</aisquare-team>")
     return "\n".join(lines)
 
@@ -2111,7 +2117,7 @@ def _persona_briefing(name: str, root: Path) -> list[str]:
         return [f'persona "{name}": {reason} — launched without it']
 
 
-def _asked_persona(store: ContextStore, project_id: str) -> str | None:
+def _asked_persona(store: ContextStore, project_id: str) -> tuple[str | None, str | None]:
     """The persona a session start asks for (docs/plans/spawn-personas.md §4.7).
 
     The persona on the ``fleet_agent`` row ``AISQUARE_FLEET_AGENT`` names, when
@@ -2121,12 +2127,16 @@ def _asked_persona(store: ContextStore, project_id: str) -> str | None:
     attachment survives a ``/clear`` or a restart even for an agent spawned with
     ``--persona``. Otherwise ``AISQUARE_PERSONA``, which is all a hand-typed
     launch with no fleet row has. ``None`` asks for nothing, and the session row
-    keeps whatever it recorded before. Fail-open: a row that cannot be read is
-    logged and costs only the row, never the team block.
+    keeps whatever it recorded before.
+
+    Returns ``(persona, note)``. Fail-open, but never silently: a row that cannot be
+    read costs only the row, never the team block. It is logged with its traceback,
+    and ``note`` is the one briefing line that tells the agent it started without
+    an attached persona. The note names the exception class, never a value.
     """
     try:
         row = _fleet_row_named(store, project_id)
-    except Exception:
+    except Exception as exc:
         _log.warning(
             "session start: fleet row %s for project %s could not be read; "
             "falling back to AISQUARE_PERSONA",
@@ -2134,10 +2144,14 @@ def _asked_persona(store: ContextStore, project_id: str) -> str | None:
             project_id,
             exc_info=True,
         )
-        row = None
+        note = (
+            f"persona: the fleet row could not be read ({type(exc).__name__}) "
+            "— started without an attached persona"
+        )
+        return orchestrator.env_persona(), note
     if row is not None and row.persona:
-        return row.persona
-    return orchestrator.env_persona()
+        return row.persona, None
+    return orchestrator.env_persona(), None
 
 
 def event_line(event: TeamEvent, roles: dict[str, str]) -> str:

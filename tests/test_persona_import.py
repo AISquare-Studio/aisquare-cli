@@ -26,7 +26,7 @@ from aisquare.cli import persona as persona_cli
 from aisquare.cli.app import app
 from aisquare.core import harness, personas
 from aisquare.core.config import AppConfig, RoleLaunchProfile, save_config
-from aisquare.core.paths import aisquare_home
+from aisquare.core.paths import aisquare_home, config_path
 from aisquare.core.personas import PersonaError
 from aisquare.core.spawn import EXCLUDED, SEAMS
 from aisquare.services import persona_import
@@ -108,8 +108,12 @@ def _runs(monkeypatch: pytest.MonkeyPatch, *answers: _Completed | BaseException)
     return recorder
 
 
+#: A structured answer cut off at ``max_tokens`` — what the SDK's parser was handed.
+TRUNCATED = '{"name": "kind-reviewer", "description": "Rev'
+
+
 def _fake_sdk(
-    monkeypatch: pytest.MonkeyPatch, outcome: object | Literal["auth"]
+    monkeypatch: pytest.MonkeyPatch, outcome: object | Literal["auth", "truncated"]
 ) -> list[dict[str, Any]]:
     """A stand-in ``anthropic`` with the names the engine uses; returns the recorded calls."""
     calls: list[dict[str, Any]] = []
@@ -125,6 +129,10 @@ def _fake_sdk(
             calls.append(kwargs)
             if outcome == "auth":
                 raise AuthenticationError("401")
+            if outcome == "truncated":
+                # The real parser validates the text itself, so this is the exception it
+                # raises: pydantic's ValidationError, which is not an AnthropicError.
+                persona_import.PersonaDraft.model_validate_json(TRUNCATED)
             return SimpleNamespace(
                 parsed_output=outcome,
                 usage=SimpleNamespace(input_tokens=1_200, output_tokens=340),
@@ -323,6 +331,26 @@ def test_api_credentials_missing_is_reported_as_such(
     assert "no usable credentials" in str(caught.value)
 
 
+def test_an_api_answer_cut_off_mid_draft_is_a_reason_not_a_traceback(
+    engines: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, runner: CliRunner
+) -> None:
+    """Peer review #185: a draft cut off at max_tokens escaped as a ValidationError traceback."""
+    _fake_sdk(monkeypatch, "truncated")
+    notes = _notes(tmp_path)
+
+    with pytest.raises(PersonaError) as caught:
+        _import(str(notes), engine="api")
+    cli = runner.invoke(
+        app, ["--json", "persona", "import", str(notes), "--engine", "api", "--yes"]
+    )
+
+    assert caught.value.code == "no_import_engine"
+    assert "api engine: no structured draft — the answer did not parse" in str(caught.value)
+    assert '"description"' not in str(caught.value), "the reason carries no answer text"
+    assert cli.exit_code == 1, cli.output
+    assert json.loads(cli.stdout)["error"] == "no_import_engine"
+
+
 def test_forcing_an_engine_never_touches_the_other(
     engines: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -351,6 +379,36 @@ def test_engine_off_in_config_refuses_the_llm_path_before_anything_runs(
 
     assert caught.value.code == "import_engine_off"
     assert runs.calls == []
+
+
+def test_a_config_that_will_not_load_refuses_the_llm_path_unless_an_engine_is_named(
+    engines: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Peer review #185: `engine = "off"` must fail CLOSED when the file around it is broken."""
+    path = config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        '[persona.import]\nengine = "off"\n\n[snapshot]\nignore = "node_modules"\n',
+        encoding="utf-8",
+    )
+    runs = _runs(monkeypatch, _envelope())
+
+    with pytest.raises(PersonaError) as caught:
+        _import(str(_notes(tmp_path)))
+
+    assert caught.value.code == "config_unreadable"
+    assert "(ValidationError)" in str(caught.value)
+    assert "node_modules" not in str(caught.value), "the reason names a class, never a value"
+    assert runs.calls == [], "no engine ran on a config that may say off"
+
+    progress: list[str] = []
+    result = _import(str(_notes(tmp_path)), engine="manager", progress=progress)
+
+    assert result.engine == "manager"
+    assert len(runs.calls) == 1
+    assert any(
+        line.startswith("config.toml could not be read (ValidationError)") for line in progress
+    )
 
 
 # --- validate, retry, keep -----------------------------------------------------------------

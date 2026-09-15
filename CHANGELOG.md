@@ -7,6 +7,144 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **`aisquare xr` — the board as a spatial client (cliXR, M1–M7).** A new command
+  serving a static WebXR client and one websocket on `127.0.0.1:8748`, beside
+  `serve` on 8747, from the new `[xr]` extra. It projects live board state:
+  one session per panel, with the role bucket, `working` / `waiting` /
+  `needs_you`, a claimed task's title, and a six-word summary computed from the
+  session's most recent board event — never from its transcript, which reaches
+  a client only for the one session it explicitly subscribes to. The projector
+  polls the store every 500 ms and sends a delta only when something moved, so
+  nothing in the hook path changes and no agent session can be blocked by a
+  headset.
+  - The wire protocol is generated, not described: a Pydantic model per message
+    in `services/xr/protocol.py`, with `python -m aisquare.services.xr.protocol
+    --write` emitting `web/xr/protocol.schema.json` and `--check` failing on
+    drift, so the browser client and the server cannot diverge silently. One
+    message beyond the plan's draft — `ack` — because a prompt sent to a panel
+    is delivered either by typing into a waiting pane or by filing a board note
+    (`fleet tell`'s own two paths), and an operator wants to know which.
+  - Auth is `serve`'s bearer token, from the same 0600 file: one credential for
+    both servers. It arrives in the socket's first frame (a browser cannot set
+    a header on a `WebSocket`) and is printed as a URL fragment, which is never
+    sent to a server and never lands in a log. `xr` prints the `adb reverse
+    tcp:8748 tcp:8748` line and the `chrome://flags` secure-origin note on
+    start, because `navigator.xr` exists only in a secure context and a LAN
+    address is not one. An occupied port is a sentence and exit 1
+    (`xr_port_busy`), checked before anything is activated.
+  - One toolchain note that comes with the extra: `faster-whisper` pulls in
+    numpy, whose stubs are PEP 695, and mypy parses them under this project's
+    `python_version = "3.11"` and stops the whole run on a syntax error in a
+    file nobody here imports. A `[[tool.mypy.overrides]]` skips them, which
+    takes `follow_imports_for_stubs` as well as `follow_imports` — the first
+    alone leaves the stub parsed and the run still red.
+  - **Voice (M6, server half).** Between an `audio` header and its `audioEnd`
+    the binary frames go to a per-connection faster-whisper transcriber
+    (`base.en` by default, `AISQUARE_XR_WHISPER_MODEL=small.en` allowed):
+    interim `stt` frames while the operator speaks, then the final `stt`, and
+    the SERVER routes the final text as the prompt — `fleet tell` into a
+    waiting pane or a board note — and answers with the same `ack` a typed
+    prompt gets. Releasing the trigger is the commit; the client sends no
+    `prompt` for voice. Every call into the model runs on a daemon thread from
+    a per-connection worker fed in wire order, so the socket keeps being read
+    (pongs answered, typed prompts and `audioEnd` not queued behind a decode),
+    frames that arrive during a slow decode are fed as one chunk, and Ctrl-C
+    stops the server while a model is still downloading. The model's
+    voice-activity gate decides whether a press had speech in it, so a breath
+    or a click is an empty final and never a prompt. Each burst is answered by
+    at most one error, after which its remaining frames are accepted and
+    discarded: `stt_unavailable` (no backend; the message carries the install
+    or pre-download line), `stt_empty` (no audio frame arrived at all),
+    `stt_failed` (the backend raised), `audio_too_long` (past 60 s or its byte
+    equivalent, counted as frames arrive), `audio_misaligned` (a frame that is
+    not a whole number of samples — the sender lost or added a byte, so the
+    burst is dropped rather than transcribed as byte-shifted noise) and
+    `audio_unexpected` (audio with no open burst). An `audio` header that
+    arrives while a burst is open ends that burst as its `audioEnd` would have
+    and opens the next, so a trigger bounce loses neither sentence. A headset
+    that disconnects after releasing the trigger still gets its sentence
+    routed; one that disconnects mid-burst loses only that burst, quietly. A
+    board that cannot be read at connect is a `board_unavailable` error and a
+    clean close 1013 (try again later) rather than a dropped transport, and a
+    binary first frame is refused like any other non-auth frame
+    (`auth_invalid`, close 4408: no token was checked, so the client retries).
+    `ack.ok` is true whenever the text reached the agent by either route and
+    false only when delivery raised. Ambient summaries of task events
+    lead with a board-status verb (`doing:`, `review:`, `done:`, `released:` …)
+    so a claim and a hand-off are different panels.
+  - `doctor` gains an `xr` row — the extra, port 8748 and the cached whisper
+    model on one line, below `browser tools` so it cannot evict an actionable
+    row from the fleet sidebar. Absences are **ok**: an extra nobody installed
+    and a model nobody has downloaded are not faults, and `install.sh` exits 2
+    on any amber row but `brain`, so the row stays green on a base install and
+    carries the install and pre-download lines in its detail instead. It
+    **warns** only for something to act on: 8748 held, a faster-whisper install
+    missing its ctranslate2 or onnxruntime wheel, a cached model directory with
+    no loadable snapshot, or an unsupported `AISQUARE_XR_WHISPER_MODEL`.
+  - Review hardening of the badge and transcript paths, each a panel that looked
+    right while being wrong: an unread badge now counts each session from its own
+    watermark rather than a board-wide window, so a busy session no longer
+    silently zeroes a quiet one's badge, and a late joiner counts from the
+    connection's start with no per-tick re-seeding read. The transcript tail
+    follows a session re-pointed at a new file, re-reads a file replaced by one
+    at least as long (by inode, not size alone), replays a final record larger
+    than the backlog window, retries a briefly-missing file rather than dying on
+    it (surfacing `transcript_gone` only on a lasting loss), and marks a restart
+    with `transcript.reset` so the client clears instead of appending a
+    replacement below the old conversation. On the wire: the auth close code
+    splits into 4401 (`auth_failed`, a rejected token, do not retry) and 4408
+    (`auth_timeout`/`auth_invalid`, a stalled or malformed handshake, retry); a
+    session id — on `subscribe`, `prompt`, `audio` and `audioEnd` alike — must
+    be a non-empty non-glob string, and a spoken-at prefix resolves on this
+    board the way a typed one does (an ambiguous one is refused in the `ack`);
+    a mismatched `audioEnd` keeps the header's session (logged, not refused)
+    and an over-long burst is
+    answered once with `audio_too_long`; and the audio format lives once in
+    `protocol.py`, with `frameBytes` and the burst cap derived from it.
+  - **The client** (`web/xr/`, plain ES modules, no build step; three.js from a
+    CDN). An ambient ring drawn from one shared texture atlas — one texture per
+    panel is what tanks the frame rate at ten of them, so the atlas is the
+    design and not a later optimization — and a focus tier that pulls one panel
+    forward on a `text-optimized` quad layer, requested as an optional feature
+    and checked before use so a device without `layers` still works. Focus
+    subscribes to that one session's transcript; the ring never carries
+    transcript text. Controller ray, select, rotate, recenter, collapse and
+    summon with pose re-anchoring on summon rather than on session start, which
+    is what survives guardian drift.
+  - **Push-to-talk** (`[xr]` brings faster-whisper). The left trigger — or `t`
+    on the desktop — captures 16 kHz mono PCM16LE in 20 ms frames, with an RMS
+    gate so a held trigger in a quiet room never reaches the model, an interim
+    decode about once a second onto the focus panel, and a final transcript on
+    release that is routed as the prompt. The client sends no `prompt` frame of
+    its own for a voice utterance: releasing the trigger is the commit, and a
+    client that echoed one would deliver the sentence twice. Capture stops
+    itself at 55 s, inside the server's 60 s, closing the utterance rather than
+    abandoning it — the words already spoken are still transcribed.
+  - **Alerts.** A session entering `needs_you` turns its bar `#FF5A4E`, the one
+    token reserved for that state and used nowhere else, and fires a chime at
+    that panel's own world position — the point being to say *where to turn*.
+    It fires once on the transition in, not once per notice, because Claude
+    re-notifies while parked. **B** sweeps focus through the alerting panels in
+    angle order. The bar is the panel's left edge, and neighbours overlap where
+    the arc compresses — twelve panels, or the ring pulled in — so every panel
+    is louvred 6° with that edge leaning toward you: the bar wins the depth
+    test at a seam instead of vanishing behind the panel to its left. A session
+    waiting on you stays on the ring, alert standing, however long you are away:
+    only a session with no attention flag ages out on the 30-minute clock,
+    because a parked session writes nothing until you answer it.
+  - **Reconnect.** A connection chip reports the transport in words —
+    `connected`, `reconnecting — attempt N`, `server gone`, `auth failed` — as
+    DOM rather than scene, so it survives a WebGL context loss. Backoff runs
+    500 ms to 8 s; after five failures the wording changes to `server gone`
+    while retries continue, and a restarted server is picked up **without a page
+    reload**, which is what you cannot comfortably do in a headset. `auth
+    failed` is the one state that stops retrying, since the same token will be
+    rejected again.
+  - **[`docs/xr-demo.md`](docs/xr-demo.md)** is the runbook: the nine demo
+    steps, the three traps, the recovery drill, the exact command that puts a
+    live session into `needs_you` on demand, and a definition-of-done table
+    that separates what a desktop has verified from the four lines only a
+    headset can settle. Those four are **not** claimed.
 - **Accounts, in `asq` and on the command line.** A new **Accounts** section in
   the fleet UI's sidebar opens a page with the AISquare sign-in on top and the
   Claude Code accounts under it. The AISquare card runs `aisquare login`'s

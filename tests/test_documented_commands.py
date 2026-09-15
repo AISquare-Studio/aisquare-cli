@@ -22,7 +22,7 @@ Scope, stated rather than implied:
 
 - Only fenced code blocks are read. Prose is excluded on purpose — "aisquare has
   two halves" is a sentence, and a guard that flags sentences gets switched off.
-- A line is split on `&&`, `||` and `;`, so the second half of the runbook's
+- A line is split on `&&`, `||`, `|` and `;`, so the second half of the runbook's
   `which aisquare && aisquare --version` preflight is parsed. Requiring the LINE
   to start with `aisquare` had silently dropped it.
 - A BLOCKQUOTED fence is a fence. `> ```bash` styles an aside; the fence still
@@ -123,6 +123,27 @@ DOCUMENTED = (
     # The live-wiring handoff: doctor, the hooks by hand, metrics — all meant to
     # be typed against the staging server.
     "docs/ci-live-wiring-handoff.md",
+    # The XR demo runbook. Its fenced lines are the ones an operator types
+    # before putting the headset on — `doctor`, `launch`, `board`, `xr`, and the
+    # two `hook` invocations behind the pipes in §15 step 7 — so a flag that
+    # leaves the CLI must fail here. `aisquare xr` IS fenced and IS extracted
+    # (three lines, and the CENSUS entry below counts them): the integration
+    # task converted the inline mentions when it added the command, which is
+    # what the note that stood here used to promise (docs/plans/clixr.md
+    # §11/M7-M9). Do not restore the inline form to match a stale reading of
+    # this comment — that would drop three of the eleven commands from the
+    # census. Which floor catches that is the whole point, so name it exactly:
+    # THIS DOCUMENT'S OWN floor does, and it goes RED.
+    # `test_every_aisquare_mention_is_classified` is parametrized over this
+    # tuple and asserts `len(extracted) >= was_resolved * 0.8`; with a CENSUS of
+    # eleven the floor is 8.8, and `8 >= 8.8` is false. The GLOBAL floor is the
+    # one that would have absorbed it silently — it is derived from every
+    # document at once (149 * 0.8 = 119.2, against 176 found when this was
+    # measured on 2026-09-13), and lives ~500 lines up in
+    # `test_the_extractor_found_the_documented_commands`. Three lines off a
+    # margin that wide is invisible there. That gap between the two floors is
+    # the reason this file carries a per-document one at all.
+    "docs/xr-demo.md",
 )
 
 #: Directories the staleness sweep never enters. Everything else under the repo
@@ -213,7 +234,19 @@ def _shell_lines(markdown: str) -> list[tuple[int, str]]:
 
 
 #: Shell operators that end one command and begin another on the same line.
-_SEQUENCERS = re.compile(r"\s*(?:&&|\|\||;)\s*")
+#:
+#: A single `|` is in here for the same reason `&&` is: the command after it is
+#: a command. `docs/xr-demo.md`'s alert trigger is
+#: `printf '{…}' | aisquare hook notification` — the payload has to come from
+#: somewhere, a hook reads it on stdin, and that pipeline is the literal line an
+#: operator runs at the moment the whole demo is built around. Without this the
+#: segment starts at `printf`, no `aisquare` head is found, and the most
+#: important command in that document was reported as an unclassified mention.
+#: `||` stays ahead of `|` in the alternation, so it still wins.
+#:
+#: `_walk` already truncated a resolved command at `|`, so nothing downstream
+#: changes: this only lets the extractor SEE the right-hand side.
+_SEQUENCERS = re.compile(r"\s*(?:&&|\|\||\||;)\s*")
 
 #: `aisquare`, or any path ending in it, at the head of a segment. The optional
 #: `exec` is there because a cron wrapper's real line is
@@ -886,6 +919,20 @@ CENSUS = {
     # Measured 2026-09-02: eight commands, two path mentions (`../aisquare-ci`,
     # `src/aisquare/...`).
     "docs/ci-live-wiring-handoff.md": (8, 2),
+    # Re-measured 2026-09-13 by the integration task (plan §11/M7-M9), which is
+    # what the previous note here asked for. The document was rewritten so every
+    # step is an instruction, and the `aisquare xr` mentions that were inline
+    # because the command did not exist yet are now fenced: eleven fenced
+    # commands — `doctor`, three `launch`, `board`, two `xr`, `xr --show-token`,
+    # `--json board`, and the two `hook` invocations that drive §15 step 7 on
+    # demand. The last two are the right-hand side of a `printf … |` pipeline,
+    # which is why `_SEQUENCERS` learned `|`.
+    #
+    # The one classified mention is the `pipx install 'aisquare-cli[xr]'` line in
+    # "Before you start": `aisquare-cli` matches the path-segment reason, so it is
+    # recorded as a mention rather than resolved as a command. That is correct —
+    # it names the distribution, not a subcommand of the CLI.
+    "docs/xr-demo.md": (11, 1),
 }
 
 
@@ -1097,11 +1144,16 @@ def test_a_blockquoted_fence_is_still_a_fence() -> None:
 
     found = _from_text("doc.md", markdown)
 
-    # The pipeline stays in the stored text: a single `|` is not a sequencer, so
-    # the segment is the whole line, and `_split` drops the tail later. Asserting
-    # the trimmed form here would be asserting `_split`'s job in `_from_text`'s
-    # test — which is how the first version of this assertion was wrong.
-    expected = "aisquare --json explainability status | jq -c .shipping"
+    # The pipeline does NOT stay in the stored text any more: `|` became a
+    # sequencer when `docs/xr-demo.md` started documenting
+    # `printf '{…}' | aisquare hook notification`, where the command worth
+    # validating is on the RIGHT of the pipe and was invisible before. So the
+    # extractor now ends this segment at the pipe and `jq -c .shipping` becomes
+    # a segment of its own with no `aisquare` head, which is dropped.
+    #
+    # What this test exists for is unchanged and still asserted: a blockquoted
+    # fence is a fence, and the command resolves to `explainability status`.
+    expected = "aisquare --json explainability status"
     assert [invocation.text for invocation in found] == [expected], (
         f"a blockquoted fence was read as prose: {found}"
     )

@@ -486,6 +486,57 @@ remove `~/.aisquare/projects/<id>/brain` and re-run
 `AISQUARE_BRAIN_EMBED=1 aisquare team distill --all`. `doctor` flags
 knob-vs-schema mismatches in both directions.
 
+### Spatial board (`aisquare xr`)
+
+The same board as a ring of panels around you in passthrough, for a WebXR
+headset. One panel per live session, coloured by role, showing state
+(`working` / `waiting` / `needs you`) and a six-word summary; focus one to read
+its transcript and talk to it. Ten sessions held in peripheral awareness
+instead of ten terminal tabs.
+
+```sh
+pipx install 'aisquare-cli[xr]'
+aisquare xr                      # static client + websocket on 127.0.0.1:8748
+aisquare xr --show-token         # the URL, the token and the adb line
+adb reverse tcp:8748 tcp:8748    # then open http://localhost:8748 in the headset
+```
+
+`adb reverse` over USB is not optional advice. `navigator.xr` exists only in a
+secure context, `http://` counts as secure on `localhost` and nowhere else, and
+over a LAN address the session request fails with an error that names none of
+this. Untethered, add the LAN origin under `chrome://flags` → "Insecure origins
+treated as secure" in the Quest browser instead. `xr` prints both on start.
+
+The token is `serve`'s — same credential, same file — and it rides in the URL
+fragment, which is never sent to a server and never lands in a log. `xr` is
+read-only on the board except for one path: a prompt spoken or typed at a panel
+reaches that session the same way `fleet tell` does, by typing into a waiting
+pane or by filing a board note, and the client is told which happened.
+
+What the client does with that feed: an **ambient ring** of panels drawn from
+one shared texture atlas — one texture per panel is what tanks the frame rate
+at ten of them — and a **focus tier** that pulls a single panel forward on a
+`text-optimized` quad layer to be read, with its transcript streamed for that
+session alone. **Push-to-talk** on the left trigger (or `t` on the desktop)
+captures 16 kHz mono PCM16LE, shows interim text on the focus panel while you
+speak, and routes the final transcript as the prompt — releasing the trigger is
+the commit, so nothing is sent twice. A session entering `needs_you` turns its
+bar the one colour reserved for it and fires a chime **from that panel's own
+position**, so it tells you where to turn rather than only that something
+happened. A dropped server shows in a connection chip in words and reconnects
+on its own, without a page reload — which is what you cannot comfortably do
+while wearing a headset.
+
+`aisquare doctor` carries an `xr` row answering the three preconditions in one
+line: the extra installed, port 8748 free, and the whisper model already in the
+Hugging Face cache — the last being the only one that fails *late*, on the first
+push-to-talk, if it is not.
+
+The runbook is **[`docs/xr-demo.md`](docs/xr-demo.md)**: the nine demo steps,
+the three traps that each cost an hour if you meet them live, the recovery
+drill, and a definition-of-done table that separates what has been verified on
+a desktop from the four lines only a headset can settle.
+
 ### Remote agents over MCP (`aisquare serve`)
 
 The same board, tasks, and notes — exposed as an MCP server so Claude
@@ -696,6 +747,7 @@ aisquare
 │                   tester, reviewer, ui-tester), a numbered seat (coder1), or any role you
 │                   have bound; env merges over `team bind`
 ├── serve [--stdio | --port N --bind H] [--show-token]
+├── xr [--port N --bind H] [--show-token]   the spatial board (WebXR, :8748)
 ├── ui              the fleet UI — what bare `asq` opens at a terminal (docs/fleet.md)
 ├── fleet           spawn <role> [--label L] [--task ID] [--worktree/--no-worktree]
 │                             [--permission-mode M] [--bin B] [--prompt TEXT] [--account SLOT]

@@ -48,6 +48,46 @@ serve = [
   # keeps one from being resolved in the first place.
   "mcp>=2.1,<3",
 ]
+xr = [
+  # The `aisquare xr` transport: static client + one websocket on 8748.
+  # Starlette is the ASGI app and uvicorn runs it -- the same pair `serve`
+  # already reaches for (mcp brings them in), chosen here for the same reason:
+  # the websocket half of this server is twelve lines on starlette and a
+  # protocol implementation on anything smaller.
+  #
+  # The floors are stated as what was MEASURED, not as library history: both
+  # are 2024 releases (starlette 0.37.0 2024-02-05, uvicorn 0.30.0
+  # 2024-05-28) and both declare requires-python >=3.8, so every interpreter
+  # this package supports is in range. The four pins were resolved together
+  # with a `pip install --dry-run` on 3.12 and on 3.14 -- the two
+  # interpreters on the machine this was written on -- and both pick the same
+  # set (starlette 1.6.0, uvicorn 0.52.4, websockets 17.1, faster-whisper
+  # 1.2.1). 3.11 and 3.13 were NOT run here; CI's matrix covers them, and
+  # that is the honest limit of this note. This code uses nothing newer than
+  # the floors: an ASGI app, a websocket route, and
+  # `uvicorn.run(app, host=, port=)`.
+  #
+  # Lower bounds only. An upper bound here would strand an operator who
+  # already has a newer starlette in the same environment for something else,
+  # and unlike the `mcp` pins above there is no rename to defend against --
+  # if one comes, the failure is an import error at start, not a silently
+  # wrong server.
+  "starlette>=0.37",
+  "uvicorn>=0.30",
+  # uvicorn speaks HTTP on its own but delegates the websocket protocol, and
+  # with neither `websockets` nor `wsproto` installed it answers every
+  # handshake with 404 -- a server that serves the page and silently refuses
+  # the socket. So this is a runtime dependency of the feature, not a dev
+  # convenience. >=12 is the rewritten asyncio implementation uvicorn's
+  # `websockets` impl targets.
+  "websockets>=12",
+  # Speech-to-text for push-to-talk: services/xr/speech.py loads it lazily,
+  # inside the transcriber factory services/xr/server.py calls per connection;
+  # declared here because the extra is what an operator installs once, and a
+  # second install step for the half of the feature that needs a microphone
+  # is the step everyone skips.
+  "faster-whisper>=1.0",
+]
 explainability = [
   # This extra installs a distribution that shares our top-level package
   # DIRECTORY. `aisquare` (the SDK) ships aisquare/__init__.py; so do we. pip's
@@ -115,6 +155,18 @@ dev = [
   # py.typed and mypy runs strict over tests.
   "jsonschema>=4.18",
   "types-jsonschema>=4.18",
+  # The web half of `[xr]`, duplicated here exactly as `mcp` is above and for
+  # the same reason: mypy runs strict over src and tests, and an unresolvable
+  # `import starlette` in services/xr/ is a red typecheck job in CI, which
+  # installs `.[dev]` alone. faster-whisper is deliberately NOT duplicated --
+  # it is imported in exactly one place, lazily, inside speech.py's factory,
+  # and the mypy override below covers that import in both environments; it
+  # would drag ctranslate2 and a CUDA-shaped wheel set into every CI run to
+  # type nothing. The suite runs the real model only when the [xr] extra is
+  # present (tests/test_xr_speech_backend.py) and skips it otherwise.
+  "starlette>=0.37",
+  "uvicorn>=0.30",
+  "websockets>=12",
 ]
 
 [project.scripts]
@@ -150,3 +202,55 @@ files = ["src", "tests"]
 strict = true
 pretty = true
 plugins = ["pydantic.mypy"]
+
+# numpy reaches the type graph two ways, on two different machines, and this
+# override answers both. It is INSTALLED only when the `xr` extra is
+# (faster-whisper -> ctranslate2 -> numpy). Each of the three lines is
+# load-bearing on exactly one of those machines; all three were measured, cold
+# cache, by deleting them one at a time in both environments.
+#
+# WHERE IT IS INSTALLED (`pip install -e ".[dev,xr]"`): numpy's stubs are
+# written in PEP 695 `type X = ...`, which mypy rejects while `python_version`
+# says 3.11 -- one syntax error inside site-packages, in a file nobody here
+# wrote, that stops the whole run ("errors prevented further checking").
+# Skipping the body is the honest scope: we are not type-checking numpy, we are
+# declining to parse it. `follow_imports` does NOT apply to stub files at all
+# unless `follow_imports_for_stubs` is on, so `follow_imports = "skip"` ALONE
+# leaves the .pyi parsed and the run still dies -- which is what makes this look
+# unfixable from the config, and it was first reported that way. Deleting either
+# line brings the syntax error straight back. Raising `python_version` would be
+# the wrong fix twice over: it is the floor this package supports, and it would
+# silently stop checking our own code against 3.11.
+#
+# WHERE IT IS ABSENT (every `[dev]` install, and CI): `services/xr/speech.py`
+# imports numpy lazily inside the factory, on purpose, and mypy raises
+# `import-not-found` for a module that is simply not on disk. `follow_imports`
+# has nothing to follow in that case and does not suppress it -- measured: with
+# numpy absent the run is green without it. `ignore_missing_imports` is the line
+# that covers this one, and it is the line that is unnecessary on the machine
+# above.
+#
+# Neither branch that merged into this file could see the second case alone:
+# the server tree had no file importing numpy, and the speech tree had no numpy
+# installed. The third line arrived with the merge, from the `[dev]` half of the
+# "green under both extras" acceptance.
+[[tool.mypy.overrides]]
+module = ["numpy", "numpy.*"]
+follow_imports = "skip"
+follow_imports_for_stubs = true
+ignore_missing_imports = true
+
+# faster-whisper is imported in exactly one place -- inside
+# `services/xr/speech.py`'s factory, lazily, so a base install never pays for
+# ctranslate2 and av -- and it is unresolvable in BOTH environments, for two
+# different reasons that this one setting happens to cover:
+#
+#   [dev]      absent from disk    -> import-not-found
+#   [dev,xr]   installed, but ships no py.typed and no stubs -> import-untyped
+#
+# The second is the one worth writing down, because "we installed the extra, so
+# the import resolves" is the reasonable guess and it is wrong. Scoped to this
+# one module name: anything else missing its stubs stays an error.
+[[tool.mypy.overrides]]
+module = ["faster_whisper.*"]
+ignore_missing_imports = true

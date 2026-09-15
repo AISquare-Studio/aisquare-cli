@@ -505,24 +505,47 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   or leave it with the verifier when it is the agent's own work already in
   review. Every role whose cycle pulls from the review pool counts as a
   verifier — `ui-tester` included, which was being told to rework the very
-  work it was spawned to check. The one branch that tells an agent to stand down and ask the manager
-  is the one that earns it: a teammate live on the task right now. An agent
-  meeting its OWN claimed task after a `/clear` or resume carries on — the claim
-  moves with the agent onto its new session id, for every status that keeps one
-  (`review` and `blocked` as well as `doing`), so the board names a session that
-  exists and a second `/clear` still recognises the work. `task next` puts the caller's
-  assigned task first through the same query as every other candidate, so
-  parallel spawns stop racing. `AISQUARE_FLEET_AGENT` is inherited by every
+  work it was spawned to check. Every instruction is one the commands would
+  honour: "claim it" only when `task next` would hand the task out (its needs
+  done) and `task claim` would accept it — so a `doing` task whose holder's
+  lease has run out is offered, not guarded — and a verifier is never told to
+  claim anything: a task it reopened, or one blocked or being worked, is
+  somebody else's turn until it is back in review. The one branch that tells an
+  agent to stand down and ask the manager is the one that earns it: a teammate
+  live on the task right now. An agent meeting its OWN claimed task after a
+  `/clear` carries on — Claude Code fires `SessionEnd(reason: clear)` for the
+  old id *before* the `SessionStart` of the new one, and the end hook used to
+  release the claim into that gap; it now keeps a fleet agent's claims across a
+  clear, and the start that follows moves every one of them (the assigned task
+  and the pool work it took, in every status that keeps a claim) onto the new
+  id together with the row, in one store transaction, so the board names a
+  session that exists and a looper's `task next --claim` in between finds the
+  task still held. `task next` puts the caller's assigned task first through
+  the same query as every other candidate, so parallel spawns stop racing — for
+  the tester, runner and reviewer cycles too, which now pass `--as`, and for the
+  MCP server's `task_next`, which runs under the agent's window and takes the
+  order (never a claim) from it. `AISQUARE_FLEET_AGENT` is inherited by every
   process the agent starts, so a nested `claude -p` reaches both the hook and
-  `task next`: identity is the session id recorded on the row, never the
-  variable alone, so a child is neither briefed on nor able to claim its
-  parent's task. `fleet spawn --task` refuses a task that is already `done` or
-  `dropped`. The whole lookup is fail-open on BOTH doors — the briefing's and
-  `task next`'s — as its docstring always claimed: a damaged or locked store
-  costs the assignment line, never the board and never the work loop. And a
-  session that comes back under a new id is recognised by not being a new
-  process rather than by a list of the harness's source strings, so `compact`
-  keeps its assignment exactly as `/clear` and `resume` do.
+  `task next`: the row belongs to the *process* in its pane — Claude Code hands
+  every hook the pid of the process that fired it (`CLAUDE_PID`), and the hook
+  compares it with the pane's — so a child is neither briefed on nor able to
+  claim its parent's task, whatever start it reports (`resume`, `fork` and
+  `compact` are all things a child can say), and the manager's task-less row
+  is not rebound under a child either; a binary that exports no pid binds its
+  row on first arrival and keeps that session. An assignment ends with its
+  task: once the task is done or dropped the row forgets it, so a later clear
+  or compaction is not re-briefed on finished work — each such briefing used
+  to tell the agent to send the manager a question note, and each note woke
+  the manager for nothing — and a reopened task claimed by someone else is no
+  order to stand down. `fleet spawn --task` refuses a task that is already
+  `done` or `dropped`. The whole lookup is fail-open on BOTH doors — the
+  briefing's and `task next`'s — as its docstring always claimed: a damaged or
+  locked store, or a tmux that does not answer, costs the assignment line,
+  never the board and never the work loop. The first-prompt board an agent
+  gets when it meets the orchestrator late shows the claim under its new
+  holder, not the old one. And `fleet spawn`'s `AISQUARE_FLEET_AGENT` no longer
+  lingers in the tmux *session* environment after the first window: a window
+  opened by hand in the fleet's session used to inherit the first agent's row.
 - **The wheel goes to the program that can use it — Claude Code's fullscreen
   TUI first.** The root of "scroll not working" (reported 2026-09-08 from WSL2
   + Windows Terminal). Claude Code's fullscreen TUI turns on the alternate

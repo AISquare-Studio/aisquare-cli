@@ -191,7 +191,35 @@ follows as a `⚠` line.
 
 Refused, with the reason in the message: a second `manager`, more agents than
 `max_agents_per_project`, `--worktree` in a project that is not a git
-repository, an unknown role.
+repository, an unknown role, a `--task` that is already done or dropped.
+
+**What the agent is told.** `fleet spawn` exports `AISQUARE_FLEET_AGENT` — the
+agent's row — onto its window, and the session-start hook joins the session to
+that row and puts an **ASSIGNED TO YOU** block at the top of the briefing: what
+the task's state asks of *this* role. A coder is told to claim a `todo` task
+(unless it still waits on other tasks — then to take pool work until it is
+ready), to carry on with a `doing` task it holds, to do the rework on a task
+back in `review`, to take over a `doing` task whose holder's lease has run out,
+or to stand down and ask the manager when a teammate is live on it right now. A
+verifier (tester, ui-tester, reviewer, validator) is told to verify a task in
+`review` and, in any other state, that it is not yet its turn. `task next` puts
+the assigned task first — for the agent's own session, and for a verifier's
+cycle or the MCP server's `task_next` running under the same window (the order
+only; a claim needs the session). The assignment ends when its task is done or
+dropped: nothing is said about it afterwards.
+
+The row belongs to the *process* in the pane, not to a session id. Claude Code
+mints a new session id on `/clear` and keeps the process, and it hands every
+hook the pid of the process that fired it (`CLAUDE_PID`), which the hook
+compares with the pane's own (`aisquare launch` execs the agent, so tmux's
+`#{pane_pid}` is the agent). So a `/clear` keeps the agent's claims: the
+`SessionEnd` hook sees the reason and the process, and the `SessionStart` that
+follows moves every claim to the new id together with the row, in one store
+transaction. A nested `claude -p` started from the agent's shell inherits
+`AISQUARE_FLEET_AGENT` but not the pid, so it is never briefed on the parent's
+task and never takes its row, whatever start it reports. A binary that exports
+no `CLAUDE_PID` binds its row on first arrival and keeps that session; a
+`/clear` there releases its claims, as any session end does.
 
 ### `fleet ls` / `fleet status`
 
@@ -408,9 +436,10 @@ precedence rule:
 
 **No `[fleet]` setting is read from the environment**: the fleet reads this
 section from the config file alone. (`AISQUARE_FLEET_AGENT` exists, but it is
-not a setting — `fleet spawn` sets it on each window as the agent's identity,
+not a setting — `fleet spawn` sets it on each window to name the agent's row,
 and the session-start hook reads it to brief the agent on the task it was
-spawned for.) The environment layer is real one level down — the model, effort
+spawned for; see *What the agent is told* under `fleet spawn`.) The environment
+layer is real one level down — the model, effort
 and binary a launch resolves (`AISQUARE_MODEL_<ROLE>` and friends, below) —
 which is the harness's rule, not this one.
 

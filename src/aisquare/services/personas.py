@@ -66,7 +66,10 @@ class SkillRef(BaseModel):
     recognised: bool
     reason: str | None = None
     imported: bool = False
-    """A persona of this name already exists in some layer."""
+    """A user or project persona's ``.persona.json`` names this skill as its source."""
+    taken_by: Layer | None = None
+    """The layer of a persona that holds this skill's name without having come from it —
+    why importing the skill needs ``--name``."""
 
 
 class PersonaDraftView(BaseModel):
@@ -536,14 +539,29 @@ def _is_skill_name(name: str) -> bool:
 
 def importable_skills(root: Path | None) -> list[SkillRef]:
     """Every skill in ``<config dir>/skills`` and ``<repo>/.claude/skills`` —
-    personal first, as Claude Code ranks them — with an ``imported`` mark."""
-    known = {persona.name for persona in core.catalogue(root)[0]}
+    personal first, as Claude Code ranks them. ``imported`` is provenance, not a
+    name match: some user or project persona — shadowed or not, under any name —
+    was copied from the skill. ``taken_by`` names the layer whose persona holds the
+    skill's name without having come from it."""
+    holders = {persona.name: persona for persona in core.catalogue(root)[0]}
+    sources: set[Path] = set()
+    for layer, layer_base in core.layer_dirs(root):
+        if layer == "bundled":
+            continue
+        for directory in _skill_dirs(layer_base):
+            try:
+                source = _source_dir(core.load(directory, layer=layer))
+            except PersonaError:
+                continue
+            if source is not None:
+                sources.add(source)
     places: list[tuple[SkillScope, Path]] = [("user", _claude_home() / "skills")]
     if root is not None:
         places.append(("project", root / ".claude" / "skills"))
     refs: list[SkillRef] = []
     for scope, base in places:
         for directory in _skill_dirs(base):
+            origin = directory.resolve()
             try:
                 persona = core.load(directory, layer="user")
             except PersonaError as exc:
@@ -555,7 +573,8 @@ def importable_skills(root: Path | None) -> list[SkillRef]:
                         scope=scope,
                         recognised=False,
                         reason=exc.rule,
-                        imported=directory.name in known,
+                        imported=origin in sources,
+                        taken_by=_taken_by(holders.get(directory.name), origin),
                     )
                 )
                 continue
@@ -566,10 +585,26 @@ def importable_skills(root: Path | None) -> list[SkillRef]:
                     path=directory,
                     scope=scope,
                     recognised=True,
-                    imported=persona.name in known,
+                    imported=origin in sources,
+                    taken_by=_taken_by(holders.get(persona.name), origin),
                 )
             )
     return refs
+
+
+def _source_dir(persona: Persona) -> Path | None:
+    """The directory a persona was copied from, when its provenance names one."""
+    if persona.provenance is None:
+        return None
+    source = Path(persona.provenance.source)
+    return source.resolve() if source.is_absolute() else None  # not stdin, not a URL
+
+
+def _taken_by(holder: Persona | None, origin: Path) -> Layer | None:
+    """The layer whose persona holds a skill's name without having come from it."""
+    if holder is None or _source_dir(holder) == origin:
+        return None
+    return holder.layer
 
 
 def _skill_dirs(base: Path) -> list[Path]:

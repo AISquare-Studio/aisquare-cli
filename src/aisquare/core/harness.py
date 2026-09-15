@@ -556,6 +556,22 @@ def probe_model(alias: str) -> ProbeResult:
             reason="unparseable probe reply",
             checked_at=now,
         )
+    if not isinstance(reply, dict):
+        # Not an object, so no modelUsage to read. Claude Code answers with the whole
+        # message list when its JSON output is verbose, and on an account that is not
+        # logged in that list ends in the error envelope. No evidence either way:
+        # inconclusive, in the envelope's own words when it has them.
+        shape = {list: "list", str: "string", bool: "boolean", int: "number", float: "number"}
+        last = reply[-1] if isinstance(reply, list) and reply else None
+        said = last.get("result") if isinstance(last, dict) and last.get("is_error") else None
+        hint = said if isinstance(said, str) and said else "is this account logged in?"
+        return ProbeResult(
+            alias=alias,
+            available=False,
+            conclusive=False,
+            reason=f"reply was a JSON {shape.get(type(reply), 'null')}, not an object — {hint}",
+            checked_at=now,
+        )
     usage = reply.get("modelUsage")
     if not isinstance(usage, dict):
         # No modelUsage in the reply: we cannot tell what ran. Inconclusive —

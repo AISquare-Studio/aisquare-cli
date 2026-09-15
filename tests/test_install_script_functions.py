@@ -26,6 +26,7 @@ import pty
 import re
 import shutil
 import subprocess
+from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
@@ -231,6 +232,28 @@ def test_a_missing_binary_yields_an_empty_version(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+def host_is_wsl(env: Mapping[str, str] | None = None) -> bool:
+    """Whether ``detect_os`` finds a WSL host HERE — the script's own two checks, in order.
+
+    ``install.sh`` sets ``IS_WSL=1`` when ``WSL_DISTRO_NAME`` is non-empty (a shell
+    started by WSL), and otherwise when ``/proc/version`` names ``microsoft`` or
+    ``wsl`` (a service or a cron job inside WSL has no variable). A test cannot stub
+    that path — the script reads it literally, and ``grep`` is on every stubbed
+    PATH (:func:`base_path`) — so the real ``detect_os`` on a WSL2 kernel reports
+    ``IS_WSL=1`` whatever ``uname`` is made to say. An expectation that includes
+    ``IS_WSL`` asks this rather than assuming a plain Linux runner: there the answer
+    is ``False`` and the assertion is exactly what it was.
+    """
+    source = os.environ if env is None else env
+    if source.get("WSL_DISTRO_NAME", ""):
+        return True
+    try:
+        version = Path("/proc/version").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    return re.search(r"microsoft|wsl", version, re.IGNORECASE) is not None
+
+
 @pytest.mark.parametrize(
     ("kernel", "machine", "expected_os", "expected_arch"),
     [
@@ -244,7 +267,13 @@ def test_a_missing_binary_yields_an_empty_version(tmp_path: Path) -> None:
 def test_detect_os_maps_uname(
     tmp_path: Path, kernel: str, machine: str, expected_os: str, expected_arch: str
 ) -> None:
-    """`uname -s`/`-m` to the labels the rest of the script branches on."""
+    """`uname -s`/`-m` to the labels the rest of the script branches on.
+
+    The third field, ``IS_WSL``, is the HOST's, not the stub's: on a WSL2 machine
+    ``detect_os`` reads ``/proc/version`` for real, so the expectation is what
+    :func:`host_is_wsl` says — ``0`` on the plain Linux runners CI uses, exactly as
+    before. These five failed on every WSL2 host until this read the same signal.
+    """
     stubs = stub_dir(
         tmp_path,
         "bin",
@@ -255,7 +284,28 @@ def test_detect_os_maps_uname(
         'detect_os >/dev/null; printf "%s %s %s\\n" "$OS" "$ARCH" "$IS_WSL"',
         path=f"{stubs}:{base_path(tmp_path)}",
     )
-    assert result.stdout.split() == [expected_os, expected_arch, "0"], result.stderr
+    wsl = "1" if host_is_wsl() else "0"
+    assert result.stdout.split() == [expected_os, expected_arch, wsl], result.stderr
+
+
+def test_host_is_wsl_agrees_with_detect_os_on_this_host(tmp_path: Path) -> None:
+    """The helper the expectation above leans on is checked against the real function.
+
+    With ``WSL_DISTRO_NAME`` set, both say WSL. With it blank, both fall back to
+    ``/proc/version`` — whatever this host's says, the helper and ``detect_os`` must
+    agree, or the uname test would be asserting the helper's opinion of the host.
+    """
+    assert host_is_wsl({"WSL_DISTRO_NAME": "Ubuntu-24.04"}) is True
+    stubs = stub_dir(
+        tmp_path, "bin", "uname", body='case "$1" in -s) echo Linux ;; -m) echo x86_64 ;; esac'
+    )
+    result = sh(
+        'detect_os >/dev/null; printf "%s\n" "$IS_WSL"',
+        env={"WSL_DISTRO_NAME": ""},
+        path=f"{stubs}:{base_path(tmp_path)}",
+    )
+    expected = "1" if host_is_wsl({"WSL_DISTRO_NAME": ""}) else "0"
+    assert result.stdout.strip() == expected, result.stderr
 
 
 def test_wsl_is_detected_from_the_environment(tmp_path: Path) -> None:

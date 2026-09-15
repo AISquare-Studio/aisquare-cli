@@ -1,0 +1,617 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "cliXR wire protocol",
+  "description": "Generated from aisquare.services.xr.protocol \u2014 do not edit. Regenerate with: python -m aisquare.services.xr.protocol --write",
+  "protocol": 1,
+  "audio": {
+    "description": "Binary websocket frames between an `audio` header and its `audioEnd` are raw samples in this format, with no container and no per-frame header. JSON Schema cannot describe a binary frame, so it is stated here: this block IS the contract for the audio half.",
+    "encoding": "pcm_s16le",
+    "sampleRateHz": 16000,
+    "sampleBits": 16,
+    "signed": true,
+    "endianness": "little",
+    "channels": 1,
+    "frameMs": 20,
+    "frameBytes": 640,
+    "alignment": "Every frame must be a whole number of samples. An odd byte length is half a sample and shifts every sample after it by eight bits."
+  },
+  "closeCodes": {
+    "4401": {
+      "name": "CLOSE_AUTH_FAILED",
+      "retry": false,
+      "description": "The token was checked and rejected. Do not reconnect with it \u2014 it will be rejected again; reopen the URL `aisquare xr` printed to pick up a fresh token. Paired with the `auth_failed` error frame."
+    },
+    "4408": {
+      "name": "CLOSE_AUTH_TIMEOUT",
+      "retry": true,
+      "description": "The socket opened but no valid auth frame completed the handshake in time \u2014 a stalled reverse-forward, a client on the wrong port, or a malformed first frame. No token was checked, so reconnect with backoff (paired with the `auth_timeout` error frame). Every close code NOT listed here is likewise a transport close where retry is right; only CLOSE_AUTH_FAILED is terminal."
+    }
+  },
+  "server": {
+    "$defs": {
+      "Ack": {
+        "additionalProperties": false,
+        "description": "The outcome of a client action.\n\nThe one addition to the protocol as drafted, and the reason is\n:func:`services.fleet.tell`: a prompt is delivered either by typing into a\nwaiting pane or by filing a board note for the agent's next delta, and\nwhich of the two happened is something the operator wants to see. Without\nthis frame a prompt that became a note is indistinguishable from one that\nlanded in the pane.",
+        "properties": {
+          "t": {
+            "const": "ack",
+            "default": "ack",
+            "title": "T",
+            "type": "string"
+          },
+          "for": {
+            "const": "prompt",
+            "default": "prompt",
+            "title": "For",
+            "type": "string"
+          },
+          "session": {
+            "title": "Session",
+            "type": "string"
+          },
+          "ok": {
+            "title": "Ok",
+            "type": "boolean"
+          },
+          "detail": {
+            "default": "",
+            "title": "Detail",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session",
+          "ok"
+        ],
+        "title": "Ack",
+        "type": "object"
+      },
+      "Delta": {
+        "additionalProperties": false,
+        "description": "What changed since the last frame. Never sent empty.",
+        "properties": {
+          "t": {
+            "const": "delta",
+            "default": "delta",
+            "title": "T",
+            "type": "string"
+          },
+          "changed": {
+            "items": {
+              "$ref": "#/$defs/Session"
+            },
+            "title": "Changed",
+            "type": "array"
+          },
+          "removed": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Removed",
+            "type": "array"
+          }
+        },
+        "title": "Delta",
+        "type": "object"
+      },
+      "Error": {
+        "additionalProperties": false,
+        "description": "Something the client asked for did not happen, and why.\n\n``code`` is the stable half \u2014 key on it. ``message`` is for a human\nreading a console.",
+        "properties": {
+          "t": {
+            "const": "error",
+            "default": "error",
+            "title": "T",
+            "type": "string"
+          },
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "message"
+        ],
+        "title": "Error",
+        "type": "object"
+      },
+      "Group": {
+        "additionalProperties": false,
+        "description": "A visual container for several panels. Reserved: ``groups`` is ``[]`` today.",
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "colorKey": {
+            "enum": [
+              "planner",
+              "coder",
+              "runner"
+            ],
+            "title": "Colorkey",
+            "type": "string"
+          },
+          "sessions": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Sessions",
+            "type": "array"
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "colorKey"
+        ],
+        "title": "Group",
+        "type": "object"
+      },
+      "Hello": {
+        "additionalProperties": false,
+        "description": "First frame after a successful auth.",
+        "properties": {
+          "t": {
+            "const": "hello",
+            "default": "hello",
+            "title": "T",
+            "type": "string"
+          },
+          "protocol": {
+            "default": 1,
+            "title": "Protocol",
+            "type": "integer"
+          },
+          "hub": {
+            "title": "Hub",
+            "type": "string"
+          },
+          "serverTime": {
+            "title": "Servertime",
+            "type": "string"
+          }
+        },
+        "required": [
+          "hub",
+          "serverTime"
+        ],
+        "title": "Hello",
+        "type": "object"
+      },
+      "Session": {
+        "additionalProperties": false,
+        "description": "One agent session as a panel in the ring.\n\n``summary`` is computed by the server from the session's most recent BOARD\nEVENT and is capped at six words. It is never derived from transcript\ntext \u2014 the ambient tier must stay glanceable, and transcript content\nreaches the client only for the one session it has subscribed to.",
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "role": {
+            "enum": [
+              "planner",
+              "coder",
+              "runner",
+              "remote"
+            ],
+            "title": "Role",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "working",
+              "waiting",
+              "needs_you",
+              "gone"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "summary": {
+            "title": "Summary",
+            "type": "string"
+          },
+          "taskId": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Taskid"
+          },
+          "colorKey": {
+            "enum": [
+              "planner",
+              "coder",
+              "runner"
+            ],
+            "title": "Colorkey",
+            "type": "string"
+          },
+          "lastActivityAt": {
+            "title": "Lastactivityat",
+            "type": "string"
+          },
+          "unread": {
+            "default": 0,
+            "title": "Unread",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "role",
+          "title",
+          "state",
+          "summary",
+          "colorKey",
+          "lastActivityAt"
+        ],
+        "title": "Session",
+        "type": "object"
+      },
+      "Snapshot": {
+        "additionalProperties": false,
+        "description": "The whole board. Sent once after ``hello``, and again on reconnect.",
+        "properties": {
+          "t": {
+            "const": "snapshot",
+            "default": "snapshot",
+            "title": "T",
+            "type": "string"
+          },
+          "sessions": {
+            "items": {
+              "$ref": "#/$defs/Session"
+            },
+            "title": "Sessions",
+            "type": "array"
+          },
+          "tasks": {
+            "items": {
+              "$ref": "#/$defs/Task"
+            },
+            "title": "Tasks",
+            "type": "array"
+          },
+          "groups": {
+            "items": {
+              "$ref": "#/$defs/Group"
+            },
+            "title": "Groups",
+            "type": "array"
+          }
+        },
+        "title": "Snapshot",
+        "type": "object"
+      },
+      "Stt": {
+        "additionalProperties": false,
+        "description": "A speech-to-text result: interim (``final=False``) then final.",
+        "properties": {
+          "t": {
+            "const": "stt",
+            "default": "stt",
+            "title": "T",
+            "type": "string"
+          },
+          "text": {
+            "title": "Text",
+            "type": "string"
+          },
+          "final": {
+            "default": false,
+            "title": "Final",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "text"
+        ],
+        "title": "Stt",
+        "type": "object"
+      },
+      "Task": {
+        "additionalProperties": false,
+        "description": "A board task, for the client's task-side affordances.",
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "role": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Role"
+          },
+          "claimedBy": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Claimedby"
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "status"
+        ],
+        "title": "Task",
+        "type": "object"
+      },
+      "Transcript": {
+        "additionalProperties": false,
+        "description": "A chunk of the subscribed session's transcript.\n\n``seq`` increases per subscription, so a client that misses a frame knows.\n``final`` marks the end of one transcript record, not the end of the stream.",
+        "properties": {
+          "t": {
+            "const": "transcript",
+            "default": "transcript",
+            "title": "T",
+            "type": "string"
+          },
+          "session": {
+            "title": "Session",
+            "type": "string"
+          },
+          "seq": {
+            "title": "Seq",
+            "type": "integer"
+          },
+          "text": {
+            "title": "Text",
+            "type": "string"
+          },
+          "final": {
+            "default": true,
+            "title": "Final",
+            "type": "boolean"
+          },
+          "reset": {
+            "default": false,
+            "title": "Reset",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "session",
+          "seq",
+          "text"
+        ],
+        "title": "Transcript",
+        "type": "object"
+      }
+    },
+    "discriminator": {
+      "mapping": {
+        "ack": "#/$defs/Ack",
+        "delta": "#/$defs/Delta",
+        "error": "#/$defs/Error",
+        "hello": "#/$defs/Hello",
+        "snapshot": "#/$defs/Snapshot",
+        "stt": "#/$defs/Stt",
+        "transcript": "#/$defs/Transcript"
+      },
+      "propertyName": "t"
+    },
+    "oneOf": [
+      {
+        "$ref": "#/$defs/Hello"
+      },
+      {
+        "$ref": "#/$defs/Snapshot"
+      },
+      {
+        "$ref": "#/$defs/Delta"
+      },
+      {
+        "$ref": "#/$defs/Transcript"
+      },
+      {
+        "$ref": "#/$defs/Stt"
+      },
+      {
+        "$ref": "#/$defs/Error"
+      },
+      {
+        "$ref": "#/$defs/Ack"
+      }
+    ]
+  },
+  "client": {
+    "$defs": {
+      "Audio": {
+        "additionalProperties": false,
+        "description": "Header for a push-to-talk burst. Binary frames follow until ``audioEnd``.\n\nThose frames are raw ``pcm_s16le`` \u2014 16 kHz, mono, signed 16-bit\nlittle-endian PCM, no container \u2014 and never anything else. The module\ndocstring states it in full and :func:`schema_document` publishes the\nnumbers as the ``audio`` block, so a client author never has to open this\nfile or infer the format from a comment about a byte cap.",
+        "properties": {
+          "t": {
+            "const": "audio",
+            "default": "audio",
+            "title": "T",
+            "type": "string"
+          },
+          "session": {
+            "description": "Session this burst is addressed to. The HEADER owns the burst: the microphone is opened for this session and the samples are recorded for it, so this is where the transcript is routed. A matching audioEnd that names a different session does NOT move it \u2014 the disagreement is logged and the header wins, rather than either attributing the operator's speech to whichever frame the server read last or discarding a spoken sentence over a client's bookkeeping bug. See audioEnd.session for the other half of the rule.",
+            "title": "Session",
+            "type": "string"
+          },
+          "seq": {
+            "default": 0,
+            "description": "Ordinal of this burst on this connection; 0 for a client that does not number its bursts. It is NOT a per-chunk sequence number: the binary frames carry no sequencing and there is no gap detection anywhere in this protocol, because a websocket delivers its messages in order or not at all. The server reads this only to reject a negative value.",
+            "minimum": 0,
+            "title": "Seq",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "session"
+        ],
+        "title": "Audio",
+        "type": "object"
+      },
+      "AudioEnd": {
+        "additionalProperties": false,
+        "description": "End of a push-to-talk burst: transcribe what was buffered.",
+        "properties": {
+          "t": {
+            "const": "audioEnd",
+            "default": "audioEnd",
+            "title": "T",
+            "type": "string"
+          },
+          "session": {
+            "description": "Should equal the session on the audio header that opened this burst. If the two disagree the HEADER wins: the microphone was opened for it and the samples were recorded for it, so routing the transcript anywhere else is the defect this field exists to prevent. The mismatch is logged, not answered \u2014 a client whose two frames disagree has a bug worth finding, but discarding the operator's sentence over it would spend their words on our bookkeeping.",
+            "title": "Session",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session"
+        ],
+        "title": "AudioEnd",
+        "type": "object"
+      },
+      "Auth": {
+        "additionalProperties": false,
+        "description": "Always the first frame. The socket is closed if it is not.",
+        "properties": {
+          "t": {
+            "const": "auth",
+            "default": "auth",
+            "title": "T",
+            "type": "string"
+          },
+          "token": {
+            "title": "Token",
+            "type": "string"
+          }
+        },
+        "required": [
+          "token"
+        ],
+        "title": "Auth",
+        "type": "object"
+      },
+      "Prompt": {
+        "additionalProperties": false,
+        "description": "Send text to one session, as the operator.",
+        "properties": {
+          "t": {
+            "const": "prompt",
+            "default": "prompt",
+            "title": "T",
+            "type": "string"
+          },
+          "session": {
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9_:-]+$",
+            "title": "Session",
+            "type": "string"
+          },
+          "text": {
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session",
+          "text"
+        ],
+        "title": "Prompt",
+        "type": "object"
+      },
+      "Subscribe": {
+        "additionalProperties": false,
+        "description": "Start (or with ``session=None``, stop) streaming one transcript.\n\n``session`` is a :data:`SessionRef`: an exact id or a unique prefix, never\nan empty string or a ``GLOB`` metacharacter, which the server would resolve\ninto \"every session on the board\".",
+        "properties": {
+          "t": {
+            "const": "subscribe",
+            "default": "subscribe",
+            "title": "T",
+            "type": "string"
+          },
+          "session": {
+            "anyOf": [
+              {
+                "minLength": 1,
+                "pattern": "^[A-Za-z0-9_:-]+$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Session"
+          }
+        },
+        "title": "Subscribe",
+        "type": "object"
+      }
+    },
+    "discriminator": {
+      "mapping": {
+        "audio": "#/$defs/Audio",
+        "audioEnd": "#/$defs/AudioEnd",
+        "auth": "#/$defs/Auth",
+        "prompt": "#/$defs/Prompt",
+        "subscribe": "#/$defs/Subscribe"
+      },
+      "propertyName": "t"
+    },
+    "oneOf": [
+      {
+        "$ref": "#/$defs/Auth"
+      },
+      {
+        "$ref": "#/$defs/Subscribe"
+      },
+      {
+        "$ref": "#/$defs/Prompt"
+      },
+      {
+        "$ref": "#/$defs/Audio"
+      },
+      {
+        "$ref": "#/$defs/AudioEnd"
+      }
+    ]
+  }
+}

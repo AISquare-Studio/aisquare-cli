@@ -31,6 +31,7 @@ from aisquare.cli import (
     serve,
     task,
     team,
+    xr,
 )
 from aisquare.cli import config as config_cli
 from aisquare.cli import metrics as metrics_cli
@@ -153,6 +154,7 @@ app.command("board")(team.board)
 app.command("recall")(team.recall)
 launch.register(app)  # needs context_settings to forward agent args
 app.command("serve")(serve.serve)
+app.command("xr")(xr.xr)
 app.add_typer(fleet.app, name="fleet")
 app.command("ui")(fleet.ui)
 app.add_typer(hook.app, name="hook", hidden=True)

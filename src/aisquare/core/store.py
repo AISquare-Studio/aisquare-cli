@@ -614,6 +614,7 @@ class ContextStore(Protocol):
     def team_active(self, project_id: str) -> bool: ...
     def upsert_session(self, session: TeamSession) -> TeamSession: ...
     def get_session(self, session_id: str) -> TeamSession | None: ...
+    def get_session_in_project(self, project_id: str, ref: str) -> TeamSession | None: ...
     def team_sessions(self, project_id: str) -> list[TeamSession]: ...
     def update_session(
         self,
@@ -660,6 +661,9 @@ class ContextStore(Protocol):
         self, project_id: str, seq: int, *, exclude_session: str | None = None, limit: int = 50
     ) -> list[TeamEvent]: ...
     def recent_events(self, project_id: str, *, limit: int = 10) -> list[TeamEvent]: ...
+    def unread_counts(
+        self, project_id: str, floors: Mapping[str, int], *, cap: int
+    ) -> dict[str, int]: ...
     def filtered_events(
         self,
         project_id: str,
@@ -1280,6 +1284,38 @@ class SqliteStore:
             raise AmbiguousIdError(session_id)
         return _row_to_session(matches[0]) if matches else None
 
+    def get_session_in_project(self, project_id: str, ref: str) -> TeamSession | None:
+        """Resolve an exact id or a unique prefix to a session ON THIS PROJECT.
+
+        :meth:`get_session`'s ``GLOB`` fallback spans every project in the
+        store, so a prefix that is unique on one board is answered ambiguous
+        because a *different* board (another checkout sharing one
+        ``context.db``) also has a session starting with those characters — a
+        session the caller cannot see and did not mean. Scoping the resolution
+        to ``project_id`` is what makes a per-board prefix behave the way an
+        operator staring at one board expects it to.
+
+        Exact match first, then a prefix ``GLOB`` within the project;
+        :func:`_glob_prefix` strips the ``GLOB`` metacharacters so a lone ``*``
+        cannot turn into a wildcard over the whole board. More than one prefix
+        match raises :class:`AmbiguousIdError`, exactly as :meth:`get_session`
+        does, so the caller can tell an ambiguous prefix from an absent one.
+        """
+        exact = self._conn.execute(
+            f"SELECT {_SESSION_COLUMNS} FROM team_session WHERE id = ? AND project_id = ?",
+            (ref, project_id),
+        ).fetchone()
+        if exact is not None:
+            return _row_to_session(exact)
+        matches = self._conn.execute(
+            f"SELECT {_SESSION_COLUMNS} FROM team_session "
+            "WHERE project_id = ? AND id GLOB ? LIMIT 2",
+            (project_id, _glob_prefix(ref)),
+        ).fetchall()
+        if len(matches) > 1:
+            raise AmbiguousIdError(ref)
+        return _row_to_session(matches[0]) if matches else None
+
     def team_sessions(self, project_id: str) -> list[TeamSession]:
         rows = self._conn.execute(
             f"SELECT {_SESSION_COLUMNS} FROM team_session "
@@ -1892,6 +1928,45 @@ class SqliteStore:
             (project_id, limit),
         ).fetchall()
         return [_row_to_event(row) for row in reversed(rows)]
+
+    def unread_counts(
+        self, project_id: str, floors: Mapping[str, int], *, cap: int
+    ) -> dict[str, int]:
+        """Events per session past THAT session's own ``floors`` watermark, capped.
+
+        One event counts for a session only when its ``seq`` is above the floor
+        recorded for *that* session, so a busy session's traffic can never evict
+        a quiet one's unread events the way a single newest-N-of-the-board window
+        does: with that window, 500 events from one session push a quieter
+        session's three out of view and its badge silently reads 0 though its
+        watermark never moved (or, read from the oldest end, the busy session's
+        own badge freezes once the board runs past the window). Counting each
+        session from its own watermark is immune to both.
+
+        The scan is the ``(project_id, seq)`` index range above ``min(floors)``
+        — bounded by what has happened since the earliest thing this connection
+        is still waiting to see, not by the board's total size — and ``cap``
+        bounds the ANSWER per session, so a badge never reports more than ``cap``
+        and the work of counting one session stops there. That makes the cap the
+        real one the projector's docstring describes: reached only by a session
+        that genuinely has ``cap`` unread events.
+        """
+        if not floors:
+            return {}
+        floor = min(floors.values())
+        counts: dict[str, int] = {}
+        for sid, seq in self._conn.execute(
+            "SELECT session_id, seq FROM team_event "
+            "WHERE project_id = ? AND session_id IS NOT NULL AND seq > ? ORDER BY seq",
+            (project_id, floor),
+        ):
+            threshold = floors.get(sid)
+            if threshold is None or seq <= threshold:
+                continue
+            seen = counts.get(sid, 0)
+            if seen < cap:
+                counts[sid] = seen + 1
+        return counts
 
     def latest_seq(self, project_id: str) -> int:
         row = self._conn.execute(

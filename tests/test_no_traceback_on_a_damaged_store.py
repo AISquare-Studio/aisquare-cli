@@ -63,8 +63,16 @@ from aisquare.core import paths
 #: Not invoked, each for a reason that is about the HARNESS and never about the
 #: command being expected to fail. Every name is checked to still exist below,
 #: so a rename cannot quietly widen this list into a hiding place.
+#:
+#: **Leaving a blocking command out of this dict does not fail the sweeps — it
+#: HANGS them**: this one and the two siblings that walk the same command tree,
+#: so the CI job burns its whole budget and reports nothing at all. That is not
+#: hypothetical and it hid for several full-suite runs behind a coincidence;
+#: `test_xr_server.py::test_xr_is_registered_as_a_command_the_sweeps_must_not_invoke`
+#: has the story, and guards one entry so the next one has a precedent to copy.
 UNINVOKED = {
     "serve": "binds a port and blocks",
+    "xr": "binds a port and blocks",
     "launch": "spawns a real agent process",
     "team spawn": "spawns a real agent process",
     "login": "polls the identity provider until a browser approval arrives",

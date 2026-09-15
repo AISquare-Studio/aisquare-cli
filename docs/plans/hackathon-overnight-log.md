@@ -50,13 +50,14 @@ read-only.
 | 2026-09-15 evening | `runner2-1` in NEEDS YOU state with nothing in review. | Pane read; see next entry. | `tmux -L asqui capture-pane -t %4` |
 | 2026-09-15 evening | `runner2-1`'s pane shows Claude Code's one-time "Teach auto mode about your environment?" dialog (options 1/2/3). | Direct keystrokes into a pane (`tmux send-keys`) are denied to the manager by the auto-mode classifier; `fleet tell` refuses an *attention* pane and files a note instead. Decision: observe — its own loop job `b3e8f801` may still fire; nothing is in review for hours. Plan B if it is still stuck when the first review lands: `fleet stop runner2-1`, respawn the bound seat (`fleet spawn runner2 --label runner2-1`), and re-deliver the runner prompt from `docs/plans/hackathon-loop-prompts.md` with `fleet tell` once it is waiting. | pane capture; `fleet tell` receipt "it is attention — filed as board note #6953" |
 | 2026-09-15 evening | `make check` from the ROOT checkout fails one test: `tests/test_documented_commands.py::test_the_document_list_has_not_gone_stale` sweeps every markdown file under the repo and finds the coders' worktrees under `.aisquare-worktrees/`. | Not a defect in any PR: inside a worktree, in the runner's verify worktree and in CI (clean checkout) it passes. Filed **P9** `tsk_01m2hrgbsf3s0dwcx11mjap123` (S): the sweep skips the configured `worktree_dir` and nested worktrees; assigned to whichever coder frees up first. | pytest output at fd487d5 |
+| 2026-09-15 ~01:25 | Owner dismissed the runner's onboarding dialog ("runner is unblocked"). | Pane confirmed clear: tick 1 output visible, its loop job `b3e8f801` live. The board's NEEDS YOU chip clears on its next turn. Morning-audit item 1 is resolved; the permission-rule suggestion stands for future dialogs. | pane capture 01:25 |
 | 2026-09-15 evening | Both coders deep in their first tasks (`coder3a-1` on P1 in `.aisquare-worktrees/p1-persona-core`, `coder3b-1` on P3 in `.aisquare-worktrees/p3-spawn-dialog`), exploring the code before writing. | No action; they were told their queues. | pane captures |
 
 ## Morning audit — questions and calls for the owner
 
 _(appended as they arise; each with the manager's interim decision)_
 
-1. **Runner onboarding dialog.** `runner2-1`'s pane may still show Claude
+1. **Runner onboarding dialog — RESOLVED by the owner at ~01:25.** Kept for the record: `runner2-1`'s pane may still show Claude
    Code's "Teach auto mode about your environment?" prompt in the morning. The
    manager cannot press a key in an agent's pane (classifier denies
    `tmux send-keys`). Recommendation: press `3` (Don't show again) in that pane,

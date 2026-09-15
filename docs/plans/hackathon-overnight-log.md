@@ -7,6 +7,35 @@
 > merges to `main` and deploys. Every entry: when, what, why, evidence.
 > Questions the owner must answer are collected at the bottom.
 
+## Morning at a glance (07:05, 2026-09-15)
+
+**Status: the train is VERIFIED and waiting on your merges.** Sixteen tasks,
+sixteen PRs, sixteen runner verdicts (each naming the exact commit it ran),
+sixteen manager review comments, one validator gate `PASS-WITH-FIXES` on the
+assembled head with every finding closed in its own lane. Only #180 (P3) is
+merged; the classifier kept every other merge with you (item 6 below).
+
+**What to do, in order:**
+
+1. Merge into `rc/hackathon-v1` with merge commits, stack-safe:
+   `#182` P9 · `#181` P1 → `#195` P16 · `#183` P2 → `#185` P5 → `#193` P15 →
+   `#186` P8 · `#184` P6 · `#187` P4 · `#188` P7 → `#194` P14; `#190` P10,
+   `#191` P12, `#192` P13 any time. Every PR is MERGEABLE with CI 6/6 green and
+   a manager review comment; the runner's `task done` note on the board carries
+   its evidence. Or grant this session a Bash rule for `gh pr merge*` and I do
+   it in that order within one tick.
+2. Run the demo from `docs/plans/hackathon-demo.md` (PR #194): twelve CLI
+   steps the runner extracted and ran verbatim, nine `asq` steps each tied to a
+   passing headless test.
+3. One follow-up remains after `#188` and `#192` land: `coder3b-1` switches
+   `cli/ui/attach.py:419` to the public `services.fleet.role_ok` (one line).
+4. Then `main` and the deploy are yours; I never touched either.
+
+**Caveats:** every branch except `#189` predates P11, so a gate on this WSL2
+host shows the five install-script failures until `#189` merges (after it,
+`make check` here is 0 failed, measured 3687 passed). The manager's account hit
+its window 02:05–04:00; the fleet ran unattended and lost nothing.
+
 ## Operating rules for the night
 
 1. **Scope.** Anything on `rc/hackathon-v1`. Never `main`. Never infra: no
@@ -87,6 +116,7 @@ read-only.
 | 2026-09-15 06:17 | **P13 #192 verified** (runner: 22 edge inputs, zero mismatches between `role_ok` and spawn's own check; a numbered seat is only of the eight known roles by design). Manager review posted on #192. Remaining with the runner: #193 P15, #194 P14, #195 P16. | — | board 06:17–06:20 |
 | 2026-09-15 06:34 | **P14 #194 verified** at a18be96 (the runner extracted the runbook's twelve `sh` fences programmatically and ran them verbatim in one shell; CHANGELOG:110 rewritten in the present tense, 1 line). Manager review posted. Remaining with the runner: #193 P15, #195 P16. | — | board 06:28–06:34 |
 | 2026-09-15 06:49 | **P15 #193 verified** (runner rendered `persona import --help` through both trees: the hole on #185, gone on the fix; plan §3.6/§3.9/§7 drift closed). Manager review posted. Remaining with the runner: **#195 P16 only.** | — | board 06:49–06:50 |
+| 2026-09-15 07:03 | **P16 #195 verified** against the real `~/.claude/skills/careful` collision (imported=True on #181 → imported=False, taken_by=bundled here; 57 skills listed, nothing falsely marked). **Runner's queue empty: sixteen of sixteen verified.** Manager review posted on #195; the train-verified note posted on the board with the stack-safe merge order. | READY follows the owner's merges. | board 07:03–07:04 |
 | 2026-09-15 evening | Both coders deep in their first tasks (`coder3a-1` on P1 in `.aisquare-worktrees/p1-persona-core`, `coder3b-1` on P3 in `.aisquare-worktrees/p3-spawn-dialog`), exploring the code before writing. | No action; they were told their queues. | pane captures |
 
 ## Morning audit — questions and calls for the owner
@@ -108,7 +138,7 @@ _(appended as they arise; each with the manager's interim decision)_
    hackathon task.
 4. **Manager headroom.** The manager's account hit its 5-hour window at 02:05 and the train waited two hours on merges and two spec answers. Recommendation: give the manager seat an account with headroom (or a second manager seat) for the next overnight run; the coders' `.claude3` never hit its limit in the same window.
 5. **Merges by the manager.** #180 merged directly; the classifier then required a visible review before each merge, so every later merge carries a manager review comment on the PR. If you prefer to be the only merger, the verified, CI-green PRs are listed in the timeline in stack order.
-6. **Merge the verified PRs, or let me** (state at 04:35: every verified PR is MERGEABLE CLEAN with CI green and a manager review comment; heads #181 bf0cf5f, #182 16f22f8, #183 d4571be, #184 195fdc3, #186 0e744e6; #187 c07ca4e, #185 2e68c67 and #188 74ce36f all verified and reviewed). Full order: #182, #181, #183, #184, #185, #186, #187, #188; **#195** (P16, `import --list` provenance) right after #181; **#193** (P15, help text + plan drift) right after #185; **#194** (P14, demo runbook + CHANGELOG tidy) right after #188; then the independent hygiene PRs #190 (P10), #189 (P11), #191 (P12), #192 (P13), and P14's docs PR when it opens. Either add a Bash permission rule for this session (`gh pr merge*`) and I merge in stack order with a review comment on each, or merge yourself, in this order, each with a merge commit: **#181** P1 (`feat/persona-core`) → **#183** P2 (`feat/persona-wiring`) → **#184** P6 (`feat/hack-p6-personas-tab`) → **#185** P5 (`feat/persona-import`, after runner2-1's `task done`) → **#186** P8 (`feat/persona-attach`) → P4's PR → P7's PR. #182 P9 (`fix/hack-p9-doc-guard-worktrees`) is clean and reviewed on the PR; merge it any time. Gate evidence per PR is on the board (runner `task done` notes) and in CI.
+6. **Merge the verified PRs, or let me.** Final stack-safe order (runner and manager agree): `#182` P9 · `#181` P1 → `#195` P16 · `#183` P2 → `#185` P5 → `#193` P15 → `#186` P8 · `#184` P6 · `#187` P4 · `#188` P7 → `#194` P14; independents `#190` P10, `#191` P12, `#192` P13 any time. Every PR: runner `task done` with evidence on the board, CI 6/6 SUCCESS, MERGEABLE, manager review comment on the PR. Or add a Bash permission rule for `gh pr merge*` and I merge in that order.
 7. **A public name for the seat rule — P13 in flight.** `services.fleet.role_ok` lands on rc via P13 (coder3a-1); the picker (`cli/ui/attach.py:419`, PR #188) still calls the private `_role_ok` and is switched in a one-line follow-up by coder3b-1 after both #188 and P13 have merged. Not a hackathon gate.
 8. **Validator verdict: PASS-WITH-FIXES** (05:40). The feature deliverable is verified on the assembled head; the four findings are routed (P16, P15, P14, #189). READY is posted once your merges land and the runner has verified P11–P16; if you merge before that, READY follows within the manager's next tick.
 9. **Doc guard vs. fleet worktrees (P9).** A root-checkout `make check` fails

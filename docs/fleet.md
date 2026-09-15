@@ -212,7 +212,10 @@ Refused, with the reason in the message: a second `manager`, more agents than
 `max_agents_per_project`, `--worktree` in a project that is not a git
 repository, an unknown role, a persona the project does not have (the known
 names are listed; a stale `[fleet.roles.<role>].persona` default names its key).
-All of these are checked before any window exists.
+All of these are checked before any window exists. A known role is one of
+`aisquare launch`'s roles, a numbered seat of one (`coder2`), or a role bound with
+`team bind` — the same rule `aisquare launch` applies, public as
+`services.fleet.role_ok`.
 
 ### `fleet ls` / `fleet status`
 
@@ -244,6 +247,11 @@ Types the text into the agent — **only** when it is *waiting* and its pane is
 alive. Otherwise the message is filed as a board note addressed to that agent,
 and the output says which happened (`✓` typed, `→` noted). Never interrupts an
 agent that is working or sitting on a permission prompt. Takes `--as SESSION`.
+
+`aisquare persona attach <name> --to <label>` uses the same delivery to give a
+running agent a persona, and keeps it on the agent's row so a `/clear` or a restart
+briefs it again ([docs/personas.md](personas.md)); its receipt reads `typed` or
+`noted`.
 
 ### `fleet stop`
 

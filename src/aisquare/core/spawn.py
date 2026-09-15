@@ -46,6 +46,12 @@ otherwise inherit a live identity:
     check entitlement. A real LLM process, but NOT a session: it is a
     yes/no question about the account, and a Run for it is pure noise
     attributed to whoever happened to be probing.
+  * ``services/persona_import.py::draft_with_manager`` — ``persona import``'s
+    manager engine: one headless ``claude -p`` under the manager role's binding
+    that turns a source into a persona draft (docs/plans/spawn-personas.md
+    §3.9). A real model process but not a session — like the probe, one
+    question and one answer — so a Run for it would be attributed to whoever
+    happened to import.
   * ``core/brain.py::_run`` — the gbrain worker. Not an agent session, and its
     own ``_env`` already contemplates an Anthropic key path
     (``ANTHROPIC_API_KEY`` is popped only when embeddings are off), so an
@@ -177,6 +183,13 @@ SEAMS: dict[str, Seam] = {
         EXCLUDED,
         "runs `claude -p` to test an entitlement; a Run for it is junk data "
         "attributed to whoever was probing",
+        strips_identity=True,
+    ),
+    "aisquare/services/persona_import.py::draft_with_manager": Seam(
+        EXCLUDED,
+        "`persona import`'s manager engine runs `claude -p` once to draft a persona; like "
+        "the entitlement probe it is a question, not a session, and a Run for it is junk "
+        "attributed to whoever imported",
         strips_identity=True,
     ),
     "aisquare/core/brain.py::_run": Seam(

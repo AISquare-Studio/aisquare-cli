@@ -199,22 +199,25 @@ def test_import_dash_reads_stdin(runner: CliRunner) -> None:
     assert (code, payload["error"]) == (1, "source_empty")
 
 
-def test_plain_text_is_not_recognised_and_the_refusal_names_the_llm_path(
+def test_plain_text_goes_to_the_llm_path_and_no_llm_refuses_it(
     runner: CliRunner, tmp_path: Path
 ) -> None:
     notes = tmp_path / "notes.txt"
     notes.write_text("remember to be kind\n", encoding="utf-8")
 
-    human = runner.invoke(app, ["persona", "import", str(notes)])
-    code, payload = _json(runner, "import", str(notes))
+    human = runner.invoke(app, ["persona", "import", str(notes), "--no-llm"])
+    code, payload = _json(runner, "import", str(notes), "--no-llm")
+    engines_code, engines = _json(runner, "import", str(notes))
     missing_code, missing = _json(runner, "import", str(tmp_path / "absent.md"))
 
     assert human.exit_code == 1
     assert isinstance(human.exception, SystemExit)
     assert "not a recognised skill" in human.stderr
-    assert "LLM import path" in human.stderr
+    assert "--no-llm forbids it" in human.stderr
     assert (code, payload["error"]) == (1, "not_recognised")
-    assert "LLM import path" in payload["detail"]
+    # conftest's no_real_llm_import: without --no-llm the engines are tried, and none can run.
+    assert (engines_code, engines["error"]) == (1, "no_import_engine")
+    assert "aisquare-cli[llm]" in engines["detail"]
     assert (missing_code, missing["error"]) == (1, "source_not_found")
     assert not _user_layer().exists()
 
@@ -533,3 +536,91 @@ def test_a_project_persona_shadows_bundled_and_a_broken_one_is_listed_not_fatal(
     assert skeptic.split()[1] == "project"
     assert skeptic.endswith("Our own skeptic.  (shadows bundled)")
     assert f"✗ {_user_layer() / 'broken'}: no SKILL.md" in rows
+
+
+# --- persona attach (docs/plans/spawn-personas.md §7 "P8") ---------------------------------
+
+
+def _attach_fakes(
+    monkeypatch: pytest.MonkeyPatch, outcome: object
+) -> list[tuple[object, str, str, str | None]]:
+    """The fleet service faked on the module the CLI calls through; returns the calls."""
+    from datetime import UTC, datetime
+
+    from aisquare.models import FleetAgent, ProjectInfo
+    from aisquare.services import fleet as fleet_service
+
+    project = ProjectInfo(id="prj_attach", root=Path("/tmp/attach"), codename="amber-otter")
+    calls: list[tuple[object, str, str, str | None]] = []
+
+    def attach(
+        target: ProjectInfo, label: str, name: str, *, sender: str | None = None
+    ) -> fleet_service.AttachReceipt:
+        calls.append((target, label, name, sender))
+        if isinstance(outcome, Exception):
+            raise outcome
+        agent = FleetAgent(
+            id="agt_coderx",
+            project_id=project.id,
+            label=label,
+            role="coder",
+            pane_id="%7",
+            cwd=project.root,
+            created_at=datetime(2026, 9, 15, tzinfo=UTC),
+            persona=name,
+        )
+        return fleet_service.AttachReceipt(
+            agent=agent,
+            persona=name,
+            replaced="minimalist",
+            delivered="typed",
+            how="typed into its pane (it was waiting)",
+        )
+
+    monkeypatch.setattr(fleet_service, "resolve_project", lambda ref=None, **_: project)
+    monkeypatch.setattr(fleet_service, "attach_persona", attach)
+    return calls
+
+
+def test_attach_prints_the_receipt_and_json_carries_delivered(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = _attach_fakes(monkeypatch, None)
+
+    human = runner.invoke(app, ["persona", "attach", "skeptic", "--to", "coder-x", "--as", "mgr-1"])
+    code, payload = _json(runner, "attach", "skeptic", "--to", "coder-x")
+
+    assert human.exit_code == 0, human.output
+    assert human.stdout.splitlines()[0] == "✓ attached skeptic to coder-x (typed)"
+    assert calls[0][1:] == ("coder-x", "skeptic", "mgr-1")
+    assert code == 0
+    assert (payload["delivered"], payload["replaced"], payload["label"]) == (
+        "typed",
+        "minimalist",
+        "coder-x",
+    )
+
+
+def test_attach_refusals_report_the_fleets_error_codes(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from aisquare.services import fleet as fleet_service
+
+    _attach_fakes(monkeypatch, fleet_service.NoSuchAgent("no live agent 'coder-9' in api"))
+
+    code, payload = _json(runner, "attach", "skeptic", "--to", "coder-9")
+
+    assert (code, payload["error"]) == (1, "no_such_agent")
+    assert "no live agent 'coder-9'" in payload["detail"]
+
+
+def test_import_help_names_the_config_table_behind_both_defaults(runner: CliRunner) -> None:
+    """Rich reads a bare `[persona.import]` as a style tag and drops it: `(default:  engine)`."""
+    result = runner.invoke(
+        app, ["persona", "import", "--help"], env={"NO_COLOR": "1", "COLUMNS": "200"}
+    )
+
+    assert result.exit_code == 0, result.output
+    page = " ".join(result.output.split())
+    assert "(default: [persona.import] engine)" in page
+    assert "(default: [persona.import] api_model)" in page

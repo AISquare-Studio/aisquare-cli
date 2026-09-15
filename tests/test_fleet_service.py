@@ -25,7 +25,9 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from typer.testing import CliRunner
 
+from aisquare.cli.app import app
 from aisquare.core import codenames, selfcli
 from aisquare.core.config import FleetRoleSettings, FleetSettings
 from aisquare.core.ids import new_agent_id, new_task_id
@@ -636,6 +638,18 @@ def test_spawn_refuses_an_unknown_role_but_accepts_a_bound_one(
     receipt = fleet_service.spawn(project, "scribe")
     assert receipt.agent.role == "scribe" and receipt.agent.label == "scribe-1"
     assert _command(tmux)[5] == "scribe"
+
+
+@pytest.mark.parametrize(
+    ("role", "expected"),
+    [("tester", True), ("coder2", True), ("scribe", True), ("codr", False)],
+)
+def test_role_ok_is_the_public_name_of_the_rule_spawn_applies(role: str, expected: bool) -> None:
+    """A fleet role, a numbered seat, a name bound with `team bind`, and a typo."""
+    bound = CliRunner().invoke(app, ["team", "bind", "scribe", "--bin", "claude"])
+    assert bound.exit_code == 0, bound.output
+    assert fleet_service.role_ok(role) is expected
+    assert fleet_service.role_ok(role) is fleet_service._role_ok(role)
 
 
 def test_spawn_refuses_a_worktree_outside_git(
@@ -1834,6 +1848,110 @@ def test_tell_an_unknown_label_is_no_such_agent(tmux: FakeTmux, project: Project
         fleet_service.tell(project, "coder-9", "hello")
     with pytest.raises(NoSuchAgent, match="no live agent 'coder-9'"):
         fleet_service.stop(project, "coder-9")
+
+
+# --- attach a persona to a running agent (docs/plans/spawn-personas.md §4.7, §7 "P8") ---
+
+
+def _preface(name: str, *, replaces: str | None = None) -> str:
+    tail = f"; it replaces {replaces}" if replaces else ""
+    return f"aisquare: the operator attached persona {name} to you — it applies from now on{tail}"
+
+
+def test_attaching_to_a_waiting_agent_records_it_and_types_the_briefing(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    from aisquare.core import personas
+
+    agent = _coder(project)
+    _board_session(agent, "waiting")
+    tmux.set_command(agent.pane_id, "claude")
+
+    receipt = fleet_service.attach_persona(project, "coder-1", "skeptic")
+
+    briefing = personas.briefing(personas.resolve("skeptic", project.root))
+    assert (receipt.persona, receipt.replaced, receipt.delivered) == ("skeptic", None, "typed")
+    assert tmux.typed == [
+        (agent.pane_id, "paste", "\n".join([_preface("skeptic"), *briefing])),
+        (agent.pane_id, "key", "Enter"),
+    ]
+    with store_session() as store:
+        row = store.get_fleet_agent(agent.id)
+        session = store.get_session(agent.session_id or "")
+    assert row is not None and row.persona == "skeptic"
+    assert session is not None and session.persona == "skeptic"
+    assert _events(project, "persona_attached") == ["persona skeptic attached to coder-1"]
+    assert _events(project, "note") == []
+
+
+def test_attaching_to_a_busy_agent_files_the_briefing_as_a_board_note(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    agent = _coder(project)
+    _board_session(agent, "working")
+
+    receipt = fleet_service.attach_persona(project, "coder-1", "skeptic")
+
+    assert receipt.delivered == "noted" and "board note" in receipt.how
+    assert tmux.typed == [], "never typed into a busy agent"
+    [note] = _events(project, "note")
+    assert note.startswith(_preface("skeptic") + '\n<aisquare-persona name="skeptic"')
+    with store_session() as store:
+        row = store.get_fleet_agent(agent.id)
+    assert row is not None and row.persona == "skeptic"
+
+
+def test_attaching_an_unknown_persona_refuses_before_the_store_or_tmux(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    agent = _coder(project)
+    tmux.installed = False  # from here on any tmux call would raise TmuxUnavailable instead
+
+    with pytest.raises(FleetError, match="known: careful, mentor, minimalist, skeptic"):
+        fleet_service.attach_persona(project, "coder-1", "nope")
+
+    with store_session() as store:
+        row = store.get_fleet_agent(agent.id)
+    assert row is not None and row.persona is None
+    assert _events(project, "persona_attached") == []
+
+
+def test_attaching_to_an_unknown_label_is_no_such_agent(
+    tmux: FakeTmux, project: ProjectInfo
+) -> None:
+    with pytest.raises(NoSuchAgent, match="no live agent 'coder-9'"):
+        fleet_service.attach_persona(project, "coder-9", "skeptic")
+    assert _events(project, "persona_attached") == []
+
+
+def test_replacing_a_persona_records_the_new_one_and_the_preface_names_the_old(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    agent = _coder(project, persona="minimalist")
+    _board_session(agent, "waiting")
+    tmux.set_command(agent.pane_id, "claude")
+
+    receipt = fleet_service.attach_persona(project, "coder-1", "skeptic")
+
+    assert (receipt.persona, receipt.replaced) == ("skeptic", "minimalist")
+    assert tmux.typed[0][2].startswith(_preface("skeptic", replaces="minimalist") + "\n")
+    assert _events(project, "persona_attached") == [
+        "persona skeptic attached to coder-1 (replaces minimalist)"
+    ]
+
+
+def test_attaching_to_an_agent_that_has_not_joined_records_only_the_fleet_row(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    agent = _coder(project)
+
+    fleet_service.attach_persona(project, "coder-1", "careful")
+
+    with store_session() as store:
+        row = store.get_fleet_agent(agent.id)
+        session = store.get_session(agent.session_id or "")
+    assert row is not None and row.persona == "careful"
+    assert session is None
 
 
 def test_tell_attributes_the_note_to_the_sender(

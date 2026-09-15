@@ -201,3 +201,20 @@ def test_a_role_persona_round_trips_and_a_build_without_the_field_keeps_it(
             "persona": "minimalist",
         }
     }
+
+
+def test_the_persona_import_section_round_trips_under_its_file_key(tmp_path: Path) -> None:
+    """``[persona.import]`` (docs/plans/spawn-personas.md §8). ``import`` is a Python
+    keyword, so the field is ``import_``: the section must load, be written back as
+    ``import`` — never ``import_`` — and keep a newer build's key inside it, which
+    needs the merge to know a field by its alias."""
+    target = tmp_path / "config.toml"
+    _write(target, '[persona.import]\nengine = "off"\napi_model = "claude-sonnet-5"\nretries = 2\n')
+
+    config = load_config(target)
+    save_config(config, target)
+
+    assert config.persona.import_.engine == "off"
+    assert _sections(target)["persona"] == {
+        "import": {"engine": "off", "api_model": "claude-sonnet-5", "retries": 2}
+    }

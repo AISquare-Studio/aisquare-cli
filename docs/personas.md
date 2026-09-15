@@ -199,6 +199,12 @@ engine = "auto"               # auto | manager | api | off — off refuses every
 api_model = "claude-opus-5"   # the api engine's model; the manager rides the manager's ladder
 ```
 
+If `config.toml` cannot be read, a conversion is refused with
+`config_unreadable`, naming only the error's class. A broken file may be the
+one that says `engine = "off"`, so its defaults are not assumed. Fix the file, or
+pass `--engine` to choose an engine for that one import; the output then says
+the config was not read.
+
 ### Export a persona
 
 ```sh

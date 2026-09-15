@@ -283,7 +283,20 @@ def _import_with_llm(
             "replaces it, --name picks another",
             code="persona_exists",
         )
-    settings = _import_settings()
+    settings, unreadable = _import_settings()
+    if unreadable is not None:
+        if engine is None:
+            raise PersonaError(
+                f"config.toml could not be read ({unreadable}), so [persona.import] cannot "
+                'be honoured, and it may say engine = "off"; fix the config, or pass '
+                "--engine to choose an engine for this import",
+                code="config_unreadable",
+            )
+        if progress is not None:
+            progress(
+                f"config.toml could not be read ({unreadable}); using --engine {engine} "
+                "with the default [persona.import] settings"
+            )
     chosen_engine = cast(persona_import.Engine, engine or settings.engine)
     api_model = model or settings.api_model
     feedback: str | None = None
@@ -427,13 +440,19 @@ def _engine_provenance(src: _Source) -> Provenance | None:
     return carried if carried.engine != "copy" else None
 
 
-def _import_settings() -> PersonaImportSettings:
-    """``[persona.import]``. A config that will not load costs the customisation,
-    never the import — the defaults apply."""
+def _import_settings() -> tuple[PersonaImportSettings, str | None]:
+    """``[persona.import]``, plus the reason when the config would not load.
+
+    The reason is RETURNED, never swallowed (``harness._team_settings``'s rule).
+    The file that will not load may be the one saying ``engine = "off"``, so the
+    caller refuses the LLM path on it rather than quietly applying the defaults,
+    which could start an engine the operator switched off. The reason names only
+    the exception class: a config that fails to parse can echo its own values.
+    """
     try:
-        return load_config().persona.import_
-    except Exception:
-        return PersonaImportSettings()
+        return load_config().persona.import_, None
+    except Exception as exc:
+        return PersonaImportSettings(), type(exc).__name__
 
 
 def _read_source(source: str, root: Path | None, *, stdin: bytes | None = None) -> _Source:

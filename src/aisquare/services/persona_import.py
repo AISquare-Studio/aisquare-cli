@@ -247,6 +247,14 @@ def draft_with_api(
         raise EngineUnavailable(
             f"api engine: {type(exc).__name__}: {_first_line(str(exc))}"
         ) from None
+    except ValidationError as exc:
+        # messages.parse validates the answer itself: a structured answer cut off at
+        # max_tokens, or a refusal part-way through, is not a PersonaDraft. That is a
+        # reason for the ladder, not a traceback. The first line names the model, never
+        # the answer's text.
+        raise EngineUnavailable(
+            f"api engine: no structured draft — the answer did not parse ({_first_line(str(exc))})"
+        ) from None
     if progress is not None:
         progress(
             f"api engine: {model} — {message.usage.input_tokens:,} input + "

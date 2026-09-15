@@ -12,10 +12,10 @@ from __future__ import annotations
 import json
 import os
 import sys
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 import typer
 
@@ -257,15 +257,36 @@ def _progress(text: str) -> None:
         typer.echo(text, err=True)
 
 
-def _confirm(draft: PersonaDraftView) -> bool:
-    """y/N on a terminal; never under --json or without one (§3.7)."""
-    if _json() or not sys.stdin.isatty():
-        return False
-    typer.echo(draft.skill_md, err=True)
-    model = f", {draft.model}" if draft.model else ""
-    return typer.confirm(
-        f"Save persona '{draft.name}' ({draft.engine}{model})?", default=False, err=True
-    )
+def _confirmer(yes: bool, asked: list[bool]) -> Callable[[PersonaDraftView], bool]:
+    """y/N at a terminal; ``--yes`` answers for you. Under ``--json`` or without a
+    terminal nothing can be asked, so the draft stays kept and the import exits
+    ``needs_confirmation`` (§3.7). ``asked`` records whether a human said no."""
+
+    def confirm(draft: PersonaDraftView) -> bool:
+        if yes:
+            return True
+        if _json() or not sys.stdin.isatty():
+            return False
+        asked.append(True)
+        _show_draft(draft)
+        return typer.confirm(f"Save persona '{draft.name}'?", default=False, err=True)
+
+    return confirm
+
+
+def _show_draft(draft: PersonaDraftView) -> None:
+    """The frontmatter, the first twelve body lines, the character count, engine and
+    model — and the engine's notes on what it dropped (§3.9)."""
+    frontmatter = draft.skill_md.split("\n---\n", 1)[0]
+    lines = draft.body.splitlines()
+    typer.echo(f"{frontmatter}\n---", err=True)
+    typer.echo("\n".join(lines[:12]), err=True)
+    if len(lines) > 12:
+        typer.echo(f"… {len(lines) - 12} more lines", err=True)
+    model = f" · {draft.model}" if draft.model else ""
+    typer.echo(f"{len(draft.body):,} characters · {draft.engine}{model}", err=True)
+    for note in draft.notes:
+        typer.echo(f"  note: {note}", err=True)
 
 
 @app.command("import")
@@ -273,8 +294,8 @@ def import_(
     source: Annotated[
         str | None,
         typer.Argument(
-            help="A skill directory, a SKILL.md or Markdown file, - for stdin, or a Claude "
-            "Code skill's name."
+            help="A skill directory, a SKILL.md or any text file, - for stdin, an https:// "
+            "URL, or a Claude Code skill's name."
         ),
     ] = None,
     user: UserFlag = False,
@@ -288,8 +309,37 @@ def import_(
     list_skills: Annotated[
         bool, typer.Option("--list", help="List the skills in Claude Code's skill directories.")
     ] = False,
+    llm: Annotated[
+        bool | None,
+        typer.Option(
+            "--llm/--no-llm",
+            help="Force the LLM path (to reshape a skill), or forbid it (never spend a token).",
+        ),
+    ] = None,
+    condense: Annotated[
+        bool,
+        typer.Option("--condense", help="Rewrite the body shorter through an engine."),
+    ] = False,
+    engine: Annotated[
+        str | None,
+        typer.Option(
+            "--engine",
+            help="auto, manager, api or off (default: [persona.import] engine).",
+            metavar="ENGINE",
+        ),
+    ] = None,
+    model: Annotated[
+        str | None,
+        typer.Option(
+            "--model", help="The api engine's model (default: [persona.import] api_model)."
+        ),
+    ] = None,
+    yes: Annotated[
+        bool, typer.Option("--yes", "-y", help="Save an engine's draft without asking.")
+    ] = False,
 ) -> None:
-    """Import a skill as a persona, byte for byte (default: --user)."""
+    """Import a persona: a skill is copied byte for byte; anything else is converted
+    by an engine and shown before it is saved (default: --user)."""
     root = _root()
     if list_skills:
         _emit_skills(persona_service.importable_skills(root))
@@ -301,20 +351,29 @@ def import_(
             error="missing_source",
         )
     layer: Layer = resolve_pool(user, project) or "user"
+    mode: Literal["auto", "always", "never"] = (
+        "auto" if llm is None else "always" if llm else "never"
+    )
+    asked: list[bool] = []
     with _reported():
-        result = persona_service.import_source(
-            source,
-            layer=layer,
-            root=root,
-            name=name,
-            force=force,
-            llm="auto",
-            condense=False,
-            engine=None,
-            model=None,
-            confirm=_confirm,
-            progress=_progress,
-        )
+        try:
+            result = persona_service.import_source(
+                source,
+                layer=layer,
+                root=root,
+                name=name,
+                force=force,
+                llm=mode,
+                condense=condense,
+                engine=engine,
+                model=model,
+                confirm=_confirmer(yes, asked),
+                progress=_progress,
+            )
+        except persona_service.DraftKept as exc:
+            # "n" at a terminal is not_confirmed; no terminal to ask is needs_confirmation.
+            code = "needs_confirmation" if exc.code == "not_confirmed" and not asked else exc.code
+            fail(str(exc), error=code, ref=str(exc.draft_path), detail=str(exc))
     persona = result.persona
     if _json():
         _emit(
@@ -331,10 +390,8 @@ def import_(
         )
         return
     replaced = " (replaced)" if result.replaced else ""
-    typer.echo(
-        f"✓ imported {persona.name} ({result.engine}) into {persona.layer}: {persona.path}"
-        f"{replaced}"
-    )
+    how = f"{result.engine}, {result.model}" if result.model else result.engine
+    typer.echo(f"✓ imported {persona.name} ({how}) into {persona.layer}: {persona.path}{replaced}")
     _warn(result.warnings)
 
 

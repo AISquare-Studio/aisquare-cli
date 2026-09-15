@@ -7,6 +7,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Import anything as a persona.** `aisquare persona import` now converts a
+  source that is not already a skill — plain text, another tool's JSON or YAML
+  persona, a page over `https://` — with an LLM: the fleet's own Claude Code,
+  headless, under the manager role's binding first; then the Anthropic API
+  through the official SDK (new optional extra `aisquare-cli[llm]`); then a
+  refusal naming both fixes. The answer is structured, held to the same rules
+  as a copied skill (one retry with the failed rule), kept as a draft under
+  `$AISQUARE_HOME/personas/.drafts/` before anything else, shown and confirmed
+  (`--yes` skips; `--json` or no terminal keeps the draft and exits
+  `needs_confirmation` with its path), and saved with engine, model and
+  `condensed` in `.persona.json`. New flags `--llm/--no-llm`, `--condense`,
+  `--engine`, `--model`, `--yes`; new config `[persona.import]` (`engine =
+  "auto" | "manager" | "api" | "off"`, `api_model`). The headless run is a ruled
+  spawn seam that strips the tracing identity, and `anthropic` and the engine
+  module are imported inside functions, so the CLI's startup and every hook load
+  neither. Saving config now keeps a newer build's unknown key inside a section
+  written under an alias, such as `[persona.import]`.
 - **Run an agent as a persona.** `aisquare launch <role> --persona NAME` and
   `aisquare fleet spawn <role> --persona NAME` — default: the role's new
   `[fleet.roles.<role>].persona` — start an agent as someone. The name is checked

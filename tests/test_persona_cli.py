@@ -199,22 +199,25 @@ def test_import_dash_reads_stdin(runner: CliRunner) -> None:
     assert (code, payload["error"]) == (1, "source_empty")
 
 
-def test_plain_text_is_not_recognised_and_the_refusal_names_the_llm_path(
+def test_plain_text_goes_to_the_llm_path_and_no_llm_refuses_it(
     runner: CliRunner, tmp_path: Path
 ) -> None:
     notes = tmp_path / "notes.txt"
     notes.write_text("remember to be kind\n", encoding="utf-8")
 
-    human = runner.invoke(app, ["persona", "import", str(notes)])
-    code, payload = _json(runner, "import", str(notes))
+    human = runner.invoke(app, ["persona", "import", str(notes), "--no-llm"])
+    code, payload = _json(runner, "import", str(notes), "--no-llm")
+    engines_code, engines = _json(runner, "import", str(notes))
     missing_code, missing = _json(runner, "import", str(tmp_path / "absent.md"))
 
     assert human.exit_code == 1
     assert isinstance(human.exception, SystemExit)
     assert "not a recognised skill" in human.stderr
-    assert "LLM import path" in human.stderr
+    assert "--no-llm forbids it" in human.stderr
     assert (code, payload["error"]) == (1, "not_recognised")
-    assert "LLM import path" in payload["detail"]
+    # conftest's no_real_llm_import: without --no-llm the engines are tried, and none can run.
+    assert (engines_code, engines["error"]) == (1, "no_import_engine")
+    assert "aisquare-cli[llm]" in engines["detail"]
     assert (missing_code, missing["error"]) == (1, "source_not_found")
     assert not _user_layer().exists()
 

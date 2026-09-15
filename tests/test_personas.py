@@ -396,10 +396,14 @@ def test_plain_text_is_not_recognised_and_nothing_is_written(
     with pytest.raises(PersonaError) as caught:
         _import(str(notes), llm=llm)
 
-    assert caught.value.code == "not_recognised"
-    assert "no frontmatter" in str(caught.value)
-    tail = "LLM import path" if llm == "auto" else "LLM path is not allowed"
-    assert tail in str(caught.value)
+    if llm == "never":
+        assert caught.value.code == "not_recognised"
+        assert "no frontmatter" in str(caught.value)
+        assert "--no-llm forbids it" in str(caught.value)
+    else:
+        # conftest's no_real_llm_import: the LLM path is taken, and no engine can run.
+        assert caught.value.code == "no_import_engine"
+        assert "tests never run a model" in str(caught.value)
     assert not _user_layer().exists()
 
 

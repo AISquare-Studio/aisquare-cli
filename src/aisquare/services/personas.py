@@ -7,10 +7,11 @@ ignores. Every write lands in a dot-named staging directory inside the target's
 parent and is renamed into place, so a reader never sees half a persona and a
 failed write leaves the old one untouched.
 
-This module holds the RECOGNISED path. The LLM engines (P5) arrive behind
-``import_source``'s ``llm``/``condense``/``engine``/``model``/``confirm`` seam;
-until then a source that fails the recognised test is refused as
-``not_recognised``, naming that path.
+A source that is already a skill takes the RECOGNISED path — bytes copied. Anything
+else (or ``--llm``/``--condense``) takes the LLM path: an engine from
+``services.persona_import`` drafts a skill, the same validator as the recognised path
+checks it (one retry with the rule), the draft is kept under ``.drafts`` before
+anyone is asked, and only a confirmed draft becomes a persona (§3.9).
 """
 
 from __future__ import annotations
@@ -24,12 +25,13 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Literal
+from typing import Literal, cast
 
 from pydantic import BaseModel
 
 from aisquare.core import personas as core
 from aisquare.core.agents import _claude_home
+from aisquare.core.config import PersonaImportSettings, load_config
 from aisquare.core.editor import edit_text
 from aisquare.core.personas import Layer, Persona, PersonaError, Provenance
 
@@ -47,6 +49,11 @@ You are … — say, in the second person, how this agent works and communicates
 """
 _PROBE_NAME = "persona"
 """A valid name to run the recognised test under before the real name is known."""
+DRAFTS_DIR = ".drafts"
+"""Under the user layer: every LLM draft, kept before anyone is asked (§3.7)."""
+_ENGINES = ("auto", "manager", "api", "off")
+_FETCH_TIMEOUT_SECONDS = 20.0
+_FETCH_MAX_BYTES = 2 * 1024 * 1024
 
 
 class SkillRef(BaseModel):
@@ -90,6 +97,20 @@ class ImportResult(BaseModel):
     warnings: list[str] = []
 
 
+class DraftKept(PersonaError):
+    """An LLM import that did not become a persona — but its draft is on disk.
+
+    ``code`` says why: ``import_invalid`` (failed validation twice), ``not_confirmed``
+    (the confirmation said no, or could not be asked) or ``persona_exists``.
+    ``draft_path`` is the kept SKILL.md; ``aisquare persona import <draft_path>``
+    finishes it on the recognised path.
+    """
+
+    def __init__(self, rule: str, *, draft_path: Path, code: str) -> None:
+        super().__init__(rule, code=code)
+        self.draft_path = draft_path
+
+
 @dataclass(frozen=True)
 class _Source:
     origin: str
@@ -114,28 +135,70 @@ def import_source(
     model: str | None,
     confirm: Callable[[PersonaDraftView], bool],
     progress: Callable[[str], None] | None = None,
+    stdin: bytes | None = None,
 ) -> ImportResult:
-    """Import ``source`` into ``layer``: ``-`` (stdin), a skill directory, a
-    SKILL.md or Markdown file, or the name of a skill in Claude Code's skill
-    directories. ``confirm`` and ``progress`` are the UI's seam (§4.3)."""
+    """Import ``source`` into ``layer``: ``-`` (stdin — or ``stdin``'s bytes, for a UI
+    that has no stdin to hand over), a skill directory, a SKILL.md or other file, an
+    ``https://`` URL, or the name of a skill in Claude Code's skill directories.
+
+    A recognised skill is copied. Anything else — or ``llm="always"``, or
+    ``condense`` — goes through an engine (``engine``/``model`` default to
+    ``[persona.import]``); ``llm="never"`` refuses instead. ``confirm`` and
+    ``progress`` are the UI's seam (§4.3): the CLI passes y/N and a stderr printer,
+    the TUI passes modals.
+    """
     base = _layer_dir(layer, root)
-    src = _read_source(source, root)
-    where: Path | str = src.directory or (src.origin if src.origin != "stdin" else "stdin")
-    if llm == "always" or condense:
+    if engine is not None and engine not in _ENGINES:
         raise PersonaError(
-            "the LLM import path (--llm, --condense) is not in this build yet",
-            path=where,
-            code="no_import_engine",
+            f"unknown engine {engine!r} — one of: {', '.join(_ENGINES)}", code="usage"
         )
+    src = _read_source(source, root, stdin=stdin)
+    where: Path | str = src.directory or (src.origin if src.origin != "stdin" else "stdin")
+    text: str | None
     try:
         text = src.skill_bytes.decode("utf-8")
-        probe = core.parse_skill(text, name=_PROBE_NAME, path=base / _PROBE_NAME, layer=layer)
     except UnicodeDecodeError:
-        raise _not_recognised(where, "not UTF-8 text", None, llm) from None
-    except PersonaError as exc:
-        if exc.code != "not_recognised":
-            raise PersonaError(exc.rule, path=where, line=exc.line, code=exc.code) from None
-        raise _not_recognised(where, exc.rule, exc.line, llm) from None
+        text = None
+    probe: Persona | None = None
+    refusal: PersonaError | None = None
+    if text is None:
+        refusal = PersonaError("not UTF-8 text", code="not_recognised")
+    else:
+        try:
+            probe = core.parse_skill(text, name=_PROBE_NAME, path=base / _PROBE_NAME, layer=layer)
+        except PersonaError as exc:
+            # A skill over the hard cap is exactly what --condense is for.
+            if exc.code != "not_recognised" and not (condense and exc.code == "too_large"):
+                raise PersonaError(exc.rule, path=where, line=exc.line, code=exc.code) from None
+            refusal = exc
+    if probe is None or condense or llm == "always":
+        if llm == "never":
+            if refusal is None:
+                raise PersonaError(
+                    "--llm and --condense need the LLM path, and --no-llm forbids it",
+                    path=where,
+                    code="no_import_engine",
+                )
+            raise _not_recognised(where, refusal.rule, refusal.line)
+        if text is None:
+            raise PersonaError(
+                "not UTF-8 text — an import engine reads text", path=where, code="not_recognised"
+            )
+        return _import_with_llm(
+            src,
+            text,
+            where=where,
+            base=base,
+            layer=layer,
+            name=name,
+            force=force,
+            condense=condense,
+            engine=engine,
+            model=model,
+            confirm=confirm,
+            progress=progress,
+        )
+    assert text is not None
 
     chosen = name or _implied_name(src, probe)
     try:
@@ -165,7 +228,14 @@ def import_source(
                 ),
             )
         (staged / core.SKILL_FILE).write_bytes(src.skill_bytes)
-        _write_provenance(staged, source=src.origin, skill_bytes=src.skill_bytes)
+        carried = _engine_provenance(src)
+        if carried is not None:
+            # A kept LLM draft finished here still says which engine wrote it.
+            (staged / core.PROVENANCE_FILE).write_text(
+                carried.model_dump_json(indent=2) + "\n", encoding="utf-8"
+            )
+        else:
+            _write_provenance(staged, source=src.origin, skill_bytes=src.skill_bytes)
 
     replaced = _publish(dest, fill)
     persona = core.load(dest, layer=layer)
@@ -178,25 +248,198 @@ def import_source(
     )
 
 
-def _not_recognised(
-    where: Path | str, rule: str, line: int | None, llm: Literal["auto", "always", "never"]
-) -> PersonaError:
-    if llm == "never":
-        tail = "and the LLM path is not allowed for this import"
-    else:
-        tail = (
-            "converting it takes the LLM import path, which is not in this build yet — "
-            "until then, give it frontmatter with a `description` and a body"
-        )
+def _not_recognised(where: Path | str, rule: str, line: int | None) -> PersonaError:
     return PersonaError(
-        f"not a recognised skill: {rule}; {tail}", path=where, line=line, code="not_recognised"
+        f"not a recognised skill: {rule}; converting it takes the LLM import path, and "
+        "--no-llm forbids it",
+        path=where,
+        line=line,
+        code="not_recognised",
     )
 
 
-def _read_source(source: str, root: Path | None) -> _Source:
+def _import_with_llm(
+    src: _Source,
+    text: str,
+    *,
+    where: Path | str,
+    base: Path,
+    layer: Layer,
+    name: str | None,
+    force: bool,
+    condense: bool,
+    engine: str | None,
+    model: str | None,
+    confirm: Callable[[PersonaDraftView], bool],
+    progress: Callable[[str], None] | None,
+) -> ImportResult:
+    """§3.9's LLM path: draft → render → the recognised path's validator (one retry
+    with its rule) → keep the draft → confirm → save with provenance."""
+    from aisquare.services import persona_import
+
+    if name is not None and _occupied(base / name) and not force:
+        raise PersonaError(
+            f"a {layer} persona named '{name}' already exists at {base / name} — --force "
+            "replaces it, --name picks another",
+            code="persona_exists",
+        )
+    settings = _import_settings()
+    chosen_engine = cast(persona_import.Engine, engine or settings.engine)
+    api_model = model or settings.api_model
+    feedback: str | None = None
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            drafted, ran, ran_model = persona_import.draft(
+                text,
+                engine=chosen_engine,
+                condense=condense,
+                model=api_model,
+                feedback=feedback,
+                progress=progress,
+            )
+        except persona_import.ImportRefused as exc:
+            raise PersonaError(exc.message, path=where, code=exc.code) from None
+        skill_name = name or drafted.name.strip()
+        rendered = core.render(
+            skill_name, drafted.description, drafted.body, metadata={"persona-source": src.origin}
+        )
+        kept = _keep_draft(
+            skill_name, rendered, src=src, engine=ran, model=ran_model, condensed=condense
+        )
+        problem = _draft_problem(rendered, skill_name, base=base, layer=layer, condense=condense)
+        if problem is None:
+            break
+        if attempt == 2:
+            raise DraftKept(
+                f"the {ran} engine's draft failed validation twice ({problem}) — the draft is "
+                f"kept at {kept}",
+                draft_path=kept,
+                code="import_invalid",
+            )
+        feedback = problem
+
+    dest = base / skill_name
+    if _occupied(dest) and not force:
+        raise DraftKept(
+            f"a {layer} persona named '{skill_name}' already exists at {dest} — --force "
+            f"replaces it, --name picks another; the draft is kept at {kept}",
+            draft_path=kept,
+            code="persona_exists",
+        )
+    view = PersonaDraftView(
+        name=skill_name,
+        description=drafted.description.strip(),
+        body=drafted.body.strip(),
+        skill_md=rendered,
+        engine=ran,
+        model=ran_model,
+        notes=drafted.notes,
+        draft_path=kept,
+    )
+    if not confirm(view):
+        raise DraftKept(
+            f"not saved — the draft is kept at {kept}; `aisquare persona import {kept}` saves it",
+            draft_path=kept,
+            code="not_confirmed",
+        )
+
+    def fill(staged: Path) -> None:
+        (staged / core.SKILL_FILE).write_text(rendered, encoding="utf-8")
+        _write_provenance(
+            staged,
+            source=src.origin,
+            skill_bytes=src.skill_bytes,
+            engine=ran,
+            model=ran_model,
+            condensed=condense,
+        )
+
+    replaced = _publish(dest, fill)
+    _discard(kept.parent)
+    persona = core.load(dest, layer=layer)
+    return ImportResult(
+        persona=persona,
+        engine=ran,
+        model=ran_model,
+        source=src.origin,
+        replaced=replaced,
+        warnings=core.warnings(persona),
+    )
+
+
+def _draft_problem(
+    rendered: str, name: str, *, base: Path, layer: Layer, condense: bool
+) -> str | None:
+    """The recognised path's rules, plus ``--condense``'s promise of a short body."""
+    try:
+        persona = core.parse_skill(rendered, name=name, path=base / name, layer=layer)
+    except PersonaError as exc:
+        return exc.rule
+    if condense and len(persona.body) > core.BODY_SOFT_CAP:
+        return (
+            f"the condensed body is {len(persona.body):,} characters, over the "
+            f"{core.BODY_SOFT_CAP:,} asked for"
+        )
+    return None
+
+
+def _keep_draft(
+    name: str,
+    rendered: str,
+    *,
+    src: _Source,
+    engine: Literal["manager", "api"],
+    model: str | None,
+    condensed: bool,
+) -> Path:
+    """``$AISQUARE_HOME/personas/.drafts/<name>/SKILL.md`` — written before anyone is
+    asked, so nothing an engine produced is lost (§3.7). Returns the SKILL.md."""
+    slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")[: core.SKILL_NAME_MAX].rstrip("-")
+    dest = dict(core.layer_dirs(None))["user"] / DRAFTS_DIR / (slug or "draft")
+
+    def fill(staged: Path) -> None:
+        (staged / core.SKILL_FILE).write_text(rendered, encoding="utf-8")
+        _write_provenance(
+            staged,
+            source=src.origin,
+            skill_bytes=src.skill_bytes,
+            engine=engine,
+            model=model,
+            condensed=condensed,
+        )
+
+    _publish(dest, fill)
+    return dest / core.SKILL_FILE
+
+
+def _engine_provenance(src: _Source) -> Provenance | None:
+    """An engine's sidecar on a source directory — a kept draft being finished."""
+    if src.directory is None:
+        return None
+    try:
+        carried = Provenance.model_validate_json(
+            (src.directory / core.PROVENANCE_FILE).read_bytes()
+        )
+    except (OSError, ValueError):
+        return None
+    return carried if carried.engine != "copy" else None
+
+
+def _import_settings() -> PersonaImportSettings:
+    """``[persona.import]``. A config that will not load costs the customisation,
+    never the import — the defaults apply."""
+    try:
+        return load_config().persona.import_
+    except Exception:
+        return PersonaImportSettings()
+
+
+def _read_source(source: str, root: Path | None, *, stdin: bytes | None = None) -> _Source:
     """Resolved in §3.9's order: stdin, an existing path, a URL, a skill name."""
     if source == "-":
-        data = sys.stdin.buffer.read()
+        data = stdin if stdin is not None else sys.stdin.buffer.read()
         if not data.strip():
             raise PersonaError("stdin is empty", code="source_empty")
         return _Source(origin="stdin", skill_bytes=data, directory=None, stem=None)
@@ -209,8 +452,7 @@ def _read_source(source: str, root: Path | None) -> _Source:
         if not skill.is_file():
             raise PersonaError(
                 f"no {core.SKILL_FILE} — a skill is a directory holding <name>/{core.SKILL_FILE}; "
-                "converting anything else takes the LLM import path, which is not in this "
-                "build yet",
+                "to convert something else, import the file itself",
                 path=directory,
                 code="not_recognised",
             )
@@ -222,13 +464,14 @@ def _read_source(source: str, root: Path | None) -> _Source:
         return _Source(
             origin=str(resolved), skill_bytes=resolved.read_bytes(), directory=None, stem=path.stem
         )
-    if source.startswith(("https://", "http://")):
+    if source.startswith("http://"):
         raise PersonaError(
-            "importing from a URL arrives with the LLM import path — download the file and "
-            "import it from disk",
+            "http:// is refused — a persona is always-injected context; import it over https://",
             path=source,
             code="unsupported_source",
         )
+    if source.startswith("https://"):
+        return _fetch(source)
     for ref in importable_skills(root):
         if ref.name == source:
             return _read_source(str(ref.path), root)
@@ -237,6 +480,34 @@ def _read_source(source: str, root: Path | None) -> _Source:
         "(`aisquare persona import --list` shows the skills)",
         code="source_not_found",
     )
+
+
+def _fetch(url: str) -> _Source:
+    """An ``https://`` source, with the stdlib, inside this function only (the CLI's
+    startup never pays for it): 20 s, 2 MB, refused past either."""
+    from urllib.error import URLError
+    from urllib.parse import urlsplit
+    from urllib.request import Request, urlopen
+
+    request = Request(url, headers={"User-Agent": "aisquare-cli persona import"})
+    try:
+        with urlopen(request, timeout=_FETCH_TIMEOUT_SECONDS) as response:
+            data = response.read(_FETCH_MAX_BYTES + 1)
+    except (URLError, OSError, ValueError) as exc:
+        reason = getattr(exc, "reason", None) or exc
+        raise PersonaError(
+            f"could not fetch it ({reason})", path=url, code="source_unreadable"
+        ) from None
+    if len(data) > _FETCH_MAX_BYTES:
+        raise PersonaError(
+            f"the response is over {_FETCH_MAX_BYTES // (1024 * 1024)} MB",
+            path=url,
+            code="source_too_large",
+        )
+    if not data.strip():
+        raise PersonaError("the response is empty", path=url, code="source_empty")
+    stem = Path(urlsplit(url).path).stem or None
+    return _Source(origin=url, skill_bytes=data, directory=None, stem=stem)
 
 
 def _implied_name(src: _Source, probe: Persona) -> str:
@@ -524,12 +795,22 @@ def _bundled_refusal(name: str, verb: Literal["edited", "removed"]) -> PersonaEr
     return PersonaError(rule, code="bundled_read_only")
 
 
-def _write_provenance(directory: Path, *, source: str, skill_bytes: bytes) -> None:
+def _write_provenance(
+    directory: Path,
+    *,
+    source: str,
+    skill_bytes: bytes,
+    engine: Literal["copy", "manager", "api"] = "copy",
+    model: str | None = None,
+    condensed: bool = False,
+) -> None:
     provenance = Provenance(
         source=source,
         source_sha256=hashlib.sha256(skill_bytes).hexdigest(),
-        engine="copy",
+        engine=engine,
+        model=model,
         imported_at=datetime.now(UTC),
+        condensed=condensed,
     )
     (directory / core.PROVENANCE_FILE).write_text(
         provenance.model_dump_json(indent=2) + "\n", encoding="utf-8"

@@ -103,8 +103,21 @@ tmux can see and its row says so (`no hooks`).
    icon (🧭 manager · 🔨 coder · 🧪 tester · 🌐 ui-tester · 👀 reviewer · 🛡 validator) and a
    state chip — **▶ working**, **⏸ waiting**, **🔔 NEEDS YOU** (with a terminal
    bell), **💤 exited(N)**, **✗ lost**. **Click an agent** and you see its real
-   session; click into the pane and every key you type goes to it. `＋ spawn
-   agent` on a project starts one of your own (Phase 4).
+   session; click into the pane and every key you type goes to it.
+   **`＋ spawn agent`** under a project opens the **Spawn dialog** for that
+   project, headed with its name and codename: role (the fleet's roles plus any
+   role bound with `team bind`; `manager` is greyed out while one runs), label
+   (prefilled `<role>-1`, or `<role>-<task short id>` once a task is picked;
+   🎲 offers `<role>-<adjective>-<animal>`; a label that breaks the rule
+   disables *Spawn* and shows the rule), task (the project's open tasks),
+   worktree (disabled with "not a git repository" outside one), permission mode,
+   account, binary, extra agent args (split like a shell would; a quoting error
+   is shown inline) and a first prompt. A field left as it opened means the
+   role's default, exactly as an omitted `fleet spawn` flag does. A refusal —
+   the agent limit, a binary not on your `PATH` — stays in the dialog with its
+   reason; a spawn toasts its receipt and notes and opens the new agent's pane.
+   `Esc` cancels, except while a spawn is already running: that one cannot be
+   taken back, so the dialog waits for its answer.
 5. **Press `F12`** to hand focus back to the sidebar (it is the one key the pane
    never forwards; configurable). With the sidebar focused: `t` picks a theme,
    `q` quits the UI — and the agents keep running.

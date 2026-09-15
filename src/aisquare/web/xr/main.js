@@ -1137,12 +1137,21 @@ function startLiveFeed() {
    *
    *  - `auth*` belongs to the connection chip (net.js), which already decides
    *    terminal-vs-transient; drawing it here too would double the message.
-   *  - A VOICE-utterance error (`stt*`, `audio*`, `session_mismatch`) ends one
-   *    utterance: match it to the front of the queue, clear that session's dead
-   *    interim, and abort the LIVE capture only when the error is FOR it — a late
+   *  - A BURST error ends one utterance — `stt_unavailable`, `stt_failed`,
+   *    `stt_empty` (audioEnd with no audio: no stt frame, no ack follows),
+   *    `audio_too_long`, `audio_misaligned` (an odd-length frame: the burst is
+   *    dropped and later frames discarded until the next header), and
+   *    `session_mismatch`. The server answers bursts in wire order and sends at
+   *    most one error per burst (an interim may precede it), so the error is
+   *    matched to the FRONT of the queue: that session's dead interim is cleared,
+   *    and the LIVE capture is aborted only when the error is FOR it — a late
    *    error for utterance N must not tear down the N+1 the operator is speaking.
-   *  - Anything else is a subscribe/prompt error: show it on the focused panel
-   *    and the HUD.
+   *  - `audio_unexpected` is a stray-frame report, not a burst error: it consumes
+   *    no queue entry (that would misattribute the next final) and ends nothing.
+   *  - Anything else (`internal`, `no_transcript`, `no_such_session`,
+   *    `ambiguous_session`, `bad_message`, `board_unavailable` — which the
+   *    server follows with close 1013, so net.js reconnects with the token kept —
+   *    and any future code) is shown on the focused panel and the HUD.
    *
    * `message` is the server's own words, repeated rather than re-worded — it is
    * written for a human, and this client's paraphrase would only drift from it.
@@ -1152,6 +1161,10 @@ function startLiveFeed() {
     const code = String(msg.code ?? '');
     const message = String(msg.message ?? code);
     if (code.startsWith('auth')) return; // the connection chip owns auth codes
+    if (code === 'audio_unexpected') {
+      showNotice(speakingAt ?? focus.sessionId, message, { alert: true, ms: 8000, hudToo: true });
+      return;
+    }
     const isVoice =
       code.startsWith('stt') || code.startsWith('audio') || code === 'session_mismatch';
     if (isVoice) {

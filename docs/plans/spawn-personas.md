@@ -74,12 +74,20 @@ available"). Each line is something the finished feature must do.
 9. The board row, `aisquare fleet ls` and the sidebar all say which persona an
    agent runs.
 10. `make check` green at every PR; every existing guard (§8) stays green.
-11. **A Personas view in `asq`** (§4.2–§4.6): browse the catalogue with its
-    layers and marks, preview exactly what will be injected, import (with the
-    LLM draft shown and confirmed in a modal), create and edit a SKILL.md in
-    place, export back into Claude's skill directories, remove, validate, and
-    **Spawn with…** a persona straight into the Spawn dialog. Everything goes
-    through the same service functions the CLI uses.
+11. **Personas live in the project, and attaching one is two steps** (§4.2,
+    §4.6, §4.7). A **Personas tab** in the Project view: search, select, preview
+    exactly what will be injected, import (the LLM draft shown and confirmed in
+    a modal), create and edit a SKILL.md in place, export back into Claude's
+    skill directories, remove, validate. Each persona has two actions, **Attach
+    to existing** and **Attach to new**; both open one **target picker** listing
+    this project's running **Agents**, the bound teammates (**Binds**, from
+    `aisquare team bind`) and the Claude **Accounts** — Agents first for
+    "existing", Binds and Accounts first for "new", every section selectable
+    either way. New binds and accounts are created right there. A running agent
+    gets the persona now and keeps it across `/clear`; a bind or account opens
+    the Spawn dialog already filled in. The Spawn dialog's own **Pick…** opens
+    the same picker, so the agent-first path is the same two steps: who runs
+    it, then as whom. No global personas section anywhere.
 
 **Non-goals for v1, stated so nobody re-derives them:**
 
@@ -154,7 +162,10 @@ available"). Each line is something the finished feature must do.
   EXPORT  persona export NAME [--to DIR | --skill --user|--project]  ──▶ <config dir>/skills/NAME/  or  <repo>/.claude/skills/NAME/
   board row · fleet ls · sidebar badge  ◀── team_session.persona / fleet_agent.persona
   Spawn dialog (cli/ui/spawn.py, new) ──▶ fleet_service.spawn(…, persona=…)
-  Personas view (cli/ui/views/personas.py, new) ──▶ services.personas.*  — import's progress/confirm callbacks become modals
+  Personas tab (views/personas_tab.py, new) ──▶ services.personas.*  — import's progress/confirm callbacks become modals
+     └─ Attach to existing / new ──▶ target picker (cli/ui/attach.py, new): Agents · Binds · Accounts (+ New bind → team bind, + New account)
+            agent  ──▶ services.fleet.attach_persona (record on the rows, deliver via fleet tell; the hook re-reads the row on /clear)
+            bind / account ──▶ Spawn dialog, preset (persona · seat · binary · account)
 ```
 
 The only process any of this starts is the import's headless Claude (§3.9),
@@ -460,7 +471,7 @@ line above the buttons for refusals.
 | Role | `Select` | `coder` | `fleet_service.FLEET_ROLES` plus roles bound in `team.profiles`; `manager` greyed with "one per project" when one is live |
 | Label | `Input` + 🎲 `Button` | `<role>-<task short id>` when a task is picked, else `<role>-<n>` (§5.7, via `next_label`) | live-checked against `fleet_service.LABEL`; invalid → *Spawn* disabled and the rule shown; 🎲 → `<role>-<adjective>-<animal>` from `core/codenames` |
 | Task | `Select` | `(none)` | the project's open tasks (`todo`, `doing`, `review`, `blocked`) as `<short id> [status] <title>`; changing it re-prefills an untouched label |
-| Persona *(P4)* | `Select` + **Import…** `Button` *(P7)* | the role's `[fleet.roles.<role>].persona`, else `(none)` | `core.personas.catalogue(project.root)`; the description shows under the field; follows the role until touched; Import… opens §4.3 and selects the result |
+| Persona *(P4)* | `Select` + **Import…** `Button` *(P7)* | the role's `[fleet.roles.<role>].persona`, else `(none)` | placed right after Role/Account/Binary so the dialog reads as two steps — who runs it, then as whom; `core.personas.catalogue(project.root)`; the description shows under the field; follows the role until touched; Import… opens §4.3 and selects the result |
 | Worktree | `Switch` | the role's `FleetRoleSettings.worktree` | **disabled with "not a git repository"** when `fleet_service.is_git_project(root)` is false (§5.7) |
 | Permission mode | `Select` | the role's `permission_mode` | `views.settings.permission_options(current)` |
 | Account | `Select` | `(this shell's)` | slots from `services.claude_accounts` as the Accounts page lists them; loaded in a worker so the dialog opens instantly |
@@ -487,32 +498,36 @@ Behaviour:
   open and the pane behind it keeps rendering.
 - Header shows the project (`aisquare-cli · solar-sparrow`) so a spawn from the
   wrong project's row is visible before it happens.
+- **Presets and Pick…** *(P4, P7)*: the constructor accepts `persona`, `role`,
+  `binary` and `account`, applied at compose, so the persona-first flow (§4.6)
+  opens the dialog already filled in; **Pick…** beside Role/Account opens the
+  target picker in "new" order and presets those fields from the choice. The
+  Spawn dialog is the last screen of both flows.
 
 Tests: `tests/test_ui_spawn.py` **(new)**, headless, `fleet_service.spawn`
 replaced by a recorder, no tmux (reuse `no_real_tmux` from
 `tests/test_ui_project.py`). What is asserted is the artefact: the exact kwargs
 the recorder received.
 
-### 4.2 The Personas view — browse, preview, act
+### 4.2 The Personas tab — inside the project, not beside it
 
-Entry: a **Personas** section in the sidebar between Accounts and Doctor
-(`PersonasSelected`, like `AccountsSelected`), showing the catalogue count. The
-view is **scoped like Doctor** (`_set_doctor_scope`, `_scoped_project`): the
-project selected in the sidebar supplies the project layer and the `--project`
-targets; with no project selected the view is global (bundled + user) and every
-project action is greyed with the reason.
+A **Personas** `TabPane` in the Project view (`views/project.py`, beside Manager
+· Board · Settings · Explainability · Doctor). Personas live where the fleet
+they serve lives: the tab's project supplies the project layer and every target
+the picker (§4.6) can list. Rev 3's global sidebar section is withdrawn — the
+owner: "persona is a selection that opens when we want to spawn an agent".
 
-Layout: left, a `DataTable` of `catalogue(root)` — name, layer, description,
-roles (from `metadata.persona-roles`), marks `⇧ shadows <layer>` and `✗ invalid`
-(the second tuple `catalogue()` returns, greyed, reason in the preview) — with a
-filter `Input` above (name/description/tag substring, layer chips). Right, the
-**preview**: exactly `briefing()`'s text, then path, layer, supporting files,
-provenance (`.persona.json`) and `warnings()` (soft cap, unknown keys, label ≠
-directory). Bottom, the action bar: **Import…** (`i`), **New…** (`n`), **Edit**
-(`e`), **Export…** (`x`), **Remove** (`Del`), **Validate** (`v`), **Spawn with…**
-(`s`, §4.6), **Refresh** (`r`). Bundled rows disable Edit and Remove with
-"bundled — export to a layer first". Every action re-reads the catalogue: the
-view holds no state the disk does not.
+Layout: a search `Input` (name, description, tag; layer chips) over
+`catalogue(root)`; the list with layer and the marks `⇧ shadows <layer>` and
+`✗ invalid` (greyed, reason in the preview); beside it the **preview**,
+byte-equal to `briefing()`, then path, layer, supporting files, provenance
+(`.persona.json`) and `warnings()`. The selected persona has two **primary**
+actions — **Attach to existing** (`a`) and **Attach to new** (`n`) — which open
+the target picker with that intent; and the secondary ones: **Edit** (`e`),
+**Export…** (`x`), **Remove** (`Del`), **Validate** (`v`). Above the list:
+**+ Import…** (`i`, §4.3) and **+ New** (§4.4). Bundled rows disable Edit and
+Remove with "bundled — export to a layer first". Every action re-reads the
+catalogue: the tab holds no state the disk does not.
 
 ### 4.3 Import — the dialog and the confirmation
 
@@ -521,7 +536,7 @@ path, an `https://` URL, or a skill name; a "Paste text…" `TextArea` toggle
 stands in for stdin — with a **Browse skills** `Select` beneath it fed by
 `services.personas.importable_skills(root)` (name · description · `imported`)
 that fills the Source field; Layer `RadioSet` (user / project; project disabled
-without a scoped git project); Name override `Input`, live-checked against the
+outside a git project); Name override `Input`, live-checked against the
 skill-name rule; `Switch` "Use the LLM when the source is not a recognised skill"
 (default: `[persona.import].engine != "off"`); `Switch` Condense; Engine
 `Select` (auto/manager/api) and Model `Input` (api only) defaulting from config;
@@ -538,7 +553,7 @@ is the CLI's `y/N`. Cancel while running cancels the worker; the service's
 180 s timeout bounds the process (v1 does not kill it early, §9). Errors —
 `PersonaError`, `ImportRefused`, a `needs_confirmation`/`import_invalid` outcome
 — land in the status line with the saved draft's path when there is one; the
-dialog stays open. Success dismisses with the result; the view selects the new
+dialog stays open. Success dismisses with the result; the tab selects the new
 row and toasts `✓ imported <name> (<engine>)`.
 
 `ConfirmDraftScreen(ModalScreen[bool])`: header "engine · model · N
@@ -552,7 +567,7 @@ characters"; the frontmatter as it will be written; the body in a scrollable
 `SKILL.md` (frontmatter and body); a live status line that re-runs `parse_skill`
 on change (debounced) and prints the first error or the warnings; **Save**,
 disabled while the text does not parse, writes through `services.personas` —
-never a `Path.write_text` from the UI — and **Cancel**. **New…** is a small
+never a `Path.write_text` from the UI — and **Cancel**. **+ New** is a small
 `NewPersonaScreen` (name, layer, description → `services.personas.new`) followed
 by the same editor on the scaffold. Bundled personas open **read-only** with
 "Save as…", which copies into a layer via `export --to`. `$EDITOR` remains the
@@ -562,34 +577,76 @@ CLI's affordance in v1.
 
 `ExportPersonaScreen(ModalScreen[Path | None])`: destination `RadioSet` —
 **Claude personal skills** (`<config dir>/skills/<name>/`, the resolved path
-shown), **Project skills** (`<repo>/.claude/skills/<name>/`, disabled without a
-scoped git project), **Directory…** (`Input`) — and `Switch` Force; **Export**
-calls `services.personas.export(...)`; the toast names the written path and, for
-the skill targets, says "it is `/name` in Claude Code now". **Remove** is a
-confirm modal naming the directory; bundled is disabled.
+shown), **Project skills** (`<repo>/.claude/skills/<name>/`, disabled outside a
+git project), **Directory…** (`Input`) — and `Switch` Force; **Export** calls
+`services.personas.export(...)`; the toast names the written path and, for the
+skill targets, says "it is `/name` in Claude Code now". **Remove** is a confirm
+modal naming the directory; bundled is disabled.
 
-### 4.6 Spawn with…
+### 4.6 The target picker — who runs it, in two steps
 
-**Spawn with…** on a selected row opens the Spawn dialog (§4.1) for the scoped
-project with the Persona Select preset to that row and the Role Select preset to
-the persona's first `persona-roles` entry when it names a fleet role. The Spawn
-dialog's own **Import…** button opens §4.3 and, on success, selects the new
-persona. That is the demo path: import a skill, spawn a coder as it, watch the
-badge appear on its row.
+`AttachTargetScreen(ModalScreen[Target | None])`: one filterable list in three
+sections; the intent decides the order and the focus, and every section stays
+selectable in both modes — the owner's "the same screen allows both".
 
-### 4.7 Tests for the persona UI
+| Section | Rows | From | Choosing one means |
+| --- | --- | --- | --- |
+| **Agents** | this project's live agents: label · role · state · current persona badge | `fleet_service.list_agents(project)` | attach the persona to that running agent, now (§4.7); a confirm names what it replaces |
+| **Binds** | bound teammates: seat or role · binary · the account its env points at (summarised from `CLAUDE_CONFIG_DIR`) | `load_config().team.profiles` — what `aisquare team bind` writes | spawn a new agent as that seat: the Spawn dialog opens preset with role = the seat, binary = its bin, and the persona |
+| **Accounts** | Claude accounts: slot · email · plan · usage | `services.claude_accounts`, as the Accounts page summarises them | spawn a new agent on that account: the Spawn dialog opens preset with `account = slot`, the role default, and the persona |
+
+**Attach to existing**: Agents first, focused. **Attach to new**: Binds, then
+Accounts, then Agents. A filter `Input` narrows all sections at once (the
+owner's machine binds twenty-six seats; a list without a filter is not usable).
+
+Two footer actions create targets without leaving the flow. **+ New bind**
+opens `NewBindScreen`: seat name validated as `launch` accepts it (a role, a
+numbered seat such as `coder2`, or a name already in `team.profiles`); Binary
+`Input` (default `claude`, checked with `shutil.which`); an Account `Select`
+that fills `CLAUDE_CONFIG_DIR` and `CLAUDE_CODE_TMPDIR` the way `launch
+--account` resolves them, or free `KEY=VALUE` rows; Extra args. Save goes
+through `services.settings.bind_role(...)` — the one writer `aisquare team bind`
+uses — and the picker re-lists with the new bind selected. **+ New account**
+opens the Accounts page's own add-account flow (`AccountsView.begin_claude_sign_in`)
+and returns to the picker once the slot has signed in.
+
+The picker is also the Spawn dialog's **Pick…** (§4.1): opened in "new" order,
+its choice presets Role/Binary/Account. So the agent-first path from the
+`＋ spawn agent` row is the same two steps — who runs it, then as whom.
+
+### 4.7 Attaching to a running agent
+
+`services.fleet.attach_persona(project, label, persona_name, *, sender=None)
+-> AttachReceipt`: resolve the persona (unknown → the known names); update
+`fleet_agent.persona` and, when the agent has a joined session row,
+`team_session.persona`; deliver the briefing **now** through the existing
+`fleet_service.tell(...)` — one preface line ("aisquare: the operator attached
+persona <name> to you — it applies from now on; it replaces <old>") followed by
+`briefing(persona)` — which types into a waiting agent and files a board note
+for a busy one, exactly as `fleet tell` does today; the receipt says which
+(`typed` / `noted`); one board event. To make the attachment survive `/clear`
+and a restart, `hook_session_start` resolves the persona as `AISQUARE_PERSONA`
+env > the `fleet_agent` row `AISQUARE_FLEET_AGENT` names > the session row's
+stored persona. The CLI verb is `aisquare persona attach <name> --to <label>`.
+
+### 4.8 Tests for the persona UI
 
 `tests/test_ui_personas.py` **(new)**, headless, no tmux (`no_real_tmux`): every
-`services.personas.*` call is a recorder — `import_source` above all — so the
-assertions are the kwargs and the rendered rows: the section opens the view; the
-table lists layer and marks; the preview equals `briefing()`; the filter narrows;
-bundled rows disable Edit/Remove; Import with a recorder that (a) returns a
-result → refresh, selection, toast, (b) calls `progress` twice and `confirm`
-once → both status texts shown, the confirm modal shows the draft, Save returns
-True to the recorder, Discard returns False and shows the path, (c) raises
-`PersonaError` → status line, dialog open; Edit: invalid text disables Save,
-valid text saves through the recorder; Export: each destination produces the
-right kwargs; Spawn with… opens the Spawn dialog with the persona preselected.
+`services.*` call is a recorder — `import_source`, `attach_persona`,
+`list_agents`, `bind_role`, the accounts summary, `spawn` — so the assertions
+are the kwargs and the rendered rows: the tab appears and lists layer and marks;
+search narrows; the preview equals `briefing()`; bundled rows disable
+Edit/Remove; Import with a recorder that (a) returns a result → refresh,
+selection, toast, (b) calls `progress` twice and `confirm` once → both status
+texts in order, the confirm modal shows the draft, Save returns True to the
+recorder, Discard returns False and shows the path, (c) raises `PersonaError`
+→ status line, dialog open; Edit: invalid text disables Save, valid text saves
+through the recorder; Export: each destination produces the right kwargs; the
+picker: section order per intent, the filter, the agent path (confirm → attach
+recorder → toast `typed|noted`), the bind path (Spawn dialog preset with seat,
+binary, persona), the account path (preset with the slot), + New bind through
+the `bind_role` recorder, Pick… from the Spawn dialog. `tests/test_persona_attach.py`
+covers the service and the hook fallback against the fake tmux (§7, P8).
 
 ---
 
@@ -672,6 +729,9 @@ core.config.PersonaImportSettings(engine="auto", api_model="claude-opus-5")   # 
 models.TeamSession.persona: str | None = None                   # recorded at session start
 models.FleetAgent.persona: str | None = None                    # recorded at spawn
 services.fleet.spawn(..., persona: str | None = None)           # None → role config → none
+services.fleet.attach_persona(project, label, name, *, sender=None) -> AttachReceipt   # P8: record + tell; receipt.delivered is "typed" | "noted"
+services.settings.bind_role(role, *, agent_bin, env, unset, args)   # existing writer, reused by NewBindScreen
+cli.ui.spawn.SpawnDialog(project, *, persona=None, role=None, binary=None, account=None)   # presets (P4)
 ```
 
 Files, by task (§6):
@@ -683,8 +743,9 @@ Files, by task (§6):
 | **P3** Spawn dialog | `src/aisquare/cli/ui/spawn.py`, `tests/test_ui_spawn.py` | `cli/ui/app.py` (`on_spawn_agent`), `docs/fleet.md` (the dialog paragraph), `CHANGELOG.md` |
 | **P5** smart import | `src/aisquare/services/persona_import.py`, `tests/test_persona_import.py` | `services/personas.py` (`import_source` gains the LLM branch), `cli/persona.py` (`--llm/--no-llm`, `--condense`, `--engine`, `--model`, `--yes`), `core/config.py` (`[persona.import]`), `core/spawn.py` (the new seam), `pyproject.toml` (`llm` extra), `docs/personas.md`, `CHANGELOG.md` |
 | **P4** persona in the UI | — | `cli/ui/spawn.py` (the Select + footer), `cli/ui/views/settings.py` (per-role default), `cli/ui/sidebar.py` (badge), `tests/test_ui_spawn.py`, `tests/test_ui_project.py`, `docs/fleet.md`, `docs/personas.md` |
-| **P6** Personas view | `src/aisquare/cli/ui/views/personas.py`, `src/aisquare/cli/ui/persona_dialogs.py` (Import, ConfirmDraft, New, Edit, Export, Remove screens), `tests/test_ui_personas.py` | `cli/ui/sidebar.py` (Personas section, `PersonasSelected`), `cli/ui/app.py` (`on_personas_selected`, scope), `docs/personas.md`, `docs/fleet.md`, `CHANGELOG.md` |
-| **P7** Spawn with… / Import… | — | `cli/ui/views/personas.py`, `cli/ui/spawn.py`, `tests/test_ui_personas.py`, `tests/test_ui_spawn.py`, `docs/personas.md`, `docs/fleet.md`, `CHANGELOG.md` |
+| **P6** Personas tab | `src/aisquare/cli/ui/views/personas_tab.py`, `src/aisquare/cli/ui/persona_dialogs.py` (Import, ConfirmDraft, New, Edit, Export, Remove screens), `tests/test_ui_personas.py` | `cli/ui/views/project.py` (the tab), `docs/personas.md`, `docs/fleet.md`, `CHANGELOG.md` |
+| **P7** target picker + attach flows | `src/aisquare/cli/ui/attach.py` (AttachTargetScreen, NewBindScreen) | `cli/ui/spawn.py` (Pick…, Import…), `cli/ui/views/personas_tab.py`, `cli/ui/views/accounts.py` (return hop), `tests/test_ui_personas.py`, `tests/test_ui_spawn.py`, `docs/personas.md`, `docs/fleet.md`, `CHANGELOG.md` |
+| **P8** attach to a running agent | `tests/test_persona_attach.py` | `services/fleet.py` (`attach_persona`), `services/team.py` (hook fallback to the row), `cli/persona.py` (`attach`), `core/store.py` (row updates), `docs/personas.md`, `docs/fleet.md`, `CHANGELOG.md` |
 
 The bundled set, four operating personalities as skill directories (bodies
 ≤ 1,200 characters each, owner reviews the wording in P1's PR): **skeptic** —
@@ -711,7 +772,7 @@ api_model = "claude-opus-5"   # the api engine's model; the manager engine rides
 
 ---
 
-## 6. Delivery — seven tasks, two coders, one tester
+## 6. Delivery — eight tasks, two coders, one tester
 
 Board: the **aisquare-cli** board (project `prj_61a0b873…`, codename
 `solar-sparrow`). Tasks are titled `[HACK][P<n>][coder] …`; `--needs` carries the
@@ -722,17 +783,18 @@ ordering. Both coders start at once.
 | **P1** | Persona core: personas are skill directories, PyYAML parser, three layers, `catalogue`/`resolve`/`briefing`, four bundled skills, the `aisquare persona` group with the **recognised-path** `import`, `import --list`, `export --skill`, `docs/personas.md` | `coder-persona-core` | — | M |
 | **P3** | The Spawn dialog over today's `spawn()` — every field except persona; `on_spawn_agent` opens it | `coder-spawn-dialog` | — | M |
 | **P2** | Persona wiring: `launch --persona` + `AISQUARE_PERSONA`, the hook records and renders once, store v15, `fleet spawn --persona`, `[fleet.roles.<role>].persona`, board / `fleet ls` show it | `coder-persona-core` | P1 | M |
-| **P6** | The Personas view (§4.2–§4.5): sidebar section, catalogue + preview, Import dialog with progress and the confirm-draft modal, in-UI editor, Export to Claude's skill dirs, Remove, Validate | `coder-spawn-dialog` | P1 | L |
+| **P6** | The Personas tab (§4.2–§4.5): search, catalogue, preview, Attach to existing / new (the picker's message seam), Import with progress and the confirm-draft modal, in-UI editor, Export, Remove, Validate | `coder-spawn-dialog` | P1 | L |
 | **P5** | Smart import: the `manager` and `api` engines, structured drafts, validate → show → confirm, drafts on refusal, provenance, `[persona.import]`, the `llm` extra, the seam ruling | `coder-persona-core` | P1 | M |
-| **P4** | Persona in the Spawn dialog: the Select (default from role config), per-role default in Settings, sidebar badge | `coder-spawn-dialog` | P2, P3 | S |
-| **P7** | Spawn with… from the Personas view; Import… beside the dialog's Persona Select (§4.6) | `coder-spawn-dialog` | P4, P6 | S |
+| **P4** | Persona in the Spawn dialog: the Persona step after the target fields, constructor presets, the Pick… seam, per-role default in Settings, sidebar badge | `coder-spawn-dialog` | P2, P3 | S |
+| **P8** | Attach to a running agent: `attach_persona` (record + `tell`), the hook's fallback to the row, `persona attach <name> --to <label>` | `coder-persona-core` | P2 | S |
+| **P7** | The target picker (§4.6): Agents · Binds · Accounts ordered by intent, + New bind through `team bind`, + New account, agent → `attach_persona`, bind/account → the Spawn dialog preset, Pick… and Import… in the dialog | `coder-spawn-dialog` | P4, P6, P8 | L |
 
 Board ids are recorded in §10 when the tasks are (re)issued.
 
 Tester (`tester-hackathon`): spawned when the first task reaches review; its
 prompt names the worktree and branch to check, because nothing moves a tester
 into a coder's tree (`docs/fleet.md`, the roles table). Reviewer once a PR
-exists; validator once all seven are done.
+exists; validator once all eight are done.
 
 **Rules for every PR on this train**
 
@@ -891,56 +953,90 @@ exists; validator once all seven are done.
 - `docs/fleet.md`'s UI section describes the dialog in the present tense only
   for what P3 ships (no persona field yet).
 
-**P6 — Personas view**
+**P6 — Personas tab**
 
-- The sidebar shows a Personas section with the catalogue count; activating it
-  shows `PersonasView` scoped to the selected project (global when none: project
-  actions disabled with the reason).
-- The table lists every persona with layer, description, roles and the marks
-  `⇧ shadows …` / `✗ invalid …`; the filter narrows by name, description, tag
-  and layer; the preview for the selected row is byte-equal to `briefing()`'s
-  text and shows provenance, files and warnings.
+- The Project view has a Personas tab; it lists every persona with layer,
+  description, roles and the marks `⇧ shadows …` / `✗ invalid …`; the search
+  narrows by name, description, tag and layer; the preview for the selected row
+  is byte-equal to `briefing()`'s text and shows provenance, files and warnings.
+- Attach to existing / Attach to new post `AttachRequested(persona, intent)`
+  (until P7 lands the tab toasts "target picker arrives with P7").
 - Bundled rows: Edit and Remove disabled with the reason; Export enabled.
 - Import dialog: Browse-skills fills Source from `importable_skills`; Layer
-  project is disabled without a scoped git project; an invalid Name override
-  disables Import with the rule. With a recorder in place of `import_source`:
-  (a) a returned result → dialog dismissed, view refreshed, the new row
-  selected, toast `✓ imported <name> (<engine>)`; (b) the recorder calls
-  `progress` twice and `confirm` once → both texts appear in the status line in
-  order, `ConfirmDraftScreen` shows engine, model, count, frontmatter, body and
-  notes, Save returns True to the recorder and Discard returns False with the
-  draft path shown; (c) the recorder raises `PersonaError("…")` → the message in
-  the status line, the dialog open, Import re-enabled. The recorder receives
-  exactly the chosen layer, name, force, llm, condense, engine and model.
+  project is disabled outside a git project; an invalid Name override disables
+  Import with the rule. With a recorder in place of `import_source`: (a) a
+  returned result → dialog dismissed, tab refreshed, the new row selected, toast
+  `✓ imported <name> (<engine>)`; (b) the recorder calls `progress` twice and
+  `confirm` once → both texts appear in the status line in order,
+  `ConfirmDraftScreen` shows engine, model, count, frontmatter, body and notes,
+  Save returns True to the recorder, Discard returns False with the draft path
+  shown; (c) the recorder raises `PersonaError("…")` → the message in the status
+  line, the dialog open, Import re-enabled. The recorder receives exactly the
+  chosen layer, name, force, llm, condense, engine and model.
 - New: name + layer + description → `services.personas.new` recorder → the
   editor opens on the scaffold. Edit: text that does not parse disables Save
   and shows the first error; text that parses shows warnings and Save writes
   through the recorder (never through `Path`); a bundled persona is read-only
   with Save as….
-- Export: each destination (personal skills, project skills, directory) sends
-  the right kwargs to the recorder; the toast names the returned path and, for
-  skill targets, "it is `/name` in Claude Code now". Remove asks once, names the
-  directory, then calls the recorder.
-- No test reaches tmux; `tests/test_ui_shell.py` and
-  `tests/test_terminal_pane.py` stay green (bindings unchanged); the docs guards
-  and `test_config_writes_stay_in_the_cli.py` stay green.
+- Export: each destination sends the right kwargs to the recorder; the toast
+  names the returned path and, for skill targets, "it is `/name` in Claude Code
+  now". Remove asks once, names the directory, then calls the recorder.
+- No test reaches tmux; `tests/test_ui_shell.py`, `tests/test_terminal_pane.py`,
+  `tests/test_ui_project.py`, the docs guards and
+  `test_config_writes_stay_in_the_cli.py` stay green.
 
-**P7 — Spawn with… and Import…**
+**P8 — attach to a running agent**
 
-- Spawn with… on a row opens `SpawnDialog` for the scoped project with the
-  Persona Select preset to the row and the Role Select preset to its first
-  `persona-roles` entry when it is a fleet role; the spawn recorder receives
-  `persona="<row>"`. With no scoped project the action is disabled with the
-  reason.
-- Import… beside the dialog's Persona Select opens `ImportPersonaScreen`; a
-  recorder result refreshes the Select and selects the new persona.
+- Against the fake tmux: attaching to a **waiting** agent updates
+  `fleet_agent.persona` (and `team_session.persona` when the agent has a joined
+  session), types the preface line plus `briefing()` into the pane, emits one
+  board event, and the receipt reads `typed`; attaching to a **busy** agent
+  files a board note instead and the receipt reads `noted`; an unknown persona
+  refuses before any tmux call and lists the known names; an unknown label
+  raises `NoSuchAgent`; replacing a persona makes the preface name the old one.
+- Hook fallback (`tests/test_persona_briefing.py`): with no `AISQUARE_PERSONA`
+  but `AISQUARE_FLEET_AGENT` naming a row whose persona is `skeptic`, the
+  SessionStart injection carries exactly one block; env beats the row; the row
+  beats the session row; nothing anywhere → bytes identical to the pinned
+  rendering.
+- `aisquare persona attach skeptic --to coder-x` prints `✓ attached skeptic to
+  coder-x (typed|noted)`; `--json` carries `delivered`.
+- Guards: `test_spawn_seams` (no new process — `tell` is existing),
+  `test_no_network_on_the_primary_path`, the stubs and sweeps, the fleet docs
+  guard.
+
+**P7 — the target picker and the two-step attach**
+
+- From the Personas tab, Attach to existing opens the picker with Agents first
+  and focused; Attach to new opens it with Binds, Accounts, Agents; the filter
+  narrows all three sections; Agents rows show the persona badge.
+- Choosing an agent → confirm names the persona, the label and what it replaces
+  → the `attach_persona` recorder receives (project, label, persona) → toast
+  `✓ attached <persona> to <label> (typed|noted)` → the tab refreshes.
+- Choosing a bind → the Spawn dialog opens with role = the seat, binary = its
+  bin and the persona preset, and the spawn recorder receives them; choosing an
+  account → the dialog opens with `account = slot` and the persona preset.
+- + New bind: an invalid seat name or a binary `which` cannot find disables Save
+  with the rule; Save sends seat, bin, env and args to the `bind_role` recorder
+  and the picker re-lists with the new bind selected; the Account Select fills
+  `CLAUDE_CONFIG_DIR`/`CLAUDE_CODE_TMPDIR` as `launch --account` would. + New
+  account opens the Accounts page's add flow (return hop asserted when it is
+  implemented; otherwise the navigation is asserted and the review note says so).
+- Pick… in the Spawn dialog opens the picker in "new" order and presets
+  Role/Binary/Account; Import… beside its Persona Select opens
+  `ImportPersonaScreen` and a recorder result selects the imported persona.
+- `tests/test_ui_accounts.py`, `tests/test_ui_shell.py`,
+  `tests/test_terminal_pane.py` and the docs guards stay green.
 
 **P4 — persona in the UI**
 
-- The dialog's Persona Select lists `(none)` plus the catalogue; choosing
-  `coder` preselects `[fleet.roles.coder].persona` when set; the description
-  updates under the field; the footer names `aisquare persona import`; the
-  recorder receives `persona="skeptic"`.
+- The dialog's Persona Select sits right after the target fields and lists
+  `(none)` plus the catalogue; choosing `coder` preselects
+  `[fleet.roles.coder].persona` when set; the description updates under the
+  field; the recorder receives `persona="skeptic"`.
+- Presets: `SpawnDialog(project, persona="skeptic", role="coder2",
+  account="2")` shows those values on open and the recorder receives them;
+  Pick… posts `PickTargetRequested` (P7 wires it; until then a toast).
 - Settings tab: a Persona Select per role, saved through `save_config` (the one
   writer), re-read after save; an unknown configured name still shows (the
   `(custom)` pattern from `permission_options`).
@@ -987,6 +1083,9 @@ exists; validator once all seven are done.
 | Hook context is weaker than the system prompt; a persona may not hold for a long session | medium | persona fades | acceptable for v1 (the role cycle governs from the same place and demonstrably holds); `/clear` re-briefs; promotion to `--append-system-prompt-file` for the default binary is a contained follow-up (§3.2). |
 | Import spends money or quota | certain, by design | surprise cost | the receipt names engine and model; the API engine prints usage; `[persona.import].engine = "off"`; nothing runs an LLM without `import` being typed. |
 | Two coders touch `docs/fleet.md`, `docs/personas.md` and `CHANGELOG.md` | certain | trivial conflicts | each PR adds its own paragraph/bullet; rebase on `rc/hackathon-v1` before review. |
+| Attaching to a **busy** agent lands as a board note, so the persona applies when the agent next reads the board, not instantly | certain, by `fleet tell`'s design | a short delay the operator may not expect | the receipt and the toast say `noted` rather than `typed`; the row is recorded at once, so the badge and the next `/clear` are correct regardless. |
+| The Accounts page's add-account flow was built as a page, not a modal; returning to the picker after a sign-in is a new hop | medium | P7 slips on the return hop | the plan allows a plain navigation to Accounts with the persona/intent remembered; the review note says which shipped. |
+| Twenty-six binds on the owner's machine | certain | an unfilterable picker is unusable | the filter is a requirement, not a nicety (§4.6); binds show the account they point at so they can be told apart. |
 | Bridging a thread worker to a modal (`call_from_thread` + `push_screen_wait`) misbehaves on Textual 8.2.8 | low–medium | the confirm step hangs or the worker cannot show the modal | P6 verifies the API in a spike test first; fallback: an async (`thread=False`) worker that awaits `push_screen_wait` and runs the service in `asyncio.to_thread`. |
 | A running LLM import cannot be killed from the UI in v1 | certain | up to 180 s of a busy status line after Cancel | the timeout bounds it; the dialog says so; killing the child early is a follow-up once the engine accepts a cancel token. |
 | An in-UI `TextArea` is a poor editor for a long SKILL.md | medium | people prefer `$EDITOR` | the CLI keeps `persona edit`; the follow-up is a tmux-pane editor like the Accounts sign-in pane. |
@@ -1000,3 +1099,4 @@ exists; validator once all seven are done.
 | 2026-09-15 | Plan authored; `rc/hackathon-v1` cut from `release/2026-09-12` @ `5ec92b5` and pushed. First-cut defaults: Markdown + flat YAML front matter, no new dependency; delivery via the session-start briefing (§3.2); layers project > user > bundled (§3.4); body cap 4,000; four bundled starters (§5); no `UI:` prefix on the dialog tasks because a browser ui-tester cannot verify a Textual dialog. Tasks issued: P1 `tsk_01m2hkec4s10veyxy1d2rc2jnm`, P3 `tsk_01m2hkecm1tgegphnqa9kt398s`, P2 `tsk_01m2hked3g7e26f4zs0x5ypyjw`, P4 `tsk_01m2hkedk67vpy4gnt3bar1hmm`. | manager `8e92f6af` |
 | 2026-09-15 | **Owner redirect:** a persona is a Claude Code skill directory (§3.3), interchangeable both ways through `import`/`export --skill` (§3.9). PyYAML accepted as a core dependency for interchange fidelity. Smart import: recognised skills copy verbatim; everything else goes through an LLM — `manager` engine = headless Claude Code under the manager role's binding (not the live pane: no RPC exists), then `api` via the official SDK as an optional extra, then refuse. Body caps 4,000 soft / 12,000 hard. `roles`/`tags` moved under `metadata`. P1 re-specified, **P5** added (needs P1), P2/P4 re-issued for the dependency ids; P3 unchanged. Ids: P1 `tsk_01m2hmms453d9veehg44p5xzx0` · P5 `tsk_01m2hmmsmqp4yn0s57hksnz24t` (needs P1) · P2 `tsk_01m2hmmt4e06kr6z08m6pmdmqx` (needs P1) · P4 `tsk_01m2hmmtm4afjwprvz5tc26j5a` (needs P2, P3); P3 keeps `tsk_01m2hkecm1tgegphnqa9kt398s`; the first-cut P1/P2/P4 were dropped. Deferred: LLM import inside the UI, batch import, `extends`. Follow-up when #144 lands: `persona` joins `LaunchSpec`. | owner + manager `8e92f6af` |
 | 2026-09-15 | **Rev 3 — the persona TUI.** Owner asked for the whole lifecycle in `asq`: §4 becomes 4.1 Spawn dialog, 4.2 Personas view (sidebar section, Doctor-style project scope, catalogue + preview), 4.3 Import dialog with `progress` and the confirm-draft modal bridged from a thread worker, 4.4 in-UI editor (TextArea, validate-on-save, bundled read-only), 4.5 Export to Claude's skill dirs / Remove, 4.6 Spawn with… + Import… in the dialog. `import_source` gains `progress`; the UI consumes the CLI's own callbacks and never re-implements import. Tasks: **P6** `tsk_01m2hn7whzm1edrxb78mf03g86` (needs P1, L) and **P7** `tsk_01m2hn7wyktx1kksfpsw7yqz8n` (needs P4, P6, S) added; P5 reassigned to coder-persona-core (P1 → P2 → P5); coder-spawn-dialog runs P3 → P6 → P4 → P7. The stale `AISQUARE_TEAM_HUB` was removed from the `asqui` tmux server's global env before any teammate is spawned. | owner + manager `8e92f6af` |
+| 2026-09-15 | **Rev 4 — persona-first, two steps, no global section.** Owner: personas are a selection when spawning; a Personas **tab** under the project replaces rev 3's sidebar section; each persona has **Attach to existing** / **Attach to new**, both opening one **target picker** (Agents · Binds · Accounts, ordered by intent, all selectable) with **+ New bind** (through `team bind`) and **+ New account** (the Accounts page); an agent gets the persona now via `fleet tell` and keeps it through the hook's row fallback (new **P8**); a bind or account opens the Spawn dialog preset; **Pick…** in the dialog is the same picker. Tasks re-issued: P4 `tsk_01m2hqgwsk4g7p49gdass3qey3` (needs P2, P3), P6 `tsk_01m2hqgvvcd9nqv06v57pty8cf` (needs P1), P8 `tsk_01m2hqgwb1v812egwahakzg0c7` (needs P2), P7 `tsk_01m2hqgx8d7hs9tbd7d1es54h2` (needs P4, P6, P8); P1/P2/P3/P5 unchanged. Assignments: coder-persona-core P1 → P2 → P5 → P8; coder-spawn-dialog P3 → P6 → P4 → P7. Loop prompts are persona-style and board-driven; the manager assigns by task notes and `fleet tell`. | owner + manager `8e92f6af` |

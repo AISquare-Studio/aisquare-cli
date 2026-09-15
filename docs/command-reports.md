@@ -125,7 +125,7 @@ are explicitly estimates using bytes divided by four; they are not provider
 usage. Receipts, prompts, other tools, and extra model turns are outside these
 numbers. Truncation is not counted as compaction. Reports carry the exact working
 directory, optional caller-supplied project/task/session IDs, and a separately
-labelled Explainability pipeline ID when available. No personality text is added
+labelled Explainability pipeline ID when available. No decorative text is added
 to agent reports or factual metadata.
 
 ## Use a report as requirement evidence
@@ -152,4 +152,4 @@ changed or vanished still invalidates the pass.
 
 If source capture fails, the command still runs and its ordinary output remains
 available. The report explicitly records unknown proof; it cannot then provide
-fresh source-backed evidence. No persona setting changes these facts.
+fresh source-backed evidence.

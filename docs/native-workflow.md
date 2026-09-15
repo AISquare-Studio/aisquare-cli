@@ -9,9 +9,6 @@ such as `R1` and `R2`. Existing board tasks are linked to those requirements.
 Evidence records what was checked and which source files were checked. A final
 coverage check identifies missing, failed, blocked, or stale evidence.
 
-Personality is separate. Switching a persona does not change a brief, a working
-instruction, a command, a recorded result, or a task's status.
-
 ## A login page, from request to finished work
 
 You tell the manager:
@@ -238,8 +235,7 @@ working rules and the evidence-recording instructions for new sessions; the
 linked requirements are still shown, because they are facts about the project.
 `mode native` enables the rules for new sessions. Sessions retain their recorded
 rule version when resumed; the rule text follows the session's current role, so a
-session relaunched as a tester gets tester habits. These controls are independent
-of persona selection.
+session relaunched as a tester gets tester habits.
 
 For a file shortlist, a worker can use `asq context focus "login error"`. This
 uses the existing snapshot index. It is a map to possible files, not proof or a

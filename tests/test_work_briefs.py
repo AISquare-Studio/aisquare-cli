@@ -387,7 +387,7 @@ def test_command_evidence_rejects_failed_stale_and_changed_raw_report(work: Path
     failed = command_reports.run_command(
         [sys.executable, "-c", "raise SystemExit(1)"], project_id=brief.project_id, task_id=task
     )
-    with pytest.raises(ValueError, match="failed command"):
+    with pytest.raises(ValueError, match="failed or interrupted command"):
         briefs.record_evidence(
             brief.id,
             "R1",
@@ -441,3 +441,29 @@ def test_invalid_finding_does_not_create_a_correction_task(work: Path) -> None:
         briefs.finding(brief.id, "R1", summary="failure", artifact=work / "missing.png")
     assert not team.list_tasks()
     assert not briefs.show(brief.id).requirements[0].task_ids
+
+
+def test_a_dropped_duplicate_task_does_not_permanently_block(work: Path, proof: Path) -> None:
+    """Finding 5: a dropped duplicate linked task is ignored, not a permanent block."""
+    brief = briefs.create("Login", ["Valid login opens dashboard"])
+    t1, _ = team.add_task("Build login", role="coder", cwd=work)
+    t2, _ = team.add_task("Build login (dup)", role="coder", cwd=work)
+    briefs.link(brief.id, t1.id, ["R1"])
+    brief = briefs.link(brief.id, t2.id, ["R1"])
+    with store_session() as store:
+        store.set_task_status(t2.id, "dropped")
+    record(brief, t1.id, "R1", proof)
+    result = briefs.check(brief.id)
+    r1 = next(r for r in result.requirements if r.requirement_id == "R1")
+    assert r1.status == "pass"
+    assert result.complete
+
+
+def test_re_sending_an_identical_requirement_value_is_a_noop(work: Path) -> None:
+    """Finding 11: an identical -r/--check value is a no-op, like link()."""
+    brief = briefs.create("Login", ["Valid login opens dashboard"])
+    rev = brief.revision
+    same = briefs.update(brief.id, changes={"R1": "Valid login opens dashboard"})
+    assert same.revision == rev, "identical requirement text must not bump the revision"
+    changed = briefs.update(brief.id, changes={"R1": "Valid login opens the dashboard page"})
+    assert changed.revision == rev + 1, "a real change still bumps the revision"

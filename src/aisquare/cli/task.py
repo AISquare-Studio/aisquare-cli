@@ -260,7 +260,9 @@ def done(
     try:
         task = team_service.finish_task(ref, note=note, session_ref=as_session)
     except ValueError as exc:
-        fail(str(exc), error="unverified_requirements", ref=ref)
+        # detail= so a --json caller learns WHY the refusal happened (which brief,
+        # which requirements) instead of a bare error code (finding 6).
+        fail(str(exc), error="unverified_requirements", ref=ref, detail=str(exc))
     except STORE_ERRORS as exc:
         _fail_team(exc, ref)
     _emit_task(task, verb="done")

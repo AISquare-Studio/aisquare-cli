@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from aisquare.core import harness, insights, orchestrator
 from aisquare.core.ids import new_event_id
@@ -256,13 +256,21 @@ def update(
         brief = _load(store, ref, _scope(store, cwd))
         expected = brief.revision
         touched: set[str] = set()
+        # Finding 11: only a value that actually differs from the stored one is a
+        # change. Re-sending an identical -r/--check/--assumption/--boundary must
+        # not bump revisions, stale evidence or reopen finished tasks.
         for req_id, text in (changes or {}).items():
             requirement = _requirement(brief, req_id)
-            requirement.text = Requirement(id=req_id, text=text.strip()).text
-            touched.add(req_id)
+            new_text = Requirement(id=req_id, text=text.strip()).text
+            if requirement.text != new_text:
+                requirement.text = new_text
+                touched.add(req_id)
         for req_id, text in (checks or {}).items():
-            _requirement(brief, req_id).expected_check = text.strip()
-            touched.add(req_id)
+            requirement = _requirement(brief, req_id)
+            new_check = text.strip()
+            if requirement.expected_check != new_check:
+                requirement.expected_check = new_check
+                touched.add(req_id)
         for req_id in affected or []:
             _requirement(brief, req_id)
         if affected and source_revision is None:
@@ -276,12 +284,16 @@ def update(
                 ) and requirement.source_revision != source_revision:
                     requirement.source_revision = source_revision
                     touched.add(requirement.id)
-        if assumptions is not None or boundaries is not None:
-            touched.update(req.id for req in brief.requirements)
-        if assumptions is not None:
+        if assumptions is not None and assumptions != brief.assumptions:
             brief.assumptions = assumptions
-        if boundaries is not None:
+            touched.update(req.id for req in brief.requirements)
+        if boundaries is not None and boundaries != brief.boundaries:
             brief.boundaries = boundaries
+            touched.update(req.id for req in brief.requirements)
+        if not touched and not (add or []):
+            # Nothing actually changed (identical values re-sent): a no-op, like
+            # link() — no revision bump, no staled evidence, no reopened tasks.
+            return brief
         statuses: dict[str, str] = {}
         for requirement in brief.requirements:
             if requirement.id in touched:
@@ -416,13 +428,28 @@ def record_evidence(
             if report.task_id is not None and report.task_id != task.id:
                 raise ValueError("report belongs to a different task")
             if verdict == "pass":
-                if not report.completed or report.exit_code != 0 or report.launch_error:
-                    raise ValueError("a failed command cannot be recorded as pass")
+                # Finding 7: an interrupted run whose child still exited 0 is not a
+                # clean pass — the operator's SIGINT is recorded on the report.
+                if (
+                    not report.completed
+                    or report.exit_code != 0
+                    or report.launch_error
+                    or report.interrupted_by is not None
+                ):
+                    raise ValueError("a failed or interrupted command cannot be recorded as pass")
+                # Finding 8: compare against the checkout the REPORT was captured
+                # in (its own source_root), not wherever the recorder stands — a
+                # worktree proof recorded from the repo root must not be judged
+                # against the root's source.
+                report_root = (
+                    Path(report.source_root).resolve() if report.source_root else source_root
+                )
+                current = source_fingerprint(report_root)
                 if (
                     report.source_capture_error
                     or not report.source_fingerprint_before
                     or report.source_fingerprint_before != report.source_fingerprint_after
-                    or report.source_fingerprint_after != fingerprint
+                    or report.source_fingerprint_after != current
                 ):
                     raise ValueError(
                         "command evidence is stale or source changed during the check; rerun"
@@ -567,16 +594,20 @@ def coverage(
             reason="No live linked task",
             task_ids=requirement.task_ids,
         )
-        linked = [indexed[t] for t in requirement.task_ids if t in indexed]
-        if (
-            not linked
-            or len(linked) != len(requirement.task_ids)
-            or any(t.status == "dropped" for t in linked)
-        ):
+        # Finding 5: a dropped or vanished linked task (e.g. a duplicate that was
+        # later dropped) is ignored, not a permanent block. The requirement is
+        # covered by its LIVE linked tasks; only when none survive is it
+        # 'missing-task'.
+        live = [
+            indexed[t]
+            for t in requirement.task_ids
+            if t in indexed and indexed[t].status != "dropped"
+        ]
+        if not live:
             rows.append(row)
             continue
         outcomes: list[RequirementCoverage] = []
-        for task in linked:
+        for task in live:
             outcome = row.model_copy(deep=True)
             outcome.status, outcome.reason = "missing-evidence", f"No recorded check for {task.id}"
             evidence = [
@@ -671,7 +702,18 @@ def task_gate(store: ContextStore, task: TeamTask) -> dict[str, int]:
     """A linked task cannot be declared done with missing, failed or stale evidence."""
     snapshot: dict[str, int] = {}
     for data in store.work_briefs(task.project_id):
-        brief = WorkBrief.model_validate_json(data)
+        # Finding 6: a brief this task is not part of must never block its
+        # completion. A damaged brief row that does not even mention this task is
+        # someone else's problem; only one that references THIS task is a genuine
+        # refusal (with a reason the caller can read).
+        try:
+            brief = WorkBrief.model_validate_json(data)
+        except ValidationError as exc:
+            if task.id not in data:
+                continue
+            raise ValueError(
+                f"a brief linked to this task is damaged and cannot be read: {exc}"
+            ) from None
         snapshot[brief.id] = brief.revision
         linked = {r.id for r in brief.requirements if task.id in r.task_ids}
         if not linked:

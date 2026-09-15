@@ -886,3 +886,29 @@ def test_settings_shows_a_configured_persona_the_project_lacks_as_custom(
     assert value == "ghost"
     assert prompts[0] == "(none)" and "skeptic" in prompts
     assert prompts[-1] == "ghost (custom)"
+
+
+def test_settings_says_why_it_lists_no_personas_when_the_catalogue_cannot_be_read(
+    project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def unreadable(root: Path | None = None) -> Any:
+        raise PermissionError(13, "Permission denied", "/repo/.aisquare/personas")
+
+    monkeypatch.setattr("aisquare.core.personas.catalogue", unreadable)
+
+    async def scenario(pilot: Pilot[None], host: Host) -> list[Any]:
+        host.query_one(ProjectView).active = "tab-settings"
+        await pilot.pause()
+        note = host.query_one("#settings-personas-unavailable", Static)
+        field = host.query_one("#persona-coder", Select)
+        overlay = field.query_one(OptionList)
+        prompts = [str(overlay.get_option_at_index(i).prompt) for i in range(overlay.option_count)]
+        return [note.display, str(note.render()), prompts]
+
+    displayed, text, prompts = drive(project, scenario)
+    assert displayed is True
+    assert text == (
+        "personas unavailable — PermissionError: "
+        "[Errno 13] Permission denied: '/repo/.aisquare/personas'"
+    )
+    assert prompts == ["(none)"]  # no names, and the tab is still up

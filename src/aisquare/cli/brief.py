@@ -25,6 +25,11 @@ Ref = Annotated[str, typer.Argument(help="Brief id (unambiguous prefix accepted)
 Requirements = Annotated[
     list[str], typer.Option("--requirement", "-r", help="Repeat for each outcome.")
 ]
+#: Who is writing. A brief write attributed to a session is left out of that
+#: session's own wake-up, so a manager's correction does not wake the manager.
+AsSession = Annotated[
+    str | None, typer.Option("--as", help="Your board session id (prefix), as `task claim --as`.")
+]
 
 
 def _plain(text: str) -> str:
@@ -97,10 +102,19 @@ def create(
     requirement: Requirements,
     assumption: Annotated[list[str] | None, typer.Option("--assumption")] = None,
     boundary: Annotated[list[str] | None, typer.Option("--boundary")] = None,
+    as_session: AsSession = None,
 ) -> None:
     """Create a brief; its requirements receive stable R1, R2… ids."""
     with _errors():
-        _emit(service.create(title, requirement, assumptions=assumption, boundaries=boundary))
+        _emit(
+            service.create(
+                title,
+                requirement,
+                assumptions=assumption,
+                boundaries=boundary,
+                session_id=as_session,
+            )
+        )
 
 
 @app.command("list")
@@ -140,6 +154,7 @@ def update(
     ] = None,
     assumption: Annotated[list[str] | None, typer.Option("--assumption")] = None,
     boundary: Annotated[list[str] | None, typer.Option("--boundary")] = None,
+    as_session: AsSession = None,
 ) -> None:
     """Apply corrections. Changed requirements/source invalidate affected evidence."""
     with _errors():
@@ -155,15 +170,21 @@ def update(
                 affected=affected,
                 assumptions=assumption,
                 boundaries=boundary,
+                session_id=as_session,
             )
         )
 
 
 @app.command("link")
-def link(ref: Ref, task: Annotated[str, typer.Argument()], requirement: Requirements) -> None:
+def link(
+    ref: Ref,
+    task: Annotated[str, typer.Argument()],
+    requirement: Requirements,
+    as_session: AsSession = None,
+) -> None:
     """Link an existing task to one or more requirements; does not duplicate tasks."""
     with _errors():
-        _emit(service.link(ref, task, requirement))
+        _emit(service.link(ref, task, requirement, session_id=as_session))
 
 
 @app.command("evidence")
@@ -208,10 +229,20 @@ def finding(
     summary: Annotated[str, typer.Option("--summary")],
     artifact: Annotated[Path, typer.Option("--artifact")],
     task: Annotated[str | None, typer.Option("--task")] = None,
+    as_session: AsSession = None,
 ) -> None:
     """Report a failure; reuse its linked task or create one deduplicated correction."""
     with _errors():
-        _emit(service.finding(ref, requirement, summary=summary, artifact=artifact, task_ref=task))
+        _emit(
+            service.finding(
+                ref,
+                requirement,
+                summary=summary,
+                artifact=artifact,
+                task_ref=task,
+                session_id=as_session,
+            )
+        )
 
 
 @app.command("check")

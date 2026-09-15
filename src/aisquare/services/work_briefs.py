@@ -152,6 +152,22 @@ def _event(brief: WorkBrief, kind: str, text: str, task_id: str | None = None) -
     )
 
 
+def _actor(store: ContextStore, project_id: str, session_id: str | None) -> str | None:
+    """The acting session a brief write is attributed to (``--as``), validated.
+
+    A write that names its session is excluded from that session's own wake-up:
+    a manager's own correction reopens its done tasks, and without the
+    attribution those ``task_reopened`` events woke the manager at its next Stop
+    and spent one of its hourly continuations on news it wrote itself.
+    """
+    if session_id is None:
+        return None
+    session = store.get_session(session_id)
+    if session is None or session.project_id != project_id:
+        raise ValueError("--as session is missing or on another board")
+    return session.id
+
+
 def _save(
     store: ContextStore,
     brief: WorkBrief,
@@ -160,12 +176,16 @@ def _save(
     kind: str,
     text: str,
     task_statuses: dict[str, str] | None = None,
+    session_id: str | None = None,
 ) -> WorkBrief:
     brief.updated_at = datetime.now(UTC)
     event = _event(brief, kind, text)
     if kind == "brief_evidence" and brief.evidence:
         event.session_id = brief.evidence[-1].session_id
         event.task_id = brief.evidence[-1].task_id
+    if session_id is not None:
+        # The write's author; the per-task reopen/block events inherit it too.
+        event.session_id = session_id
     store.save_work_brief(
         brief.id,
         brief.project_id,
@@ -203,6 +223,7 @@ def create(
     *,
     assumptions: list[str] | None = None,
     boundaries: list[str] | None = None,
+    session_id: str | None = None,
     cwd: Path | None = None,
 ) -> WorkBrief:
     """Create a contract with stable sequential requirement ids."""
@@ -213,9 +234,10 @@ def create(
         raise ValueError("duplicate requirements: keep one requirement and link its tasks")
     with store_session() as store:
         now = datetime.now(UTC)
+        project_id = _scope(store, cwd)
         brief = WorkBrief(
             id=f"brief_{uuid4().hex[:12]}",
-            project_id=_scope(store, cwd),
+            project_id=project_id,
             title=title.strip(),
             requirements=[Requirement(id=f"R{i}", text=t) for i, t in enumerate(cleaned, 1)],
             assumptions=assumptions or [],
@@ -223,7 +245,14 @@ def create(
             created_at=now,
             updated_at=now,
         )
-        return _save(store, brief, expected=None, kind="brief_created", text=brief.title)
+        return _save(
+            store,
+            brief,
+            expected=None,
+            kind="brief_created",
+            text=brief.title,
+            session_id=_actor(store, project_id, session_id),
+        )
 
 
 def show(ref: str, *, cwd: Path | None = None) -> WorkBrief:
@@ -248,6 +277,7 @@ def update(
     affected: list[str] | None = None,
     assumptions: list[str] | None = None,
     boundaries: list[str] | None = None,
+    session_id: str | None = None,
     cwd: Path | None = None,
 ) -> WorkBrief:
     """Corrections supersede old text; source changes stale affected evidence.
@@ -258,6 +288,7 @@ def update(
     """
     with store_session() as store:
         brief = _load(store, ref, _scope(store, cwd))
+        actor = _actor(store, brief.project_id, session_id)
         expected = brief.revision
         touched: set[str] = set()
         # Finding 11: only a value that actually differs from the stored one is a
@@ -326,17 +357,24 @@ def update(
             text=f"corrected {', '.join(sorted(touched)) or 'requirements'}; "
             f"read `asq brief show {brief.id}` before continuing",
             task_statuses=statuses,
+            session_id=actor,
         )
 
 
 def link(
-    ref: str, task_ref: str, requirement_ids: list[str], *, cwd: Path | None = None
+    ref: str,
+    task_ref: str,
+    requirement_ids: list[str],
+    *,
+    session_id: str | None = None,
+    cwd: Path | None = None,
 ) -> WorkBrief:
     """Link an existing task; never create a parallel task list."""
     if not requirement_ids:
         raise ValueError("at least one --requirement is required")
     with store_session() as store:
         brief = _load(store, ref, _scope(store, cwd))
+        actor = _actor(store, brief.project_id, session_id)
         task = store.get_task(task_ref)
         if task is None or task.project_id != brief.project_id:
             raise ValueError("task is missing or belongs to another board")
@@ -350,7 +388,14 @@ def link(
         if not changed:
             return brief
         brief.revision += 1
-        return _save(store, brief, expected=expected, kind="brief_linked", text=f"linked {task.id}")
+        return _save(
+            store,
+            brief,
+            expected=expected,
+            kind="brief_linked",
+            text=f"linked {task.id}",
+            session_id=actor,
+        )
 
 
 def _artifact(path: Path) -> tuple[str, str]:
@@ -529,6 +574,7 @@ def record_evidence(
             kind="brief_evidence",
             text=f"{requirement_id} {verdict}: {summary}",
             task_statuses=statuses,
+            session_id=session_id,
         )
 
 
@@ -539,6 +585,7 @@ def finding(
     summary: str,
     artifact: Path,
     task_ref: str | None = None,
+    session_id: str | None = None,
     cwd: Path | None = None,
 ) -> WorkBrief:
     """Attach a finding to an existing task or create one idempotent correction task."""
@@ -550,18 +597,28 @@ def finding(
     brief = show(ref, cwd=cwd)
     requirement = _requirement(brief, requirement_id)
     if task_ref is None:
-        if requirement.task_ids:
-            task_ref = requirement.task_ids[0]
+        # The first LIVE linked task, never a dropped one (finding 5): a finding
+        # recorded against a dropped duplicate reopens nothing and blocks nothing,
+        # so the failure would sit on the brief with no task to act on it.
+        with store_session() as store:
+            live = [
+                task_id
+                for task_id in requirement.task_ids
+                if (task := store.get_task(task_id)) is not None and task.status != "dropped"
+            ]
+        if live:
+            task_ref = live[0]
         else:
             task, _ = team.add_task(
                 f"Correct {requirement_id}: {requirement.text[:150]}",
                 key=f"{brief.id}-{requirement_id}-correction",
                 detail=summary,
                 role="coder",
+                session_ref=session_id,
                 cwd=cwd,
             )
             task_ref = task.id
-    link(ref, task_ref, [requirement_id], cwd=cwd)
+    link(ref, task_ref, [requirement_id], session_id=session_id, cwd=cwd)
     return record_evidence(
         ref,
         requirement_id,
@@ -569,6 +626,7 @@ def finding(
         verdict="fail",
         summary=summary,
         artifact=artifact,
+        session_id=session_id,
         cwd=cwd,
     )
 

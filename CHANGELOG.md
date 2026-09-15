@@ -27,6 +27,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     Role-specific working rules (`native-1`) reach manager-spawned and directly
     launched sessions through the shared session-start briefing and follow the
     session's current role; `asq brief mode off` turns them off for new sessions.
+    Brief writes take `--as SESSION` like the task commands, and the reopen/block
+    events a write causes carry that session, so a manager's own correction no
+    longer wakes the manager at its next Stop; `brief finding` without `--task`
+    lands on the first live linked task, never a dropped duplicate.
     The `work_brief` table is store schema v15, and it converges by presence as
     well as by number: the in-flight account-registry branch stamps the same
     `user_version 15` for its own tables, and `_migrate` compares the number

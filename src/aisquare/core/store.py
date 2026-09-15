@@ -1022,12 +1022,18 @@ class SqliteStore:
                 ).rowcount
                 if changed != 1:
                     raise ValueError("linked task disappeared or changed board")
+                # Attributed to the same session as the brief write that caused it.
+                # These are manager wake kinds, and a manager's OWN correction that
+                # reopens its done task must not wake the manager at its next Stop
+                # (and spend a continuation): the wake-up excludes the manager's own
+                # session, which only works if the event names it.
                 self._conn.execute(
-                    "INSERT INTO team_event (id, project_id, kind, text, task_id, created_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO team_event (id, project_id, session_id, kind, text, task_id, "
+                    "created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
                     (
                         f"{event.id}-{task_id}",
                         project_id,
+                        event.session_id,
                         "task_blocked" if status == "blocked" else "task_reopened",
                         event.text,
                         task_id,

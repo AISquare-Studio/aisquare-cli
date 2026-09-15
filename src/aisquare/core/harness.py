@@ -1009,6 +1009,8 @@ def working_rules(role: str) -> list[str]:
         "Never omit the FULL required checks, errors or warnings to save tokens.",
         "Use `asq context focus 'task keywords'` as an optional file-path shortlist,",
         "not evidence. Read originals and use ordinary search for missing or newly added files.",
+        "Pass `--as <your session id>` on every brief write, as on task commands: a write",
+        "attributed to you is left out of your own wake-up and delta.",
     ]
     roles = {
         "manager": [

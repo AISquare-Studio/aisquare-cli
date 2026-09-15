@@ -65,6 +65,13 @@ asq brief update BRIEF_ID \
   --check "R3=Try the error flow in a browser at the requested phone size"
 ```
 
+Every brief write (`create`, `update`, `link`, `evidence`, `finding`) takes
+`--as SESSION_ID`, the same session id the task commands take. Pass it: a write
+attributed to your session is left out of your own wake-up and delta, so a
+manager's own correction that reopens a finished task does not wake the manager at
+its next Stop and spend one of its continuations on news it wrote itself. Without
+`--as` the write is unattributed and every manager reads it as fleet news.
+
 `asq --json brief show BRIEF_ID` includes the board's `project_id`. The manager
 can launch the implementation worker with `asq fleet spawn coder --task TASK_ID`.
 The worker's startup context names that task and tells it to use the existing

@@ -615,3 +615,68 @@ def test_an_interrupted_command_that_exits_zero_cannot_be_recorded_as_pass(work:
             summary="interrupted but exit 0",
             report_id=report.id,
         )
+
+
+def test_a_managers_own_brief_correction_does_not_wake_it_at_stop(
+    work: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A manager's own `brief update` reopened its done task, and the task_reopened
+    event carried no session, so the manager's next Stop read it as fleet news,
+    woke the manager and spent one of its hourly continuations on a correction it
+    wrote itself. Attributed with --as, the write is left out of its own wake-up;
+    the same correction by a coder still wakes it."""
+    monkeypatch.setenv("AISQUARE_ROLE", "manager")
+    team.hook_session_start("mgr", work, "startup")
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
+    team.hook_session_start("c1", work, "startup")
+    monkeypatch.delenv("AISQUARE_ROLE")
+    brief, task = contract(work)
+
+    def settle() -> None:
+        # The task is done and the manager has read everything so far.
+        with store_session() as store:
+            store.set_task_status(task, "done")
+            store.touch_session("mgr", cursor=store.latest_seq(brief.project_id), state="working")
+
+    settle()
+    briefs.update(
+        brief.id, changes={"R1": "Valid login opens the dashboard page"}, session_id="mgr"
+    )
+    assert team.show_task(task).status == "todo", "the correction reopened the done task"
+    assert team.hook_stop("mgr", work) is None, "its own correction must not wake the manager"
+    with store_session() as store:
+        assert store.get_meta(team.continuation_key("mgr", datetime.now(UTC))) is None
+
+    settle()
+    briefs.update(
+        brief.id, changes={"R1": "Valid login opens the dashboard, fast"}, session_id="c1"
+    )
+    assert team.hook_stop("mgr", work) is not None, "a coder's correction is news for the manager"
+
+
+def test_a_brief_write_as_an_unknown_session_is_refused(work: Path) -> None:
+    brief = briefs.create("Login", ["Valid login opens dashboard"])
+    with pytest.raises(ValueError, match="--as session"):
+        briefs.update(brief.id, changes={"R1": "changed"}, session_id="nobody")
+    assert briefs.show(brief.id).requirements[0].text == "Valid login opens dashboard"
+
+
+def test_a_finding_without_a_task_lands_on_a_live_linked_task_not_a_dropped_one(
+    work: Path, proof: Path
+) -> None:
+    """Finding 5's other half: `brief finding` without --task used task_ids[0] even
+    when that task had been dropped, so the failure sat on a task nothing would
+    act on. It must pick the first LIVE linked task, and create a correction task
+    only when none is live."""
+    brief = briefs.create("Login", ["Valid login opens dashboard"])
+    dup, _ = team.add_task("Build login (dup)", role="coder", cwd=work)
+    real, _ = team.add_task("Build login", role="coder", cwd=work)
+    briefs.link(brief.id, dup.id, ["R1"])  # linked first, so it is task_ids[0]
+    briefs.link(brief.id, real.id, ["R1"])
+    team.drop_task(dup.id)
+
+    result = briefs.finding(brief.id, "R1", summary="Clipped on a phone", artifact=proof)
+
+    assert result.evidence[-1].task_id == real.id
+    assert len(team.list_tasks()) == 2, "no correction task while a live linked task exists"
+    assert team.show_task(dup.id).status == "dropped"

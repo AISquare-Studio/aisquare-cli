@@ -132,6 +132,13 @@ named by the variable still wins, and the fleet row wins over one a session
 recorded earlier. Attaching another persona replaces it, and the agent is told
 which one it replaces.
 
+In `asq`, the Spawn dialog (`＋ spawn agent` under a project) asks for the
+persona right after who runs the agent — role, account, binary — with the role's
+default preselected and the persona's description under the field; `(none)`
+spawns without one even when the role has a default. The Settings tab sets each
+role's default persona, and an agent running as a persona carries a dim
+`· skeptic` on its sidebar row.
+
 ## Commands
 
 Every reporting command takes `--json` before the subcommand

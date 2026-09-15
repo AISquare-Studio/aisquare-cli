@@ -131,7 +131,12 @@ def ordered_agents(statuses: Iterable[FleetAgentStatus]) -> list[FleetAgentStatu
 
 
 def agent_row_text(status: FleetAgentStatus) -> Text:
-    """``🧭 manager       ⏸`` — icon, label, state chip, exit status when exited."""
+    """``🧭 manager       ⏸ · skeptic`` — icon, label, state chip, exit status, persona.
+
+    The persona badge is the row's (what the agent was spawned with) or, for an
+    agent the row does not know one for, its session's (what it launched as) —
+    docs/plans/spawn-personas.md §0 item 9.
+    """
     agent = status.agent
     chip, style = STATE_CHIP.get(status.state, STATE_CHIP["unknown"])
     text = Text(no_wrap=True, overflow="ellipsis")
@@ -140,6 +145,9 @@ def agent_row_text(status: FleetAgentStatus) -> Text:
     text.append(chip, style=style)
     if status.state == "exited" and agent.exit_status is not None:
         text.append(f"({agent.exit_status})", style="dim")
+    persona = agent.persona or (status.session.persona if status.session is not None else None)
+    if persona:
+        text.append(f" · {persona}", style="dim")
     return text
 
 

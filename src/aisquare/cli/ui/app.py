@@ -55,6 +55,7 @@ from aisquare.cli.ui.sidebar import (
     SpawnAgent,
     accounts_summary_text,
 )
+from aisquare.cli.ui.spawn import SpawnDialog
 from aisquare.cli.ui.terminal import EscapeToSidebar, route_selection_gesture
 from aisquare.cli.ui.theme import ThemePicker, remember_theme, restore_theme
 from aisquare.cli.ui.views.accounts import AccountsChanged, AccountsView, read_session, summarise
@@ -585,11 +586,33 @@ class FleetApp(App[None], inherit_bindings=False):
         self._set_doctor_scope(event.project_id)
 
     def on_spawn_agent(self, event: SpawnAgent) -> None:
-        # The Spawn dialog is Phase 7 (§9); until it lands the CLI is the way.
-        self.notify(
-            "the spawn dialog is not built yet — from a terminal: aisquare fleet spawn <role>",
-            timeout=6,
+        """The sidebar's spawn-agent row: the Spawn dialog for THAT row's project."""
+        project = self.snapshot.project(event.project_id) if self.snapshot else None
+        if project is None:
+            self.notify("that project is no longer listed", severity="warning", timeout=4)
+            return
+        self.push_screen(
+            SpawnDialog(project, accounts=self._accounts), callback=self.spawn_finished
         )
+
+    def spawn_finished(self, receipt: fleet_service.SpawnReceipt | None) -> None:
+        """The dialog closed: toast the receipt and its notes, then show the new agent.
+
+        The Project view's Start-manager toasts, word for word. ``markup=False``
+        on every one: a note can carry a path or a branch with brackets in it.
+        """
+        if receipt is None:
+            return
+        agent = receipt.agent
+        self.notify(
+            f"✓ spawned {agent.label} ({agent.id}) → {receipt.tmux_session} {agent.pane_id}",
+            timeout=6,
+            markup=False,
+        )
+        for note in receipt.notes:
+            self.notify(note, severity="warning", timeout=8, markup=False)
+        self.refresh_data()
+        self.post_message(AgentSelected(agent.project_id, agent.id))
 
     async def on_accounts_selected(self, event: AccountsSelected) -> None:
         await self._show(

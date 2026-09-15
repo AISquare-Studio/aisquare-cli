@@ -35,11 +35,11 @@ MANAGER_SOURCE_MAX_BYTES = 200_000
 """The largest source fed to headless Claude Code on stdin."""
 API_MAX_TOKENS = 16_000
 
-#: The manager engine's flags around ``--json-schema``, exactly as §3.9 lists them.
-#: ``--bare`` is under review: Claude Code 2.1.272 documents that under it "OAuth and
-#: keychain are never read", so an OAuth account binding cannot pay (board question,
-#: seq 7100). Kept as one constant so the answer is a one-line change.
-_MANAGER_FLAGS_HEAD = ("--bare", "--tools", "", "--max-turns", "1", "--output-format", "json")
+#: The manager engine's flags around ``--json-schema``: ``harness.probe_model``'s
+#: isolation. No ``--bare`` — Claude Code 2.1.272 documents that under it "OAuth and
+#: keychain are never read", so an OAuth-bound manager account could not pay; dropped
+#: on the manager's answer (board seq 7100), the isolation kept exactly.
+_MANAGER_FLAGS_HEAD = ("--tools", "", "--max-turns", "1", "--output-format", "json")
 _MANAGER_FLAGS_TAIL = ("--no-session-persistence", "--settings", "{}", "--strict-mcp-config")
 
 _OPEN = "<<<SOURCE"

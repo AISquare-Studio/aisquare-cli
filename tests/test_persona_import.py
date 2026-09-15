@@ -215,7 +215,7 @@ def test_the_manager_engine_runs_the_contract_argv_under_the_managers_binding(
     assert resolution is not None
     assert argv[:2] == ["other-claude", "-p"]
     assert _flag(argv, "--model") == resolution.model
-    assert "--bare" in argv
+    assert "--bare" not in argv, "--bare reads no OAuth: an OAuth-bound manager could not pay"
     assert _flag(argv, "--tools") == ""
     assert _flag(argv, "--max-turns") == "1"
     assert _flag(argv, "--output-format") == "json"
@@ -236,6 +236,7 @@ def test_the_manager_engine_runs_the_contract_argv_under_the_managers_binding(
     ):
         assert stripped not in env, stripped
     assert env["AISQUARE_TEAM"] == "0"
+    assert env["CLAUDE_CODE_DISABLE_ADVISOR_TOOL"] == "1"
     assert env["CLAUDE_CONFIG_DIR"] == "/accounts/manager"
 
     dest = _user_layer() / "kind-reviewer"
@@ -617,5 +618,6 @@ def test_the_cli_pulls_in_neither_the_sdk_nor_the_engines() -> None:
     )
 
     assert "anthropic" not in cli
+    assert "yaml" not in cli
     assert "aisquare.services.persona_import" not in cli
     assert "aisquare.services.persona_import" in branch

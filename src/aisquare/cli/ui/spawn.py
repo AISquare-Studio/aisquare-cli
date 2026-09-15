@@ -1,0 +1,525 @@
+"""The Spawn dialog — the sidebar's spawn-agent row, over ``services.fleet.spawn``.
+
+docs/plans/spawn-personas.md §4.1 (the field table this follows row by row) and
+docs/plans/fleet-tui.md §4.1, §5.7 (the row, the label rules, the 🎲 form). The
+dialog is a form in front of the one spawn the CLI runs: every field is one
+keyword of :func:`aisquare.services.fleet.spawn`, and a field still showing what
+it opened with is sent as ``None`` — "the role's default", exactly what an
+omitted CLI flag means — so the service resolves the default at spawn time from
+the config it reads then, not from the one this form read when it opened. The
+prefilled label follows the same rule: sent only when the user changed it, so
+the service picks the free label under the store it is writing with.
+
+Two things are sent although nobody touched them, because the default cannot
+stand: in a project that is not a git repository the worktree switch is off and
+disabled, so a role whose default IS a worktree is sent ``worktree=False``
+rather than a ``None`` the service would refuse; and the manager's label is
+always ``manager``, so the Label field is locked for that role.
+
+The spawn runs in a thread worker (tmux, git and the first-prompt wait take
+seconds) with ``exit_on_error=False``, the Manager tab's pattern: a
+``FleetError`` is the service's answer and lands in the status line while the
+dialog stays open; anything else lands there too, with its class name — never
+a crash of the app. A spawn cannot be taken back once it has started, so while
+one runs *Cancel* and ``Esc`` wait for its answer rather than pretend to cancel.
+
+Keys: ``Esc`` cancels; ``Tab``/``Shift+Tab`` move; the buttons are the only
+submit. Nothing else is bound — the modal owns focus while it is open, and the
+agent pane behind it keeps every key it had.
+"""
+
+from __future__ import annotations
+
+import random
+import shlex
+from collections.abc import Callable, Iterable
+from typing import Any, ClassVar
+
+from rich.text import Text
+from textual import on
+from textual.app import ComposeResult
+from textual.binding import Binding
+from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.screen import ModalScreen
+from textual.widgets import Button, Input, Label, OptionList, Select, Static, Switch, TextArea
+from textual.worker import Worker, WorkerState
+
+from aisquare.cli.ui.views.settings import permission_options
+from aisquare.core import codenames, harness
+from aisquare.core.config import FleetRoleSettings, load_config
+from aisquare.core.store import store_session
+from aisquare.models import AccountsOverview, ClaudeAccountStatus, ProjectInfo, TeamTask
+from aisquare.services import claude_accounts as accounts_service
+from aisquare.services import fleet as fleet_service
+
+SPAWN_WORKER = "spawn-agent"
+"""The worker that runs the spawn. Not ``spawn-manager`` — that is the Manager
+tab's, and a worker's state change bubbles up to the app past both."""
+
+ACCOUNTS_WORKER = "spawn-accounts"
+"""The worker that reads the Claude accounts, so the dialog opens before they are read."""
+
+NO_TASK = ""
+"""The Task field's ``(none)``."""
+
+THIS_SHELL = ""
+"""The Account field's ``(this shell's)``: no ``--account`` at all."""
+
+OPEN_TASK_STATUSES = ("todo", "doing", "review", "blocked")
+"""A task an agent can still be spawned for; ``done`` and ``dropped`` are refused by the service."""
+
+LABEL_MAX = 24
+"""The longest label ``fleet_service.LABEL`` accepts."""
+
+LABEL_RULE = (
+    "a label is 2 to 24 characters: a lowercase letter, then lowercase letters, "
+    "digits or '-' — no '.', ':' or spaces"
+)
+
+
+def role_choices(bound: Iterable[str]) -> list[str]:
+    """The fleet's roles in their fixed order, then every other role ``team bind`` knows, sorted."""
+    return [
+        *fleet_service.FLEET_ROLES,
+        *sorted(set(bound) - set(fleet_service.FLEET_ROLES)),
+    ]
+
+
+def dice_label(role: str, rng: random.Random | None = None) -> str | None:
+    """``<role>-<adjective>-<animal>`` from the codename lists; ``None`` when no pair fits.
+
+    The pick is made among the words that fit, not clipped afterwards — a
+    clipped word is not a word — and the longest words do not always fit:
+    ``ui-tester-<7 letters>-<7 letters>`` is 25 characters, one past the limit.
+    A role too long for any pair gets ``None`` so the caller can say so instead
+    of offering a label the service would refuse.
+    """
+    pick = rng or random.Random()
+    room = LABEL_MAX - len(role) - 2  # the two '-' separators
+    shortest_animal = min(len(animal) for animal in codenames.ANIMALS)
+    adjectives = [word for word in codenames.ADJECTIVES if len(word) + shortest_animal <= room]
+    if not adjectives:
+        return None
+    adjective = pick.choice(adjectives)
+    animal = pick.choice([word for word in codenames.ANIMALS if len(adjective) + len(word) <= room])
+    label = f"{role}-{adjective}-{animal}"
+    return label if fleet_service.is_label(label) else None
+
+
+def split_agent_args(text: str) -> list[str]:
+    """The Extra agent args field as ``agent_args``; ``ValueError`` on a quoting error."""
+    return shlex.split(text)
+
+
+def task_choice(task: TeamTask) -> str:
+    """``<short id> [status] <title>`` — the short id is the one a label and a branch use."""
+    return (
+        f"{task.id.removeprefix('tsk_')[: fleet_service.TASK_SHORT]} [{task.status}] {task.title}"
+    )
+
+
+def account_choice(status: ClaudeAccountStatus) -> str:
+    """``2 · account 2 · me@example.com`` — who a slot is, as the Accounts page names it."""
+    who = status.identity.email if status.identity is not None else "not signed in"
+    return f"{status.account.slot} · {status.label} · {who}"
+
+
+def _bound_roles() -> list[str]:
+    """Roles named in ``team.profiles``; none when the config cannot be read (fail-open)."""
+    try:
+        return list(load_config().team.profiles)
+    except Exception:  # a broken config costs the extra roles, never the dialog
+        return []
+
+
+class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
+    """Spawn one agent for ``project``; dismisses with the receipt, or ``None`` on cancel."""
+
+    DEFAULT_CSS = """
+    SpawnDialog { align: center middle; }
+    SpawnDialog #spawn-box { width: 90; max-width: 96%; height: 92%; border: heavy $accent;
+                             background: $surface; padding: 0 1; }
+    SpawnDialog #spawn-header { height: auto; padding: 1 0; }
+    SpawnDialog #spawn-fields { height: 1fr; }
+    SpawnDialog .spawn-row { height: auto; }
+    SpawnDialog .spawn-row > Label { width: 18; padding-top: 1; }
+    SpawnDialog .spawn-row > Select { width: 1fr; }
+    SpawnDialog .spawn-row > Input { width: 1fr; }
+    SpawnDialog #spawn-dice { min-width: 7; width: 7; }
+    SpawnDialog .spawn-note { height: auto; padding-left: 18; color: $text-muted; }
+    SpawnDialog #spawn-worktree-note { padding: 1 0 0 1; height: auto; color: $text-muted; }
+    SpawnDialog #spawn-prompt { height: 6; width: 1fr; }
+    SpawnDialog #spawn-status { height: auto; padding: 0 0 0 0; }
+    SpawnDialog #spawn-buttons { height: auto; align-horizontal: right; padding-bottom: 1; }
+    SpawnDialog #spawn-buttons Button { margin-left: 2; }
+    """
+    BINDINGS: ClassVar = [Binding("escape", "cancel", "cancel")]
+
+    def __init__(
+        self,
+        project: ProjectInfo,
+        *,
+        accounts: Callable[[], AccountsOverview] | None = accounts_service.overview,
+    ) -> None:
+        super().__init__()
+        self.project = project
+        self._accounts = accounts
+        self._fleet = fleet_service.settings()
+        self._git = fleet_service.is_git_project(project.root)
+        self._roles = role_choices(_bound_roles())
+        self._role = "coder"
+        self._tasks, self._tasks_unavailable = self._read_tasks()
+        self._manager_live = self._read_manager_live()
+        self._prefill = self._label_for(self._role, NO_TASK)
+        """The label the form filled in for the current role and task; equal means untouched."""
+        self._kept_label: str | None = None
+        """What the user had typed, kept while the manager role locks the field."""
+        self._spawning = False
+
+    # --- what the form reads when it opens ----------------------------------------------
+
+    def _read_tasks(self) -> tuple[list[TeamTask], str | None]:
+        try:
+            with store_session() as store:
+                tasks = store.team_tasks(self.project.id)
+        except Exception as exc:  # the store is busy: no task list, still a dialog
+            return [], f"tasks unavailable — {type(exc).__name__}: {exc}"
+        return [task for task in tasks if task.status in OPEN_TASK_STATUSES], None
+
+    def _read_manager_live(self) -> bool:
+        try:
+            return fleet_service.manager_of(self.project) is not None
+        except Exception:  # unknown: offer the role; the service refuses a second manager itself
+            return False
+
+    def _defaults(self, role: str) -> FleetRoleSettings:
+        return fleet_service.role_settings(role, self._fleet)
+
+    def _label_for(self, role: str, task_id: str) -> str:
+        """The prefill: ``<role>-<task short id>`` or ``<role>-<n>``, free among live agents."""
+        try:
+            return fleet_service.next_label(self.project, role, task_id=task_id or None)
+        except Exception:  # no store to ask: the service re-picks at spawn anyway
+            if role == "manager":
+                return fleet_service.MANAGER_LABEL
+            short = task_id.removeprefix("tsk_")[: fleet_service.TASK_SHORT]
+            return f"{role}-{short}" if short else f"{role}-1"
+
+    @staticmethod
+    def _binary_hint(role: str) -> str:
+        try:
+            return harness.resolve_binary(role).binary
+        except Exception:  # a hint, never a reason to fail
+            return harness.DEFAULT_AGENT_BINARY
+
+    # --- layout -----------------------------------------------------------------------
+
+    def _header(self) -> Text:
+        text = Text()
+        text.append("Spawn an agent", style="bold")
+        text.append(f"  {self.project.root.name or self.project.id}", style="bold cyan")
+        if self.project.codename:
+            text.append(f" · {self.project.codename}", style="cyan")
+        return text
+
+    def _role_prompt(self, role: str) -> str | Text:
+        if role == "manager" and self._manager_live:
+            return Text("manager — one per project, already running", style="dim")
+        return role
+
+    def compose(self) -> ComposeResult:
+        defaults = self._defaults(self._role)
+        with Vertical(id="spawn-box"):
+            yield Static(self._header(), id="spawn-header")
+            with VerticalScroll(id="spawn-fields"):
+                with Horizontal(classes="spawn-row"):
+                    yield Label("Role")
+                    yield Select(
+                        [(self._role_prompt(role), role) for role in self._roles],
+                        value=self._role,
+                        allow_blank=False,
+                        id="spawn-role",
+                    )
+                yield Static(id="spawn-role-note", classes="spawn-note")
+                with Horizontal(classes="spawn-row"):
+                    yield Label("Label")
+                    yield Input(value=self._prefill, id="spawn-label")
+                    yield Button("🎲", id="spawn-dice", tooltip="<role>-<adjective>-<animal>")
+                yield Static(id="spawn-label-rule", classes="spawn-note")
+                with Horizontal(classes="spawn-row"):
+                    yield Label("Task")
+                    yield Select(
+                        [("(none)", NO_TASK), *((task_choice(t), t.id) for t in self._tasks)],
+                        value=NO_TASK,
+                        allow_blank=False,
+                        id="spawn-task",
+                    )
+                yield Static(id="spawn-task-note", classes="spawn-note")
+                with Horizontal(classes="spawn-row"):
+                    yield Label("Worktree")
+                    yield Switch(
+                        value=defaults.worktree and self._git,
+                        disabled=not self._git,
+                        id="spawn-worktree",
+                    )
+                    yield Static(
+                        "" if self._git else "not a git repository", id="spawn-worktree-note"
+                    )
+                with Horizontal(classes="spawn-row"):
+                    yield Label("Permission mode")
+                    yield Select(
+                        permission_options(defaults.permission_mode),
+                        value=defaults.permission_mode,
+                        allow_blank=False,
+                        id="spawn-permission",
+                    )
+                with Horizontal(classes="spawn-row"):
+                    yield Label("Account")
+                    yield Select(
+                        [("(this shell's)", THIS_SHELL)],
+                        value=THIS_SHELL,
+                        allow_blank=False,
+                        id="spawn-account",
+                    )
+                yield Static(id="spawn-account-note", classes="spawn-note")
+                with Horizontal(classes="spawn-row"):
+                    yield Label("Binary")
+                    yield Input(placeholder=self._binary_hint(self._role), id="spawn-binary")
+                with Horizontal(classes="spawn-row"):
+                    yield Label("Extra agent args")
+                    yield Input(placeholder="e.g. --model opus", id="spawn-args")
+                yield Static(id="spawn-args-error", classes="spawn-note")
+                with Horizontal(classes="spawn-row"):
+                    yield Label("First prompt")
+                    yield TextArea(id="spawn-prompt")
+            yield Static(id="spawn-status")
+            with Horizontal(id="spawn-buttons"):
+                yield Button("Spawn", id="spawn-submit", variant="primary")
+                yield Button("Cancel", id="spawn-cancel")
+
+    def on_mount(self) -> None:
+        if self._manager_live:
+            # After the Select has built its overlay's options (its own mount).
+            self.call_after_refresh(self._grey_out_manager)
+        self._note("#spawn-task-note", self._tasks_unavailable, style="dim")
+        self._validate()
+        if self._accounts is not None:
+            self.run_worker(
+                self._accounts,
+                name=ACCOUNTS_WORKER,
+                group=ACCOUNTS_WORKER,
+                thread=True,
+                exit_on_error=False,
+            )
+        self.query_one("#spawn-role", Select).focus()
+
+    def _grey_out_manager(self) -> None:
+        overlay = self.query_one("#spawn-role", Select).query_one(OptionList)
+        overlay.disable_option_at_index(self._roles.index("manager"))
+
+    def _note(self, selector: str, text: str | None, *, style: str = "red") -> None:
+        note = self.query_one(selector, Static)
+        note.update(Text(text, style=style) if text else "")
+        note.display = bool(text)
+
+    # --- validation -------------------------------------------------------------------
+
+    def _label_problem(self, label: str) -> str | None:
+        if not fleet_service.is_label(label):
+            return LABEL_RULE
+        if label == fleet_service.MANAGER_LABEL:
+            return f"the label {fleet_service.MANAGER_LABEL!r} is reserved for the manager role"
+        return None
+
+    def _validate(self) -> bool:
+        """Show every rule the form breaks right now; *Spawn* is enabled only when there is none."""
+        name = self.project.root.name or self.project.id
+        role_problem = (
+            f"{name} already has a manager — one per project"
+            if self._role == "manager" and self._manager_live
+            else None
+        )
+        label_problem = (
+            None
+            if self._role == "manager"
+            else self._label_problem(self.query_one("#spawn-label", Input).value)
+        )
+        args_problem: str | None = None
+        try:
+            split_agent_args(self.query_one("#spawn-args", Input).value)
+        except ValueError as exc:
+            args_problem = f"extra agent args: {exc}"
+        self._note("#spawn-role-note", role_problem)
+        self._note("#spawn-label-rule", label_problem)
+        self._note("#spawn-args-error", args_problem)
+        ok = role_problem is None and label_problem is None and args_problem is None
+        self.query_one("#spawn-submit", Button).disabled = self._spawning or not ok
+        return ok
+
+    # --- the fields follow the role and the task until touched --------------------------
+
+    def _task_value(self) -> str:
+        value = self.query_one("#spawn-task", Select).value
+        return value if isinstance(value, str) else NO_TASK
+
+    def _relabel(self, old_role: str) -> None:
+        """Re-prefill the label for the current role and task — unless the user changed it."""
+        label = self.query_one("#spawn-label", Input)
+        if old_role != "manager":
+            self._kept_label = label.value if label.value != self._prefill else None
+        self._prefill = self._label_for(self._role, self._task_value())
+        if self._role == "manager" or self._kept_label is None:
+            label.value = self._prefill
+        else:
+            label.value = self._kept_label
+        locked = self._role == "manager"
+        label.disabled = locked
+        self.query_one("#spawn-dice", Button).disabled = locked
+
+    @on(Select.Changed, "#spawn-role")
+    def _role_changed(self, event: Select.Changed) -> None:
+        role = event.value
+        if not isinstance(role, str) or role == self._role:
+            self._validate()
+            return
+        old, self._role = self._role, role
+        old_defaults, new_defaults = self._defaults(old), self._defaults(role)
+        self._relabel(old)
+        switch = self.query_one("#spawn-worktree", Switch)
+        if self._git and switch.value == old_defaults.worktree:
+            switch.value = new_defaults.worktree
+        mode = self.query_one("#spawn-permission", Select)
+        current = mode.value
+        keep = (
+            current
+            if isinstance(current, str) and current != old_defaults.permission_mode
+            else new_defaults.permission_mode
+        )
+        mode.set_options(permission_options(keep))
+        mode.value = keep
+        self.query_one("#spawn-binary", Input).placeholder = self._binary_hint(role)
+        self._validate()
+
+    @on(Select.Changed, "#spawn-task")
+    def _task_changed(self) -> None:
+        self._relabel(self._role)
+        self._validate()
+
+    @on(Input.Changed, "#spawn-label")
+    @on(Input.Changed, "#spawn-args")
+    def _field_changed(self) -> None:
+        self._validate()
+
+    @on(Button.Pressed, "#spawn-dice")
+    def _roll(self) -> None:
+        label = dice_label(self._role)
+        if label is None:
+            self._note(
+                "#spawn-status",
+                f"🎲 no adjective-animal pair fits after {self._role!r} in {LABEL_MAX} "
+                "characters — type a label",
+                style="yellow",
+            )
+            return
+        self.query_one("#spawn-label", Input).value = label
+
+    # --- spawn --------------------------------------------------------------------------
+
+    def spawn_kwargs(self) -> dict[str, Any]:
+        """The keywords *Spawn* sends — ``None`` wherever the form shows the role's default."""
+        defaults = self._defaults(self._role)
+        label = self.query_one("#spawn-label", Input).value
+        switched = self.query_one("#spawn-worktree", Switch).value
+        if not self._git:
+            worktree: bool | None = False if defaults.worktree else None
+        else:
+            worktree = None if switched == defaults.worktree else switched
+        mode = self.query_one("#spawn-permission", Select).value
+        account = self.query_one("#spawn-account", Select).value
+        prompt = self.query_one("#spawn-prompt", TextArea).text
+        return {
+            "label": None if self._role == "manager" or label == self._prefill else label,
+            "task_id": self._task_value() or None,
+            "worktree": worktree,
+            "permission_mode": None if mode == defaults.permission_mode else mode,
+            "binary": self.query_one("#spawn-binary", Input).value.strip() or None,
+            "prompt": prompt if prompt.strip() else None,
+            "agent_args": split_agent_args(self.query_one("#spawn-args", Input).value),
+            "account": account if isinstance(account, str) and account != THIS_SHELL else None,
+        }
+
+    @on(Button.Pressed, "#spawn-submit")
+    def _submit(self) -> None:
+        if self._spawning or not self._validate():
+            return
+        role, kwargs = self._role, self.spawn_kwargs()
+        self._set_spawning(True)
+        self.run_worker(
+            lambda: fleet_service.spawn(self.project, role, **kwargs),
+            name=SPAWN_WORKER,
+            group=SPAWN_WORKER,
+            thread=True,
+            exit_on_error=False,  # a FleetError is an answer to show, not a crash
+        )
+
+    def _set_spawning(self, running: bool) -> None:
+        self._spawning = running
+        self.query_one("#spawn-cancel", Button).disabled = running
+        self._note("#spawn-status", f"spawning {self._role} …" if running else None, style="dim")
+        self._validate()
+
+    def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
+        if event.worker.name == ACCOUNTS_WORKER:
+            self._accounts_changed(event.worker, event.state)
+        elif event.worker.name == SPAWN_WORKER:
+            self._spawn_changed(event.worker, event.state)
+
+    def _spawn_changed(self, worker: Worker[Any], state: WorkerState) -> None:
+        if state is WorkerState.SUCCESS:
+            receipt = worker.result
+            if isinstance(receipt, fleet_service.SpawnReceipt):
+                self.dismiss(receipt)
+                return
+            self._refused(f"the spawn answered without a receipt ({type(receipt).__name__})")
+        elif state is WorkerState.ERROR:
+            error = worker.error
+            if isinstance(error, fleet_service.FleetError):
+                self._refused(str(error))
+            else:
+                self._refused(f"{type(error).__name__}: {error}")
+        elif state is WorkerState.CANCELLED:
+            self._set_spawning(False)
+
+    def _refused(self, reason: str) -> None:
+        """The service said no (or broke): say why, stay open, let the user try again."""
+        self._set_spawning(False)
+        # A Text, not a markup string: the reason can carry a path with [brackets].
+        self._note("#spawn-status", reason, style="bold red")
+
+    def _accounts_changed(self, worker: Worker[Any], state: WorkerState) -> None:
+        if state is WorkerState.SUCCESS and isinstance(worker.result, AccountsOverview):
+            select = self.query_one("#spawn-account", Select)
+            current = select.value
+            options = [("(this shell's)", THIS_SHELL)] + [
+                (account_choice(status), str(status.account.slot))
+                for status in worker.result.accounts
+            ]
+            select.set_options(options)
+            if current in {value for _, value in options}:
+                select.value = current
+        elif state is WorkerState.ERROR:
+            error = worker.error
+            self._note(
+                "#spawn-account-note",
+                f"accounts unavailable — {type(error).__name__}: {error}",
+                style="dim",
+            )
+
+    def action_cancel(self) -> None:
+        if self._spawning:
+            return  # a started spawn cannot be taken back; its answer is on the way
+        self.dismiss(None)
+
+    @on(Button.Pressed, "#spawn-cancel")
+    def _cancel(self) -> None:
+        self.action_cancel()

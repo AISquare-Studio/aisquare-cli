@@ -36,12 +36,14 @@ from typing import ClassVar
 from rich.text import Text
 from textual import events
 from textual.app import ComposeResult
+from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.css.query import NoMatches
 from textual.message import Message
 from textual.widget import Widget
 from textual.widgets import Static
 
+from aisquare.cli.ui.divider import STEP, ResizeSidebar
 from aisquare.models import FleetAgentStatus, ProjectInfo
 
 ROLE_ICON: dict[str, str] = {
@@ -536,6 +538,11 @@ class Sidebar(Vertical):
         ("down", "cursor_down", "next"),
         ("up", "cursor_up", "previous"),
         ("enter", "activate", "open"),
+        # The partition, for terminals without mouse reporting (#137): live only
+        # while the sidebar has focus, so a pane still receives < > = as text.
+        Binding("greater_than_sign", "widen", "wider", show=False, key_display=">"),
+        Binding("less_than_sign", "narrow", "narrower", show=False, key_display="<"),
+        Binding("equals_sign", "reset_width", "reset width", show=False, key_display="="),
     ]
 
     can_focus = True
@@ -762,6 +769,15 @@ class Sidebar(Vertical):
         if step >= 0:
             return ahead[0] if ahead else behind[-1]
         return behind[-1] if behind else ahead[0]
+
+    def action_widen(self) -> None:
+        self.post_message(ResizeSidebar(STEP))
+
+    def action_narrow(self) -> None:
+        self.post_message(ResizeSidebar(-STEP))
+
+    def action_reset_width(self) -> None:
+        self.post_message(ResizeSidebar(None))
 
     def action_cursor_down(self) -> None:
         self._move_cursor(1)

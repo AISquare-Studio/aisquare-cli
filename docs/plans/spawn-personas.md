@@ -791,6 +791,9 @@ ordering. Both coders start at once.
 
 Board ids are recorded in §10 when the tasks are (re)issued.
 
+Loop prompts for the three agents (persona-first, board-driven):
+`docs/plans/hackathon-loop-prompts.md`.
+
 Tester (`tester-hackathon`): spawned when the first task reaches review; its
 prompt names the worktree and branch to check, because nothing moves a tester
 into a coder's tree (`docs/fleet.md`, the roles table). Reviewer once a PR

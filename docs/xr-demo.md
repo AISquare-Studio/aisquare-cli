@@ -175,6 +175,12 @@ summon rather than on session start is what makes this survive guardian drift
 - **Voice produces nothing at all** — the transcriber refuses to start rather
   than degrading silently, so there is an error with a fix attached; the three
   reasons it can refuse are a missing extra, an unsupported model name in
-  `AISQUARE_XR_WHISPER_MODEL`, and a model that cannot be loaded.
+  `AISQUARE_XR_WHISPER_MODEL`, and a model that cannot be loaded. A press that
+  ends with an `stt_empty` error is a microphone that sent no audio at all (a
+  suspended audio context in the headset browser); a press answered with
+  `audio_misaligned` is a client sending frames that are not a whole number of
+  samples. An empty final `stt` with no error is simply a press with no speech
+  in it — a breath, a click, room tone — which the model's voice-activity gate
+  declines to turn into a prompt.
 - **Voice produces the wrong words** — expected for identifiers (§10). Not a
   configuration problem, and not one to debug live.

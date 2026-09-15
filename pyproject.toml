@@ -81,10 +81,11 @@ xr = [
   # convenience. >=12 is the rewritten asyncio implementation uvicorn's
   # `websockets` impl targets.
   "websockets>=12",
-  # Speech-to-text for push-to-talk. A later task wires it in behind
-  # services/xr/server.py's TRANSCRIBE hook; declared here because the extra
-  # is what an operator installs once, and a second install step for the half
-  # of the feature that needs a microphone is the step everyone skips.
+  # Speech-to-text for push-to-talk: services/xr/speech.py loads it lazily,
+  # inside the transcriber factory services/xr/server.py calls per connection;
+  # declared here because the extra is what an operator installs once, and a
+  # second install step for the half of the feature that needs a microphone
+  # is the step everyone skips.
   "faster-whisper>=1.0",
 ]
 explainability = [
@@ -158,9 +159,11 @@ dev = [
   # the same reason: mypy runs strict over src and tests, and an unresolvable
   # `import starlette` in services/xr/ is a red typecheck job in CI, which
   # installs `.[dev]` alone. faster-whisper is deliberately NOT duplicated --
-  # nothing imports it yet (the TRANSCRIBE hook defaults to None), and it
-  # drags ctranslate2 and a CUDA-shaped wheel set into every CI run to type
-  # nothing.
+  # it is imported in exactly one place, lazily, inside speech.py's factory,
+  # and the mypy override below covers that import in both environments; it
+  # would drag ctranslate2 and a CUDA-shaped wheel set into every CI run to
+  # type nothing. The suite runs the real model only when the [xr] extra is
+  # present (tests/test_xr_speech_backend.py) and skips it otherwise.
   "starlette>=0.37",
   "uvicorn>=0.30",
   "websockets>=12",

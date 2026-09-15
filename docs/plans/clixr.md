@@ -1,5 +1,7 @@
 > **Status: 2026-09-12 — implementation in progress; milestones tracked on the board.**
 > Copied verbatim from the planning document below this header; the sections are cited by number from the code and the tests, so edit the plan and re-copy rather than editing this file in place.
+>
+> **Amended in place, 2026-09-14, in two places the implementation overtook** — §10's pipeline (the SERVER routes the final transcript as the prompt; the client sends no `prompt` for voice) and §6's `summary` example (a task event leads with a board-status verb). Both are marked below. A client written from the original §10 would send the final `stt` back as a `prompt` and every spoken command would reach the agent twice.
 
 # cliXR — 24-hour implementation plan
 
@@ -194,7 +196,7 @@ cannot drift silently. Version the protocol from day one.
   "role":      "planner" | "coder" | "runner" | "remote",
   "title":     "auth refactor",       // short, human, from task or repo
   "state":     "working" | "waiting" | "needs_you" | "gone",
-  "summary":   "claimed tsk_01k4 — wiring JWT",   // <= 6 words, server-computed
+  "summary":   "doing: wiring JWT into the refresh", // <= 6 words, server-computed: a board-status verb for a task event, then the event text
   "taskId":    "tsk_01k…" | null,
   "colorKey":  "planner" | "coder" | "runner",     // client maps to hex
   "lastActivityAt": "<iso8601>",
@@ -326,14 +328,25 @@ Chromium does implement it, recognition is server-side, which defeats the point.
 
 ```
 left trigger down
+  → {"t":"audio"} header, then
   → getUserMedia({audio:{channelCount:1, sampleRate:16000, echoCancellation:true}})
-  → AudioWorklet, 16kHz mono PCM, 20ms frames
+  → AudioWorklet, 16kHz mono PCM, 20ms frames (a whole number of samples each)
   → binary ws frames to host
-  → faster-whisper (or whisper.cpp) on host, VAD-gated
+  → faster-whisper on host, VAD-gated
   → {"t":"stt"} interim results back for on-panel feedback
 left trigger up
-  → final transcript → {"t":"prompt"} → focused session
+  → {"t":"audioEnd"}
+  → SERVER: final transcript → {"t":"stt","final":true}, routed to the focused
+    session as a prompt by the server (fleet.tell or a board note), then
+    {"t":"ack"} — the client sends no {"t":"prompt"} for voice
 ```
+
+*(Amended 2026-09-14: as drafted, the last line had the CLIENT send the final
+transcript back as a `prompt`. The server routes it — releasing the trigger is
+the commit, and a round trip through the headset is the latency this path
+exists to remove — so a client that also sends a `prompt` delivers every spoken
+command twice. The error codes a burst can be answered with, each at most once,
+are listed on the `error` message in `services/xr/protocol.py`.)*
 
 Use a **small** model here (`base.en` or `small.en`). This path is command input,
 where latency dominates accuracy. Long-form transcription is a different job for a

@@ -588,34 +588,58 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   widget: a Line API widget has no `render()` for Textual's default selection to
   read, and switched on alone every drag resolved to select-all, because the
   compositor takes the drag's content offset from segment metadata only the
-  `render()` path stamped. The pane now stamps every row it renders, supplies
+  `render()` path stamped. The pane now stamps the row the terminal library
+  reads when it resolves a press or a drag (that row only — see below), supplies
   its own extraction (a drag in the blank area below the output used to raise
   out of the handler), and paints the span itself — as cells, so a row with wide
   glyphs highlights what is copied, and tinting behind the text rather than over
   it, since the theme's selection style resolves with foreground equal to
   background. The text is copied when the gesture ends, wherever on screen it
-  ends — the app hears that from the screen and tells the panes, so a drag that
+  ends — the app sees every press and release itself and tells the panes, so a drag that
   crosses the pane's edge copies in either direction instead of depending on
   whether the neighbouring widget happens to capture the mouse. Only a
   left-button gesture that actually changed a pane's selection copies: a
   right-button drag across a standing highlight leaves the clipboard alone, and
   so does a release with nothing to do with a pane — a drag on the footer, a
-  scrollbar, a button. ctrl+c copies again while a selection stands and is the
-  agent's interrupt otherwise, including when the selection covers nothing;
-  cmd+c is only ever the copy, and types nothing when there is no selection;
-  double-click selects a word and a triple click nothing (Textual's defaults
-  would select the whole pane, and the next ctrl+c would copy it instead of
-  interrupting the agent).
+  scrollbar, a button. ctrl+c copies again while a selection stands — from the
+  pane or from the sidebar, through one path — and clears it; otherwise it is
+  the agent's interrupt, including when the selection covers nothing. cmd+c is
+  only ever the copy, and types nothing when there is no selection. The
+  highlight does not outlive what it means: a key or a paste into the agent
+  drops it, so does the agent printing something else under it, so a later
+  ctrl+c is the interrupt and never a copy of text nobody selected. Double-click
+  selects a word, a triple click nothing, and the pane is never selected whole
+  — not by a triple click on its header either (Textual's defaults would select
+  the whole pane, and the next ctrl+c would copy it instead of interrupting the
+  agent). A click is a press and a release in one cell, so a drag followed by a
+  click on its end cell is not a double click. The app reads every press and
+  release itself, before they bubble, so a burst of input handled back-to-back
+  cannot route a release with the previous gesture's button; and an empty copy
+  never reaches the terminal, where an empty OSC 52 clears the clipboard.
   The `(exited 0)` notice row is tinted by the drag that copies it, like every
   other row, and so is the `[↑k/history]` marker — whatever a row displays is
   what it highlights and what it copies, cut to the columns the pane shows
-  rather than to the width of a tmux window that outgrew it. The highlight and
-  the clipboard read the same rows at the same moment, so they cannot disagree:
-  under an agent that is still printing, a drag copies the text at release and
-  ctrl+c copies what is under the highlight when it is pressed. Switching the
-  pane to another agent drops the selection, and changing the theme drops the
-  highlight's resolved colour so a theme picked mid-drag does not leave the
-  tint in the old palette.
+  rather than to the width of a tmux window that outgrew it. A line tmux
+  soft-wrapped is copied as one line (the copy asks tmux for its wrap flags
+  once and joins those rows, keeping a space that fell on the wrap; if the
+  screen moved in between it falls back to one line per row), a tab is
+  expanded to the cells it occupies on screen so what is highlighted is what
+  the eye sees, and an emoji or a wide glyph is one unit to the highlight, the
+  cursor and the copy alike — the paint, the offsets the terminal library
+  resolves a drag with and the copied text share one grapheme model of the
+  row. The tint is visible on reverse-video cells too, and the cursor stays
+  visible inside a highlight. Painting no longer stamps every row with
+  selection offsets: that gave each segment a unique link id and made a plain
+  mouse hover repaint the whole pane (120 pointer moves on a 200x60 pane: 7200
+  row renders, now 0), doubled the CPU per streamed frame (8.2 → 4.0 ms) and
+  held twice the memory in the strip cache; only the terminal library's own
+  offset lookup is stamped now. The highlight and the clipboard read the same
+  rows at the same moment, so they cannot disagree:
+  under an agent that is still printing, a drag copies the text at release.
+  Switching the pane to another agent drops the selection, so does hiding the
+  pane behind another tab, and changing the theme drops the highlight's
+  resolved colour so a theme picked mid-drag does not leave the tint in the old
+  palette.
 - **One session is ONE Run again — the launcher owns the Run's trace id.**
   Measured against a production workspace on 2026-09-09: one
   `aisquare launch coder -p …` produced TWO dashboard Runs. `5efb96de…` held the

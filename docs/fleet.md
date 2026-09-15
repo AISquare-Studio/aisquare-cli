@@ -634,8 +634,9 @@ tmux -L asq list-sessions
 ```
 
 **Keys.** With a pane focused, every key goes to the agent except the escape
-hatch (`F12`), the scroll keys below, ctrl+c while text is selected (it copies)
-and cmd+c, which is only ever the copy. Printable characters travel as typed —
+hatch (`F12`), the scroll keys below, ctrl+c while text is highlighted in that
+pane (it copies) and cmd+c, which is only ever the copy. Printable characters
+travel as typed —
 except with alt held on an ASCII letter, where the chord is the meaning (`M-p`,
 so Claude Code's alt+p switches the model; alt+shift+a is `M-A`). Special keys
 are translated into tmux's names (Enter, BSpace, ctrl+c → `C-c` when nothing is
@@ -662,18 +663,29 @@ decision as the wheel, so on a Claude Code pane they scroll Claude's transcript.
 A pane scrolled into tmux history shows `[↑k/history]` in its top-right corner.
 Drag to select text in a pane (double-click selects a word): it is copied to
 your clipboard on release (OSC 52 — your terminal has to accept it; Windows
-Terminal, kitty, wezterm, iTerm2 and foot do), and ctrl+c or cmd+c copies again
-while the selection stands. Only a left-button drag is a copy, so a right-click
-over a highlight leaves your clipboard alone, and so does a drag somewhere else
-entirely while a highlight stands. A drag that crosses the pane's edge — begun
-on the agent header, or released outside it — copies too, one character short
-of the same gesture made inside the pane: the terminal library reports the
-crossing endpoint without the trailing cell, and the highlight stops there too,
-so what you see is what you get. What is copied is always what is shown under the
-highlight at the moment you copy: cut to the columns the pane actually shows,
-and including the `[↑k/history]` marker and the `(exited 0)` notice where those
-are what the row displays. Under an agent that is still printing that means the
-text at release, not at the press — the same text you can see highlighted.
+Terminal, kitty, wezterm, iTerm2 and foot do), and ctrl+c or cmd+c copies it
+again while the highlight stands — from the pane or from the sidebar — and then
+clears it. Only a left-button drag is a copy, so a right-click over a highlight
+leaves your clipboard alone, and so does a drag somewhere else entirely while a
+highlight stands. The highlight does not outlive what it means: typing or
+pasting into the agent drops it, so does the agent printing something else
+under it, and so does a click, and ctrl+c after any of those is the agent's
+interrupt. A triple click selects nothing, and the pane is never highlighted
+whole: a drag that starts on the agent header and ends below the pane selects
+nothing in it. A drag that crosses the pane's edge — begun on the agent header,
+or released outside it — copies too, one character short of the same gesture
+made inside the pane: the terminal library reports the crossing endpoint
+without the trailing cell, and the highlight stops there too, so what you see
+is what you get. What is copied is always what is shown under the highlight at
+the moment you copy: cut to the columns the pane actually shows, and including
+the `[↑k/history]` marker and the `(exited 0)` notice where those are what the
+row displays. A line tmux soft-wrapped is copied as one line, as tmux's own
+copy mode copies it — the pane asks tmux which rows are wrapped when you copy,
+and falls back to one line per row if the screen moved in between. Tabs are
+copied as the spaces they occupy on screen, and an emoji or a wide glyph is
+always highlighted and copied whole. Under an agent that is still printing that
+means the text at release, not at the press — the same text you can see
+highlighted.
 Modifier
 chords beyond ctrl and alt depend on your *outer* terminal speaking the kitty
 keyboard protocol (kitty, ghostty, wezterm, foot, recent alacritty): in

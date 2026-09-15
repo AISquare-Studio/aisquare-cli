@@ -20,10 +20,12 @@ from typing import Annotated, Any, Literal
 import typer
 
 from aisquare.cli.common import fail, resolve_pool
+from aisquare.cli.fleet import ProjectRef, SessionRef, _fail_fleet, _project
 from aisquare.core import personas as core
 from aisquare.core.personas import Layer, Persona, PersonaError
 from aisquare.core.state import get_state
 from aisquare.core.workspace import git_common_root
+from aisquare.services import fleet as fleet_service
 from aisquare.services import personas as persona_service
 from aisquare.services.personas import PersonaDraftView
 
@@ -451,3 +453,38 @@ def export(
         return
     slash = f" — it is /{name} in Claude Code now" if skill else ""
     typer.echo(f"✓ exported {name} to {result}{slash}")
+
+
+@app.command("attach")
+def attach(
+    name: PersonaName,
+    to: Annotated[
+        str,
+        typer.Option(
+            "--to", help="The running agent's label (see `aisquare fleet ls`).", metavar="LABEL"
+        ),
+    ],
+    project: ProjectRef = None,
+    as_session: SessionRef = None,
+) -> None:
+    """Give a running fleet agent a persona now — delivered as `fleet tell` delivers,
+    kept on its rows so a /clear or a restart briefs it again."""
+    target = _project(project)
+    try:
+        receipt = fleet_service.attach_persona(target, to, name, sender=as_session)
+    except fleet_service.FleetError as exc:
+        _fail_fleet(exc)
+    if _json():
+        _emit(
+            {
+                "persona": receipt.persona,
+                "label": receipt.agent.label,
+                "agent": receipt.agent.id,
+                "delivered": receipt.delivered,
+                "replaced": receipt.replaced,
+                "how": receipt.how,
+            }
+        )
+        return
+    typer.echo(f"✓ attached {receipt.persona} to {receipt.agent.label} ({receipt.delivered})")
+    typer.echo(f"  {receipt.how}")

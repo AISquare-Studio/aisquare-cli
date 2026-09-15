@@ -245,6 +245,11 @@ alive. Otherwise the message is filed as a board note addressed to that agent,
 and the output says which happened (`✓` typed, `→` noted). Never interrupts an
 agent that is working or sitting on a permission prompt. Takes `--as SESSION`.
 
+`aisquare persona attach <name> --to <label>` uses the same delivery to give a
+running agent a persona, and keeps it on the agent's row so a `/clear` or a restart
+briefs it again ([docs/personas.md](personas.md)); its receipt reads `typed` or
+`noted`.
+
 ### `fleet stop`
 
 ```sh

@@ -636,6 +636,7 @@ class ContextStore(Protocol):
         label: str | None = None,
         focus: str | None = None,
     ) -> TeamSession: ...
+    def set_session_persona(self, session_id: str, persona: str | None) -> TeamSession: ...
     def touch_session(
         self, session_id: str, *, cursor: int | None = None, state: str | None = None
     ) -> None: ...
@@ -705,6 +706,7 @@ class ContextStore(Protocol):
         self, project_id: str, label: str, *, live_only: bool = True
     ) -> FleetAgent | None: ...
     def end_fleet_agent(self, agent_id: str, *, exit_status: int | None = None) -> FleetAgent: ...
+    def set_fleet_agent_persona(self, agent_id: str, persona: str | None) -> FleetAgent: ...
     def close(self) -> None: ...
 
 
@@ -2096,6 +2098,28 @@ class SqliteStore:
         if agent is None:
             raise KeyError(agent_id)
         return agent
+
+    def set_fleet_agent_persona(self, agent_id: str, persona: str | None) -> FleetAgent:
+        """The persona a running agent was given (``fleet.attach_persona``, plan §4.7)."""
+        self._conn.execute("UPDATE fleet_agent SET persona = ? WHERE id = ?", (persona, agent_id))
+        self._conn.commit()
+        agent = self.get_fleet_agent(agent_id)
+        if agent is None:
+            raise KeyError(agent_id)
+        return agent
+
+    def set_session_persona(self, session_id: str, persona: str | None) -> TeamSession:
+        """The persona a joined session now runs as — beside ``set_fleet_agent_persona``."""
+        session = self.get_session(session_id)
+        if session is None:
+            raise KeyError(session_id)
+        self._conn.execute(
+            "UPDATE team_session SET persona = ? WHERE id = ?", (persona, session.id)
+        )
+        self._conn.commit()
+        updated = self.get_session(session.id)
+        assert updated is not None  # just updated
+        return updated
 
     def terminal_events(self, project_id: str) -> dict[str, TeamEvent]:
         """The latest done/dropped event per task — archive attribution.

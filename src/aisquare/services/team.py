@@ -1290,9 +1290,10 @@ def hook_session_start(
                 account=session_account(transcript_path),
                 model=model,
                 effort=effort,
-                # Recorded as ASKED, loadable or not (§3.7); a start without the
-                # variable keeps what the row already holds (the store's COALESCE).
-                persona=orchestrator.env_persona(),
+                # Recorded as ASKED, loadable or not (§3.7): the variable, else an
+                # attached persona on this pane's fleet row (§4.7); asking for none
+                # keeps what the session row already holds (the store's COALESCE).
+                persona=_asked_persona(store, project.id),
             )
         )
         if role is not None and known is not None and known.role != role:
@@ -2105,6 +2106,25 @@ def _persona_briefing(name: str, root: Path) -> list[str]:
     except Exception as exc:
         reason = getattr(exc, "rule", None) or f"{type(exc).__name__}: {exc}"
         return [f'persona "{name}": {reason} — launched without it']
+
+
+def _asked_persona(store: ContextStore, project_id: str) -> str | None:
+    """The persona a session start asks for (docs/plans/spawn-personas.md §4.7).
+
+    ``AISQUARE_PERSONA`` first; else the persona on the ``fleet_agent`` row
+    ``AISQUARE_FLEET_AGENT`` names — which is where ``persona attach`` puts one,
+    so it survives a ``/clear`` or a restart. ``None`` asks for nothing, and the
+    session row keeps whatever it recorded before. Fail-open: a row that cannot
+    be read costs the fallback, never the team block.
+    """
+    asked = orchestrator.env_persona()
+    if asked is not None:
+        return asked
+    try:
+        row = _fleet_row_named(store, project_id)
+    except Exception:
+        return None
+    return None if row is None else row.persona
 
 
 def event_line(event: TeamEvent, roles: dict[str, str]) -> str:

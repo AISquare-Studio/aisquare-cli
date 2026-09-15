@@ -24,6 +24,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   reported.
 
 ### Added
+- **Attach a persona to a running agent.** `aisquare persona attach <name> --to
+  <label>` gives a fleet agent that is already running a persona: the name is
+  checked first (an unknown one lists the known names before anything is
+  touched), one `persona_attached` line goes on the board, the agent's
+  `fleet_agent` row — and its board session, once joined — records it, and the
+  briefing is delivered exactly as `fleet tell` delivers: typed into a waiting
+  agent, a board note for a busy one, with the receipt saying `typed` or `noted`
+  (`--json` carries `delivered`). Replacing a persona tells the agent which one it
+  replaces. The session-start hook now asks for `AISQUARE_PERSONA`, else the
+  persona on the fleet row `AISQUARE_FLEET_AGENT` names, else keeps the session's
+  own — so an attached persona is briefed again after a `/clear` or a restart,
+  and a session with no persona anywhere still sees byte-identical text.
 - **Import anything as a persona.** `aisquare persona import` now converts a
   source that is not already a skill — plain text, another tool's JSON or YAML
   persona, a page over `https://` — with an LLM: the fleet's own Claude Code,

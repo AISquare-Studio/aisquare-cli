@@ -536,3 +536,15 @@ def test_a_project_persona_shadows_bundled_and_a_broken_one_is_listed_not_fatal(
     assert skeptic.split()[1] == "project"
     assert skeptic.endswith("Our own skeptic.  (shadows bundled)")
     assert f"✗ {_user_layer() / 'broken'}: no SKILL.md" in rows
+
+
+def test_import_help_names_the_config_table_behind_both_defaults(runner: CliRunner) -> None:
+    """Rich reads a bare `[persona.import]` as a style tag and drops it: `(default:  engine)`."""
+    result = runner.invoke(
+        app, ["persona", "import", "--help"], env={"NO_COLOR": "1", "COLUMNS": "200"}
+    )
+
+    assert result.exit_code == 0, result.output
+    page = " ".join(result.output.split())
+    assert "(default: [persona.import] engine)" in page
+    assert "(default: [persona.import] api_model)" in page

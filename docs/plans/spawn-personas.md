@@ -347,8 +347,9 @@ labelled with its layer, and the bytes pass `core.injection.sanitise_text`
 (control characters). A literal `</aisquare-persona>` inside a body is
 neutralised the way `_DELIMITER_REMOVED` handles a frame delimiter in retrieved
 text, so a body cannot close its own fence and speak as the harness. The
-headless conversion runs with `--tools ""` and `--bare`: it can read the
-prompt and write an answer, nothing else.
+headless conversion runs with `--tools ""`, one turn and `probe_model`'s
+isolation (no `--bare`, which reads no OAuth — §10 P5): it can read the prompt
+and write an answer, nothing else.
 
 ### 3.7 Failure modes → behaviour
 
@@ -401,9 +402,11 @@ lines, character count, engine and model) and confirmed — `y/N` on a TTY,
    `harness.resolve_profile("manager")` for its env (so the account and config
    dir the fleet's manager runs on are what pays), `harness.resolve_model(
    "manager", probe=False)` for the model (`fable → opus → sonnet`), then the
-   `probe_model` shape: `claude -p --model … --bare --tools "" --max-turns 1
+   `probe_model` shape: `claude -p --model … --tools "" --max-turns 1
    --output-format json --json-schema <PersonaDraft schema>
-   --no-session-persistence --settings {} --strict-mcp-config`, the source on
+   --no-session-persistence --settings {} --strict-mcp-config` — no `--bare`,
+   which reads no OAuth, so an OAuth-bound manager could not pay (§10 P5) —
+   the source on
    **stdin** (Claude Code reads piped stdin in print mode; cap 200 KB), cwd the
    aisquare home, environment from a `_probe_env`-style stripper (no role, no
    team, no model overrides, no tracing identity) plus the manager profile's
@@ -888,10 +891,10 @@ exists; validator once all eight are done.
 
 - With a fake runner in place of the subprocess (the `tests/test_harness.py`
   probe pattern): `aisquare persona import ./notes.txt --user --yes` builds the
-  argv `claude -p --model <manager ladder pick> --bare --tools "" --max-turns 1
+  argv `claude -p --model <manager ladder pick> --tools "" --max-turns 1
   --output-format json --json-schema … --no-session-persistence --settings {}
-  --strict-mcp-config`, feeds the source on stdin, runs with cwd = the aisquare
-  home and an env that has no `AISQUARE_ROLE`, `AISQUARE_FLEET_AGENT`,
+  --strict-mcp-config` (no `--bare`), feeds the source on stdin, runs with cwd =
+  the aisquare home and an env that has no `AISQUARE_ROLE`, `AISQUARE_FLEET_AGENT`,
   `ANTHROPIC_BASE_URL` or `ANTHROPIC_CUSTOM_HEADERS` and has `AISQUARE_TEAM=0`
   **and** the manager profile's own variables; the fake's JSON answer becomes
   `<name>/SKILL.md` with `metadata.persona-source` and a `.persona.json`
@@ -923,7 +926,10 @@ exists; validator once all eight are done.
   strips identity*; `tests/test_spawn_seams.py` green; `tests/
   test_no_network_on_the_primary_path.py` green (no hook imports
   `persona_import`); `python -X importtime -c "import aisquare.cli.app"` shows
-  neither `anthropic` nor `urllib.request`.
+  P5 adding no module-level `anthropic`, `urllib.request` or `yaml`, and
+  `persona_import` outside the CLI and hook import closure — `urllib.request`'s
+  pre-existing load (`services/ci_client.py`, `services/explainability.py`) is
+  recorded in the test, not asserted away (§10 P5).
 - `docs/personas.md` gains the import section with the engine ladder, cost
   note and the config keys; `test_documented_commands` green.
 

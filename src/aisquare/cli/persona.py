@@ -324,14 +324,15 @@ def import_(
         str | None,
         typer.Option(
             "--engine",
-            help="auto, manager, api or off (default: [persona.import] engine).",
+            # Escaped: Rich reads a bare [persona.import] as a style tag and drops it.
+            help="auto, manager, api or off (default: \\[persona.import] engine).",
             metavar="ENGINE",
         ),
     ] = None,
     model: Annotated[
         str | None,
         typer.Option(
-            "--model", help="The api engine's model (default: [persona.import] api_model)."
+            "--model", help="The api engine's model (default: \\[persona.import] api_model)."
         ),
     ] = None,
     yes: Annotated[

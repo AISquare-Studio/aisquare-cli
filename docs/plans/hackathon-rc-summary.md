@@ -1,7 +1,7 @@
 # rc/hackathon-v1 — what is folded in, and why it matters
 
 > Prepared 2026-09-15 by the fleet manager for the owner's review of the
-> `rc/hackathon-v1` → `main` pull request. One row per feature. Every row was
+> `rc/hackathon-v1` → `main` pull request. One row per feature. Eighteen PRs in total; every row was
 > built on the fleet overnight, verified by the runner against its plan
 > acceptance (`docs/plans/spawn-personas.md` §7) in its own worktree, reviewed
 > read-only by the manager and against the workspace 9-dimension framework,
@@ -31,6 +31,7 @@
 | The five install-script tests honour a WSL2 host | This machine's gate is green for the first time (0 failed); CI still executes all 87 tests in the file. | P11 #189 |
 | `probe_model` treats a non-object reply as inconclusive | `aisquare team spawn` crashed with a traceback on a not-logged-in account; now an honest "not logged in" reason. | P12 #191 |
 | Public `services.fleet.role_ok` | The seat rule the UI relies on has a public name (a wrapper, so it cannot drift). | P13 #192 |
+| The picker's New-bind form calls that public `role_ok` | The last private call under `cli/ui` is gone; the runner's bite shows the seat-check test now observes which name is asked. | P17 #200 |
 | `import --list` decides "imported" by provenance | A never-imported skill sharing a bundled name showed `imported`; validator finding, checked against the real collision on the owner's machine. | P16 #195 |
 
 ## Before the demo (from the runner's smoke on the merged rc, 13:29)
@@ -49,5 +50,5 @@ The demo path holds end to end on the merged branch: import → show → attach 
 - **One channel:** the persona rides the same session-start briefing the role cycle uses; no `--append-system-prompt`, no per-turn injection.
 - **LLM import cannot be exercised in tests** (no live engines); its argv, env stripping, seam and outcomes are pinned by fakes, and the validator read the code paths.
 - **Merges into rc were performed under the owner's overnight authorisation** with a merge gate of runner verdict (fresh worktree, own venv, evidence on the board) + peer review by the other coder against the workspace 9-dimension framework (verdict + comment id cited in every merge commit body) + CI green on the merged head + the manager's read-only review. A reopened PR merged only after its original reviewer confirmed the 🔴s closed on the fixed head and the runner re-verified. Every merge is a merge commit; nothing was squashed or force-pushed. The full sequence is in `docs/plans/hackathon-overnight-log.md`.
-- **Known follow-up:** P17 switches the picker's seat check to the public `role_ok` (one line, `cli/ui/attach.py`); its PR opens the moment #188 lands in this branch (#192, which it also needs, is in).
+- **No known follow-ups.** P17 (#200) landed the one-line switch to the public `role_ok`; the validator's four findings (P15, P16, P17, the runbook) are all closed on the branch.
 - **Not touched:** `main`, CI configuration, servers, accounts, the tmux server.

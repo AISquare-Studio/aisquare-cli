@@ -69,7 +69,7 @@ from aisquare.core.store import ContextStore, store_session
 from aisquare.core.tmux import Completed
 from aisquare.models import CheckStatus, DoctorCheck, FleetAgent, FleetAgentStatus, ProjectInfo
 from aisquare.services import fleet as fleet_service
-from tests.pane_harness import FakePane, FakeTmux, move, press, release
+from tests.pane_harness import FakePane, FakeTmux, asks_a_server, move, press, release, socket_of
 
 T = TypeVar("T")
 SIZE = (140, 40)
@@ -123,12 +123,6 @@ def status(
     return FleetAgentStatus(agent=agent, state=state)
 
 
-def _socket_of(argv: Sequence[str]) -> str | None:
-    """The ``-L <socket>`` a tmux argv addresses, or ``None`` when it names none."""
-    args = list(argv)
-    return args[args.index("-L") + 1] if "-L" in args else None
-
-
 @pytest.fixture(autouse=True)
 def no_real_tmux(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[tuple[str, ...]]]:
     """Every tmux command this file causes must address :data:`PRIVATE_SOCKET`.
@@ -150,7 +144,7 @@ def no_real_tmux(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[tuple[str, ..
 
     monkeypatch.setattr(tmux_core, "_tmux", record)
     yield ran
-    wrong = [argv for argv in ran if _socket_of(argv) != PRIVATE_SOCKET]
+    wrong = [argv for argv in ran if asks_a_server(argv) and socket_of(argv) != PRIVATE_SOCKET]
     assert not wrong, f"a UI test addressed a tmux socket that is not the test's: {wrong[:2]}"
 
 
@@ -253,14 +247,18 @@ def test_the_no_tmux_guard_is_reachable(
     drive(go)
 
     assert no_real_tmux, "no tmux call recorded — the guard inspects nothing here"
-    assert {_socket_of(argv) for argv in no_real_tmux} == {PRIVATE_SOCKET}
+    served = [argv for argv in no_real_tmux if asks_a_server(argv)]
+    assert served, "no tmux SERVER was addressed — the guard inspects nothing here"
+    assert {socket_of(argv) for argv in served} == {PRIVATE_SOCKET}
 
 
 def test_the_no_tmux_guard_rejects_the_real_fleets_socket() -> None:
     """The negative half, on the rule itself — and it must still SEE a good argv."""
-    assert _socket_of(("tmux", "-L", "asq", "capture-pane")) != PRIVATE_SOCKET
-    assert _socket_of(("tmux", "-L", PRIVATE_SOCKET, "capture-pane")) == PRIVATE_SOCKET
-    assert _socket_of(("tmux", "-V")) is None  # an argv naming no socket is not the test's
+    assert socket_of(("tmux", "-L", "asq", "capture-pane")) != PRIVATE_SOCKET
+    assert socket_of(("tmux", "-L", PRIVATE_SOCKET, "capture-pane")) == PRIVATE_SOCKET
+    assert socket_of(("tmux", "-V")) is None  # an argv naming no socket is not the test's…
+    assert not asks_a_server(("tmux", "-V"))  # …and a version query reaches no server to guard
+    assert asks_a_server(("tmux", "-L", "asq", "capture-pane"))
     assert FleetAgent.model_fields["tmux_socket"].default == "asq" != PRIVATE_SOCKET
 
 

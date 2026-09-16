@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Any, TypeVar
 
 import pytest
-from rich.cells import cell_len
+from rich.cells import cell_len, split_graphemes
 from rich.style import Style
 from textual import events
 from textual.app import App, ComposeResult
@@ -45,7 +45,9 @@ from textual.strip import Strip
 from textual.widget import Widget
 from textual.widgets import ContentSwitcher, Footer, Input, Static
 
+from aisquare.cli.ui import terminal as terminal_module
 from aisquare.cli.ui.terminal import (
+    _MOUNTED_PANES,
     NO_PANE,
     PANE_GONE,
     TMUX_UNAVAILABLE,
@@ -162,6 +164,20 @@ class SwitcherHost(SelectionHost):
     @property
     def tabs(self) -> ContentSwitcher:
         return self.query_one("#tabs", ContentSwitcher)
+
+
+class PairHost(SelectionHost):
+    """Two panes stacked, BOTH visible — the one shape in which two highlights can
+    stand at once, since Textual's own drag replaces every selection and a click
+    clears them all; the tests that need two write them through the screen."""
+
+    def __init__(self, server: TmuxServer) -> None:
+        super().__init__()
+        self._server = server
+
+    def compose(self) -> ComposeResult:
+        yield TerminalPane("%1", server=self._server, id="first")
+        yield TerminalPane("%2", server=self._server, id="second")
 
 
 def run(coro: Coroutine[Any, Any, T]) -> T:
@@ -2512,9 +2528,9 @@ def test_a_soft_wrapped_line_is_copied_as_one_line(fake: FakeTmux, tmp_path: Pat
     joined with newlines, so a command tmux had wrapped copied as three lines
     split mid-token, with a space lost where the wrap fell on one — pasted into
     a shell, three broken commands. tmux 3.7c's ``capture-pane -F`` marks a
-    wrapped row ``W``; a copy asks for the flags once and joins those rows,
-    keeping the wrap-point space. The negative half: a row that merely fills
-    the width, unwrapped, still ends its line."""
+    wrapped row ``W``; every frame carries the flags and a copy joins those
+    rows, keeping the wrap-point space. The negative half: a row that merely
+    fills the width, unwrapped, still ends its line."""
     pane_fake = fake.panes["%1"]
     pane_fake.width, pane_fake.height = 40, 6
     pane_fake.screen = [
@@ -2546,44 +2562,79 @@ def test_a_soft_wrapped_line_is_copied_as_one_line(fake: FakeTmux, tmp_path: Pat
         words
         == "word word word word word word word word tail\n0123456789012345678901234567890123456789"
     )
-    assert asked >= 1, "the flags were asked for at the copy"
+    assert asked >= 1, "the frames carried the flags"
 
 
-def test_wrap_flags_that_no_longer_match_the_frame_are_not_used(
+def test_a_copy_runs_no_tmux_process_of_its_own_and_joins_by_the_frames_own_flags(
     fake: FakeTmux, tmp_path: Path
 ) -> None:
-    """The flags describe tmux's screen NOW; the copy reads the frame on screen.
-    A busy agent can change the rows between the two, and joining rows that are
-    not the ones highlighted would be a copy of text nobody selected — so on any
-    difference the answer is dropped whole and the rows keep their newlines. The
-    paint never asks: only a copy pays for the extra process."""
+    """Finding 9 of the second #135 review. The copy used to run a SECOND
+    ``capture-pane -F`` and compare every row of its answer with the frame on
+    screen, dropping the whole answer on any difference — a process on the
+    event loop per copy, and newline joins under a busy agent, exactly when a
+    wrapped command is most likely on screen. The frame capture the render loop
+    already runs carries the flags now (``-F`` in the same process), so the
+    copy reads them off the frame it shows: no process, no comparison, and a
+    screen that moves after the frame cannot change what the highlight means."""
     pane_fake = fake.panes["%1"]
     pane_fake.screen = ["first line that wraps into the second on", "e", "third"]
     pane_fake.wrapped = {0}
 
-    async def drive() -> tuple[int, str | None, str | None]:
+    async def drive() -> tuple[str | None, int, str | None, str | None, int]:
         host = Host(fake.server(tmp_path), "%1")
         async with host.run_test(size=(40, 6)) as pilot:
             pane = host.pane
             await wait_until(pilot, lambda: synced(pane) and "third" in rows(pane)[2].text)
-            await press(pilot, pane, (0, 0))
-            await move(pilot, pane, (3, 1), button=1)
-            while_dragging = fake.flag_captures
-            await release(pilot, pane, (3, 1))
+            await drag(pilot, pane, (0, 0), (3, 1))
             joined = pane.selected_text()
-            # The screen moves under the standing highlight's rows only at the
-            # copy: the frame on screen is stale for that one call, and the
-            # flags tmux answers describe rows other than the ones highlighted.
+            before = len(fake.captures)
+            again = pane.get_selection(Selection(Offset(0, 0), Offset(4, 1)))
+            ran = len(fake.captures) - before
+            # tmux's screen moves, and its flags with it, but no frame has been
+            # taken yet: the frame on screen — its text AND its flags — decides.
             pane_fake.screen = ["first line that wraps into the second on", "e MORE", "third"]
-            extracted = pane.get_selection(Selection(Offset(0, 0), Offset(4, 1)))
-            return while_dragging, joined, extracted[0] if extracted else None
+            pane_fake.wrapped = set()
+            stale = pane.get_selection(Selection(Offset(0, 0), Offset(4, 1)))
+            return (
+                joined,
+                ran,
+                again[0] if again else None,
+                stale[0] if stale else None,
+                fake.flag_captures,
+            )
 
-    while_dragging, joined, after_change = run(drive())
-    assert while_dragging == 0, "painting a drag asks tmux for nothing"
+    joined, ran, again, stale, flagged = run(drive())
     assert joined == "first line that wraps into the second one"
-    assert after_change == "first line that wraps into the second on\ne", (
-        "flags for a screen that moved are dropped: newlines, not a wrong join"
-    )
+    assert ran == 0, "the copy ran no tmux process of its own"
+    assert again == joined
+    assert stale == joined, "the frame's own flags and text decide, not tmux's screen now"
+    assert flagged >= 1, "the frames carried the flags"
+
+
+def test_an_older_tmux_gets_plain_frames_and_one_line_per_row(
+    fake: FakeTmux, tmp_path: Path
+) -> None:
+    """``capture-pane -F`` is tmux 3.7's; an older server fails the whole frame
+    on an unknown flag, and every frame would read ``(pane gone)``. Below the
+    gate the pane asks for plain frames and a wrapped line copies as one line
+    per row — the wrap join is all that refusing costs."""
+    fake.version = "tmux 3.6"
+    pane_fake = fake.panes["%1"]
+    pane_fake.screen = ["first line that wraps into the second on", "e", "third"]
+    pane_fake.wrapped = {0}
+
+    async def drive() -> tuple[str | None, int, str]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 6)) as pilot:
+            pane = host.pane
+            await wait_until(pilot, lambda: synced(pane) and "third" in rows(pane)[2].text)
+            await drag(pilot, pane, (0, 0), (3, 1))
+            return pane.selected_text(), fake.flag_captures, screen_text(pane)[0]
+
+    copied, flagged, first_row = run(drive())
+    assert flagged == 0, "no frame asked a 3.6 server for flags it does not know"
+    assert first_row == "first line that wraps into the second on", "and the frames still render"
+    assert copied == "first line that wraps into the second on\ne"
 
 
 def test_a_row_with_tabs_copies_and_highlights_what_the_pointer_covers(
@@ -3142,3 +3193,337 @@ def test_real_tmux_pane_renders_output_and_echoes_forwarded_keys(
     assert before[:2] == ["hello", ""]
     assert after[:2] == ["hellox", "x"]
     assert elapsed < 1.0
+
+
+# --- the second review round of #135 --------------------------------------------------
+
+
+def test_the_highlight_is_visible_on_reverse_video_cells_under_a_theme_with_no_selection_bg(
+    fake: FakeTmux, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Finding 1 of the second #135 review. ``_selection_tint`` falls back to plain
+    reverse video for a theme whose selection style names no background, and
+    ``_tinted`` then swapped a reversed cell's colours "by hand" onto that
+    ``None`` background — which kept the cell's own and drew the glyph in it:
+    blue on blue, the invisibility the method exists to prevent (reproduced by
+    the reviewer with this repo's rich). Inverting an inverted cell is
+    un-reversing it; the plain cells beside it are reversed, as the fallback
+    always did."""
+    fake.panes["%1"].screen = ["\x1b[7mrev\x1b[0m x"]
+    monkeypatch.setattr(
+        TerminalPane, "selection_style", property(lambda self: Style(color="white"))
+    )
+
+    async def drive() -> tuple[Style, Style, Style]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 6)) as pilot:
+            pane = host.pane
+            await wait_until(pilot, lambda: synced(pane) and "rev x" in rows(pane)[0].text)
+            before = style_at(rows(pane)[0], 1)
+            await drag(pilot, pane, (0, 0), (4, 0))  # "rev x", reversed word and plain letter
+            row = rows(pane)[0]
+            return before, style_at(row, 1), style_at(row, 4)
+
+    before, reversed_cell, plain_cell = run(drive())
+    assert before.reverse, "the premise: the cell is drawn in reverse video"
+    assert not reversed_cell.reverse, "inverting an inverted cell un-reverses it"
+    assert reversed_cell.color != reversed_cell.bgcolor, (
+        f"and the glyph is visible: {reversed_cell}"
+    )
+    assert plain_cell.reverse, "while the plain cell beside it takes the fallback's reverse video"
+
+
+def test_a_right_click_does_not_seed_the_click_chain(fake: FakeTmux, tmp_path: Path) -> None:
+    """Finding 2 of the second #135 review. The pane's own click chain was counted
+    before the left-button gate, for every button — so a right click (paste, or
+    a context menu, on most terminals) and a left click in the same cell within
+    half a second read as a double click: a word selected and the clipboard
+    written by one left click. Only left clicks count, and any other button
+    breaks the run; two real left clicks are still a double click."""
+
+    async def drive() -> tuple[str | None, str, int, str | None, str]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 6)) as pilot:
+            pane = host.pane
+            await wait_until(pilot, lambda: synced(pane))
+            await click(pilot, pane, (8, 1), button=3)
+            await click(pilot, pane, (8, 1))  # well within Textual's 0.5 s
+            after = (pane.selected_text(), host.clipboard, len(host.notices))
+            await click(pilot, pane, (8, 1))  # the second LEFT click in a row
+            return *after, pane.selected_text(), host.clipboard
+
+    word, clipboard, toasts, real_word, copied = run(drive())
+    assert word is None and clipboard == "" and toasts == 0, "right then left is one click"
+    assert real_word == "row" and copied == "row", "left then left is still a double click"
+
+
+def test_the_copy_key_takes_the_highlight_made_most_recently(
+    fake: FakeTmux, tmp_path: Path
+) -> None:
+    """Finding 3 of the second #135 review. ``copy_pane_selection`` promised "the
+    first standing pane highlight" and iterated a ``WeakSet`` — hash order, which
+    varies with allocation — so with two panes highlighted the copy key picked
+    one at random. Most recent is the rule, and it is driven in BOTH orders on
+    one host: whatever order the set holds the two panes in, one half would fail
+    without the clock. The older highlight is next in line."""
+    fake.panes["%2"] = FakePane(screen=["other agent"], cursor=(0, 0))
+
+    async def drive() -> list[str]:
+        host = PairHost(fake.server(tmp_path))
+        async with host.run_test(size=(40, 8)) as pilot:
+            first = host.query_one("#first", TerminalPane)
+            second = host.query_one("#second", TerminalPane)
+            await wait_until(pilot, lambda: synced(first) and synced(second))
+            copies: list[str] = []
+            for newest, older in ((second, first), (first, second)):
+                host.screen.selections = {older: Selection(Offset(0, 0), Offset(3, 0))}
+                await pilot.pause()
+                host.screen.selections = {
+                    **host.screen.selections,
+                    newest: Selection(Offset(0, 0), Offset(3, 0)),
+                }
+                await pilot.pause()
+                host.set_focus(None)
+                for _ in range(2):
+                    await pilot.press("ctrl+c")
+                    await pilot.pause()
+                    copies.append(host.clipboard)
+            return copies
+
+    assert run(drive()) == ["oth", "red", "red", "oth"]
+
+
+def test_a_failed_frame_drops_the_highlight_on_the_row_its_notice_replaces(
+    fake: FakeTmux, tmp_path: Path
+) -> None:
+    """Finding 4 of the second #135 review. ``_fail`` put ``(pane gone)`` in the
+    bottom row without the staleness check every frame runs, so a highlight
+    over that row now covered the notice, and the next ctrl+c copied
+    ``(pane`` and returned True instead of falling through to the interrupt.
+    The negative half: a highlight on another row survives the notice."""
+
+    async def on_bottom_row() -> tuple[str, Selection | None, str]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 3)) as pilot:
+            pane = host.pane
+            pane.focus()
+            await wait_until(pilot, lambda: synced(pane))
+            await drag(pilot, pane, (0, 2), (5, 2))
+            assert host.clipboard == "third ", "the premise: the bottom row is highlighted"
+            fake.panes["%1"].gone = True
+            pane.refresh_frame()
+            dropped = pane.text_selection
+            await pilot.press("ctrl+c")
+            await pilot.pause()
+            return screen_text(pane)[2], dropped, host.clipboard
+
+    bottom, dropped, clipboard = run(on_bottom_row())
+    assert bottom == PANE_GONE
+    assert dropped is None, "the highlight covered text the notice replaced"
+    assert clipboard == "third ", "so the notice was never copied"
+
+    fake.panes["%1"].gone = False
+
+    async def elsewhere() -> Selection | None:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 3)) as pilot:
+            pane = host.pane
+            await wait_until(pilot, lambda: synced(pane))
+            await drag(pilot, pane, (0, 0), (3, 0))
+            fake.panes["%1"].gone = True
+            pane.refresh_frame()
+            return pane.text_selection
+
+    assert run(elsewhere()) is not None, "a highlight the notice does not touch stands"
+
+
+def test_unmounting_a_pane_takes_its_selection_entry_with_it(
+    fake: FakeTmux, tmp_path: Path
+) -> None:
+    """Finding 6 of the second #135 review. ``on_hide`` cleared the pane's entry in
+    ``screen.selections``; ``on_unmount`` only left the register, so the screen
+    kept a strong reference to the dead widget — its strip cache included — and
+    a stale span nothing short of ``clear_selection`` could drop. The sibling's
+    entry is left alone."""
+    fake.panes["%2"] = FakePane(screen=["other agent"], cursor=(0, 0))
+
+    async def drive() -> tuple[list[str | None], bool]:
+        host = PairHost(fake.server(tmp_path))
+        async with host.run_test(size=(40, 8)) as pilot:
+            first = host.query_one("#first", TerminalPane)
+            second = host.query_one("#second", TerminalPane)
+            await wait_until(pilot, lambda: synced(first) and synced(second))
+            host.screen.selections = {
+                first: Selection(Offset(0, 0), Offset(3, 0)),
+                second: Selection(Offset(0, 0), Offset(5, 0)),
+            }
+            await pilot.pause()
+            await first.remove()
+            await pilot.pause()
+            return [widget.id for widget in host.screen.selections], first in _MOUNTED_PANES
+
+    left, registered = run(drive())
+    assert left == ["second"], f"the unmounted pane's entry is gone, its sibling's stays: {left}"
+    assert not registered
+
+
+def test_a_release_is_routed_even_when_the_apps_own_handling_of_it_raises(
+    fake: FakeTmux, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Finding 8 of the second #135 review. ``SelectionHost.on_event`` routed the
+    release after ``super().on_event`` returned — and ``App.on_event`` renders
+    the widget under the pointer to read its style, arbitrary widget code that
+    can raise. Raised, the release was never routed and ``_pressed`` kept the
+    gesture's button for the next one. A ``finally`` makes the pairing exact on
+    every path; the app here survives the raise the way a subclass could."""
+
+    class Boom(Exception):
+        pass
+
+    original = App.on_event
+
+    async def raising(self: App[Any], event: events.Event) -> None:
+        if (
+            isinstance(event, events.MouseUp)
+            and not event.is_forwarded
+            and getattr(self, "boom_next_release", False)
+        ):
+            self.boom_next_release = False  # type: ignore[attr-defined]
+            raise Boom("the widget under the pointer failed to render")
+        await original(self, event)
+
+    monkeypatch.setattr(App, "on_event", raising)
+
+    class Surviving(Host):
+        boom_next_release = False
+        booms = 0
+
+        async def on_event(self, event: events.Event) -> None:
+            try:
+                await super().on_event(event)
+            except Boom:
+                self.booms += 1
+
+    async def drive() -> tuple[int, int | None, str]:
+        host = Surviving(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 6)) as pilot:
+            pane = host.pane
+            await wait_until(pilot, lambda: synced(pane))
+            host.boom_next_release = True
+            await drag(pilot, pane, (0, 1), (5, 1))
+            return host.booms, host._pressed, host.clipboard
+
+    booms, pressed, copied = run(drive())
+    assert booms == 1, "the premise: the app's own handling of the release raised"
+    assert copied == "second", "the release was routed all the same, and the drag copied"
+    assert pressed is None, "and the press it paired with is disarmed"
+
+
+def test_the_compositor_reads_offsets_through_render_line_and_paints_through_render_lines(
+    fake: FakeTmux, tmp_path: Path
+) -> None:
+    """Finding 10 of the second #135 review — a PIN, not a fix. Which method the
+    compositor calls for which purpose is Textual's: it resolves a press or a
+    drag through ``render_line`` (stamped here) and paints and reads the hover
+    style through ``render_lines`` (unstamped, so the caches hold). There is no
+    offset source that bypasses it — the Screen builds a drag's ``Selection``
+    from what ``get_widget_and_offset_at`` reads off the stamps, and selects the
+    whole widget when it finds none — so the assumption is checked against the
+    installed Textual: this fails the moment either entry point moves, with the
+    offsets going missing or the paint being stamped."""
+
+    async def drive() -> tuple[bool, Offset | None, bool]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 6)) as pilot:
+            pane = host.pane
+            await wait_until(pilot, lambda: synced(pane))
+            compositor = host.screen._compositor
+            x, y = pane.content_region.offset
+            widget, offset = compositor.get_widget_and_offset_at(x + 4, y + 1)
+            style = compositor.get_style_at(x + 4, y + 1)
+            return widget is pane, offset, "offset" in style.meta
+
+    is_pane, offset, stamped = run(drive())
+    assert is_pane and offset == Offset(4, 1), (
+        f"the drag path resolves the cell under the pointer from render_line's stamps: {offset}"
+    )
+    assert not stamped, "and the paint/hover path (render_lines) carries no stamps"
+
+
+def test_the_cursor_row_reuses_its_text_model_from_frame_to_frame(
+    fake: FakeTmux, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Finding 11 of the second #135 review. The cursor is an overlay and is on
+    screen essentially always, and ``_render_row`` built a fresh ``DisplayedRow``
+    — an uncached ``Strip.text`` join and a grapheme scan — for its row on every
+    frame the cursor moved. The model of a frame line is cached beside its
+    Strip now, so the cursor walking along an unchanged row scans nothing."""
+    scans = 0
+
+    def counting(text: str) -> Any:
+        nonlocal scans
+        scans += 1
+        return split_graphemes(text)
+
+    monkeypatch.setattr(terminal_module, "split_graphemes", counting)
+
+    async def drive() -> tuple[int, int, int]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 6)) as pilot:
+            pane = host.pane
+            pane.focus()
+            await wait_until(pilot, lambda: synced(pane) and pane._cursor == (2, 0))
+            await pilot.pause(0.1)
+            first_frames, before = scans, pane.lines_rendered
+
+            def cursor_at(x: int) -> Callable[[], bool]:
+                return lambda: pane._cursor == (x, 0)
+
+            for x in range(3, 9):
+                fake.panes["%1"].cursor = (x, 0)
+                await wait_until(pilot, cursor_at(x))
+                await pilot.pause()
+            return first_frames, pane.lines_rendered - before, scans - first_frames
+
+    first_frames, rendered, scanned = run(drive())
+    assert first_frames >= 1, "the premise: the first frame built the cursor row's model"
+    assert rendered >= 6, "the premise: the cursor row was re-rendered for every move"
+    assert scanned == 0, f"and its model came from the cache each time, not {scanned} rebuilds"
+
+
+def test_a_change_hidden_under_the_corner_marker_leaves_the_highlight_standing(
+    fake: FakeTmux, tmp_path: Path
+) -> None:
+    """Finding 12 of the second #135 review. The staleness check measured the RAW
+    frame line while the paint and the copy measured the row as composed, so a
+    frame that changed the cells under the ``[↑k/history]`` marker — cells the
+    marker covers — dropped a highlight for a change nobody could see. One row
+    model for all three: what is displayed under the span decides, and a change
+    the user can see still drops it."""
+    pane_fake = fake.panes["%1"]
+    pane_fake.history = [f"old {n}" for n in range(5)]
+
+    async def drive() -> tuple[str | None, bool, bool, Selection | None]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 6)) as pilot:
+            widget = host.pane
+            widget.focus()
+            await wait_until(pilot, lambda: synced(widget))
+            widget.post_message(scroll_event(widget, up=True))
+            await wait_until(pilot, lambda: widget.scrollback == 3)
+            await drag(pilot, widget, (0, 0), (39, 0))  # the whole row, marker included
+            copied = widget.selected_text()
+            standing = widget.text_selection is not None
+            # Cells 34-39 of row 0 — exactly the six the marker covers.
+            pane_fake.history[2] = "old 2" + " " * 29 + "HIDDEN"
+            await wait_until(pilot, lambda: "HIDDEN" in widget._lines[0])
+            after_hidden = widget.text_selection is not None
+            pane_fake.history[2] = "NEW 2" + " " * 29 + "HIDDEN"
+            await wait_until(pilot, lambda: "NEW" in widget._lines[0])
+            return copied, standing, after_hidden, widget.text_selection
+
+    copied, standing, after_hidden, after_visible = run(drive())
+    assert copied is not None and copied.startswith("old 2") and copied.endswith("[↑3/5]")
+    assert standing, "the premise: the whole row is highlighted"
+    assert after_hidden, "the text the user sees did not change: the marker covers the cells"
+    assert after_visible is None, "a change under the highlight the user CAN see drops it"

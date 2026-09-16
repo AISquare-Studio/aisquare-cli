@@ -620,14 +620,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   other row, and so is the `[↑k/history]` marker — whatever a row displays is
   what it highlights and what it copies, cut to the columns the pane shows
   rather than to the width of a tmux window that outgrew it. A line tmux
-  soft-wrapped is copied as one line (the copy asks tmux for its wrap flags
-  once and joins those rows, keeping a space that fell on the wrap; if the
-  screen moved in between it falls back to one line per row), a tab is
+  soft-wrapped is copied as one line (every frame carries tmux's own wrap
+  marks — `capture-pane -F`, tmux 3.7 and later — so the copy joins the rows
+  it shows, keeping a space that fell on the wrap, without a process of its
+  own; an older tmux gets one line per row), a tab is
   expanded to the cells it occupies on screen so what is highlighted is what
   the eye sees, and an emoji or a wide glyph is one unit to the highlight, the
   cursor and the copy alike — the paint, the offsets the terminal library
   resolves a drag with and the copied text share one grapheme model of the
-  row. The tint is visible on reverse-video cells too, and the cursor stays
+  row, cached beside the row's Strip rather than rebuilt for the cursor row
+  on every frame. The tint is visible on reverse-video cells too — under a
+  theme whose selection style names no background as well, where the fallback
+  used to draw the glyph in its own background — and the cursor stays
   visible inside a highlight. Painting no longer stamps every row with
   selection offsets: that gave each segment a unique link id and made a plain
   mouse hover repaint the whole pane (120 pointer moves on a 200x60 pane: 7200
@@ -637,9 +641,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   rows at the same moment, so they cannot disagree:
   under an agent that is still printing, a drag copies the text at release.
   Switching the pane to another agent drops the selection, so does hiding the
-  pane behind another tab, and changing the theme drops the highlight's
-  resolved colour so a theme picked mid-drag does not leave the tint in the old
-  palette.
+  pane behind another tab or unmounting it, and changing the theme drops the
+  highlight's resolved colour so a theme picked mid-drag does not leave the
+  tint in the old palette. What decides whether a frame dropped the highlight
+  is the row as displayed: a `(pane gone)` notice replacing the row drops it
+  like any other change of the text, while a change hidden under the
+  `[↑k/history]` marker leaves it. A right click seeds no double click, so a
+  right click followed by a left click in the same cell selects nothing; the
+  copy key outside a pane takes the highlight made most recently when two
+  panes hold one; and the end of a gesture is routed even when the app's own
+  handling of it raises, so no press stays armed for the next gesture.
 - **One session is ONE Run again — the launcher owns the Run's trace id.**
   Measured against a production workspace on 2026-09-09: one
   `aisquare launch coder -p …` produced TWO dashboard Runs. `5efb96de…` held the

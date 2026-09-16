@@ -176,6 +176,14 @@ _WINDOW_FIELDS = (
 )
 _WINDOW_FORMAT = _SEP.join(f"#{{{name}}}" for name in _WINDOW_FIELDS)
 _VERSION = re.compile(r"(\d+)\.(\d+)")
+#: The first tmux whose ``capture-pane`` takes ``-F`` (a flags column before each
+#: line: ``-`` none, ``W`` wrapped into the next, ``X`` extended cells, …).
+#: Measured on 3.7c, where ``-p -e -N -F`` prints ``W <escapes><text>`` per row;
+#: 3.4 and 3.5 document no such flag, and tmux's CHANGES file does not date it,
+#: so the gate is the version it was measured on. A server below it is asked
+#: for plain frames: an unknown flag fails the whole capture, and a frame is
+#: worth more than a wrap mark.
+WRAP_FLAGS_MINIMUM: tuple[int, int] = (3, 7)
 _ABSENT = re.compile(r"no server running on |error connecting to .*\(No such file or directory\)")
 """tmux's two ways of saying there is no server behind a socket (see ``server_absent``)."""
 #: Characters tmux reads as target separators; a session named with one can be
@@ -290,6 +298,13 @@ class Capture:
 
     The EFFECTIVE offset: tmux clamps a request deeper than ``facts.history_size``
     to the top of history, and this reports where the frame really starts.
+    """
+    wrapped: list[bool] | None = None
+    """Per row of ``lines``, whether tmux soft-wrapped it into the row below —
+    the ``W`` of ``capture-pane -F`` — or ``None`` when the flags were not asked
+    for (:meth:`TmuxServer.capture` with ``flags=False``, the default). Read
+    with the frame they describe, so a copy that joins wrapped rows joins the
+    rows it shows and never rows a later screen would have shown.
     """
 
 
@@ -826,7 +841,14 @@ class TmuxServer:
 
     # --- the screen -------------------------------------------------------------------
 
-    def capture(self, pane_id: str, *, scrollback: int = 0, height: int | None = None) -> Capture:
+    def capture(
+        self,
+        pane_id: str,
+        *,
+        scrollback: int = 0,
+        height: int | None = None,
+        flags: bool = False,
+    ) -> Capture:
         """One frame of ``pane_id`` — the rows with SGR escapes, plus the pane's facts.
 
         ``scrollback`` is how many history lines above the live screen the
@@ -840,25 +862,53 @@ class TmuxServer:
         user is reading the top of a long run. A stale hint (the pane grew,
         or history shrank under a clear) yields a short frame, which is
         detected and refetched unbounded — one extra process, only then.
+
+        ``flags`` asks for ``-F`` as well, and the frame then carries which of
+        its rows tmux soft-wrapped (:attr:`Capture.wrapped`) — in the SAME
+        process, so a copy that joins wrapped rows never has to ask a second
+        time and compare two screens (review of #135). Only for a server that
+        knows the flag (:data:`WRAP_FLAGS_MINIMUM`): the caller checks the
+        version, because an unknown flag fails the whole frame.
         """
         scrollback = max(0, scrollback)
         bound = height if scrollback and height is not None and height > 0 else None
-        rows, facts = self._frame(pane_id, scrollback, bound)
+        rows, wrapped, facts = self._frame(pane_id, scrollback, bound, flags)
         if bound is not None and len(rows) < facts.height:
-            rows, facts = self._frame(pane_id, scrollback, None)
+            rows, wrapped, facts = self._frame(pane_id, scrollback, None, flags)
         effective = min(scrollback, facts.history_size)
-        return Capture(lines=rows[: facts.height], facts=facts, scrollback=effective)
+        return Capture(
+            lines=rows[: facts.height],
+            facts=facts,
+            scrollback=effective,
+            wrapped=None if wrapped is None else wrapped[: facts.height],
+        )
 
     def _frame(
-        self, pane_id: str, scrollback: int, height: int | None
-    ) -> tuple[list[str], PaneFacts]:
+        self, pane_id: str, scrollback: int, height: int | None, flags: bool
+    ) -> tuple[list[str], list[bool] | None, PaneFacts]:
         window = ["-E", str(height - 1 - scrollback)] if height is not None else []
+        marks = ["-F"] if flags else []
         out = self.run(
-            "capture-pane", "-p", "-e", "-N", "-S", str(-scrollback), *window, "-t", pane_id,
+            "capture-pane", "-p", "-e", "-N", *marks, "-S", str(-scrollback), *window,
+            "-t", pane_id,
             ";", "display-message", "-p", "-t", pane_id, _FACTS_FORMAT,
         )  # fmt: skip
         body = out.rstrip("\n").split("\n")
-        return body[:-1], _facts(body[-1])
+        rows, facts = body[:-1], _facts(body[-1])
+        if not flags:
+            return rows, None, facts
+        # ``-F`` puts the line's flags, then one space, before the line — before
+        # its escapes too (measured on 3.7c: ``W \x1b[31m…``). A blank row is
+        # ``- `` and an empty flags column never happens, so ``partition`` is
+        # exact; a flag other than ``W`` (``X`` extended cells, ``H`` hyperlinks)
+        # rides in the same column and is ignored here.
+        lines: list[str] = []
+        wrapped: list[bool] = []
+        for row in rows:
+            mark, _, text = row.partition(" ")
+            lines.append(text)
+            wrapped.append("W" in mark)
+        return lines, wrapped, facts
 
     # --- input --------------------------------------------------------------------------
 

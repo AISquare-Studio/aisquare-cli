@@ -665,12 +665,16 @@ Drag to select text in a pane (double-click selects a word): it is copied to
 your clipboard on release (OSC 52 — your terminal has to accept it; Windows
 Terminal, kitty, wezterm, iTerm2 and foot do), and ctrl+c or cmd+c copies it
 again while the highlight stands — from the pane or from the sidebar — and then
-clears it. Only a left-button drag is a copy, so a right-click over a highlight
-leaves your clipboard alone, and so does a drag somewhere else entirely while a
+clears it (when two panes hold a highlight, the one made most recently goes
+first). Only a left-button drag is a copy, so a right-click over a highlight
+leaves your clipboard alone — and a right click followed by a left click is one
+click, not a double click — and so does a drag somewhere else entirely while a
 highlight stands. The highlight does not outlive what it means: typing or
 pasting into the agent drops it, so does the agent printing something else
-under it, and so does a click, and ctrl+c after any of those is the agent's
-interrupt. A triple click selects nothing, and the pane is never highlighted
+under it — or a `(pane gone)` notice replacing the row — and so does a click,
+and ctrl+c after any of those is the agent's interrupt; a change hidden under
+the `[↑k/history]` marker is not a change you can see and leaves it standing.
+A triple click selects nothing, and the pane is never highlighted
 whole: a drag that starts on the agent header and ends below the pane selects
 nothing in it. A drag that crosses the pane's edge — begun on the agent header,
 or released outside it — copies too, one character short of the same gesture
@@ -680,8 +684,8 @@ is what you get. What is copied is always what is shown under the highlight at
 the moment you copy: cut to the columns the pane actually shows, and including
 the `[↑k/history]` marker and the `(exited 0)` notice where those are what the
 row displays. A line tmux soft-wrapped is copied as one line, as tmux's own
-copy mode copies it — the pane asks tmux which rows are wrapped when you copy,
-and falls back to one line per row if the screen moved in between. Tabs are
+copy mode copies it — every frame carries tmux's own wrap marks (`capture-pane
+-F`, tmux 3.7 and later; an older tmux gets one line per row). Tabs are
 copied as the spaces they occupy on screen, and an emoji or a wide glyph is
 always highlighted and copied whole. Under an agent that is still printing that
 means the text at release, not at the press — the same text you can see

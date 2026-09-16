@@ -710,6 +710,28 @@ def test_capture_is_one_process_and_keeps_blank_rows(fake_bin: Path, conf: Path)
     assert len(capture.lines) == 24
 
 
+def test_capture_with_flags_reads_each_rows_wrap_mark_and_strips_the_column(
+    fake_bin: Path, conf: Path
+) -> None:
+    """``-F`` puts a flags column before every row — ``W`` wrapped into the next,
+    ``X`` extended cells, ``-`` none — one space, then the row, escapes and all
+    (measured on 3.7c). The frame carries the marks and the rows come back
+    clean; without ``flags`` the argv is what it always was and ``wrapped`` is
+    ``None`` (review of #135, second round, finding 9)."""
+    rows = ["W \x1b[31mwrapped\x1b[39m ", "- plain", "X tab\tbed", "- ", *["- "] * 20]
+    fake = FakeTmux(_frame(rows, _facts_line()))
+    capture = _server(fake, fake_bin, conf).capture("%3", flags=True)
+    assert fake.commands()[0][:7] == ["capture-pane", "-p", "-e", "-N", "-F", "-S", "0"]
+    assert capture.lines[:4] == ["\x1b[31mwrapped\x1b[39m ", "plain", "tab\tbed", ""]
+    assert capture.wrapped is not None
+    assert capture.wrapped[:4] == [True, False, False, False]
+    assert len(capture.wrapped) == len(capture.lines) == 24
+
+    plain = FakeTmux(_frame([""] * 24, _facts_line()))
+    assert _server(plain, fake_bin, conf).capture("%3").wrapped is None
+    assert "-F" not in plain.commands()[0]
+
+
 def test_capture_slices_a_scrolled_frame_to_the_screen_height(fake_bin: Path, conf: Path) -> None:
     history = [f"h{i}" for i in range(5)]
     screen = [f"s{i}" for i in range(24)]
@@ -1047,6 +1069,25 @@ def test_live_capture_returns_the_screen_with_colours_and_consumes_the_facts_lin
     assert capture.facts.dead is False and capture.facts.dead_status is None
     assert capture.scrollback == 0
     assert _wait(lambda: live.capture(window.pane_id).facts.current_command == "cat")
+
+
+@requires_tmux
+def test_live_capture_flags_mark_the_rows_tmux_wrapped(live: TmuxServer) -> None:
+    version = live.version()
+    if version is None or version < tmux_module.WRAP_FLAGS_MINIMUM:
+        pytest.skip("capture-pane -F needs tmux 3.7 or newer")
+    long_line = "x" * 100 + " tail"
+    window = _spawn(
+        live, "asq-test-fox", "w0", ["sh", "-c", f'printf "%s\\n" "{long_line}"; exec cat']
+    )
+    assert _wait(lambda: "tail" in _screen(live, window.pane_id))
+
+    capture = live.capture(window.pane_id, flags=True)
+    assert capture.wrapped is not None
+    assert len(capture.wrapped) == len(capture.lines) == 24
+    assert capture.wrapped[:3] == [True, False, False], capture.wrapped[:3]
+    assert capture.lines[0] == "x" * 80, "the flags column is not part of the row"
+    assert capture.lines[1].startswith("x" * 20 + " tail")
 
 
 @requires_tmux

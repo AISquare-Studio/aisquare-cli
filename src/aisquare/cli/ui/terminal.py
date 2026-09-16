@@ -4,14 +4,18 @@ The risky core of docs/plans/fleet-tui.md (§6, §4.3, §3.1): tmux is the
 terminal emulator, this widget is a viewport onto one of its panes.
 
 Rendering. A frame is one ``server.capture`` (one tmux process:
-``capture-pane -e`` + ``display-message``). Each captured row is a string with
-SGR escapes; rows are diffed against the previous frame as STRINGS, and only
-the rows that changed — plus the old and new cursor rows — are marked dirty,
-so Textual's Line API (:meth:`render_line`) is asked for exactly those. A row
-string becomes a :class:`Strip` through ``rich.text.Text.from_ansi`` — tabs
-expanded, because tmux prints a tab cell as a literal TAB and pads the row as
-if expanded — cached by the string, so a row that scrolled by one line is a
-dict lookup. The cursor is a reverse-video cell (underline while the pane is
+``capture-pane -e -F`` + ``display-message``; ``-F`` only on a server that
+knows it). Each captured row is a string with SGR escapes; rows are diffed
+against the previous frame as STRINGS, and only the rows that changed — plus
+the old and new cursor rows — are marked dirty, so Textual's Line API
+(:meth:`render_line`) is asked for exactly those. A row string becomes a
+:class:`Strip` through ``rich.text.Text.from_ansi`` — tabs expanded, because
+tmux prints a tab cell as a literal TAB and pads the row as if expanded —
+cached by the string, so a row that scrolled by one line is a dict lookup; the
+row's text model (:class:`DisplayedRow`) is cached beside it. The ``W`` flags
+say which rows tmux soft-wrapped and travel WITH the frame, so a copy joins
+the rows it shows and never asks tmux a second time (review of #135, second
+round). The cursor is a reverse-video cell (underline while the pane is
 unfocused) when tmux says it is visible and the view is live (scrollback 0).
 
 Rows are painted UNSTAMPED. The compositor reads a drag's content offset from
@@ -84,10 +88,11 @@ then ever fewer).
 from __future__ import annotations
 
 import contextlib
+import itertools
 import weakref
 from bisect import bisect_left
 from collections.abc import Callable
-from typing import Any, ClassVar
+from typing import Any, ClassVar, NamedTuple
 
 from rich.cells import cell_len, set_cell_size, split_graphemes
 from rich.segment import Segment
@@ -110,7 +115,13 @@ from aisquare.core.keys import (
     Translation,
     translate,
 )
-from aisquare.core.tmux import PaneFacts, TmuxError, TmuxServer, TmuxUnavailable
+from aisquare.core.tmux import (
+    WRAP_FLAGS_MINIMUM,
+    PaneFacts,
+    TmuxError,
+    TmuxServer,
+    TmuxUnavailable,
+)
 from aisquare.services import fleet as fleet_service
 
 CURSOR = Style(reverse=True)
@@ -214,6 +225,24 @@ class DisplayedRow:
         return self.bounds[first], self.bounds[last + 1]
 
 
+class Shown(NamedTuple):
+    """What the pane displays at one moment, before any overlay: the frame's rows,
+    the bottom-row notice standing in for the last row, and the corner marker's
+    numbers on row 0 (``None`` while live).
+
+    One value for the paint, the copy and the staleness check, so "did the text
+    under the highlight change" is asked of the rows the user SEES. The check
+    used to read the raw frame lines, so a change hidden under the marker, or
+    under the notice, dropped a highlight for text nobody could see change —
+    and a notice arriving under a highlight (``_fail``) was never checked at
+    all (review of #135, second round, findings 4 and 12).
+    """
+
+    lines: list[str]
+    notice: str | None
+    marker: tuple[int, int] | None
+
+
 def _extract(selection: Selection, rows: list[DisplayedRow], width: int) -> str:
     """The text ``selection`` covers in ``rows`` — read off the SAME spans
     :meth:`Selection.get_span` hands :meth:`TerminalPane._render_row` to paint,
@@ -267,6 +296,10 @@ def _extract(selection: Selection, rows: list[DisplayedRow], width: int) -> str:
 _MOUNTED_PANES: weakref.WeakSet[TerminalPane] = weakref.WeakSet()
 """Every mounted pane, so the start and end of a gesture reach them without a DOM walk."""
 
+_SELECTION_CLOCK = itertools.count(1)
+"""Ticks once per pane selection that changed: the order the copy key reads
+when more than one pane holds a highlight (:func:`copy_pane_selection`)."""
+
 
 def _tell_panes(app: App[Any], what: str, tell: Callable[[TerminalPane], object]) -> None:
     """Run ``tell`` on every pane of ``app``'s active screen, logging what fails.
@@ -316,22 +349,32 @@ def route_selection_gesture(app: App[Any], button: int | None) -> None:
 
 
 def copy_pane_selection(app: App[Any]) -> bool:
-    """Copy the first standing pane highlight on ``app``'s active screen; whether one was.
+    """Copy the pane highlight made MOST RECENTLY on ``app``'s active screen; whether one was.
 
     The copy key outside a pane: :class:`PaneScreen` asks this before Textual's
     own copy, so ctrl+c from the sidebar copies exactly what the pane's release
     copied — its own rows, through its own path — and clears the highlight the
     same way the pane's focused ctrl+c does (review of #135, finding 10).
+
+    Most recent, by :attr:`TerminalPane.selected_at`: the panes are kept in a
+    ``WeakSet``, and "the first one" in a set is whichever hash order yields,
+    which changed from run to run (review of #135, second round, finding 3).
+    A pane whose highlight extracts as nothing is passed over for the next.
     """
-    copied = False
+    standing: list[TerminalPane] = []
 
     def tell(pane: TerminalPane) -> None:
-        nonlocal copied
-        if not copied and pane.copy_standing_selection():
-            copied = True
+        if pane.has_standing_selection():
+            standing.append(pane)
 
     _tell_panes(app, "copy key", tell)
-    return copied
+    for pane in sorted(standing, key=lambda pane: pane.selected_at, reverse=True):
+        try:
+            if pane.copy_standing_selection():
+                return True
+        except Exception as error:
+            app.log.error("copy key failed for a pane", error)
+    return False
 
 
 class PaneScreen(Screen[None]):
@@ -408,10 +451,18 @@ class SelectionHost(App[None]):
             assert isinstance(event, events.MouseDown)
             self._pressed = event.button
             route_gesture_start(self)
-        await super().on_event(event)
-        if released:
-            button, self._pressed = self._pressed, None
-            route_selection_gesture(self, button)
+        try:
+            await super().on_event(event)
+        finally:
+            # Routed even when the app's own handling of the release raised —
+            # ``App.on_event`` renders the widget under the pointer to read its
+            # style, which is arbitrary widget code. Skipped, the release left
+            # ``_pressed`` armed with this gesture's button for the next one,
+            # and the pairing this class exists for was exact only on the happy
+            # path (review of #135, second round, finding 8).
+            if released:
+                button, self._pressed = self._pressed, None
+                route_selection_gesture(self, button)
 
 
 class EscapeToSidebar(Message):
@@ -442,8 +493,10 @@ class TerminalPane(Widget, can_focus=True):
     3. *The highlight stands only while it means what was selected.* Any key or
        paste forwarded to the agent drops it, so ctrl+c after typing is the
        agent's interrupt and never a copy of whatever now sits under an old
-       highlight; a frame that changes the text under it drops it; so do hiding
-       the pane and attaching another pane (finding 2).
+       highlight; a frame that changes the text under it drops it — the text as
+       DISPLAYED, notice and corner marker included, whether a frame or a
+       failed capture put it there; so do hiding the pane, unmounting it and
+       attaching another pane (finding 2; second round, findings 4, 6 and 12).
     4. *The pane is never selected whole.* ``Selection(None, None)`` is what
        Textual writes for a multi-click on a neighbour (the container's
        select-all) and for a drag that starts and ends beyond both of the pane's
@@ -453,13 +506,17 @@ class TerminalPane(Widget, can_focus=True):
     5. *One key path copies pane text.* With the pane focused, ctrl+c and cmd+c
        copy a standing highlight and clear it; without one ctrl+c is the
        interrupt and cmd+c types nothing. Everywhere else the same keys reach
-       :class:`PaneScreen`, which asks the panes first through the same method,
-       and an empty copy never reaches the terminal (finding 10).
-    6. *A click is a press and a release in one cell.* Textual chains clicks by
-       release position alone, so a drag followed by a click on its end cell
-       arrived as a double click; the pane keeps its own chain over real clicks
-       and selects a word on the second of two — with the left button only
-       (finding 13; review of #120, round 8).
+       :class:`PaneScreen`, which asks the panes first through the same method
+       — the most recently made highlight first, should more than one pane
+       hold one — and an empty copy never reaches the terminal (finding 10;
+       second round, finding 3).
+    6. *A click is a press and a release in one cell, with the left button.*
+       Textual chains clicks by release position alone, so a drag followed by a
+       click on its end cell arrived as a double click; the pane keeps its own
+       chain over real LEFT clicks and selects a word on the second of two. A
+       click with any other button breaks the chain and counts for nothing, so
+       a right click followed by a left click is one click, not two (finding
+       13; review of #120, round 8; second round, finding 2).
     7. *A modal pushed mid-drag takes the release.* The pane's baseline is then
        stale, and stale is harmless: it is rewritten at the next press on the
        pane's own screen, the only place it is read (cut finding of #135).
@@ -523,8 +580,9 @@ class TerminalPane(Widget, can_focus=True):
         self.pane_id = pane_id
         self.server = server
         self.escape_key = escape_key
-        self._extended: bool | None = None
-        """Whether the server delivers extended chords; read once per server."""
+        self._version: tuple[int, int] | None = None
+        """The server's version, read once per attach (``_server_version``)."""
+        self._version_read = False
         self.scrollback = 0
         """How many history lines above the live screen the view starts at (``k``)."""
         self.facts: PaneFacts | None = None
@@ -540,8 +598,12 @@ class TerminalPane(Widget, can_focus=True):
         self.lines_rendered = 0
         """Rows Textual actually asked :meth:`render_line` for (instrumentation)."""
         self._lines: list[str] = []
+        self._wrapped: list[bool] = []
+        """Per row of ``_lines``, whether tmux soft-wrapped it into the next (``-F``)."""
         self._cursor: tuple[int, int] | None = None
         self._strip_cache: dict[str, Strip] = {}
+        self._row_cache: dict[tuple[str, int], DisplayedRow] = {}
+        """The text model of a frame line shown in a row of N cells, beside its Strip."""
         self._timer: Timer | None = None
         self._resize_timer: Timer | None = None
         self._resize_retry: float = self.RESIZE_RETRY
@@ -568,6 +630,8 @@ class TerminalPane(Widget, can_focus=True):
         """The selection the rows on screen were last painted for."""
         self._painting = False
         """Inside :meth:`render_lines`: rows are being painted, not read for offsets."""
+        self._selected_at = 0
+        """When this pane's selection last changed, on :data:`_SELECTION_CLOCK`."""
         # A tmux pane's links are the agent's, not Textual's: no hover highlight,
         # and no repaint of the whole pane when the pointer crosses one.
         self.auto_links = False
@@ -583,8 +647,18 @@ class TerminalPane(Widget, can_focus=True):
         """tmux's history behind the live screen — 0 until the first frame answers."""
         return self.facts.history_size if self.facts is not None else 0
 
+    def _server_version(self) -> tuple[int, int] | None:
+        """The server's version, asked once per attach; ``None`` when it will not say."""
+        if not self._version_read:
+            self._version = None
+            if self.server is not None:
+                with contextlib.suppress(TmuxError):
+                    self._version = self.server.version()
+            self._version_read = True
+        return self._version
+
     def _extended_keys(self) -> bool:
-        """Whether this server delivers extended chords (tmux ≥ 3.5), read once.
+        """Whether this server delivers extended chords (tmux ≥ 3.5).
 
         Below :data:`~aisquare.core.keys.EXTENDED_MINIMUM` tmux TYPES those
         chords' names into the agent (measured on 3.3a/3.4), so ``translate``
@@ -592,13 +666,19 @@ class TerminalPane(Widget, can_focus=True):
         ``tmux -V`` answers on anything alive, and refusing shift+enter on
         every modern server to guard a hypothetical mute one inverts the trade.
         """
-        if self._extended is None:
-            version: tuple[int, int] | None = None
-            if self.server is not None:
-                with contextlib.suppress(TmuxError):
-                    version = self.server.version()
-            self._extended = version is None or version >= EXTENDED_MINIMUM
-        return self._extended
+        version = self._server_version()
+        return version is None or version >= EXTENDED_MINIMUM
+
+    def _wrap_flags(self) -> bool:
+        """Whether a frame may ask for ``capture-pane -F`` (tmux ≥ 3.7).
+
+        The OTHER way round from :meth:`_extended_keys`: fail-closed. A server
+        that does not know the flag fails the whole capture, and every frame
+        would then read ``(pane gone)``; what refusing costs on a server that
+        would have answered is the wrapped-line join in a copy, nothing else.
+        """
+        version = self._server_version()
+        return version is not None and version >= WRAP_FLAGS_MINIMUM
 
     def notify_style_update(self) -> None:
         """Textual's "your resolved styles changed" hook — drop what bakes in a theme.
@@ -620,6 +700,7 @@ class TerminalPane(Widget, can_focus=True):
         self.facts = None
         self.notice = None
         self._lines = []
+        self._wrapped = []
         self._cursor = None
         self._synced = None
         self._resize_retry = self.RESIZE_RETRY
@@ -638,9 +719,10 @@ class TerminalPane(Widget, can_focus=True):
             self._wheel_timer = None
         # A new attach may be a new server — ``ManagerTab`` assigns ``server``
         # then calls this — and a cached "extended chords are fine" from a 3.7
-        # server would TYPE ``S-Enter`` into an agent on a 3.4 one. Re-read
-        # lazily, on the next key: one ``tmux -V`` per attach at most.
-        self._extended = None
+        # server would TYPE ``S-Enter`` into an agent on a 3.4 one, as a cached
+        # "-F is known" would fail every frame. Re-read lazily: one ``tmux -V``
+        # per attach at most.
+        self._version_read = False
         if pane_id is not None and self.server is None:
             # The fleet's server from config — a default like any other (§3.10).
             self.server = fleet_service.server()
@@ -656,7 +738,19 @@ class TerminalPane(Widget, can_focus=True):
         self._schedule(self.FAST_INTERVAL)
 
     def on_unmount(self) -> None:
+        """The pane goes: so does its entry in ``screen.selections``.
+
+        ``on_hide`` clears it because a hidden pane's highlight can go stale;
+        an unmounted pane's entry was left behind, a strong reference from the
+        screen's dict to a dead widget — and its strip cache, up to
+        ``CACHE_LIMIT`` rows — that nothing short of ``clear_selection`` could
+        drop (review of #135, second round, finding 6). Textual dispatches
+        ``Unmount`` while the widget still hangs in the DOM, so the screen is
+        reachable here.
+        """
         _MOUNTED_PANES.discard(self)
+        if self.text_selection is not None:
+            self._clear_own_selection()
         if self._timer is not None:
             self._timer.stop()
         if self._wheel_timer is not None:
@@ -717,6 +811,7 @@ class TerminalPane(Widget, can_focus=True):
                 # ``scrollback + height`` rows every tick. ``None`` before the
                 # first frame, when scrollback is 0 and there is nothing to bound.
                 height=self.facts.height if self.facts is not None else None,
+                flags=self._wrap_flags(),
             )
         except TmuxUnavailable:
             return self._fail(TMUX_UNAVAILABLE)
@@ -734,6 +829,8 @@ class TerminalPane(Widget, can_focus=True):
         offset = max(0, len(capture.lines) - height)
         lines = capture.lines[offset:]
         lines += [""] * (height - len(lines))
+        wrapped = (capture.wrapped or [])[offset:]
+        wrapped += [False] * (height - len(wrapped))
         cursor: tuple[int, int] | None = None
         if facts.cursor_visible and self.scrollback == 0 and not facts.dead:
             row = facts.cursor_y - offset
@@ -769,9 +866,10 @@ class TerminalPane(Widget, can_focus=True):
         if marker != self._marker:
             dirty.add(0)
             replaced.add(0)
-        stale = self._highlight_is_stale(previous, lines, changed, replaced)
+        stale = self._highlight_is_stale(Shown(lines, notice, marker), changed | replaced)
         self._marker = marker
         self._lines = lines
+        self._wrapped = wrapped
         self._cursor = cursor
         self.facts = facts
         self.notice = notice
@@ -780,50 +878,62 @@ class TerminalPane(Widget, can_focus=True):
         self._repaint_rows(dirty)
         return bool(dirty)
 
-    def _highlight_is_stale(
-        self, previous: list[str], lines: list[str], changed: set[int], replaced: set[int]
-    ) -> bool:
-        """Whether this frame changed the text under the standing highlight.
+    def _shown(self) -> Shown:
+        """What the pane displays now — the state every reader of a row starts from."""
+        return Shown(self._lines, self.notice, self._marker)
+
+    def _highlight_is_stale(self, after: Shown, rows: set[int]) -> bool:
+        """Whether showing ``after`` in place of what is shown now changes the text
+        under the standing highlight, on ``rows`` (the rows about to repaint).
 
         The highlight means "this text": once the agent has printed something
         else there, a ctrl+c meant as the interrupt would copy text nobody
         selected and send no ``C-c`` (review of #135, finding 2). Compared cell
         for cell under the span, not row for row — Claude Code's status line
         redraws several times a second, and a highlight elsewhere on that row
-        would otherwise never survive it. A row whose displayed text is replaced
-        wholesale (the notice, the corner marker) is stale as soon as it changes.
+        would otherwise never survive it. Compared as DISPLAYED (:class:`Shown`),
+        through the same :meth:`_displayed_row` the copy reads: a frame that
+        changes the text hidden under the corner marker changes nothing the user
+        sees and leaves the highlight; a notice arriving in the bottom row
+        changes what a highlight there means and drops it (second round,
+        findings 4 and 12).
         """
         selection = self._own_selection()
         if selection is None:
             return False
-        width = self.content_size.width
-        for y in changed | replaced:
+        before = self._shown()
+        for y in rows:
             span = selection.get_span(y)
             if span is None:
                 continue
-            if y in replaced:
-                return True
             start, end = span
-            old = self._line_row(previous[y] if y < len(previous) else "", width)
-            new = self._line_row(lines[y] if y < len(lines) else "", width)
+            old = self._displayed_row(y, shown=before)
+            new = self._displayed_row(y, shown=after)
             if old.slice(start, old.cells if end == -1 else end) != new.slice(
                 start, new.cells if end == -1 else end
             ):
                 return True
         return False
 
-    def _line_row(self, line: str, width: int) -> DisplayedRow:
-        """A captured line as a row of ``width`` cells, before any overlay."""
-        text = self._strip_for(line).text
-        if cell_len(text) > width:
-            text = set_cell_size(text, width)
-        return DisplayedRow(text.rstrip())
-
     def _fail(self, notice: str) -> bool:
-        """Keep the last frame, show ``notice`` in the bottom row; True when that is new."""
+        """Keep the last frame, show ``notice`` in the bottom row; True when that is new.
+
+        The notice replaces the bottom row's text, and a highlight over that
+        row now covers ``(pane gone)`` rather than what was selected — checked
+        like any frame (class docstring, rule 3; review of #135, second round,
+        finding 4). It used to be the one path that rewrote a displayed row
+        without asking, so the next ctrl+c copied the notice and swallowed the
+        interrupt.
+        """
         changed = notice != self.notice or self._cursor is not None
+        height = self.content_size.height
+        stale = notice != self.notice and self._highlight_is_stale(
+            Shown(self._lines, notice, self._marker), {height - 1}
+        )
         self.notice = notice
         self._cursor = None
+        if stale:
+            self._clear_own_selection()
         if changed:
             self.refresh()
         if not self._reported_gone and self.pane_id is not None:
@@ -855,9 +965,19 @@ class TerminalPane(Widget, can_focus=True):
         The compositor takes a widget's picture through here (and the style
         under the pointer, for hover), and resolves a press or a drag's content
         offset by calling :meth:`render_line` directly — the one and only direct
-        caller, measured on Textual 8.2.8. Stamping the painted rows too gave
-        every segment a unique link id, and the module docstring has what that
-        cost (review of #135, finding 3).
+        caller on Textual 8.2.8. Stamping the painted rows too gave every
+        segment a unique link id, and the module docstring has what that cost
+        (review of #135, finding 3).
+
+        Which method the compositor calls for which purpose is Textual's, not
+        ours, and there is no offset source that does not go through it: the
+        Screen builds a drag's ``Selection`` from what ``get_widget_and_offset_at``
+        reads off the stamped metadata, and hands back a whole-widget
+        selection when it finds none (review of #135, second round, finding
+        10). So the assumption is PINNED rather than trusted:
+        ``test_the_compositor_reads_offsets_through_render_line_and_paints_through_render_lines``
+        drives both entry points on the installed Textual and fails the moment
+        either moves — the offsets going missing, or the paint being stamped.
         """
         self._painting = True
         try:
@@ -939,12 +1059,11 @@ class TerminalPane(Widget, can_focus=True):
         if cursor_x is None and span is None:
             return strip
         # The row the overlays are measured against is the row AS COMPOSED —
-        # ``Strip.text`` of what is about to be painted, the notice and the
-        # corner marker included — so the paint, the copy and the word under a
-        # double click cannot come apart (review of #120, rounds 3 to 5). Read
-        # only when an overlay actually runs: ``Strip.text`` is uncached and the
-        # common row has neither a cursor nor a highlight on it.
-        row = DisplayedRow(strip.text)
+        # the notice and the corner marker included — so the paint, the copy
+        # and the word under a double click cannot come apart (review of #120,
+        # rounds 3 to 5). For a plain frame row that is the cached model of its
+        # line; only the two composed rows are measured from the strip.
+        row = self._overlay_row(y, strip)
         if span is not None:
             strip = self._with_selection(strip, span, row, width)
         if cursor_x is not None:
@@ -953,92 +1072,115 @@ class TerminalPane(Widget, can_focus=True):
             strip = self._with_cursor(strip, cursor_x, row)
         return strip
 
-    def _composed_strip(self, y: int) -> Strip:
+    def _composed_strip(self, y: int, shown: Shown | None = None) -> Strip:
         """Row ``y`` as it is shown, before any overlay: the frame's row, or the
         notice in its place, with the corner marker composed into row 0 while
-        the view is scrolled. The paint and the copy both start from here."""
+        the view is scrolled. The paint and the copy both start from here —
+        from what is shown now, or from ``shown`` (a frame about to be)."""
+        if shown is None:
+            shown = self._shown()
         width, height = self.content_size
         base = self.rich_style
-        if self.notice is not None and y == height - 1:
+        line = shown.lines[y] if y < len(shown.lines) else ""
+        if shown.notice is not None and y == height - 1:
             # Built, not returned: the overlays still apply. Returning early
             # left the one row a drag COPIES as the only row a selection never
             # tinted (review of #120, round 3).
-            strip = Strip([Segment(self.notice, base + NOTICE)]).adjust_cell_length(width, base)
+            strip = Strip([Segment(shown.notice, base + NOTICE)]).adjust_cell_length(width, base)
+            row = DisplayedRow(strip.text.rstrip())
         else:
-            line = self._lines[y] if y < len(self._lines) else ""
             strip = self._strip_for(line).apply_style(base).adjust_cell_length(width, base)
-        if y == 0 and self.scrollback:
-            strip = self._with_scroll_marker(strip, width)
+            row = self._frame_row(line, width)
+        if y == 0 and shown.marker is not None:
+            strip = self._with_scroll_marker(strip, width, row, shown.marker)
         return strip
 
-    def _displayed_row(self, y: int, *, wrapped: bool = False) -> DisplayedRow:
+    def _composed(self, y: int, shown: Shown) -> bool:
+        """Whether row ``y`` displays something other than its frame line."""
+        height = self.content_size.height
+        notice_row = shown.notice is not None and y == height - 1
+        return notice_row or (y == 0 and shown.marker is not None)
+
+    def _overlay_row(self, y: int, strip: Strip) -> DisplayedRow:
+        """The text model the overlays on row ``y`` are measured against.
+
+        The cached model of the frame line for a plain row — the cursor row is
+        re-rendered on every frame the cursor moves on, and it paid an uncached
+        ``Strip.text`` join and a grapheme scan each time, twice for row 0
+        while scrolled (review of #135, second round, finding 11) — and the
+        composed ``strip``'s own text for the two rows that display something
+        else, built once from the strip already in hand.
+        """
+        shown = self._shown()
+        if self._composed(y, shown):
+            return DisplayedRow(strip.text.rstrip())
+        line = shown.lines[y] if y < len(shown.lines) else ""
+        return self._frame_row(line, self.content_size.width)
+
+    def _frame_row(self, line: str, width: int) -> DisplayedRow:
+        """A frame line as a row of ``width`` cells — cropped to it, trailing
+        padding dropped — cached by the line beside its Strip.
+
+        ONE model for the paint's overlays, the copy and the staleness check;
+        ``_line_row`` re-implemented it against the raw line and the two had to
+        be kept in step by hand (review of #135, second round, finding 12).
+        Trailing blanks are the pane's padding, not text: past the last glyph
+        every cell is one blank cell, so snapping and slicing read the same
+        with or without them, and the copy must not take them.
+        """
+        key = (line, width)
+        row = self._row_cache.get(key)
+        if row is None:
+            if len(self._row_cache) >= self.CACHE_LIMIT:
+                self._row_cache.clear()
+            text = self._strip_for(line).text
+            if cell_len(text) > width:
+                text = set_cell_size(text, width)
+            row = DisplayedRow(text.rstrip())
+            self._row_cache[key] = row
+        return row
+
+    def _displayed_row(
+        self, y: int, *, shown: Shown | None = None, wrapped: bool = False
+    ) -> DisplayedRow:
         """Row ``y`` as the widget DISPLAYS it — the text a drag over it copies.
 
         Trailing blanks are the pane's padding, not text, and are dropped — except
         on a row tmux wrapped, where every cell up to the pane's width was
         written by the program and a space at the wrap point is real (review of
-        #135, finding 9).
+        #135, finding 9). ``shown`` reads the row from a state other than the
+        current one (the frame about to replace it, in ``_highlight_is_stale``).
         """
-        text = self._composed_strip(y).text
+        if shown is None:
+            shown = self._shown()
         if wrapped:
+            text = self._composed_strip(y, shown).text
             facts = self.facts
             pane_width = facts.width if facts is not None else self.content_size.width
             if cell_len(text) > pane_width:
                 text = set_cell_size(text, pane_width)
             return DisplayedRow(text, wrapped=True)
-        return DisplayedRow(text.rstrip())
+        if self._composed(y, shown):
+            return DisplayedRow(self._composed_strip(y, shown).text.rstrip())
+        line = shown.lines[y] if y < len(shown.lines) else ""
+        return self._frame_row(line, self.content_size.width)
 
-    def _displayed_rows(self, wrapped: list[bool] | None) -> list[DisplayedRow]:
+    def _displayed_rows(self) -> list[DisplayedRow]:
         # Exactly the rows the widget RENDERS: the height alone. Taking the longer
         # of the height and ``_lines`` copied rows that are not on screen — a pane
         # whose captures are failing keeps the taller frame (review of #120,
         # round 8). The notice row and a marker row display something other than
-        # the frame's row, so neither continues onto the next.
-        height = self.content_size.height
+        # the frame's row, so neither continues onto the next. The wrap flags
+        # are the frame's own (``capture-pane -F``, carried with every frame):
+        # they describe exactly the rows on screen, so a copy runs no process of
+        # its own and never has to compare two screens (review of #135, finding
+        # 9; second round, finding 9).
+        shown = self._shown()
         rows: list[DisplayedRow] = []
-        for y in range(height):
-            joined = bool(wrapped and wrapped[y])
-            if (self.notice is not None and y == height - 1) or (y == 0 and self.scrollback):
-                joined = False
-            rows.append(self._displayed_row(y, wrapped=joined))
+        for y in range(self.content_size.height):
+            joined = y < len(self._wrapped) and self._wrapped[y] and not self._composed(y, shown)
+            rows.append(self._displayed_row(y, shown=shown, wrapped=joined))
         return rows
-
-    def _wrapped_rows(self) -> list[bool] | None:
-        """Which rows on screen tmux soft-wrapped into the next, or ``None`` if unknowable.
-
-        One ``capture-pane -p -N -F`` process, asked when text is COPIED and never
-        per frame: tmux 3.7c prints each line's flags before it (``W`` for a
-        wrapped line, measured), and reading them on every 50 ms tick would cost
-        a parse per row for a fact only a copy uses. The flags describe tmux's
-        screen NOW while the copy reads the frame on screen, so every row's text
-        is compared with the frame's and the answer is dropped whole on any
-        difference — a busy agent then gets newline joins, never a join of rows
-        that were not the ones highlighted. A tmux that cannot answer (older
-        than the flag, gone) is the same case.
-        """
-        facts = self.facts
-        if self.pane_id is None or self.server is None or facts is None:
-            return None
-        scrollback = self.scrollback
-        window = ["-E", str(facts.height - 1 - scrollback)] if scrollback and facts.height else []
-        try:
-            out = self.server.run(
-                "capture-pane", "-p", "-N", "-F",
-                "-S", str(-scrollback), *window, "-t", self.pane_id,
-            )  # fmt: skip
-        except (TmuxError, TmuxUnavailable):
-            return None
-        captured = out.rstrip("\n").split("\n") if out.strip("\n") else []
-        flagged = [(flags, text) for flags, _, text in (row.partition(" ") for row in captured)]
-        height = self.content_size.height
-        flagged = flagged[max(0, len(flagged) - height) :]
-        flagged += [("-", "")] * (height - len(flagged))
-        lines = self._lines
-        for y, (_flags, text) in enumerate(flagged):
-            shown = Text.from_ansi(lines[y], end="").plain if y < len(lines) else ""
-            if shown != text:
-                return None
-        return ["W" in flags for flags, _ in flagged]
 
     def get_selection(self, selection: Selection) -> tuple[str, str] | None:
         """The plain text under ``selection``, from the rows this widget shows.
@@ -1051,8 +1193,7 @@ class TerminalPane(Widget, can_focus=True):
         """
         if self.pane_id is None or selection == SELECT_ALL:
             return None  # a whole-pane selection is never this pane's (class docstring, rule 4)
-        rows = self._displayed_rows(self._wrapped_rows())
-        return _extract(selection, rows, self.content_size.width), "\n"
+        return _extract(selection, self._displayed_rows(), self.content_size.width), "\n"
 
     def selected_text(self) -> str | None:
         """What a drag has selected in this pane, or ``None`` when nothing is.
@@ -1072,6 +1213,16 @@ class TerminalPane(Widget, can_focus=True):
         extracted = self.get_selection(selection)
         text = extracted[0] if extracted else ""
         return text or None
+
+    @property
+    def selected_at(self) -> int:
+        """When this pane's selection last changed, on the module's selection clock
+        — what orders the panes for the copy key (:func:`copy_pane_selection`)."""
+        return self._selected_at
+
+    def has_standing_selection(self) -> bool:
+        """Whether a highlight the copy key could take stands in this pane."""
+        return self._own_selection() is not None
 
     def _own_selection(self) -> Selection | None:
         """This pane's standing selection — never a whole-pane one (class docstring, rule 4).
@@ -1105,6 +1256,11 @@ class TerminalPane(Widget, can_focus=True):
             return
         if selection is None:
             self._selection_bg = None
+        elif selection != self._painted_span:
+            # WHEN this pane's highlight last changed, for the copy key's order
+            # (rule 5). Textual tells every owner in the old and new dicts, so
+            # an unchanged entry is not a change and keeps its place.
+            self._selected_at = next(_SELECTION_CLOCK)
         # Nothing about participation is recorded here: Textual tells the union
         # of the old and new selection owners, this watcher runs asynchronously
         # — after the release was routed, under load — and every flag set from
@@ -1190,24 +1346,36 @@ class TerminalPane(Widget, can_focus=True):
         status bar are made of (cut finding of #135). Such a cell is un-reversed
         and its colours swapped by hand, so the tint sits behind the glyph as
         it does everywhere else.
+
+        When the tint has no background of its own — :meth:`_selection_tint`'s
+        fallback for a theme whose selection style names none is plain reverse
+        video — a reversed cell is simply un-reversed: inverting an inverted
+        cell. Swapping its colours "by hand" onto a ``None`` background kept the
+        cell's own, and drew the glyph in it — blue on blue, the invisibility
+        this method exists to prevent (review of #135, second round, finding 1).
         """
         text, style, control = segment
         if control:
             return segment
         if style is not None and style.reverse:
+            if tint.bgcolor is None:
+                return Segment(text, style + Style(reverse=False))
             shown = style.bgcolor if style.bgcolor is not None else self.rich_style.bgcolor
             over = Style(reverse=False, color=shown, bgcolor=tint.bgcolor)
             return Segment(text, style + over)
         return Segment(text, style + tint if style is not None else tint)
 
-    def _with_scroll_marker(self, strip: Strip, width: int) -> Strip:
+    def _with_scroll_marker(
+        self, strip: Strip, width: int, row: DisplayedRow, numbers: tuple[int, int]
+    ) -> Strip:
         """``[↑k/history]`` in the top-right corner while the view is in history.
 
         tmux's own copy-mode indicator, in the same place: without it a scrolled
         pane is indistinguishable from a live one that happens to be quiet. The
-        cut is snapped to a grapheme boundary; a widened gap is blank.
+        cut is snapped to a grapheme boundary of ``row`` — ``strip``'s text
+        model, cached — and a widened gap is blank.
         """
-        layout = self._marker_layout(DisplayedRow(strip.text), width)
+        layout = self._marker_layout(row, width, numbers)
         if layout is None:
             return strip
         cut, gap, marker = layout
@@ -1229,11 +1397,17 @@ class TerminalPane(Widget, can_focus=True):
     East-Asian Ambiguous and resolves to one cell, so the shipped marker cannot
     tell the two apart (review of the ninth version)."""
 
-    def _marker_layout(self, row: DisplayedRow, width: int) -> tuple[int, int, str] | None:
-        """``(cut, gap, marker)`` in cells — one answer for the strip and the text."""
-        marker = self.SCROLL_MARKER_TEMPLATE.format(
-            scrollback=self.scrollback, history=self.history_size
-        )
+    def _marker_layout(
+        self, row: DisplayedRow, width: int, shown: tuple[int, int]
+    ) -> tuple[int, int, str] | None:
+        """``(cut, gap, marker)`` in cells — one answer for the strip and the text.
+
+        ``shown`` is the ``(scrollback, history)`` pair the marker names — the
+        frame's own, so a row can be composed for the frame about to replace
+        this one as well as for the one on screen.
+        """
+        scrollback, history = shown
+        marker = self.SCROLL_MARKER_TEMPLATE.format(scrollback=scrollback, history=history)
         # CELLS, like `cut`, `gap` and every crop they feed. `↑` is East-Asian
         # Ambiguous and resolves to one cell today, so a character count agreed
         # by luck — and a row where they diverge puts the marker over its corner
@@ -1257,6 +1431,7 @@ class TerminalPane(Widget, can_focus=True):
         if strip is None:
             if len(self._strip_cache) >= self.CACHE_LIMIT:
                 self._strip_cache.clear()
+                self._row_cache.clear()
             text = Text.from_ansi(line, end="")
             text.expand_tabs(self.TAB_STOPS)
             strip = Strip(text.render(self.app.console)).simplify()
@@ -1382,30 +1557,40 @@ class TerminalPane(Widget, can_focus=True):
         the multi-click path owns the gesture and brokers it itself.
 
         The chain is the pane's own, not ``event.chain``. Textual chains clicks
-        by release position and time alone, and synthesises a Click for a drag
-        whose press and release land on the same widget — so a drag followed
-        within half a second by a click on its end cell arrived here as a
-        double click, replaced the dragged selection with a word and copied it
-        twice (review of #135, finding 13). A click here is a press and a
-        release in the same cell; only those count, and only in succession.
+        by release position and time alone, whatever the button, and
+        synthesises a Click for a drag whose press and release land on the same
+        widget — so a drag followed within half a second by a click on its end
+        cell arrived here as a double click, replaced the dragged selection
+        with a word and copied it twice (review of #135, finding 13). A click
+        here is a press and a release in the same cell, with the LEFT button;
+        only those count, and only in succession (class docstring, rule 6).
         """
         self.focus()
         if event.widget is self and event.chain >= 2:
             # Textual's own multi-click would select the whole widget or its
             # container: never, whatever this pane makes of the click.
             event.prevent_default()
-        if event.widget is self and self._own_click_chain(event) == 2 and event.button == 1:
-            # The LEFT button, like every other copy. All the button work
-            # went into the drag path and none into this one, so a right- or
-            # middle-button double click selected a word and wrote the
-            # clipboard — on a terminal where the right button is paste or a
-            # context menu (review of the eighth version).
+        if event.widget is self and self._own_click_chain(event) == 2:
             self._select_word(event.x, event.y)
         if event.widget is self and event.chain >= 2:
             await self.broker_event("click", event)
 
     def _own_click_chain(self, event: events.Click) -> int:
-        """How many real clicks in a row this one makes; 0 when it is a drag's release."""
+        """How many real LEFT clicks in a row this one makes; 0 when it is a
+        drag's release, or a click with any other button.
+
+        The button is read HERE, where the chain is counted, and not after it:
+        counted first and gated after, a right click (paste, or a context menu,
+        on most terminals) seeded the chain, and the left click that followed
+        it in the same cell read as the second of two — a word selected and
+        the clipboard written by a gesture that was one left click (review of
+        the eighth version; review of #135, second round, finding 2). Any other
+        button breaks the run, so the next left click starts one afresh.
+        """
+        if event.button != 1:
+            self._clicks = 0
+            self._last_click = None
+            return 0
         moved = self._press is not None and event.offset != self._press
         threshold = self.app.CLICK_CHAIN_TIME_THRESHOLD
         last = self._last_click

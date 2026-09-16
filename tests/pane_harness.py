@@ -101,7 +101,7 @@ class FakeTmux:
         """Rows each ``capture-pane`` piped back — what the subprocess actually
         transferred and the widget actually split, one entry per capture."""
         self.flag_captures = 0
-        """``capture-pane -F`` calls — the wrap flags a copy asks for."""
+        """``capture-pane -F`` calls — the frames that carried tmux's wrap flags."""
         self.input: list[tuple[str, ...]] = []
         """``("send-keys", pane, *args)``, ``("load-buffer", text)``,
         ``("paste-buffer", pane)``, ``("resize-window", pane, w, h)`` in order."""
@@ -215,6 +215,28 @@ class FakeTmux:
                     pane.cursor = (pane.cursor[0], max(0, pane.cursor[1] - surplus))
             return Completed(0, "", "")
         return Completed(1, "", f"unknown command: {name}\n")
+
+
+# --- the socket guard the UI test modules share --------------------------------------------
+
+
+def socket_of(argv: Sequence[str]) -> str | None:
+    """The ``-L <socket>`` a tmux argv addresses, or ``None`` when it names none."""
+    args = list(argv)
+    return args[args.index("-L") + 1] if "-L" in args else None
+
+
+def asks_a_server(argv: Sequence[str]) -> bool:
+    """Whether a tmux argv reaches a SERVER at all.
+
+    ``tmux -V`` asks the binary its version and touches no socket — the pane
+    reads it once per attach to decide which flags the server knows (extended
+    chords, ``capture-pane -F``) — so it can address no fleet, ours or anyone's.
+    The guard that every other argv must name the test's private socket leaves
+    it alone; a copy of that guard per test module drifted on exactly this
+    (the shell tests and the accounts tests each carried one).
+    """
+    return list(argv)[1:] != ["-V"]
 
 
 # --- mouse gestures, the driver's way ---------------------------------------------------

@@ -32,8 +32,10 @@ import typer
 
 from aisquare.cli.common import expected_config_write_errors, fail
 from aisquare.core import outbox
-from aisquare.core.config import ExplainabilityTarget, load_config, save_config
+from aisquare.core.config import load_config, save_config
 from aisquare.core.state import get_state
+from aisquare.models import CheckStatus
+from aisquare.services import explainability as explainability_service
 from aisquare.services import explainability_ops as ops
 from aisquare.services.explainability import (
     RESERVED_ENV_VARS,
@@ -57,8 +59,16 @@ def status(
 ) -> None:
     """Show the tracing config and whether the proxy would accept a session.
 
-    Exits non-zero only when tracing is enabled but the proxy probe fails —
-    the state where launches would silently fall back to untraced.
+    Exits non-zero only when tracing is enabled and the proxy lane is RED --
+    ``ProxyState.problem``, the same verdict ``doctor`` and the fleet tab
+    render. Red is two states, and the second is newer than the first: the
+    proxy would not take a session (launches silently fall back to untraced),
+    or the proxy is alive and REPORTS that it ships to another deployment than
+    the target, so sessions are traced onto a gateway nobody is watching. Both
+    are "the traces are not arriving where you think", which is what a cutover
+    script gating on this code is asking, so the second case joined without a
+    flag day. Amber -- a destination that cannot be checked from here -- exits
+    0; ``probe_severity`` in the JSON says which.
 
     Honours ``--json``, because this is the command a cutover gets scripted
     against: without it every check in the runbook is a grep against prose,
@@ -109,6 +119,12 @@ def status(
                     "identity": target.agent_name_template,
                     "agents": list(target.agent_names),
                     "probe": proxy.summary,
+                    # The verdict as a FIELD, not only as prose in `probe`. A
+                    # script watching for a misroute had to regex an English
+                    # sentence that this PR is free to reword; `probe_severity`
+                    # is the same vocabulary `doctor --json` publishes.
+                    "probe_severity": str(proxy.severity),
+                    "probe_fix": proxy.remediation or None,
                     "redaction": str(level),
                     # The spool counters live HERE, not under a top-level
                     # "spool", even though the human view below prints them on
@@ -148,6 +164,12 @@ def status(
         typer.echo(f"identity: {target.agent_name_template}")
         typer.echo(f"agents:   {', '.join(target.agent_names) or '(none)'}")
         typer.echo(f"probe:    {proxy.summary}")
+        # "A red line without its next command is half a doctor" -- this
+        # module's own rule, and the amber verdict reached the operator without
+        # one: `status` and the fleet tab both rendered `summary` and dropped
+        # `remediation`, so the only surface carrying the fix was `doctor`.
+        if proxy.remediation and proxy.severity is not CheckStatus.ok:
+            typer.echo(f"          → {proxy.remediation}")
         typer.echo(f"shipping: {state.reason}")
         # On THIS line and not a new one: "how much is queued" and "where is it"
         # are one question, and the empty case is exactly when someone goes
@@ -160,9 +182,13 @@ def status(
         # and "what is in it" are one question, and an operator who reads the
         # first without the second is the person this line exists for.
         typer.echo(f"redaction: {ops.redaction_summary(level)}")
-    # Unchanged rule, same data: non-zero ONLY when tracing is on and the proxy
-    # would not take a session — the state where launches silently go untraced.
-    if settings.enabled and not proxy.healthy:
+    # Non-zero exactly when the lane is red -- the ONE derived verdict, so this
+    # cannot disagree with what `doctor` and the tab render. Red is the proxy
+    # refusing a session OR a live proxy shipping to another deployment (see
+    # the docstring); amber is not red. This read a separate `healthy` boolean
+    # until it was removed, and agreed with the severity only because every
+    # construction site happened to set both consistently.
+    if settings.enabled and proxy.problem:
         raise typer.Exit(code=1)
 
 
@@ -201,23 +227,22 @@ def enable(
     """
     config = load_config()
     settings = config.explainability
-    name = target_name or settings.target
-    if target_name:
-        settings.target = target_name
-
-    if gateway_url or key_env or proxy_url or identity:
-        target = settings.targets.get(name, ExplainabilityTarget())
-        if gateway_url:
-            target.gateway_url = gateway_url.rstrip("/")
-        if key_env:
-            target.api_key_env = key_env
-        if proxy_url:
-            target.proxy_url = proxy_url
-        if identity:
-            target.agent_name_template = identity
-        settings.targets[name] = target
-
-    settings.enabled = True
+    try:
+        name = explainability_service.configure_target(
+            config,
+            target_name=target_name,
+            gateway_url=gateway_url,
+            key_env=key_env,
+            proxy_url=proxy_url,
+            identity=identity,
+        )
+    except ValueError as exc:
+        # The writer refused a URL or an identity template and changed nothing.
+        # One `✗` line naming the fix rather than a stored value that fails
+        # later: `--gateway-url stg.example` is the runbook command four
+        # characters short, and this command used to store it -- after which
+        # the proxy lane read green over a gateway nothing could reach.
+        fail(str(exc), error="bad-setting")
     with expected_config_write_errors():
         save_config(config)
 

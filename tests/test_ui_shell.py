@@ -32,7 +32,7 @@ from textual.containers import Vertical, VerticalScroll
 from textual.content import Content
 from textual.geometry import Region
 from textual.pilot import Pilot
-from textual.widgets import Button, Input, Static, Switch
+from textual.widgets import Button, Checkbox, Input, Static, Switch
 from textual.widgets._toast import Toast
 from textual.worker import Worker, WorkerState
 
@@ -1053,6 +1053,268 @@ def test_a_blank_form_changes_nothing_and_says_so(tmp_path: Path, script: Script
 
     assert "nothing to save" in drive(go, notifications=True)
     assert load_config().explainability.targets == {}
+
+
+def _toasts(app: Any) -> str:
+    """Every toast on screen, oldest first — one save can raise more than one."""
+    return " | ".join(toast.render().plain for toast in app.screen.query(Toast))
+
+
+def test_a_prefix_with_a_stray_closing_brace_is_still_taken_as_a_name(
+    tmp_path: Path, script: Script
+) -> None:
+    """Review blocker B. The guard detected ``}`` and stripped at ``{`` only, so
+    ``nishil}`` passed through whole and was stored as ``nishil}-{role}`` — which
+    raises in ``.format``, so every launch went untraced and the tab read
+    ``agents: (none)`` under a success line. The toast now quotes what was
+    stored, because that is the name the operator will look for."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+
+    async def go(pilot: Pilot[None]) -> str:
+        app = fleet_app(pilot)
+        await app.content.add_content(ExplainabilityView(id="tracing"), set_current=True)
+        await pilot.pause()
+        await settle(app)
+        _setup(app, target="stg", prefix="nishil}")
+        app.screen.query_one("#explainability-save", Button).press()
+        await pilot.pause()
+        await settle(app)
+        return _toasts(app)
+
+    rendered = drive(go, notifications=True)
+    template = load_config().explainability.targets["stg"].agent_name_template
+    assert template == "nishil-{role}"
+    assert template.format(role="coder") == "nishil-coder"
+    assert "'nishil-{role}'" in rendered, "the toast quotes what was stored"
+
+
+def test_a_key_typed_for_a_target_that_names_its_own_variable_is_refused(
+    tmp_path: Path, script: Script
+) -> None:
+    """Review blocker C. ``resolve_target`` reads the key file only for the
+    default variable, so key + custom key variable in one save wrote a file
+    nothing reads and named a variable nothing exports: ``✓ setup saved`` over
+    ``$MY_WORKSPACE_KEY is NOT set``. The whole save is refused, with the reason."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+
+    async def go(pilot: Pilot[None]) -> str:
+        app = fleet_app(pilot)
+        await app.content.add_content(ExplainabilityView(id="tracing"), set_current=True)
+        await pilot.pause()
+        await settle(app)
+        _setup(app, target="stg", key_env="MY_WORKSPACE_KEY", key="AIS_typed")
+        app.screen.query_one("#explainability-save", Button).press()
+        await pilot.pause()
+        await settle(app)
+        return _toasts(app)
+
+    rendered = drive(go, notifications=True)
+    assert "MY_WORKSPACE_KEY" in rendered and "never be used" in rendered
+    assert load_config().explainability.targets == {}, "refused whole, not half"
+    assert explainability_service.stored_api_key() is None, "and no key file was written"
+
+
+def test_a_key_typed_for_a_target_that_already_names_its_own_variable_is_refused(
+    tmp_path: Path, script: Script
+) -> None:
+    """The deeper half of C: the variable was stored last month and the field
+    is blank today. The rule is judged against what the target will read from,
+    not against the field."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+    config = load_config()
+    explainability_service.configure_target(
+        config,
+        target_name="prod",
+        gateway_url="https://prod.example",
+        key_env="PROD_KEY",
+        enable=False,
+    )
+    save_config(config)
+
+    async def go(pilot: Pilot[None]) -> str:
+        app = fleet_app(pilot)
+        await app.content.add_content(ExplainabilityView(id="tracing"), set_current=True)
+        await pilot.pause()
+        await settle(app)
+        _setup(app, target="prod", key="AIS_typed")
+        app.screen.query_one("#explainability-save", Button).press()
+        await pilot.pause()
+        await settle(app)
+        return _toasts(app)
+
+    rendered = drive(go, notifications=True)
+    assert "PROD_KEY" in rendered
+    assert explainability_service.stored_api_key() is None
+
+
+def test_a_key_beside_the_default_variable_is_stored(tmp_path: Path, script: Script) -> None:
+    """The negative half of C: naming the default variable explicitly is fine."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+
+    async def go(pilot: Pilot[None]) -> None:
+        app = fleet_app(pilot)
+        await app.content.add_content(ExplainabilityView(id="tracing"), set_current=True)
+        await pilot.pause()
+        await settle(app)
+        _setup(app, target="stg", key_env="EXPLAINABILITY_API_KEY", key="AIS_typed")
+        app.screen.query_one("#explainability-save", Button).press()
+        await pilot.pause()
+        await settle(app)
+
+    drive(go, notifications=True)
+    assert explainability_service.stored_api_key() == "AIS_typed"
+    assert load_config().explainability.targets["stg"].api_key_env == "EXPLAINABILITY_API_KEY"
+
+
+def test_the_deployment_field_does_not_move_the_machine(tmp_path: Path, script: Script) -> None:
+    """Review blocker D. An operator on stg correcting prod's gateway had moved
+    the machine to prod — traffic to a deployment nobody chose, this tab's own
+    headline failure from the other side. The entry is written; the machine
+    stays; the toast says both and names the switch."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+
+    async def go(pilot: Pilot[None]) -> str:
+        app = fleet_app(pilot)
+        await app.content.add_content(ExplainabilityView(id="tracing"), set_current=True)
+        await pilot.pause()
+        await settle(app)
+        _setup(app, target="prod", gateway="https://prod.example")
+        app.screen.query_one("#explainability-save", Button).press()
+        await pilot.pause()
+        await settle(app)
+        return _toasts(app)
+
+    rendered = drive(go, notifications=True)
+    settings = load_config().explainability
+    assert settings.targets["prod"].gateway_url == "https://prod.example", "the correction lands"
+    assert settings.target == "stg", "the machine stays where it was"
+    assert "stays on 'stg'" in rendered and "make active" in rendered
+
+
+def test_ticking_make_active_is_the_switch(tmp_path: Path, script: Script) -> None:
+    """The affordance D asked for: moving the machine is a separate, visible act."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+
+    async def go(pilot: Pilot[None]) -> None:
+        app = fleet_app(pilot)
+        await app.content.add_content(ExplainabilityView(id="tracing"), set_current=True)
+        await pilot.pause()
+        await settle(app)
+        _setup(app, target="prod", gateway="https://prod.example")
+        app.screen.query_one("#explainability-switch", Checkbox).value = True
+        app.screen.query_one("#explainability-save", Button).press()
+        await pilot.pause()
+        await settle(app)
+
+    drive(go, notifications=True)
+    settings = load_config().explainability
+    assert settings.target == "prod"
+    assert settings.targets["prod"].gateway_url == "https://prod.example"
+
+
+def test_a_deployment_name_alone_writes_nothing_and_says_so(tmp_path: Path, script: Script) -> None:
+    """The sharper half of D: typing ONLY a name used to flip ``settings.target``
+    while writing no entry, under a ``✓ setup saved`` toast."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+
+    async def go(pilot: Pilot[None]) -> str:
+        app = fleet_app(pilot)
+        await app.content.add_content(ExplainabilityView(id="tracing"), set_current=True)
+        await pilot.pause()
+        await settle(app)
+        _setup(app, target="prod")
+        app.screen.query_one("#explainability-save", Button).press()
+        await pilot.pause()
+        return _toasts(app)
+
+    rendered = drive(go, notifications=True)
+    settings = load_config().explainability
+    assert settings.target == "stg" and settings.targets == {}
+    assert "nothing to save" in rendered and "'prod'" in rendered
+
+
+def test_a_deliberate_top_level_proxy_is_not_shadowed_by_the_suggestion(
+    tmp_path: Path, script: Script
+) -> None:
+    """Review follow-up F. A top-level ``[explainability] proxy_url`` that is not
+    the shipped default is a choice (``_proxy_source`` says ``config``), and the
+    hosted suggestion must not be written over it as a per-target value."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+    config = load_config()
+    config.explainability.proxy_url = "http://127.0.0.1:9190"
+    save_config(config)
+
+    async def go(pilot: Pilot[None]) -> None:
+        app = fleet_app(pilot)
+        await app.content.add_content(ExplainabilityView(id="tracing"), set_current=True)
+        await pilot.pause()
+        await settle(app)
+        _setup(app, target="stg", gateway="https://g.example")
+        app.screen.query_one("#explainability-save", Button).press()
+        await pilot.pause()
+        await settle(app)
+
+    drive(go, notifications=True)
+    settings = load_config().explainability
+    assert settings.targets["stg"].gateway_url == "https://g.example"
+    assert settings.targets["stg"].proxy_url is None, "no suggestion over a chosen proxy"
+    assert settings.proxy_url == "http://127.0.0.1:9190"
+
+
+def test_a_malformed_gateway_is_told_apart_from_a_schemeless_one(
+    tmp_path: Path, script: Script
+) -> None:
+    """Review follow-up I. ``http://[::1`` got "needs a scheme — try
+    https://http://[::1"; the regression test asserted only that a toast
+    appeared, so the wrong advice was uncovered."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+
+    async def go(pilot: Pilot[None]) -> str:
+        app = fleet_app(pilot)
+        await app.content.add_content(ExplainabilityView(id="tracing"), set_current=True)
+        await pilot.pause()
+        await settle(app)
+        _setup(app, target="stg", gateway="http://[::1")
+        app.screen.query_one("#explainability-save", Button).press()
+        await pilot.pause()
+        await settle(app)
+        return _toasts(app)
+
+    rendered = drive(go, notifications=True)
+    assert "cannot be parsed" in rendered
+    assert "https://http://" not in rendered
+    assert load_config().explainability.targets == {}
+
+
+def test_the_key_field_is_cleared_even_when_the_key_write_fails(
+    tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review follow-up M. A failed ``store_api_key`` returned before the field
+    was cleared, so the plaintext stayed live in the widget for the session —
+    against the view's own "never shown back". Cleared the moment a write
+    begins, and the notice says to type it again."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+
+    def refuse(_key: str) -> Path:
+        raise OSError("disk says no")
+
+    monkeypatch.setattr(explainability_service, "store_api_key", refuse)
+
+    async def go(pilot: Pilot[None]) -> tuple[str, str]:
+        app = fleet_app(pilot)
+        await app.content.add_content(ExplainabilityView(id="tracing"), set_current=True)
+        await pilot.pause()
+        await settle(app)
+        _setup(app, target="stg", gateway="https://g.example", key="AIS_secret")
+        app.screen.query_one("#explainability-save", Button).press()
+        await pilot.pause()
+        await settle(app)
+        return app.screen.query_one("#explainability-key", Input).value, _toasts(app)
+
+    value, rendered = drive(go, notifications=True)
+    assert value == ""
+    assert "could not be written" in rendered and "type it again" in rendered
+    assert load_config().explainability.targets["stg"].gateway_url == "https://g.example"
 
 
 def test_the_explainability_views_toasts_keep_bracketed_data(

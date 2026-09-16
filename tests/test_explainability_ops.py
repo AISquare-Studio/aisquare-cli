@@ -1120,3 +1120,140 @@ def test_enable_renders_the_same_facts_in_both_forms(
         f"key_set={payload['key_set']} disagrees with the human view about the "
         f"same shell:\n{human.stdout}"
     )
+
+
+# ── the second gate: the shared layer under the surfaces ─────────────────────
+
+
+def test_a_gateway_that_is_not_a_url_is_not_a_loopback_pair(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review blocker A, at the discriminator.
+
+    ``stg.example`` parses with the whole string as the PATH: no scheme, no
+    host. ``is_loopback`` counts an empty host as local, so with a loopback
+    proxy the pair-exemption fired and the lane read GREEN over a gateway
+    nothing can reach — configured, green and stranded, through the primary
+    documented path. The writer refuses it now; a hand-edited config or
+    ``$EXPLAINABILITY_GATEWAY_URL`` still deliver one, and this is what they
+    get: amber in the proxy lane (a live proxy is not to blame for a config
+    value), red in the config lane, whose fact it is.
+    """
+    monkeypatch.setattr(ops, "probe_proxy", _probes(None))
+    settings = _wired("stg.example", proxy_url="http://127.0.0.1:9090")
+    checks = {c.name: c for c in ops.checks(settings, env=_env())}
+
+    proxy = checks["explainability proxy"]
+    assert proxy.status is CheckStatus.warn, "green was the bug; red would blame the proxy"
+    assert "scheme" in proxy.detail and "cannot be compared" in proxy.detail
+    assert proxy.fix
+    config = checks["explainability config"]
+    assert config.status is CheckStatus.fail
+    assert "stg.example" in config.detail and "scheme" in config.detail
+    assert "--gateway-url" in (config.fix or "")
+
+
+def test_enable_refuses_a_schemeless_gateway_and_stores_nothing(runner: CliRunner) -> None:
+    """Review blocker A, at the door the first round left open.
+
+    The form refused ``stg.example``; ``aisquare explainability enable
+    --gateway-url stg.example`` — the runbook command four characters short —
+    stored it and switched tracing on around it.
+    """
+    from aisquare.cli.app import app as cli_app
+
+    result = runner.invoke(
+        cli_app, ["explainability", "enable", "--target", "stg", "--gateway-url", "stg.example"]
+    )
+
+    assert result.exit_code == 1, result.output
+    assert "scheme" in result.output and "https://stg.example" in result.output
+    settings = load_config().explainability
+    assert settings.targets == {}, "nothing stored"
+    assert settings.enabled is False, "and tracing was not switched on around it"
+
+
+def test_the_unset_gateway_amber_names_where_the_proxy_ships(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review follow-up K. The proxy DID say where it ships, and that is the
+    most useful sentence available to an operator with nothing configured —
+    so it is the one printed, with the command that adopts it."""
+    monkeypatch.setattr(ops, "probe_proxy", _probes("https://g.example"))
+    settings = ExplainabilitySettings(
+        enabled=True,
+        targets={"stg": ExplainabilityTarget(gateway_url="", proxy_url="https://p.example:9443")},
+    )
+    proxy = next(c for c in ops.checks(settings, env=_env()) if c.name == "explainability proxy")
+
+    assert proxy.status is CheckStatus.warn
+    assert "https://g.example" in proxy.detail
+    assert "--gateway-url https://g.example" in (proxy.fix or "")
+
+
+def test_the_local_proxy_amber_names_the_mechanism(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review follow-up L. "Not on the gateway's host" reads as a wrong address
+    for a deliberately-local sidecar. The actionable fact is WHY it might ship
+    elsewhere: it took its destination from the environment it was started
+    with. The fix names that variable and the deployment's own proxy."""
+    monkeypatch.setattr(ops, "probe_proxy", _probes(None))
+    settings = _wired("https://stg.example", proxy_url="http://127.0.0.1:9090")
+    proxy = next(c for c in ops.checks(settings, env=_env()) if c.name == "explainability proxy")
+
+    assert proxy.status is CheckStatus.warn
+    assert "EXPLAINABILITY_GATEWAY_URL" in proxy.detail and "started" in proxy.detail
+    fix = proxy.fix or ""
+    assert "EXPLAINABILITY_GATEWAY_URL=https://stg.example" in fix
+    assert "https://stg.example:9443" in fix, "the deployment's own proxy, spelled out"
+
+
+def test_an_off_host_proxy_is_not_ordered_to_repoint(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review follow-up E. A gateway at api.example with its proxy at
+    proxy.example:9443 — an ordinary LB/CNAME split — is a correct deployment
+    this lane cannot verify from here. Amber is honest; an imperative to
+    repoint is not. The remediation asks the question and gives both answers,
+    and stays amber rather than green because a field the proxy did not send
+    is still unknown."""
+    monkeypatch.setattr(ops, "probe_proxy", _probes(None))
+    settings = _wired("https://api.example", proxy_url="https://proxy.example:9443")
+    proxy = next(c for c in ops.checks(settings, env=_env()) if c.name == "explainability proxy")
+
+    assert proxy.status is CheckStatus.warn
+    assert "cannot be checked" in proxy.detail
+    fix = proxy.fix or ""
+    assert "nothing is wrong" in fix
+    assert "EXPLAINABILITY_GATEWAY_URL=https://api.example" in fix
+    assert "https://api.example:9443" in fix
+    assert not fix.startswith("Point this CLI"), "no bare imperative for a state that may be right"
+
+
+def test_the_verdict_is_one_field() -> None:
+    """Review follow-up G. ``healthy`` survived one round as a second,
+    independently settable encoding of the verdict, so
+    ``ProxyState(healthy=True, severity=fail)`` was constructible and two
+    surfaces branched on it. Pinned structurally: one field, one derivation."""
+    from dataclasses import fields
+
+    assert {f.name for f in fields(ops.ProxyState)} == {"summary", "severity", "remediation"}
+    assert ops.ProxyState("x", CheckStatus.fail).problem is True
+    assert ops.ProxyState("x", CheckStatus.warn).problem is False
+    assert ops.ProxyState("x").problem is False
+
+
+def test_chosen_proxy_is_the_targets_then_a_deliberate_top_level_one_then_nothing() -> None:
+    """Review follow-up F. The form asked the per-target value only, so a
+    deliberate top-level ``[explainability] proxy_url`` — which ``_proxy_source``
+    reports as ``config`` for exactly this reason — was shadowed by the hosted
+    suggestion. The shipped default is the one value nobody chose."""
+    assert ops.chosen_proxy(ExplainabilitySettings()) is None
+
+    top_level = ExplainabilitySettings(proxy_url="http://127.0.0.1:9190")
+    assert ops.chosen_proxy(top_level) == "http://127.0.0.1:9190"
+    assert ops.chosen_proxy(top_level, "prod") == "http://127.0.0.1:9190", "no entry needed"
+
+    own = ExplainabilitySettings(
+        proxy_url="http://127.0.0.1:9190",
+        targets={"stg": ExplainabilityTarget(proxy_url="https://stg.example:9443")},
+    )
+    assert ops.chosen_proxy(own, "stg") == "https://stg.example:9443"
+    assert ops.chosen_proxy(own, "prod") == "http://127.0.0.1:9190"

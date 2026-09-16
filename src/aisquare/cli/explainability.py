@@ -59,8 +59,16 @@ def status(
 ) -> None:
     """Show the tracing config and whether the proxy would accept a session.
 
-    Exits non-zero only when tracing is enabled but the proxy probe fails —
-    the state where launches would silently fall back to untraced.
+    Exits non-zero only when tracing is enabled and the proxy lane is RED --
+    ``ProxyState.problem``, the same verdict ``doctor`` and the fleet tab
+    render. Red is two states, and the second is newer than the first: the
+    proxy would not take a session (launches silently fall back to untraced),
+    or the proxy is alive and REPORTS that it ships to another deployment than
+    the target, so sessions are traced onto a gateway nobody is watching. Both
+    are "the traces are not arriving where you think", which is what a cutover
+    script gating on this code is asking, so the second case joined without a
+    flag day. Amber -- a destination that cannot be checked from here -- exits
+    0; ``probe_severity`` in the JSON says which.
 
     Honours ``--json``, because this is the command a cutover gets scripted
     against: without it every check in the runbook is a grep against prose,
@@ -174,9 +182,13 @@ def status(
         # and "what is in it" are one question, and an operator who reads the
         # first without the second is the person this line exists for.
         typer.echo(f"redaction: {ops.redaction_summary(level)}")
-    # Unchanged rule, same data: non-zero ONLY when tracing is on and the proxy
-    # would not take a session — the state where launches silently go untraced.
-    if settings.enabled and not proxy.healthy:
+    # Non-zero exactly when the lane is red -- the ONE derived verdict, so this
+    # cannot disagree with what `doctor` and the tab render. Red is the proxy
+    # refusing a session OR a live proxy shipping to another deployment (see
+    # the docstring); amber is not red. This read a separate `healthy` boolean
+    # until it was removed, and agreed with the severity only because every
+    # construction site happened to set both consistently.
+    if settings.enabled and proxy.problem:
         raise typer.Exit(code=1)
 
 
@@ -215,14 +227,22 @@ def enable(
     """
     config = load_config()
     settings = config.explainability
-    name = explainability_service.configure_target(
-        config,
-        target_name=target_name,
-        gateway_url=gateway_url,
-        key_env=key_env,
-        proxy_url=proxy_url,
-        identity=identity,
-    )
+    try:
+        name = explainability_service.configure_target(
+            config,
+            target_name=target_name,
+            gateway_url=gateway_url,
+            key_env=key_env,
+            proxy_url=proxy_url,
+            identity=identity,
+        )
+    except ValueError as exc:
+        # The writer refused a URL or an identity template and changed nothing.
+        # One `✗` line naming the fix rather than a stored value that fails
+        # later: `--gateway-url stg.example` is the runbook command four
+        # characters short, and this command used to store it -- after which
+        # the proxy lane read green over a gateway nothing could reach.
+        fail(str(exc), error="bad-setting")
     with expected_config_write_errors():
         save_config(config)
 

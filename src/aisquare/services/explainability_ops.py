@@ -62,6 +62,7 @@ from aisquare.services.explainability import (
     FALLBACK_ROLE,
     KEY_ENV_VAR,
     ProxyProbe,
+    hosted_proxy_for,
     is_loopback,
     key_path,
     probe_proxy,
@@ -69,6 +70,7 @@ from aisquare.services.explainability import (
     split_url,
     stored_api_key,
     trace_identity,
+    url_problem,
 )
 from aisquare.services.explainability import (
     INSTALL_HINT as _EXTRA_INSTALL_HINT,
@@ -971,6 +973,23 @@ def _check_config(target: ResolvedTarget, *, on: bool) -> DoctorCheck:
             "Point it at a deployment: aisquare explainability enable "
             f"--target {target.name} --gateway-url <url>",
         )
+    # A gateway that is not a URL -- `stg.example`, the runbook command four
+    # characters short. `configure_target` refuses it now, but a hand-edited
+    # config or $EXPLAINABILITY_GATEWAY_URL still deliver one, and until here
+    # nothing said so: `/ready` failed with an opaque urlopen error under
+    # --live, and without --live this lane read `target 'stg' -> stg.example`
+    # as configured. It is the config lane's fact, so it is red in the config
+    # lane; the proxy lane stays amber over it rather than calling a live proxy
+    # broken for a value it did not choose.
+    unusable = url_problem(target.gateway_url, what="gateway")
+    if unusable:
+        return degrade(
+            name,
+            f"target '{target.name}' ({target.gateway_source}): {unusable} — nothing can "
+            "be posted to it, and the proxy lane cannot tell whether the proxy agrees with it",
+            f"Store a full URL: aisquare explainability enable --target {target.name} "
+            "--gateway-url https://<host>",
+        )
     if not target.api_key:
         return degrade(
             name,
@@ -1052,40 +1071,62 @@ def _proxy_source(settings: ExplainabilitySettings, target: ExplainabilityTarget
     return "config" if settings.proxy_url != default else "default"
 
 
+def chosen_proxy(settings: ExplainabilitySettings, name: str | None = None) -> str | None:
+    """The proxy someone CHOSE for target ``name`` (the active one when ``None``).
+
+    The target's own, else the top-level ``proxy_url`` when it is not the
+    shipped default -- the fold ``resolve_target`` applies, minus the default,
+    because the default is the one value nobody picked. The setup form asks
+    this before offering the hosted-proxy suggestion: it read the per-target
+    value only, so a deliberate top-level ``[explainability] proxy_url`` -- which
+    ``_proxy_source`` already reports as ``config`` rather than ``default`` for
+    exactly this reason -- was shadowed by a suggestion the operator never
+    asked for.
+    """
+    target = settings.targets.get(name or settings.target, ExplainabilityTarget())
+    if target.proxy_url:
+        return target.proxy_url
+    return settings.proxy_url if _proxy_source(settings, target) == "config" else None
+
+
 @dataclass(frozen=True)
 class ProxyState:
-    """What to say about the tracing proxy, and whether it is a problem.
+    """What to say about the tracing proxy, and how loudly.
 
-    ONE description for ``status`` and ``doctor``, because they were already
-    drifting: doctor knew to stay quiet while tracing was off and status did
-    not, so a cold machine read green in one surface and broken in the other.
+    ONE description for ``status``, ``doctor`` and the fleet tab, because they
+    were already drifting: doctor knew to stay quiet while tracing was off and
+    status did not, so a cold machine read green in one surface and broken in
+    the other.
+
+    ONE verdict field. This carried ``healthy``, ``problem`` and ``caution`` as
+    independent booleans, which could express states that mean nothing
+    (``problem`` and ``caution`` together) and were read by different surfaces
+    -- only ``doctor`` read the third, so an amber rendered green on ``status``
+    and the tab. ``healthy`` went last: it survived one round as a second
+    encoding of the same fact, its docstring ("whether a session launched now
+    would be traced") was contradicted by the misroute branch, which set it
+    False for a proxy that IS tracing -- to the wrong place -- and the two
+    surfaces reading it agreed with ``severity`` only by accident of the
+    construction sites. ``severity`` is the ``CheckStatus`` vocabulary every
+    other check speaks, and ``problem`` is derived from it, so there is nothing
+    left to contradict.
     """
 
     summary: str
-    healthy: bool
-    """Whether a session launched now would be traced. NOT the verdict: an
-    answering proxy whose destination cannot be checked is healthy AND amber."""
     severity: CheckStatus = CheckStatus.ok
-    """How loudly to say it -- ``ok`` / ``warn`` / ``fail``, the vocabulary every
-    other check already speaks.
-
-    Three independent booleans could express states that mean nothing
-    (``problem`` and ``caution`` together), and only one of the three surfaces
-    read the third, so an amber rendered green in the other two. A single
-    severity cannot contradict itself and cannot be half-read.
-    """
     remediation: str = ""
 
     @property
     def problem(self) -> bool:
-        """Kept so ``status`` and the fleet tab need no change to stay correct."""
+        """Red: tracing is on and either the proxy would not take a session, or
+        it is alive and ships to another deployment. ``status`` exits 1 on it."""
         return self.severity is CheckStatus.fail
 
 
-#: Remediation for an ALIVE proxy whose destination is wrong or unknowable. It
-#: names both levers because either can be the mistaken one: the operator either
-#: pointed the CLI at the wrong proxy, or started the right proxy against the
-#: wrong gateway -- and only they know which they meant.
+#: Remediation for an ALIVE proxy that REPORTS a gateway other than the target's.
+#: It names both levers because either can be the mistaken one: the operator
+#: either pointed the CLI at the wrong proxy, or started the right proxy against
+#: the wrong gateway -- and only they know which they meant.
 _PROXY_DESTINATION_FIX = (
     "Point this CLI at the proxy for the target "
     "(aisquare explainability enable --proxy-url <deployment proxy>), or restart "
@@ -1134,13 +1175,11 @@ def proxy_state(
                     f"not configured — the default {target.proxy_url} is not consulted "
                     "while tracing is off"
                 ),
-                healthy=False,
                 severity=CheckStatus.ok,
             )
         if not live:
             return ProxyState(
                 summary=f"not consulted while tracing is off ({target.proxy_url})",
-                healthy=False,
                 severity=CheckStatus.ok,
             )
         # --live means "make the calls", and this is the one an operator
@@ -1156,7 +1195,6 @@ def proxy_state(
                     f"answered at {target.proxy_url}, but tracing is off — nothing is "
                     "being traced yet (turn it on: aisquare explainability enable)"
                 ),
-                healthy=True,
                 severity=CheckStatus.ok,
             )
         return ProxyState(
@@ -1164,7 +1202,6 @@ def proxy_state(
                 f"{verdict.reason} — nothing is untraced yet because tracing is off, "
                 "but it will be the moment you enable it"
             ),
-            healthy=False,
             severity=CheckStatus.ok,
             remediation=_PROXY_FIX,
         )
@@ -1173,7 +1210,6 @@ def proxy_state(
         return _destination(target, verdict)
     return ProxyState(
         summary=f"{verdict.reason} — sessions launch UNTRACED (they never block on this)",
-        healthy=False,
         severity=CheckStatus.fail,
         remediation=_PROXY_FIX,
     )
@@ -1190,42 +1226,71 @@ def _destination(target: ResolvedTarget, verdict: ProxyProbe) -> ProxyState:
     for the client lane ("Both halves looked healthy. Nobody was told"); it was
     fixed there and not here.
 
-    Four answers, in the order the facts allow:
+    Five answers, in the order the facts allow:
 
     * **Nothing to compare against.** ``resolve_target`` legitimately yields an
       empty ``gateway_url`` (source ``unset``), and an empty string equals no
       deployment, so a strict comparison called every such machine misrouted --
       printing a sentence with a blank where a URL goes, and exiting 1. Nothing
-      is misrouted; the CLI has no second value. Amber, and say so.
+      is misrouted; the CLI has no second value. Amber -- and when the proxy DID
+      name its gateway, that is the most useful sentence this operator can be
+      given, so it is printed, with the command that adopts it.
+    * **A gateway that is not a URL.** ``stg.example`` -- the runbook command
+      four characters short -- parses with the whole string as the PATH: no
+      scheme, no host. ``is_loopback`` reads an empty host as local, so with a
+      local proxy the pair-exemption below fired and the lane read GREEN over a
+      gateway nothing can reach: configured, green and stranded. Amber here;
+      ``_check_config`` carries the red for the same fact, in the lane it
+      belongs to.
     * **The proxy names its gateway.** Compared; disagreement is red.
-    * **It names none and the pair CAN disagree.** A loopback sidecar takes its
-      destination from whoever started it. A hosted proxy on a host that is not
-      the gateway's is the same exposure -- the docstring used to call that
-      impossible because a hosted proxy is "addressed at the deployment", but
-      that is an assumption about the operator's typing, and ``hosted_proxy_for``
-      is this module's own statement that the two share a host. Where they do
-      not, the claim is unchecked, so it is amber rather than green.
     * **It names none and the pair CANNOT disagree** -- same host as the
-      gateway, or a loopback pair (the self-hosted topology working as intended).
-      Green, and silent: neither earns a warning for a field it did not send.
+      gateway, or a loopback pair (the self-hosted topology working as
+      intended). Green, and silent: neither earns a warning for a field it did
+      not send.
+    * **It names none and the pair CAN disagree.** Two mechanisms, worded apart
+      because the fix differs. A LOOPBACK sidecar ships wherever
+      ``EXPLAINABILITY_GATEWAY_URL`` pointed when it was started -- the exact
+      combination that stranded the traffic this lane was rewritten for -- and
+      gets an imperative. A hosted proxy on a host that is not the gateway's is
+      either the deployment's own behind another hostname (an ordinary LB or
+      CNAME split) or another deployment's, and from here the two cannot be
+      told apart; it gets the question and both answers, because ordering a
+      correct deployment to repoint itself is the false red this lane exists to
+      avoid. Both stay amber rather than green: a warning for a field the proxy
+      did not send is the price of not knowing, and a proxy that reports its
+      gateway clears it.
     """
     alive = f"claude_code proxy healthy at {target.proxy_url}"
+    ships = f", and it says it ships to {verdict.gateway}" if verdict.gateway else ""
     if not target.gateway_url:
         return ProxyState(
             summary=(
-                f"{alive}, but no gateway is configured for target {target.name!r}, "
-                "so where it ships cannot be compared with anything"
+                f"{alive}{ships}, but no gateway is configured for target "
+                f"{target.name!r}, so that cannot be compared with anything"
             ),
-            healthy=True,
             severity=CheckStatus.warn,
-            remediation=_PROXY_DESTINATION_FIX,
+            remediation=(
+                f"Name the deployment: aisquare explainability enable --target {target.name} "
+                f"--gateway-url {verdict.gateway or '<url>'}"
+            ),
+        )
+    unusable = url_problem(target.gateway_url, what="gateway")
+    if unusable:
+        return ProxyState(
+            summary=(
+                f"{alive}{ships}, but the gateway configured for target {target.name!r} is "
+                f"unusable ({unusable}), so where the proxy ships cannot be compared with it"
+            ),
+            severity=CheckStatus.warn,
+            remediation=(
+                f"Store a full URL: aisquare explainability enable --target {target.name} "
+                "--gateway-url https://<host>"
+            ),
         )
     if verdict.gateway:
         if _same_deployment(verdict.gateway, target.gateway_url):
             return ProxyState(
-                summary=f"{alive}, shipping to {target.name}",
-                healthy=True,
-                severity=CheckStatus.ok,
+                summary=f"{alive}, shipping to {target.name}", severity=CheckStatus.ok
             )
         return ProxyState(
             summary=(
@@ -1233,23 +1298,46 @@ def _destination(target: ResolvedTarget, verdict: ProxyProbe) -> ProxyState:
                 f"{target.name!r} is {target.gateway_url} — model traffic lands on "
                 "the other deployment and nothing here will say so again"
             ),
-            healthy=False,
             severity=CheckStatus.fail,
             remediation=_PROXY_DESTINATION_FIX,
         )
     if _shares_host(target.proxy_url, target.gateway_url) or (
         is_loopback(target.proxy_url) and is_loopback(target.gateway_url)
     ):
-        return ProxyState(summary=alive, healthy=True, severity=CheckStatus.ok)
+        return ProxyState(summary=alive, severity=CheckStatus.ok)
+    # The deployment's own proxy, by this module's convention -- the thing to
+    # point at instead, spelled out rather than left as a placeholder.
+    hosted = hosted_proxy_for(target.gateway_url) or "<the deployment's proxy>"
+    if is_loopback(target.proxy_url):
+        return ProxyState(
+            summary=(
+                f"{alive}, but it does not report a gateway, and a local proxy ships wherever "
+                "EXPLAINABILITY_GATEWAY_URL pointed when it was started — which need not be "
+                f"{target.gateway_url}; whether it is cannot be checked from here"
+            ),
+            severity=CheckStatus.warn,
+            remediation=(
+                f"Restart the local proxy with EXPLAINABILITY_GATEWAY_URL={target.gateway_url}, "
+                "or point this CLI at the deployment's own proxy: aisquare explainability "
+                f"enable --target {target.name} --proxy-url {hosted}"
+            ),
+        )
     return ProxyState(
         summary=(
-            f"{alive}, but it does not report a gateway and is not on "
-            f"{target.gateway_url}'s host, so it may be shipping somewhere else — "
-            "this cannot be checked from here"
+            f"{alive}, but it does not report a gateway and is not on {target.gateway_url}'s "
+            f"host, so whether it ships to {target.name} cannot be checked from here — the "
+            "deployment's own proxy behind another hostname looks exactly like another "
+            "deployment's"
         ),
-        healthy=True,
         severity=CheckStatus.warn,
-        remediation=_PROXY_DESTINATION_FIX,
+        remediation=(
+            f"If {target.proxy_url} is {target.name}'s proxy behind another hostname, nothing "
+            "is wrong: confirm on that host that it was started with "
+            f"EXPLAINABILITY_GATEWAY_URL={target.gateway_url} (a proxy that reports its "
+            "gateway from /health clears this on its own). Otherwise point this CLI at the "
+            f"deployment's proxy: aisquare explainability enable --target {target.name} "
+            f"--proxy-url {hosted}"
+        ),
     )
 
 

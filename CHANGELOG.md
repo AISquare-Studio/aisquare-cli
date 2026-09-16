@@ -8,6 +8,68 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A schemeless gateway is refused by the writer, not only by the form.** The
+  Setup form refused `stg.example`; `aisquare explainability enable
+  --gateway-url stg.example` — the runbook command, four characters short —
+  stored it, after which the proxy lane read **green and silent** over a gateway
+  nothing could reach: a host-less URL parses with the whole string as the path,
+  `is_loopback` counts an empty host as local, and the loopback-pair exemption
+  fired. `configure_target` — the one writer both surfaces go through — now
+  validates the gateway, the proxy and the identity template before it mutates
+  anything and raises with the fix; `enable` prints it as one `✗` line and
+  stores nothing. `url_problem` is the shared validator and says *which* thing
+  is wrong (unparseable, bad port, no scheme, not http(s), no host) — the form
+  used to answer `http://[::1` with "try https://http://[::1". The proxy lane
+  no longer treats a host-less gateway as a loopback pair, and `doctor`'s config
+  lane flags a stored one, so a hand-edited config or
+  `EXPLAINABILITY_GATEWAY_URL` cannot reach the stranded state either.
+- **The Setup form's deployment field no longer moves the machine.** It set
+  `settings.target` on every save, so an operator on stg correcting prod's
+  gateway had moved their machine to prod — traffic to a deployment nobody
+  chose, the headline failure from the other side — and typing *only* a
+  deployment name flipped the target while writing no entry, under a `✓ setup
+  saved` toast. The field now names the entry the settings belong to; a **make
+  active** checkbox beside it is the switch, and the toast says which target
+  the machine is on. `enable --target` keeps switching: a flag typed in a shell
+  is the explicit act the box is.
+- **A key typed for a target that names its own key variable is refused.** The
+  key file is read only for the default variable — a single unlabelled key must
+  never satisfy a prod target — so key + custom variable in one save wrote a
+  file nothing reads: `✓ setup saved` over `$MY_WORKSPACE_KEY is NOT set`. The
+  rule is judged against the variable the target will read from after the save,
+  typed today or stored last month, and the notice says where the key should go
+  instead.
+- **The prefix guard strips at either brace.** It detected `}` and stripped at
+  `{`, so `nishil}` passed through whole, was stored as `nishil}-{role}`, and
+  every `.format` raised: `agent_names` empty, every launch untraced, a success
+  line on the screen. The name is now what precedes the first brace of either
+  kind, the toast quotes the identity that was *stored*, and the writer refuses
+  any template that cannot render or renders every role to one name.
+- **The hosted-proxy suggestion respects a deliberate top-level `proxy_url`.**
+  The form read the per-target value only, so a chosen `[explainability]
+  proxy_url` — which `_proxy_source` already reports as `config` rather than
+  `default` for exactly this reason — was shadowed by a per-target suggestion.
+  `explainability_ops.chosen_proxy` is the resolver's fold minus the shipped
+  default, which is the one value nobody picked.
+- **The two unverifiable ambers are worded by mechanism.** A loopback sidecar is
+  told *why* it may ship elsewhere — it took its destination from
+  `EXPLAINABILITY_GATEWAY_URL` when it was started — with the restart and the
+  deployment's own proxy spelled out. A hosted proxy on a host that is not the
+  gateway's may be the deployment's own behind a load balancer or CNAME, which
+  from here looks exactly like another deployment's, so it is asked the question
+  and given both answers rather than ordered to repoint. The unset-gateway amber
+  prints the gateway the proxy *does* report, with the `--gateway-url` command
+  that adopts it.
+- **`explainability status` exits 1 for a live proxy shipping to another
+  deployment, and now says so.** The exit code's documented meaning was "the
+  proxy would not take a session"; the destination check widened it without a
+  word. Both states are "the traces are not arriving where you think", which is
+  what a cutover script gating on this code asks, so the rule stands and the
+  docstring, the comment and this entry carry it. Amber exits 0, and
+  `probe_severity` says which — that field is now tested, with `probe_fix`.
+- **The key field is cleared even when the key write fails.** A failed
+  `store_api_key` returned before the field was cleared, leaving the plaintext
+  live in a masked `Input` for the rest of the session.
 - **Every URL this integration takes from a human now goes through one guarded
   parse.** `urlsplit` raises `ValueError` on a malformed authority — `http://[::1`
   (a typo'd IPv6 bracket) is reachable by typing — and two callers took it
@@ -57,8 +119,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (`problem` and `caution` together), and only `doctor` read the third — so the
   amber rendered **green** on `explainability status` and in the fleet tab.
   `ProxyState.severity` is the `CheckStatus` vocabulary every other check already
-  speaks; `problem` survives as a property so the surfaces reading it stay
-  correct. Both surfaces now render the amber as amber **and** print its
+  speaks; `problem` is derived from it, and `healthy` — a second, independently
+  settable encoding of the same fact, which the misroute branch contradicted by
+  setting it `False` for a proxy that *is* tracing — is gone, so `status`'s exit
+  code and the fleet tab's red both branch on `problem`. Both surfaces now
+  render the amber as amber **and** print its
   remediation, against this module's own rule that a line which is not ok without
   its next command is half a doctor. `status --json` gains `probe_severity` and
   `probe_fix`, so a script watching for a misroute no longer has to regex an
@@ -302,15 +367,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   section now takes deployment, gateway URL, proxy URL, prefix and workspace key.
   - A blank field leaves the setting alone, so the same form corrects one value
     later without restating the rest.
+  - The deployment field names the entry the settings belong to; **make
+    active** beside it is what moves this machine, and the toast says which
+    target the machine is on.
   - Type a gateway, leave the proxy blank, and the hosted proxy beside it is
-    filled in — offered, never imposed: an explicit value always wins, and a
-    self-hosted adopter with no proxy tier types their own. `hosted_proxy_for`
-    returns `None` rather than assembling a URL out of half an answer.
+    filled in — offered, never imposed: an explicit value always wins, a proxy
+    already configured for the target (its own, or a deliberate top-level one)
+    is never overwritten, and a self-hosted adopter with no proxy tier types
+    their own. `hosted_proxy_for` returns `None` rather than assembling a URL
+    out of half an answer.
   - The prefix field asks for a **name**, not a template: `nishil` becomes
     `nishil-{role}`, so nobody types a format string into a form.
   - The key is written to `~/.aisquare/explainability-key` at mode 600 and the
     field is cleared — this view's own docstring already rules a key out of a
-    full-screen UI, and a masked `Input` still holds its value.
+    full-screen UI, and a masked `Input` still holds its value. The file is
+    read only for the default key variable, so a key typed for a target that
+    names its own variable is refused, with the reason.
   - Consent stays a separate press: saving configures, **Enable** enables.
   - One writer. `explainability.configure_target` is lifted out of the Typer
     command so the form and `aisquare explainability enable` are the same write,

@@ -865,3 +865,110 @@ def test_a_trailing_slash_is_stripped_from_the_stored_gateway() -> None:
     config = AppConfig()
     explainability.configure_target(config, target_name="stg", gateway_url="https://g.example/")
     assert config.explainability.targets["stg"].gateway_url == "https://g.example"
+
+
+# ── the writer validates, so both doors are guarded ──────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("url", "fragment", "not_fragment"),
+    [
+        ("stg.example", "try https://stg.example", None),
+        ("stg.example:8000", "try https://stg.example:8000", "not stg.example://"),
+        ("http://[::1", "cannot be parsed", "https://http://"),
+        ("ftp://stg.example", "not ftp://", None),
+        ("https://", "names no host", None),
+        ("https://g.example:99999", "port", None),
+    ],
+    ids=["schemeless", "schemeless-with-port", "malformed-ipv6", "ftp", "no-host", "bad-port"],
+)
+def test_url_problem_says_which_thing_is_wrong(
+    url: str, fragment: str, not_fragment: str | None
+) -> None:
+    """Review follow-up I. The form answered every failure with "needs a scheme
+    — try https://…" and prefixed ``https://`` onto ``http://[::1``. One
+    validator, each diagnosis with the fix that applies to it — and
+    ``stg.example:8000`` is a missing scheme, not an unknown one, even though
+    ``urlsplit`` reads ``stg.example`` as the scheme."""
+    problem = explainability.url_problem(url, what="gateway")
+
+    assert problem is not None and problem.startswith("gateway")
+    assert fragment in problem
+    if not_fragment:
+        assert not_fragment not in problem
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://g.example",
+        "http://127.0.0.1:9090",
+        "https://[::1]:8000/",
+        "https://g.example:443/path",
+    ],
+)
+def test_a_usable_url_has_no_problem(url: str) -> None:
+    assert explainability.url_problem(url, what="gateway") is None
+
+
+def test_configure_target_refuses_a_schemeless_gateway_and_changes_nothing() -> None:
+    """Review blocker A: the form refused what this writer stored.
+
+    ``enable --gateway-url stg.example`` — the runbook command, four characters
+    short — went into config, after which a host-less gateway read as loopback,
+    the proxy lane's pair-exemption fired, and the machine was configured, green
+    and stranded. A check in one caller guards one door; this is the writer
+    both go through. Nothing is mutated when it refuses — not even the switch.
+    """
+    config = AppConfig()
+    with pytest.raises(ValueError, match="scheme") as caught:
+        explainability.configure_target(config, target_name="prod", gateway_url="stg.example")
+
+    assert "https://stg.example" in str(caught.value)
+    assert config.explainability.targets == {}
+    assert config.explainability.target == ExplainabilitySettings().target
+    assert config.explainability.enabled is False
+
+
+def test_configure_target_refuses_a_schemeless_proxy() -> None:
+    config = AppConfig()
+    with pytest.raises(ValueError, match="proxy needs a scheme"):
+        explainability.configure_target(config, proxy_url="stg.example:9443")
+    assert config.explainability.targets == {}
+
+
+@pytest.mark.parametrize(
+    "identity",
+    ["nishil}-{role}", "nishil-{role", "nishil", "{rol}-x"],
+    ids=["stray-close", "stray-open", "no-role", "wrong-field"],
+)
+def test_configure_target_refuses_an_identity_that_cannot_name_agents(identity: str) -> None:
+    """Review blocker B, at the writer: the template that empties ``agent_names``
+    — every launch untraced, the tab reading ``agents: (none)``, Register
+    pointing at the wrong setting — is refused wherever it is typed, the
+    ``--identity`` flag included."""
+    config = AppConfig()
+    with pytest.raises(ValueError, match="identity template"):
+        explainability.configure_target(config, identity=identity)
+    assert config.explainability.targets == {}
+
+
+def test_configure_target_can_write_a_target_without_moving_the_machine_to_it() -> None:
+    """Review blocker D: the form's deployment field was a switch nobody announced.
+
+    ``enable --target prod`` moves the machine on purpose and keeps doing so;
+    the form passes ``make_active=False`` unless its box is ticked.
+    """
+    config = AppConfig()
+    config.explainability.target = "stg"
+
+    name = explainability.configure_target(
+        config, target_name="prod", gateway_url="https://prod.example", make_active=False
+    )
+
+    assert name == "prod"
+    assert config.explainability.targets["prod"].gateway_url == "https://prod.example"
+    assert config.explainability.target == "stg", "the machine stays where it was"
+
+    explainability.configure_target(config, target_name="prod", make_active=True)
+    assert config.explainability.target == "prod", "the switch is still there, explicitly"

@@ -542,6 +542,41 @@ def is_loopback(url: str) -> bool:
     return host in ("127.0.0.1", "localhost", "::1", "") or host.startswith("127.")
 
 
+def url_problem(url: str, *, what: str) -> str | None:
+    """Why ``url`` cannot be handed to an agent or a gateway client, or ``None``.
+
+    ONE validator for every URL this integration takes from a human, and it
+    says WHICH of five things is wrong, because the form used to answer all of
+    them with "needs a scheme -- try https://..." and prefixed ``https://`` onto
+    a URL that already had one (``http://[::1`` became ``try https://http://[::1``).
+
+    * an unparseable authority -- a typo'd IPv6 bracket;
+    * a port ``urlsplit`` accepts and ``.port`` then refuses (``:99999``), which
+      would otherwise be stored and fail at the first request;
+    * no scheme -- and ``stg.example:8000`` parses with ``stg.example`` as the
+      SCHEME, so "not http" is only the right diagnosis when ``://`` was typed;
+    * a scheme that is not http(s);
+    * no host -- ``https://`` alone, or ``https:///path``.
+
+    ``what`` is the noun the sentence opens with (``"gateway"``, ``"proxy"``).
+    """
+    text = (url or "").strip().rstrip("/")
+    split = split_url(text)
+    if split is None:
+        return f"{what} URL {text!r} cannot be parsed — check the brackets and the port"
+    try:
+        _ = split.port  # `urlsplit` defers the range check to the attribute
+    except ValueError:
+        return f"{what} URL {text!r} has a port that is not a number in range"
+    if not split.scheme or (split.scheme not in ("http", "https") and "://" not in text):
+        return f"{what} needs a scheme — try https://{text}"
+    if split.scheme not in ("http", "https"):
+        return f"{what} must be an http(s) URL, not {split.scheme}://"
+    if not split.hostname:
+        return f"{what} URL {text!r} names no host"
+    return None
+
+
 def _usable_base_url(value: str) -> bool:
     """Whether ``value`` is something an agent can actually use as a base URL.
 
@@ -1031,6 +1066,28 @@ def hosted_proxy_for(gateway_url: str) -> str | None:
     return f"{split.scheme}://{host}:{HOSTED_PROXY_PORT}"
 
 
+def identity_problem(template: str) -> str | None:
+    """Why ``template`` cannot name agents, or ``None``.
+
+    Two failures, and both end the same way -- ``agent_names`` empty, the tab
+    reading ``agents: (none)``, every launch untraced behind a success line: a
+    template that RAISES in ``.format`` (a stray brace, ``nishil}-{role}``, is
+    ``ValueError: Single '}'``), and one that renders every role to the same
+    name because ``{role}`` is not in it. Rendered twice with different roles
+    rather than searched for the literal, so ``{role!s}`` and friends count.
+    """
+    try:
+        one, two = template.format(role="planner"), template.format(role="coder")
+    except (KeyError, IndexError, ValueError) as exc:
+        return f"identity template {template!r} cannot render ({exc}) — try 'name-{{role}}'"
+    if one == two:
+        return (
+            f"identity template {template!r} has no {{role}} in it, so every agent would "
+            "share one name — try 'name-{role}'"
+        )
+    return None
+
+
 def configure_target(
     config: AppConfig,
     *,
@@ -1040,6 +1097,7 @@ def configure_target(
     proxy_url: str | None = None,
     identity: str | None = None,
     enable: bool = True,
+    make_active: bool = True,
 ) -> str:
     """Apply one deployment's settings to ``config`` and return the target's name.
 
@@ -1052,10 +1110,32 @@ def configure_target(
     call with one field set is how a machine changes its proxy without restating
     its gateway, and an empty string from a blank form field must not erase what
     is configured.
+
+    VALIDATES BEFORE IT WRITES, and raises ``ValueError`` naming the fix. The
+    form refused a schemeless gateway on its own while this function stored one
+    from ``enable --gateway-url stg.example`` -- the runbook command, four
+    characters short -- and the machine ended configured, green and stranded: a
+    host-less gateway read as loopback and silenced the proxy lane's own warning.
+    A check in one caller guards one door; this is the writer both go through.
+    The identity template is held to the same standard because one that cannot
+    render empties ``agent_names`` and untraces every launch (see
+    :func:`identity_problem`). Nothing is mutated when this raises.
+
+    ``make_active`` is the switch ``enable --target`` has always thrown: this
+    machine moves to the named deployment. The form passes ``False`` unless the
+    operator ticked the box for it, because correcting prod's gateway from a
+    machine on stg must not move the machine to prod -- traffic landing on a
+    deployment nobody chose is this integration's headline failure, arrived at
+    from the other side.
     """
+    for what, value in (("gateway", gateway_url), ("proxy", proxy_url)):
+        if value and (problem := url_problem(value, what=what)):
+            raise ValueError(problem)
+    if identity and (problem := identity_problem(identity)):
+        raise ValueError(problem)
     settings = config.explainability
     name = target_name or settings.target
-    if target_name:
+    if target_name and make_active:
         settings.target = target_name
     if gateway_url or key_env or proxy_url or identity:
         target = settings.targets.get(name, ExplainabilityTarget())

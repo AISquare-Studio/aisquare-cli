@@ -2065,6 +2065,61 @@ def test_x_ignores_a_selection_that_is_not_an_agent(
     assert recorder.calls == []
 
 
+def test_x_offers_no_stop_where_the_button_offers_none(
+    tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two controls, ONE rule: the key asks ``ALIVE_STATES`` exactly as the button does.
+
+    A dead row is still an ordinary selectable ``AgentRow``, so a key that did
+    not ask offered precisely the Stop the view had just refused. And ``stop``
+    does not decline such a row: its pane is gone, so there is no ``/exit`` and
+    no grace wait — it ends the row outright, which is ``fleet reap``'s outcome,
+    and reap is outside this task's boundaries.
+
+    Found by coder3a-1's probe before this PR opened, and reproduced by runner2-1
+    one state WIDER: ✗ lost disagreed as well as 💤 exited. So the states are
+    derived from the constants — every ``STATE_CHIP`` key that is not alive —
+    rather than typed out here: the rule IS the constant, and a test naming one
+    state would drift from a rule that covers both.
+    """
+    seed(tmp_path, ("prj_a", "alpha", None))
+    dead = sorted(set(STATE_CHIP) - ALIVE_STATES)  # 💤 exited AND ✗ lost
+    script["prj_a"] = [
+        status(
+            "prj_a",
+            f"agent-{state}",
+            "coder",
+            state,
+            minute=index,
+            exit_status=0 if state == "exited" else None,
+        )
+        for index, state in enumerate(dead)
+    ]
+    recorder = stopper(monkeypatch, script["prj_a"][0].agent)
+
+    async def go(pilot: Pilot[None]) -> dict[str, tuple[bool, bool]]:
+        app = fleet_app(pilot)
+        offered: dict[str, tuple[bool, bool]] = {}
+        for state in dead:
+            await pilot.click(row_for(app, f"agt_a_agent-{state}"))
+            await pilot.pause()
+            view = app.current_view()
+            assert isinstance(view, AgentView), f"the row opened {type(view).__name__}"
+            button = view.query_one("#agent-stop", Button).display
+            app.sidebar.focus()
+            await pilot.press("x")
+            await pilot.pause()
+            offered[state] = (button, isinstance(app.screen, StopAgentScreen))
+        return offered
+
+    offered = drive(go)
+    assert dead, "the premise: some states have no process"
+    # One equality over both dead states, not a pair of negatives: a control that
+    # starts offering a stop in either state shows up as a diff, not as a silence.
+    assert offered == {state: (False, False) for state in dead}
+    assert recorder.calls == []  # and the service is never asked to stop a dead row
+
+
 def test_the_dialog_says_when_the_target_is_the_projects_manager(
     tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -135,8 +135,9 @@ tmux can see and its row says so (`no hooks`).
    taken back, so the dialog waits for its answer.
 5. **Press `F12`** to hand focus back to the sidebar (it is the one key the pane
    never forwards; configurable). With the sidebar focused: `t` picks a theme,
-   `x` opens the Stop dialog for the selected agent (on a project row it does
-   nothing), `q` quits the UI — and the agents keep running.
+   `x` opens the Stop dialog for the selected agent — the same rule as the
+   button, so on a project row, or an agent that is **💤 exited** or **✗ lost**,
+   it does nothing — `q` quits the UI, and the agents keep running.
 
 From any terminal, the same session at full fidelity:
 

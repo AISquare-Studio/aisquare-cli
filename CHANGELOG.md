@@ -27,10 +27,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Stop an agent from `asq`.** The agent view's header gains a compact **Stop**
   button, and `x` with the sidebar focused stops the selected agent — both open
   one dialog (*Stop* · *Force* · *Cancel*) over `services.fleet.stop`, the same
-  command `aisquare fleet stop` runs, `--force` included. Stop shows only while
-  the agent has a process: the button asks `sidebar.ALIVE_STATES`, the rule the
-  card's "agents alive" chip already counts by, so an exited or lost row offers
-  none. The call runs in a thread worker with the buttons disabled; a refusal —
+  command `aisquare fleet stop` runs, `--force` included. Stop is offered only
+  while the agent has a process, and **both controls ask the same rule** —
+  `sidebar.ALIVE_STATES`, the one the card's "agents alive" chip already counts
+  by — so an exited or lost row offers none, by button or by key. The call runs in a thread worker with the buttons disabled; a refusal —
   including the deliberate one where tmux cannot confirm the pane died and the
   row is left live — stays in the dialog as its own text, with the agent
   untouched, rather than closing over a stop that did not happen. A stop that

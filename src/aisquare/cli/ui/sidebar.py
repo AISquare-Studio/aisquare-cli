@@ -808,6 +808,13 @@ class Sidebar(Vertical):
 
         The agent names its own project, so a row selected under one card cannot
         be stopped against another's ``ProjectInfo``.
+
+        It asks ``ALIVE_STATES`` too — the rule the agent view's button asks, the
+        same constant, not a copy of it. An exited or lost row is an ordinary
+        selectable row, so without this the key offered exactly the Stop the
+        button refuses; and ``stop`` does not decline such a row, it ends it
+        outright with no ``/exit`` and no grace, which is ``fleet reap``'s
+        outcome and outside this task (found by coder3a-1 before the PR opened).
         """
         key = self.selected_key
         if key is None or not key.startswith("agent:") or self.last_frame is None:
@@ -817,5 +824,6 @@ class Sidebar(Vertical):
         for statuses in agents.values():
             for status in statuses:
                 if status.agent.id == agent_id:
-                    self.post_message(StopAgent(status.agent.project_id, agent_id))
+                    if status.state in ALIVE_STATES:
+                        self.post_message(StopAgent(status.agent.project_id, agent_id))
                     return

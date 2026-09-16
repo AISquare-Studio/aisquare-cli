@@ -629,6 +629,7 @@ class ContextStore(Protocol):
     ) -> None: ...
     def mark_attention(self, session_id: str) -> bool: ...
     def end_session(self, session_id: str, *, release_claims: bool = True) -> list[TeamTask]: ...
+    def release_claims(self, session_id: str) -> list[TeamTask]: ...
     def upsert_task(self, task: TeamTask) -> tuple[TeamTask, bool]: ...
     def get_task(self, ref: str) -> TeamTask | None: ...
     def team_tasks(
@@ -1394,26 +1395,47 @@ class SqliteStore:
         The return value still lists the tasks that WOULD have been released,
         so the caller can report them either way.
         """
-        released = [
-            _row_to_task(row)
-            for row in self._conn.execute(
-                f"SELECT {_TASK_COLUMNS} FROM team_task WHERE claimed_by = ? AND status = 'doing'",
-                (session_id,),
-            ).fetchall()
-        ]
         now = _now_iso()
+        released = self._doing_claims(session_id)
         if release_claims:
-            self._conn.execute(
-                "UPDATE team_task SET status = 'todo', claimed_by = NULL, "
-                "claim_expires_at = NULL, updated_at = ? WHERE claimed_by = ? AND status = 'doing'",
-                (now, session_id),
-            )
+            self._release_doing_claims(session_id, now)
         self._conn.execute(
             "UPDATE team_session SET ended_at = ?, last_seen_at = ? WHERE id = ?",
             (now, now, session_id),
         )
         self._conn.commit()
         return released
+
+    def release_claims(self, session_id: str) -> list[TeamTask]:
+        """Return the session's ``doing`` claims to the pool — its presence row untouched.
+
+        The other half of :meth:`end_session`, on its own: for a session that
+        already ENDED with its claims kept (a fleet agent's ``/clear`` parks
+        them for the start hook that follows) whose fleet row then ended before
+        anything came back for them. Ending the session again would only move
+        its ``ended_at``; the claims are what is owed (review of #135, second
+        round, finding 5).
+        """
+        released = self._doing_claims(session_id)
+        self._release_doing_claims(session_id, _now_iso())
+        self._conn.commit()
+        return released
+
+    def _doing_claims(self, session_id: str) -> list[TeamTask]:
+        return [
+            _row_to_task(row)
+            for row in self._conn.execute(
+                f"SELECT {_TASK_COLUMNS} FROM team_task WHERE claimed_by = ? AND status = 'doing'",
+                (session_id,),
+            ).fetchall()
+        ]
+
+    def _release_doing_claims(self, session_id: str, now: str) -> None:
+        self._conn.execute(
+            "UPDATE team_task SET status = 'todo', claimed_by = NULL, "
+            "claim_expires_at = NULL, updated_at = ? WHERE claimed_by = ? AND status = 'doing'",
+            (now, session_id),
+        )
 
     def upsert_task(self, task: TeamTask) -> tuple[TeamTask, bool]:
         """Add a task; a duplicate ``(project_id, key)`` returns the existing one.
@@ -2064,9 +2086,11 @@ class SqliteStore:
         done task re-briefed its agent on every later session start — "already
         done; tell the manager" — and a nudge went out to the manager each time
         for nothing; reopened and claimed by someone else, the same row ordered
-        a busy agent to stand down (review of #135). The label and the branch
-        still carry the task's id, so nothing the operator sees changes; only
-        what the agent is told next.
+        a busy agent to stand down (review of #135). What the operator sees: the
+        agent header's ``task 01k…`` chip goes with it — the agent is no longer
+        on that task — while the label (``coder-<task>``) and the branch keep
+        the task's short id, so the row still says what it was spawned for
+        (review of #135, second round, finding 7).
         """
         cursor = self._conn.execute(
             "UPDATE fleet_agent SET task_id = NULL WHERE task_id = ? AND ended_at IS NULL",

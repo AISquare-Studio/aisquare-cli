@@ -1385,6 +1385,10 @@ def hook_prompt_heartbeat(
         # exactly as long as the two agents were quiet, which is when the
         # interleaved claims do their damage.
         collision = _shared_row_banner(session, transcript_path, _now())
+        # The fleet-row bind the start hook could not make is tried again here,
+        # and the briefing it was owed comes with it (rule 2, second half).
+        late = _late_assignment(store, session)
+        briefing = "\n".join(_assignment_lines(late, session)) + "\n" if late is not None else ""
         lease = _now() + timedelta(minutes=orchestrator.lease_minutes())
         store.renew_leases(session.id, lease)
         raw = store.events_since(
@@ -1398,12 +1402,12 @@ def hook_prompt_heartbeat(
         if not events or not orchestrator.delta_enabled():
             cursor = raw[-1].seq if raw else None
             store.touch_session(session.id, cursor=cursor, state="working")
-            return collision
+            return collision + briefing
         truncated = len(events) > _DELTA_LIMIT
         shown = events[:_DELTA_LIMIT]
         store.touch_session(session.id, cursor=shown[-1].seq, state="working")
         roles = {s.id: s.role for s in store.team_sessions(session.project_id)}
-        return collision + _render_delta(shown, roles, truncated=truncated)
+        return collision + briefing + _render_delta(shown, roles, truncated=truncated)
 
 
 def hook_stop(
@@ -1593,7 +1597,8 @@ def hook_session_end(session_id: str, cwd: Path | None, *, reason: str | None = 
     stop order for what was now a stranger's claim (review of #135, finding 1).
     So a clear from the process that holds a live fleet row's pane retires the
     presence only (rule 2 of the fleet-row section); the start hook that follows
-    moves the claims to the new id with the row, in one transaction. Anything
+    moves the claims to the new id with the row, in one transaction — or the
+    first prompt after it does, should tmux not answer the start hook. Anything
     else — an exit, a logout, a reason this version does not know, a nested
     child clearing ITS session — releases, as every end always did.
     """
@@ -1603,24 +1608,55 @@ def hook_session_end(session_id: str, cwd: Path | None, *, reason: str | None = 
         session = store.get_session(session_id)
         if session is None:
             return
-        clearing = reason == CLEAR_REASON and _clearing_its_own_pane(store, session)
-        released = store.end_session(session.id, release_claims=not clearing)
-        # No "left" feed event — the board's session panel is the presence
-        # view. Released claims below are real work signals and do go out;
-        # a clear released nothing, so it says nothing.
-        if not clearing:
-            for task in released:
-                _emit(
-                    store,
-                    session.project_id,
-                    "task_released",
-                    f"{task.title} (session ended)",
-                    session_id=session.id,
-                    task_id=task.id,
-                )
+        # No "left" feed event either way — the board's session panel is the
+        # presence view. Released claims are real work signals and do go out;
+        # a clear releases nothing, so it says nothing.
+        if reason == CLEAR_REASON and _clearing_its_own_pane(store, session):
+            store.end_session(session.id, release_claims=False)
+        else:
+            _release_session(store, session, why="session ended")
         root = _project_root(store, session.project_id)
     # Safety drain: catch anything a per-command spawn missed this session.
     distill_service.spawn_drain(cwd, root=root)
+
+
+def _release_session(store: ContextStore, session: TeamSession, *, why: str) -> list[TeamTask]:
+    """Return ``session``'s ``doing`` claims to the pool, ending its presence
+    unless that already happened, and say so on the board (``task_released``)."""
+    if session.ended_at is None:
+        released = store.end_session(session.id, release_claims=True)
+    else:
+        released = store.release_claims(session.id)
+    for task in released:
+        _emit(
+            store,
+            session.project_id,
+            "task_released",
+            f"{task.title} ({why})",
+            session_id=session.id,
+            task_id=task.id,
+        )
+    return released
+
+
+def release_agent_claims(store: ContextStore, agent: FleetAgent, *, why: str) -> list[TeamTask]:
+    """A fleet row that has just ENDED holds nothing: release the claims of the
+    session bound to it, and retire that presence if it is still up.
+
+    For ``fleet stop`` and ``fleet reap``, once the pane is verifiably dead or
+    gone. An agent's own ``SessionEnd`` hook releases on a clean exit; a killed
+    process fires none, and a ``/clear`` parks the claims on the id it ended
+    for the start hook that follows (rule 2) — so a stop that landed in that
+    gap, or on a row whose start hook could not adopt, left them on a dead id
+    with nothing to come back for them until the lease ran out (review of
+    #135, second round, finding 5). ``why`` is the board's word for it.
+    """
+    if agent.session_id is None:
+        return []
+    session = store.get_session(agent.session_id)
+    if session is None:
+        return []
+    return _release_session(store, session, why=why)
 
 
 # --- maintenance --------------------------------------------------------------
@@ -1891,7 +1927,14 @@ def _render_board(
 #    presence and leaves the claims where they are, and the start hook moves
 #    them onto the new id together with the row, in one transaction. A looper's
 #    ``task next --claim`` in the gap finds the task still ``doing`` under a live
-#    lease. Every other end releases, as it always did (finding 1).
+#    lease. Every other end releases, as it always did (finding 1). The hand-off
+#    proves the process twice, in two hook processes; when tmux fails the second
+#    proof the claims sit on the ended id, so the bind is TRIED AGAIN at every
+#    prompt of a session under a fleet window that no row is bound to
+#    (``_late_assignment``), and a row that ENDS — ``fleet stop``, ``fleet
+#    reap`` — releases whatever its session still holds (``release_agent_claims``):
+#    parked claims never outlive the row they were parked for (second round,
+#    finding 5).
 # 3. AN ASSIGNMENT ENDS WITH ITS TASK. Once the task is done or dropped the rows
 #    spawned for it forget it (``retire_fleet_assignments``, from ``_finish_task``
 #    and, for rows that predate the rule, from the briefing itself): a later
@@ -2070,6 +2113,29 @@ def _assignment(store: ContextStore, session_id: str, project_id: str) -> Assign
         return _resolve_assignment(store, session_id, project_id)
     except Exception:
         return None
+
+
+def _late_assignment(store: ContextStore, session: TeamSession) -> Assignment | None:
+    """The bind a session's start hook could not make, tried again at a prompt.
+
+    Only for a session under a fleet window (``AISQUARE_FLEET_AGENT`` set) that
+    no row is yet bound to — a bound session costs two indexed reads here and
+    is never re-briefed, and a session outside the fleet has no row to try
+    for. A ``/clear``'s hand-off needs the pane's process proven twice, at the
+    end hook and at the start hook that follows, in two processes; tmux not
+    answering the second time left the row bound to the ended id and its
+    claims parked there, with nothing coming back for either until the lease
+    ran out (review of #135, second round, finding 5). The prompt is the next
+    thing an agent does after a clear, so the bind lands a prompt late at
+    worst, and the ASSIGNED TO YOU block it was owed comes with it. A child
+    that inherited the variable pays one ``display-message`` per prompt to be
+    refused, exactly as it is at its start.
+    """
+    if orchestrator.env_fleet_agent() is None:
+        return None
+    if _fleet_row_for(store, session.id, session.project_id) is not None:
+        return None
+    return _assignment(store, session.id, session.project_id)
 
 
 def _resolve_assignment(store: ContextStore, session_id: str, project_id: str) -> Assignment | None:

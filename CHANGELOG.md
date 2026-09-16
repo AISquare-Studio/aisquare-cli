@@ -554,6 +554,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   holder, not the old one. And `fleet spawn`'s `AISQUARE_FLEET_AGENT` no longer
   lingers in the tmux *session* environment after the first window: a window
   opened by hand in the fleet's session used to inherit the first agent's row.
+  The row is written after the window starts, so `aisquare launch` inside the
+  window now waits for it before starting the agent — a slow or locked store,
+  a relabel or the cap check can delay the agent's start, never strip its
+  briefing. A `/clear`'s hand-off proves the process twice, in two hooks; when
+  tmux fails to answer the second, the bind is tried again at the agent's next
+  prompt and the **ASSIGNED TO YOU** block arrives with it, once — and a row
+  that ends (`fleet stop`, `fleet reap`) releases whatever its session still
+  held, so a claim parked for a clear never outlives the row it was parked
+  for, and a killed agent's claims go back to the pool with its row rather
+  than sitting `doing` under a dead holder for the length of the lease. When
+  an assignment ends, the agent header's `task …` chip goes with it; the label
+  and branch keep the task's short id.
 - **The wheel goes to the program that can use it — Claude Code's fullscreen
   TUI first.** The root of "scroll not working" (reported 2026-09-08 from WSL2
   + Windows Terminal). Claude Code's fullscreen TUI turns on the alternate

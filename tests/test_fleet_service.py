@@ -44,7 +44,7 @@ from aisquare.core.tmux import (
     TmuxUnavailable,
     WindowInfo,
 )
-from aisquare.models import FleetAgent, ProjectInfo, TeamSession, TeamTask
+from aisquare.models import FleetAgent, FleetAgentStatus, ProjectInfo, TeamSession, TeamTask
 from aisquare.services import fleet as fleet_service
 from aisquare.services import team as team_service
 from aisquare.services.fleet import (
@@ -2638,6 +2638,146 @@ def test_a_tmux_that_does_not_answer_costs_the_adoption_and_not_the_board(
     assert _row(agent.id).session_id == first, "a bound row is not adopted on a guess"
     released = _task_now(mine.id)
     assert (released.status, released.claimed_by) == ("todo", None), "released, not parked"
+
+
+def test_a_bind_the_start_hook_could_not_make_lands_at_the_next_prompt(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Finding 5 of the second #135 review. A ``/clear``'s hand-off proves the
+    pane's process twice, in two hook processes: the end hook keeps the claims,
+    the start hook adopts them. tmux not answering the second time left the row
+    bound to the ended id and the claims parked on it — nothing to adopt them,
+    nothing to release them, for the length of the lease. The bind is tried
+    again at every prompt of a session under a fleet window that no row is
+    bound to, and the briefing it was owed comes with it, once."""
+    mine = _task(project, "the task this coder is for")
+    agent, first = _spawned(project, "coder", mine.id, tmux, monkeypatch)
+    team_service.hook_session_start(first, project.root, "startup")
+    team_service.claim_task(mine.id, session_ref=first)
+    team_service.hook_session_end(first, project.root, reason="clear")  # kept: the pane's process
+    answering = FakeTmux.pane_pid
+
+    def wedged(self: FakeTmux, pane_id: str) -> int | None:
+        raise TmuxError("server wedged")
+
+    monkeypatch.setattr(FakeTmux, "pane_pid", wedged)
+    started = team_service.hook_session_start("sess-c2", project.root, "clear")
+    assert "ASSIGNED TO YOU" not in started
+    parked = _task_now(mine.id)
+    assert parked.claimed_by == first and _row(agent.id).session_id == first, (
+        "the premise: the claim sits on the ended id, the row with it"
+    )
+    still_down = team_service.hook_prompt_heartbeat("sess-c2", project.root)
+    assert "ASSIGNED TO YOU" not in still_down and _row(agent.id).session_id == first
+
+    monkeypatch.setattr(FakeTmux, "pane_pid", answering)
+    prompt = team_service.hook_prompt_heartbeat("sess-c2", project.root)
+
+    assert f"ASSIGNED TO YOU: {mine.id} [doing]" in prompt, prompt
+    assert "You are the one working it" in prompt
+    assert _row(agent.id).session_id == "sess-c2"
+    assert _task_now(mine.id).claimed_by == "sess-c2", "the parked claim moved with the row"
+    again = team_service.hook_prompt_heartbeat("sess-c2", project.root)
+    assert "ASSIGNED TO YOU" not in again, "briefed once; a bound session is not re-briefed"
+
+
+def test_a_bound_session_pays_no_tmux_call_per_prompt(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The retry above runs on every prompt, so its cost has to be nothing for the
+    common case: a session whose row is bound already is two indexed reads and
+    no identity check. A child under the same window pays one ``display-message``
+    per prompt to be refused — as at its start — and never binds."""
+    mine = _task(project, "the task this coder is for")
+    agent, first = _spawned(project, "coder", mine.id, tmux, monkeypatch)
+    team_service.hook_session_start(first, project.root, "startup")
+    asked: list[str] = []
+    answering = FakeTmux.pane_pid
+
+    def counting(self: FakeTmux, pane_id: str) -> int | None:
+        asked.append(pane_id)
+        return answering(self, pane_id)
+
+    monkeypatch.setattr(FakeTmux, "pane_pid", counting)
+    team_service.hook_prompt_heartbeat(first, project.root)
+    team_service.hook_prompt_heartbeat(first, project.root)
+    assert asked == [], "a bound session asks tmux nothing at its prompts"
+
+    _become(agent, tmux, monkeypatch, pid=CHILD_PID, role="coder")
+    team_service.hook_session_start("sess-child", project.root, "startup")
+    team_service.hook_prompt_heartbeat("sess-child", project.root)
+    assert asked == [agent.pane_id, agent.pane_id], "a child is checked at its start and its prompt"
+    assert _row(agent.id).session_id == first, "and never binds"
+
+
+def test_stopping_an_agent_releases_the_claims_parked_on_its_ended_session(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other strand of finding 5: ``fleet stop`` landing in the ``/clear`` gap
+    ends the row while the claims sit on the id the end hook just ended. No
+    start hook adopts an ended row, and the process is dead — so the row's end
+    releases what its session still held, and the board is told why."""
+    mine = _task(project, "the task this coder is for")
+    agent, first = _spawned(project, "coder", mine.id, tmux, monkeypatch)
+    team_service.hook_session_start(first, project.root, "startup")
+    team_service.claim_task(mine.id, session_ref=first)
+    team_service.hook_session_end(first, project.root, reason="clear")
+    assert _task_now(mine.id).claimed_by == first, "the premise: parked for the start hook"
+
+    stopped = fleet_service.stop(project, agent.label, force=True)
+
+    assert stopped.ended_at is not None
+    released = _task_now(mine.id)
+    assert (released.status, released.claimed_by) == ("todo", None)
+    assert "the task this coder is for (agent stopped)" in _events(project, "task_released")
+    with store_session() as store:
+        session = store.get_session(first)
+    assert session is not None and session.ended_at is not None
+
+
+def test_reaping_a_dead_pane_releases_what_its_session_still_held(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A killed agent fires no ``SessionEnd``: its claims stayed ``doing`` under a
+    dead holder until the lease ran out. ``reap`` ends the row for a dead pane
+    and now releases with it; a vanished pane is the same case."""
+    mine = _task(project, "the task this coder is for")
+    agent, first = _spawned(project, "coder", mine.id, tmux, monkeypatch)
+    team_service.hook_session_start(first, project.root, "startup")
+    team_service.claim_task(mine.id, session_ref=first)
+    tmux.die(agent.pane_id, 137)
+
+    report = fleet_service.reap(project)
+
+    assert [a.id for a in report.ended] == [agent.id]
+    released = _task_now(mine.id)
+    assert (released.status, released.claimed_by) == ("todo", None)
+    assert "the task this coder is for (agent exited)" in _events(project, "task_released")
+
+
+def test_a_closed_assignment_leaves_the_header_chip_and_keeps_the_label(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Finding 7 of the second #135 review. ``retire_fleet_assignments`` claimed
+    "nothing the operator sees changes", but the agent header renders its
+    ``task 01k…`` chip from ``task_id``. The chip goes — the agent is no longer
+    on that task — and the docstring now says so; the label, named after the
+    task at spawn, is what keeps the tie visible."""
+    from aisquare.cli.ui.views.agent import header_text
+
+    mine = _task(project, "the task this coder is for")
+    agent, first = _spawned(project, "coder", mine.id, tmux, monkeypatch)
+    short = mine.id.removeprefix("tsk_")[: fleet_service.TASK_SHORT]
+    before = header_text(FleetAgentStatus(agent=agent)).plain
+    assert f"task {mine.id[-8:]}" in before and agent.label == f"coder-{short}"
+
+    team_service.hook_session_start(first, project.root, "startup")
+    team_service.claim_task(mine.id, session_ref=first)
+    team_service.finish_task(mine.id, note="shipped", session_ref=first)
+
+    after = header_text(FleetAgentStatus(agent=_row(agent.id))).plain
+    assert "task " not in after, "the chip goes with the assignment"
+    assert f"coder-{short}" in after, "the label still names the task the agent was spawned for"
 
 
 def test_a_tester_spawned_for_a_review_task_is_told_to_verify_it(

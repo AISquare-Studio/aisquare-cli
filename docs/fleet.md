@@ -206,7 +206,11 @@ verifier (tester, ui-tester, reviewer, validator) is told to verify a task in
 the assigned task first — for the agent's own session, and for a verifier's
 cycle or the MCP server's `task_next` running under the same window (the order
 only; a claim needs the session). The assignment ends when its task is done or
-dropped: nothing is said about it afterwards.
+dropped: nothing is said about it afterwards, and the agent header's `task …`
+chip goes with it — the label and the branch keep the task's short id. The
+row is written after the window starts, so `aisquare launch` inside the window
+waits for it (ten seconds at most) before it starts the agent: the first hook
+always finds the row.
 
 The row belongs to the *process* in the pane, not to a session id. Claude Code
 mints a new session id on `/clear` and keeps the process, and it hands every
@@ -215,7 +219,11 @@ compares with the pane's own (`aisquare launch` execs the agent, so tmux's
 `#{pane_pid}` is the agent). So a `/clear` keeps the agent's claims: the
 `SessionEnd` hook sees the reason and the process, and the `SessionStart` that
 follows moves every claim to the new id together with the row, in one store
-transaction. A nested `claude -p` started from the agent's shell inherits
+transaction. Should tmux not answer that `SessionStart`, the bind is tried
+again at the agent's next prompt and the **ASSIGNED TO YOU** block arrives with
+it; and a row that ends — `fleet stop`, `fleet reap` — releases whatever its
+session still held, so a claim parked for a clear never outlives the row it
+was parked for. A nested `claude -p` started from the agent's shell inherits
 `AISQUARE_FLEET_AGENT` but not the pid, so it is never briefed on the parent's
 task and never takes its row, whatever start it reports. A binary that exports
 no `CLAUDE_PID` binds its row on first arrival and keeps that session; a

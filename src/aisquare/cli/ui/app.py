@@ -54,9 +54,11 @@ from aisquare.cli.ui.sidebar import (
     ProjectSelected,
     Sidebar,
     SpawnAgent,
+    StopAgent,
     accounts_summary_text,
 )
 from aisquare.cli.ui.spawn import SpawnCompleted, SpawnDialog
+from aisquare.cli.ui.stop import StopAgentScreen
 from aisquare.cli.ui.terminal import EscapeToSidebar, route_selection_gesture
 from aisquare.cli.ui.theme import ThemePicker, remember_theme, restore_theme
 from aisquare.cli.ui.views.accounts import AccountsChanged, AccountsView, read_session, summarise
@@ -70,6 +72,7 @@ from aisquare.models import (
     AccountsOverview,
     CheckStatus,
     DoctorCheck,
+    FleetAgent,
     FleetAgentStatus,
     ProjectInfo,
 )
@@ -614,6 +617,31 @@ class FleetApp(App[None], inherit_bindings=False):
             self.notify(note, severity="warning", timeout=8, markup=False)
         self.refresh_data()
         self.post_message(AgentSelected(agent.project_id, agent.id))
+
+    def on_stop_agent(self, event: StopAgent) -> None:
+        """The agent view's Stop button, or ``x`` on the selected row: one question first."""
+        project = self.snapshot.project(event.project_id) if self.snapshot else None
+        status = self.snapshot.agent(event.project_id, event.agent_id) if self.snapshot else None
+        if project is None or status is None:
+            self.notify("that agent is no longer listed", severity="warning", timeout=4)
+            return
+        self.push_screen(StopAgentScreen(project, status), callback=self.stop_finished)
+
+    def stop_finished(self, agent: FleetAgent | None) -> None:
+        """The dialog closed: toast the ended row, re-read, and leave the view it stopped.
+
+        ``None`` is Cancel, or a refusal the dialog is still showing — nothing
+        happened, so nothing is said. Its own view would otherwise keep polling
+        a pane that is gone, so the shell goes back to the project the way a
+        click on the project's title does.
+        """
+        if agent is None:
+            return
+        self.notify(f"✓ stopped {agent.label} ({agent.id})", timeout=6, markup=False)
+        self.refresh_data()
+        view = self.current_view()
+        if isinstance(view, AgentView) and view.status.agent.id == agent.id:
+            self.post_message(ProjectSelected(agent.project_id))
 
     def on_spawn_completed(self, event: SpawnCompleted) -> None:
         """A Spawn dialog opened from a persona's *Attach to new*: the same receipt path."""

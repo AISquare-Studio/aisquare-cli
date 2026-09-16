@@ -24,6 +24,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   reported.
 
 ### Added
+- **Stop an agent from `asq`.** The agent view's header gains a compact **Stop**
+  button, and `x` with the sidebar focused stops the selected agent — both open
+  one dialog (*Stop* · *Force* · *Cancel*) over `services.fleet.stop`, the same
+  command `aisquare fleet stop` runs, `--force` included. Stop shows only while
+  the agent has a process: the button asks `sidebar.ALIVE_STATES`, the rule the
+  card's "agents alive" chip already counts by, so an exited or lost row offers
+  none. The call runs in a thread worker with the buttons disabled; a refusal —
+  including the deliberate one where tmux cannot confirm the pane died and the
+  row is left live — stays in the dialog as its own text, with the agent
+  untouched, rather than closing over a stop that did not happen. A stop that
+  worked toasts `✓ stopped <label> (<id>)`, re-reads the fleet, and leaves the
+  stopped agent's view for the project's.
 - **Attach a persona in two steps, from `asq`.** The Personas tab's *Attach to
   existing* / *Attach to new* open one **target picker**: this project's running
   **Agents** (each with the persona it runs), the **Binds** `aisquare team bind`

@@ -103,7 +103,15 @@ tmux can see and its row says so (`no hooks`).
    icon (🧭 manager · 🔨 coder · 🧪 tester · 🌐 ui-tester · 👀 reviewer · 🛡 validator) and a
    state chip — **▶ working**, **⏸ waiting**, **🔔 NEEDS YOU** (with a terminal
    bell), **💤 exited(N)**, **✗ lost**. **Click an agent** and you see its real
-   session; click into the pane and every key you type goes to it.
+   session; click into the pane and every key you type goes to it. The header
+   carries a **Stop** button whenever the agent still has a process — an
+   **💤 exited** or **✗ lost** row shows none — and it asks first: *Stop* sends
+   `/exit` and kills the window after the grace period, *Force* skips the
+   `/exit`, *Cancel* does nothing at all. A refusal stays in the dialog with its
+   reason and the agent keeps running (`fleet stop` below: tmux that cannot
+   confirm the pane died leaves the row live); a stop toasts
+   `✓ stopped <label> (<id>)`, the list re-reads and the view returns to the
+   project.
    **`＋ spawn agent`** under a project opens the **Spawn dialog** for that
    project, headed with its name and codename. It reads in two steps. First who
    runs it: role (the fleet's roles plus any role bound with `team bind`;
@@ -127,7 +135,8 @@ tmux can see and its row says so (`no hooks`).
    taken back, so the dialog waits for its answer.
 5. **Press `F12`** to hand focus back to the sidebar (it is the one key the pane
    never forwards; configurable). With the sidebar focused: `t` picks a theme,
-   `q` quits the UI — and the agents keep running.
+   `x` opens the Stop dialog for the selected agent (on a project row it does
+   nothing), `q` quits the UI — and the agents keep running.
 
 From any terminal, the same session at full fidelity:
 
@@ -269,7 +278,9 @@ aisquare fleet stop coder-auth --force
 
 Sends `/exit`, waits a grace period, then kills the window. The agent's own
 `SessionEnd` hook releases its task claims on the way out. `--force` skips the
-graceful exit.
+graceful exit. In `asq` this is the agent view's **Stop** button and `x` on the
+selected sidebar row — the same command behind one confirmation, `--force`
+included.
 
 **When tmux cannot confirm the pane died** — a wedged server, a `tmux` that
 left `PATH` — the row is **left live** and the command fails saying so, rather

@@ -96,6 +96,20 @@ class SpawnAgent(Message):
         super().__init__()
 
 
+class StopAgent(Message):
+    """Stop this agent, please: the agent view's button, or ``x`` on the selected row.
+
+    Both controls ask the SHELL rather than calling the service, because the
+    shell is what holds the :class:`ProjectInfo` a stop needs (``on_spawn_agent``
+    resolves a project the same way) and what owns the dialog.
+    """
+
+    def __init__(self, project_id: str, agent_id: str) -> None:
+        self.project_id = project_id
+        self.agent_id = agent_id
+        super().__init__()
+
+
 class DoctorSelected(Message):
     def __init__(self, project_id: str | None) -> None:
         self.project_id = project_id
@@ -544,6 +558,7 @@ class Sidebar(Vertical):
         ("down", "cursor_down", "next"),
         ("up", "cursor_up", "previous"),
         ("enter", "activate", "open"),
+        ("x", "stop_agent", "stop"),
     ]
 
     can_focus = True
@@ -782,3 +797,25 @@ class Sidebar(Vertical):
             if row.selection_key == self._cursor_key:
                 row.activate()
                 return
+
+    def action_stop_agent(self) -> None:
+        """``x``: the Stop dialog for the SELECTED agent; any other selection does nothing.
+
+        The binding is the sidebar's, not the row's — the rows are Statics with
+        ``can_focus=False`` on purpose (see ``#projects`` above), so there is no
+        focused row to bind to. It acts on what is selected, which is what the
+        user sees highlighted and what the open view is showing.
+
+        The agent names its own project, so a row selected under one card cannot
+        be stopped against another's ``ProjectInfo``.
+        """
+        key = self.selected_key
+        if key is None or not key.startswith("agent:") or self.last_frame is None:
+            return
+        agent_id = key.removeprefix("agent:")
+        _projects, agents = self.last_frame
+        for statuses in agents.values():
+            for status in statuses:
+                if status.agent.id == agent_id:
+                    self.post_message(StopAgent(status.agent.project_id, agent_id))
+                    return

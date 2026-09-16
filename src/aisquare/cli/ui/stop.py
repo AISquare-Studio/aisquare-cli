@@ -60,6 +60,21 @@ def grace_seconds() -> float:
     The dialog promises the user a number of seconds. Typing that number here
     would make the sentence true only until someone changed the service's
     default, and the screen is the last place that would notice.
+
+    Rename ``grace`` on the service — or stand ``stop`` in with a double that
+    does not carry that parameter — and this raises ``KeyError: grace`` while the
+    dialog is composed, loudly and on purpose. A typed fallback would swallow the
+    rename and go back to promising a number nobody maintains, which is the drift
+    this function exists to prevent.
+
+    The double is the likelier meeting. Every recorder in
+    ``tests/test_ui_shell.py`` carries the full signature (``project, label, *,
+    force=False, grace=5.0``), so this suite never hits it — but a one-off fake
+    written for its return value alone will, and the dialog then fails to OPEN
+    rather than failing to stop. That is how it was met during P21's live
+    verification, and the fake was the thing that was wrong. Every test that
+    opens the dialog composes it, so a rename turns them red on the spot rather
+    than reaching an operator.
     """
     return float(inspect.signature(fleet_service.stop).parameters["grace"].default)
 

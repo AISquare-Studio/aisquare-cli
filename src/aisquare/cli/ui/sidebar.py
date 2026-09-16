@@ -96,6 +96,20 @@ class SpawnAgent(Message):
         super().__init__()
 
 
+class StopAgent(Message):
+    """Stop this agent, please: the agent view's button, or ``x`` on the selected row.
+
+    Both controls ask the SHELL rather than calling the service, because the
+    shell is what holds the :class:`ProjectInfo` a stop needs (``on_spawn_agent``
+    resolves a project the same way) and what owns the dialog.
+    """
+
+    def __init__(self, project_id: str, agent_id: str) -> None:
+        self.project_id = project_id
+        self.agent_id = agent_id
+        super().__init__()
+
+
 class DoctorSelected(Message):
     def __init__(self, project_id: str | None) -> None:
         self.project_id = project_id
@@ -131,7 +145,12 @@ def ordered_agents(statuses: Iterable[FleetAgentStatus]) -> list[FleetAgentStatu
 
 
 def agent_row_text(status: FleetAgentStatus) -> Text:
-    """``🧭 manager       ⏸`` — icon, label, state chip, exit status when exited."""
+    """``🧭 manager       ⏸ · skeptic`` — icon, label, state chip, exit status, persona.
+
+    The persona badge is the row's (what the agent was spawned with) or, for an
+    agent the row does not know one for, its session's (what it launched as) —
+    docs/plans/spawn-personas.md §0 item 9.
+    """
     agent = status.agent
     chip, style = STATE_CHIP.get(status.state, STATE_CHIP["unknown"])
     text = Text(no_wrap=True, overflow="ellipsis")
@@ -140,6 +159,9 @@ def agent_row_text(status: FleetAgentStatus) -> Text:
     text.append(chip, style=style)
     if status.state == "exited" and agent.exit_status is not None:
         text.append(f"({agent.exit_status})", style="dim")
+    persona = agent.persona or (status.session.persona if status.session is not None else None)
+    if persona:
+        text.append(f" · {persona}", style="dim")
     return text
 
 
@@ -536,6 +558,7 @@ class Sidebar(Vertical):
         ("down", "cursor_down", "next"),
         ("up", "cursor_up", "previous"),
         ("enter", "activate", "open"),
+        ("x", "stop_agent", "stop"),
     ]
 
     can_focus = True
@@ -774,3 +797,33 @@ class Sidebar(Vertical):
             if row.selection_key == self._cursor_key:
                 row.activate()
                 return
+
+    def action_stop_agent(self) -> None:
+        """``x``: the Stop dialog for the SELECTED agent; any other selection does nothing.
+
+        The binding is the sidebar's, not the row's — the rows are Statics with
+        ``can_focus=False`` on purpose (see ``#projects`` above), so there is no
+        focused row to bind to. It acts on what is selected, which is what the
+        user sees highlighted and what the open view is showing.
+
+        The agent names its own project, so a row selected under one card cannot
+        be stopped against another's ``ProjectInfo``.
+
+        It asks ``ALIVE_STATES`` too — the rule the agent view's button asks, the
+        same constant, not a copy of it. An exited or lost row is an ordinary
+        selectable row, so without this the key offered exactly the Stop the
+        button refuses; and ``stop`` does not decline such a row, it ends it
+        outright with no ``/exit`` and no grace, which is ``fleet reap``'s
+        outcome and outside this task (found by coder3a-1 before the PR opened).
+        """
+        key = self.selected_key
+        if key is None or not key.startswith("agent:") or self.last_frame is None:
+            return
+        agent_id = key.removeprefix("agent:")
+        _projects, agents = self.last_frame
+        for statuses in agents.values():
+            for status in statuses:
+                if status.agent.id == agent_id:
+                    if status.state in ALIVE_STATES:
+                        self.post_message(StopAgent(status.agent.project_id, agent_id))
+                    return

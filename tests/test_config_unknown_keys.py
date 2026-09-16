@@ -26,7 +26,15 @@ from __future__ import annotations
 import tomllib
 from pathlib import Path
 
-from aisquare.core.config import AppConfig, RoleLaunchProfile, load_config, save_config
+from pydantic import BaseModel
+
+from aisquare.core.config import (
+    AppConfig,
+    RoleLaunchProfile,
+    _keep_unknown,
+    load_config,
+    save_config,
+)
 
 
 def _write(target: Path, body: str) -> None:
@@ -151,3 +159,62 @@ def test_unknown_keys_survive_a_round_trip_through_this_build(tmp_path: Path) ->
     for key in ("sampling_rate", "redaction_profile", "retry"):
         assert key in explainability, f"{key} was erased by an ordinary write"
     assert _sections(target)["profile"] == "changed", "the actual edit did not land"
+
+
+def test_a_role_persona_round_trips_and_a_build_without_the_field_keeps_it(
+    tmp_path: Path,
+) -> None:
+    """``[fleet.roles.<role>].persona`` (docs/plans/spawn-personas.md §8).
+
+    The first half is this build: the key loads and is written back. The second
+    is a build whose role model has no ``persona`` field. ``roles`` is a MAPPING
+    of models, and the merge used to own a mapping wholesale — so such a build
+    erased the persona on any save. Now each entry the model kept is merged like
+    any section, while an entry the model dropped stays dropped.
+    """
+    target = tmp_path / "config.toml"
+    _write(target, '[fleet.roles.coder]\nworktree = true\npersona = "minimalist"\n')
+
+    config = load_config(target)
+    save_config(config, target)
+
+    assert config.fleet.roles["coder"].persona == "minimalist"
+    fleet = _sections(target)["fleet"]
+    assert isinstance(fleet, dict)
+    assert fleet["roles"]["coder"]["persona"] == "minimalist"
+
+    class OlderRole(BaseModel):
+        permission_mode: str = "auto"
+        worktree: bool = False
+        extra_args: list[str] = []
+
+    existing = {"coder": {"worktree": True, "persona": "minimalist"}, "gone": {"worktree": False}}
+    older = {"coder": OlderRole(worktree=True)}
+
+    merged = _keep_unknown(existing, {k: v.model_dump() for k, v in older.items()}, older)
+
+    assert merged == {
+        "coder": {
+            "permission_mode": "auto",
+            "worktree": True,
+            "extra_args": [],
+            "persona": "minimalist",
+        }
+    }
+
+
+def test_the_persona_import_section_round_trips_under_its_file_key(tmp_path: Path) -> None:
+    """``[persona.import]`` (docs/plans/spawn-personas.md §8). ``import`` is a Python
+    keyword, so the field is ``import_``: the section must load, be written back as
+    ``import`` — never ``import_`` — and keep a newer build's key inside it, which
+    needs the merge to know a field by its alias."""
+    target = tmp_path / "config.toml"
+    _write(target, '[persona.import]\nengine = "off"\napi_model = "claude-sonnet-5"\nretries = 2\n')
+
+    config = load_config(target)
+    save_config(config, target)
+
+    assert config.persona.import_.engine == "off"
+    assert _sections(target)["persona"] == {
+        "import": {"engine": "off", "api_model": "claude-sonnet-5", "retries": 2}
+    }

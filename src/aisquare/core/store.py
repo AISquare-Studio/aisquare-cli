@@ -488,6 +488,18 @@ _PREPARE: dict[int, Callable[[sqlite3.Connection], None]] = {
 _SCHEMA_V14 = """
 ALTER TABLE project ADD COLUMN forgotten_at TEXT;
 """
+
+# v15: personas (docs/plans/spawn-personas.md §5) — the persona a session was
+# launched as and the one a fleet agent was spawned with. Nullable: no persona is
+# the default and the common case, and a row records what was ASKED even when the
+# persona could not be loaded. PROVISIONAL NUMBER: PR #169 (#144) stacks
+# fleet_agent columns as v15 to v18 on its branch; whoever lands second renumbers,
+# as v13/v14 did. Both tables exist at 14 whatever route a store took there, so
+# two plain ALTERs are safe to run last.
+_SCHEMA_V15 = """
+ALTER TABLE team_session ADD COLUMN persona TEXT;
+ALTER TABLE fleet_agent ADD COLUMN persona TEXT;
+"""
 # Ordered migrations; index i upgrades the db from user_version i to i+1.
 _MIGRATIONS = (
     _SCHEMA_V1,
@@ -504,6 +516,7 @@ _MIGRATIONS = (
     _SCHEMA_V12,
     _SCHEMA_V13,
     _SCHEMA_V14,
+    _SCHEMA_V15,
 )
 SCHEMA_VERSION = len(_MIGRATIONS)
 
@@ -560,7 +573,7 @@ in the wall-clock median. Older than this it stays open and is excluded
 instead, which is what an unfinished turn is."""
 _SESSION_COLUMNS = (
     "id, project_id, role, label, focus, started_at, last_seen_at, ended_at, cursor, state, "
-    "transcript_path, account, model, effort"
+    "transcript_path, account, model, effort, persona"
 )
 _TASK_COLUMNS = (
     "id, project_id, key, title, detail, status, role, needs, "
@@ -569,7 +582,7 @@ _TASK_COLUMNS = (
 _EVENT_COLUMNS = "seq, id, project_id, session_id, kind, text, task_id, to_role, created_at"
 _FLEET_AGENT_COLUMNS = (
     "id, project_id, label, role, binary, tmux_socket, pane_id, session_id, cwd, worktree, "
-    "task_id, spawned_by, created_at, ended_at, exit_status"
+    "task_id, spawned_by, created_at, ended_at, exit_status, persona"
 )
 
 
@@ -623,6 +636,7 @@ class ContextStore(Protocol):
         label: str | None = None,
         focus: str | None = None,
     ) -> TeamSession: ...
+    def set_session_persona(self, session_id: str, persona: str | None) -> TeamSession: ...
     def touch_session(
         self, session_id: str, *, cursor: int | None = None, state: str | None = None
     ) -> None: ...
@@ -639,8 +653,17 @@ class ContextStore(Protocol):
     def release_task(self, task_id: str) -> TeamTask: ...
     def reopen_task(self, task_id: str) -> TeamTask: ...
     def next_task(
-        self, project_id: str, *, role: str | None = None, status: TaskStatus = "todo"
+        self,
+        project_id: str,
+        *,
+        role: str | None = None,
+        status: TaskStatus = "todo",
+        prefer: str | None = None,
     ) -> TeamTask | None: ...
+    def bind_fleet_agent_session(self, agent_id: str, session_id: str) -> bool: ...
+    def reassign_claim(
+        self, task_id: str, from_session: str, to_session: str, lease_until: datetime
+    ) -> bool: ...
     def open_turn(self, metric: TurnMetric) -> TurnMetric: ...
     def close_turn(self, session_id: str, *, ended_at: datetime) -> TurnMetric | None: ...
     def turn_metrics(
@@ -678,10 +701,12 @@ class ContextStore(Protocol):
     def upsert_fleet_agent(self, agent: FleetAgent) -> FleetAgent: ...
     def get_fleet_agent(self, ref: str) -> FleetAgent | None: ...
     def fleet_agents(self, project_id: str, *, live_only: bool = False) -> list[FleetAgent]: ...
+    def fleet_agent_for_session(self, project_id: str, session_id: str) -> FleetAgent | None: ...
     def fleet_agent_by_label(
         self, project_id: str, label: str, *, live_only: bool = True
     ) -> FleetAgent | None: ...
     def end_fleet_agent(self, agent_id: str, *, exit_status: int | None = None) -> FleetAgent: ...
+    def set_fleet_agent_persona(self, agent_id: str, persona: str | None) -> FleetAgent: ...
     def close(self) -> None: ...
 
 
@@ -730,6 +755,7 @@ def _row_to_fleet_agent(row: sqlite3.Row) -> FleetAgent:
         created_at=datetime.fromisoformat(row["created_at"]),
         ended_at=_maybe_dt(row["ended_at"]),
         exit_status=row["exit_status"],
+        persona=row["persona"],
     )
 
 
@@ -809,6 +835,7 @@ def _row_to_session(row: sqlite3.Row) -> TeamSession:
         account=row["account"],
         model=row["model"],
         effort=row["effort"],
+        persona=row["persona"],
     )
 
 
@@ -1236,14 +1263,15 @@ class SqliteStore:
         """Insert the session, or revive/refresh it if the id is already known."""
         self._conn.execute(
             f"INSERT INTO team_session ({_SESSION_COLUMNS}) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT (id) DO UPDATE SET "
             "last_seen_at = excluded.last_seen_at, ended_at = NULL, "
             "state = 'working', "
             "transcript_path = COALESCE(excluded.transcript_path, transcript_path), "
             "account = COALESCE(excluded.account, account), "
             "model = COALESCE(excluded.model, model), "
-            "effort = COALESCE(excluded.effort, effort)",
+            "effort = COALESCE(excluded.effort, effort), "
+            "persona = COALESCE(excluded.persona, persona)",
             (
                 session.id,
                 session.project_id,
@@ -1259,6 +1287,7 @@ class SqliteStore:
                 session.account,
                 session.model,
                 session.effort,
+                session.persona,
             ),
         )
         self._conn.commit()
@@ -1492,6 +1521,34 @@ class SqliteStore:
         self._conn.commit()
         return cursor.rowcount == 1
 
+    def reassign_claim(
+        self, task_id: str, from_session: str, to_session: str, lease_until: datetime
+    ) -> bool:
+        """Move a live claim between two ids of the SAME worker; False if none moved.
+
+        A ``/clear`` mints a new session id for the agent that is already working
+        the task. Without this the claim keeps naming an id nobody has: the board
+        shows the work held by a ghost, and the agent's next start does not
+        recognise its own claim and is told to stand down from work in progress
+        (review of #116). Narrow by construction — only a task claimed by exactly
+        ``from_session`` moves, so it can never take a claim from a session that
+        is genuinely someone else.
+
+        Every status that KEEPS a claim, not just ``doing``: ``set_task_status``
+        clears ``claimed_by`` for ``done``/``dropped`` alone, so ``review`` and
+        ``blocked`` carry one too — and those were exactly the two the first cut
+        left naming a dead session (review of #116, round 3). The lease it writes
+        is read only for ``doing`` (``claim_task``, ``renew_leases``), so it is
+        inert on the others.
+        """
+        cursor = self._conn.execute(
+            "UPDATE team_task SET claimed_by = ?, claim_expires_at = ?, updated_at = ? "
+            "WHERE id = ? AND claimed_by = ?",
+            (to_session, lease_until.isoformat(), _now_iso(), task_id, from_session),
+        )
+        self._conn.commit()
+        return cursor.rowcount == 1
+
     def renew_leases(self, session_id: str, lease_until: datetime) -> None:
         """Extend the claim lease on everything this session is working on."""
         self._conn.execute(
@@ -1569,7 +1626,12 @@ class SqliteStore:
         return updated
 
     def next_task(
-        self, project_id: str, *, role: str | None = None, status: TaskStatus = "todo"
+        self,
+        project_id: str,
+        *,
+        role: str | None = None,
+        status: TaskStatus = "todo",
+        prefer: str | None = None,
     ) -> TeamTask | None:
         """The oldest *ready* task in ``status`` a session of ``role`` could pick up.
 
@@ -1577,14 +1639,22 @@ class SqliteStore:
         only match sessions of that role (or an unfiltered query). A ``todo``
         task is ready only when every task it needs is resolved — so loopers
         never receive work whose prerequisites are still in flight.
+
+        ``prefer`` puts one task first in the order — the one a fleet agent was
+        spawned for — under exactly the same status, role and readiness rules
+        as every other candidate: one predicate, one query, not a copy of it.
         """
         clauses = ["project_id = ?", "status = ?"]
         params: list[str] = [project_id, status]
         if role is not None:
             clauses.append("(role IS NULL OR role = ?)")
             params.append(role)
+        order = "ORDER BY id"
+        if prefer is not None:
+            order = "ORDER BY (id = ?) DESC, id"
+            params.append(prefer)
         rows = self._conn.execute(
-            f"SELECT {_TASK_COLUMNS} FROM team_task WHERE {' AND '.join(clauses)} ORDER BY id",
+            f"SELECT {_TASK_COLUMNS} FROM team_task WHERE {' AND '.join(clauses)} {order}",
             params,
         ).fetchall()
         if not rows:
@@ -1926,7 +1996,7 @@ class SqliteStore:
         """
         self._conn.execute(
             f"INSERT INTO fleet_agent ({_FLEET_AGENT_COLUMNS}) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT (id) DO UPDATE SET "
             "pane_id = excluded.pane_id, session_id = excluded.session_id, "
             "cwd = excluded.cwd, worktree = excluded.worktree, task_id = excluded.task_id, "
@@ -1947,12 +2017,28 @@ class SqliteStore:
                 agent.created_at.isoformat(),
                 agent.ended_at.isoformat() if agent.ended_at else None,
                 agent.exit_status,
+                agent.persona,
             ),
         )
         self._conn.commit()
         stored = self.get_fleet_agent(agent.id)
         assert stored is not None  # just written
         return stored
+
+    def bind_fleet_agent_session(self, agent_id: str, session_id: str) -> bool:
+        """Join a LIVE fleet row to the session running in its pane; False if none did.
+
+        A targeted UPDATE, like ``end_fleet_agent``, rather than a read-modify-
+        write of the whole row: the hook that calls this runs in another process
+        from ``fleet stop`` / ``reap``, and writing a stale snapshot back
+        resurrected a stopped agent (review of the first version).
+        """
+        cursor = self._conn.execute(
+            "UPDATE fleet_agent SET session_id = ? WHERE id = ? AND ended_at IS NULL",
+            (session_id, agent_id),
+        )
+        self._conn.commit()
+        return cursor.rowcount == 1
 
     def get_fleet_agent(self, ref: str) -> FleetAgent | None:
         """A fleet agent by id or unambiguous id prefix (git-style)."""
@@ -1972,6 +2058,22 @@ class SqliteStore:
             (project_id,),
         ).fetchall()
         return [_row_to_fleet_agent(row) for row in rows]
+
+    def fleet_agent_for_session(self, project_id: str, session_id: str) -> FleetAgent | None:
+        """The live fleet row recorded against ``session_id``, if there is one.
+
+        One targeted lookup rather than materialising every live row and
+        scanning: this runs on the session-start hook AND on every ``task next``,
+        including the plain CLI ones that have no fleet row at all and paid for
+        the whole list to find that out (review of #116, round 3).
+        """
+        row = self._conn.execute(
+            f"SELECT {_FLEET_AGENT_COLUMNS} FROM fleet_agent "
+            "WHERE project_id = ? AND session_id = ? AND ended_at IS NULL "
+            "ORDER BY created_at DESC LIMIT 1",
+            (project_id, session_id),
+        ).fetchone()
+        return _row_to_fleet_agent(row) if row is not None else None
 
     def fleet_agent_by_label(
         self, project_id: str, label: str, *, live_only: bool = True
@@ -1996,6 +2098,28 @@ class SqliteStore:
         if agent is None:
             raise KeyError(agent_id)
         return agent
+
+    def set_fleet_agent_persona(self, agent_id: str, persona: str | None) -> FleetAgent:
+        """The persona a running agent was given (``fleet.attach_persona``, plan §4.7)."""
+        self._conn.execute("UPDATE fleet_agent SET persona = ? WHERE id = ?", (persona, agent_id))
+        self._conn.commit()
+        agent = self.get_fleet_agent(agent_id)
+        if agent is None:
+            raise KeyError(agent_id)
+        return agent
+
+    def set_session_persona(self, session_id: str, persona: str | None) -> TeamSession:
+        """The persona a joined session now runs as — beside ``set_fleet_agent_persona``."""
+        session = self.get_session(session_id)
+        if session is None:
+            raise KeyError(session_id)
+        self._conn.execute(
+            "UPDATE team_session SET persona = ? WHERE id = ?", (persona, session.id)
+        )
+        self._conn.commit()
+        updated = self.get_session(session.id)
+        assert updated is not None  # just updated
+        return updated
 
     def terminal_events(self, project_id: str) -> dict[str, TeamEvent]:
         """The latest done/dropped event per task — archive attribution.

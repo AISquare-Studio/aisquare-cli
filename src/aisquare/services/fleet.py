@@ -39,8 +39,9 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import ModuleType
+from typing import Literal
 
-from aisquare.core import codenames, harness, selfcli
+from aisquare.core import codenames, harness, personas, selfcli
 from aisquare.core.config import FleetRoleSettings, FleetSettings, load_config
 from aisquare.core.ids import new_agent_id
 from aisquare.core.store import AmbiguousIdError, ContextStore, store_session
@@ -157,6 +158,20 @@ class TellResult:
 
     delivered: bool
     how: str
+
+
+@dataclass(frozen=True)
+class AttachReceipt:
+    """What :func:`attach_persona` did (docs/plans/spawn-personas.md §4.7)."""
+
+    agent: FleetAgent
+    persona: str
+    replaced: str | None
+    """The persona the agent ran as before, when it was a different one."""
+    delivered: Literal["typed", "noted"]
+    """``typed`` into a waiting agent's pane, or ``noted`` on the board for a busy one."""
+    how: str
+    """``tell``'s own words for what happened."""
 
 
 @dataclass(frozen=True)
@@ -822,6 +837,17 @@ def _require_tmux(srv: TmuxServer) -> None:
         raise FleetUnavailable(str(exc)) from exc
 
 
+def role_ok(role: str) -> bool:
+    """The seat rule: whether ``spawn`` accepts ``role``.
+
+    A role is accepted when it is a fleet or harness role, a numbered seat of one
+    (``coder2``), or a role declared in ``team.profiles`` (``aisquare team bind``).
+    ``spawn`` refuses anything else, ``aisquare launch`` applies the same rule, and
+    the UI's New bind form asks it before saving a seat, so all three agree.
+    """
+    return _role_ok(role)
+
+
 def _role_ok(role: str) -> bool:
     """A fleet role, a harness role, or anything ``aisquare launch`` would accept."""
     if role in FLEET_ROLES or role in harness.ROLE_PROFILES:
@@ -843,6 +869,13 @@ def _task_for(store: ContextStore, project: ProjectInfo, task_id: str | None) ->
         raise FleetError(f"no task matches {task_id!r}")
     if task.project_id != project.id:
         raise FleetError(f"task {task_id!r} belongs to another project's board")
+    if task.status in ("done", "dropped"):
+        # Harmless when the id only named a label; now it reaches the agent as
+        # its assignment, and an agent spawned for finished work would be told
+        # so on arrival and hold a slot for nothing.
+        raise FleetError(
+            f"task {task.id} is {task.status} — spawn for a task that still needs work"
+        )
     return task
 
 
@@ -872,6 +905,7 @@ def spawn(
     agent_args: Sequence[str] = (),
     spawned_by: str = "user",
     account: str | None = None,
+    persona: str | None = None,
 ) -> SpawnReceipt:
     """Start an agent for ``project`` in the fleet's tmux server and record it.
 
@@ -889,6 +923,11 @@ def spawn(
     ``extra_args`` and the caller's ``agent_args``. ``AISQUARE_FLEET_AGENT``
     carries the row id into the window; ``CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=0``
     keeps Claude's native teams out of the fleet unless configured otherwise (§7.6).
+
+    ``persona`` — the flag, else ``[fleet.roles.<role>].persona``, else none — is
+    checked against the project's personas before anything starts, travels to the
+    window as ``launch --persona`` and is recorded on the row
+    (docs/plans/spawn-personas.md §3.7, §3.8).
     """
     config = settings()
     if not _role_ok(role):
@@ -906,6 +945,7 @@ def spawn(
         )
     role_config = role_settings(role, config)
     notes: list[str] = []
+    chosen_persona = _chosen_persona(project, role, persona, role_config, notes)
     with store_session() as store:
         project = ensure_codename(project, store)
         codename = project.codename or codenames.codename_for(project.id)
@@ -990,6 +1030,9 @@ def spawn(
         # variables inside the window; a slot that does not exist fails there
         # with `unknown_account`, exactly as a hand-typed launch would.
         flags += ["--account", account]
+    if chosen_persona is not None:
+        # A flag, not an env var: the window's environment is the tmux SERVER's.
+        flags += ["--persona", chosen_persona]
     flags += ["--name", picked]
     command = selfcli.argv_for(["launch", role, *flags, *role_args, *extra])
     env = {"AISQUARE_FLEET_AGENT": agent_id}
@@ -1023,6 +1066,7 @@ def spawn(
         task_id=resolved_task_id,
         spawned_by=spawned_by,
         created_at=_now(),
+        persona=chosen_persona,
     )
     stored = _record(
         agent, project, srv, wanted=label, notes=notes, cap=config.max_agents_per_project
@@ -1030,6 +1074,42 @@ def spawn(
     if prompt:
         _type_prompt(srv, stored.pane_id, prompt, notes)
     return SpawnReceipt(agent=stored, asked_label=label, tmux_session=tmux_session, notes=notes)
+
+
+def _chosen_persona(
+    project: ProjectInfo,
+    role: str,
+    flag: str | None,
+    role_config: FleetRoleSettings,
+    notes: list[str],
+) -> str | None:
+    """The spawn's persona — flag > ``[fleet.roles.<role>].persona`` > none — checked
+    against the project's personas before any window or worktree exists.
+
+    A name nothing resolves refuses with the known names; one that came from the
+    config names the key, so a stale default is found at the first spawn rather
+    than after a day of work (§3.7). ``persona-roles`` is advisory: a persona
+    written for other roles is a receipt note, never a refusal. A seat
+    (``coder2``) counts as its role.
+    """
+    name = flag if flag is not None else role_config.persona
+    if not name:
+        return None
+    try:
+        found = personas.resolve(name, project.root)
+    except personas.PersonaError as exc:
+        if flag is not None:
+            raise FleetError(exc.rule) from exc
+        raise FleetError(
+            f"[fleet.roles.{role}].persona = {name!r}: {exc.rule} — fix the key or pass --persona"
+        ) from exc
+    seat_of = re.sub(r"\d+$", "", role)
+    if found.roles and role not in found.roles and seat_of not in found.roles:
+        notes.append(
+            f"persona {name} is written for {', '.join(found.roles)}, not {role} — spawned "
+            "with it anyway"
+        )
+    return name
 
 
 def _refuse_occupied_worktree(project: ProjectInfo, worktree_dir: str, label: str) -> None:
@@ -1326,6 +1406,60 @@ def _file_note(project: ProjectInfo, label: str, text: str, sender: str | None) 
     except KeyError as exc:
         raise FleetError(f"unknown sender session {sender!r}") from exc
     return f"filed as board note #{event.seq} to {label}"
+
+
+def attach_persona(
+    project: ProjectInfo, label: str, name: str, *, sender: str | None = None
+) -> AttachReceipt:
+    """Give a RUNNING agent a persona, now (docs/plans/spawn-personas.md §4.7).
+
+    The persona is resolved first — an unknown name lists the known ones before
+    the store or tmux is touched — then the live agent. One ``persona_attached``
+    board event is written (which also refuses an unknown ``sender`` before
+    anything changes); the ``fleet_agent`` row and, when the agent has joined,
+    its ``team_session`` row record the name; and the briefing goes through
+    :func:`tell` — typed into a waiting agent, a board note for a busy one, no
+    second channel. The rows are what make it last: the session-start hook reads
+    the fleet row, so a ``/clear`` or a restart briefs the agent with it again.
+    """
+    try:
+        persona = personas.resolve(name, project.root)
+    except personas.PersonaError as exc:
+        raise FleetError(exc.rule) from exc
+    with store_session() as store:
+        agent = _live_agent(store, project, label)
+    replaced = agent.persona if agent.persona and agent.persona != persona.name else None
+    team = _team()
+    note = f"persona {persona.name} attached to {label}"
+    try:
+        team.add_note(
+            f"{note} (replaces {replaced})" if replaced else note,
+            session_ref=sender,
+            to_role=label,
+            kind="persona_attached",
+            cwd=project.root,
+        )
+    except team.TeamDisabledError as exc:
+        raise FleetError(f"cannot record the attachment on the board: {exc}") from exc
+    except KeyError as exc:
+        raise FleetError(f"unknown sender session {sender!r}") from exc
+    with store_session() as store:
+        agent = store.set_fleet_agent_persona(agent.id, persona.name)
+        if agent.session_id is not None and store.get_session(agent.session_id) is not None:
+            store.set_session_persona(agent.session_id, persona.name)
+    tail = f"; it replaces {replaced}" if replaced else ""
+    preface = (
+        f"aisquare: the operator attached persona {persona.name} to you — it applies from "
+        f"now on{tail}"
+    )
+    result = tell(project, label, "\n".join([preface, *personas.briefing(persona)]), sender=sender)
+    return AttachReceipt(
+        agent=agent,
+        persona=persona.name,
+        replaced=replaced,
+        delivered="typed" if result.delivered else "noted",
+        how=result.how,
+    )
 
 
 def stop(

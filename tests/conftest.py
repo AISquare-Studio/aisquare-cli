@@ -13,6 +13,7 @@ from collections.abc import Iterator
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as metadata_version
 from pathlib import Path
+from typing import NoReturn
 
 import pytest
 from typer.testing import CliRunner
@@ -158,6 +159,8 @@ def isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     for knob in (
         "AISQUARE_TEAM",
         "AISQUARE_ROLE",
+        # Exported by `launch --persona`; a fleet agent running the suite has one.
+        "AISQUARE_PERSONA",
         "AISQUARE_TEAM_HUB",
         "AISQUARE_TEAM_DELTA",
         "AISQUARE_TEAM_LEASE_MIN",
@@ -192,6 +195,11 @@ def isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         # A sign-in token in the operator's shell would make every test run as them.
         "AISQUARE_TOKEN",
         "BROWSER",
+        # `persona new` and `persona edit` open the operator's editor. The
+        # command sweeps run every leaf; an exported EDITOR=vim would put a real
+        # editor on the developer's terminal mid-run. Tests that edit set one.
+        "EDITOR",
+        "VISUAL",
         # The CI test bed's switches. An operator who has them exported would
         # otherwise run the suite's hooks against THEIR endpoint, with THEIR
         # token — measured once: four real POSTs to a listener during a green
@@ -289,6 +297,26 @@ def no_detached_distill(monkeypatch: pytest.MonkeyPatch) -> None:
     from aisquare.services import distill
 
     monkeypatch.setattr(distill, "spawn_drain", lambda cwd=None, *, root=None: None)
+
+
+@pytest.fixture(autouse=True)
+def no_real_llm_import(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No test may run a model.
+
+    ``persona import`` of anything that is not already a skill reaches
+    ``services.persona_import``'s engines: a real ``claude -p`` under the manager's
+    binding, or a paid API call. Both are replaced with an engine that is
+    unavailable, so such an import in any test ends in ``no_import_engine``.
+    ``tests/test_persona_import.py`` tests the engines themselves by capturing the
+    real functions at import time, as ``test_spawn_seams.py`` does for the distiller.
+    """
+    from aisquare.services import persona_import
+
+    def unavailable(*_args: object, **_kwargs: object) -> NoReturn:
+        raise persona_import.EngineUnavailable("tests never run a model")
+
+    monkeypatch.setattr(persona_import, "draft_with_manager", unavailable)
+    monkeypatch.setattr(persona_import, "draft_with_api", unavailable)
 
 
 @pytest.fixture

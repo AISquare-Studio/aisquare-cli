@@ -21,13 +21,16 @@ import json
 import os
 import shutil
 import sqlite3
+import threading
+import time
 from collections.abc import Awaitable, Callable, Iterator, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TypeVar
 
 import pytest
-from textual import events
+from textual import Logger, events
+from textual.app import ScreenStackError
 from textual.containers import Vertical, VerticalScroll
 from textual.content import Content
 from textual.geometry import Region
@@ -39,6 +42,8 @@ from textual.worker import Worker, WorkerState
 from aisquare.cli.ui import app as app_mod
 from aisquare.cli.ui.app import FleetApp, HelpScreen
 from aisquare.cli.ui.sidebar import (
+    ALIVE_STATES,
+    STATE_CHIP,
     Activatable,
     AgentRow,
     Disclosure,
@@ -49,7 +54,12 @@ from aisquare.cli.ui.sidebar import (
     ordered_agents,
     short_path,
 )
-from aisquare.cli.ui.terminal import EscapeToSidebar, TerminalPane
+from aisquare.cli.ui.stop import StopAgentScreen
+from aisquare.cli.ui.terminal import (
+    EscapeToSidebar,
+    TerminalPane,
+    route_selection_gesture,
+)
 from aisquare.cli.ui.theme import ThemePicker
 from aisquare.cli.ui.views import explainability as explainability_view
 from aisquare.cli.ui.views.agent import AgentView
@@ -475,6 +485,247 @@ def test_clicking_a_project_opens_its_project_view_once(tmp_path: Path, script: 
     assert shown_ids == ["project-prj_b", "project-prj_a", "project-prj_b"]
     assert views == 2  # one view per project, reused on the second visit — not three
     assert selected
+
+
+class PaneScript:
+    """A tmux runner that answers a pane's frames, so a real ``AgentView`` in a
+    real ``FleetApp`` shows real rows.
+
+    ``no_real_tmux`` stubs every command into a failure, which is right for
+    tests about routing and wrong for one about SELECTING text — there is
+    nothing on screen to select. This answers the one call the pane makes per
+    frame (``capture-pane`` + ``display-message`` in a single process) and reads
+    the pane's size back out of the ``resize-window`` that precedes it, exactly
+    as the real server would.
+    """
+
+    def __init__(self, ran: list[tuple[str, ...]], rows: list[str]) -> None:
+        self.ran = ran
+        self.rows = rows
+        self.width, self.height = 40, len(rows)
+
+    def __call__(self, argv: Sequence[str], stdin: bytes | None) -> Completed:
+        args = list(argv)
+        self.ran.append(tuple(args))
+        if args[1:] == ["-V"]:
+            return Completed(0, "tmux 3.5a\n", "")
+        command = args[5:]
+        if command and command[0] == "resize-window":
+            self.width = int(command[command.index("-x") + 1])
+            self.height = int(command[command.index("-y") + 1])
+            return Completed(0, "", "")
+        if command and command[0] == "capture-pane":
+            body = [*self.rows, *([""] * (self.height - len(self.rows)))][: self.height]
+            facts = tmux_core._SEP.join(
+                ["%1", str(self.width), str(self.height), "0", "0", "1", "0", "0",
+                 "0", "", "0", "bash", "0", "0", ""]
+            )  # fmt: skip
+            return Completed(0, "\n".join([*body, facts]) + "\n", "")
+        return Completed(0, "", "")
+
+
+async def _agent_pane(pilot: Pilot[None]) -> tuple[TerminalPane, Static]:
+    """Open the scripted agent and wait until its pane has painted a frame."""
+    app = fleet_app(pilot)
+    await pilot.click(row_for(app, "agt_a_coder-auth"))
+    await pilot.pause()
+    view = app.current_view()
+    assert isinstance(view, AgentView)
+    pane = view.query_one(TerminalPane)
+    deadline = time.monotonic() + 3.0
+    while pane.frames < 1 or "second row" not in pane_text(pane):
+        assert time.monotonic() < deadline, "the pane never painted the scripted rows"
+        await pilot.pause()
+    return pane, view.query_one("#agent-header", Static)
+
+
+def pane_text(pane: TerminalPane) -> str:
+    width, height = pane.content_size
+    return "\n".join(strip.text for strip in pane.render_lines(Region(0, 0, width, height)))
+
+
+def test_a_drag_from_the_agent_header_into_the_pane_copies_through_the_app(
+    tmp_path: Path,
+    script: Script,
+    no_real_tmux: list[tuple[str, ...]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The app is what turns the end of a selection gesture into a copy.
+
+    ``FleetApp.on_text_selected`` is the only thing that makes a drag crossing
+    the pane's edge copy, and nothing exercised it: replacing its body with
+    ``return`` left the whole suite green, because every test of that gesture
+    re-implemented the handler on its own test ``Host`` (review of #120, round
+    7). This drives the real app, the real ``AgentView``, and the real header.
+    """
+    seed(tmp_path, ("prj_a", "alpha", None))
+    script["prj_a"] = [status("prj_a", "coder-auth", "coder", "working")]
+    monkeypatch.setattr(
+        tmux_core, "_tmux", PaneScript(no_real_tmux, ["red plain", "second row", "third row"])
+    )
+
+    async def go(pilot: Pilot[None]) -> tuple[str, int, str, int]:
+        app = fleet_app(pilot)
+        pane, header = await _agent_pane(pilot)
+        await pilot.mouse_down(header, offset=(1, 0))
+        await pilot.hover(pane, offset=(5, 1))
+        await pilot.mouse_up(pane, offset=(5, 1))
+        await pilot.pause()
+        crossed, toasts = app.clipboard, len(app._notifications)
+        # The negative half: a gesture that touches no row of the pane must
+        # leave both the clipboard and the toast count exactly as they were.
+        app.screen.clear_selection()
+        await pilot.pause()
+        await pilot.mouse_down(header, offset=(1, 0))
+        await pilot.hover(header, offset=(6, 0))
+        await pilot.mouse_up(header, offset=(6, 0))
+        await pilot.pause()
+        return crossed, toasts, app.clipboard, len(app._notifications)
+
+    crossed, toasts, after, toasts_after = drive(go, notifications=True)
+    assert crossed == "red plain\nsecon", crossed
+    assert toasts == 1, "one copy, one toast"
+    assert after == crossed and toasts_after == toasts, (
+        "a gesture over no pane row must not re-copy a standing selection"
+    )
+
+
+def test_a_right_button_drag_from_the_agent_header_copies_nothing_through_the_app(
+    tmp_path: Path,
+    script: Script,
+    no_real_tmux: list[tuple[str, ...]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``FleetApp.on_mouse_down`` is the whole of the button fix: a pane only
+    sees a press that lands ON it, so without the app a right-button drag begun
+    on the header reads as a left one and copies. Nothing reached that handler —
+    replacing its body left the suite green (review of #120, round 8)."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+    script["prj_a"] = [status("prj_a", "coder-auth", "coder", "working")]
+    monkeypatch.setattr(
+        tmux_core, "_tmux", PaneScript(no_real_tmux, ["red plain", "second row", "third row"])
+    )
+
+    async def go(pilot: Pilot[None]) -> tuple[str, int, bool]:
+        app = fleet_app(pilot)
+        pane, header = await _agent_pane(pilot)
+        await pilot.mouse_down(header, offset=(1, 0), button=3)
+        await pilot.hover(pane, offset=(5, 1))
+        await pilot.mouse_up(pane, offset=(5, 1))
+        await pilot.pause()
+        return app.clipboard, len(app._notifications), pane.text_selection is not None
+
+    clipboard, toasts, highlighted = drive(go, notifications=True)
+    assert highlighted, "the premise: the gesture did select text in the pane"
+    assert clipboard == "" and toasts == 0, "a right-button drag is not a copy request"
+
+
+def test_one_panes_failure_does_not_stop_the_others_being_told(
+    tmp_path: Path,
+    script: Script,
+    no_real_tmux: list[tuple[str, ...]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The guard around the fan-out, both halves: a pane that raises is logged
+    rather than swallowed silently, and its neighbours still hear the gesture.
+    This PR's history is an unguarded exception in a mouse handler taking the
+    app down (review of #120, round 8)."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+    script["prj_a"] = [
+        status("prj_a", "coder-auth", "coder", "working"),
+        status("prj_a", "coder-two", "coder", "working", minute=1),
+    ]
+    monkeypatch.setattr(
+        tmux_core, "_tmux", PaneScript(no_real_tmux, ["red plain", "second row", "third row"])
+    )
+
+    logged: list[str] = []
+    original_call = Logger.__call__
+
+    def record(self: Logger, *args: object, **kwargs: object) -> None:
+        logged.append(" ".join(str(a) for a in args))
+        original_call(self, *args, **kwargs)
+
+    monkeypatch.setattr(Logger, "__call__", record)
+
+    async def go(pilot: Pilot[None]) -> tuple[int, str, int, list[str], list[str]]:
+        app = fleet_app(pilot)
+        await pilot.click(row_for(app, "agt_a_coder-two"))
+        await pilot.pause()
+        pane, header = await _agent_pane(pilot)  # opens coder-auth, leaves both mounted
+        panes = list(app.screen.query(TerminalPane))
+        assert len(panes) >= 2, "the app keeps a view per opened agent mounted"
+
+        async def cross() -> None:
+            await pilot.mouse_down(header, offset=(1, 0))
+            await pilot.hover(pane, offset=(5, 1))
+            await pilot.mouse_up(pane, offset=(5, 1))
+            await pilot.pause()
+
+        # The negative half first, while every pane still works.
+        logged.clear()
+        await cross()
+        quiet = list(logged)
+        app.screen.selections = {}
+        await pilot.pause()
+
+        def boom(button: int | None = None) -> None:
+            raise RuntimeError("this pane is mid-teardown")
+
+        broken = next(other for other in panes if other is not pane)
+        monkeypatch.setattr(broken, "selection_gesture_ended", boom)
+        logged.clear()
+        await cross()
+        return len(panes), app.clipboard, len(app._notifications), quiet, list(logged)
+
+    panes, clipboard, toasts, quiet, recorded = drive(go, notifications=True)
+    assert panes >= 2
+    assert clipboard == "red plain\nsecon", "the working pane still copied"
+    assert toasts == 2, "one toast per crossing gesture, the failing pane notwithstanding"
+    assert not [line for line in quiet if "selection gesture" in line], quiet
+    assert any("mid-teardown" in line for line in recorded), (
+        f"the failure must leave a trace, not be swallowed: {recorded}"
+    )
+
+
+def test_a_screen_that_cannot_be_queried_is_logged_not_a_crash(
+    tmp_path: Path,
+    script: Script,
+    no_real_tmux: list[tuple[str, ...]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other half of the fan-out guard. Resolving the screen is what raises
+    when a stack is being torn down, and nothing exercised it — the guard and
+    its log line were both mutation-green (review of the tenth version)."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+    script["prj_a"] = [status("prj_a", "coder-auth", "coder", "working")]
+    monkeypatch.setattr(
+        tmux_core, "_tmux", PaneScript(no_real_tmux, ["red plain", "second row", "third row"])
+    )
+    logged: list[str] = []
+    original_call = Logger.__call__
+
+    def record(self: Logger, *args: object, **kwargs: object) -> None:
+        logged.append(" ".join(str(a) for a in args))
+        original_call(self, *args, **kwargs)
+
+    monkeypatch.setattr(Logger, "__call__", record)
+
+    async def go(pilot: Pilot[None]) -> tuple[list[str], bool]:
+        app = fleet_app(pilot)
+        await _agent_pane(pilot)
+
+        def no_screen(self: FleetApp) -> object:
+            raise ScreenStackError("the screen stack is empty")
+
+        monkeypatch.setattr(type(app), "screen", property(no_screen))
+        logged.clear()
+        route_selection_gesture(app, 1)
+        return list(logged), app.is_running
+
+    recorded, alive = drive(go)
+    assert alive, "the app survives a screen it cannot resolve"
+    assert any("no screen to tell" in line for line in recorded), recorded
 
 
 def test_clicking_an_agent_opens_its_agent_view(tmp_path: Path, script: Script) -> None:
@@ -1520,3 +1771,468 @@ def test_theme_picker_applies_live_and_autosaves(
         return str(fleet_app(pilot).theme)
 
     assert drive(relaunch) == final  # restored on the next launch
+
+
+# --- stopping an agent --------------------------------------------------------------
+
+
+def ended(agent: FleetAgent, *, exit_status: int = 0) -> FleetAgent:
+    """The row ``services.fleet.stop`` answers with: the same agent, ended."""
+    return agent.model_copy(update={"ended_at": datetime.now(tz=UTC), "exit_status": exit_status})
+
+
+class StopRecorder:
+    """Stands in for ``services.fleet.stop``: records every call, answers an ended row.
+
+    What these tests assert is what the SERVICE was asked — the project, the
+    label and ``force`` — never the sentence the dialog showed on the way there.
+    """
+
+    def __init__(self, agent: FleetAgent) -> None:
+        self.agent = agent
+        self.calls: list[tuple[str, str, bool]] = []
+        self.refuse: Exception | None = None
+
+    def __call__(
+        self, project: ProjectInfo, label: str, *, force: bool = False, grace: float = 5.0
+    ) -> FleetAgent:
+        self.calls.append((project.id, label, force))
+        if self.refuse is not None:
+            raise self.refuse
+        return ended(self.agent)
+
+
+def stopper(monkeypatch: pytest.MonkeyPatch, agent: FleetAgent) -> StopRecorder:
+    recorder = StopRecorder(agent)
+    monkeypatch.setattr(fleet_service, "stop", recorder)
+    return recorder
+
+
+async def open_stop_dialog(pilot: Pilot[None], app: FleetApp, agent_id: str) -> StopAgentScreen:
+    """Open the agent's view and press ITS Stop button — the dialog the shell pushes.
+
+    The button is taken from the view ON SCREEN rather than by a bare
+    ``#agent-stop`` selector: the ``ContentSwitcher`` keeps every agent view it
+    has ever mounted, so a test that opens a second agent would otherwise click
+    the first view's button, which is not on screen and opens nothing.
+    """
+    await pilot.click(row_for(app, agent_id))
+    await pilot.pause()
+    view = app.current_view()
+    assert isinstance(view, AgentView), f"the row opened {type(view).__name__}"
+    await pilot.click(view.query_one("#agent-stop", Button))
+    await pilot.pause()
+    screen = app.screen
+    assert isinstance(screen, StopAgentScreen), f"Stop opened {type(screen).__name__}"
+    return screen
+
+
+def test_the_agent_view_offers_stop_exactly_while_there_is_a_process(
+    tmp_path: Path, script: Script
+) -> None:
+    """Every alive state shows Stop and no other state does — asked of ``ALIVE_STATES``.
+
+    That constant is already the card's "agents alive" rule, so the view and the
+    chip cannot disagree and this test cannot drift from either: a state added
+    to it must gain the button, a state taken out of it must lose it. 💤 exited
+    and ✗ lost have no process to stop (a lost row is ``fleet reap``'s business).
+    """
+    seed(tmp_path, ("prj_a", "alpha", None))
+    states = sorted(STATE_CHIP)
+    script["prj_a"] = [
+        status(
+            "prj_a",
+            f"agent-{state}",
+            "coder",
+            state,
+            minute=index,
+            exit_status=0 if state == "exited" else None,
+        )
+        for index, state in enumerate(states)
+    ]
+
+    async def go(pilot: Pilot[None]) -> set[str]:
+        app = fleet_app(pilot)
+        offered: set[str] = set()
+        for state in states:
+            await pilot.click(row_for(app, f"agt_a_agent-{state}"))
+            await pilot.pause()
+            view = app.current_view()
+            assert isinstance(view, AgentView)
+            if view.query_one("#agent-stop", Button).display:
+                offered.add(state)
+        return offered
+
+    offered = drive(go)
+    assert offered == set(ALIVE_STATES)
+    assert set(ALIVE_STATES) < set(states), "the premise: some states are not alive"
+
+
+def test_confirming_stop_asks_the_service_once_with_force_false(
+    tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seed(tmp_path, ("prj_a", "alpha", None))
+    live = status("prj_a", "coder-auth", "coder", "working")
+    script["prj_a"] = [live]
+    recorder = stopper(monkeypatch, live.agent)
+
+    async def go(pilot: Pilot[None]) -> bool:
+        app = fleet_app(pilot)
+        await open_stop_dialog(pilot, app, "agt_a_coder-auth")
+        await pilot.click("#stop-confirm")
+        await settle(app)
+        await pilot.pause()
+        return isinstance(app.screen, StopAgentScreen)
+
+    still_open = drive(go)
+    assert recorder.calls == [("prj_a", "coder-auth", False)]  # the graceful /exit, exactly once
+    assert not still_open  # a stop that worked closes its own dialog
+
+
+def test_force_asks_the_service_to_skip_the_graceful_exit(
+    tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seed(tmp_path, ("prj_a", "alpha", None))
+    live = status("prj_a", "coder-auth", "coder", "working")
+    script["prj_a"] = [live]
+    recorder = stopper(monkeypatch, live.agent)
+
+    async def go(pilot: Pilot[None]) -> None:
+        app = fleet_app(pilot)
+        await open_stop_dialog(pilot, app, "agt_a_coder-auth")
+        await pilot.click("#stop-force")
+        await settle(app)
+        await pilot.pause()
+
+    drive(go)
+    assert recorder.calls == [("prj_a", "coder-auth", True)]
+
+
+def test_cancelling_the_stop_dialog_calls_nothing(
+    tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seed(tmp_path, ("prj_a", "alpha", None))
+    live = status("prj_a", "coder-auth", "coder", "working")
+    script["prj_a"] = [live]
+    recorder = stopper(monkeypatch, live.agent)
+
+    async def go(pilot: Pilot[None]) -> tuple[bool, str]:
+        app = fleet_app(pilot)
+        await open_stop_dialog(pilot, app, "agt_a_coder-auth")
+        await pilot.click("#stop-cancel")
+        await pilot.pause()
+        return isinstance(app.screen, StopAgentScreen), type(app.current_view()).__name__
+
+    still_open, view = drive(go)
+    assert recorder.calls == []  # Cancel asks the service nothing at all
+    assert not still_open and view == "AgentView"
+
+
+def test_a_refusal_stays_in_the_dialog_with_its_reason_intact(
+    tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``stop`` refuses when tmux cannot confirm the pane died; the dialog must SAY so.
+
+    The service leaves the row live on purpose rather than printing ✓ over an
+    agent that is still running. A dialog that closed on that answer — or an app
+    that died on it — would undo exactly that honesty, so the reason stays on the
+    status line, the dialog stays open, and the app keeps taking keys.
+    """
+    seed(tmp_path, ("prj_a", "alpha", None))
+    live = status("prj_a", "coder-auth", "coder", "working")
+    script["prj_a"] = [live]
+    recorder = stopper(monkeypatch, live.agent)
+    recorder.refuse = fleet_service.FleetError(
+        "could not stop 'coder-auth' ([red] pane 3 refused, tmux did not answer) — its pane "
+        "is still alive, so its row is left live"
+    )
+
+    async def go(pilot: Pilot[None]) -> tuple[str, bool, bool, str]:
+        app = fleet_app(pilot)
+        screen = await open_stop_dialog(pilot, app, "agt_a_coder-auth")
+        await pilot.click("#stop-confirm")
+        await settle(app)
+        await pilot.pause()
+        note = shown(screen.query_one("#stop-status", Static))
+        open_after = isinstance(app.screen, StopAgentScreen)
+        await pilot.press("escape")  # the app still answers keys after a refusal
+        await pilot.pause()
+        return (
+            note,
+            open_after,
+            isinstance(app.screen, StopAgentScreen),
+            type(app.current_view()).__name__,
+        )
+
+    note, open_after, open_at_end, view = drive(go)
+    assert "tmux did not answer" in note and "[red]" in note
+    assert open_after, "the refusal must not close the dialog"
+    assert not open_at_end and view == "AgentView"  # …and the app is alive to close it
+    # Control: the same reason rendered AS MARKUP loses the tag — and `[red]` is a
+    # REAL Rich style, so this cannot be argued to survive by accident the way an
+    # unknown tag might. It is the failure the Text on that status line prevents.
+    assert "[red]" not in Content.from_markup(note).plain
+
+
+def test_a_successful_stop_toasts_the_ended_row_re_reads_and_leaves_its_view(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seed(tmp_path, ("prj_a", "alpha", None))
+    live = status("prj_a", "coder-auth", "coder", "working")
+    reads: list[str] = []
+    stopped: list[bool] = []
+
+    def list_agents(project: ProjectInfo, *, live_only: bool = True) -> list[FleetAgentStatus]:
+        reads.append(project.id)
+        if stopped:
+            return [FleetAgentStatus(agent=ended(live.agent), state="exited")]
+        return [live]
+
+    def stop(
+        project: ProjectInfo, label: str, *, force: bool = False, grace: float = 5.0
+    ) -> FleetAgent:
+        stopped.append(True)
+        return ended(live.agent)
+
+    monkeypatch.setattr(fleet_service, "list_agents", list_agents)
+    monkeypatch.setattr(fleet_service, "stop", stop)
+
+    async def go(pilot: Pilot[None]) -> tuple[list[str], int, str | None]:
+        app = fleet_app(pilot)
+        await open_stop_dialog(pilot, app, "agt_a_coder-auth")
+        before = len(reads)
+        await pilot.click("#stop-confirm")
+        await settle(app)
+        await pilot.pause()
+        await pilot.pause()
+        # Every toast, not the first: the scripted pane has no tmux behind it and
+        # raises its own "(pane gone)" here, which is the harness, not the claim.
+        toasts = [toast.render().plain for toast in app.screen.query(Toast)]
+        return toasts, len(reads) - before, app.content.current
+
+    toasts, re_reads, current = drive(go, notifications=True)
+    assert f"✓ stopped coder-auth ({live.agent.id})" in toasts
+    assert re_reads == 1, "the sidebar re-reads the fleet once, through the shell's own refresh"
+    assert current == "project-prj_a"  # the stopped agent's view is not left polling a dead pane
+
+
+def test_x_on_the_selected_agent_row_opens_the_same_stop_dialog(
+    tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The key is the SIDEBAR's: the rows are non-focusable Statics by design."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+    live = status("prj_a", "coder-auth", "coder", "working")
+    script["prj_a"] = [live]
+    stopper(monkeypatch, live.agent)
+
+    async def go(pilot: Pilot[None]) -> tuple[str, str | None]:
+        app = fleet_app(pilot)
+        await pilot.click(row_for(app, "agt_a_coder-auth"))
+        await pilot.pause()
+        app.sidebar.focus()
+        await pilot.pause()
+        await pilot.press("x")
+        await pilot.pause()
+        screen = app.screen
+        label = screen.label if isinstance(screen, StopAgentScreen) else None
+        return type(screen).__name__, label
+
+    assert drive(go) == ("StopAgentScreen", "coder-auth")
+
+
+def test_x_ignores_a_selection_that_is_not_an_agent(
+    tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seed(tmp_path, ("prj_a", "alpha", None))
+    live = status("prj_a", "coder-auth", "coder", "working")
+    script["prj_a"] = [live]
+    recorder = stopper(monkeypatch, live.agent)
+
+    async def go(pilot: Pilot[None]) -> tuple[bool, bool]:
+        app = fleet_app(pilot)
+        app.sidebar.focus()
+        await pilot.press("x")  # nothing selected yet
+        await pilot.pause()
+        with_nothing = isinstance(app.screen, StopAgentScreen)
+        await pilot.click(card_for(app, "prj_a").query_one(ProjectTitle))
+        await pilot.pause()
+        app.sidebar.focus()
+        await pilot.press("x")  # a PROJECT is selected
+        await pilot.pause()
+        return with_nothing, isinstance(app.screen, StopAgentScreen)
+
+    assert drive(go) == (False, False)
+    assert recorder.calls == []
+
+
+def test_x_offers_no_stop_where_the_button_offers_none(
+    tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two controls, ONE rule: the key asks ``ALIVE_STATES`` exactly as the button does.
+
+    A dead row is still an ordinary selectable ``AgentRow``, so a key that did
+    not ask offered precisely the Stop the view had just refused. And ``stop``
+    does not decline such a row: its pane is gone, so there is no ``/exit`` and
+    no grace wait — it ends the row outright, which is ``fleet reap``'s outcome,
+    and reap is outside this task's boundaries.
+
+    Found by coder3a-1's probe before this PR opened, and reproduced by runner2-1
+    one state WIDER: ✗ lost disagreed as well as 💤 exited. So the states are
+    derived from the constants — every ``STATE_CHIP`` key that is not alive —
+    rather than typed out here: the rule IS the constant, and a test naming one
+    state would drift from a rule that covers both.
+    """
+    seed(tmp_path, ("prj_a", "alpha", None))
+    dead = sorted(set(STATE_CHIP) - ALIVE_STATES)  # 💤 exited AND ✗ lost
+    script["prj_a"] = [
+        status(
+            "prj_a",
+            f"agent-{state}",
+            "coder",
+            state,
+            minute=index,
+            exit_status=0 if state == "exited" else None,
+        )
+        for index, state in enumerate(dead)
+    ]
+    recorder = stopper(monkeypatch, script["prj_a"][0].agent)
+
+    async def go(pilot: Pilot[None]) -> dict[str, tuple[bool, bool]]:
+        app = fleet_app(pilot)
+        offered: dict[str, tuple[bool, bool]] = {}
+        for state in dead:
+            await pilot.click(row_for(app, f"agt_a_agent-{state}"))
+            await pilot.pause()
+            view = app.current_view()
+            assert isinstance(view, AgentView), f"the row opened {type(view).__name__}"
+            button = view.query_one("#agent-stop", Button).display
+            app.sidebar.focus()
+            await pilot.press("x")
+            await pilot.pause()
+            offered[state] = (button, isinstance(app.screen, StopAgentScreen))
+        return offered
+
+    offered = drive(go)
+    assert dead, "the premise: some states have no process"
+    # One equality over both dead states, not a pair of negatives: a control that
+    # starts offering a stop in either state shows up as a diff, not as a silence.
+    assert offered == {state: (False, False) for state in dead}
+    assert recorder.calls == []  # and the service is never asked to stop a dead row
+
+
+def test_the_dialog_says_when_the_target_is_the_projects_manager(
+    tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Stopping the manager is not like stopping a coder, so the question says so."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+    manager = status("prj_a", "manager", "manager", "working")
+    coder = status("prj_a", "coder-auth", "coder", "working", minute=1)
+    script["prj_a"] = [manager, coder]
+    stopper(monkeypatch, manager.agent)
+
+    async def go(pilot: Pilot[None]) -> tuple[str, str]:
+        app = fleet_app(pilot)
+        asked: list[str] = []
+        for agent_id in ("agt_a_manager", "agt_a_coder-auth"):
+            screen = await open_stop_dialog(pilot, app, agent_id)
+            asked.append(shown(screen.query_one("#stop-question", Static)))
+            await pilot.click("#stop-cancel")
+            await pilot.pause()
+        return asked[0], asked[1]
+
+    about_manager, about_coder = drive(go)
+    assert "the project's manager" in about_manager
+    assert "the agents it started keep running" in about_manager  # what the warning is FOR
+    # Control: a coder's dialog says none of it — the line is about this target,
+    # not a sentence every stop carries.
+    assert "manager" not in about_coder
+
+
+def test_the_app_stays_live_while_a_stop_is_in_flight(
+    tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``stop`` BLOCKS — /exit, a 5 s grace, then the kill. Inline, that is a frozen app.
+
+    Every other assertion in this file passes on a Stop that runs on the UI
+    thread: the service is still called with the right arguments, the dialog
+    still closes, the toast still says the right words — and the whole app is
+    dead for five seconds while it happens.
+
+    So the service here blocks until this test releases it, and the test proves a
+    frame rendered BEFORE the release. Run inline, the click could not return
+    until the service gave up on its own, which is what ``timed_out`` records —
+    a red, rather than a hang.
+    """
+    seed(tmp_path, ("prj_a", "alpha", None))
+    live = status("prj_a", "coder-auth", "coder", "working")
+    script["prj_a"] = [live]
+    entered = threading.Event()
+    release = threading.Event()
+    timed_out: list[bool] = []
+
+    def blocking_stop(
+        project: ProjectInfo, label: str, *, force: bool = False, grace: float = 5.0
+    ) -> FleetAgent:
+        entered.set()
+        if not release.wait(10):
+            timed_out.append(True)  # nobody let it go: the UI thread was inside it
+        return ended(live.agent)
+
+    monkeypatch.setattr(fleet_service, "stop", blocking_stop)
+
+    async def go(pilot: Pilot[None]) -> tuple[bool, bool, str, bool]:
+        app = fleet_app(pilot)
+        await open_stop_dialog(pilot, app, "agt_a_coder-auth")
+        await pilot.click("#stop-confirm")
+        await pilot.pause()
+        started = entered.wait(5)  # the worker really reached the service
+        # …and the app is still painting frames while the service holds a thread.
+        in_flight = isinstance(app.screen, StopAgentScreen)
+        note = shown(app.screen.query_one("#stop-status", Static))
+        release.set()
+        await settle(app)
+        await pilot.pause()
+        return started, in_flight, note, isinstance(app.screen, StopAgentScreen)
+
+    started, in_flight, note, open_at_end = drive(go)
+    assert timed_out == [], "the stop ran on the UI thread: the app could not release it"
+    assert started and in_flight  # the dialog is up and repainting mid-call
+    assert note == "stopping coder-auth …"  # a frame rendered WHILE the service blocked
+    assert not open_at_end  # and the answer still landed when it came
+
+
+def test_a_refusal_re_reads_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The fleet is re-read on success only.
+
+    A reload after a refusal reports a stop that did not happen, and repaints the
+    row the service deliberately left live as though something had changed.
+    """
+    seed(tmp_path, ("prj_a", "alpha", None))
+    live = status("prj_a", "coder-auth", "coder", "working")
+    reads: list[str] = []
+
+    def list_agents(project: ProjectInfo, *, live_only: bool = True) -> list[FleetAgentStatus]:
+        reads.append(project.id)
+        return [live]
+
+    def refusing_stop(
+        project: ProjectInfo, label: str, *, force: bool = False, grace: float = 5.0
+    ) -> FleetAgent:
+        raise fleet_service.FleetError("tmux did not answer, so its row is left live")
+
+    monkeypatch.setattr(fleet_service, "list_agents", list_agents)
+    monkeypatch.setattr(fleet_service, "stop", refusing_stop)
+
+    async def go(pilot: Pilot[None]) -> tuple[int, bool]:
+        app = fleet_app(pilot)
+        await open_stop_dialog(pilot, app, "agt_a_coder-auth")
+        before = len(reads)
+        await pilot.click("#stop-confirm")
+        await settle(app)
+        await pilot.pause()
+        await pilot.pause()
+        return len(reads) - before, row_for(app, "agt_a_coder-auth").status.state == "working"
+
+    re_reads, still_live = drive(go)
+    assert re_reads == 0, "a refused stop must not re-read the fleet"
+    assert still_live  # the row the service left live is still shown live

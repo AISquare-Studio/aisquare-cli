@@ -1100,7 +1100,9 @@ def test_live_a_finished_command_is_a_dead_pane_with_its_status(live: TmuxServer
             (w for w in live.list_windows("asq-test-fox") if w.pane_id == exiting.pane_id), None
         )
 
-    assert _wait(lambda: (found := dead()) is not None and found.dead)
+    # tmux can report a pane dead a beat before it records the exit status: wait for the
+    # status itself, whatever it is, so a wrong one still fails the assertion below.
+    assert _wait(lambda: (found := dead()) is not None and found.dead_status is not None)
     found = dead()
     assert found is not None and (found.dead, found.dead_status) == (True, 3)
     facts = live.pane_facts(exiting.pane_id)

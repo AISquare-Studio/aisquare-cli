@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from rich.text import Text
+from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
@@ -44,6 +45,7 @@ from textual.widget import Widget
 from textual.widgets import ContentSwitcher, Footer, Static
 from textual.worker import Worker, WorkerState
 
+from aisquare.cli.ui.attach import NewAccountRequested
 from aisquare.cli.ui.sidebar import (
     AccountsSelected,
     AddProject,
@@ -52,9 +54,12 @@ from aisquare.cli.ui.sidebar import (
     ProjectSelected,
     Sidebar,
     SpawnAgent,
+    StopAgent,
     accounts_summary_text,
 )
-from aisquare.cli.ui.terminal import EscapeToSidebar
+from aisquare.cli.ui.spawn import SpawnCompleted, SpawnDialog
+from aisquare.cli.ui.stop import StopAgentScreen
+from aisquare.cli.ui.terminal import EscapeToSidebar, route_selection_gesture
 from aisquare.cli.ui.theme import ThemePicker, remember_theme, restore_theme
 from aisquare.cli.ui.views.accounts import AccountsChanged, AccountsView, read_session, summarise
 from aisquare.cli.ui.views.agent import AgentView
@@ -67,6 +72,7 @@ from aisquare.models import (
     AccountsOverview,
     CheckStatus,
     DoctorCheck,
+    FleetAgent,
     FleetAgentStatus,
     ProjectInfo,
 )
@@ -147,6 +153,7 @@ class HelpScreen(ModalScreen[None]):
             ("↑ ↓ Enter", "move over the sidebar and open the row under the cursor"),
             (self.escape_key.upper(), "hand focus from an agent's pane back to the sidebar"),
             ("wheel", "scroll an agent pane; shift/alt+PgUp/PgDn too, shift+Home/End"),
+            ("drag", "select text in a pane (double-click: a word) — copied on release"),
             ("t", "themes (applied live, autosaved)"),
             ("r", "refresh now"),
             ("F1", "command palette"),
@@ -208,6 +215,8 @@ class FleetApp(App[None], inherit_bindings=False):
         self._doctor_worker: Worker[Any] | None = None
         """The newest doctor run; an older one's result is not ours to paint."""
         self._theme_restored = False
+        self._gesture_button: int | None = None
+        """Which button began the selection gesture now running, if one is."""
 
     # --- layout -------------------------------------------------------------------
 
@@ -283,6 +292,26 @@ class FleetApp(App[None], inherit_bindings=False):
             parent(theme_name)
         if self._theme_restored:
             remember_theme(theme_name)
+
+    def on_mouse_down(self, event: events.MouseDown) -> None:
+        """Remember which button began the gesture now running.
+
+        The screen posts ``TextSelected`` from its MouseUp branch and it carries
+        no button, while the pane only sees a press that lands ON it — so a
+        right-button drag begun on the agent header read as a left one and
+        copied (review of #120, round 7). Here every press is visible.
+        """
+        self._gesture_button = event.button
+
+    def on_text_selected(self, event: events.TextSelected) -> None:
+        """A selection gesture ended anywhere on screen — tell the panes.
+
+        One line, because the routing itself lives beside the widget it serves
+        and every test host calls the same function: a harness that ends a
+        gesture differently from this is a test that proves nothing.
+        """
+        button, self._gesture_button = self._gesture_button, None
+        route_selection_gesture(self, button)
 
     # --- help / refresh ---------------------------------------------------------------
 
@@ -561,11 +590,67 @@ class FleetApp(App[None], inherit_bindings=False):
         self._set_doctor_scope(event.project_id)
 
     def on_spawn_agent(self, event: SpawnAgent) -> None:
-        # The Spawn dialog is Phase 7 (§9); until it lands the CLI is the way.
-        self.notify(
-            "the spawn dialog is not built yet — from a terminal: aisquare fleet spawn <role>",
-            timeout=6,
+        """The sidebar's spawn-agent row: the Spawn dialog for THAT row's project."""
+        project = self.snapshot.project(event.project_id) if self.snapshot else None
+        if project is None:
+            self.notify("that project is no longer listed", severity="warning", timeout=4)
+            return
+        self.push_screen(
+            SpawnDialog(project, accounts=self._accounts), callback=self.spawn_finished
         )
+
+    def spawn_finished(self, receipt: fleet_service.SpawnReceipt | None) -> None:
+        """The dialog closed: toast the receipt and its notes, then show the new agent.
+
+        The Project view's Start-manager toasts, word for word. ``markup=False``
+        on every one: a note can carry a path or a branch with brackets in it.
+        """
+        if receipt is None:
+            return
+        agent = receipt.agent
+        self.notify(
+            f"✓ spawned {agent.label} ({agent.id}) → {receipt.tmux_session} {agent.pane_id}",
+            timeout=6,
+            markup=False,
+        )
+        for note in receipt.notes:
+            self.notify(note, severity="warning", timeout=8, markup=False)
+        self.refresh_data()
+        self.post_message(AgentSelected(agent.project_id, agent.id))
+
+    def on_stop_agent(self, event: StopAgent) -> None:
+        """The agent view's Stop button, or ``x`` on the selected row: one question first."""
+        project = self.snapshot.project(event.project_id) if self.snapshot else None
+        status = self.snapshot.agent(event.project_id, event.agent_id) if self.snapshot else None
+        if project is None or status is None:
+            self.notify("that agent is no longer listed", severity="warning", timeout=4)
+            return
+        self.push_screen(StopAgentScreen(project, status), callback=self.stop_finished)
+
+    def stop_finished(self, agent: FleetAgent | None) -> None:
+        """The dialog closed: toast the ended row, re-read, and leave the view it stopped.
+
+        ``None`` is Cancel, or a refusal the dialog is still showing — nothing
+        happened, so nothing is said. Its own view would otherwise keep polling
+        a pane that is gone, so the shell goes back to the project the way a
+        click on the project's title does.
+        """
+        if agent is None:
+            return
+        self.notify(f"✓ stopped {agent.label} ({agent.id})", timeout=6, markup=False)
+        self.refresh_data()
+        view = self.current_view()
+        if isinstance(view, AgentView) and view.status.agent.id == agent.id:
+            self.post_message(ProjectSelected(agent.project_id))
+
+    def on_spawn_completed(self, event: SpawnCompleted) -> None:
+        """A Spawn dialog opened from a persona's *Attach to new*: the same receipt path."""
+        self.spawn_finished(event.receipt)
+
+    async def on_new_account_requested(self, event: NewAccountRequested) -> None:
+        """The picker's *+ New account*: the Accounts page, its add-account flow started."""
+        await self.on_accounts_selected(AccountsSelected())
+        self.query_one("#accounts", AccountsView).begin_claude_sign_in(None)
 
     async def on_accounts_selected(self, event: AccountsSelected) -> None:
         await self._show(

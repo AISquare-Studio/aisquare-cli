@@ -236,8 +236,9 @@ Sends `/exit`, waits a grace period, then kills the window. The agent's own
 graceful exit.
 
 **When tmux cannot confirm the pane died** — a wedged server, a `tmux` that
-left `PATH` — the row is **left live** and the command fails saying so, rather
-than reporting `✓ stopped` over an agent that is still running. Re-run it once
+left `PATH`, a socket that is there but refuses this user (`Permission denied`)
+— the row is **left live** and the command fails saying so, rather than
+reporting `✓ stopped` over an agent that is still running. Re-run it once
 tmux answers again, or `fleet reap` after the server comes back. If the server is
 genuinely gone — a reboot, `kill-server` — `fleet reap --all --server-down` marks
 the rows on it lost; it acts only where tmux itself reports no server behind the

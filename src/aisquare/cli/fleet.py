@@ -397,7 +397,13 @@ def _emit_shutdown(report: fleet_service.ShutdownReport) -> None:
     for row in report.failed:
         console.print(f"  ⚠ {row.agent.label}  LEFT LIVE — {row.reason}")
     for session in report.sessions_failed:
-        console.print(f"  ⚠ tmux refused to kill session {session}")
+        # NOT "tmux refused to kill it": round 9 widened this field past a refused
+        # `kill-session` to a refused WINDOW kill (a late row's dead pane) and to a
+        # query that failed with no kill attempted at all. Each entry carries its
+        # own reason where it has one; the line above it must only claim the thing
+        # they share — the session is still standing (review of #121, round 9
+        # verification).
+        console.print(f"  ⚠ session {session} was not taken down")
     for session in report.sessions_left_up:
         console.print(f"  ⚠ session {session} left up: it holds a row left live")
     for session in report.sessions_absent:
@@ -417,9 +423,17 @@ def _emit_shutdown(report: fleet_service.ShutdownReport) -> None:
             "store answers"
         )
     if report.pause_scan_failed:
+        # "every pause is kept" is true only when the visible-projects lookup
+        # itself failed and none was reached. The field also carries PER-PROJECT
+        # failures, and those sit beside projects that DID clear — printed right
+        # above, which the old line then contradicted. Naming what is still set by
+        # what was not cleared holds in both shapes, including a signal nobody
+        # could read, which the report deliberately claims nothing about (review
+        # of #121, round 9 verification).
         console.print(
-            f"  ⚠ the fleet-paused signals could not be reconciled "
-            f"({report.pause_scan_failed}) — every pause is kept; re-run once the store answers"
+            f"  ⚠ the fleet-paused signals could not be fully reconciled "
+            f"({report.pause_scan_failed}) — any signal not named cleared above is still "
+            "set; re-run once the store answers, or clear it with `aisquare fleet resume`"
         )
     if partial:
         console.print(

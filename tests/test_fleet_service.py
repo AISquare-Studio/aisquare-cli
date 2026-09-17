@@ -192,20 +192,45 @@ class FakeTmux(TmuxServer):
         except TmuxError:
             return False
 
+    def _read(self) -> bool:
+        """What a LENIENT read sees: True when the server answered this query.
+
+        False is tmux's non-zero exit, which every lenient wrapper reports as its
+        empty answer (`[]` / `None` / `False`) — no server on the socket
+        (`running`), or a socket this user may not open (`socket_denied`, exit 1
+        with `Permission denied` on a server that is perfectly alive). A client
+        that could not RUN (`installed`, `exec_unavailable`) or a server that
+        never answered at all (`answers_raises`, the wedged 30 s timeout) raises
+        out of the runner instead, and the real lenient wrappers propagate that
+        rather than swallowing it.
+
+        The fake gated only on `running`, so `socket_denied` left it answering
+        with the pane's facts where the real client answers non-zero — the one
+        state that separates "tmux says the pane is gone" from "tmux could not
+        be asked", and therefore the state no test could express (review of #121,
+        round 9 verification).
+        """
+        self.binary()
+        if self.exec_unavailable:
+            raise TmuxUnavailable("tmux is not runnable: bad interpreter (fake)")
+        if self.answers_raises is not None:
+            raise TmuxError(self.answers_raises)
+        return self.running and not self.socket_denied
+
     def reachable(self) -> bool:
         """The raising probe: an unavailable client — missing (`installed`) or
         failing at EXECUTION (`exec_unavailable`: the binary is found but its
         interpreter is gone) — is `TmuxUnavailable`; a socket that is there but
         refuses this user (`socket_denied`) is a `TmuxError`; only "no server" is
         False."""
-        self.binary()
-        if self.exec_unavailable:
-            raise TmuxUnavailable("tmux is not runnable: bad interpreter (fake)")
-        if self.answers_raises is not None:
-            raise TmuxError(self.answers_raises)
         if self.socket_denied:
+            self.binary()
+            if self.exec_unavailable:
+                raise TmuxUnavailable("tmux is not runnable: bad interpreter (fake)")
+            if self.answers_raises is not None:
+                raise TmuxError(self.answers_raises)
             raise TmuxError(f"error connecting to /fake/tmux-0/{self.socket} (Permission denied)")
-        return self.running
+        return self._read()
 
     def kill_server(self) -> None:
         """As the real one: ``run("kill-server")``, which FAILS with no server up.
@@ -225,12 +250,10 @@ class FakeTmux(TmuxServer):
         self.facts.clear()
 
     def list_sessions(self) -> list[str]:
-        self.binary()
-        return list(self.sessions) if self.running else []
+        return list(self.sessions) if self._read() else []
 
     def has_session(self, name: str) -> bool:
-        self.binary()
-        return self.running and name in self.sessions
+        return self._read() and name in self.sessions
 
     def spawn_window(
         self,
@@ -275,8 +298,7 @@ class FakeTmux(TmuxServer):
         return window
 
     def list_windows(self, session: str) -> list[WindowInfo]:
-        self.binary()
-        if not self.running:
+        if not self._read():
             return []
         return [self._current(window) for window in self.sessions.get(session, [])]
 
@@ -297,8 +319,7 @@ class FakeTmux(TmuxServer):
         )
 
     def pane_facts(self, pane_id: str) -> PaneFacts | None:
-        self.binary()
-        return self.facts.get(pane_id) if self.running else None
+        return self.facts.get(pane_id) if self._read() else None
 
     # The strict twins the shutdown paths use: each is the lenient answer UNLESS
     # the server could not be asked, and that single distinction is `reachable()`
@@ -365,10 +386,14 @@ class FakeTmux(TmuxServer):
 
         The real ``kill_window`` / ``kill_session`` / ``rename_session`` /
         ``send_keys`` all route through ``run()``, which raises on a non-zero
-        exit, and tmux answers ``error connecting to …`` for each of them.
+        exit, and tmux answers ``error connecting to …`` for each of them — for
+        a socket that REFUSED this user (`socket_denied`) exactly as for one
+        with no server behind it, which is why both go through `_read`.
         """
-        if not self.running:
-            raise TmuxError(f"error connecting to /fake/tmux-0/{self.socket}")
+        if self._read():
+            return
+        denied = " (Permission denied)" if self.socket_denied else ""
+        raise TmuxError(f"error connecting to /fake/tmux-0/{self.socket}{denied}")
 
     def attach_argv(self, session: str) -> list[str]:
         return [self.binary(), "-L", self.socket, "attach-session", "-t", f"={session}"]
@@ -2069,6 +2094,42 @@ def test_stop_leaves_the_row_live_when_the_window_kill_was_refused_and_the_pane_
     assert fleet_service.list_agents(project) == []
 
 
+def test_stop_leaves_the_row_live_when_a_denied_socket_cannot_confirm_the_pane_died(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """Review of #121, round 9 verification (major): round 9 closed the suppressed
+    ``kill_window``, but ``_window`` — the very look :func:`_verify_gone` acts on —
+    still read through the LENIENT ``list_windows``/``pane_facts``. Those answer
+    ``[]``/``None`` for ANY non-zero exit, so a socket that is THERE and refuses
+    this user (``Permission denied``, exit 1 — the live server of round 7) read as
+    "the pane is really gone": the row was ended and ``✓ stopped`` printed over an
+    agent still running. The strict twins raise, so the refusal lands in
+    ``_verify_gone``'s "could not be asked" branch instead.
+
+    A wedged server was already safe here (``_tmux`` raises on the timeout, through
+    either twin). What this covers is the answered-but-refused socket, the one
+    shape the lenient reads could not tell from death.
+    """
+    agent = _coder(project)
+    tmux.honours_exit = False
+    tmux.socket_denied = True  # the socket is there; it just will not open for us
+
+    with pytest.raises(FleetError, match="could not be asked whether"):
+        fleet_service.stop(project, "coder-1", grace=2.0)
+
+    with store_session() as store:
+        live = store.fleet_agents(project.id, live_only=True)
+    assert [a.id for a in live] == [agent.id], "the row is LEFT LIVE"
+    assert tmux.facts[agent.pane_id].dead is False, "and the pane really is still running"
+    assert tmux.killed == [], "nothing died"
+    # Negative control: the same non-zero exit from a server tmux says is GONE is
+    # positive evidence of absence, and ends the row exactly as it always did.
+    tmux.socket_denied = False
+    tmux.running = False
+    ended = fleet_service.stop(project, "coder-1", grace=2.0)
+    assert ended.ended_at is not None and ended.exit_status is None
+
+
 # --- reap ----------------------------------------------------------------------------
 
 
@@ -3092,6 +3153,204 @@ def test_shutdown_reports_a_late_dead_pane_it_could_not_remove(
     assert [s for s in report.sessions_failed if late[0].pane_id in s], report.sessions_failed
     assert report.incomplete_projects == [project.id], "so the project is NOT down"
     assert [a.exit_status for a in report.stopped if a.id == late[0].id] == [42], "status kept"
+
+
+def test_shutdown_keeps_the_claim_of_a_row_on_a_socket_that_refused_after_the_probe(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same major finding, reached the way an operator would: the socket ANSWERS
+    ``_shutdown_probe`` — so the command runs rather than refusing — and refuses
+    from then on. Through the lenient reads that was indistinguishable from every
+    pane being gone: rows ended, board sessions closed and a running agent's claimed
+    task handed back to the next worker, over agents that were all still alive.
+    """
+    coder = _coder(project)
+    _board_session(coder, "working")
+    task = _add_task(project, "wire the auth callback")
+    assert coder.session_id is not None
+    with store_session() as store:
+        lease = datetime.now(tz=UTC) + timedelta(hours=1)
+        assert store.claim_task(task.id, coder.session_id, lease)
+    real_probe = fleet_service._shutdown_probe
+
+    def probe_then_refuse(*args: object, **kwargs: object) -> dict[str, bool]:
+        answering = real_probe(*args, **kwargs)  # type: ignore[arg-type]
+        tmux.socket_denied = True  # it answered, and only THEN refused
+        return answering
+
+    monkeypatch.setattr(fleet_service, "_shutdown_probe", probe_then_refuse)
+
+    report = fleet_service.shutdown(project, force=True)
+
+    assert report.stopped == [] and report.claims_released == []
+    assert [row.agent.id for row in report.failed] == [coder.id]
+    assert "could not be asked" in report.failed[0].reason
+    assert tmux.facts[coder.pane_id].dead is False, "its pane is still running"
+    assert tmux.killed == [], "and nothing was killed on a socket that would not answer"
+    assert report.incomplete_projects == [project.id], "the project is NOT confirmed down"
+    with store_session() as store:
+        live = store.fleet_agents(project.id, live_only=True)
+        held = store.get_task(task.id)
+        session = store.get_session(coder.session_id)
+    assert [a.id for a in live] == [coder.id], "the row is LEFT LIVE"
+    assert held is not None and held.status == "doing" and held.claimed_by == coder.session_id
+    assert session is not None and session.ended_at is None, "its board session is kept too"
+
+
+# The three branches of `_retire_late_panes`' session reconcile. The round-9 tests
+# both take its `has_session_or_raise(...) is False` exit — "the window took the
+# session with it" — so everything after it, including the spare rule the docstring
+# leans on hardest, was unexecuted by any test (review of #121, round 9
+# verification). Each of the three is the same late self-exit with one thing
+# different about what its session still holds.
+
+
+def test_shutdown_leaves_up_a_session_the_late_dead_pane_shared_with_a_live_one(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two rows land after the kill phase in one session; one exits on its own, the
+    other is still running. Removing the dead pane must not take the session — that
+    would kill an agent tmux had just confirmed alive, the bug rounds 2-3 closed.
+    """
+    _coder(project)
+    late: list[FleetAgent] = []
+    real_kill = fleet_service._kill_fleet_sessions
+
+    def kill_then_two_late_rows(*args: object, **kwargs: object) -> None:
+        real_kill(*args, **kwargs)  # type: ignore[arg-type]
+        exited = _coder(project)  # both came up after the kill phase, same session
+        running = _coder(project)
+        tmux.die(exited.pane_id, 42)  # …and only one of them exited
+        late.extend([exited, running])
+
+    monkeypatch.setattr(fleet_service, "_kill_fleet_sessions", kill_then_two_late_rows)
+
+    report = fleet_service.shutdown(project, force=True)
+
+    exited, running = late
+    assert exited.pane_id in tmux.killed, "the retained dead pane is removed"
+    assert tmux.facts[running.pane_id].dead is False, "the live late agent survives"
+    assert report.sessions_left_up == [_session_of(project)], "its session is SPARED"
+    assert report.sessions_killed == [] and tmux.killed_sessions == []
+    assert [row.agent.id for row in report.failed] == [running.id], "the live row is reported"
+    assert [a.exit_status for a in report.stopped if a.id == exited.id] == [42], "status kept"
+    assert report.incomplete_projects == [project.id], "so the project is NOT confirmed down"
+
+
+def test_shutdown_kills_the_session_a_late_dead_pane_left_holding_only_a_stray_window(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The session outlives the late pane because a window the OPERATOR opened by
+    hand is in it (``prefix c``, ``fleet attach``). No row names that window, so
+    nothing spares the session on its account: it is the fleet's own session and it
+    comes down, rather than being left standing under "✓ fleet shut down".
+    """
+    _coder(project)
+    late: list[FleetAgent] = []
+    real_kill = fleet_service._kill_fleet_sessions
+
+    def kill_then_late_exit_beside_a_stray_window(*args: object, **kwargs: object) -> None:
+        real_kill(*args, **kwargs)  # type: ignore[arg-type]
+        agent = _coder(project)
+        tmux.die(agent.pane_id, 42)
+        tmux.spawn_window(
+            f"asq-{_codename(project)}", name="by-hand", cwd=project.root, command=["sh"]
+        )
+        late.append(agent)
+
+    monkeypatch.setattr(
+        fleet_service, "_kill_fleet_sessions", kill_then_late_exit_beside_a_stray_window
+    )
+
+    report = fleet_service.shutdown(project, force=True)
+
+    assert late[0].pane_id in tmux.killed, "the retained dead pane is removed"
+    assert report.sessions_killed == [_session_of(project)], "and its session with it"
+    assert tmux.killed_sessions == [f"asq-{_codename(project)}"]
+    assert tmux.sessions == {} and not tmux.running, "the fleet really is down"
+    assert not tmux.server_killed, "the SERVER is still never killed — it exits on its own"
+    assert report.sessions_failed == [] and report.sessions_left_up == []
+    assert report.incomplete_projects == [], "nothing is left for the report to qualify"
+
+
+def test_shutdown_reports_the_session_of_a_late_dead_pane_that_tmux_would_not_kill(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other outcome of the same branch: the session survived the late pane, is
+    spared by nothing, and tmux refuses to kill it. A refused kill is not a session
+    that went down — it is reported, and the project is not confirmed down.
+    """
+    _coder(project)
+    late: list[FleetAgent] = []
+    real_kill = fleet_service._kill_fleet_sessions
+
+    def kill_then_late_exit_beside_a_stray_window(*args: object, **kwargs: object) -> None:
+        real_kill(*args, **kwargs)  # type: ignore[arg-type]
+        agent = _coder(project)
+        tmux.die(agent.pane_id, 42)
+        tmux.spawn_window(
+            f"asq-{_codename(project)}", name="by-hand", cwd=project.root, command=["sh"]
+        )
+        late.append(agent)
+        real_kill_window = tmux.kill_window
+
+        def kill_window_then_refuse_the_rest(pane_id: str) -> None:
+            real_kill_window(pane_id)
+            tmux.refuse_kills = True  # the pane went; the session will not
+
+        monkeypatch.setattr(tmux, "kill_window", kill_window_then_refuse_the_rest)
+
+    monkeypatch.setattr(
+        fleet_service, "_kill_fleet_sessions", kill_then_late_exit_beside_a_stray_window
+    )
+
+    report = fleet_service.shutdown(project, force=True)
+
+    assert late[0].pane_id in tmux.killed, "the dead pane was removed before the refusal"
+    assert report.sessions_failed == [_session_of(project)], "the session is reported, not killed"
+    assert report.sessions_killed == [] and tmux.killed_sessions == []
+    assert f"asq-{_codename(project)}" in tmux.sessions, "and it really is still standing"
+    assert [a.exit_status for a in report.stopped if a.id == late[0].id] == [42], "status kept"
+    assert report.incomplete_projects == [project.id], "so the project is NOT confirmed down"
+
+
+def test_shutdown_reports_a_session_it_could_not_recheck_after_a_late_pane_exited(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The socket refuses between removing the late pane and re-reading its session.
+    An answer that never came is not "the session is gone": it is reported, and the
+    project stays not confirmed down, rather than the run claiming a clean finish.
+    """
+    _coder(project)
+    late: list[FleetAgent] = []
+    real_kill = fleet_service._kill_fleet_sessions
+
+    def kill_then_late_exit(*args: object, **kwargs: object) -> None:
+        real_kill(*args, **kwargs)  # type: ignore[arg-type]
+        agent = _coder(project)
+        tmux.die(agent.pane_id, 42)
+        late.append(agent)
+        real_kill_window = tmux.kill_window
+
+        def kill_window_then_deny(pane_id: str) -> None:
+            real_kill_window(pane_id)
+            tmux.socket_denied = True  # still THERE; it just stops opening for us
+
+        # Set here, not before the run: the stop phase's own kills must land
+        # normally, so the refusal meets the late retirement and nothing else.
+        monkeypatch.setattr(tmux, "kill_window", kill_window_then_deny)
+
+    monkeypatch.setattr(fleet_service, "_kill_fleet_sessions", kill_then_late_exit)
+
+    report = fleet_service.shutdown(project, force=True)
+
+    assert late[0].pane_id in tmux.killed, "the pane was removed before the socket refused"
+    assert [s for s in report.sessions_failed if "could not be re-checked" in s], (
+        report.sessions_failed
+    )
+    assert report.sessions_killed == [] and report.sessions_left_up == []
+    assert [a.exit_status for a in report.stopped if a.id == late[0].id] == [42], "status kept"
+    assert report.incomplete_projects == [project.id], "an unverified session is not down"
 
 
 def test_shutdown_reports_a_pause_signal_it_could_not_read_or_clear(

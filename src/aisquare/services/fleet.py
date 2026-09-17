@@ -1470,11 +1470,23 @@ def stop(
         with a status) under some other session name, and hard-killing it
         without the graceful ``/exit`` would drop its ``SessionEnd`` hook, its
         claims and its exit status.
+
+        Both reads are the STRICT twins, because ``None`` from here is what
+        :func:`_verify_gone` acts on: the lenient pair answers ``[]``/``None``
+        for every non-zero exit, so a socket that answered the shutdown probe
+        and then refused this user (``Permission denied``, exit 1 — the live
+        server of round 7) read as "the pane is really gone", the row was ended
+        and, under ``shutdown``, a running agent's claims went back to the
+        board. That is the door round 9 closed on ``kill_window`` while leaving
+        this one open (review of #121, round 9 verification). A wedged server
+        was already safe — ``_tmux`` raises on the timeout, through either twin
+        — so what changes here is the answered-but-refused case, which now
+        raises and lands in ``_verify_gone``'s "could not be asked" branch.
         """
-        for window in srv.list_windows(session):
+        for window in srv.windows_or_raise(session):
             if window.pane_id == agent.pane_id:
                 return window
-        facts = srv.pane_facts(agent.pane_id)
+        facts = srv.pane_facts_or_raise(agent.pane_id)
         if facts is None:
             return None
         return WindowInfo(

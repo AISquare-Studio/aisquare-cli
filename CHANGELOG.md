@@ -102,7 +102,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   socket path cannot slip past it; a final row scan the store refused is
   `late_scan_failed` in the report (PARTLY, exit 1, every snapshot project keeps
   its pause); and a forgotten registration's pause is skipped, not read, so
-  `shutdown --all` no longer clears the tombstone `project forget` wrote. **Exit status is recorded only where
+  `shutdown --all` no longer clears the tombstone `project forget` wrote.
+  **Exit status is recorded only where
   tmux exposes one**: `--force` kills a live pane and records none. It refuses
   rather than guess — no usable tmux, a socket that cannot be *asked* whether a
   server is there (a wedged server's 30 s timeout used to escape as a traceback
@@ -115,7 +116,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   in `stop` still wrapped in `suppress(TmuxError)`, so a forced stop over a live
   pane returned as *stopped* and released the running agent's claims to the next
   worker; it goes through `_verify_gone` like every other failure there, and an
-  unconfirmed stop is LEFT LIVE with its claim and its board session intact. The
+  unconfirmed stop is LEFT LIVE with its claim and its board session intact.
+  Round 10 closed the other door into that outcome: the look `_verify_gone`
+  acts on read tmux LENIENTLY, so a socket that answered the probe and then
+  refused this user (`Permission denied`, exit 1) read as a pane that is gone —
+  row ended, claims released, agent running. It uses the strict reads now, and
+  a denied socket leaves the row live with "could not be asked". The report's
+  `sessions_failed` line no longer says "refused to kill" over a refused window
+  kill or a query that failed, and its `pause_scan_failed` line no longer claims
+  every pause is kept beside a project it has just cleared. The
   confirmation plan uses the strict `has_session_or_raise` and refuses on an
   enumeration that fails after a good probe, instead of quietly omitting the
   sessions it could not ask about — the operator confirmed one session and the
@@ -127,7 +136,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   row, so its window no longer holds a session — and the session a server —
   under a shutdown reporting itself complete; a session that survives that is
   spared if it holds a row left live, killed if it does not, and reported either
-  way. Board notes and tasks are kept. Doctor's fleet row now decides "the server is gone" with `answers()`
+  way. Board notes and tasks are kept. Doctor's fleet row now decides "the
+  server is gone" with `answers()`
   rather than an empty `list-sessions` (which cannot tell an empty server from an
   absent one) and *appends* a scoped `fleet shutdown --project <codename>` to the
   reap advice instead of replacing it. Twenty service tests and eight CLI

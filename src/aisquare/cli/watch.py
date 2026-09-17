@@ -22,7 +22,6 @@ by the fleet UI, which reuses the theme persistence verbatim.
 
 from __future__ import annotations
 
-import json
 import time
 from datetime import datetime
 from pathlib import Path
@@ -33,6 +32,7 @@ from rich.text import Text
 from aisquare.cli.common import local_time
 from aisquare.core import harness, paths
 from aisquare.core.console import stderr_console, stdout_console
+from aisquare.core.state_file import read_state, update_state
 from aisquare.core.store import unmet_needs
 from aisquare.models import ProjectInfo, TeamEvent, TeamSession, TeamTask
 from aisquare.services import team as team_service
@@ -225,37 +225,24 @@ _THEME_KEY = "board_theme"
 
 
 def _load_saved_theme() -> str | None:
-    """The autosaved board theme from ``state.json``, if any."""
-    path = paths.state_path()
-    if not path.exists():
-        return None
-    try:
-        value = json.loads(path.read_text(encoding="utf-8")).get(_THEME_KEY)
-    except json.JSONDecodeError:
-        return None
+    """The autosaved board theme from ``state.json``, if any.
+
+    The file has one reader (``core.state_file``): a missing, corrupt or
+    non-object file is no theme, never an exception — ``.get`` on a list used to
+    raise ``AttributeError`` from here, one line into the fleet UI's mount.
+    """
+    value = read_state().get(_THEME_KEY)
     return value if isinstance(value, str) else None
 
 
-def _save_theme(name: str) -> None:
+def _save_theme(name: str) -> bool:
     """Autosave the board theme (every change persists — no save step).
 
-    Tolerates a corrupt state.json (same anticipation as the loader) and
-    writes atomically (tmp + rename) so a mid-write crash can never leave
-    the shared state file truncated.
+    ``False`` when ``state.json`` refused it — it is not a JSON object, or not
+    writable — and was left as it was: a theme is a preference, and the file's
+    other keys are worth more than remembering one.
     """
-    try:
-        paths.ensure_home()
-        path = paths.state_path()
-        try:
-            data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
-        except (OSError, ValueError):
-            data = {}
-        data[_THEME_KEY] = name
-        temp = path.with_suffix(".json.tmp")
-        temp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-        temp.replace(path)
-    except OSError:
-        return
+    return update_state(_THEME_KEY, name)
 
 
 def action_open_transcript(app: App[Any], command: list[str]) -> str | None:

@@ -43,7 +43,6 @@ from textual.message import Message
 from textual.widget import Widget
 from textual.widgets import Static
 
-from aisquare.cli.ui.divider import STEP, ResizeSidebar
 from aisquare.models import FleetAgentStatus, ProjectInfo
 
 ROLE_ICON: dict[str, str] = {
@@ -106,6 +105,23 @@ class DoctorSelected(Message):
 
 class AccountsSelected(Message):
     """The Accounts section: the AISquare sign-in and the Claude Code accounts."""
+
+
+RESIZE_STEP = 4
+"""Columns one keyboard step moves the partition (#137)."""
+
+
+class ResizeSidebar(Message):
+    """The keyboard asks for the partition to move ``delta`` columns; ``None`` puts it back.
+
+    Posted by the sidebar, handled by the container that owns both it and the
+    divider (``app.Panes``): the two are siblings, and a bubbled message reaches
+    their parent, never each other.
+    """
+
+    def __init__(self, delta: int | None) -> None:
+        self.delta = delta
+        super().__init__()
 
 
 # --- pure helpers (unit-testable without a running app) -----------------------------
@@ -525,8 +541,7 @@ class Sidebar(Vertical):
     """
 
     DEFAULT_CSS = """
-    Sidebar { width: 30; min-width: 24; border-right: solid $primary; }
-    Sidebar:focus { border-right: solid $accent; }
+    Sidebar { width: 30; min-width: 24; }
     Sidebar #fleet-header { height: 1; padding: 0 1; }
     Sidebar #fleet-title { width: 1fr; text-style: bold; }
     Sidebar #projects { height: 1fr; }
@@ -540,9 +555,14 @@ class Sidebar(Vertical):
         ("enter", "activate", "open"),
         # The partition, for terminals without mouse reporting (#137): live only
         # while the sidebar has focus, so a pane still receives < > = as text.
-        Binding("greater_than_sign", "widen", "wider", show=False, key_display=">"),
-        Binding("less_than_sign", "narrow", "narrower", show=False, key_display="<"),
-        Binding("equals_sign", "reset_width", "reset width", show=False, key_display="="),
+        # Out of the footer (it is full); the help screen (?) lists them.
+        Binding(
+            "greater_than_sign", f"resize({RESIZE_STEP})", "wider", show=False, key_display=">"
+        ),
+        Binding(
+            "less_than_sign", f"resize(-{RESIZE_STEP})", "narrower", show=False, key_display="<"
+        ),
+        Binding("equals_sign", "resize(None)", "reset width", show=False, key_display="="),
     ]
 
     can_focus = True
@@ -564,7 +584,7 @@ class Sidebar(Vertical):
         # the nearest focusable ancestor. Left focusable, this scroll would take
         # that focus and — once the list overflows — its own up/down bindings
         # would eat the arrows, so ↑/↓ scrolled the list instead of moving the
-        # cursor and the Sidebar:focus border never showed. Focus belongs to the
+        # cursor and the sidebar never read as focused. Focus belongs to the
         # Sidebar (§4.3); the cursor scrolls the list through ``scroll_visible``.
         with VerticalScroll(id="projects", can_focus=False):
             yield Static(
@@ -770,14 +790,9 @@ class Sidebar(Vertical):
             return ahead[0] if ahead else behind[-1]
         return behind[-1] if behind else ahead[0]
 
-    def action_widen(self) -> None:
-        self.post_message(ResizeSidebar(STEP))
-
-    def action_narrow(self) -> None:
-        self.post_message(ResizeSidebar(-STEP))
-
-    def action_reset_width(self) -> None:
-        self.post_message(ResizeSidebar(None))
+    def action_resize(self, delta: int | None) -> None:
+        """Ask for the partition to move ``delta`` columns (``None``: reset); ``Panes`` answers."""
+        self.post_message(ResizeSidebar(delta))
 
     def action_cursor_down(self) -> None:
         self._move_cursor(1)

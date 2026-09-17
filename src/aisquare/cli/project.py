@@ -48,6 +48,8 @@ def switch(name: Annotated[str, typer.Argument(help="Project name or id prefix."
         fail(f"no project matches '{name}'", error="not_found", ref=name)
     except ValueError as exc:
         fail(str(exc), error="ambiguous_project", ref=name)
+    except OSError as exc:
+        fail(str(exc), error="state_unwritable", ref=name)
     emit_project_action(f"✓ switched to {project.root.name or project.id} ({project.id})", project)
 
 
@@ -92,6 +94,8 @@ def forget(
         fail(str(exc), error="ambiguous_project", ref=ref)
     except project_service.ProjectBusyError as exc:
         fail(str(exc), error="project_busy", ref=exc.project.id, exit_code=2)
+    except OSError as exc:
+        fail(str(exc), error="state_unwritable", ref=ref)
     emit_project_forget(report)
 
 

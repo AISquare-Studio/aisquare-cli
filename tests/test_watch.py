@@ -483,3 +483,17 @@ def test_single_click_shows_task_detail(runner: CliRunner, work_dir: Path) -> No
     # (3) ...and so did the refresh ticks.
     assert final_text == feed_text
     assert final_moment == feed_moment
+
+
+def test_the_theme_readers_survive_a_state_file_that_is_not_an_object(isolated_home: Path) -> None:
+    """`_load_saved_theme` raised `AttributeError` on such a file (`.get` on a list), one
+    line into the fleet UI's mount; `_save_theme` replaced the file wholesale."""
+    from aisquare.cli import watch as watch_mod
+
+    isolated_home.mkdir(parents=True, exist_ok=True)
+    path = isolated_home / "state.json"
+    body = '["was", "a", "list"]\n'
+    path.write_text(body)
+    assert watch_mod._load_saved_theme() is None
+    assert watch_mod._save_theme("nord") is False
+    assert path.read_text() == body

@@ -45,19 +45,14 @@ from textual.widget import Widget
 from textual.widgets import ContentSwitcher, Footer, Static
 from textual.worker import Worker, WorkerState
 
-from aisquare.cli.ui.divider import (
-    Divider,
-    ResizeSidebar,
-    SidebarResized,
-    load_sidebar_width,
-    save_sidebar_width,
-)
+from aisquare.cli.ui.divider import Divider, cells
 from aisquare.cli.ui.sidebar import (
     AccountsSelected,
     AddProject,
     AgentSelected,
     DoctorSelected,
     ProjectSelected,
+    ResizeSidebar,
     Sidebar,
     SpawnAgent,
     accounts_summary_text,
@@ -94,6 +89,11 @@ _DoctorReport = tuple[Path | None, list[DoctorCheck]]
 _DOCTOR_WORKER = "doctor"
 _CHECK_SYMBOL = {CheckStatus.ok: "✓", CheckStatus.warn: "⚠", CheckStatus.fail: "✗"}
 _CHECK_STYLE = {CheckStatus.ok: "green", CheckStatus.warn: "yellow", CheckStatus.fail: "bold red"}
+
+SIDEBAR_WIDTH_KEY = "sidebar_width"
+"""The ``state.json`` key the navigator's width is remembered under (#137) — beside
+``board_theme`` and ``active_project_id``; ``core.state_file`` is the file's one
+reader and writer."""
 
 
 def _doctor_report(result: object) -> _DoctorReport | None:
@@ -156,6 +156,8 @@ class HelpScreen(ModalScreen[None]):
             (self.escape_key.upper(), "hand focus from an agent's pane back to the sidebar"),
             ("wheel", "scroll an agent pane; shift/alt+PgUp/PgDn too, shift+Home/End"),
             ("drag", "select text in a pane (double-click: a word) — copied on release"),
+            ("divider", "drag the line beside the sidebar to resize it; double-click puts it back"),
+            ("> < =", "from the sidebar: widen, narrow, reset the divider"),
             ("t", "themes (applied live, autosaved)"),
             ("r", "refresh now"),
             ("F1", "command palette"),
@@ -169,6 +171,84 @@ class HelpScreen(ModalScreen[None]):
 
     def action_close_help(self) -> None:
         self.dismiss(None)
+
+
+class Panes(Horizontal):
+    """The two panes and the partition between them — and the partition's wiring (#137).
+
+    ``Sidebar`` and ``Divider`` are siblings, so a message that bubbles from one
+    can never reach the other; it reaches this container, which is where the
+    sidebar's keyboard request (``ResizeSidebar``) meets the handle. Two more
+    things are the container's because they are about the layout, not about
+    either child:
+
+    - **The content's minimum.** A ``TerminalPane`` under :data:`MIN_CONTENT`
+      columns wraps every prompt line and Claude Code's own layout gives up.
+      Rather than re-derive that bound on every gesture — which left it
+      unenforced when the TERMINAL shrank, collapsing the pane to one column
+      with the handle off screen — the container writes it as the sidebar's
+      ``max-width`` whenever its own width changes, and Textual clamps against
+      ``max-width`` on every layout pass. Too narrow for both minimums, the
+      navigator's wins: one you can read beats a pane you cannot, and the pane
+      says so with its own placeholder.
+    - **The focus signal.** Focus is in the sidebar or in a pane (§4.3), and
+      the sidebar's ``border-right`` used to say which. The divider is that
+      line now — one column, the one the hand grabs — and lights ``$accent``
+      while focus is in the sidebar.
+
+    The app keeps no handler for any of it, and nothing here assumes there is
+    one ``Divider`` on the screen: the handle and the navigator are this
+    container's direct children, and a later split inside a view is not its
+    business.
+    """
+
+    MIN_CONTENT: ClassVar[int] = 40
+    """The columns the content pane keeps, whatever the drag or the terminal's size."""
+
+    @property
+    def sidebar(self) -> Sidebar:
+        return self.query_children(Sidebar).first()
+
+    @property
+    def divider(self) -> Divider:
+        return self.query_children(Divider).first()
+
+    @classmethod
+    def sidebar_ceiling(cls, total: int, floor: int) -> int:
+        """The widest the navigator may be in ``total`` columns; the divider takes one of them."""
+        return max(floor, total - 1 - cls.MIN_CONTENT)
+
+    def on_resize(self, event: events.Resize) -> None:
+        sidebar = self.sidebar
+        floor = cells(sidebar.styles.min_width) or 1
+        sidebar.styles.max_width = self.sidebar_ceiling(event.size.width, floor)
+
+    def on_resize_sidebar(self, event: ResizeSidebar) -> None:
+        """The sidebar's keyboard fallback: step or reset the partition."""
+        event.stop()
+        if event.delta is None:
+            self.divider.reset()
+        else:
+            self.divider.step(event.delta)
+
+    def on_descendant_focus(self, event: events.DescendantFocus) -> None:
+        self._mark_focus()
+
+    def on_descendant_blur(self, event: events.DescendantBlur) -> None:
+        self._mark_focus()
+
+    def _mark_focus(self) -> None:
+        """Light the divider iff focus is in the sidebar — read off the screen, not the event.
+
+        A pane's ``DescendantBlur`` bubbles up through the content switcher while
+        the sidebar's ``DescendantFocus`` is posted straight here, so the two can
+        arrive in either order; the screen's ``focused`` is already settled by
+        the time either does.
+        """
+        focused = self.screen.focused
+        sidebar = self.sidebar
+        beside = focused is not None and (focused is sidebar or sidebar in focused.ancestors)
+        self.divider.set_class(beside, "-neighbour-focused")
 
 
 class FleetApp(App[None], inherit_bindings=False):
@@ -223,11 +303,11 @@ class FleetApp(App[None], inherit_bindings=False):
     # --- layout -------------------------------------------------------------------
 
     def compose(self) -> ComposeResult:
-        with Horizontal(id="main"):
+        with Panes(id="main"):
             yield Sidebar(id="sidebar")
             # The partition is a widget, not a border: drag it, or step it with
             # < > = from the sidebar; the width is remembered (#137).
-            yield Divider("#sidebar", id="divider")
+            yield Divider("#sidebar", state_key=SIDEBAR_WIDTH_KEY, id="divider")
             with ContentSwitcher(id="content", initial="welcome"):
                 yield WelcomeView(escape_key=self.escape_key, id="welcome")
                 # The Onboard view is built on the first `+` (on_add_project): its
@@ -239,10 +319,6 @@ class FleetApp(App[None], inherit_bindings=False):
     def on_mount(self) -> None:
         restore_theme(self)
         self._theme_restored = True
-        saved = load_sidebar_width()
-        if saved is not None:
-            # After the first layout: the bounds need the screen's width.
-            self.call_after_refresh(self.query_one(Divider).resize_to, saved)
         self.refresh_data()
         self.set_interval(self.refresh_seconds, self.refresh_data)
         self.run_doctor()
@@ -282,16 +358,6 @@ class FleetApp(App[None], inherit_bindings=False):
 
     def on_escape_to_sidebar(self, event: EscapeToSidebar) -> None:
         self.sidebar.focus()
-
-    # --- the partition (#137) ---------------------------------------------------------
-
-    def on_resize_sidebar(self, event: ResizeSidebar) -> None:
-        """The sidebar's keyboard fallback: step or reset the partition."""
-        self.query_one(Divider).step(event.delta)
-
-    def on_sidebar_resized(self, event: SidebarResized) -> None:
-        """Every settled width is the save; the next launch starts from it."""
-        save_sidebar_width(event.width)
 
     # --- theme ----------------------------------------------------------------------
 

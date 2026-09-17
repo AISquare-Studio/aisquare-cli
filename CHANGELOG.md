@@ -7,13 +7,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
-- **The navigator is resizable** (#137). The partition between the sidebar and
-  the content is a one-column divider: drag it (the sidebar never drops below
-  24 columns, the content never below 40 — a pane narrower than that is not a
-  terminal), or with the sidebar focused step it with `>` / `<` and reset it
-  with `=`; a double click on the divider resets it too. The width is
-  remembered in `state.json` beside the theme and restored at the next launch;
-  an agent's pane forwards every width change to tmux, so the agent reflows.
+- **The navigator is resizable** (#137). The line between the sidebar and the
+  content is a divider: drag it (the sidebar never drops below 24 columns, the
+  content never below 40 — a pane narrower than that is not a terminal — and a
+  terminal that shrinks re-bounds it), or with the sidebar focused step it with
+  `>` / `<` and put it back with `=`; a double click on the divider does the
+  same. The divider is the sidebar's old right border, one column over: it
+  lights up while the sidebar has focus. The width is remembered in
+  `state.json` beside the theme and restored at the next launch; an agent's
+  pane forwards every width change to tmux, so the agent reflows. `?` lists the
+  keys.
 - **Accounts, in `asq` and on the command line.** A new **Accounts** section in
   the fleet UI's sidebar opens a page with the AISquare sign-in on top and the
   Claude Code accounts under it. The AISquare card runs `aisquare login`'s
@@ -476,6 +479,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   never shipped.
 
 ### Fixed
+- **`state.json` has one reader and one writer** (`core.state_file`; review of
+  #167). The board's theme, the pinned project and the navigator's width each
+  carried their own read-modify-write of the file, and the copies had drifted: a
+  file whose top level was not a JSON object raised from the theme's and the
+  pin's readers (the fleet UI did not start), the writers replaced such a file
+  wholesale — the theme and the pinned project gone without a word — and two
+  processes autosaving at once (`asq` and `board -w`) shared one temp file
+  name. Now a corrupt file reads as empty, is never overwritten (the save is
+  refused and the fleet UI says so once), and every write is a rename of this
+  process's own temp file. `project switch` and `project forget` report an
+  unwritable or corrupt file instead of a traceback.
 - **Alt+letter chords reach the agent as chords.** Claude Code's alt+p (switch
   model) did nothing from a fleet pane — reported 2026-09-02 and again
   2026-09-10 — because Textual's parser reads `ESC p` as `Key("alt+p",

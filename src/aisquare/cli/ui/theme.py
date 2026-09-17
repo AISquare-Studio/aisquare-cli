@@ -4,9 +4,10 @@
 picker and its autosave in ``state.json`` are reused verbatim"): a modal that
 applies every highlighted theme instantly and persists it under one key, so the
 board and the fleet UI share a look and a user picks it once. The load/save
-helpers are IMPORTED from ``cli.watch`` — one home for the state-file format —
-and only the widget is rebuilt here, because the board's picker is a local
-class inside its app factory and cannot be imported.
+helpers are IMPORTED from ``cli.watch`` — one home for the theme's key; the
+file itself has one reader and writer in ``core.state_file`` — and only the
+widget is rebuilt here, because the board's picker is a local class inside its
+app factory and cannot be imported.
 """
 
 from __future__ import annotations

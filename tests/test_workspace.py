@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from aisquare.core.ids import PROJECT_PREFIX
 from aisquare.core.store import store_session
 from aisquare.core.workspace import (
@@ -70,3 +72,18 @@ def test_active_project_ignores_a_stale_pin(tmp_path: Path) -> None:
     pin_project("prj_never_registered")
     with store_session() as store:
         assert active_project(store, cwd=tmp_path).id == project_id_for(tmp_path.resolve())
+
+
+def test_a_state_file_that_is_not_an_object_pins_nothing_and_is_not_overwritten(
+    isolated_home: Path,
+) -> None:
+    """`pinned_project_id` raised `AttributeError` on such a file (`.get` on a list) and
+    `pin_project` replaced it — theme and all. The file is the user's; it stays as it is."""
+    isolated_home.mkdir(parents=True, exist_ok=True)
+    path = isolated_home / "state.json"
+    body = '["was", "a", "list"]\n'
+    path.write_text(body)
+    assert pinned_project_id() is None
+    with pytest.raises(OSError, match="not a JSON object"):
+        pin_project("prj_abc")
+    assert path.read_text() == body

@@ -9,12 +9,12 @@ A project's id is a stable hash of its resolved root path.
 from __future__ import annotations
 
 import hashlib
-import json
 import subprocess
 from pathlib import Path
 
 from aisquare.core import paths
 from aisquare.core.ids import PROJECT_PREFIX
+from aisquare.core.state_file import read_state, update_state
 from aisquare.core.store import ContextStore
 from aisquare.models import ProjectInfo
 
@@ -133,24 +133,26 @@ def current_project(cwd: Path | None = None) -> ProjectInfo:
 
 
 def pinned_project_id() -> str | None:
-    """Return the project id pinned by ``project switch``, or ``None``."""
-    path = paths.state_path()
-    if not path.exists():
-        return None
-    value = json.loads(path.read_text(encoding="utf-8")).get(_PIN_KEY)
+    """Return the project id pinned by ``project switch``, or ``None``.
+
+    A ``state.json`` that cannot be read, or is not a JSON object, pins nothing
+    (``core.state_file``): the project is then the working directory's, as with
+    no pin at all — it used to raise from here.
+    """
+    value = read_state().get(_PIN_KEY)
     return value if isinstance(value, str) else None
 
 
 def pin_project(project_id: str | None) -> None:
-    """Pin (or, with ``None``, unpin) the active project in ``state.json``."""
-    paths.ensure_home()
-    path = paths.state_path()
-    data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
-    if project_id is None:
-        data.pop(_PIN_KEY, None)
-    else:
-        data[_PIN_KEY] = project_id
-    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    """Pin (or, with ``None``, unpin) the active project in ``state.json``.
+
+    Raises ``OSError`` when the file could not be updated: the home is not
+    writable, or the file exists and is not a JSON object — it is left as it
+    is, because the other keys in it (the board's theme, the fleet UI's
+    navigator width) are the user's.
+    """
+    if not update_state(_PIN_KEY, project_id):
+        raise OSError(f"could not update {paths.state_path()}: not writable, or not a JSON object")
 
 
 def active_project(store: ContextStore, cwd: Path | None = None) -> ProjectInfo:

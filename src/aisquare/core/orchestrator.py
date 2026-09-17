@@ -65,6 +65,25 @@ def env_fleet_agent() -> str | None:
     return agent_id or None
 
 
+def env_claude_pid() -> int | None:
+    """The pid of the Claude Code process running this hook (``CLAUDE_PID``), if any.
+
+    Claude Code exports it to every process it starts — hooks included — and
+    writes ITS OWN pid each time, so a hook always reads the process that fired
+    it: a nested ``claude -p`` inherits the parent's value into its environment
+    and still hands its hooks its own. Measured on Claude Code 2.1.272: a hook
+    under a fleet pane read the pane's ``#{pane_pid}`` on startup, on the
+    ``SessionEnd(clear)`` and on the ``SessionStart(clear)`` that follows it,
+    while the session id changed underneath. That is the PROCESS identity a
+    session id is not — ``/clear`` mints a new id in the same process, a nested
+    child is a new process under the same ``AISQUARE_FLEET_AGENT`` — and it is
+    what ``services.team`` binds a fleet row to. ``None`` for a binary that does
+    not export it, and for a value that is not a number.
+    """
+    raw = os.environ.get("CLAUDE_PID", "").strip()
+    return int(raw) if raw.isdigit() else None
+
+
 def delta_enabled() -> bool:
     """Whether per-prompt teammate deltas are injected (``AISQUARE_TEAM_DELTA=0`` mutes)."""
     return _flag_on("AISQUARE_TEAM_DELTA")

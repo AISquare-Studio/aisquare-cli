@@ -47,6 +47,7 @@ from aisquare.core.store import AmbiguousIdError, ContextStore, store_session
 from aisquare.core.tmux import TmuxError, TmuxServer, TmuxUnavailable, WindowInfo
 from aisquare.core.workspace import active_project
 from aisquare.models import (
+    CLOSED_STATUSES,
     FleetAgent,
     FleetAgentState,
     FleetAgentStatus,
@@ -843,7 +844,7 @@ def _task_for(store: ContextStore, project: ProjectInfo, task_id: str | None) ->
         raise FleetError(f"no task matches {task_id!r}")
     if task.project_id != project.id:
         raise FleetError(f"task {task_id!r} belongs to another project's board")
-    if task.status in ("done", "dropped"):
+    if task.status in CLOSED_STATUSES:
         # Harmless when the id only named a label; now it reaches the agent as
         # its assignment, and an agent spawned for finished work would be told
         # so on arrival and hold a slot for nothing.
@@ -896,6 +897,15 @@ def spawn(
     ``extra_args`` and the caller's ``agent_args``. ``AISQUARE_FLEET_AGENT``
     carries the row id into the window; ``CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=0``
     keeps Claude's native teams out of the fleet unless configured otherwise (§7.6).
+
+    The row is written AFTER the window starts (``_record``: the window's
+    ``pane_id`` is part of the row, and a label or cap race is settled against
+    the window that exists). What keeps the agent's first hook from arriving
+    before the row does is the launcher: ``aisquare launch``, inside the
+    window, waits for the row ``AISQUARE_FLEET_AGENT`` names before it execs
+    the agent (:func:`aisquare.cli.launch._await_fleet_row`), so a slow or
+    locked store, a relabel or the cap check can delay the agent's start, never
+    strip its briefing (review of #135, second round, cut item).
     """
     config = settings()
     if not _role_ok(role):
@@ -1423,7 +1433,14 @@ def stop(
     except TmuxError as exc:
         exit_status = _verify_gone(_window, label, exc)
     with store_session() as store:
-        return store.end_fleet_agent(agent.id, exit_status=exit_status)
+        ended = store.end_fleet_agent(agent.id, exit_status=exit_status)
+        # The process is dead or gone by here, so whatever its session still
+        # holds is nobody's: a clean ``/exit`` released through the agent's own
+        # hook already, a kill fired no hook, and a stop landing in a
+        # ``/clear``'s gap found the claims parked on the id that just ended
+        # (review of #135, second round, finding 5).
+        _team().release_agent_claims(store, ended, why="agent stopped")
+        return ended
 
 
 def _verify_gone(look: Callable[[], WindowInfo | None], label: str, cause: TmuxError) -> int | None:
@@ -1499,9 +1516,14 @@ def reap(project: ProjectInfo | None = None, *, server_down: bool = False) -> Re
                         continue  # that socket could not be asked: nothing is marked
                     pane = observed.get(agent.pane_id)
                     if pane is None:
-                        report.lost.append(store.end_fleet_agent(agent.id, exit_status=None))
+                        lost = store.end_fleet_agent(agent.id, exit_status=None)
+                        _team().release_agent_claims(store, lost, why="agent lost")
+                        report.lost.append(lost)
                     elif pane.dead:
                         ended = store.end_fleet_agent(agent.id, exit_status=pane.dead_status)
+                        # A crash fires no ``SessionEnd``; a clean exit already
+                        # released, and finds nothing more to release here.
+                        _team().release_agent_claims(store, ended, why="agent exited")
                         report.ended.append(ended)
                         _emit_exit(store, ended)
             _remove_merged_worktrees(store, current, report)

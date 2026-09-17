@@ -149,6 +149,32 @@ class Host(SelectionHost):
         self.notices.append(message)
 
 
+class Severities(Host):
+    """A host that records the severity of every notice, not just its text.
+
+    Severity is the whole claim of two tests — an unmappable key must not read
+    as an alarm (#151), and the wheel's fullscreen notice must stay one. It was
+    unpinned for the wheel, so a change of severity there was invisible
+    (review).
+    """
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.severities: list[str] = []
+
+    def notify(
+        self,
+        message: str,
+        *,
+        title: str = "",
+        severity: SeverityLevel = "information",
+        timeout: float | None = None,
+        markup: bool = True,
+    ) -> None:
+        self.severities.append(severity)
+        super().notify(message, title=title, severity=severity, timeout=timeout, markup=markup)
+
+
 class SwitcherHost(SelectionHost):
     """Two panes in a ``ContentSwitcher`` — the shell's own shape for hidden tabs."""
 
@@ -803,19 +829,23 @@ def test_the_wheel_on_a_plain_alternate_screen_sends_nothing_and_says_why(
     pane = fake.panes["%1"]
     pane.alternate_on, pane.mouse_on = True, False
 
-    async def drive() -> tuple[int, list[tuple[str, ...]], list[str]]:
-        host = Host(fake.server(tmp_path), "%1")
+    async def drive() -> tuple[int, list[tuple[str, ...]], list[str], list[str]]:
+        host = Severities(fake.server(tmp_path), "%1")
         async with host.run_test(size=(40, 6)) as pilot:
             widget = host.pane
             await wait_until(pilot, lambda: synced(widget))
             _notch(widget, up=True)
             _notch(widget, up=True)
             await pilot.pause(0.1)
-            return widget.scrollback, fake.sent(), list(host.notices)
+            return widget.scrollback, fake.sent(), list(host.notices), host.severities
 
-    scrollback, sent, notices = run(drive())
+    scrollback, sent, notices, severities = run(drive())
     assert scrollback == 0 and sent == []
     assert len([n for n in notices if "fullscreen" in n]) == 1, notices
+    # A WARNING, and pinned here because it shares _warn_once with the key
+    # notice: #151 made that helper hard-code "information" and this notice
+    # changed severity with it, silently, since nothing looked (review).
+    assert severities == ["warning"], severities
 
 
 def test_a_scrolled_view_comes_back_with_the_wheel_whatever_the_program_wants(
@@ -3531,24 +3561,63 @@ def test_a_change_hidden_under_the_corner_marker_leaves_the_highlight_standing(
     assert after_visible is None, "a change under the highlight the user CAN see drops it"
 
 
-def test_a_bare_modifier_press_is_ignored_in_silence(fake: FakeTmux, tmp_path: Path) -> None:
-    """#151: kitty-protocol terminals report Shift, Control… pressed ALONE as key events.
+#: Keys a focused pane sees that are not keystrokes, written out INDEPENDENTLY of
+#: ``MODIFIER_ONLY_KEYS`` — pressing the constant under test would shrink the loop
+#: rather than fail it when a name goes missing (review; CONTRIBUTING's "emptiness
+#: as both goal and symptom"). Three groups, each a bug that reached a user or a
+#: review: the fourteen modifier names, the locks WITH a modifier held (Textual
+#: keeps the prefix for those, so an exact match on ``event.key`` let them
+#: through), and the whole keys a kitty-protocol terminal reports only because
+#: Textual asks for every key.
+NOTHING_TO_TYPE = (
+    "left_shift",
+    "left_control",
+    "left_alt",
+    "left_super",
+    "left_hyper",
+    "left_meta",
+    "right_shift",
+    "right_control",
+    "right_alt",
+    "right_super",
+    "right_hyper",
+    "right_meta",
+    "iso_level3_shift",
+    "iso_level5_shift",
+    "caps_lock",
+    "num_lock",
+    "scroll_lock",
+    "shift+caps_lock",
+    "ctrl+num_lock",
+    "shift+scroll_lock",
+    "menu",
+    "print_screen",
+    "pause",
+    "raise_volume",
+    "lower_volume",
+    "mute_volume",
+    "media_play",
+    "media_pause",
+    "kp_begin",
+)
 
-    Nothing can be forwarded — a modifier is half of a chord — so nothing is
-    sent, and nothing is said: the old path raised one "tmux has no name for
-    this key — dropped" toast per modifier, three red toasts into an ordinary
-    typing session. Every name Textual can produce for a modifier is tried,
-    the lock keys included, and the control beside it is a chord that uses the
-    same modifier and still arrives.
+
+def test_a_key_with_nothing_to_type_is_ignored_in_silence(fake: FakeTmux, tmp_path: Path) -> None:
+    """#151: a kitty-protocol terminal reports keys that are not keystrokes.
+
+    Nothing can be forwarded — a modifier is half of a chord, and Menu or the
+    volume keys are nobody's message to an agent — so nothing is sent and
+    nothing is said. The old path raised one "tmux has no name for this key —
+    dropped" toast per key, three red toasts into an ordinary typing session.
+    The control beside it is a chord that USES a modifier and still arrives.
     """
-    from aisquare.core.keys import MODIFIER_ONLY_KEYS
 
     async def drive() -> tuple[list[str], list[tuple[str, ...]]]:
         host = Host(fake.server(tmp_path), "%1")
         async with host.run_test(size=(40, 6)) as pilot:
             host.pane.focus()
             await pilot.pause()
-            for key in sorted(MODIFIER_ONLY_KEYS):
+            for key in NOTHING_TO_TYPE:
                 await pilot.press(key)
             await pilot.press("ctrl+a")  # the modifier USED: the chord still arrives
             await pilot.pause()
@@ -3556,31 +3625,13 @@ def test_a_bare_modifier_press_is_ignored_in_silence(fake: FakeTmux, tmp_path: P
 
     notices, sent = run(drive())
     assert notices == []  # not one toast
-    assert sent == [("C-a",)]  # and not one stray send-keys for a bare modifier
-    assert {"left_shift", "right_control", "iso_level3_shift", "caps_lock"} <= MODIFIER_ONLY_KEYS
+    assert sent == [("C-a",)]  # and not one stray send-keys
 
 
 def test_a_truly_unmappable_key_is_still_named_once_but_as_information(
     fake: FakeTmux, tmp_path: Path
 ) -> None:
     """The remaining notice does not blame tmux or say "dropped" in red (#151)."""
-
-    class Severities(Host):
-        def __init__(self, *args: Any, **kwargs: Any) -> None:
-            super().__init__(*args, **kwargs)
-            self.severities: list[str] = []
-
-        def notify(
-            self,
-            message: str,
-            *,
-            title: str = "",
-            severity: SeverityLevel = "information",
-            timeout: float | None = None,
-            markup: bool = True,
-        ) -> None:
-            self.severities.append(severity)
-            super().notify(message, title=title, severity=severity, timeout=timeout, markup=markup)
 
     async def drive() -> tuple[list[str], list[str]]:
         host = Severities(fake.server(tmp_path), "%1")

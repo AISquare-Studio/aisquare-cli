@@ -657,12 +657,14 @@ it, not a chord; a chord your tmux is too old to carry is dropped rather than
 mistyped (below 3.5, `ctrl+alt+space` does nothing). The one exception is a
 modifier tmux cannot spell at all — Cmd (super) or hyper — which is dropped
 rather than typed, because Cmd+V is a command and not a request for a `v`.
-A modifier pressed on its own (Shift, Control, Alt… — terminals speaking the
-kitty keyboard protocol report those as keys) is nothing to type and is ignored
-without a word; a key that genuinely has no tmux spelling (F13, ctrl on a digit)
-is named once per session in a quiet notice — `no way to type f13 into a tmux
-pane` — and nothing is sent, since mistyping into a running agent is the worse
-failure.
+A key with nothing to type is ignored without a word: a modifier or a lock
+pressed on its own (Shift, Control, Caps Lock…), and the whole keys a terminal
+speaking the kitty keyboard protocol reports only because we asked it for every
+key — Menu, PrtSc, Pause, the volume and media keys, the keypad's centre. A
+chord you could have meant — a modifier held, or a function key past F12 — is
+named in a quiet notice instead, once per key name in that pane: `no way to
+type f13 into a tmux pane`. Nothing is sent either way, since mistyping into a
+running agent is the worse failure.
 Paste is bracketed, so Claude Code sees one paste and not one Enter
 per line. The wheel goes to whoever can use it: a program that tracks the mouse
 (Claude Code's fullscreen TUI does) receives it as its own mouse event and

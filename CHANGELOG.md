@@ -469,18 +469,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   never shipped.
 
 ### Fixed
-- **Tapping a bare modifier key in an agent pane no longer pops a warning
-  toast** (#151). Terminals speaking the kitty keyboard protocol (kitty,
-  ghostty, wezterm, foot, recent alacritty) report Shift, Control, Alt, Super
-  and the lock keys pressed on their own as key events; the pane looked each
-  one up in the tmux key table, found nothing, and said `left_shift: tmux has
-  no name for this key — dropped` — one red toast per modifier, three or more
-  into an ordinary typing session, reading as tmux failing. A bare modifier
-  carries no keystroke, so it is now ignored in silence (`core.keys.
-  MODIFIER_ONLY_KEYS`, every name Textual can produce). The notice for a key
-  that genuinely has no tmux spelling (F13, ctrl on a digit) stays, once per
-  key name, but as information — `no way to type f13 into a tmux pane` — since
-  tmux did not fail and nothing that could have been sent was dropped.
+- **Tapping a key with nothing to type in an agent pane no longer pops a
+  warning toast** (#151). Terminals speaking the kitty keyboard protocol
+  (kitty, ghostty, wezterm, foot, recent alacritty) report Shift, Control, Alt,
+  Super and the locks pressed on their own as key events — and, because Textual
+  asks for every key, Menu, PrtSc, Pause, the volume and media keys and the
+  keypad's centre too. The pane looked each one up in the tmux key table, found
+  nothing, and said `left_shift: tmux has no name for this key — dropped` — one
+  red toast per key, three or more into an ordinary typing session, reading as
+  tmux failing. None of them is a keystroke, so none of them is mentioned:
+  `core.keys.worth_naming` keeps the notice for a chord you could have meant —
+  a modifier held, or a function key past the twelve tmux knows. That notice
+  stays, once per key name in a pane, but as information — `no way to type f13
+  into a tmux pane` — since tmux did not fail and nothing that could have been
+  sent was dropped.
 - **Alt+letter chords reach the agent as chords.** Claude Code's alt+p (switch
   model) did nothing from a fleet pane — reported 2026-09-02 and again
   2026-09-10 — because Textual's parser reads `ESC p` as `Key("alt+p",

@@ -89,13 +89,19 @@ MODIFIERS: dict[str, str] = {"ctrl": "C-", "alt": "M-", "meta": "M-", "shift": "
 #: #135, finding 15).
 ESC_INTRODUCERS: frozenset[str] = frozenset("NOP")
 
-#: A modifier pressed ON ITS OWN, as the kitty keyboard protocol reports it and
-#: Textual names it (``textual/_keyboard_protocol.py``'s ``MODIFIER_FUNCTIONAL_KEYS``,
-#: plus the lock keys Textual would name the same way). There is no keystroke
-#: in such an event — a modifier is half of a chord, and the chord arrives as
-#: its own event — so the pane ignores these without a word (#151). Spelled out
-#: here rather than imported from Textual's private module, so a rename there
-#: breaks a test and not the UI.
+#: A modifier or a lock, as the kitty keyboard protocol reports it and Textual
+#: names it (``textual/_keyboard_protocol.py``'s ``MODIFIER_FUNCTIONAL_KEYS``,
+#: plus the three locks, which that module keeps out of the subset). There is no
+#: keystroke in such an event — a modifier is half of a chord, and the chord
+#: arrives as its own event — so the pane ignores these without a word (#151).
+#: Spelled out here rather than imported from Textual's private module, so a
+#: rename there breaks a test and not the UI: ``tests/test_keys.py`` holds this
+#: set against theirs.
+#:
+#: These are BASE names, matched by :func:`worth_naming` after the modifier
+#: tokens are stripped. Textual drops the redundant prefix only for the fourteen
+#: true modifiers, so ``left_shift`` with ctrl held is still ``left_shift`` while
+#: caps lock with shift held arrives as ``shift+caps_lock`` (review).
 MODIFIER_ONLY_KEYS: frozenset[str] = frozenset(
     {
         "left_shift",
@@ -286,6 +292,36 @@ def translate(
     if translation is None and printable and character:
         return Translation("literal", character)
     return translation
+
+
+def worth_naming(key: str) -> bool:
+    """Whether a key :func:`translate` has no answer for is worth a word.
+
+    ``translate`` returning ``None`` means nothing was sent, and the pane used
+    to say so for every such key. Most of them were never a keystroke: Textual
+    asks the terminal to report EVERY key it has
+    (``KITTY_REPORT_ALL_KEYS``, ``textual/drivers/linux_driver.py``), so a
+    focused pane sees the modifiers, the locks, Menu, PrtSc, Pause, the volume
+    and media keys and the keypad's centre — none of which anyone was trying to
+    type into an agent. Naming those is the #151 complaint with a different key
+    name on it, which is why the answer is a rule and not the list of the
+    fourteen modifier names this module used to carry alone (review).
+
+    What is left is a chord the reader could plausibly have MEANT: a modifier
+    held, or a function key above the twelve tmux knows. Those are aimed at the
+    program deliberately, so silence would be the wrong answer — nothing is
+    sent, and the reader is told once.
+
+    Known residue, recorded rather than hidden: a modifier held on one of those
+    whole keys — ``ctrl+pause``, ``shift+menu`` — still earns its one line,
+    since the rule reads a modifier as deliberate aim. That is a chord nobody
+    sends to an agent, and one informational line is the price of not keeping a
+    second copy of Textual's key names in step with theirs.
+    """
+    *modifiers, base = key.split("+")
+    if base in MODIFIER_ONLY_KEYS:
+        return False
+    return any(modifiers) or _FUNCTION.fullmatch(base) is not None
 
 
 def _is_ascii_letter(character: str) -> bool:

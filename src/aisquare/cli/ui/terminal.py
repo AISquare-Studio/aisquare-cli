@@ -56,14 +56,15 @@ unbounded — one extra process, only then.
 Input (§4.3). With the pane focused every key goes to tmux through
 ``core.keys.translate`` — literal text via ``send-keys -l``, everything else by
 tmux's key name — except the escape hatch (``F12`` by default), which posts
-:class:`EscapeToSidebar` and is never forwarded. A key tmux has no safe name for
-is dropped, with ONE quiet notice per key name; a modifier pressed on its own
-(a kitty-protocol terminal reports those) is ignored in silence (#151). ``Paste``
-goes through the paste
-buffer so the agent sees one bracketed paste. The wheel scrolls our own offset
-over the pane's history (clamped to ``history_size``); any key returns to live.
-``Resize`` is forwarded as ``resize-window`` after a 100 ms debounce. Forwarded
-input re-arms the fast cadence, so an echo never waits for the idle tick.
+:class:`EscapeToSidebar` and is never forwarded. A key tmux has no safe name
+for is dropped, with ONE quiet notice per key name and per pane — and in
+silence where there was nothing to type: a modifier, a lock, or a whole key a
+kitty-protocol terminal reports only because Textual asked for every key
+(#151). ``Paste`` goes through the paste buffer so the agent sees one bracketed
+paste. The wheel scrolls our own offset over the pane's history (clamped to
+``history_size``); any key returns to live. ``Resize`` is forwarded as
+``resize-window`` after a 100 ms debounce. Forwarded input re-arms the fast
+cadence, so an echo never waits for the idle tick.
 
 Selection (§4.3). The pane owns its highlight; :class:`TerminalPane`'s docstring
 states the rules — who sees a gesture, when a highlight is dropped, and which
@@ -105,6 +106,7 @@ from textual.actions import SkipAction
 from textual.app import App
 from textual.geometry import Offset, Region
 from textual.message import Message
+from textual.notifications import SeverityLevel
 from textual.screen import Screen
 from textual.selection import SELECT_ALL, Selection
 from textual.strip import Strip
@@ -114,9 +116,9 @@ from textual.widget import Widget
 from aisquare.core.keys import (
     ARGV_SEPARATOR,
     EXTENDED_MINIMUM,
-    MODIFIER_ONLY_KEYS,
     Translation,
     translate,
+    worth_naming,
 )
 from aisquare.core.tmux import (
     WRAP_FLAGS_MINIMUM,
@@ -1483,17 +1485,6 @@ class TerminalPane(Widget, can_focus=True):
             # ``c`` into the agent for a copy gesture (review).
             self.copy_standing_selection()
             return
-        if event.key in MODIFIER_ONLY_KEYS:
-            # A bare modifier press. Terminals speaking the kitty keyboard
-            # protocol (kitty, ghostty, wezterm, foot, recent alacritty — the
-            # ones docs/fleet.md recommends for Shift+Enter) report it as a key
-            # event, and Textual names it ``left_shift``, ``right_control``…
-            # There is no keystroke in it to forward — a modifier is half of a
-            # chord — so it is neither sent nor worth a word: the old path sent
-            # nothing too, but said "tmux has no name for this key — dropped"
-            # once per modifier, three red toasts into a normal typing session
-            # that read as tmux failing (#151).
-            return
         translation = translate(
             event.key,
             event.character,
@@ -1501,11 +1492,22 @@ class TerminalPane(Widget, can_focus=True):
             extended_keys=self._extended_keys(),
         )
         if translation is None:
-            # A genuinely unmappable chord (ctrl on a digit, F13…). Nothing is
-            # typed — mistyping into a running agent is the worse failure — and
-            # the reader is told once, as information: tmux did not fail, and
-            # nothing was "dropped" that could have been sent.
-            self._warn_once(event.key, f"no way to type {event.key} into a tmux pane")
+            # Nothing is typed — mistyping into a running agent is the worse
+            # failure. Whether that is worth saying is core.keys.worth_naming's
+            # question, asked there for every key rather than here for the
+            # fourteen modifier names this branch used to special-case: a
+            # kitty-protocol terminal reports Menu, PrtSc, Pause and the volume
+            # keys exactly as it reports a bare Shift, and a toast for those is
+            # #151 again under another name (review). What survives the rule is
+            # a chord the reader meant — ctrl on a digit, F13 — and it is named
+            # once, as information: tmux did not fail, and nothing that could
+            # have been sent was dropped.
+            if worth_naming(event.key):
+                self._warn_once(
+                    event.key,
+                    f"no way to type {event.key} into a tmux pane",
+                    severity="information",
+                )
             return
         if self.text_selection is not None:
             # Typing means the highlight is stale: the next ctrl+c must be the
@@ -1537,18 +1539,25 @@ class TerminalPane(Widget, can_focus=True):
         except TmuxError:
             self._fail(PANE_GONE)
 
-    def _warn_once(self, key: str, message: str) -> None:
-        """Say ``message`` once per key name, as information — never as an alarm.
+    def _warn_once(self, key: str, message: str, *, severity: SeverityLevel = "warning") -> None:
+        """Say ``message`` once per ``key``, at ``severity``.
 
-        An unmappable key is a fact about the key table, not a fault in tmux
-        or the pane, so the toast is the information severity (#151): the
+        Severity is a property of the MESSAGE and not of the once-per-name
+        mechanism, so each caller keeps its own answer (review). The wheel's
+        "this program is fullscreen" notice is a warning, as it always was; an
+        unmappable key is a fact about the key table rather than a fault in
+        tmux or the pane, so :meth:`on_key` asks for information (#151) — the
         warning colour read as "something is broken" for a chord that simply
         has no tmux spelling.
+
+        Once per PANE, not per session: ``_warned`` is this widget's, and the
+        app composes a ``TerminalPane`` per view — so that is the scope
+        ``docs/fleet.md`` promises, and no wider (review).
         """
         if key in self._warned:
             return
         self._warned.add(key)
-        self.notify(message, severity="information", markup=False)
+        self.notify(message, severity=severity, markup=False)
 
     def on_paste(self, event: events.Paste) -> None:
         if self.pane_id is None or self.server is None:

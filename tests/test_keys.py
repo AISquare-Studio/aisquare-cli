@@ -34,12 +34,14 @@ from aisquare.core.keys import (
     ESC_INTRODUCERS,
     EXTENDED_MINIMUM,
     MAX_FUNCTION_KEY,
+    MODIFIER_ONLY_KEYS,
     NO_CTRL,
     PUNCTUATION,
     SPECIAL,
     Translation,
     needs_extended_keys,
     translate,
+    worth_naming,
 )
 from aisquare.core.tmux import BUNDLED_CONF, TmuxError, TmuxServer
 
@@ -747,3 +749,77 @@ def test_real_tmux_types_none_of_our_names_literally(
     # it literally, 3.4 swallows it. Version-independent half: it must never
     # arrive as a WORKING backspace, the mistranslation the refusal prevents.
     assert "^? <C-BSpace>" not in text
+
+
+# --- #151: what is not a keystroke, and what is worth a word ------------------------
+
+
+def test_the_modifier_set_is_textuals_own_list_plus_the_three_locks() -> None:
+    """The claim ``MODIFIER_ONLY_KEYS``' comment makes, asked of Textual.
+
+    The set is spelled out rather than imported "so a rename there breaks a
+    test and not the UI" — this is that test. Without it a rename or a
+    fifteenth modifier upstream leaves every other test green and puts the
+    toast back in front of a user (review). The locks are the deliberate
+    surplus: Textual keeps them OUT of the modifier subset, which is exactly
+    why ``shift+caps_lock`` arrives with its prefix intact.
+    """
+    from textual._keyboard_protocol import MODIFIER_FUNCTIONAL_KEYS
+
+    assert set(MODIFIER_FUNCTIONAL_KEYS) <= MODIFIER_ONLY_KEYS
+    assert MODIFIER_ONLY_KEYS - set(MODIFIER_FUNCTIONAL_KEYS) == {
+        "caps_lock",
+        "num_lock",
+        "scroll_lock",
+    }
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        # A modifier or a lock on its own, and — the case an exact match on
+        # event.key missed — a lock with a modifier HELD (review).
+        "left_shift",
+        "right_control",
+        "iso_level3_shift",
+        "caps_lock",
+        "shift+caps_lock",
+        "ctrl+num_lock",
+        "shift+scroll_lock",
+        # Whole keys a kitty-protocol terminal reports only because Textual asks
+        # for every key. Never in the set, and they toasted until the rule
+        # replaced it: the #151 complaint with another key name on it.
+        "menu",
+        "print_screen",
+        "pause",
+        "raise_volume",
+        "media_play",
+        "kp_begin",
+    ],
+)
+def test_a_key_that_was_never_a_keystroke_is_not_worth_a_word(key: str) -> None:
+    assert translate(key, None, printable=False, extended_keys=True) is None
+    assert not worth_naming(key)
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "f13",  # a function key past the twelve tmux knows
+        "ctrl+f13",
+        "ctrl+comma",  # a modifier held: aimed at the program, deliberately
+        "ctrl+1",
+        "alt+shift+o",  # an ESC introducer: no safe name, and the user meant it
+    ],
+)
+def test_a_chord_the_reader_meant_is_still_named(key: str) -> None:
+    assert translate(key, None, printable=False, extended_keys=True) is None
+    assert worth_naming(key)
+
+
+def test_a_key_the_table_can_answer_never_reaches_the_question() -> None:
+    """The premise under both lists: ``worth_naming`` only ever judges a
+    ``None``. F1-F12 and shift+Enter have tmux names, so the pane sends them
+    and never asks — ``worth_naming`` saying yes to ``f12`` costs nothing."""
+    for name in ("f12", "shift+enter", "ctrl+a"):
+        assert translate(name, None, printable=False, extended_keys=True) is not None

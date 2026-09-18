@@ -35,7 +35,7 @@ from typer.testing import CliRunner
 
 from aisquare.cli import fleet as fleet_cli
 from aisquare.cli.app import app
-from aisquare.models import FleetAgent, FleetAgentStatus, ProjectInfo, TeamSession
+from aisquare.models import FleetAgent, FleetAgentStatus, ProjectInfo, TeamSession, TeamTask
 from aisquare.services.fleet import (
     FleetError,
     FleetUnavailable,
@@ -46,6 +46,7 @@ from aisquare.services.fleet import (
     ShutdownReport,
     ShutdownRow,
     SpawnReceipt,
+    StopReceipt,
     TellResult,
 )
 
@@ -621,10 +622,26 @@ def test_tell_an_unknown_label_is_no_such_agent(
 # ── stop ─────────────────────────────────────────────────────────────────────
 
 
+def _released_task() -> TeamTask:
+    """A task a stop returned to the pool, as ``StopReceipt.released`` carries it."""
+    now = datetime.now(tz=UTC)
+    return TeamTask(
+        id="tsk_01x",
+        project_id=PROJECT.id,
+        key="k",
+        title="the task it held",
+        status="todo",
+        created_at=now,
+        updated_at=now,
+    )
+
+
 def test_stop_confirms_and_passes_force_through(
     runner: CliRunner, resolved: Seen, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    stop = _install(monkeypatch, "stop", _agent("coder-auth", ended=True, exit_status=0))
+    stop = _install(
+        monkeypatch, "stop", StopReceipt(_agent("coder-auth", ended=True, exit_status=0), [])
+    )
 
     gentle = runner.invoke(app, ["fleet", "stop", "coder-auth"])
     assert gentle.exit_code == 0, gentle.output
@@ -639,16 +656,68 @@ def test_stop_confirms_and_passes_force_through(
 def test_stop_json_returns_the_agent_row(
     runner: CliRunner, resolved: Seen, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _install(monkeypatch, "stop", _agent("coder-auth", ended=True, exit_status=0))
+    released = _released_task()
+    _install(
+        monkeypatch,
+        "stop",
+        StopReceipt(_agent("coder-auth", ended=True, exit_status=0), [released]),
+    )
 
     result = runner.invoke(app, ["--json", "fleet", "stop", "coder-auth"])
 
     assert result.exit_code == 0, result.output
     payload = json.loads(result.stdout)
-    assert set(payload) == {"agent"}
+    assert set(payload) == {"agent", "claims_released", "release_failed"}
     assert payload["agent"]["label"] == "coder-auth"
     assert payload["agent"]["ended_at"] is not None
     assert payload["agent"]["exit_status"] == 0
+    assert payload["claims_released"] == ["tsk_01x"], "what the stop returned to the pool"
+    assert payload["release_failed"] is None
+
+
+def test_stop_names_the_claims_it_released(
+    runner: CliRunner, resolved: Seen, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The work a stop returns to the pool is the one thing the next agent
+    inherits from this one, so it is named, not counted (review of #203)."""
+    released = _released_task()
+    _install(
+        monkeypatch,
+        "stop",
+        StopReceipt(_agent("coder-auth", ended=True, exit_status=0), [released]),
+    )
+
+    result = runner.invoke(app, ["fleet", "stop", "coder-auth"])
+
+    assert result.exit_code == 0, result.output
+    out = _plain(result.stdout)
+    assert "🔓 1 claimed task(s) released back to the board" in out, (
+        "the one line every command uses"
+    )
+    assert "· the task it held (tsk_01x)" in out, "and the receipt's tasks named under it"
+
+
+def test_stop_says_when_the_release_was_refused(
+    runner: CliRunner, resolved: Seen, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The row is down; the claims that stayed with the ended session are the
+    operator's to know about, not a swallowed exception's (review of the fold)."""
+    _install(
+        monkeypatch,
+        "stop",
+        StopReceipt(
+            _agent("coder-auth", ended=True, exit_status=0),
+            [],
+            release_failed="OperationalError: database is locked",
+        ),
+    )
+
+    result = runner.invoke(app, ["fleet", "stop", "coder-auth"])
+
+    assert result.exit_code == 0, result.output
+    out = _plain(result.stdout)
+    assert "✓ stopped coder-auth" in out
+    assert "its claims could not be released (OperationalError: database is locked)" in out
 
 
 # ── shutdown ─────────────────────────────────────────────────────────────────
@@ -816,6 +885,7 @@ def test_shutdown_json_carries_every_group_and_the_reasons(
         "sessions_left_up",
         "servers_absent",
         "claims_released",
+        "release_failures",
         "paused_cleared",
         "paused_kept",
         "incomplete_projects",
@@ -1044,8 +1114,9 @@ def test_reap_json(runner: CliRunner, resolved: Seen, monkeypatch: pytest.Monkey
 
     assert result.exit_code == 0, result.output
     payload = json.loads(result.stdout)
-    assert set(payload) == {"ended", "lost", "worktrees_removed"}
+    assert set(payload) == {"ended", "lost", "worktrees_removed", "claims_released"}
     assert [a["label"] for a in payload["ended"]] == ["coder-auth"]
+    assert payload["claims_released"] == []
     assert payload["lost"] == []
     assert payload["worktrees_removed"] == ["/home/me/work/api/.aisquare-worktrees/coder-auth"]
 
@@ -1163,7 +1234,7 @@ def test_pause_of_an_unknown_project_is_not_found(
         (["fleet", "ls"], {"list_agents": [_status(_agent())]}),
         (["fleet", "status"], {"list_agents": []}),
         (["fleet", "tell", "coder-auth", "hi"], {"tell": TellResult(True, "typed")}),
-        (["fleet", "stop", "coder-auth"], {"stop": _agent()}),
+        (["fleet", "stop", "coder-auth"], {"stop": StopReceipt(_agent(), [])}),
         (["fleet", "attach"], {"attach_argv": list(ATTACH_ARGV)}),
         (["fleet", "reap"], {"reap": ReapReport()}),
         (["fleet", "rename", "ruby-fox"], {"rename": PROJECT}),

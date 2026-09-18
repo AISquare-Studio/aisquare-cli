@@ -40,6 +40,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import ModuleType
+from typing import Any
 
 from aisquare.core import codenames, harness, orchestrator, selfcli
 from aisquare.core.config import FleetRoleSettings, FleetSettings, load_config
@@ -168,6 +169,32 @@ class ReapReport:
     ended: list[FleetAgent] = field(default_factory=list)
     lost: list[FleetAgent] = field(default_factory=list)
     worktrees_removed: list[Path] = field(default_factory=list)
+    claims_released: list[str] = field(default_factory=list)
+    """Task ids the ended and lost rows' board sessions still held, returned to
+    the pool — the same count ``shutdown`` reports, where ``reap`` used to
+    discard :func:`services.team.release_agent_claims`' answer in both branches
+    (review of #203, round 4)."""
+
+
+@dataclass(frozen=True)
+class StopReceipt:
+    """What :func:`stop` did: the row it ended, and the claims that ended with it.
+
+    ``released`` is the answer ``shutdown`` needs to COUNT what a stop returned
+    to the pool. It used to reach that through a ``release_claims=False`` flag
+    on ``stop`` and a second release of its own — two paths that had to agree
+    the pane was dead, and a caller that forgot the flag double-released
+    (review of #203, round 4). One release, in ``stop``, reported here.
+    """
+
+    agent: FleetAgent
+    released: list[TeamTask]
+    release_failed: str | None = None
+    """Why the release did not happen, when it did not: the row IS ended and the
+    pane IS dead by then, so a store that refuses the courtesy (a lock, a
+    vanished session row) costs the release and is SAID here — never the stop,
+    which used to raise out of ``shutdown`` and report a dead, ended row as
+    LEFT LIVE, keep the project's pause and exit 1 (review of the fold)."""
 
 
 @dataclass(frozen=True)
@@ -220,6 +247,12 @@ class ShutdownReport:
     """Sockets with no server to ask — the rows on them went to ``recorded``."""
     claims_released: list[str] = field(default_factory=list)
     """Task ids released from the ended rows' board sessions (``release_claims``)."""
+    release_failures: list[str] = field(default_factory=list)
+    """``<label>: <error>`` for each ended row whose claims could NOT be released —
+    a store that refused after the row was ended. The row is down and counted
+    where it belongs; its work stays claimed by a session that no longer exists
+    until the lease lapses, which the operator has to be told rather than have
+    swallowed (the release used to be a silent ``suppress(Exception)``)."""
     paused_cleared: list[str] = field(default_factory=list)
     """Projects whose ``fleet-paused`` signal this cleared, by display name."""
     paused_kept: list[str] = field(default_factory=list)
@@ -1455,8 +1488,7 @@ def stop(
     *,
     force: bool = False,
     grace: float = 5.0,
-    release_claims: bool = True,
-) -> FleetAgent:
+) -> StopReceipt:
     """``/exit`` the agent, wait ``grace`` seconds, then kill its window.
 
     The agent's own ``SessionEnd`` hook releases its claims when it exits
@@ -1464,8 +1496,9 @@ def stop(
     therefore records no exit status, since one is only ever read from a pane
     that already reads dead. Whatever the ended row's session STILL holds is
     released here once the pane is confirmed dead or gone (a kill fires no hook,
-    and a ``/clear`` parks claims on the id it ended); ``release_claims=False``
-    leaves that to a caller that reports the release itself (``shutdown``).
+    and a ``/clear`` parks claims on the id it ended), and RETURNED with the
+    row (:class:`StopReceipt`), so a caller that reports releases —
+    ``shutdown`` — counts this one instead of making a second.
 
     Ending the row emits ``agent_exited`` and nudges the manager, exactly as
     ``reap`` does for a pane it found dead. It belongs HERE rather than in each
@@ -1584,16 +1617,20 @@ def stop(
         # holds is nobody's: a clean ``/exit`` released through the agent's own
         # hook already, a kill fired no hook, and a stop landing in a
         # ``/clear``'s gap found the claims parked on the id that just ended
-        # (review of #135, second round, finding 5). ``fleet shutdown`` passes
-        # ``release_claims=False``: the release is its report's to make and to
-        # count, and it makes it through the same helper (``_release_session``).
-        if release_claims:
-            _team().release_agent_claims(store, ended, why="agent stopped")
+        # (review of #135, second round, finding 5). ONE release, here, in the
+        # store session that ended the row; what it returned rides on the
+        # receipt for whoever counts it.
+        released: list[TeamTask] = []
+        release_failed: str | None = None
+        try:
+            released = _team().release_agent_claims(store, ended, why="agent stopped")
+        except Exception as exc:  # the row is ended; the release is the courtesy owed after
+            release_failed = f"{type(exc).__name__}: {exc}"
         _emit_exit(store, ended)
     # Outside the store session, as ``reap`` does: the nudge types into a pane
     # and must not hold the write lock the woken manager's own hooks will want.
     nudge_manager(ended.project_id, reason=f"{ended.label} exited")
-    return ended
+    return StopReceipt(ended, released, release_failed)
 
 
 def _manager_first(agents: list[FleetAgent]) -> list[FleetAgent]:
@@ -1889,8 +1926,8 @@ def _not_down(report: ShutdownReport, project_id: str | None) -> None:
         report.incomplete_projects.append(project_id)
 
 
-def _release_session(agent: FleetAgent, report: ShutdownReport) -> None:
-    """End the ended agent's board session and RELEASE its claims.
+def _release_in(store: ContextStore, agent: FleetAgent, report: ShutdownReport) -> None:
+    """RELEASE the ended agent's board session's claims, through ``store``, and count them.
 
     ``services.team`` names exactly this caller: a caller that "genuinely knows
     the session is dead passes ``release_claims=True``". Without it a task the
@@ -1899,18 +1936,20 @@ def _release_session(agent: FleetAgent, report: ShutdownReport) -> None:
     ``_CLAIM_ORPHAN_AFTER`` (4 h) — so the next fleet's manager sees its work
     held by the dead. Under ``--force`` there is no ``/exit`` and therefore no
     ``SessionEnd`` hook to do it, and a recorded row's pane was never reached at
-    all. A courtesy, never the shutdown: a store that will not answer here costs
-    the release, not the report.
+    all. Through the store the caller already holds open for the row it just
+    ended, rather than a connection of its own per row (review of #203, round
+    4). A courtesy, never the shutdown: a store that will not answer here costs
+    the release, not the report — and is NAMED in it (``release_failures``),
+    where a ``suppress(Exception)`` used to leave the stuck claim unmentioned.
     """
     if agent.session_id is None:
         return
-    with suppress(Exception):
-        with store_session() as store:
-            # The same release `stop` and `reap` make for a row they ended — ending
-            # the session's presence, returning its ``doing`` claims and saying so
-            # on the board (``task_released``) — counted here for the report.
-            released = _team().release_agent_claims(store, agent, why="fleet shutdown")
-        report.claims_released.extend(task.id for task in released)
+    try:
+        released = _team().release_agent_claims(store, agent, why="fleet shutdown")
+    except Exception as exc:
+        report.release_failures.append(f"{agent.label}: {type(exc).__name__}: {exc}")
+        return
+    report.claims_released.extend(task.id for task in released)
 
 
 def _record_lost(agent: FleetAgent, reason: str, report: ShutdownReport) -> None:
@@ -1918,12 +1957,12 @@ def _record_lost(agent: FleetAgent, reason: str, report: ShutdownReport) -> None
     try:
         with store_session() as store:
             ended = store.end_fleet_agent(agent.id, exit_status=None)
+            _release_in(store, ended, report)
     except Exception as exc:  # a vanished row (KeyError), a locked store
         report.failed.append(ShutdownRow(agent, f"its row could not be ended ({exc})"))
         _not_down(report, agent.project_id)
         return
     report.recorded.append(ShutdownRow(ended, reason))
-    _release_session(ended, report)
 
 
 def _record_self_exit(agent: FleetAgent, dead_status: int | None, report: ShutdownReport) -> None:
@@ -1942,13 +1981,13 @@ def _record_self_exit(agent: FleetAgent, dead_status: int | None, report: Shutdo
     try:
         with store_session() as store:
             ended = store.end_fleet_agent(agent.id, exit_status=dead_status)
+            _release_in(store, ended, report)
             _emit_exit(store, ended)
     except Exception as exc:  # a vanished row (KeyError), a locked store
         report.failed.append(ShutdownRow(agent, f"its row could not be ended ({exc})"))
         _not_down(report, agent.project_id)
         return
     report.stopped.append(ended)
-    _release_session(ended, report)
 
 
 def _row_that_went_away(agent: FleetAgent, reason: str, report: ShutdownReport) -> None:
@@ -1964,11 +2003,14 @@ def _row_that_went_away(agent: FleetAgent, reason: str, report: ShutdownReport) 
     try:
         with store_session() as store:
             current = store.get_fleet_agent(agent.id)
+            if current is not None and current.ended_at is not None:
+                # Its own hook or a `reap` released already; this finds nothing
+                # more, and says so through the same count if it does.
+                _release_in(store, current, report)
     except Exception:  # the store is the only witness; without it, claim nothing new
         current = None
     if current is not None and current.ended_at is not None:
         report.stopped.append(current)
-        _release_session(current, report)
         return
     report.failed.append(ShutdownRow(agent, reason))
     _not_down(report, agent.project_id)
@@ -2001,7 +2043,7 @@ def _shutdown_row(
         _record_lost(agent, f"no server answered on socket {agent.tmux_socket!r}", report)
         return
     try:
-        stopped = stop(project, agent.label, force=force, grace=grace, release_claims=False)
+        receipt = stop(project, agent.label, force=force, grace=grace)
     except NoSuchAgent as exc:
         _row_that_went_away(agent, str(exc), report)
     except FleetError as exc:
@@ -2011,8 +2053,12 @@ def _shutdown_row(
         report.failed.append(ShutdownRow(agent, f"{type(exc).__name__}: {exc}"))
         _not_down(report, agent.project_id)
     else:
-        report.stopped.append(stopped)
-        _release_session(stopped, report)
+        # `stop` released what the ended session held and says what; counted
+        # here rather than released again (review of #203, round 4).
+        report.stopped.append(receipt.agent)
+        report.claims_released.extend(task.id for task in receipt.released)
+        if receipt.release_failed:
+            report.release_failures.append(f"{receipt.agent.label}: {receipt.release_failed}")
 
 
 def _retire_late_panes(
@@ -2226,15 +2272,26 @@ def _clear_pause(
     or a listing that failed keeps its signal and is named in ``paused_kept``.
     A signal this could not READ or WRITE is reported rather than passed over —
     the pause outlives the shutdown either way, and the operator has to know.
+
+    ONE store connection for the whole pass. ``is_paused`` and ``resume`` each
+    open their own — connect, WAL switch, migrations — so an ``--all`` shutdown
+    paid two opens per project here on top of the rows'; the signals are read
+    and cleared through the store this holds, by project id
+    (:func:`services.team.read_signal_in`, :func:`services.team.set_signal_in`),
+    which also keeps the shutdown from contending with the hooks of the agents
+    it is still stopping (review of #203, round 4).
     """
-    # `is_paused`/`resume` resolve the board through `ensure_project`, which
-    # CLEARS a registration's tombstone. `shutdown --all` reads past tombstones
-    # on purpose (a forgotten project can hold live rows), so touching the pause
-    # of one would silently undo `project forget` (review of #121, round 7). A
-    # forgotten project's pause is nobody's standing order: skipped, not read.
+    team = _team()
     try:
         with store_session() as store:
+            # `is_paused`/`resume` resolve the board through `ensure_project`,
+            # which CLEARS a registration's tombstone. `shutdown --all` reads
+            # past tombstones on purpose (a forgotten project can hold live
+            # rows), so touching the pause of one would silently undo `project
+            # forget` (review of #121, round 7). A forgotten project's pause is
+            # nobody's standing order: skipped, not read.
             visible = {p.id for p in store.list_projects()}
+            failures = _reconcile_pauses(store, team, targets, visible, report)
     except Exception as exc:
         # The store `_record_late_rows` already found locked is still locked (or
         # a fresh failure). The report is owed to the caller regardless, and this
@@ -2245,19 +2302,35 @@ def _clear_pause(
         # the partial report is returned.
         report.pause_scan_failed = f"{type(exc).__name__}: {exc}"
         return
-    # Per-project read/write failures, surfaced the way the lookup above is. A
-    # blanket `suppress(Exception)` here left the signal ON with `paused_kept=[]`,
-    # `pause_scan_failed=null` and exit 0 — the next manager still under orders to
-    # spawn nothing, and nothing in the report saying so (review of #121, round 9).
-    # A disabled board is NOT one of these: `is_paused` answers False for it
-    # (nothing can be paused where no signal can exist), so an ordinary run on a
-    # project with no board still reports clean.
+    if failures:
+        report.pause_scan_failed = "; ".join(failures)
+
+
+def _reconcile_pauses(
+    store: ContextStore,
+    team: Any,
+    targets: Sequence[tuple[ProjectInfo, list[FleetAgent]]],
+    visible: Collection[str],
+    report: ShutdownReport,
+) -> list[str]:
+    """The per-project half of :func:`_clear_pause`; returns what could not be done.
+
+    Per-project read/write failures are surfaced the way the lookup's is. A
+    blanket ``suppress(Exception)`` here left the signal ON with
+    ``paused_kept=[]``, ``pause_scan_failed=null`` and exit 0 — the next manager
+    still under orders to spawn nothing, and nothing in the report saying so
+    (review of #121, round 9). A disabled board is NOT one of these: it holds no
+    signals (nothing can be paused where no signal can exist), so an ordinary
+    run on a project with no board still reports clean.
+    """
     failures: list[str] = []
     for project, _ in targets:
         if project.id not in visible:
             continue
         try:
-            paused = is_paused(project)
+            paused = _pause_is_on(store, project)
+        except team.TeamDisabledError:
+            return failures  # no board, no signals: nothing is paused anywhere
         except Exception as exc:
             # The signal could not even be READ, so nothing is known about it:
             # the failure is named and the project is not confirmed down, and
@@ -2275,17 +2348,16 @@ def _clear_pause(
             report.paused_kept.append(_name(project))
             continue
         try:
-            resume(project)
+            _clear_pause_signal(store, project)
         except Exception as exc:
-            # `is_paused` just said the signal is ON and the clear did not happen:
-            # it IS kept, so it is named as kept as well as reported failed.
+            # The signal was just read ON and the clear did not happen: it IS
+            # kept, so it is named as kept as well as reported failed.
             failures.append(f"{_name(project)}: could not be cleared ({type(exc).__name__}: {exc})")
             report.paused_kept.append(_name(project))
             _not_down(report, project.id)
             continue
         report.paused_cleared.append(_name(project))
-    if failures:
-        report.pause_scan_failed = "; ".join(failures)
+    return failures
 
 
 def shutdown_plan(project: ProjectInfo | None = None) -> ShutdownPlan:
@@ -2484,13 +2556,15 @@ def reap(project: ProjectInfo | None = None, *, server_down: bool = False) -> Re
                     pane = observed.get(agent.pane_id)
                     if pane is None:
                         lost = store.end_fleet_agent(agent.id, exit_status=None)
-                        _team().release_agent_claims(store, lost, why="agent lost")
+                        released = _team().release_agent_claims(store, lost, why="agent lost")
+                        report.claims_released.extend(task.id for task in released)
                         report.lost.append(lost)
                     elif pane.dead:
                         ended = store.end_fleet_agent(agent.id, exit_status=pane.dead_status)
                         # A crash fires no ``SessionEnd``; a clean exit already
                         # released, and finds nothing more to release here.
-                        _team().release_agent_claims(store, ended, why="agent exited")
+                        released = _team().release_agent_claims(store, ended, why="agent exited")
+                        report.claims_released.extend(task.id for task in released)
                         report.ended.append(ended)
                         _emit_exit(store, ended)
             _remove_merged_worktrees(store, current, report)
@@ -2582,12 +2656,29 @@ def _set_pause(project: ProjectInfo, value: str, session_ref: str | None) -> Non
 
 
 def is_paused(project: ProjectInfo) -> bool:
-    team = _team()
-    try:
-        state = team.read_signal(PAUSE_SIGNAL, project_id=project.id)
-    except team.TeamDisabledError:
-        return False  # a disabled board holds no signals: nothing can be paused
+    if not orchestrator.team_enabled():
+        return False  # a disabled board holds no signals: nothing can be paused — and no store
+    return_value: bool
+    with store_session() as store:
+        return_value = _pause_is_on(store, project)
+    return return_value
+
+
+def _pause_is_on(store: ContextStore, project: ProjectInfo) -> bool:
+    """Whether ``project``'s ``fleet-paused`` signal reads ON, through ``store``.
+
+    The read half of the pause, id-addressed and on a caller's connection, so
+    ``shutdown``'s pass over every project pays one open (review of #203,
+    round 4). Raises ``TeamDisabledError`` when there is no board to ask.
+    """
+    state = _team().read_signal_in(store, project.id, PAUSE_SIGNAL)
     return state is not None and state.value == "on"
+
+
+def _clear_pause_signal(store: ContextStore, project: ProjectInfo) -> None:
+    """Set ``project``'s ``fleet-paused`` signal OFF through ``store`` — the write
+    half of the pause for the same pass; ``resume`` is the command's own door."""
+    _team().set_signal_in(store, project.id, PAUSE_SIGNAL, "off")
 
 
 def nudge_manager(project_id: str, *, reason: str) -> bool:

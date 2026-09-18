@@ -540,6 +540,14 @@ def test_doctor_declines_to_guess_from_a_name_alone(
                     "db-browser": {},
                     "browserslist-mcp": {},
                     "chrome-history-reader": {},
+                    # The declared table's OWN names with a hyphenated tail: a
+                    # boundary that let `-` end the identifier read each as the
+                    # tool it merely names (review of #203).
+                    "playwright-report": {},
+                    "selenium-grid-docs": {},
+                    "puppeteer-recorder": {"args": ["puppeteer-recorder"]},
+                    "browser-use-examples": {},
+                    "chrome-devtools-mcp-docs": {},
                 }
             }
         )
@@ -553,9 +561,78 @@ def test_doctor_declines_to_guess_from_a_name_alone(
         "db-browser",
         "browserslist-mcp",
         "chrome-history-reader",
+        "playwright-report",
+        "selenium-grid-docs",
+        "puppeteer-recorder",
+        "browser-use-examples",
+        "chrome-devtools-mcp-docs",
     ):
         assert guess not in check.detail, guess
     assert "no browser MCP/plugin declared" in check.detail
+
+
+def test_doctor_recognises_the_real_package_ids(
+    tmp_path: Path, config_dirs: Callable[..., None]
+) -> None:
+    """Review of the fold. A boundary that kept `-` inside the identifier, meant
+    to stop `playwright-report` reading as playwright, also stopped every real
+    package id: the providers are joined to `server`, `mcp` and a scope with
+    hyphens. The hyphen is a boundary again and the benign tails are a declared
+    table, so both halves hold."""
+    home = tmp_path / "claude"
+    home.mkdir()
+    (home / ".claude.json").write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "pup": {"command": "npx", "args": ["@modelcontextprotocol/server-puppeteer"]},
+                    "pw1": {"command": "mcp-server-playwright"},
+                    "pw2": {"args": ["@executeautomation/playwright-mcp-server"]},
+                    "sh": {"args": ["@browserbasehq/mcp-stagehand"]},
+                    "bu": {"command": "browser-use-mcp"},
+                    "sel": {"command": "selenium-webdriver"},
+                    "playwright-report": {},
+                }
+            }
+        )
+    )
+    config_dirs(home)
+    check = diagnostics._check_browser_tools(tmp_path)
+    for real in ("mcp pup", "mcp pw1", "mcp pw2", "mcp sh", "mcp bu", "mcp sel"):
+        assert real in check.detail, real
+    assert "playwright-report" not in check.detail
+
+
+def test_doctor_parses_each_claude_json_once(
+    tmp_path: Path, config_dirs: Callable[..., None], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #203. The server scan and the declined-server scan each read
+    every ``.claude.json`` of every config dir, so a file Claude Code grows
+    without bound (``~/.claude.json``'s ``projects`` fan-out) was parsed twice
+    per directory per ``doctor`` run — and ``doctor`` re-runs on every project
+    switch. Read once, handed to both."""
+    a, b = tmp_path / "claude-a", tmp_path / "claude-b"
+    a.mkdir()
+    b.mkdir()
+    (a / ".claude.json").write_text(json.dumps({"mcpServers": {"pw": {"command": "playwright"}}}))
+    (b / ".claude.json").write_text(json.dumps({"projects": {str(tmp_path): {}}}))
+    config_dirs(a, b)
+    reads: list[Path] = []
+    real = Path.read_text
+
+    def counting(self: Path, *args: Any, **kwargs: Any) -> str:
+        # Counted at the file, not at any helper: the whole finding is that two
+        # helpers each read the same file through their own call.
+        if self.name == ".claude.json":
+            reads.append(self)
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", counting)
+
+    check = diagnostics._check_browser_tools(tmp_path)
+
+    assert "mcp pw" in check.detail, "the premise: the files were read"
+    assert len(reads) == len(set(reads)) == 2, f"a .claude.json read twice: {reads}"
 
 
 def test_doctor_credits_the_plugin_and_not_its_marketplace(

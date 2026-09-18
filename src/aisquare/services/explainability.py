@@ -585,10 +585,11 @@ def _usable_base_url(value: str) -> bool:
     and nothing about whether anyone is listening, which is the probe's job.
     It exists for one reason: to stop a value the AGENT cannot parse from
     reaching its environment, because that failure mode is not a lost trace,
-    it is a dead session.
+    it is a dead session. It IS :func:`url_problem`'s answer: the two used to be
+    separate parsers, and ``https://proxy.example:99999`` — a port the agent's
+    client refuses — passed this one and failed the other (review of #132).
     """
-    split = split_url(value)
-    return split is not None and split.scheme in ("http", "https") and bool(split.netloc)
+    return url_problem(value, what="base URL") is None
 
 
 def probe_proxy(proxy_url: str, timeout: float = _PROBE_TIMEOUT_SECONDS) -> ProxyProbe:
@@ -1149,12 +1150,18 @@ def configure_target(
         settings.target = target_name
     if gateway_url or key_env or proxy_url or identity:
         target = settings.targets.get(name, ExplainabilityTarget())
+        # Stored as VALIDATED: stripped, no trailing slash. `url_problem` judged
+        # that spelling, and every comparison downstream (`_proxy_source`
+        # against the shipped default, `chosen_proxy`, the remediation lines)
+        # is a string comparison — a pasted `https://g.example:9443/` used to
+        # be stored with its slash and read as a chosen, non-default proxy
+        # (review of #132).
         if gateway_url:
-            target.gateway_url = gateway_url.rstrip("/")
+            target.gateway_url = gateway_url.strip().rstrip("/")
         if key_env:
-            target.api_key_env = key_env
+            target.api_key_env = key_env.strip()
         if proxy_url:
-            target.proxy_url = proxy_url
+            target.proxy_url = proxy_url.strip().rstrip("/")
         if identity:
             target.agent_name_template = identity
         settings.targets[name] = target
@@ -1579,13 +1586,22 @@ class _ClientLaneSegment:
 
     def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         otel_trace, otel_context = _otel()
-        if exc_type is not None:
-            self._span.set_status(otel_trace.StatusCode.ERROR, str(exc_val))
-        else:
-            self._span.set_status(otel_trace.StatusCode.OK)
-        self._span.end()
-        if self._token is not None:
-            otel_context.detach(self._token)
+        # The detach is what this block OWES: `set_status` and `end` are SDK
+        # calls that can raise (a shut-down tracer provider, a processor that
+        # throws on `end`), and `_drain` catches whatever escapes here and
+        # returns a deferral — so a raise before the detach left a dead segment
+        # attached as the current context for the life of the process, and every
+        # later span in it (the next group of the same sweep included) was
+        # parented under it (review of #203).
+        try:
+            if exc_type is not None:
+                self._span.set_status(otel_trace.StatusCode.ERROR, str(exc_val))
+            else:
+                self._span.set_status(otel_trace.StatusCode.OK)
+            self._span.end()
+        finally:
+            if self._token is not None:
+                otel_context.detach(self._token)
 
     def set_input(self, value: str) -> None:
         self._span.set_attribute("input.value", value)

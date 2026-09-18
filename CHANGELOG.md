@@ -39,12 +39,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   rule is judged against the variable the target will read from after the save,
   typed today or stored last month, and the notice says where the key should go
   instead.
-- **The prefix guard strips at either brace.** It detected `}` and stripped at
-  `{`, so `nishil}` passed through whole, was stored as `nishil}-{role}`, and
-  every `.format` raised: `agent_names` empty, every launch untraced, a success
-  line on the screen. The name is now what precedes the first brace of either
-  kind, the toast quotes the identity that was *stored*, and the writer refuses
-  any template that cannot render or renders every role to one name.
+- **A braced prefix is refused, not repaired.** The first cut detected `}` and
+  stripped at `{`, so `nishil}` passed through whole, was stored as
+  `nishil}-{role}`, and every `.format` raised: `agent_names` empty, every
+  launch untraced, a success line on the screen. The second stripped at either
+  brace and stored what preceded it — a template the operator never typed
+  (`team-{env}-{role}` became `team-{role}`) while the CLI's `--identity`
+  refused the same input. The field asks for a name: a brace of either kind is
+  refused with the reason and nothing is stored, and the writer refuses any
+  template that cannot render or renders every role to one name.
 - **The hosted-proxy suggestion respects a deliberate top-level `proxy_url`.**
   The form read the per-target value only, so a chosen `[explainability]
   proxy_url` — which `_proxy_source` already reports as `config` rather than
@@ -98,10 +101,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the form and asserted one layer down in `configure_target`. It also refuses a
   schemeless gateway (which parses with the whole string as the path, leaving no
   host, no suggestion, and an empty host that reads as loopback and suppresses
-  the very warning that would have flagged it), takes the prefix as a **name**
-  even when typed as a template (`nishil-{role}` would have composed to
-  `nishil-coder-coder`, and a stray brace empties `agent_names` entirely), and
-  can set `key_env`, which it was `configure_target`'s only caller to omit.
+  the very warning that would have flagged it), refuses a prefix typed as a
+  template (`nishil-{role}` would have composed to `nishil-coder-coder`, and a
+  stray brace empties `agent_names` entirely), and can set `key_env`, which it
+  was `configure_target`'s only caller to omit.
 - **An unset gateway is no longer reported as a misroute.** `resolve_target`
   legitimately yields `gateway_url == ""`, and an empty string equals no
   deployment, so the comparison called every such machine misrouted — printing a
@@ -305,7 +308,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `answers()` that can raise, the `running` gate on every write, and a
   per-socket fake) and `fleet shutdown` added to the no-traceback sweeps'
   `UNINVOKED` list, which it was missing: a plain `make test` ran it against the
-  developer's real `asq` socket and killed their live fleet.
+  developer's real `asq` socket and killed their live fleet. Its read-only plan
+  (`--json` without `--yes`) is held to the same property by a test of its own.
+  `fleet stop` returns what it released — the ended session's claims ride on a
+  `StopReceipt` and are named in the output (`claims_released` under `--json`) —
+  and `shutdown` counts that receipt instead of turning the release off and
+  making a second one; `fleet reap` reports its releases the same way.
 - **A `ui-tester` role: user-facing work is verified in a real browser, with
   evidence — and the role brings its own browser flag.** Eight first-class roles
   now. It takes tasks titled `UI: …` from the review pool and runs their
@@ -475,7 +483,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     their own. `hosted_proxy_for` returns `None` rather than assembling a URL
     out of half an answer.
   - The prefix field asks for a **name**, not a template: `nishil` becomes
-    `nishil-{role}`, so nobody types a format string into a form.
+    `nishil-{role}`, and a prefix with a brace in it is refused rather than
+    repaired, so nobody types a format string into a form.
   - The key is written to `~/.aisquare/explainability-key` at mode 600 and the
     field is cleared — this view's own docstring already rules a key out of a
     full-screen UI, and a masked `Input` still holds its value. The file is

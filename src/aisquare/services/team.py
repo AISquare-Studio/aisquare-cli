@@ -13,6 +13,7 @@ so repos that never opted in never see team output.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import re
@@ -700,14 +701,8 @@ def set_signal(
     signal receipts like any other write.
     """
     _require_enabled()
+    _validate_signal(name, value)  # before any store is opened or board resolved
     _DELIVERY.set(None)
-    if not _SIGNAL_NAME.fullmatch(name):
-        raise ValueError(
-            f"signal name {name!r} must be a lowercase token "
-            "([a-z0-9._-], starting alphanumeric, max 64)"
-        )
-    if not _SIGNAL_VALUE.fullmatch(value):
-        raise ValueError(f"signal value {value!r} must be a single token (no whitespace)")
     with store_session() as store:
         session = _resolve_session(store, session_ref)
         # A caller that names the project by ID resolves the board id-addressed,
@@ -718,36 +713,84 @@ def set_signal(
         board = (
             _board_of(store, project_id) if project_id is not None else _board(store, session, cwd)
         )
-        key = _signal_key(board.id, name)
-        prior = store.get_meta(key)
-        prev = _signal_state(name, prior).value if prior is not None else None
-        text = f"{name}: {value}" if prev is None else f"{name}: {value} (was {prev})"
-        now = _now()
-        event = store.add_signal_event(
-            TeamEvent(
-                id=new_event_id(),
-                project_id=board.id,
-                session_id=session.id if session else None,
-                kind="signal",
-                text=text,
-                created_at=now,
-            ),
-            key,
-            {
-                "value": value,
-                "session_id": session.id if session else None,
-                "updated_at": now.isoformat(),
-            },
-        )
+        state, prev, event = _write_signal(store, board, session, name, value)
     stored = _record_delivery(event, board)
+    return dataclasses.replace(state, seq=stored.seq), prev
+
+
+def set_signal_in(
+    store: ContextStore, project_id: str, name: str, value: str
+) -> tuple[SignalState, str | None]:
+    """:func:`set_signal` for ``project_id`` through a store the CALLER holds open.
+
+    For a pass over many projects — ``fleet shutdown`` clearing every confirmed
+    project's pause — which used to open a connection per project through
+    :func:`set_signal` (connect, WAL switch, migrations each time) on top of one
+    per row it ended (review of #203, round 4). Same validation, same
+    one-transaction write; no delivery receipt is published, because the caller
+    is not the ``team signal`` command and there is nobody to hand it to.
+    """
+    _require_enabled()
+    _validate_signal(name, value)
+    board = _board_of(store, project_id)
+    state, prev, _event = _write_signal(store, board, None, name, value)
+    return state, prev
+
+
+def _validate_signal(name: str, value: str) -> None:
+    """Names and values are single tokens by contract (#23); refused before any write."""
+    if not _SIGNAL_NAME.fullmatch(name):
+        raise ValueError(
+            f"signal name {name!r} must be a lowercase token "
+            "([a-z0-9._-], starting alphanumeric, max 64)"
+        )
+    if not _SIGNAL_VALUE.fullmatch(value):
+        raise ValueError(f"signal value {value!r} must be a single token (no whitespace)")
+
+
+def _write_signal(
+    store: ContextStore,
+    board: _Board,
+    session: TeamSession | None,
+    name: str,
+    value: str,
+) -> tuple[SignalState, str | None, TeamEvent]:
+    """The one write behind :func:`set_signal` and :func:`set_signal_in`.
+
+    Validation is the CALLER's, before it opens or resolves anything:
+    ``_board`` runs ``ensure_project``, which revives a forgotten project's
+    tombstone, so a signal that was going to be refused used to register the
+    directory first (review of the fold).
+    """
+    key = _signal_key(board.id, name)
+    prior = store.get_meta(key)
+    prev = _signal_state(name, prior).value if prior is not None else None
+    text = f"{name}: {value}" if prev is None else f"{name}: {value} (was {prev})"
+    now = _now()
+    event = store.add_signal_event(
+        TeamEvent(
+            id=new_event_id(),
+            project_id=board.id,
+            session_id=session.id if session else None,
+            kind="signal",
+            text=text,
+            created_at=now,
+        ),
+        key,
+        {
+            "value": value,
+            "session_id": session.id if session else None,
+            "updated_at": now.isoformat(),
+        },
+    )
     state = SignalState(
         name=name,
         value=value,
         set_by=session.id if session else None,
-        seq=stored.seq,
+        seq=event.seq,
         updated_at=now,
     )
-    return state, prev
+    return state, prev, event
 
 
 def read_signal(
@@ -764,8 +807,19 @@ def read_signal(
         board = (
             _board_of(store, project_id) if project_id is not None else _board(store, session, cwd)
         )
-        blob = store.get_meta(_signal_key(board.id, name))
-        return _signal_state(name, blob) if blob is not None else None
+        return _read_signal(store, board.id, name)
+
+
+def read_signal_in(store: ContextStore, project_id: str, name: str) -> SignalState | None:
+    """:func:`read_signal` for ``project_id`` through a store the CALLER holds open
+    (see :func:`set_signal_in` for why)."""
+    _require_enabled()
+    return _read_signal(store, project_id, name)
+
+
+def _read_signal(store: ContextStore, project_id: str, name: str) -> SignalState | None:
+    blob = store.get_meta(_signal_key(project_id, name))
+    return _signal_state(name, blob) if blob is not None else None
 
 
 def list_signals(*, session_ref: str | None = None, cwd: Path | None = None) -> list[SignalState]:

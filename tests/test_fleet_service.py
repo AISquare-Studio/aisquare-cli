@@ -30,10 +30,11 @@ from typer.testing import CliRunner
 
 from aisquare.cli.app import app
 from aisquare.core import codenames, selfcli
+from aisquare.core import store as core_store
 from aisquare.core.config import FleetRoleSettings, FleetSettings
 from aisquare.core.ids import new_agent_id, new_task_id
 from aisquare.core.orchestrator import team_project
-from aisquare.core.store import SqliteStore, store_session
+from aisquare.core.store import ContextStore, SqliteStore, store_session
 from aisquare.core.tmux import (
     _FACTS_FIELDS,
     Completed,
@@ -1966,7 +1967,7 @@ def test_stop_exits_gracefully_and_records_the_status(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
 ) -> None:
     agent = _coder(project)
-    ended = fleet_service.stop(project, "coder-1")
+    ended = fleet_service.stop(project, "coder-1").agent
     assert tmux.typed == [(agent.pane_id, "literal", "/exit"), (agent.pane_id, "key", "Enter")]
     assert ended.ended_at is not None and ended.exit_status == 0
     assert tmux.killed == [agent.pane_id]
@@ -1984,7 +1985,7 @@ def test_stop_outwaits_the_dead_without_status_gap(
     """
     tmux.status_lag = 2
     agent = _coder(project)
-    ended = fleet_service.stop(project, "coder-1")
+    ended = fleet_service.stop(project, "coder-1").agent
     assert ended.exit_status == 0, "the status that landed a beat later was collected"
     assert tmux.killed == [agent.pane_id]
     assert tmux.status_lag == 0, "the gap reads were consumed — the lag was exercised"
@@ -1998,7 +1999,7 @@ def test_stop_accepts_a_dead_pane_whose_status_never_lands(
     not sit out the whole grace for a status that will never land."""
     tmux.status_lag = 10**9
     agent = _coder(project)
-    ended = fleet_service.stop(project, "coder-1", grace=15.0)
+    ended = fleet_service.stop(project, "coder-1", grace=15.0).agent
     assert ended.exit_status is None and ended.ended_at is not None
     assert tmux.killed == [agent.pane_id]
     assert clock.now < 15.0, "the status window, not the whole grace"
@@ -2009,7 +2010,7 @@ def test_stop_kills_after_the_grace_period_when_exit_is_ignored(
 ) -> None:
     tmux.honours_exit = False
     agent = _coder(project)
-    ended = fleet_service.stop(project, "coder-1", grace=2.0)
+    ended = fleet_service.stop(project, "coder-1", grace=2.0).agent
     assert clock.now >= 2.0, "waited the grace period"
     assert tmux.killed == [agent.pane_id] and ended.exit_status is None
 
@@ -2018,7 +2019,7 @@ def test_stop_force_skips_the_exit(
     tmux: FakeTmux, clock: FakeClock, claude_on_path: Path, project: ProjectInfo
 ) -> None:
     agent = _coder(project)
-    ended = fleet_service.stop(project, "coder-1", force=True)
+    ended = fleet_service.stop(project, "coder-1", force=True).agent
     assert tmux.typed == [] and tmux.killed == [agent.pane_id] and clock.now == 0
     assert ended.ended_at is not None
 
@@ -2028,7 +2029,7 @@ def test_stop_ends_the_row_even_when_the_pane_is_already_gone(
 ) -> None:
     agent = _coder(project)
     tmux.vanish(agent.pane_id)
-    ended = fleet_service.stop(project, "coder-1")
+    ended = fleet_service.stop(project, "coder-1").agent
     assert ended.ended_at is not None and tmux.killed == []
 
 
@@ -2042,7 +2043,7 @@ def test_stop_exits_gracefully_when_the_pane_sits_under_another_session_name(
     agent = _coder(project)
     tmux.sessions["asq-elsewhere"] = tmux.sessions.pop(f"asq-{_codename(project)}")
 
-    ended = fleet_service.stop(project, "coder-1")
+    ended = fleet_service.stop(project, "coder-1").agent
 
     assert tmux.typed == [(agent.pane_id, "literal", "/exit"), (agent.pane_id, "key", "Enter")]
     assert ended.exit_status == 0 and tmux.killed == [agent.pane_id]
@@ -2050,7 +2051,7 @@ def test_stop_exits_gracefully_when_the_pane_sits_under_another_session_name(
     second = _coder(project)
     tmux.vanish(second.pane_id)
     tmux.typed.clear()
-    assert fleet_service.stop(project, second.label).ended_at is not None
+    assert fleet_service.stop(project, second.label).agent.ended_at is not None
     assert tmux.typed == []
 
 
@@ -2072,7 +2073,7 @@ def test_stop_leaves_the_row_live_when_tmux_cannot_confirm_the_agent_stopped(
     tmux.fail_input = False
     assert [s.agent.id for s in fleet_service.list_agents(project)] == [agent.id]
     # Negative control: with tmux answering, the same call stops it and ends the row.
-    ended = fleet_service.stop(project, "coder-1")
+    ended = fleet_service.stop(project, "coder-1").agent
     assert ended.ended_at is not None and ended.exit_status == 0
     assert fleet_service.list_agents(project) == []
 
@@ -2101,7 +2102,7 @@ def test_stop_leaves_the_row_live_when_the_window_kill_was_refused_and_the_pane_
     # Negative control: the SAME refused kill over a pane that did die is still
     # "already gone, which is what the kill wanted" — the row ends, with its status.
     tmux.die(agent.pane_id, 7)
-    ended = fleet_service.stop(project, "coder-1", grace=2.0)
+    ended = fleet_service.stop(project, "coder-1", grace=2.0).agent
     assert ended.ended_at is not None and ended.exit_status == 7, "the observed status is kept"
     assert fleet_service.list_agents(project) == []
 
@@ -2138,7 +2139,7 @@ def test_stop_leaves_the_row_live_when_a_denied_socket_cannot_confirm_the_pane_d
     # positive evidence of absence, and ends the row exactly as it always did.
     tmux.socket_denied = False
     tmux.running = False
-    ended = fleet_service.stop(project, "coder-1", grace=2.0)
+    ended = fleet_service.stop(project, "coder-1", grace=2.0).agent
     assert ended.ended_at is not None and ended.exit_status is None
 
 
@@ -3013,7 +3014,7 @@ def test_stopping_an_agent_releases_the_claims_parked_on_its_ended_session(
     team_service.hook_session_end(first, project.root, reason="clear")
     assert _task_now(mine.id).claimed_by == first, "the premise: parked for the start hook"
 
-    stopped = fleet_service.stop(project, agent.label, force=True)
+    stopped = fleet_service.stop(project, agent.label, force=True).agent
 
     assert stopped.ended_at is not None
     released = _task_now(mine.id)
@@ -3480,7 +3481,7 @@ def test_shutdown_counts_an_agent_that_exited_on_its_own_as_stopped(
     coder = _coder(project)
     real_stop = fleet_service.stop
 
-    def exit_first(*args: object, **kwargs: object) -> FleetAgent:
+    def exit_first(*args: object, **kwargs: object) -> fleet_service.StopReceipt:
         with store_session() as store:  # its own SessionEnd hook got there first
             store.end_fleet_agent(coder.id, exit_status=7)
         return real_stop(*args, **kwargs)  # type: ignore[arg-type]
@@ -3600,7 +3601,7 @@ def test_shutdown_records_a_row_spawned_during_the_run(
     late: list[FleetAgent] = []
     real_stop = fleet_service.stop
 
-    def stop_and_spawn(*args: object, **kwargs: object) -> FleetAgent:
+    def stop_and_spawn(*args: object, **kwargs: object) -> fleet_service.StopReceipt:
         if not late:  # the spawn lands while the manager is being stopped
             late.append(_coder(project))
         return real_stop(*args, **kwargs)  # type: ignore[arg-type]
@@ -4133,6 +4134,117 @@ def test_shutdown_asks_each_socket_only_about_the_sessions_that_lived_there(
     assert report.sessions_killed == [] and report.incomplete_projects == []
 
 
+def test_stop_returns_the_claims_it_released(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #203, round 4. ``stop`` released a dead pane's claims behind a
+    ``release_claims`` flag that ``shutdown`` turned OFF so it could release
+    again and count — two paths deciding the pane was dead. One release, in
+    ``stop``, and the receipt says what it returned to the pool."""
+    mine = _task(project, "the task this coder is for")
+    agent, first = _spawned(project, "coder", mine.id, tmux, monkeypatch)
+    team_service.hook_session_start(first, project.root, "startup")
+    team_service.claim_task(mine.id, session_ref=first)
+
+    receipt = fleet_service.stop(project, agent.label, force=True)
+
+    assert receipt.agent.ended_at is not None
+    assert [t.id for t in receipt.released] == [mine.id]
+    assert _task_now(mine.id).claimed_by is None and _task_now(mine.id).status == "todo"
+    # And a second look finds nothing left to release: the receipt IS the count.
+    assert fleet_service.shutdown(project, force=True).claims_released == []
+
+
+def test_a_release_the_store_refuses_costs_the_release_and_never_the_stop(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of the fold. With the release moved into ``stop``, a store that
+    refused it AFTER the row was ended raised out of ``stop`` — and ``shutdown``
+    reported a dead, ended row as LEFT LIVE, kept the pause and exited 1. The
+    release is the courtesy owed after the stop: refused, it is NAMED on the
+    receipt and in the report, and the row is counted where it belongs."""
+    mine = _task(project, "the task this coder is for")
+    agent, first = _spawned(project, "coder", mine.id, tmux, monkeypatch)
+    team_service.hook_session_start(first, project.root, "startup")
+    team_service.claim_task(mine.id, session_ref=first)
+
+    def refuse(*args: object, **kwargs: object) -> list[TeamTask]:
+        raise sqlite3.OperationalError("database is locked (fake)")
+
+    monkeypatch.setattr(team_service, "release_agent_claims", refuse)
+    receipt = fleet_service.stop(project, agent.label, force=True)
+
+    assert receipt.agent.ended_at is not None, "the stop happened"
+    assert receipt.released == [] and receipt.release_failed is not None
+    assert "locked" in receipt.release_failed
+    assert _task_now(mine.id).claimed_by == first, "the claim stayed — and is said to have"
+
+    another = _task(project, "another")
+    second, second_session = _spawned(project, "coder", another.id, tmux, monkeypatch)
+    team_service.hook_session_start(second_session, project.root, "startup")
+    team_service.claim_task(another.id, session_ref=second_session)
+    report = fleet_service.shutdown(project, force=True)
+
+    assert [a.id for a in report.stopped] == [second.id], "ended and counted as stopped"
+    assert report.failed == [] and report.incomplete_projects == []
+    assert len(report.release_failures) == 1 and second.label in report.release_failures[0]
+    assert "locked" in report.release_failures[0]
+
+
+def test_is_paused_opens_no_store_for_a_disabled_orchestrator(
+    project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of the fold. The enabled check moved inside the store session, so a
+    disabled orchestrator paid a connect, WAL switch and migration to learn
+    nothing can be paused. Asked first, before any connection."""
+    opens = 0
+    real_open = core_store.open_store
+
+    def counting_open() -> ContextStore:
+        nonlocal opens
+        opens += 1
+        return real_open()
+
+    monkeypatch.setattr(core_store, "open_store", counting_open)
+    monkeypatch.setenv("AISQUARE_TEAM", "0")
+
+    assert fleet_service.is_paused(project) is False
+    assert opens == 0, f"a disabled board opened the store {opens} time(s)"
+
+
+def test_the_pause_pass_reads_and_clears_every_signal_through_one_store(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    plain_project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #203, round 4. ``is_paused`` and ``resume`` each opened a store
+    of their own — connect, WAL switch, migrations — so the pause pass paid two
+    opens per project. One connection now, by project id."""
+    fleet_service.pause(project)
+    fleet_service.pause(plain_project)
+    opens = 0
+    real_open = core_store.open_store
+
+    def counting_open() -> ContextStore:
+        # Counted where EVERY store connection is made — `store_session` in any
+        # module goes through here — so a pass that opened its own through
+        # `services.team` counts the same as one opened in `services.fleet`.
+        nonlocal opens
+        opens += 1
+        return real_open()
+
+    monkeypatch.setattr(core_store, "open_store", counting_open)
+    report = fleet_service.ShutdownReport()
+
+    fleet_service._clear_pause([(project, []), (plain_project, [])], report)
+
+    assert sorted(report.paused_cleared) == sorted([project.root.name, plain_project.root.name])
+    assert opens == 1, f"two projects, one connection — not {opens}"
+    assert not fleet_service.is_paused(project) and not fleet_service.is_paused(plain_project)
+
+
 def test_shutdown_clears_the_fleet_paused_signal(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
 ) -> None:
@@ -4605,8 +4717,8 @@ def test_shutdown_reports_a_pause_signal_it_could_not_read_or_clear(
     spawn nothing, and nothing in the report saying so. Both failures are surfaced
     the way the visible-projects lookup already is, and the report is preserved.
     """
-    real_is_paused = fleet_service.is_paused
-    real_resume = fleet_service.resume
+    real_read = fleet_service._pause_is_on
+    real_clear = fleet_service._clear_pause_signal
 
     def refuse(*args: object, **kwargs: object) -> bool:
         raise sqlite3.OperationalError("database is locked (fake)")
@@ -4615,9 +4727,9 @@ def test_shutdown_reports_a_pause_signal_it_could_not_read_or_clear(
     fleet_service.pause(project)
     name = fleet_service._name(project)
 
-    monkeypatch.setattr(fleet_service, "is_paused", refuse)  # the READ fails
+    monkeypatch.setattr(fleet_service, "_pause_is_on", refuse)  # the READ fails
     report = fleet_service.shutdown(project, force=True)
-    monkeypatch.setattr(fleet_service, "is_paused", real_is_paused)
+    monkeypatch.setattr(fleet_service, "_pause_is_on", real_read)
 
     assert len(report.stopped) == 1, "the report is preserved, not discarded"
     assert report.pause_scan_failed is not None and "locked" in report.pause_scan_failed
@@ -4627,9 +4739,9 @@ def test_shutdown_reports_a_pause_signal_it_could_not_read_or_clear(
     assert project.id in report.incomplete_projects, "an unread pause is not a project down"
     assert fleet_service.is_paused(project), "the pause is in fact still on"
 
-    monkeypatch.setattr(fleet_service, "resume", refuse)  # now the WRITE fails
+    monkeypatch.setattr(fleet_service, "_clear_pause_signal", refuse)  # now the WRITE fails
     second = fleet_service.shutdown(project, force=True)
-    monkeypatch.setattr(fleet_service, "resume", real_resume)
+    monkeypatch.setattr(fleet_service, "_clear_pause_signal", real_clear)
 
     assert second.pause_scan_failed is not None and "locked" in second.pause_scan_failed
     assert "could not be cleared" in second.pause_scan_failed, "the WRITE is the one that failed"
@@ -4861,7 +4973,7 @@ def test_the_lifecycle_addresses_the_socket_each_row_was_started_on(
     assert [a.id for a in report.ended] == [dead.id], "the dead pane was seen on its own socket"
     assert report.lost == [], "a live agent must not be lost because the config moved"
 
-    ended = fleet_service.stop(project, live.label)
+    ended = fleet_service.stop(project, live.label).agent
     assert tmux.killed == [live.pane_id] and moved.killed == []
     assert ended.exit_status == 0, "the /exit reached the pane on the row's socket"
 
@@ -5287,7 +5399,7 @@ def test_spawn_and_stop_on_a_real_tmux_server(
         [status] = fleet_service.list_agents(project)
         assert status.state == "working", status  # output inside ACTIVITY_WINDOW
 
-        ended = fleet_service.stop(project, "coder-1", grace=15.0)
+        ended = fleet_service.stop(project, "coder-1", grace=15.0).agent
 
         if ended.exit_status != 0:
             # print(), not the assert message: pytest truncates long reprs, and

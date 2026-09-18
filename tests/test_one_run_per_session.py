@@ -621,6 +621,41 @@ def test_a_fail_open_launchs_insights_still_open_their_own_run(
     assert sdk.segments == []
 
 
+def test_the_segment_detaches_its_context_even_when_the_span_refuses_to_end(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #203 (#204 item 1). ``__exit__`` called ``set_status``, ``end``
+    and THEN ``detach``; an SDK span that raises on ``end`` (a shut-down tracer
+    provider, a processor that throws) left the segment attached as the current
+    context for the life of the process, and ``_drain`` — which catches what
+    escapes here and returns a deferral — carried on parenting every later span
+    under it. The detach is what the block owes, so it is in a ``finally``."""
+
+    class _RefusesToEnd(_FakeSpan):
+        def end(self) -> None:
+            raise RuntimeError("tracer provider is shut down")
+
+    class _Tracer:
+        def start_span(self, name: str, *, context: Any, attributes: dict[str, Any]) -> _FakeSpan:
+            return _RefusesToEnd(name, context, attributes)
+
+    class _Sdk:
+        def get_tracer(self, name: str) -> _Tracer:
+            return _Tracer()
+
+    otel_context = _FakeOtelContext()
+    monkeypatch.setattr(service, "_otel", lambda: (_FakeOtelTrace, otel_context))
+
+    with (
+        pytest.raises(RuntimeError, match="shut down"),
+        service._ClientLaneSegment(_Sdk(), "coder", "run-1"),
+    ):
+        pass
+
+    assert len(otel_context.attached) == 1, "the premise: the segment was attached"
+    assert len(otel_context.detached) == 1, "and detached although `end` raised"
+
+
 def test_a_segment_that_fails_is_closed_and_the_records_stay_queued(
     isolated_home: Path,
     ship_sdk: tuple[_ShipSdk, _FakeOtelContext],

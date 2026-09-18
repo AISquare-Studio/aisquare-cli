@@ -18,7 +18,6 @@ it is not safe for scrollback or a screen-share; a full-screen UI is both.
 from __future__ import annotations
 
 import os
-import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal
@@ -59,12 +58,17 @@ class StatusReport:
     """The facts ``aisquare explainability status`` prints, gathered off the UI thread."""
 
     rows: tuple[tuple[str, str], ...]
-    problem: bool
-    """Tracing is on and the proxy would not take a session — the red state."""
-    caution: bool = False
-    """Tracing is on, sessions ARE traced, and something about where they land
-    could not be checked from here — amber, which this tab used to render as
-    green because it read ``healthy`` alone."""
+    severity: CheckStatus = CheckStatus.ok
+    """The probe row's verdict while tracing is on — ``ProxyState.severity``, the
+    one vocabulary every surface speaks — and ``ok`` while it is off. This
+    carried ``problem`` and ``caution`` as two booleans derived from it, the
+    encoding ``ProxyState`` itself had just shed for being able to say both at
+    once (review of #132)."""
+
+    @property
+    def problem(self) -> bool:
+        """Red: the proxy would not take a session, or ships elsewhere."""
+        return self.severity is CheckStatus.fail
 
 
 def status_report() -> StatusReport:
@@ -107,11 +111,12 @@ def status_report() -> StatusReport:
         ),
         ("redaction", ops.redaction_summary(config.redaction.level)),
     )
-    return StatusReport(
-        rows=rows,
-        problem=settings.enabled and proxy.problem,
-        caution=settings.enabled and proxy.severity is CheckStatus.warn,
-    )
+    return StatusReport(rows=rows, severity=proxy.severity if settings.enabled else CheckStatus.ok)
+
+
+#: The probe row's style per verdict — one mapping, so a new severity is one
+#: entry here and not a third branch of a nested conditional.
+_PROBE_STYLES: dict[CheckStatus, str] = {CheckStatus.fail: "bold red", CheckStatus.warn: "yellow"}
 
 
 def render_status(report: StatusReport) -> Text:
@@ -121,7 +126,7 @@ def render_status(report: StatusReport) -> Text:
         text.append(f"{label + ':':<{width}} ", style="bold")
         style = ""
         if label == "probe":
-            style = "bold red" if report.problem else ("yellow" if report.caution else "")
+            style = _PROBE_STYLES.get(report.severity, "")
         text.append(f"{value}\n", style=style)
     return text
 
@@ -360,26 +365,24 @@ class ExplainabilityView(VerticalScroll):
             self.notify(message, severity="warning", timeout=8, markup=False)
             return
 
-        # The field asks for a NAME. An operator who has read the `--identity`
-        # examples types `nishil-{role}` and would get `nishil-{role}-{role}`,
-        # which renders as `nishil-coder-coder`; a stray brace of EITHER kind
-        # makes every `.format(role=...)` raise, `agent_names` come back empty,
-        # and Register point at the wrong setting. The first cut detected both
-        # braces and stripped at `{` only, so `nishil}` passed through whole,
-        # was stored as `nishil}-{role}`, and untraced every launch under a
-        # success line. The name is what precedes the first brace of either kind.
-        cleaned: str | None = None
+        # The field asks for a NAME, and a brace is refused with the reason
+        # rather than repaired: the first cut stripped at the first brace and
+        # stored what preceded it, so the tab kept a template the operator never
+        # typed (`team-{env}-{role}` became `team-{role}`; a typo'd `nishil}`
+        # became `nishil`) while the CLI's `--identity` refused the same input
+        # through `identity_problem`. Two doors, two answers again (review of
+        # #132). The writer's own check still runs on the composed template
+        # below, so this is guidance for the one shape it cannot word: a name
+        # with the template's braces in it.
         if prefix and ("{" in prefix or "}" in prefix):
-            cleaned = re.split(r"[{}]", prefix, maxsplit=1)[0].rstrip("-_ ")
-            if not cleaned:
-                self.notify(
-                    "prefix is a name, not a template — try 'nishil', not 'nishil-{role}'",
-                    severity="warning",
-                    timeout=8,
-                    markup=False,
-                )
-                return
-            prefix = cleaned
+            self.notify(
+                f"prefix {prefix!r} is a name, not a template — the agent's role is added "
+                "for you: try 'nishil', not 'nishil-{role}'",
+                severity="warning",
+                timeout=8,
+                markup=False,
+            )
+            return
 
         config = self._read_config()
         if config is None:
@@ -454,15 +457,6 @@ class ExplainabilityView(VerticalScroll):
                 )
                 self.refresh_status()
                 return
-        if cleaned is not None:
-            # Quotes what was STORED, not what was typed: the operator is about
-            # to look for their agents under this name.
-            self.notify(
-                f"prefix is a name, not a template — stored the identity '{identity}'",
-                severity="warning",
-                timeout=8,
-                markup=False,
-            )
         active = settings.target
         if not typed:
             done = f"✓ this machine now uses target '{name}' — press Enable tracing to trace to it"

@@ -498,6 +498,120 @@ def test_a_hosted_proxy_on_the_gateways_host_stays_green_and_silent(
     assert "cannot be checked" not in proxy.detail
 
 
+def test_a_hosted_proxy_naming_its_gateway_from_its_own_host_is_not_a_misroute(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#132 follow-up 1. The deployment's own proxy sits beside its gateway and
+    talks to it over loopback (the SDK's ``.env`` default is
+    ``http://127.0.0.1:8000``), so the day it reports that field the strict
+    comparison would have turned the real hosted topology RED and made
+    ``status`` exit 1 for a proxy shipping to exactly the right place."""
+    monkeypatch.setattr(ops, "probe_proxy", _probes("http://127.0.0.1:8000"))
+    settings = _wired("https://g.example", proxy_url="https://g.example:9443")
+    proxy = next(c for c in ops.checks(settings, env=_env()) if c.name == "explainability proxy")
+
+    assert proxy.status is CheckStatus.ok
+    assert "beside it" in proxy.detail and "127.0.0.1:8000" in proxy.detail
+
+
+def test_a_remote_proxy_naming_a_loopback_gateway_is_unverifiable_not_red(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other half of follow-up 1: a proxy on ANOTHER host whose gateway is
+    local to it cannot be compared with the target from here — amber with the
+    two levers, not the red that says "model traffic lands on the other
+    deployment", which nobody here can know."""
+    monkeypatch.setattr(ops, "probe_proxy", _probes("http://127.0.0.1:8000"))
+    settings = _wired("https://g.example", proxy_url="https://p.example:9443")
+    proxy = next(c for c in ops.checks(settings, env=_env()) if c.name == "explainability proxy")
+
+    assert proxy.status is CheckStatus.warn
+    assert "cannot be checked from here" in proxy.detail
+    assert proxy.fix
+
+
+def test_the_unset_gateway_amber_never_offers_a_proxys_local_address(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#132 follow-up 4. With no gateway configured, the amber offered
+    ``--gateway-url <what the proxy reported>`` verbatim — for a remote proxy
+    that is a URL from ITS network, and an operator who pasted it had a
+    loopback gateway on a machine with nothing on 8000."""
+    monkeypatch.setattr(ops, "probe_proxy", _probes("http://127.0.0.1:8000"))
+    settings = ExplainabilitySettings(
+        enabled=True,
+        targets={"stg": ExplainabilityTarget(gateway_url="", proxy_url="https://p.example:9443")},
+    )
+    proxy = next(c for c in ops.checks(settings, env=_env()) if c.name == "explainability proxy")
+
+    assert proxy.status is CheckStatus.warn
+    assert "its own local view" in proxy.detail
+    assert "--gateway-url <url>" in (proxy.fix or ""), "a placeholder, never the local address"
+    assert "--gateway-url http://127.0.0.1:8000" not in (proxy.fix or "")
+
+
+def test_the_loopback_pair_says_what_it_assumes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#132 follow-up 3. Loopback proxy, loopback gateway: green — the operator
+    runs both — but a local proxy ships wherever ``EXPLAINABILITY_GATEWAY_URL``
+    pointed when it was started, the same mechanism the remote-gateway amber
+    names, so the summary states the assumption instead of "by construction"."""
+    monkeypatch.setattr(ops, "probe_proxy", _probes(None))
+    settings = _wired("http://127.0.0.1:8000", proxy_url="http://127.0.0.1:9090")
+    proxy = next(c for c in ops.checks(settings, env=_env()) if c.name == "explainability proxy")
+
+    assert proxy.status is CheckStatus.ok
+    assert "EXPLAINABILITY_GATEWAY_URL" in proxy.detail
+    assert "taken to be http://127.0.0.1:8000" in proxy.detail
+
+
+def test_a_schemeless_reported_gateway_is_still_a_misroute(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review of the fold. The local-view rule was written with ``is_loopback``,
+    whose empty-host-is-local reading made ANY schemeless or malformed report
+    (``other.example:8000``, ``unknown``) pass for the proxy's own loopback, and
+    a red misroute went green on the target's host. The rule is a well-formed
+    loopback URL, nothing looser."""
+    monkeypatch.setattr(ops, "probe_proxy", _probes("other.example:8000"))
+    settings = _wired("https://g.example", proxy_url="https://g.example:9443")
+    proxy = next(c for c in ops.checks(settings, env=_env()) if c.name == "explainability proxy")
+
+    assert proxy.status is CheckStatus.fail
+    assert "other.example:8000" in proxy.detail
+
+
+def test_a_local_proxys_loopback_report_is_this_machines_and_is_offered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of the fold. The unset-gateway amber withheld a loopback report
+    from a LOCAL proxy too — but a local proxy's ``127.0.0.1`` is this box's,
+    and that is the self-hosted operator's own gateway, exactly the address
+    the amber used to offer correctly."""
+    monkeypatch.setattr(ops, "probe_proxy", _probes("http://127.0.0.1:8000"))
+    settings = ExplainabilitySettings(
+        enabled=True,
+        targets={"stg": ExplainabilityTarget(gateway_url="", proxy_url="http://127.0.0.1:9090")},
+    )
+    proxy = next(c for c in ops.checks(settings, env=_env()) if c.name == "explainability proxy")
+
+    assert proxy.status is CheckStatus.warn
+    assert "its own local view" not in proxy.detail
+    assert "--gateway-url http://127.0.0.1:8000" in (proxy.fix or "")
+
+
+def test_a_remote_proxys_loopback_report_never_matches_a_loopback_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of the fold. With a LOCAL target gateway and a REMOTE proxy that
+    reports ``http://127.0.0.1:8000``, ``_same_deployment`` compared the two
+    loopbacks as one deployment and said green — but the proxy's 127.0.0.1 is
+    its host's, not this box's. The local-view rule is judged first."""
+    monkeypatch.setattr(ops, "probe_proxy", _probes("http://127.0.0.1:8000"))
+    settings = _wired("http://127.0.0.1:8000", proxy_url="https://p.example:9443")
+    proxy = next(c for c in ops.checks(settings, env=_env()) if c.name == "explainability proxy")
+
+    assert proxy.status is CheckStatus.warn
+    assert "cannot be checked from here" in proxy.detail
+
+
 def test_the_verdict_cannot_contradict_itself(monkeypatch: pytest.MonkeyPatch) -> None:
     """Review #7. Three independent booleans could express ``problem`` AND
     ``caution`` together, and only ``_check_proxy`` read the third -- so an

@@ -22,6 +22,7 @@ import sys
 from typing import Annotated, NoReturn
 
 import typer
+from rich.console import Console
 
 from aisquare.cli.common import fail
 from aisquare.core.console import stdout_console
@@ -279,13 +280,41 @@ def stop(
     """Stop an agent: /exit, a grace period, then the window is killed."""
     target = _project(project)
     try:
-        agent = fleet_service.stop(target, label, force=force)
+        receipt = fleet_service.stop(target, label, force=force)
     except fleet_service.FleetError as exc:
         _fail_fleet(exc)
+    agent = receipt.agent
+    released = [task.id for task in receipt.released]
     if get_state().json_output:
-        typer.echo(json.dumps({"agent": agent.model_dump(mode="json")}))
+        typer.echo(
+            json.dumps(
+                {
+                    "agent": agent.model_dump(mode="json"),
+                    "claims_released": released,
+                    "release_failed": receipt.release_failed,
+                }
+            )
+        )
         return
-    stdout_console().print(f"✓ stopped {agent.label} ({agent.id})")
+    console = stdout_console()
+    console.print(f"✓ stopped {agent.label} ({agent.id})")
+    _say_released(console, len(released))
+    # The work the stop returned to the pool is the one thing the next agent
+    # inherits from this one; here the receipt carries the tasks, so they are
+    # named under the one line every fleet command uses for the count.
+    for task in receipt.released:
+        console.print(f"     · {task.title} ({task.id})")
+    if receipt.release_failed:
+        console.print(
+            f"  ⚠ its claims could not be released ({receipt.release_failed}) — they stay with "
+            "the ended session until the lease lapses; `aisquare task release <id>` frees one now"
+        )
+
+
+def _say_released(console: Console, count: int) -> None:
+    """The one line for "claims went back to the board", for stop, shutdown and reap alike."""
+    if count:
+        console.print(f"  🔓 {count} claimed task(s) released back to the board")
 
 
 def _exec_attach(argv: list[str]) -> None:
@@ -365,6 +394,7 @@ def _emit_shutdown(report: fleet_service.ShutdownReport) -> None:
                     "sessions_left_up": report.sessions_left_up,
                     "servers_absent": report.servers_absent,
                     "claims_released": report.claims_released,
+                    "release_failures": report.release_failures,
                     "paused_cleared": report.paused_cleared,
                     "paused_kept": report.paused_kept,
                     "incomplete_projects": report.incomplete_projects,
@@ -408,9 +438,11 @@ def _emit_shutdown(report: fleet_service.ShutdownReport) -> None:
         console.print(f"  ⚠ session {session} left up: it holds a row left live")
     for session in report.sessions_absent:
         console.print(f"  · session {session} was already gone with its last window")
-    if report.claims_released:
+    _say_released(console, len(report.claims_released))
+    for failure in report.release_failures:
         console.print(
-            f"  🔓 {len(report.claims_released)} claimed task(s) released back to the board"
+            f"  ⚠ claims of {failure} could not be released — they stay with the ended session "
+            "until the lease lapses; `aisquare task release <id>` frees one now"
         )
     for name in report.paused_cleared:
         console.print(f"  ▶ the fleet-paused signal on {name} was cleared")
@@ -568,6 +600,7 @@ def reap(
                     "ended": [a.model_dump(mode="json") for a in report.ended],
                     "lost": [a.model_dump(mode="json") for a in report.lost],
                     "worktrees_removed": [str(p) for p in report.worktrees_removed],
+                    "claims_released": list(report.claims_released),
                 }
             )
         )
@@ -585,6 +618,7 @@ def reap(
         console.print(f"  ✗ {agent.label}  pane {agent.pane_id} gone")
     for path in report.worktrees_removed:
         console.print(f"  🗑 {path}")
+    _say_released(console, len(report.claims_released))
 
 
 @app.command("rename")

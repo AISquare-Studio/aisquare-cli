@@ -543,6 +543,36 @@ def test_header_unsafe_role_fails_open() -> None:
 # ── the probe itself, against real listeners ─────────────────────────────────
 
 
+def test_a_base_url_the_agents_client_refuses_is_not_usable() -> None:
+    """#132 follow-up 2. ``_usable_base_url`` parsed on its own and accepted
+    ``https://proxy.example:99999`` — a port ``urlsplit`` takes and ``.port``
+    then refuses, so the agent's first request died on it — while ``url_problem``
+    refused the same value. One validator now."""
+    assert explainability._usable_base_url("https://proxy.example:99999") is False
+    assert explainability._usable_base_url("https://proxy.example:9443") is True
+    assert explainability._usable_base_url("proxy.example") is False
+
+
+def test_configure_target_stores_what_it_validated() -> None:
+    """#132 follow-up 6. The proxy URL was validated stripped and slash-less and
+    stored raw, so a pasted ``https://g.example:9443/`` kept its slash — and every
+    downstream comparison is a string comparison: ``_proxy_source`` read a
+    top-level default with a slash as a CHOSEN proxy."""
+    config = AppConfig()
+    explainability.configure_target(
+        config,
+        target_name="stg",
+        gateway_url="  https://g.example/  ",
+        proxy_url="https://g.example:9443/",
+        key_env=" MY_KEY ",
+        enable=False,
+    )
+    target = config.explainability.targets["stg"]
+    assert target.gateway_url == "https://g.example"
+    assert target.proxy_url == "https://g.example:9443"
+    assert target.api_key_env == "MY_KEY"
+
+
 def test_probe_accepts_the_claude_code_proxy() -> None:
     server, url = _serve({"status": "ok", "service": "aisquare-proxy", "mode": "claude_code"})
     try:

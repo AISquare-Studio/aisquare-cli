@@ -9,7 +9,7 @@ import os
 import re
 import shutil
 import sys
-from collections.abc import Callable, Container, Sequence
+from collections.abc import Callable, Container, Mapping, Sequence
 from importlib import metadata
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -885,20 +885,54 @@ _BROWSER_PROVIDERS: tuple[str, ...] = (
 )
 
 #: Each identifier bounded by non-alphanumerics, so it matches as an identifier
-#: rather than as a substring: `@playwright/mcp@latest` and `npx
-#: chrome-devtools-mcp` hit, `browserslist-mcp` and `file-browser` do not.
+#: rather than as a substring: `@playwright/mcp@latest`, `npx chrome-devtools-mcp`,
+#: `@modelcontextprotocol/server-puppeteer`, `mcp-server-playwright` and
+#: `selenium-webdriver` all hit; `browserslist-mcp` and `file-browser` do not. A
+#: hyphen is deliberately NOT part of the identifier: the real package ids join
+#: the provider to `server`, `mcp` and a scope with hyphens, and a boundary that
+#: kept them out missed every one of those (review of the fold).
 _BROWSER_PROVIDER_RE = re.compile(
     "|".join(rf"(?<![A-Za-z0-9]){re.escape(name)}(?![A-Za-z0-9])" for name in _BROWSER_PROVIDERS),
     re.IGNORECASE,
 )
 
+#: Tails that make a hyphenated identifier ABOUT a provider rather than the
+#: provider: `playwright-report`, `selenium-grid-docs`, `puppeteer-recorder`,
+#: `browser-use-examples`, `chrome-devtools-mcp-docs`. A declared table, like the
+#: providers themselves — a boundary cannot tell `playwright-report` from
+#: `server-puppeteer`, both have the hyphen adjacent — so the whole identifier
+#: around a match is read, and one ending in a tail here is not the tool
+#: (review of #203, round 4; review of the fold).
+_BROWSER_LOOKALIKE_TAILS: tuple[str, ...] = (
+    "-doc",
+    "-docs",
+    "-example",
+    "-examples",
+    "-report",
+    "-reports",
+    "-recorder",
+    "-grid",
+    "-tutorial",
+    "-demo",
+)
 
-def _read_json(path: Path) -> dict[str, object]:
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
-    return data if isinstance(data, dict) else {}
+_IDENTIFIER_RE = re.compile(r"[A-Za-z0-9_-]+")
+
+
+def _names_browser_tool(text: str) -> bool:
+    """Whether ``text`` names a browser-tooling provider, as a whole identifier."""
+    for match in _BROWSER_PROVIDER_RE.finditer(text):
+        # The hyphen-joined identifier around the match: `mcp-server-playwright`
+        # for a match on `playwright`, `playwright-report` for the same match.
+        start, end = match.span()
+        while start > 0 and _IDENTIFIER_RE.fullmatch(text[start - 1]):
+            start -= 1
+        while end < len(text) and _IDENTIFIER_RE.fullmatch(text[end]):
+            end += 1
+        identifier = text[start:end].lower()
+        if not identifier.endswith(_BROWSER_LOOKALIKE_TAILS):
+            return True
+    return False
 
 
 def _mcp_servers(source: dict[str, object]) -> dict[str, object]:
@@ -925,12 +959,12 @@ def _browser_servers(servers: dict[str, object], *, declined: Container[str] = (
             args = spec.get("args")
             if isinstance(args, list):
                 candidates.extend(str(arg) for arg in args)
-        if any(_BROWSER_PROVIDER_RE.search(text) for text in candidates):
+        if any(_names_browser_tool(text) for text in candidates):
             found.append(f"mcp {name}")
     return found
 
 
-def _browser_tools_in(config_dir: Path) -> list[str]:
+def _browser_tools_in(config_dir: Path, parsed: Mapping[Path, dict[str, object]]) -> list[str]:
     """Browser tooling ONE Claude Code config directory declares, as short labels.
 
     ``settings.json`` is read for ``enabledPlugins`` only. Claude Code never
@@ -945,10 +979,14 @@ def _browser_tools_in(config_dir: Path) -> list[str]:
     the directory at ``~/.claude.json``, so probing only inside it left this
     whole layer — including the ``projects`` fan-out — dead on the common
     layout, and told an operator who had just run ``claude mcp add`` to install
-    what they already had.
+    what they already had. ``parsed`` is every such file already read
+    (:func:`_claude_jsons`): the same files feed :func:`_declined_project_servers`,
+    and ``~/.claude.json`` is routinely tens of megabytes (the ``projects``
+    fan-out grows without bound), so parsing it twice per directory per
+    ``doctor`` run was the row's whole cost (review of #203).
     """
     found: list[str] = []
-    settings = _read_json(config_dir / "settings.json")
+    settings = agent_core.read_json(config_dir / "settings.json")
     plugins = settings.get("enabledPlugins")
     if isinstance(plugins, dict):
         for key, enabled in plugins.items():
@@ -957,10 +995,10 @@ def _browser_tools_in(config_dir: Path) -> list[str]:
             # to the market's name while labelling only `my-linter`. Match and
             # label the same string.
             plugin = str(key).rsplit("@", 1)[0]
-            if enabled and _BROWSER_PROVIDER_RE.search(plugin):
+            if enabled and _names_browser_tool(plugin):
                 found.append(f"plugin {plugin}")
     for path in agent_core.claude_json_paths(config_dir):
-        claude_json = _read_json(path)
+        claude_json = parsed.get(path, {})
         found.extend(_browser_servers(_mcp_servers(claude_json)))
         projects = claude_json.get("projects")
         if isinstance(projects, dict):
@@ -971,7 +1009,7 @@ def _browser_tools_in(config_dir: Path) -> list[str]:
     return list(dict.fromkeys(found))
 
 
-def _declined_project_servers(cwd: Path, dirs: Sequence[Path]) -> set[str]:
+def _declined_project_servers(cwd: Path, parsed: Mapping[Path, dict[str, object]]) -> set[str]:
     """``.mcp.json`` servers this machine's operator has explicitly declined.
 
     An unapproved project server never starts, and the record of that decision
@@ -984,30 +1022,44 @@ def _declined_project_servers(cwd: Path, dirs: Sequence[Path]) -> set[str]:
     telling an operator to install what they have — and a name in neither is
     not declined: Claude Code asks at the next start rather than refusing.
     The project block is keyed by absolute path, so both spellings of ``cwd``
-    are tried (``/tmp`` vs ``/private/tmp``).
+    are tried (``/tmp`` vs ``/private/tmp``). ``parsed`` is every ``.claude.json``
+    of every config dir, already read once (:func:`_claude_jsons`).
     """
     keys = {str(cwd)}
     with contextlib.suppress(OSError):
         keys.add(str(cwd.resolve()))
     declined: set[str] = set()
     approved: set[str] = set()
+    for claude_json in parsed.values():
+        projects = claude_json.get("projects")
+        if not isinstance(projects, dict):
+            continue
+        for key in keys:
+            block = projects.get(key)
+            if not isinstance(block, dict):
+                continue
+            for field, sink in (
+                ("disabledMcpjsonServers", declined),
+                ("enabledMcpjsonServers", approved),
+            ):
+                listed = block.get(field)
+                if isinstance(listed, list):
+                    sink.update(str(item) for item in listed)
+    return declined - approved
+
+
+def _claude_jsons(dirs: Sequence[Path]) -> dict[Path, dict[str, object]]:
+    """Every ``.claude.json`` of every config dir, parsed ONCE, keyed by path.
+
+    The default install keeps it beside ``~/.claude``, so two directories can
+    name the same file; a path is read once whatever names it.
+    """
+    parsed: dict[Path, dict[str, object]] = {}
     for directory in dirs:
         for path in agent_core.claude_json_paths(directory):
-            projects = _read_json(path).get("projects")
-            if not isinstance(projects, dict):
-                continue
-            for key in keys:
-                block = projects.get(key)
-                if not isinstance(block, dict):
-                    continue
-                for field, sink in (
-                    ("disabledMcpjsonServers", declined),
-                    ("enabledMcpjsonServers", approved),
-                ):
-                    listed = block.get(field)
-                    if isinstance(listed, list):
-                        sink.update(str(item) for item in listed)
-    return declined - approved
+            if path not in parsed:
+                parsed[path] = agent_core.read_json(path)
+    return parsed
 
 
 def _check_browser_tools(cwd: Path | None = None) -> DoctorCheck:
@@ -1034,18 +1086,21 @@ def _check_browser_tools(cwd: Path | None = None) -> DoctorCheck:
     # disagree with itself between the CLI and the fleet UI, and the CLI was
     # the surface telling operators to install what their repo declares.
     cwd = Path.cwd() if cwd is None else cwd
-    dirs = _claude_config_dirs()
+    dirs = agent_core.claude_config_dirs()
+    # Every `.claude.json` parsed ONCE for both scans below; see `_browser_tools_in`.
+    parsed = _claude_jsons(dirs)
     declared: list[str] = []
     for directory in dirs:
         declared.extend(
-            f"{tool} ({_short_path(directory)})" for tool in _browser_tools_in(directory)
+            f"{tool} ({_short_path(directory)})" for tool in _browser_tools_in(directory, parsed)
         )
     mcp_json = cwd / ".mcp.json"
     # Parsed ONCE, outside the per-directory loop: its content cannot vary by
     # config dir, so reading it per dir opened and parsed one file four times
     # on a four-directory machine and deduped three of the results away.
     project_servers = _browser_servers(
-        _mcp_servers(_read_json(mcp_json)), declined=_declined_project_servers(cwd, dirs)
+        _mcp_servers(agent_core.read_json(mcp_json)),
+        declined=_declined_project_servers(cwd, parsed),
     )
     declared.extend(f"{tool} ({_short_path(mcp_json)})" for tool in project_servers)
     chrome_note = (
@@ -1069,39 +1124,6 @@ def _check_browser_tools(cwd: Path | None = None) -> DoctorCheck:
         "`claude mcp add -s user chrome-devtools npx chrome-devtools-mcp`, or install the "
         "Claude in Chrome extension (claude.ai/chrome)",
     )
-
-
-def _claude_config_dirs() -> list[Path]:
-    """The Claude Code directories a ui-tester of THIS home could start in.
-
-    The dirs this home connected plus the ambient one, and deliberately NOT
-    :func:`agent_core.hook_sites`, for two measured reasons.
-
-    It GRADES every site: ``hook_site_health`` runs ``classify_hook_binary``,
-    which runs a real ``<that install's aisquare> --version`` subprocess with a
-    10 s timeout, and its dedupe cache is built fresh per call. ``_check_claude_code``
-    already called it earlier in this same ``doctor()`` run, so a second call
-    re-ran every probe: 1 → 2 scans, 3 → 6 subprocesses, 683 ms → 1246 ms on a
-    four-directory machine (+82% on the whole run) for grading this row never
-    reads — on a path the fleet UI re-runs on every project switch, every
-    Doctor-tab activation and every one-click fix.
-
-    And it includes directories this home never connected
-    (``_claude_dirs_on_disk``, the #84 gap), which answers a different question:
-    "does ANY Claude install on this box declare a browser tool" rather than
-    "will the ui-tester's window find one". A playwright MCP in ``~/.claude4``
-    made the row green while the fleet spawned its ui-tester on ``~/.claude``,
-    where nothing answered.
-    """
-    dirs = [*agent_core.connected_dirs("claude-code"), agent_core._claude_home()]
-    seen: set[Path] = set()
-    unique: list[Path] = []
-    for directory in dirs:
-        key = agent_core._dir_key(directory)
-        if key not in seen:
-            seen.add(key)
-            unique.append(directory)
-    return unique
 
 
 def _short_path(path: Path) -> str:

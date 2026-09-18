@@ -16,6 +16,7 @@ from typer.testing import CliRunner
 
 from aisquare.cli.app import app
 from aisquare.core.store import store_session
+from aisquare.services import team as team_service
 
 CODER = "bbbb2222-0000-0000-0000-000000000000"
 
@@ -133,6 +134,24 @@ def test_signal_receipts_verify_like_any_write(runner: CliRunner, work_dir: Path
     verified = runner.invoke(app, ["team", "verify", str(signal["seq"]), "--as", "bbbb2222"])
     assert verified.exit_code == 0, verified.output
     assert "gate: open" in _flat(verified.output)
+
+
+def test_signal_validation_runs_before_any_store_is_opened(
+    work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of the fold. The name/value check moved behind ``store_session()``
+    and the board resolution — and ``_board`` runs ``ensure_project``, which
+    revives a forgotten project's tombstone — so a signal that was going to be
+    refused registered the directory first. Refused before anything is opened."""
+
+    def never() -> None:
+        raise AssertionError("the store was opened for a signal that was going to be refused")
+
+    monkeypatch.setattr(team_service, "store_session", never)
+    with pytest.raises(ValueError, match="lowercase token"):
+        team_service.set_signal("Bad Name", "on", cwd=work_dir)
+    with pytest.raises(ValueError, match="single token"):
+        team_service.set_signal("ready", "not one token", cwd=work_dir)
 
 
 def test_signal_validation_rejects_non_tokens(runner: CliRunner, work_dir: Path) -> None:

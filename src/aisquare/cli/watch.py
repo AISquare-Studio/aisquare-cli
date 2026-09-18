@@ -30,11 +30,12 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 from rich.text import Text
 
-from aisquare.cli.common import local_time
+from aisquare.cli.common import format_reset, local_time
 from aisquare.core import harness, paths
 from aisquare.core.console import stderr_console, stdout_console
 from aisquare.core.store import unmet_needs
 from aisquare.models import ProjectInfo, TeamEvent, TeamSession, TeamTask
+from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import team as team_service
 
 if TYPE_CHECKING:
@@ -140,6 +141,10 @@ _STATE_CHIP = {
     "working": ("▶ working", "green"),
     "waiting": ("⏸ waiting for input", "yellow"),
     "attention": ("🔔 NEEDS YOU", "bold red"),
+    # The two #146 states, so the one surface an operator leaves running does
+    # not print a bare dim word for a parked agent (review of #205, second round).
+    "limited": ("⏳ limited — `aisquare fleet switch <label>`", "magenta"),
+    "switching": ("⇄ switching accounts", "magenta dim"),
 }
 
 
@@ -151,6 +156,9 @@ def _session_lines(sessions: list[TeamSession]) -> Text:
         return text
     now = datetime.now(tz=live[0].last_seen_at.tzinfo)
     accounts = len({s.account for s in live if s.account})
+    # The alias, as every other surface shows it (review of #205, third round);
+    # read once per render, and only once several accounts are in play.
+    labels = accounts_service.slot_labels() if accounts > 1 else {}
     for session in live:
         emoji = _ROLE_EMOJI.get(session.role, "🤖")
         style = _ROLE_STYLE.get(session.role, "white")
@@ -158,7 +166,9 @@ def _session_lines(sessions: list[TeamSession]) -> Text:
         text.append(f"{emoji} {session.role}·{team_service.short_id(session.id)}", style=style)
         chip, chip_style = _STATE_CHIP.get(session.state, (session.state, "dim"))
         text.append(f"  {chip}", style=chip_style)
-        label = team_service.account_label(session.account)
+        if session.state == "limited" and session.limit_resets_at is not None:
+            text.append(f" (resets {format_reset(session.limit_resets_at)})", style="magenta")
+        label = team_service.account_label(session.account, labels)
         # Only meaningful once the board spans several accounts.
         if label and accounts > 1:
             text.append(f"  {label}", style="cyan dim")

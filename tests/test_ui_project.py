@@ -177,7 +177,9 @@ class ScriptedServer(TmuxServer):
     def version(self) -> tuple[int, int] | None:
         return (3, 7)
 
-    def capture(self, pane_id: str, *, scrollback: int = 0, height: int | None = None) -> Capture:
+    def capture(
+        self, pane_id: str, *, scrollback: int = 0, height: int | None = None, flags: bool = False
+    ) -> Capture:
         self.captures.append((pane_id, scrollback, height))
         facts = PaneFacts(
             pane_id=pane_id,
@@ -840,3 +842,84 @@ def test_explainability_ship_drains_through_the_service_and_register_refuses_unc
     assert ("shipped 3 records\nruns: run-1", "information") in notices
     assert rosters == []  # no gateway configured → refused before any request
     assert any("has no gateway URL" in m and s == "error" for m, s in notices), notices
+
+
+def test_settings_binds_an_account_per_role_and_a_cleared_one_leaves_no_empty_profile(
+    project: ProjectInfo,
+) -> None:
+    """The select beside each role is `team bind <role> --account` with a mouse (#145)."""
+    from aisquare.core import claude_accounts as accounts_core
+
+    accounts_core.create_account()  # slot 2, under the isolated AISQUARE_HOME
+
+    async def scenario(pilot: Pilot[None], host: Host) -> tuple[list[str], list[tuple[str, str]]]:
+        host.query_one(ProjectView).active = "tab-settings"
+        await pilot.pause()
+        select = host.query_one("#acct-coder", Select)
+        labels = [str(label) for label, _value in select._options]
+        select.value = "2"
+        host.query_one("#save-settings", Button).press()
+        await pilot.pause()
+        return labels, host.notices
+
+    labels, notices = drive(project, scenario)
+    assert any(m.startswith("✓ fleet settings saved") for m, _ in notices), notices
+    assert labels[0] == "(no account binding)"
+    assert any(label.startswith("2 · account 2") for label in labels), labels
+    assert load_config().team.profiles["coder"].account == "2"  # the binding's one home
+    assert _config_toml()["team"]["profiles"]["coder"]["account"] == "2"  # the bytes
+    assert "manager" not in load_config().team.profiles  # an untouched role gains no profile
+
+    async def clear(pilot: Pilot[None], host: Host) -> str | None:
+        host.query_one(ProjectView).active = "tab-settings"
+        await pilot.pause()
+        select = host.query_one("#acct-coder", Select)
+        shown_value = select.value
+        select.value = ""
+        host.query_one("#save-settings", Button).press()
+        await pilot.pause()
+        return str(shown_value)
+
+    shown_value = drive(project, clear)
+    assert shown_value == "2"  # the form opened on what the file held
+    assert "coder" not in load_config().team.profiles  # nothing else bound: the table goes
+
+
+def test_settings_saves_the_accounts_section_and_rejects_a_bad_line(project: ProjectInfo) -> None:
+    """`[accounts]` (#146) on the same form, through the same one writer."""
+
+    async def scenario(pilot: Pilot[None], host: Host) -> list[tuple[str, str]]:
+        host.query_one(ProjectView).active = "tab-settings"
+        await pilot.pause()
+        host.query_one("#accounts-pick", Select).value = "headroom"
+        host.query_one("#accounts-switch-at", Input).value = "70"
+        host.query_one("#accounts-on-limit", Select).value = "switch"
+        host.query_one("#accounts-wait-minutes", Input).value = "5"
+        host.query_one("#save-settings", Button).press()
+        await pilot.pause()
+        return host.notices
+
+    notices = drive(project, scenario)
+    assert any(m.startswith("✓ fleet settings saved") for m, _ in notices), notices
+    on_disk = _config_toml()["accounts"]
+    assert on_disk == {
+        "pick": "headroom",
+        "switch_at": 70,
+        "on_limit": "switch",
+        "wait_if_reset_within_minutes": 5,
+    }
+    assert load_config().accounts.pick == "headroom"
+
+    async def bad(pilot: Pilot[None], host: Host) -> tuple[str, list[tuple[str, str]]]:
+        host.query_one(ProjectView).active = "tab-settings"
+        await pilot.pause()
+        shown_pick = str(host.query_one("#accounts-pick", Select).value)
+        host.query_one("#accounts-switch-at", Input).value = "250"
+        host.query_one("#save-settings", Button).press()
+        await pilot.pause()
+        return shown_pick, host.notices
+
+    shown_pick, notices = drive(project, bad)
+    assert shown_pick == "headroom"  # the form opened on what the file holds
+    assert any("between 1 and 100" in m and sev == "error" for m, sev in notices), notices
+    assert load_config().accounts.switch_at == 70  # a refused form never reaches the writer

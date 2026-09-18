@@ -470,6 +470,9 @@ def test_the_wake_kinds_are_the_plans() -> None:
         "result",
         "question",
         "agent_exited",
+        # #146: an agent parked on a usage limit, and the hand-over that moved one.
+        "limited",
+        "switched",
     } == team_service.MANAGER_WAKE_KINDS
 
 
@@ -477,7 +480,8 @@ def test_the_wake_kinds_are_the_plans() -> None:
 def test_each_wake_kind_wakes(
     runner: CliRunner, monkeypatch: pytest.MonkeyPatch, work_dir: Path, kind: str
 ) -> None:
-    """Including ``agent_exited``, which only the fleet's ``reap`` emits."""
+    """Including ``agent_exited``, which the fleet emits wherever a row ends —
+    ``fleet.stop`` (and so ``fleet shutdown``) and ``fleet.reap``."""
     _fleet(runner, monkeypatch, work_dir)
     _emit_from_coder(kind, "coder-auth exited (1)")
 

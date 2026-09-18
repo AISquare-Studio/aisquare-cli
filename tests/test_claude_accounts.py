@@ -269,7 +269,11 @@ def test_the_board_labels_a_managed_slot_by_number_and_anything_else_by_name(
     assert team_service.account_label(str(second.config_dir)) == "account 2"
     assert team_service.account_label(str(fake_home / ".claude-c2")) == ".claude-c2"
     assert team_service.account_label(None) is None
-    assert core.label(second) == "account 2" and core.label(core.default_account()) == "default"
+    assert core.label(second) == "account 2"
+    assert (
+        core.label(core.default_account()) == "plain claude"
+    )  # "default" now means something else
+    assert core.label(second.model_copy(update={"alias": "work"})) == "work"
 
 
 # --------------------------------------------------------------------- core: what Claude wrote
@@ -339,7 +343,7 @@ def test_describe_and_overview_read_offline_facts(
     assert not overview.claude.installed and overview.claude.binary is None
     assert [s.account.slot for s in overview.accounts] == [1, 2]
     first, described = overview.accounts
-    assert not first.signed_in and first.identity is None and first.label == "default"
+    assert not first.signed_in and first.identity is None and first.label == "plain claude"
     assert described.signed_in and described.identity is not None
     assert described.identity.email == "two@example.com"
     assert described.subscription == "max 5x" and described.token_state == "ok"
@@ -352,10 +356,13 @@ def test_describe_and_overview_read_offline_facts(
 def test_resolve_finds_a_slot_by_number_or_by_email(fake_home: Path) -> None:
     second = core.create_account()
     _sign_in(second, "Two@Example.com")
-    assert service.resolve("2") == second
-    assert service.resolve(2) == second
-    assert service.resolve("two@example.com") == second  # case does not matter for an email
-    assert service.resolve("1") == core.default_account()
+    # Compared by slot: a resolved account carries its registry arrangement
+    # (position, alias, default) on top of what the directory alone knows.
+    assert service.resolve("2").slot == second.slot
+    assert service.resolve("2").config_dir == second.config_dir
+    assert service.resolve(2).slot == 2
+    assert service.resolve("two@example.com").slot == 2  # case does not matter for an email
+    assert service.resolve("1").slot == core.default_account().slot
     with pytest.raises(service.NoSuchAccount, match="slot 9"):
         service.resolve("9")
     with pytest.raises(service.NoSuchAccount, match=r"nobody@example\.com"):
@@ -905,7 +912,7 @@ def test_launch_account_sets_the_slots_variables_over_the_binding(
     default = runner.invoke(app, ["launch", "coder", "--account", "1", *bound])
     assert default.exit_code == 0, default.output
     assert core.CONFIG_DIR_VAR not in captured["env"] and core.TMPDIR_VAR not in captured["env"]
-    assert "[default]" in default.stderr
+    assert "[plain claude]" in default.stderr
     # …and replaced by the shell's own when it has them.
     captured.clear()
     monkeypatch.setenv(core.CONFIG_DIR_VAR, str(fake_home / ".claude-c2"))

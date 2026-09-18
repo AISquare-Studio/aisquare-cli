@@ -57,9 +57,10 @@ import shutil
 import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, tzinfo
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from aisquare.core import paths
 from aisquare.core.version import __version__
@@ -165,8 +166,44 @@ def managed_slot(config_dir: Path | str) -> int | None:
 
 
 def label(account: ClaudeAccount) -> str:
-    """``default`` for slot 1, ``account N`` otherwise — what the board and the UI call it."""
-    return "default" if account.slot == DEFAULT_SLOT else f"account {account.slot}"
+    """What the board, the UI and a launch line call the slot.
+
+    The alias when the operator gave it one; else ``plain claude`` for slot 1
+    and ``account N`` for a managed slot. Slot 1 was called ``default`` until
+    #145 gave "default" a meaning of its own — the account a launch picks when
+    nothing more specific says — and a slot that is NOT the default could not
+    keep wearing the word. "Plain claude" is what it is: whatever ``claude``
+    already is in the shell ``asq`` was started from.
+    """
+    if account.alias:
+        return account.alias
+    return "plain claude" if account.slot == DEFAULT_SLOT else f"account {account.slot}"
+
+
+ALIAS_PATTERN = re.compile(r"^[a-z][a-z0-9._-]{0,31}$")
+"""What an alias may look like, after lowercasing.
+
+It must START WITH A LETTER so it can never be mistaken for a slot number, and
+it cannot contain ``@`` so it can never be mistaken for an email — those are
+the two other spellings ``--account`` accepts, and a reference that could be
+read two ways is a launch that could land on two accounts. Lowercase because
+``resolve`` compares case-insensitively (as it already does for emails), and a
+name that round-trips through ``--json`` and a shell should have one spelling.
+"""
+
+
+def normalise_alias(raw: str) -> str:
+    """The stored form of an alias, or ``ValueError`` saying what is wrong with it."""
+    alias = raw.strip().lower()
+    if not alias:
+        raise ValueError("an alias cannot be empty")
+    if alias.isdigit():
+        raise ValueError(f"{raw!r} reads as a slot number — an alias must start with a letter")
+    if "@" in alias:
+        raise ValueError(f"{raw!r} reads as an email — an alias cannot contain '@'")
+    if not ALIAS_PATTERN.match(alias):
+        raise ValueError(f"{raw!r} is not a valid alias — a letter, then up to 31 of a-z 0-9 . _ -")
+    return alias
 
 
 # --- creating and removing ----------------------------------------------------------
@@ -376,6 +413,157 @@ def subscription_label(creds: ClaudeCredentials | None) -> str | None:
     if match:
         return f"{match.group(1)} {match.group(2)}"
     return creds.subscription_type
+
+
+# --- what a usage-limit error says (#146) ----------------------------------------------------
+
+# The time is matched by a BOUNDED pattern (an optional weekday, a clock time,
+# am/pm — the shape ``_RESET_TIME`` reads) and nothing anchors the end: the
+# rendered line can carry a period, a second sentence or more lines after the
+# zone ("… (America/Toronto).\nUpgrade for more usage."), and an anchor made the
+# whole match fail, which recorded the limit with no window and no reset
+# (review of #205, finding 7).
+_LIMIT_MESSAGE = re.compile(
+    r"hit your (?P<window>[A-Za-z]+) limit"
+    r"(?:\s*·\s*resets\s+(?P<when>(?:(?:mon|tue|wed|thu|fri|sat|sun)[a-z]*\s+)?"
+    r"\d{1,2}(?::\d{2})?\s*(?:am|pm)))?"
+    r"(?:\s*\((?P<zone>[A-Za-z_]+(?:/[A-Za-z_+\-0-9]+)*)\))?",
+    re.IGNORECASE,
+)
+_RESET_TIME = re.compile(
+    r"^(?:(?P<day>mon|tue|wed|thu|fri|sat|sun)[a-z]*\s+)?(?P<hour>\d{1,2})(?::(?P<minute>\d{2}))?"
+    r"\s*(?P<ampm>am|pm)$",
+    re.IGNORECASE,
+)
+_WEEKDAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+
+
+@dataclass(frozen=True)
+class LimitNotice:
+    """What a Claude Code usage-limit error told us: which window, and when it lifts."""
+
+    window: str
+    """``session``, ``weekly``, ``opus``, ``sonnet``… — lowercased, as the message named it."""
+    resets_at: datetime | None
+    """The reset as an aware UTC datetime, or ``None`` when the message named no time
+    (or one this parser could not read — the raw text stays on the board event)."""
+
+
+def parse_limit_notice(text: str | None, *, now: datetime | None = None) -> LimitNotice | None:
+    """Read ``You've hit your session limit · resets 12:30am (America/Toronto)``, or ``None``.
+
+    That is the rendered text Claude Code shows — and hands a ``StopFailure``
+    hook as ``last_assistant_message`` — when a subscription's rolling allowance
+    runs out (measured in this machine's own transcripts, 2026-09-13; the errors
+    reference documents the same four shapes: session, weekly, Opus, Sonnet,
+    the weekly one with a weekday, ``resets Mon 12:00am``). The time is a clock
+    time in the zone named in parentheses, or the local zone when none is; it
+    is resolved to the next such moment at or after ``now``, on the named
+    weekday when there is one. A ``rate_limit`` that is not a usage limit —
+    ``Request rejected (429)`` from an API key, the server's own throttle —
+    does not match, and the caller treats it as a limit with no reset time.
+    """
+    if not text:
+        return None
+    match = _LIMIT_MESSAGE.search(text)
+    if match is None:
+        return None
+    window = match.group("window").lower()
+    when = (match.group("when") or "").strip()
+    if not when:
+        return LimitNotice(window, None)
+    resets_at = _resolve_reset(when, match.group("zone"), now or _now())
+    return LimitNotice(window, resets_at)
+
+
+def _resolve_reset(when: str, zone_name: str | None, now: datetime) -> datetime | None:
+    clock = _RESET_TIME.match(when.strip())
+    if clock is None:
+        return None
+    raw_hour = int(clock.group("hour"))
+    minute = int(clock.group("minute") or 0)
+    if raw_hour > 12 or minute > 59:  # `13:00pm` is no clock time; `12:30am` is 00:30
+        return None
+    hour = raw_hour % 12
+    if clock.group("ampm").lower() == "pm":
+        hour += 12
+    try:
+        zone: tzinfo = ZoneInfo(zone_name) if zone_name else (now.astimezone().tzinfo or UTC)
+    except (ZoneInfoNotFoundError, ValueError):
+        zone = now.astimezone().tzinfo or UTC
+    local_now = now.astimezone(zone)
+    candidate = local_now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    day = clock.group("day")
+    if day is not None:
+        # `resets Mon 12:00am`: the next Monday at that time — today if it is
+        # Monday and the time is still ahead, else up to a week out.
+        wanted = _WEEKDAYS.index(day.lower()[:3])
+        ahead = (wanted - candidate.weekday()) % 7
+        candidate += timedelta(days=ahead)
+        if candidate < local_now:
+            candidate += timedelta(days=7)
+    elif candidate < local_now:
+        candidate += timedelta(days=1)
+    return candidate.astimezone(UTC)
+
+
+def format_reset(when: datetime | None, *, now: datetime | None = None) -> str:
+    """When a rate-limit window lifts, as a distance AND a clock time: ``in 3h 10m (18:00)``.
+
+    The ONE formatter for every surface that shows a reset — ``accounts usage``
+    / ``list --usage``, the Accounts page, the board's ``limited`` line, the
+    agent's ``limit resets …`` detail and doctor's parked-agents line — because
+    copies drifted (#152): two printed a bare ``HH:MM``, which for the seven-day
+    window can be six days away and read as tonight. It lives in core so the
+    services can call it too (review of #205, finding 9).
+
+    The rules, each chosen so nobody has to do calendar arithmetic:
+
+    - under an hour: ``in 12m`` — the clock time adds nothing;
+    - later the same LOCAL day: ``in 3h 10m (18:00)``;
+    - another day: ``in 2d 4h (Tue 02:00)`` — the weekday is what tells a
+      weekly reset from tonight's, and it is never a bare ``HH:MM`` again;
+    - already past (the endpoint's reading is a little stale): ``now``.
+
+    ``now`` is the clock to measure against; production reads the wall clock,
+    tests pass one so the midnight boundary can be pinned. Returns ``""`` for
+    ``None`` so callers can append it unconditionally.
+    """
+    if when is None:
+        return ""
+    moment = now if now is not None else datetime.now(tz=UTC)
+    # In UTC on purpose: two aware datetimes that share one tzinfo subtract by
+    # their WALL CLOCKS (Python ignores the offsets then), so a reset across a
+    # DST change would read an hour long; the endpoint's UTC stamps never hit
+    # this, a caller's zoned pair would (review of #205, second round).
+    remaining = when.astimezone(UTC) - moment.astimezone(UTC)
+    if remaining <= timedelta(0):
+        return "now"
+    total_minutes = int(remaining.total_seconds() // 60)
+    days, rest = divmod(total_minutes, 24 * 60)
+    hours, minutes = divmod(rest, 60)
+    # The clock time is shown to the nearest MINUTE. Measured against the live
+    # endpoint (2026-09-13): the same window's ``resets_at`` came back as
+    # 08:59:59.86, 09:00:00.26 and 08:59:59.62 on three calls seconds apart —
+    # it jitters across the second boundary — so a truncated ``%H:%M`` flickered
+    # between 04:59 and 05:00 from one refresh to the next. Rounding says what
+    # a person means by the time of a reset, and the distance still moves.
+    local_when = (when.astimezone() + timedelta(seconds=30)).replace(second=0, microsecond=0)
+    # Each instant in the local zone AS OF THAT INSTANT. ``astimezone()`` with no
+    # argument attaches the fixed offset in force at the value it converts, and
+    # reusing the reset's offset for ``now`` compared the two dates an hour apart
+    # across a DST change — a next-day reset printed as a bare clock time, the
+    # very drift #152 removed (review of #205, second round).
+    local_now = moment.astimezone()
+    if remaining < timedelta(hours=1):
+        return f"in {max(minutes, 1)}m"
+    if days == 0:
+        distance = f"{hours}h" if minutes == 0 else f"{hours}h {minutes:02d}m"
+    else:
+        distance = f"{days}d" if hours == 0 else f"{days}d {hours}h"
+    if local_when.date() == local_now.date():
+        return f"in {distance} ({local_when:%H:%M})"
+    return f"in {distance} ({local_when:%a %H:%M})"
 
 
 # --- launching ------------------------------------------------------------------------

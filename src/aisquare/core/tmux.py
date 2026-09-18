@@ -176,6 +176,14 @@ _WINDOW_FIELDS = (
 )
 _WINDOW_FORMAT = _SEP.join(f"#{{{name}}}" for name in _WINDOW_FIELDS)
 _VERSION = re.compile(r"(\d+)\.(\d+)")
+#: The first tmux whose ``capture-pane`` takes ``-F`` (a flags column before each
+#: line: ``-`` none, ``W`` wrapped into the next, ``X`` extended cells, …).
+#: Measured on 3.7c, where ``-p -e -N -F`` prints ``W <escapes><text>`` per row;
+#: 3.4 and 3.5 document no such flag, and tmux's CHANGES file does not date it,
+#: so the gate is the version it was measured on. A server below it is asked
+#: for plain frames: an unknown flag fails the whole capture, and a frame is
+#: worth more than a wrap mark.
+WRAP_FLAGS_MINIMUM: tuple[int, int] = (3, 7)
 _ABSENT = re.compile(r"no server running on |error connecting to .*\(No such file or directory\)")
 """tmux's two ways of saying there is no server behind a socket (see ``server_absent``)."""
 #: Characters tmux reads as target separators; a session named with one can be
@@ -199,6 +207,14 @@ class TmuxError(RuntimeError):
 
 class TmuxUnavailable(TmuxError):
     """No usable tmux: missing from PATH, or older than :data:`MIN_VERSION`."""
+
+
+#: How tmux says a LIVE server has no such session/window/pane — a benign
+#: "not there", distinct from the server being GONE (:data:`_ABSENT`) and from a
+#: socket that refused the probe. Measured on 3.7c: ``can't find session: NAME``
+#: (``has-session``) and ``can't find window: NAME`` (``list-panes``); a refusal
+#: reads ``(Permission denied)`` and matches neither, so a strict query raises.
+_NO_TARGET = re.compile(r"can't find ")
 
 
 @dataclass(frozen=True)
@@ -290,6 +306,13 @@ class Capture:
 
     The EFFECTIVE offset: tmux clamps a request deeper than ``facts.history_size``
     to the top of history, and this reports where the frame really starts.
+    """
+    wrapped: list[bool] | None = None
+    """Per row of ``lines``, whether tmux soft-wrapped it into the row below —
+    the ``W`` of ``capture-pane -F`` — or ``None`` when the flags were not asked
+    for (:meth:`TmuxServer.capture` with ``flags=False``, the default). Read
+    with the frame they describe, so a copy that joins wrapped rows joins the
+    rows it shows and never rows a later screen would have shown.
     """
 
 
@@ -576,9 +599,44 @@ class TmuxServer:
             return []
         return [line for line in completed.stdout.splitlines() if line]
 
+    def sessions_or_raise(self) -> list[str]:
+        """:meth:`list_sessions`, except a server that could not be ASKED raises.
+
+        The lenient twin returns ``[]`` for EVERY non-zero exit, so its caller
+        cannot tell an empty or absent server from one it failed to reach — the
+        class of bug the review kept finding at one more shutdown call site
+        (review of #121, round 8). Here ``[]`` means only what tmux confirmed: a
+        server that is gone (:data:`_ABSENT`) holds no sessions. Anything else
+        non-zero is a :class:`TmuxError` carrying tmux's own words, so the
+        ``--all`` sweep cannot read a denied socket as "no sessions to kill".
+        """
+        completed = self._runner(self.argv("list-sessions", "-F", "#{session_name}"), None)
+        if completed.returncode == 0:
+            return [line for line in completed.stdout.splitlines() if line]
+        if _ABSENT.search(completed.stderr):
+            return []
+        raise TmuxError(completed.stderr.strip() or "tmux list-sessions could not be reached")
+
     def has_session(self, name: str) -> bool:
         completed = self._runner(self.argv("has-session", "-t", f"={name}"), None)
         return completed.returncode == 0
+
+    def has_session_or_raise(self, name: str) -> bool:
+        """:meth:`has_session`, except a server that could not be ASKED raises.
+
+        ``False`` is the answer for a session tmux SAYS is not there — its server
+        gone (:data:`_ABSENT`), or a live server that holds no such session
+        (:data:`_NO_TARGET`) — never for a probe that could not run. The lenient
+        twin returns ``False`` on ANY non-zero exit, which let a denied socket
+        report an existing session as absent and clear its pause while the
+        session survived (review of #121, round 8).
+        """
+        completed = self._runner(self.argv("has-session", "-t", f"={name}"), None)
+        if completed.returncode == 0:
+            return True
+        if _ABSENT.search(completed.stderr) or _NO_TARGET.search(completed.stderr):
+            return False
+        raise TmuxError(completed.stderr.strip() or "tmux has-session could not be reached")
 
     def answers(self) -> bool:
         """Whether a server is listening on this socket at all — not what it holds.
@@ -597,13 +655,37 @@ class TmuxServer:
         set) also exits 0 with the version — where ``list-sessions`` exits 0
         with no output and is therefore indistinguishable from absence.
 
-        Never raises: an unavailable binary is not a server that answered.
+        Never raises: an unavailable binary is not a server that answered. A
+        caller that must tell "could not ask" from "no server" — the one place
+        that ends rows on that distinction is ``fleet shutdown``'s final pass —
+        uses :meth:`reachable`, which propagates :class:`TmuxUnavailable`.
         """
         try:
-            completed = self._runner(self.argv("display-message", "-p", "#{version}"), None)
-        except TmuxUnavailable:
+            return self.reachable()
+        except TmuxError:  # unavailable client, denied socket, timeout: not an answer
             return False
-        return completed.returncode == 0
+
+    def reachable(self) -> bool:
+        """:meth:`answers`, except that "could not ask" is raised, not swallowed.
+
+        :class:`TmuxUnavailable` covers both a binary ``which`` cannot find and
+        one that fails at EXECUTION — deleted between the check and the exec, or
+        a shim whose interpreter is gone — because ``_tmux`` maps the
+        ``FileNotFoundError`` from ``subprocess.run`` to the same class (review of
+        #121, round 5). And a non-zero exit is NOT proof of absence: an
+        inaccessible LIVE socket also exits 1, with ``Permission denied`` where
+        an absent server says ``No such file or directory`` (round 7). So
+        ``False`` means exactly one thing — the client ran and tmux said there is
+        no server on this socket — and every other failed probe is a
+        :class:`TmuxError` carrying tmux's own words.
+        """
+        completed = self._runner(self.argv("display-message", "-p", "#{version}"), None)
+        if completed.returncode == 0:
+            return True
+        detail = completed.stderr.strip()
+        if _ABSENT.search(detail):
+            return False
+        raise TmuxError(detail or f"tmux display-message exited {completed.returncode}")
 
     def server_absent(self) -> bool:
         """Whether tmux itself says NO SERVER is behind this socket — positive evidence.
@@ -682,6 +764,7 @@ class TmuxServer:
                 "-x", str(width), "-y", str(height), *env_flags,
                 "--", *args,
             )  # fmt: skip
+            self._forget_session_environment(session, env)
         window_id, _, pane_id = out.strip().partition(_SEP)
         return WindowInfo(
             session=session,
@@ -694,15 +777,28 @@ class TmuxServer:
             activity=False,
         )
 
-    def list_windows(self, session: str) -> list[WindowInfo]:
-        """Every window (one pane each) of ``session``; empty when it does not exist."""
-        completed = self._runner(
-            self.argv("list-panes", "-s", "-t", f"={session}", "-F", _WINDOW_FORMAT), None
-        )
-        if completed.returncode != 0:
-            return []
+    def _forget_session_environment(self, session: str, env: Mapping[str, str] | None) -> None:
+        """Take the first window's ``-e`` pairs back out of the SESSION environment.
+
+        ``new-window -e`` sets a variable for that window alone, but
+        ``new-session -e`` writes it into the session environment, which every
+        later window of the session inherits — measured on 3.7c:
+        ``show-environment`` listed it, a window opened by hand read it, and
+        after ``set-environment -u`` a third window did not. ``AISQUARE_FLEET_AGENT``
+        is an identity: the row the session-start hook briefs whoever reads it
+        on, so a window the operator opens by hand in the fleet's session
+        (``prefix c``, ``fleet attach``) would have called itself the first
+        agent (review of #135). The process in the first window already has its
+        copy; only the session's is removed. Best effort, because the window is
+        up either way: a failed unset costs exactly the leak it was closing.
+        """
+        for key in env or {}:
+            with contextlib.suppress(TmuxError):
+                self.run("set-environment", "-u", "-t", f"={session}", _data_arg(key))
+
+    def _parse_windows(self, session: str, stdout: str) -> list[WindowInfo]:
         windows: list[WindowInfo] = []
-        for line in completed.stdout.splitlines():
+        for line in stdout.splitlines():
             fields = line.split(_SEP)
             if len(fields) != len(_WINDOW_FIELDS):
                 continue
@@ -721,6 +817,35 @@ class TmuxServer:
             )
         return windows
 
+    def list_windows(self, session: str) -> list[WindowInfo]:
+        """Every window (one pane each) of ``session``; empty when it does not exist."""
+        completed = self._runner(
+            self.argv("list-panes", "-s", "-t", f"={session}", "-F", _WINDOW_FORMAT), None
+        )
+        if completed.returncode != 0:
+            return []
+        return self._parse_windows(session, completed.stdout)
+
+    def windows_or_raise(self, session: str) -> list[WindowInfo]:
+        """:meth:`list_windows`, except a server that could not be ASKED raises.
+
+        ``[]`` is the answer only for a session tmux CONFIRMS is not there — its
+        server gone (:data:`_ABSENT`) or the session itself (:data:`_NO_TARGET`).
+        The lenient twin's ``[]`` on any non-zero exit let a transient socket
+        failure read as "this session holds no left-live pane", and a session
+        whose agent was verified alive was killed anyway (review of #121, round
+        8). So the spare rule fails closed: it never kills on an enumeration
+        that did not answer.
+        """
+        completed = self._runner(
+            self.argv("list-panes", "-s", "-t", f"={session}", "-F", _WINDOW_FORMAT), None
+        )
+        if completed.returncode != 0:
+            if _ABSENT.search(completed.stderr) or _NO_TARGET.search(completed.stderr):
+                return []
+            raise TmuxError(completed.stderr.strip() or "tmux list-panes could not be reached")
+        return self._parse_windows(session, completed.stdout)
+
     def pane_facts(self, pane_id: str) -> PaneFacts | None:
         """The pane's facts, or ``None`` when the pane is gone.
 
@@ -735,6 +860,51 @@ class TmuxServer:
         )
         if completed.returncode != 0:
             return None
+        facts = _facts(completed.stdout.rstrip("\n"))
+        if not facts.pane_id or (pane_id.startswith("%") and facts.pane_id != pane_id):
+            return None
+        return facts
+
+    def pane_pid(self, pane_id: str) -> int | None:
+        """The pid of the process tmux started in the pane, or ``None`` when it is gone.
+
+        Asked on its own rather than as one more :class:`PaneFacts` field: the
+        facts are polled for every frame of the UI, and this is read once per
+        session start by the hook that has to decide whether the process asking
+        is the pane's own (``services.team``). ``aisquare launch`` execs the
+        agent, so the pid tmux started IS the agent's — the number Claude Code
+        hands its hooks as ``CLAUDE_PID``. The same two shapes of "gone" as
+        :meth:`pane_facts` — a non-zero exit, and 3.7c's empty answer for a
+        target it could not find — and the same guard against an attached
+        client's current pane answering for the one that was asked about.
+        """
+        fmt = f"#{{pane_id}}{_SEP}#{{pane_pid}}"
+        completed = self._runner(self.argv("display-message", "-p", "-t", pane_id, fmt), None)
+        if completed.returncode != 0:
+            return None
+        answered, _, pid = completed.stdout.strip().partition(_SEP)
+        if not answered or (pane_id.startswith("%") and answered != pane_id):
+            return None
+        return _optional_int(pid)
+
+    def pane_facts_or_raise(self, pane_id: str) -> PaneFacts | None:
+        """:meth:`pane_facts`, except a server that could not be ASKED raises.
+
+        ``None`` means the pane is gone as tmux CONFIRMED it: an empty answer
+        from a live server (``display-message`` may miss its target and still
+        exit 0) or a server that is gone (:data:`_ABSENT`). A non-zero exit that
+        is neither — ``Permission denied`` on a live socket — is a
+        :class:`TmuxError`, not a dead pane. The lenient twin's ``None`` there
+        ended a still-running late agent's row and released its claims (review
+        of #121, round 8).
+        """
+        completed = self._runner(
+            self.argv("display-message", "-p", "-t", pane_id, _FACTS_FORMAT), None
+        )
+        if completed.returncode != 0:
+            if _ABSENT.search(completed.stderr):
+                return None
+            raise TmuxError(completed.stderr.strip() or "tmux display-message could not be reached")
         facts = _facts(completed.stdout.rstrip("\n"))
         if not facts.pane_id or (pane_id.startswith("%") and facts.pane_id != pane_id):
             return None
@@ -784,7 +954,14 @@ class TmuxServer:
 
     # --- the screen -------------------------------------------------------------------
 
-    def capture(self, pane_id: str, *, scrollback: int = 0, height: int | None = None) -> Capture:
+    def capture(
+        self,
+        pane_id: str,
+        *,
+        scrollback: int = 0,
+        height: int | None = None,
+        flags: bool = False,
+    ) -> Capture:
         """One frame of ``pane_id`` — the rows with SGR escapes, plus the pane's facts.
 
         ``scrollback`` is how many history lines above the live screen the
@@ -798,25 +975,53 @@ class TmuxServer:
         user is reading the top of a long run. A stale hint (the pane grew,
         or history shrank under a clear) yields a short frame, which is
         detected and refetched unbounded — one extra process, only then.
+
+        ``flags`` asks for ``-F`` as well, and the frame then carries which of
+        its rows tmux soft-wrapped (:attr:`Capture.wrapped`) — in the SAME
+        process, so a copy that joins wrapped rows never has to ask a second
+        time and compare two screens (review of #135). Only for a server that
+        knows the flag (:data:`WRAP_FLAGS_MINIMUM`): the caller checks the
+        version, because an unknown flag fails the whole frame.
         """
         scrollback = max(0, scrollback)
         bound = height if scrollback and height is not None and height > 0 else None
-        rows, facts = self._frame(pane_id, scrollback, bound)
+        rows, wrapped, facts = self._frame(pane_id, scrollback, bound, flags)
         if bound is not None and len(rows) < facts.height:
-            rows, facts = self._frame(pane_id, scrollback, None)
+            rows, wrapped, facts = self._frame(pane_id, scrollback, None, flags)
         effective = min(scrollback, facts.history_size)
-        return Capture(lines=rows[: facts.height], facts=facts, scrollback=effective)
+        return Capture(
+            lines=rows[: facts.height],
+            facts=facts,
+            scrollback=effective,
+            wrapped=None if wrapped is None else wrapped[: facts.height],
+        )
 
     def _frame(
-        self, pane_id: str, scrollback: int, height: int | None
-    ) -> tuple[list[str], PaneFacts]:
+        self, pane_id: str, scrollback: int, height: int | None, flags: bool
+    ) -> tuple[list[str], list[bool] | None, PaneFacts]:
         window = ["-E", str(height - 1 - scrollback)] if height is not None else []
+        marks = ["-F"] if flags else []
         out = self.run(
-            "capture-pane", "-p", "-e", "-N", "-S", str(-scrollback), *window, "-t", pane_id,
+            "capture-pane", "-p", "-e", "-N", *marks, "-S", str(-scrollback), *window,
+            "-t", pane_id,
             ";", "display-message", "-p", "-t", pane_id, _FACTS_FORMAT,
         )  # fmt: skip
         body = out.rstrip("\n").split("\n")
-        return body[:-1], _facts(body[-1])
+        rows, facts = body[:-1], _facts(body[-1])
+        if not flags:
+            return rows, None, facts
+        # ``-F`` puts the line's flags, then one space, before the line — before
+        # its escapes too (measured on 3.7c: ``W \x1b[31m…``). A blank row is
+        # ``- `` and an empty flags column never happens, so ``partition`` is
+        # exact; a flag other than ``W`` (``X`` extended cells, ``H`` hyperlinks)
+        # rides in the same column and is ignored here.
+        lines: list[str] = []
+        wrapped: list[bool] = []
+        for row in rows:
+            mark, _, text = row.partition(" ")
+            lines.append(text)
+            wrapped.append("W" in mark)
+        return lines, wrapped, facts
 
     # --- input --------------------------------------------------------------------------
 

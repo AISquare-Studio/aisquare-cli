@@ -50,9 +50,17 @@ from typer.testing import CliRunner
 from aisquare.cli.app import app
 from aisquare.core import paths
 
-#: All FIVE boundaries, not the four I first measured — `notification` has
-#: the identical swallow and would have been the one left silent.
-_HOOKS = ["session-start", "user-prompt-submit", "stop", "session-end", "notification"]
+#: All SIX boundaries, not the four I first measured — `notification` has
+#: the identical swallow and would have been the one left silent, and
+#: `stop-failure` (#146) arrived with the same swallow and joins the census.
+_HOOKS = [
+    "session-start",
+    "user-prompt-submit",
+    "stop",
+    "session-end",
+    "notification",
+    "stop-failure",
+]
 
 _CORRUPT = b"this is not a database, and the agent deserves to be told"
 
@@ -242,7 +250,7 @@ def test_a_wedged_store_is_announced_too(runner: CliRunner, work_dir: Path, hook
 
 @pytest.mark.parametrize("hook", _HOOKS)
 def test_the_line_says_what_THIS_hook_cost(runner: CliRunner, work_dir: Path, hook: str) -> None:
-    """Three of the five do not inject context, so one shared sentence was wrong.
+    """Four of the six do not inject context, so one shared sentence was wrong.
 
     A warning that misdescribes what happened is worse than a generic one: it
     is a false statement printed on every turn, and the reader who checks it

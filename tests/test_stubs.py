@@ -43,11 +43,13 @@ IMPLEMENTED: set[tuple[str, ...]] = {
             "status",
             "tell",
             "stop",
+            "shutdown",
             "attach",
             "reap",
             "rename",
             "pause",
             "resume",
+            "switch",
         )
     ),
     ("explainability", "status"),
@@ -58,6 +60,8 @@ IMPLEMENTED: set[tuple[str, ...]] = {
     ("explainability", "ship"),
     ("hook", "session-start"),
     ("hook", "user-prompt-submit"),
+    ("hook", "stop-failure"),
+    ("hook", "hand-over"),
     ("hook", "session-end"),
     ("hook", "stop"),
     ("hook", "notification"),
@@ -118,7 +122,22 @@ IMPLEMENTED: set[tuple[str, ...]] = {
     ),
     *(("config", command) for command in ("list", "get", "set", "redaction")),
     *(("agents", command) for command in ("list", "scan", "status", "connect", "disconnect")),
-    *(("accounts", command) for command in ("list", "usage", "add", "remove", "run")),
+    *(
+        ("accounts", command)
+        for command in (
+            "list",
+            "usage",
+            "add",
+            "remove",
+            "run",
+            "default",
+            "alias",
+            "order",
+            "move",
+            "disable",
+            "enable",
+        )
+    ),
     *(("metrics", command) for command in ("show", "list")),
 }
 

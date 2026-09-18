@@ -45,6 +45,7 @@ from textual.widget import Widget
 from textual.widgets import ContentSwitcher, Footer, Static
 from textual.worker import Worker, WorkerState
 
+from aisquare.cli.ui.autosave import Autosave
 from aisquare.cli.ui.divider import Divider, cells
 from aisquare.cli.ui.sidebar import (
     AccountsSelected,
@@ -65,6 +66,7 @@ from aisquare.cli.ui.views.doctor import DoctorRefreshed, DoctorView
 from aisquare.cli.ui.views.onboard import OnboardFailed, OnboardView, ProjectOnboarded
 from aisquare.cli.ui.views.project import ProjectView
 from aisquare.cli.ui.views.welcome import WelcomeView
+from aisquare.core.console import stderr_console
 from aisquare.core.store import store_session
 from aisquare.models import (
     AccountsOverview,
@@ -307,6 +309,9 @@ class FleetApp(App[None], inherit_bindings=False):
         """The newest doctor run; an older one's result is not ours to paint."""
         self._theme_restored = False
         self._theme_autosave = theme_autosave(self)
+        self.unsaved: list[str] = []
+        """What the quit-time flush could not land (a preference each), for ``run_ui`` to say
+        once the screen is gone."""
         self._gesture_button: int | None = None
         """Which button began the selection gesture now running, if one is."""
 
@@ -389,7 +394,9 @@ class FleetApp(App[None], inherit_bindings=False):
             self._theme_autosave.remember(theme_name)
 
     def on_unmount(self) -> None:
-        self._theme_autosave.flush()  # a pick inside the debounce before q is not lost
+        # Every saver — the theme's here, the divider's — started first and joined
+        # against ONE deadline, so quit waits once, not once per preference.
+        self.unsaved = Autosave.flush_all(self)
 
     def on_mouse_down(self, event: events.MouseDown) -> None:
         """Remember which button began the gesture now running.
@@ -758,5 +765,8 @@ class FleetApp(App[None], inherit_bindings=False):
 
 
 def run_ui(**options: Any) -> None:
-    """Run the fleet UI until the user quits."""
-    FleetApp(**options).run()
+    """Run the fleet UI until the user quits; then say what its last saves could not land."""
+    app = FleetApp(**options)
+    app.run()
+    for line in app.unsaved:
+        stderr_console().print(f"⚠ {line}", markup=False, highlight=False)

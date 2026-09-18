@@ -508,7 +508,6 @@ def test_the_board_says_once_when_the_theme_cannot_be_remembered(
     from textual.widgets._toast import Toast
 
     from aisquare.cli import watch as watch_mod
-    from aisquare.cli.ui.autosave import Autosave
 
     team_service.activate()
     isolated_home.mkdir(parents=True, exist_ok=True)
@@ -521,8 +520,7 @@ def test_the_board_says_once_when_the_theme_cannot_be_remembered(
             await pilot.pause()
             for name in ("nord", "dracula"):
                 pilot.app.theme = name
-                await pilot.pause(Autosave.DEBOUNCE + 0.05)
-                await asyncio.to_thread(pilot.app._theme_autosave.wait, 5.0)
+                assert await asyncio.to_thread(pilot.app._theme_autosave.settled, 5.0)
                 await pilot.pause()
             toasts = list(pilot.app.screen.query(Toast))
             return len(toasts), toasts[0].render().plain if toasts else ""

@@ -66,7 +66,9 @@ from aisquare.cli.ui.views.doctor import DoctorRefreshed, DoctorView
 from aisquare.cli.ui.views.explainability import ExplainabilityView
 from aisquare.cli.ui.views.onboard import OnboardFailed, ProjectOnboarded
 from aisquare.cli.ui.views.project import ManagerTab, ProjectView
+from aisquare.core import state_file
 from aisquare.core import tmux as tmux_core
+from aisquare.core.atomic import write_replacing
 from aisquare.core.state_file import update_state
 from aisquare.core.store import ContextStore, store_session
 from aisquare.core.tmux import Completed
@@ -1812,13 +1814,12 @@ async def _drag(pilot: Pilot[None], from_x: int, to_x: int, y: int = 5) -> None:
 
 
 async def _settled(pilot: Pilot[None]) -> None:
-    """Let a debounced save land: the debounce, then the thread it hands the write to — and stay
-    well inside Textual's half-second click chain, which some tests need to span."""
-    await pilot.pause(Autosave.DEBOUNCE + 0.05)
+    """Let every save land — by the savers' own state, never the clock: the debounce fires and
+    the drain finishes (or a refusal stands) before this returns."""
     app = fleet_app(pilot)
     for saver in (app._theme_autosave, app.query_one(Divider)._autosave):
         if saver is not None:
-            await asyncio.to_thread(saver.wait, 5.0)
+            assert await asyncio.to_thread(saver.settled, 5.0), "a save never settled"
     await pilot.pause()
 
 
@@ -2448,13 +2449,13 @@ def test_a_width_the_file_already_has_is_not_rewritten_and_a_save_due_at_quit_is
     # `<` then `>` must both land inside one debounce; the default left a margin of a few ms
     # against a loaded runner, so this test's debounce is a generous one.
     monkeypatch.setattr(Autosave, "DEBOUNCE", 0.5)
-    writes: list[tuple[str, object]] = []
+    rewrites: list[object] = []
 
-    def counting(key: str, value: object) -> None:
-        writes.append((key, value))
-        update_state(key, value)
+    def spy(target: Path, body: str, *, keep_mode: bool = True, durable: bool = True) -> None:
+        rewrites.append(json.loads(body).get(SIDEBAR_WIDTH_KEY))
+        write_replacing(target, body, keep_mode=keep_mode, durable=durable)
 
-    monkeypatch.setattr("aisquare.cli.ui.autosave.update_state", counting)
+    monkeypatch.setattr(state_file, "write_replacing", spy)
 
     async def go(pilot: Pilot[None]) -> int:
         app = fleet_app(pilot)
@@ -2463,19 +2464,14 @@ def test_a_width_the_file_already_has_is_not_rewritten_and_a_save_due_at_quit_is
         await pilot.press("greater_than_sign")
         await _settled(pilot)  # one write: 34
         await pilot.press("less_than_sign")  # 30 queued...
-        await pilot.press(
-            "greater_than_sign"
-        )  # ...and back to what the file says: nothing to write
-        await _settled(pilot)
+        await pilot.press("greater_than_sign")  # ...and back to what the file says: handed
+        await _settled(pilot)  # over, not rewritten — the file decides, under its lock
         await pilot.press("greater_than_sign")  # 38 queued — and the app quits inside the debounce
         return declared
 
     declared = drive(go)
     step = RESIZE_STEP
-    assert writes == [
-        (SIDEBAR_WIDTH_KEY, declared + step),
-        (SIDEBAR_WIDTH_KEY, declared + 2 * step),
-    ]
+    assert rewrites == [declared + step, declared + 2 * step]
     assert _state(isolated_home)[SIDEBAR_WIDTH_KEY] == declared + 2 * step, "flushed at quit"
 
 
@@ -2592,3 +2588,38 @@ def test_the_fleet_ui_flushes_a_theme_picked_inside_the_debounce_at_quit(
 
     drive(go)
     assert _state(isolated_home)["board_theme"] == "nord"
+
+
+def test_the_ceiling_rule_reads_what_the_saver_was_last_asked_not_the_last_confirmed_write(
+    tmp_path: Path, script: Script, isolated_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """120 on file, the ceiling 99. Drag to 60 and release; while 60 is in flight drag back out
+    past the ceiling. Read against the last CONFIRMED write (120), the rule kept the ask at 120
+    and wrote nothing, and the in-flight 60 landed: shown 99, ask 120, file 60."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+    _write_state(isolated_home, {SIDEBAR_WIDTH_KEY: 120})
+    real_update = update_state
+
+    def slow(key: str, value: object) -> None:
+        time.sleep(0.4)
+        real_update(key, value)
+
+    monkeypatch.setattr("aisquare.cli.ui.autosave.update_state", slow)
+
+    async def go(pilot: Pilot[None]) -> tuple[int, int | None, object]:
+        app = fleet_app(pilot)
+        await pilot.pause()
+        ceiling = app.sidebar.outer_size.width
+        await _drag(pilot, ceiling, 60)
+        await pilot.pause(Autosave.DEBOUNCE + 0.1)  # 60 is being written now
+        await _drag(pilot, 60, 130)  # back out, past the ceiling
+        await _settled(pilot)
+        return (
+            app.sidebar.outer_size.width,
+            app.query_one(Divider)._width,
+            _state(isolated_home)[SIDEBAR_WIDTH_KEY],
+        )
+
+    shown, ask, on_file = drive(go)
+    ceiling = Panes.sidebar_ceiling(SIZE[0], 24)
+    assert (shown, ask, on_file) == (ceiling, ceiling, ceiling), "screen, ask and file agree"

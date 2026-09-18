@@ -498,9 +498,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   instead of a traceback; `project forget` and `project prune` finish (rows,
   data directory) and report a pin they could not move, instead of failing
   after the purge had already happened. The fleet UI's and the board's saves
-  (the width, the theme) run debounced on a worker thread, so a held lock or a
-  slow disk cannot freeze the UI, and `config.toml`, `state.json` and the CI
-  descriptor cache share one durable replace-by-rename.
+  (the width, the theme) run debounced on a thread of their own, so a held lock
+  or a slow disk cannot freeze the UI; at quit every save is given one bounded
+  wait together, and anything that still did not land is printed once the
+  screen is gone. `config.toml`, `state.json` and the CI descriptor cache share
+  one durable replace-by-rename.
 - **Alt+letter chords reach the agent as chords.** Claude Code's alt+p (switch
   model) did nothing from a fleet pane — reported 2026-09-02 and again
   2026-09-10 — because Textual's parser reads `ESC p` as `Key("alt+p",

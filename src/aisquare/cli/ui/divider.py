@@ -314,7 +314,9 @@ class Divider(Widget):
     def on_unmount(self) -> None:
         self._dragging = False
         if self._autosave is not None:
-            self._autosave.flush()
+            # Start the drain (a stopped timer would never fire it); the app joins
+            # every saver against one deadline at its own unmount.
+            self._autosave.wake()
 
     def _remembered_width(self) -> int | None:
         """The width the file holds or is about to hold, as the saver knows it."""

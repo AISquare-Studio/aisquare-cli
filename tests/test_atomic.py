@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import os
 import stat
 from pathlib import Path
@@ -60,6 +61,28 @@ def test_a_read_only_temp_is_still_removed_when_the_replace_fails(
         target.chmod(0o644)
     assert unlinked == [0o600], "made writable before the unlink"
     assert _leftovers(tmp_path) == ["config.toml"]
+
+
+def test_a_filesystem_that_refuses_chmod_still_gets_its_temp_removed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The cleanup's chmod and unlink shared one `suppress`: a chmod that raised (vfat, some
+    CIFS) skipped the unlink, the opposite of what the line was added for."""
+    target = tmp_path / "state.json"
+    target.write_text("old\n")
+
+    def refuse_chmod(path: object, mode: int, *args: object, **kwargs: object) -> None:
+        raise PermissionError(errno.EPERM, "Operation not permitted")
+
+    def busy(src: object, dst: object) -> None:
+        raise OSError(errno.EBUSY, "Device or resource busy")
+
+    monkeypatch.setattr(os, "chmod", refuse_chmod)
+    monkeypatch.setattr(os, "replace", busy)
+    with pytest.raises(OSError, match="busy"):  # the replace's error, not the cleanup's
+        write_replacing(target, "new\n", keep_mode=False)
+    assert target.read_text() == "old\n"
+    assert _leftovers(tmp_path) == ["state.json"]
 
 
 def test_keep_mode_copies_the_targets_bits_and_off_takes_the_umask_default(

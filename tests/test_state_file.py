@@ -213,7 +213,7 @@ def test_a_read_only_lock_file_still_serves(
     assert read_state() == {"board_theme": "nord", "sidebar_width": 44}
 
 
-@pytest.mark.parametrize("held", sorted(state_file._HELD))
+@pytest.mark.parametrize("held", sorted({errno.EAGAIN, errno.EWOULDBLOCK, errno.EACCES}))
 def test_every_errno_that_means_held_is_waited_for_not_refused(
     isolated_home: Path, monkeypatch: pytest.MonkeyPatch, held: int
 ) -> None:
@@ -233,6 +233,48 @@ def test_every_errno_that_means_held_is_waited_for_not_refused(
     update_state("sidebar_width", 44)
     assert len(attempts) == 3, "waited through two 'held' answers, then took the lock"
     assert read_state() == {"board_theme": "nord", "sidebar_width": 44}
+
+
+def test_a_file_that_already_says_so_is_not_rewritten(
+    isolated_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The decision is taken here, under the lock, where the file is the truth — not on a
+    caller's memory of what it last wrote, which another process may have changed since."""
+    update_state("sidebar_width", 44)
+    rewrites: list[str] = []
+
+    def spy(target: Path, body: str, *, keep_mode: bool = True, durable: bool = True) -> None:
+        rewrites.append(body)
+        write_replacing(target, body, keep_mode=keep_mode, durable=durable)
+
+    monkeypatch.setattr(state_file, "write_replacing", spy)
+    update_state("sidebar_width", 44)  # says so already
+    update_state("never_there", None)  # already absent
+    assert rewrites == []
+    update_state("sidebar_width", 45)
+    update_state("sidebar_width", None)
+    assert len(rewrites) == 2
+    assert read_state() == {}
+
+
+def test_a_temp_another_process_left_behind_is_swept_on_the_next_update(
+    isolated_home: Path,
+) -> None:
+    """A quit that ran out of time mid-write leaves `.state.json.<pid>.<hex>.tmp`, named for a
+    pid nothing will reuse; older than a minute it is swept under the lock. A fresh one is
+    someone's write in progress and stays."""
+    update_state("board_theme", "nord")
+    stale = isolated_home / ".state.json.99999.deadbeef.tmp"
+    stale.write_text("{}\n")
+    old = time.time() - 120
+    os.utime(stale, (old, old))
+    fresh = isolated_home / ".state.json.99998.cafef00d.tmp"
+    fresh.write_text("{}\n")
+    update_state("sidebar_width", 44)
+    assert not stale.exists()
+    assert fresh.exists()
+    fresh.unlink()
+    assert _siblings(isolated_home) == ["state.json"]
 
 
 @_not_root

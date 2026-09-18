@@ -348,9 +348,9 @@ def _build_app_class(interval: float) -> Any:
             self._theme_restored = True
 
         def on_unmount(self) -> None:
-            saver = getattr(self, "_theme_autosave", None)
-            if saver is not None:
-                saver.flush()  # a pick inside the debounce before q is not lost
+            # Started first, joined against one deadline; what did not land is said
+            # by ``_run_tui`` once the screen is gone.
+            self.unsaved = Autosave.flush_all(self)
 
         def on_board_panel_refreshed(self, event: BoardPanel.Refreshed) -> None:
             self.title = f"aisquare board — {event.project.root.name or event.project.id}"
@@ -391,7 +391,10 @@ def _build_app_class(interval: float) -> Any:
 
 
 def _run_tui(interval: float) -> None:
-    _build_app_class(interval)().run()
+    app = _build_app_class(interval)()
+    app.run()
+    for line in getattr(app, "unsaved", ()):
+        stderr_console().print(f"⚠ {line}", markup=False, highlight=False)
 
 
 # --- the Rich fallback ------------------------------------------------------------

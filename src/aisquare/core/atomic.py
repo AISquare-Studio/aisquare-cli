@@ -49,7 +49,8 @@ def write_replacing(
     except BaseException:
         with contextlib.suppress(OSError):
             os.chmod(temporary, 0o600)  # Windows will not delete a read-only file
-            temporary.unlink()
+        with contextlib.suppress(OSError):  # its own block: a filesystem that refuses chmod
+            temporary.unlink()  # (vfat, some CIFS) must not keep the temp too
         raise
     if durable:
         _sync_directory(target.parent)

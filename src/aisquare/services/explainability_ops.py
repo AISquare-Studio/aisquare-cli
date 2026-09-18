@@ -46,7 +46,6 @@ from http.client import HTTPException, IncompleteRead
 from importlib.metadata import PackageNotFoundError, version
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
 from aisquare.core.config import (
@@ -501,13 +500,20 @@ def _request(
     # the network.
     # Both spellings of "malformed" are verdicts: a URL with no scheme, and a
     # URL the parser itself rejects (`https://[::1` — "Invalid IPv6 URL" is
-    # raised by `urlsplit`, so the check has to sit inside a handler too;
-    # review of #107, round 3).
-    try:
-        usable = urlsplit(url).scheme in ("http", "https")
-    except ValueError as exc:
-        return HttpVerdict(ok=False, status=None, detail=f"not a usable URL: {url!r} ({exc})")
-    if not usable:
+    # raised by `urlsplit`; review of #107, round 3). Parsed through
+    # `split_url`, the one guarded parser every URL in this package goes
+    # through, rather than a private `try` around `urlsplit` that this module
+    # kept beside its import of the helper (review of #203). Stripped first so
+    # the parse and the request read the same text: `split_url` strips on its
+    # own, and a stray space from a pasted config value would have passed the
+    # check and then failed `Request` as "unreachable".
+    url = url.strip()
+    split = split_url(url)
+    if split is None:
+        return HttpVerdict(
+            ok=False, status=None, detail=f"not a usable URL: {url!r} (it cannot be parsed)"
+        )
+    if split.scheme not in ("http", "https"):
         return HttpVerdict(
             ok=False,
             status=None,

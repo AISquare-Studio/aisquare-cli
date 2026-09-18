@@ -473,6 +473,14 @@ spelled out in five places (the store's readiness rule and its claim clearing,
 the fleet's spawn refusal, the briefing, the board's archive split), and a sixth
 status would have had to find them all."""
 
+CLAIM_KEEPING_STATUSES: frozenset[TaskStatus] = frozenset({"doing", "review", "blocked"})
+"""The statuses in which a task keeps its ``claimed_by``: the one being worked,
+the one with a verifier (its author is who rework goes back to), the one parked
+with a reason. ``set_task_status`` clears the claim for :data:`CLOSED_STATUSES`
+alone. Only ``doing`` carries a LEASE — the ``claim_expires_at`` that
+``renew_leases`` extends and ``claim_task`` reclaims when it lapses; the other
+two hold their claim indefinitely (review of #203)."""
+
 
 class TeamSession(BaseModel):
     """One live agent session on the orchestrator (id = the agent's session id)."""

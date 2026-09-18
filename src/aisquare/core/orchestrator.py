@@ -53,6 +53,11 @@ def env_role() -> str | None:
     return role or None
 
 
+FLEET_AGENT_ENV_VAR = "AISQUARE_FLEET_AGENT"
+"""The variable that carries a fleet row's id into its window — an IDENTITY,
+which is why ``fleet spawn`` keeps it out of the tmux session environment."""
+
+
 def env_fleet_agent() -> str | None:
     """The ``fleet_agent`` row this session runs as (``AISQUARE_FLEET_AGENT``).
 
@@ -61,7 +66,7 @@ def env_fleet_agent() -> str | None:
     spawned for. Nothing read it before: the task was recorded on the row and
     named the label and branch, and the agent itself was never told.
     """
-    agent_id = os.environ.get("AISQUARE_FLEET_AGENT", "").strip()
+    agent_id = os.environ.get(FLEET_AGENT_ENV_VAR, "").strip()
     return agent_id or None
 
 

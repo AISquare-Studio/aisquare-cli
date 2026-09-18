@@ -41,7 +41,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import ModuleType
 
-from aisquare.core import codenames, harness, selfcli
+from aisquare.core import codenames, harness, orchestrator, selfcli
 from aisquare.core.config import FleetRoleSettings, FleetSettings, load_config
 from aisquare.core.ids import new_agent_id
 from aisquare.core.store import AmbiguousIdError, ContextStore, store_session
@@ -1105,7 +1105,7 @@ def spawn(
         flags += ["--account", account]
     flags += ["--name", picked]
     command = selfcli.argv_for(["launch", role, *flags, *role_args, *extra])
-    env = {"AISQUARE_FLEET_AGENT": agent_id}
+    env = {orchestrator.FLEET_AGENT_ENV_VAR: agent_id}
     if config.disable_native_agent_teams:
         env["CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"] = "0"
     if account is not None:
@@ -1118,7 +1118,17 @@ def spawn(
         env.update(carried)
     tmux_session = session_name(codename)
     try:
-        window = srv.spawn_window(tmux_session, name=picked, cwd=cwd, command=command, env=env)
+        # The identity is the one pair that must not outlive this window in the
+        # session's environment; the opt-out and the account pins are the
+        # session's defaults for a window opened by hand (review of #203).
+        window = srv.spawn_window(
+            tmux_session,
+            name=picked,
+            cwd=cwd,
+            command=command,
+            env=env,
+            private=(orchestrator.FLEET_AGENT_ENV_VAR,),
+        )
     except TmuxError as exc:
         raise FleetError(f"tmux could not start the window: {exc}") from exc
 

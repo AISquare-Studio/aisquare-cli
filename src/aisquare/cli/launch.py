@@ -20,9 +20,11 @@ byte-identical to what it always was.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 import shutil
+import sqlite3
 import time
 from collections.abc import Callable
 from typing import Annotated
@@ -35,7 +37,7 @@ from aisquare.core import claude_accounts as claude_accounts_core
 from aisquare.core import harness, orchestrator
 from aisquare.core.config import load_config
 from aisquare.core.console import stderr_console
-from aisquare.core.store import store_session
+from aisquare.core.store import ContextStore, is_locked_error, store_session
 from aisquare.services import claude_accounts as claude_accounts_service
 from aisquare.services import explainability as explainability_service
 from aisquare.services import explainability_ops
@@ -123,26 +125,42 @@ def _await_fleet_row() -> None:
     row is there on the first look, while this interpreter is still warming
     up. Fail-open at the timeout and on a store that cannot be read — the
     hook fails open the same way — with one line saying what it cost.
+
+    ONE connection for the whole wait. Opening a store connects, switches the
+    journal mode and runs the migrations, and the first cut did that on every
+    50 ms look — up to two hundred opens, each contending on ``context.db``
+    with the very insert this loop waits for — and gave up on the first
+    "database is locked", the one condition it exists to wait out (review of
+    #203). A lock, on the open or on a look, is looked past until the deadline;
+    any other failure of the store ends the wait, never the launch. The
+    deadline bounds the looks: one open that is itself waiting out a lock holds
+    for the store's own retry budget first.
     """
     agent_id = orchestrator.env_fleet_agent()
     if agent_id is None:
         return
     deadline = _monotonic() + FLEET_ROW_TIMEOUT
-    while True:
-        try:
-            with store_session() as store:
+    with contextlib.ExitStack() as stack:
+        store: ContextStore | None = None
+        while True:
+            try:
+                if store is None:
+                    store = stack.enter_context(store_session())
                 if store.get_fleet_agent(agent_id) is not None:
                     return
-        except Exception:  # an unreadable store costs the wait, never the launch
-            return
-        if _monotonic() >= deadline:
-            stderr_console().print(
-                f"fleet: row {agent_id} not recorded after {FLEET_ROW_TIMEOUT:.0f}s — "
-                "starting anyway; the session-start briefing may miss its assignment",
-                style="dim",
-            )
-            return
-        _sleep(FLEET_ROW_POLL)
+            except sqlite3.OperationalError as exc:
+                if not is_locked_error(exc):
+                    return  # an unreadable store costs the wait, never the launch
+            except Exception:  # an unreadable store costs the wait, never the launch
+                return
+            if _monotonic() >= deadline:
+                stderr_console().print(
+                    f"fleet: row {agent_id} not recorded after {FLEET_ROW_TIMEOUT:.0f}s — "
+                    "starting anyway; the session-start briefing may miss its assignment",
+                    style="dim",
+                )
+                return
+            _sleep(FLEET_ROW_POLL)
 
 
 def launch(

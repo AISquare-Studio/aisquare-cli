@@ -927,8 +927,16 @@ class TerminalPane(Widget, can_focus=True):
         """
         changed = notice != self.notice or self._cursor is not None
         height = self.content_size.height
-        stale = notice != self.notice and self._highlight_is_stale(
-            Shown(self._lines, notice, self._marker), {height - 1}
+        # A failure can arrive before Textual has sized the widget — the first
+        # capture of ``attach`` or ``on_mount`` raising — and ``height - 1`` is
+        # then ``-1``, which ``_displayed_row`` reads as the frame's LAST row
+        # (``lines[-1]``) and compares under a span meant for the notice row:
+        # a verdict about a row nobody highlighted (review of #203). No rows,
+        # no row the notice replaces.
+        stale = (
+            height > 0
+            and notice != self.notice
+            and self._highlight_is_stale(Shown(self._lines, notice, self._marker), {height - 1})
         )
         self.notice = notice
         self._cursor = None

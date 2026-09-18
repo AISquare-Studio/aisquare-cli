@@ -591,6 +591,62 @@ def test_probe_survives_valid_json_that_is_not_an_object(payload: object) -> Non
     assert "not a health object" in verdict.reason
 
 
+@pytest.mark.parametrize(
+    "proxy_url",
+    ["http://127.0.0.1:ab", "http://exa mple.com"],
+    ids=["nonnumeric-port", "space-in-host"],
+)
+def test_probe_answers_a_url_urllib_refuses_instead_of_raising(proxy_url: str) -> None:
+    """Review of #203. ``urlopen`` raises ``http.client.InvalidURL`` for these
+    before any network call, and ``InvalidURL`` is an ``HTTPException``, not an
+    ``OSError`` — so it escaped the probe's handler, and through
+    ``wire_session``, which calls the probe unguarded, stopped the agent from
+    starting over a proxy URL a hand-edited config carried."""
+    verdict = probe_proxy(proxy_url)
+    assert verdict.healthy is False
+    assert "proxy unreachable" in verdict.reason
+
+
+class _TruncatedHandler(BaseHTTPRequestHandler):
+    """Headers that promise 400 bytes, a body of 12: ``read()`` raises ``IncompleteRead``."""
+
+    def do_GET(self) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", "400")
+        self.end_headers()
+        self.wfile.write(b'{"status": "')
+        self.wfile.flush()
+        self.close_connection = True
+
+    def log_message(self, *args: object) -> None:
+        return
+
+
+def test_probe_answers_a_truncated_health_body_instead_of_raising() -> None:
+    """Review of #203, the other ``HTTPException``: a body shorter than its
+    Content-Length raises ``IncompleteRead`` from ``read()``, inside the same
+    handler that only listed ``OSError``."""
+    server = HTTPServer(("127.0.0.1", 0), _TruncatedHandler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        verdict = probe_proxy(f"http://127.0.0.1:{server.server_address[1]}")
+    finally:
+        server.shutdown()
+    assert verdict.healthy is False
+    assert "proxy unreachable" in verdict.reason
+
+
+def test_a_proxy_url_urllib_refuses_launches_untraced() -> None:
+    """The blast radius the probe's hole had: ``wire_session`` asks the real
+    probe unguarded, so this used to be a traceback out of ``aisquare launch``
+    rather than an untraced session with a reason (review of #203)."""
+    wiring = wire_session(_settings(proxy_url="http://127.0.0.1:ab"), "coder")
+    assert wiring.traced is False
+    assert "launching untraced" in wiring.reason
+    assert wiring.env == {}
+
+
 def test_probe_reads_the_gateway_a_proxy_reports() -> None:
     """The field the whole destination check rests on, end to end."""
     server, url = _serve(

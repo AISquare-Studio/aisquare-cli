@@ -36,7 +36,7 @@ from rich.cells import cell_len, split_graphemes
 from rich.style import Style
 from textual import events
 from textual.app import App, ComposeResult
-from textual.geometry import Offset, Region
+from textual.geometry import Offset, Region, Size
 from textual.notifications import SeverityLevel
 from textual.pilot import Pilot
 from textual.screen import ModalScreen
@@ -54,6 +54,7 @@ from aisquare.cli.ui.terminal import (
     DisplayedRow,
     EscapeToSidebar,
     SelectionHost,
+    Shown,
     TerminalPane,
     _extract,
     route_gesture_start,
@@ -3335,6 +3336,81 @@ def test_a_failed_frame_drops_the_highlight_on_the_row_its_notice_replaces(
             return pane.text_selection
 
     assert run(elsewhere()) is not None, "a highlight the notice does not touch stands"
+
+
+def test_a_failure_before_the_widget_has_rows_asks_no_row_about_its_highlight(
+    fake: FakeTmux, tmp_path: Path
+) -> None:
+    """Review of #203. ``_fail`` can run before Textual has sized the widget —
+    ``attach``'s first capture raising, ``on_mount``'s ``refresh_frame`` before
+    the first layout — and ``content_size.height - 1`` is then ``-1``, which
+    ``_displayed_row`` reads as the frame's LAST row and compares under a span
+    meant for the notice row: a staleness verdict about a row nobody
+    highlighted. No rows, no question asked."""
+
+    async def drive() -> tuple[list[int], str | None, bool]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 3)) as pilot:
+            pane = host.pane
+            await wait_until(pilot, lambda: synced(pane))
+            await drag(pilot, pane, (0, 0), (3, 0))
+            asked: list[int] = []
+            real = pane._highlight_is_stale
+
+            def spy(after: Shown, rows: set[int]) -> bool:
+                asked.extend(sorted(rows))
+                return real(after, rows)
+
+            pane._highlight_is_stale = spy  # type: ignore[method-assign]
+            with unsized(pane):
+                changed = pane._fail("(pane gone)")
+            return asked, pane.notice, changed
+
+    asked, notice, changed = run(drive())
+    assert asked == [], f"an unsized widget has no notice row to ask about; asked {asked}"
+    assert notice == "(pane gone)" and changed, "the notice itself still lands"
+
+
+@contextlib.contextmanager
+def unsized(pane: TerminalPane) -> Iterator[None]:
+    """``content_size`` as it reads before the first layout pass: zero rows."""
+    original = TerminalPane.content_size
+    TerminalPane.content_size = property(lambda self: Size(40, 0))  # type: ignore[assignment, method-assign]
+    try:
+        yield
+    finally:
+        TerminalPane.content_size = original  # type: ignore[method-assign]
+
+
+def test_a_copy_over_a_wrapped_row_never_reaches_past_the_widget(
+    fake: FakeTmux, tmp_path: Path
+) -> None:
+    """Pinned for the review of #203, which read ``_displayed_row``'s crop of a
+    wrapped row to the PANE's width as a copy that could reach past the widget
+    while the pane is wider — between a ``Resize`` and its debounced
+    ``resize-window``. It cannot: the row is read off ``_composed_strip``,
+    which is already the widget's width, so the pane-width crop only ever
+    narrows. Measured here with the resize held off, a 60-column pane under a
+    40-column widget: the copy of a wrapped row is the 40 cells that were
+    painted, joined to the row it wraps into."""
+    fake.apply_resize = False
+    pane_fake = fake.panes["%1"]
+    pane_fake.width, pane_fake.height = 60, 3
+    pane_fake.screen = ["a" * 60, "tail", ""]
+    pane_fake.wrapped = {0}
+
+    async def drive() -> tuple[str | None, int]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 3)) as pilot:
+            pane = host.pane
+            await wait_until(pilot, lambda: pane.facts is not None and "tail" in rows(pane)[1].text)
+            assert pane.facts is not None and pane.facts.width == 60, "the premise: a wider pane"
+            await drag(pilot, pane, (0, 0), (3, 1))
+            return pane.selected_text(), pane.content_size.width
+
+    copied, width = run(drive())
+    assert width == 40
+    assert copied == "a" * 40 + "tail", copied
 
 
 def test_unmounting_a_pane_takes_its_selection_entry_with_it(

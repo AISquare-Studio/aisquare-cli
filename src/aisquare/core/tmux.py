@@ -76,7 +76,7 @@ import os
 import re
 import shutil
 import subprocess
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -723,12 +723,18 @@ class TmuxServer:
         cwd: Path,
         command: Sequence[str],
         env: Mapping[str, str] | None = None,
+        private: Collection[str] = (),
         width: int = 200,
         height: int = 50,
     ) -> WindowInfo:
         """A new window named ``name`` running ``command`` — creating the session if needed.
 
-        ``env`` pairs are set for the new window only (``-e``); the command is
+        ``env`` pairs are set for the new window (``-e``). When the window opens
+        a NEW session tmux also writes them into the session environment, which
+        every window opened later in that session inherits; the keys named in
+        ``private`` are this window's alone and are taken back out of it
+        (:meth:`_forget_session_environment`), the rest stay as the session's
+        defaults. The command is
         passed as separate arguments and executed directly, never through a
         shell, so no shell re-interprets it. TMUX still would: an argument that
         ends in ``;`` ends the tmux command even after ``--`` and runs the rest
@@ -764,7 +770,7 @@ class TmuxServer:
                 "-x", str(width), "-y", str(height), *env_flags,
                 "--", *args,
             )  # fmt: skip
-            self._forget_session_environment(session, env)
+            self._forget_session_environment(session, private)
         window_id, _, pane_id = out.strip().partition(_SEP)
         return WindowInfo(
             session=session,
@@ -777,8 +783,8 @@ class TmuxServer:
             activity=False,
         )
 
-    def _forget_session_environment(self, session: str, env: Mapping[str, str] | None) -> None:
-        """Take the first window's ``-e`` pairs back out of the SESSION environment.
+    def _forget_session_environment(self, session: str, keys: Collection[str]) -> None:
+        """Take the first window's private ``-e`` pairs back out of the SESSION environment.
 
         ``new-window -e`` sets a variable for that window alone, but
         ``new-session -e`` writes it into the session environment, which every
@@ -788,11 +794,15 @@ class TmuxServer:
         is an identity: the row the session-start hook briefs whoever reads it
         on, so a window the operator opens by hand in the fleet's session
         (``prefix c``, ``fleet attach``) would have called itself the first
-        agent (review of #135). The process in the first window already has its
+        agent (review of #135). Only the ``keys`` the caller names as private
+        go: the first cut unset every pair that travelled as ``-e``, and took
+        the session-wide settings with it — the native-teams opt-out and the
+        account's config-dir pins a hand-opened window is meant to inherit
+        (review of #203). The process in the first window already has its
         copy; only the session's is removed. Best effort, because the window is
         up either way: a failed unset costs exactly the leak it was closing.
         """
-        for key in env or {}:
+        for key in keys:
             with contextlib.suppress(TmuxError):
                 self.run("set-environment", "-u", "-t", f"={session}", _data_arg(key))
 

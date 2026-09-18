@@ -423,6 +423,26 @@ def test_doctor_survives_a_malformed_gateway_url() -> None:
     assert any(c.name == "explainability proxy" for c in checks)
 
 
+@pytest.mark.parametrize(
+    ("url", "said"),
+    [
+        ("http://[::1", "cannot be parsed"),
+        ("  http://[::1  ", "cannot be parsed"),
+        ("gateway.example", "needs an http:// or https:// scheme"),
+    ],
+    ids=["ipv6-bracket", "padded", "schemeless"],
+)
+def test_a_request_to_a_malformed_url_is_a_verdict_naming_the_fault(url: str, said: str) -> None:
+    """Review of #203: ``_request`` kept a private ``try`` around ``urlsplit``
+    beside its import of ``split_url``, the one guarded parser. Through the
+    helper now, and stripped first so the parse and the request read the same
+    text — a padded value passed the old check and then failed ``Request`` as
+    "unreachable", which sends the operator to the network, not the config."""
+    verdict = ops._request(url)
+    assert verdict.ok is False and verdict.status is None
+    assert said in verdict.detail, verdict.detail
+
+
 def test_an_unset_gateway_is_not_reported_as_a_misroute(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -66,6 +66,7 @@ import uuid
 from collections.abc import Callable, Mapping, MutableMapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from http.client import HTTPException
 from pathlib import Path
 from typing import Any
 from urllib.error import URLError
@@ -604,7 +605,16 @@ def probe_proxy(proxy_url: str, timeout: float = _PROBE_TIMEOUT_SECONDS) -> Prox
             if response.status != 200:
                 return ProxyProbe(False, f"proxy /health returned HTTP {response.status}")
             payload = json.loads(response.read().decode("utf-8"))
-    except (URLError, OSError, TimeoutError, ValueError) as exc:
+    except (URLError, HTTPException, OSError, TimeoutError, ValueError) as exc:
+        # ``HTTPException`` is not an ``OSError``: ``urlopen`` raises
+        # ``http.client.InvalidURL`` for a port that is not a number or a
+        # stray space in the host before any network call, and ``read()``
+        # raises ``IncompleteRead`` for a body shorter than its Content-Length.
+        # Unlisted, both escaped through ``wire_session`` — which calls this
+        # unguarded — and stopped the agent from starting over a proxy URL a
+        # hand-edited config carried (review of #203). A verdict keeps "tracing
+        # may cost a trace and never a launch"; ``_request`` in
+        # ``explainability_ops`` closed the same hole the same way.
         return ProxyProbe(False, f"proxy unreachable at {url}: {exc}")
     # `[]` and `"ok"` are valid JSON and have no `.get`; the decode succeeded, so
     # the handler above is already past. Four attribute reads follow, and any

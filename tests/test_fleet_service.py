@@ -269,6 +269,7 @@ class FakeTmux(TmuxServer):
         cwd: Path,
         command: Sequence[str],
         env: Mapping[str, str] | None = None,
+        private: Collection[str] = (),
         width: int = 200,
         height: int = 50,
     ) -> WindowInfo:
@@ -299,6 +300,7 @@ class FakeTmux(TmuxServer):
                 "cwd": cwd,
                 "command": list(command),
                 "env": dict(env or {}),
+                "private": tuple(private),
             }
         )
         return window
@@ -2766,6 +2768,53 @@ def test_adopting_a_row_moves_every_claim_the_old_id_held(
     holders = {t.id: _task_now(t.id).claimed_by for t in (assigned, pool, reviewed, blocked)}
     assert holders == {t.id: "sess-c2" for t in (assigned, pool, reviewed, blocked)}
     assert _task_now(finished.id).claimed_by is None
+
+
+def test_adopting_a_row_re_leases_the_doing_claims_alone(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #203. The claim move stamped the new lease on review and
+    blocked tasks too — a lease nothing renews (``renew_leases`` is
+    ``doing``-only) and nothing reclaims (``claim_task`` too), so the board read
+    "lease until …" on a claim that had lapsed and could not be taken. The
+    claim still follows the agent in every status that keeps one; the lease is
+    ``doing``'s alone."""
+    working = _task(project, "being worked")
+    reviewed = _task(project, "in review")
+    blocked = _task(project, "blocked")
+    _agent, first = _spawned(project, "coder", working.id, tmux, monkeypatch)
+    team_service.hook_session_start(first, project.root, "startup")
+    for task in (working, reviewed, blocked):
+        team_service.claim_task(task.id, session_ref=first)
+    team_service.review_task(reviewed.id, session_ref=first)
+    team_service.block_task(blocked.id, reason="waiting", session_ref=first)
+    leases_before = {t.id: _task_now(t.id).claim_expires_at for t in (reviewed, blocked)}
+    working_lease_before = _task_now(working.id).claim_expires_at
+    time.sleep(0.01)  # so a re-stamped lease is distinguishable from the old one
+
+    _clear(first, "sess-lease", project)
+
+    for task in (working, reviewed, blocked):
+        assert _task_now(task.id).claimed_by == "sess-lease", "the claim follows the agent"
+    doing_lease = _task_now(working.id).claim_expires_at
+    assert doing_lease is not None and doing_lease != working_lease_before, "doing: a new lease"
+    assert {t.id: _task_now(t.id).claim_expires_at for t in (reviewed, blocked)} == leases_before, (
+        "review and blocked keep whatever lease they had: nothing renews one there"
+    )
+
+
+def test_spawn_keeps_only_the_identity_out_of_the_sessions_environment(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """Review of #203. ``spawn_window`` took every ``-e`` pair back out of a new
+    session's environment, and with it the native-teams opt-out and the
+    account pins a window opened by hand in the fleet's session is meant to
+    inherit. The row id is the one pair that is this window's alone."""
+    fleet_service.spawn(project, "coder", worktree=False)
+    spawned = tmux.spawned[-1]
+    env = spawned["env"]
+    assert isinstance(env, dict) and "AISQUARE_FLEET_AGENT" in env
+    assert spawned["private"] == ("AISQUARE_FLEET_AGENT",)
 
 
 def test_adopting_a_row_moves_the_row_and_the_claims_together_or_not_at_all(

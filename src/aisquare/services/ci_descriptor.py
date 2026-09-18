@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import contextlib
 import json
-import os
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -31,6 +30,7 @@ from pathlib import Path
 from pydantic import ValidationError
 
 from aisquare.core import paths
+from aisquare.core.atomic import write_replacing
 from aisquare.models import ClientReason
 from aisquare.services import ci_client
 from aisquare.services.ci_contract import (
@@ -261,15 +261,10 @@ def _write_refusal(run: str, detail: str, now: datetime, base: str) -> None:
 
 
 def _replace(target: Path, body: str) -> None:
-    """Write ``body`` to ``target`` in one step. Never raises."""
-    temporary = target.with_suffix(f".{os.getpid()}.tmp")
-    try:
+    """Write ``body`` to ``target`` in one step (``core.atomic``'s recipe). Never raises."""
+    with contextlib.suppress(OSError):
         target.parent.mkdir(parents=True, exist_ok=True)
-        temporary.write_text(body, encoding="utf-8")
-        os.replace(temporary, target)
-    except OSError:
-        with contextlib.suppress(OSError):
-            temporary.unlink()
+        write_replacing(target, body, keep_mode=False)
 
 
 def cached(run: str, now: datetime | None = None) -> DeliveryDescriptor | None:

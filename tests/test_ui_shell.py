@@ -40,6 +40,7 @@ from textual.worker import Worker, WorkerState
 
 from aisquare.cli.ui import app as app_mod
 from aisquare.cli.ui.app import SIDEBAR_WIDTH_KEY, FleetApp, HelpScreen, Panes
+from aisquare.cli.ui.autosave import Autosave
 from aisquare.cli.ui.divider import WIDEST_ASK, Divider, cells
 from aisquare.cli.ui.sidebar import (
     RESIZE_STEP,
@@ -1811,9 +1812,11 @@ async def _drag(pilot: Pilot[None], from_x: int, to_x: int, y: int = 5) -> None:
 
 
 async def _settled(pilot: Pilot[None]) -> None:
-    """Let a debounced save land — and stay well inside Textual's half-second click chain,
-    which some tests need to span."""
-    await pilot.pause(Divider.SAVE_DEBOUNCE + 0.05)
+    """Let a debounced save land: the debounce, then the worker it hands the write to — and
+    stay well inside Textual's half-second click chain, which some tests need to span."""
+    await pilot.pause(Autosave.DEBOUNCE + 0.05)
+    await settle(fleet_app(pilot))
+    await pilot.pause()
 
 
 def _declared(app: FleetApp) -> int:
@@ -2057,7 +2060,7 @@ def test_the_keyboard_steps_the_partition_from_the_sidebar_and_a_held_key_is_one
         writes.append((key, value))
         update_state(key, value)
 
-    monkeypatch.setattr("aisquare.cli.ui.divider.update_state", counting)
+    monkeypatch.setattr("aisquare.cli.ui.autosave.update_state", counting)
 
     async def go(pilot: Pilot[None]) -> dict[str, object]:
         app = fleet_app(pilot)
@@ -2368,9 +2371,9 @@ def test_a_double_click_with_a_one_row_drift_is_still_a_double_click(
 def test_a_refused_theme_save_is_said_once(
     tmp_path: Path, script: Script, isolated_home: Path
 ) -> None:
-    """`_save_theme`'s `False` was dropped at both call sites: the picker showed the theme
-    applied, the file refused it, and nothing said so — while the width, saving to the same
-    file in the same session, did."""
+    """The save's refusal was dropped at both call sites: the picker showed the theme applied,
+    the file refused it, and nothing said so — while the width, saving to the same file in the
+    same session, did. The save is debounced and runs on a worker, like the width's."""
     seed(tmp_path, ("prj_a", "alpha", None))
     path = _write_state(isolated_home, ["was", "a", "list"])
     body = path.read_text()
@@ -2378,9 +2381,9 @@ def test_a_refused_theme_save_is_said_once(
     async def go(pilot: Pilot[None]) -> tuple[list[str], str]:
         app = fleet_app(pilot)
         app.theme = "nord"
-        await pilot.pause()
+        await _settled(pilot)
         app.theme = "dracula"
-        await pilot.pause()
+        await _settled(pilot)
         return [toast.render().plain for toast in app.screen.query(Toast)], path.read_text()
 
     toasts, file = drive(go, notifications=True)
@@ -2445,7 +2448,7 @@ def test_a_width_the_file_already_has_is_not_rewritten_and_a_save_due_at_quit_is
         writes.append((key, value))
         update_state(key, value)
 
-    monkeypatch.setattr("aisquare.cli.ui.divider.update_state", counting)
+    monkeypatch.setattr("aisquare.cli.ui.autosave.update_state", counting)
 
     async def go(pilot: Pilot[None]) -> int:
         app = fleet_app(pilot)
@@ -2512,3 +2515,60 @@ def test_a_min_width_of_zero_is_a_floor_of_zero(tmp_path: Path, script: Script) 
         return cells(app.sidebar.styles.max_width)
 
     assert drive(ceiling) == 0, "the container's ceiling honours a floor of 0 too"
+
+
+def test_a_gesture_at_the_ceiling_with_a_huge_width_on_file_does_not_reach_the_style_setter(
+    tmp_path: Path, script: Script, isolated_home: Path
+) -> None:
+    """The ceiling rule wrote the UNCAPPED remembered width into `styles.width`: with `10**400`
+    on file a drag that landed on the ceiling died with `OverflowError` — the launch had been
+    made safe, the first gesture had not."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+    _write_state(isolated_home, {SIDEBAR_WIDTH_KEY: 10**400})
+
+    async def go(pilot: Pilot[None]) -> tuple[int, int | None, object]:
+        app = fleet_app(pilot)
+        await pilot.pause()
+        x = app.sidebar.outer_size.width  # the ceiling
+        await _mouse(pilot, events.MouseDown, x, 5)
+        await _mouse(pilot, events.MouseMove, 60, 5)
+        await _mouse(pilot, events.MouseMove, 130, 5)
+        await _mouse(pilot, events.MouseUp, 130, 5)
+        await _settled(pilot)
+        return (
+            app.sidebar.outer_size.width,
+            cells(app.sidebar.styles.inline.width),
+            _state(isolated_home)[SIDEBAR_WIDTH_KEY],
+        )
+
+    shown, inline, on_file = drive(go)
+    assert shown == Panes.sidebar_ceiling(SIZE[0], 24)
+    assert inline == WIDEST_ASK, "the ask put back by the ceiling rule is the capped one"
+    assert on_file == 10**400, "and the file is left as the user wrote it"
+
+
+def test_a_drag_that_ends_off_the_handle_breaks_the_double_click_chain(
+    tmp_path: Path, script: Script, isolated_home: Path
+) -> None:
+    """Textual sends a `Click` only when the release lands on the widget the press did; a drag
+    out past the ceiling ends on the content, so `on_click` never ran and the chain stayed armed
+    from the click before it — one later left click reset the width and deleted the key."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+    ceiling = Panes.sidebar_ceiling(SIZE[0], 24)
+    _write_state(isolated_home, {SIDEBAR_WIDTH_KEY: ceiling})
+
+    async def go(pilot: Pilot[None]) -> tuple[int, object]:
+        app = fleet_app(pilot)
+        await pilot.pause()
+        await _mouse(pilot, events.MouseDown, ceiling, 5)  # a still left click at the handle
+        await _mouse(pilot, events.MouseUp, ceiling, 5)
+        await _mouse(pilot, events.MouseDown, ceiling, 5)  # a drag in and back out past the ceiling
+        await _mouse(pilot, events.MouseMove, 60, 5)
+        await _mouse(pilot, events.MouseMove, 130, 5)
+        await _mouse(pilot, events.MouseUp, 130, 5)  # released on the content: no Click
+        await _mouse(pilot, events.MouseDown, ceiling, 5)  # one left click, within the chain window
+        await _mouse(pilot, events.MouseUp, ceiling, 5)
+        await _settled(pilot)
+        return app.sidebar.outer_size.width, _state(isolated_home).get(SIDEBAR_WIDTH_KEY)
+
+    assert drive(go) == (ceiling, ceiling), "a drag breaks the chain, Click or no Click"

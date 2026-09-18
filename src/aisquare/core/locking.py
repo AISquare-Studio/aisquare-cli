@@ -7,12 +7,17 @@ is replaced by rename, so a lock on its inode would not exclude a writer that
 opened the new one.
 
 Non-blocking on purpose. ``flock`` with ``LOCK_EX`` waits forever and
-Windows' ``LK_LOCK`` for about ten seconds; both callers run on a UI thread
-at times (the fleet UI's save timer, the board's theme autosave), where a
-holder stalled inside its critical section — a ``project switch`` stopped
-with ``^Z`` mid-write, a home on a share whose lock manager is unreachable —
-would freeze the whole TUI. So the primitive returns at once, raising
-``OSError`` when the lock is held, and each caller bounds its own wait.
+Windows' ``LK_LOCK`` for about ten seconds, so a holder stalled inside its
+critical section — a ``project switch`` stopped with ``^Z`` mid-write — would
+hold every other writer with it. The primitive returns at once, raising
+``OSError`` when the lock is held, and each caller bounds its own wait. Two
+things it cannot promise: on NFS an exclusive ``flock`` is emulated with a
+byte-range lock on the whole file and needs a descriptor OPEN FOR WRITING
+(``flock(2)``, "NFS details"; the client answers ``EBADF`` otherwise), so a
+caller opens its lock file for writing when it can; and there the lock is a
+synchronous RPC, so an unreachable lock manager blocks inside the call however
+non-blocking the flag — which is why the TUI's saves run on a worker thread
+(``cli.ui.autosave``) rather than trusting any bound.
 
 ``fcntl`` is POSIX-only and ``msvcrt`` is Windows-only, so the import is
 branched on ``sys.platform`` rather than wrapped in ``try``/``except

@@ -58,7 +58,7 @@ from aisquare.cli.ui.sidebar import (
     accounts_summary_text,
 )
 from aisquare.cli.ui.terminal import EscapeToSidebar, route_selection_gesture
-from aisquare.cli.ui.theme import ThemePicker, remember_theme, restore_theme
+from aisquare.cli.ui.theme import ThemePicker, restore_theme, theme_autosave
 from aisquare.cli.ui.views.accounts import AccountsChanged, AccountsView, read_session, summarise
 from aisquare.cli.ui.views.agent import AgentView
 from aisquare.cli.ui.views.doctor import DoctorRefreshed, DoctorView
@@ -306,8 +306,7 @@ class FleetApp(App[None], inherit_bindings=False):
         self._doctor_worker: Worker[Any] | None = None
         """The newest doctor run; an older one's result is not ours to paint."""
         self._theme_restored = False
-        self._theme_warned = False
-        """Whether the user has been told this session that the theme cannot be remembered."""
+        self._theme_autosave = theme_autosave(self)
         self._gesture_button: int | None = None
         """Which button began the selection gesture now running, if one is."""
 
@@ -386,19 +385,11 @@ class FleetApp(App[None], inherit_bindings=False):
         parent = getattr(super(), "watch_theme", None)
         if parent is not None:
             parent(theme_name)
-        if not self._theme_restored:
-            return
-        refused = remember_theme(theme_name)
-        if refused is not None and not self._theme_warned:
-            # Said once, as the divider says it for the width: the picker shows
-            # the theme applied, and silence would promise a memory it has not.
-            self._theme_warned = True
-            self.notify(
-                f"{refused} — the theme will not be remembered",
-                severity="warning",
-                timeout=8,
-                markup=False,
-            )
+        if self._theme_restored:
+            self._theme_autosave.remember(theme_name)
+
+    def on_unmount(self) -> None:
+        self._theme_autosave.flush()  # a pick inside the debounce before q is not lost
 
     def on_mouse_down(self, event: events.MouseDown) -> None:
         """Remember which button began the gesture now running.

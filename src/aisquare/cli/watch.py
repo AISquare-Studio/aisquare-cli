@@ -16,8 +16,9 @@ Two implementations behind one entry point:
 Only presentation lives here; all data comes from ``services.team``. The pure
 renderers (``feed_line``, ``_session_lines``, the detail texts, the transcript
 helpers) live here rather than beside the widgets because the fallback needs
-them without Textual, and ``_load_saved_theme`` / ``_save_theme`` are imported
-by the fleet UI, which reuses the theme persistence verbatim.
+them without Textual, and ``_load_saved_theme`` and the theme's key are imported
+by the fleet UI, which reuses the theme persistence verbatim (the save itself is
+``cli.ui.autosave``'s, for both apps).
 """
 
 from __future__ import annotations
@@ -32,7 +33,7 @@ from rich.text import Text
 from aisquare.cli.common import local_time
 from aisquare.core import harness, paths
 from aisquare.core.console import stderr_console, stdout_console
-from aisquare.core.state_file import StateUnwritableError, read_state, update_state
+from aisquare.core.state_file import read_state
 from aisquare.core.store import unmet_needs
 from aisquare.models import ProjectInfo, TeamEvent, TeamSession, TeamTask
 from aisquare.services import team as team_service
@@ -235,21 +236,6 @@ def _load_saved_theme() -> str | None:
     return value if isinstance(value, str) else None
 
 
-def _save_theme(name: str) -> str | None:
-    """Autosave the board theme (every change persists — no save step).
-
-    Returns why ``state.json`` refused it, when it did — the file is not a JSON
-    object, its lock could not be taken, it could not be written — and was left
-    as it was: a theme is a preference, and the file's other keys are worth
-    more than remembering one.
-    """
-    try:
-        update_state(_THEME_KEY, name)
-    except StateUnwritableError as exc:
-        return str(exc)
-    return None
-
-
 def action_open_transcript(app: App[Any], command: list[str]) -> str | None:
     """Run ``command`` — a viewer on a transcript file — with the TUI suspended.
 
@@ -289,6 +275,7 @@ def _build_app_class(interval: float) -> Any:
     from textual.widgets import Footer, OptionList, Static
     from textual.widgets.option_list import Option
 
+    from aisquare.cli.ui.autosave import Autosave
     from aisquare.cli.ui.board import BoardPanel
 
     class ThemePicker(ModalScreen[None]):
@@ -357,7 +344,13 @@ def _build_app_class(interval: float) -> Any:
             saved = _load_saved_theme()
             if saved and saved in self.available_themes:
                 self.theme = saved
+            self._theme_autosave = Autosave(self, _THEME_KEY, what="the theme")
             self._theme_restored = True
+
+        def on_unmount(self) -> None:
+            saver = getattr(self, "_theme_autosave", None)
+            if saver is not None:
+                saver.flush()  # a pick inside the debounce before q is not lost
 
         def on_board_panel_refreshed(self, event: BoardPanel.Refreshed) -> None:
             self.title = f"aisquare board — {event.project.root.name or event.project.id}"
@@ -386,23 +379,13 @@ def _build_app_class(interval: float) -> Any:
 
         def watch_theme(self, theme_name: str) -> None:
             # Fires on ANY theme change (our picker or the command palette):
-            # every change is the save. Restored on the next launch.
+            # every change is the save — debounced and off the event loop, a
+            # refusal said once. Restored on the next launch.
             parent = getattr(super(), "watch_theme", None)
             if parent is not None:
                 parent(theme_name)
-            if not getattr(self, "_theme_restored", False):
-                return
-            refused = _save_theme(theme_name)
-            if refused is not None and not getattr(self, "_theme_warned", False):
-                # Once: the picker shows the theme applied, and silence would
-                # promise a memory the file has refused.
-                self._theme_warned = True
-                self.notify(
-                    f"{refused} — the theme will not be remembered",
-                    severity="warning",
-                    timeout=8,
-                    markup=False,
-                )
+            if getattr(self, "_theme_restored", False):
+                self._theme_autosave.remember(theme_name)
 
     return BoardApp
 

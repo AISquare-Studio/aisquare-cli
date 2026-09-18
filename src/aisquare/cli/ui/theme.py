@@ -3,11 +3,11 @@
 ``board -w`` already solved this (docs/plans/fleet-tui.md §4.3: "the theme
 picker and its autosave in ``state.json`` are reused verbatim"): a modal that
 applies every highlighted theme instantly and persists it under one key, so the
-board and the fleet UI share a look and a user picks it once. The load/save
-helpers are IMPORTED from ``cli.watch`` — one home for the theme's key; the
-file itself has one reader and writer in ``core.state_file`` — and only the
-widget is rebuilt here, because the board's picker is a local class inside its
-app factory and cannot be imported.
+board and the fleet UI share a look and a user picks it once. The loader and
+the theme's key are IMPORTED from ``cli.watch`` (the file itself has one reader
+and writer in ``core.state_file``; the save is ``cli.ui.autosave``'s), and only
+the widget is rebuilt here, because the board's picker is a local class inside
+its app factory and cannot be imported.
 """
 
 from __future__ import annotations
@@ -20,7 +20,8 @@ from textual.screen import ModalScreen
 from textual.widgets import OptionList, Static
 from textual.widgets.option_list import Option
 
-from aisquare.cli.watch import _load_saved_theme, _save_theme
+from aisquare.cli.ui.autosave import Autosave
+from aisquare.cli.watch import _THEME_KEY, _load_saved_theme
 
 
 class ThemePicker(ModalScreen[None]):
@@ -82,11 +83,14 @@ def restore_theme(app: App[Any]) -> bool:
     return False
 
 
-def remember_theme(name: str) -> str | None:
-    """Autosave ``name`` — every change is the save; there is no save step.
+def theme_autosave(app: App[Any]) -> Autosave:
+    """The theme's saver for ``app``: debounced and off the event loop, under the board's key.
 
-    Returns why ``state.json`` refused it, when it did (the file, its lock, or
-    the write — it was left as it was); the app tells the user once, since the
-    picker has already shown the theme applied.
+    Every picker highlight is a theme change, at key autorepeat, and each save
+    is a lock, a read, a write, an fsync and a rename. ``Autosave`` collapses a
+    burst into one write on a worker thread and says a refusal once — the
+    picker has already shown the theme applied, and silence would promise a
+    memory the file has refused. Flush it at unmount: a pick inside the debounce
+    before ``q`` is a preference the user expressed.
     """
-    return _save_theme(name)
+    return Autosave(app, _THEME_KEY, what="the theme")

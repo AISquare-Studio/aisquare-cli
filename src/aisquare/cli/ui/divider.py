@@ -42,10 +42,10 @@ from rich.text import Text
 from textual import events
 from textual.app import RenderResult
 from textual.css.scalar import Scalar
-from textual.timer import Timer
 from textual.widget import Widget
 
-from aisquare.core.state_file import StateUnwritableError, read_state, update_state
+from aisquare.cli.ui.autosave import Autosave
+from aisquare.core.state_file import read_state
 
 LINE = "│"
 """Textual's ``solid`` border glyph, so the partition looks as the border it replaced did."""
@@ -84,9 +84,6 @@ class Divider(Widget):
     Divider.-dragging { background: $accent; color: $accent; }
     """
 
-    SAVE_DEBOUNCE: float = 0.1
-    """Seconds a settled width waits to be written: a held key is one write, not thirty a second."""
-
     def __init__(self, target: str, *, state_key: str | None = None, id: str | None = None) -> None:
         super().__init__(id=id)
         self._target = target
@@ -109,12 +106,10 @@ class Divider(Widget):
         """Whether the previous click was a LEFT click that was a click (the width did not
         change). Another button, or a drag, breaks the chain."""
         self._remembered: int | None = None
-        """The width on disk, as far as this widget knows."""
-        self._pending: int | None = None
-        self._save_due = False
-        self._save_timer: Timer | None = None
-        self._refused = False
-        """Whether the file has already refused a save this session — it is said once."""
+        """The width on disk, as far as this widget knows — capped like every number that may
+        reach the style setter."""
+        self._autosave: Autosave | None = None
+        """The debounced, off-loop save under ``state_key``; ``None`` when there is no key."""
 
     # --- the neighbour and its bounds ------------------------------------------------
 
@@ -255,6 +250,7 @@ class Divider(Widget):
         if self.app.mouse_captured is self:
             self.release_mouse()
         if self._moved:
+            self._last_click_still = False  # a drag breaks the chain, Click or no Click
             self._remember(self.width)
 
     def on_click(self, event: events.Click) -> None:
@@ -284,54 +280,60 @@ class Divider(Widget):
     def on_mount(self) -> None:
         if self._state_key is None:
             return
+        self._autosave = Autosave(
+            self, self._state_key, what="the navigator's width", on_saved=self._saved
+        )
         saved = read_state().get(self._state_key)
         if isinstance(saved, int) and not isinstance(saved, bool):
-            self._remembered = saved
+            # Capped ONCE, here: this is the number every later path may hand
+            # the style setter — the restore, and the ceiling rule putting the
+            # ask back — and ``float(10**400)`` overflows there.
+            self._remembered = max(0, min(saved, WIDEST_ASK))
             # After the first layout, not during mount: by then the container
             # has written the ceiling, so the layout bounds what is shown from
             # the first frame the ask reaches. Applied at mount, a saved 500
             # gave the content pane one frame at zero columns — a size the
             # agent's pane forwards to tmux.
-            self.call_after_refresh(self._restore, saved)
+            self.call_after_refresh(self._restore, self._remembered)
 
-    def _restore(self, saved: int) -> None:
+    def _restore(self, ask: int) -> None:
         """Apply the remembered width as the ASK, not as what is shown.
 
         A drag keeps its ask while ``max-width`` clamps the display, and gets it
         back when the terminal has room again; a width restored on a narrow
         terminal must behave the same, or the same preference has two
         behaviours depending on when the terminal was narrow — and the next
-        step writes the clamped number over it. So only an absolute cap here
-        (a hand-edited ``10**400`` must not reach the style setter); the layout
-        clamps the display, and :attr:`width` clamps the read.
+        step writes the clamped number over it. So no clamping here beyond the
+        cap ``on_mount`` applied; the layout clamps the display, and
+        :attr:`width` clamps the read.
         """
-        ask = max(0, min(saved, WIDEST_ASK))
         self._width = ask
         self.target.styles.width = ask
 
     def on_unmount(self) -> None:
         self._dragging = False
-        self._flush_save()
+        if self._autosave is not None:
+            self._autosave.flush()
+
+    def _saved(self, value: object) -> None:
+        self._remembered = value if isinstance(value, int) else None
 
     def _remember(self, width: int | None) -> None:
-        """Queue the write: one per burst, and none when the file already says ``width``."""
-        if self._state_key is None:
+        """Queue the write — one per burst, off the event loop — or decide there is nothing to."""
+        if self._autosave is None:
             return
-        if self._save_timer is not None:
-            self._save_timer.stop()
         if width == self._remembered:
-            self._save_due = False  # nothing to write; a queued save would lie
+            self._autosave.cancel()  # back where the file already is: a queued save would lie
             return
         if self._ceiling_under_remembered(width):
             # "As wide as this screen allows" — so the ask stays the remembered
             # width too, and comes back on screen when the room does, exactly as
             # the file will give it back at the next launch.
-            self._save_due = False
+            self._autosave.cancel()
             self._width = self._remembered
             self.target.styles.width = self._remembered
             return
-        self._pending, self._save_due = width, True
-        self._save_timer = self.set_timer(self.SAVE_DEBOUNCE, self._flush_save, name="divider-save")
+        self._autosave.remember(width)
 
     def _ceiling_under_remembered(self, width: int | None) -> bool:
         """Whether ``width`` is this terminal's ceiling with a wider width on file.
@@ -343,22 +345,3 @@ class Divider(Widget):
         if width is None or self._remembered is None:
             return False
         return width >= self.bounds()[1] and self._remembered > width
-
-    def _flush_save(self) -> None:
-        if not self._save_due or self._state_key is None:
-            return
-        self._save_due = False
-        width = self._pending
-        try:
-            update_state(self._state_key, width)
-        except StateUnwritableError as exc:
-            if not self._refused:
-                self._refused = True
-                self.notify(
-                    f"{exc} — the navigator's width will not be remembered",
-                    severity="warning",
-                    timeout=8,
-                    markup=False,
-                )
-            return
-        self._remembered = width

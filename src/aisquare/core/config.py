@@ -11,12 +11,12 @@ import os
 import tomllib
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
 
 import tomli_w
 from pydantic import BaseModel, Field
 
 from aisquare.core import paths
+from aisquare.core.atomic import write_replacing
 from aisquare.models import Pool, RedactionLevel
 
 
@@ -443,29 +443,24 @@ def save_config(config: AppConfig, path: Path | None = None) -> Path:
     payload = tomli_w.dumps(dumped)
 
     # Written BESIDE the target and renamed over it, never into the target
-    # itself. ``os.replace`` is atomic within a filesystem, so a concurrent
-    # reader sees either the whole old file or the whole new one; writing in
-    # place truncates first, and anyone reading in that window gets a partial
-    # TOML document. Not theoretical on a multi-seat machine — several sessions
-    # reach this function, and the caller that suffers most is the QUIETEST one:
-    # ``cli/launch.py`` treats an unreadable config as "launching untraced" by
-    # design, so a torn write costs tracing silently instead of raising.
-    #
-    # The temp file is a SIBLING because ``os.replace`` is only atomic within
-    # one filesystem — a name under /tmp would reintroduce a copy step. It
-    # carries pid plus a random suffix so two writers cannot collide on it, and
-    # it is removed on any failure rather than left next to the file an operator
-    # reads. ``fsync`` before the rename so a crash cannot publish a file whose
-    # contents never reached the disk.
-    temp = written.parent / f".{written.name}.{os.getpid()}.{uuid4().hex[:8]}.tmp"
+    # itself — ``core.atomic.write_replacing``, the durable-replace recipe this
+    # function first wrote down and measured: a sibling temp (``os.replace`` is
+    # only atomic within one filesystem; a name under /tmp would reintroduce a
+    # copy step), fsynced so a crash cannot publish a file whose contents never
+    # reached the disk, renamed over the target, then the parent directory
+    # synced so the rename itself is durable (fail-open; +2.15 ms median per
+    # write on a native disk, affordable because every call site is a typed
+    # operator command and none is on the launch, session or heartbeat path).
+    # A concurrent reader sees either the whole old file or the whole new one —
+    # and the QUIETEST caller is the one a torn write hurt: ``cli/launch.py``
+    # treats an unreadable config as "launching untraced" by design. The temp
+    # is removed on any failure rather than left next to the file an operator
+    # reads. POSIX rename semantics hold because ~/.aisquare is a native disk;
+    # on a DrvFs /mnt/c or \\wsl.localhost path the guarantee softens, and
+    # nothing in this code can tell which kind of path it is on.
     try:
-        with temp.open("w", encoding="utf-8") as handle:
-            handle.write(payload)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temp, written)
+        write_replacing(written, payload)
     except OSError as exc:
-        temp.unlink(missing_ok=True)
         if written == target:
             raise
         # A symlink was followed, so the path that failed is NOT the one the
@@ -482,41 +477,4 @@ def save_config(config: AppConfig, path: Path | None = None) -> Path:
             raise type(exc)(exc.errno, detail, str(written)) from exc
         except TypeError:  # an OSError subclass with an unusual signature
             raise OSError(exc.errno, detail, str(written)) from exc
-    except BaseException:
-        temp.unlink(missing_ok=True)
-        raise
-
-    # The rename is atomic the instant it returns, but not yet DURABLE: the new
-    # directory entry can still be in cache, so a hard kill or power loss here
-    # reverts the file to its previous contents. That is a different property
-    # from the one above — a reader never sees a partial file either way — and
-    # the cost of skipping it is "your last `explainability enable` did not
-    # stick", which `explainability status` reports immediately. It is the last
-    # step of the standard durable-replace recipe, and it was missing.
-    #
-    # MEASURED before adding it rather than assumed cheap: +2.15 ms median per
-    # write on this box (2.695 -> 4.845 ms, 200 samples interleaved, ext4 on a
-    # native WSL2 disk). Affordable because all ten call sites are explicit
-    # operator commands — enable/disable, config set, bind/clear, init — and
-    # none is on the launch, session or heartbeat path, so this is paid once per
-    # typed command and never in a loop. If that ever stops being true, this is
-    # the line to reconsider, and the number above is what to compare against.
-    #
-    # FAIL-OPEN, deliberately: the write has already succeeded and the caller's
-    # change is on disk. A parent we cannot open or sync (read-only mount, an
-    # exotic filesystem) must cost durability, never the write itself.
-    #
-    # Worth knowing: POSIX rename semantics hold here because ~/.aisquare is a
-    # native ext4 disk. On a DrvFs//mnt/c or \\wsl.localhost path the guarantee
-    # softens, and nothing in this code can tell which kind of path it is on.
-    try:
-        directory = os.open(written.parent, os.O_RDONLY)
-    except OSError:
-        return target
-    try:
-        os.fsync(directory)
-    except OSError:
-        pass
-    finally:
-        os.close(directory)
     return target

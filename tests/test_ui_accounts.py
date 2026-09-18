@@ -60,6 +60,7 @@ from aisquare.services import auth as auth_service
 from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import device_flow, iam
 from aisquare.services import fleet as fleet_service
+from tests.pane_harness import asks_a_server, socket_of
 
 T = TypeVar("T")
 SIZE = (140, 40)
@@ -117,11 +118,6 @@ def _session(email: str = "me@aisquare.studio", source: str = "file") -> iam.Ses
     )
 
 
-def _socket_of(argv: Sequence[str]) -> str | None:
-    args = list(argv)
-    return args[args.index("-L") + 1] if "-L" in args else None
-
-
 @pytest.fixture(autouse=True)
 def no_real_tmux(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[tuple[str, ...]]]:
     """Every tmux command here addresses the test's socket; the server never answers."""
@@ -134,7 +130,7 @@ def no_real_tmux(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[tuple[str, ..
     monkeypatch.setattr(tmux_core, "_tmux", record)
     monkeypatch.setattr(fleet_service, "server", lambda config=None: TmuxServer(PRIVATE_SOCKET))
     yield ran
-    wrong = [argv for argv in ran if _socket_of(argv) != PRIVATE_SOCKET]
+    wrong = [argv for argv in ran if asks_a_server(argv) and socket_of(argv) != PRIVATE_SOCKET]
     assert not wrong, f"a UI test addressed a tmux socket that is not the test's: {wrong[:2]}"
 
 

@@ -43,6 +43,7 @@ IMPLEMENTED: set[tuple[str, ...]] = {
             "status",
             "tell",
             "stop",
+            "shutdown",
             "attach",
             "reap",
             "rename",

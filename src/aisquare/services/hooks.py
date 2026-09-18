@@ -153,10 +153,13 @@ def prompt_submitted(
     return "\n\n".join(part for part in (delta, retrieved) if part)
 
 
-def session_ended(cwd: Path | None, *, session_id: str | None = None) -> None:
-    """Retire the session from the orchestrator and release its claims."""
+def session_ended(
+    cwd: Path | None, *, session_id: str | None = None, reason: str | None = None
+) -> None:
+    """Retire the session from the orchestrator and, unless it is a fleet agent's
+    ``/clear`` (``reason``), release its claims — see ``team.hook_session_end``."""
     if session_id is not None:
-        team_service.hook_session_end(session_id, cwd)
+        team_service.hook_session_end(session_id, cwd, reason=reason)
 
 
 def turn_stopped(

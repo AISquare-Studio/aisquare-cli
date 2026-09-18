@@ -36,6 +36,7 @@ from typing import Any, Protocol
 from aisquare.core import paths
 from aisquare.core.ids import new_prompt_id
 from aisquare.models import (
+    CLOSED_STATUSES,
     ClaudeAccountRecord,
     ContextEntry,
     FleetAgent,
@@ -686,7 +687,7 @@ class ContextStore(Protocol):
     def delete(self, entry_id: str) -> None: ...
     def promote(self, entry_id: str) -> ContextEntry: ...
     def ensure_project(self, project: ProjectInfo) -> None: ...
-    def list_projects(self) -> list[ProjectInfo]: ...
+    def list_projects(self, *, include_forgotten: bool = False) -> list[ProjectInfo]: ...
     def get_project(self, project_id: str) -> ProjectInfo | None: ...
     def find_projects(self, term: str) -> list[ProjectInfo]: ...
     def add_linked_repo(self, project_id: str, repo: str) -> ProjectInfo: ...
@@ -717,6 +718,7 @@ class ContextStore(Protocol):
     def mark_attention(self, session_id: str) -> bool: ...
     def mark_limited(self, session_id: str, resets_at: datetime | None) -> None: ...
     def end_session(self, session_id: str, *, release_claims: bool = True) -> list[TeamTask]: ...
+    def release_claims(self, session_id: str) -> list[TeamTask]: ...
     def upsert_task(self, task: TeamTask) -> tuple[TeamTask, bool]: ...
     def get_task(self, ref: str) -> TeamTask | None: ...
     def team_tasks(
@@ -735,10 +737,11 @@ class ContextStore(Protocol):
         status: TaskStatus = "todo",
         prefer: str | None = None,
     ) -> TeamTask | None: ...
-    def bind_fleet_agent_session(self, agent_id: str, session_id: str) -> bool: ...
-    def reassign_claim(
-        self, task_id: str, from_session: str, to_session: str, lease_until: datetime
+    def task_statuses(self, project_id: str) -> dict[str, str]: ...
+    def adopt_fleet_agent_session(
+        self, agent_id: str, previous: str | None, session_id: str, lease_until: datetime
     ) -> bool: ...
+    def retire_fleet_assignments(self, task_id: str) -> int: ...
     def open_turn(self, metric: TurnMetric) -> TurnMetric: ...
     def close_turn(self, session_id: str, *, ended_at: datetime) -> TurnMetric | None: ...
     def turn_metrics(
@@ -990,7 +993,7 @@ def unmet_needs(task: TeamTask, statuses: Mapping[str, str]) -> list[str]:
     A need is satisfied once its task is ``done`` or ``dropped``; anything
     else (including an unknown id) keeps the dependent task waiting.
     """
-    return [need for need in task.needs if statuses.get(need) not in ("done", "dropped")]
+    return [need for need in task.needs if statuses.get(need) not in CLOSED_STATUSES]
 
 
 def _fts_match(query: str) -> str:
@@ -1175,9 +1178,21 @@ class SqliteStore:
         )
         self._conn.commit()
 
-    def list_projects(self) -> list[ProjectInfo]:
+    def list_projects(self, *, include_forgotten: bool = False) -> list[ProjectInfo]:
+        """Every registration; ``include_forgotten`` also returns the tombstoned ones.
+
+        The default hides a forgotten registration, which is the promise
+        :func:`forget_project` makes. ``include_forgotten=True`` is for the one
+        question a tombstone must not hide: a forgotten project can still hold
+        LIVE ``fleet_agent`` rows (``forget`` reads liveness and writes the
+        tombstone in separate statements, and ``ensure_project`` revives the row
+        on a concurrent ``fleet spawn``), and those agents' panes are real
+        processes. ``fleet shutdown`` asks this way so a tombstone cannot leave a
+        row live on a socket it just took down, with nothing able to reconcile it.
+        """
+        clause = "" if include_forgotten else " WHERE forgotten_at IS NULL"
         rows = self._conn.execute(
-            f"SELECT {_PROJECT_COLUMNS} FROM project WHERE forgotten_at IS NULL ORDER BY name"
+            f"SELECT {_PROJECT_COLUMNS} FROM project{clause} ORDER BY name"
         ).fetchall()
         return [_row_to_project(row) for row in rows]
 
@@ -1539,26 +1554,47 @@ class SqliteStore:
         The return value still lists the tasks that WOULD have been released,
         so the caller can report them either way.
         """
-        released = [
-            _row_to_task(row)
-            for row in self._conn.execute(
-                f"SELECT {_TASK_COLUMNS} FROM team_task WHERE claimed_by = ? AND status = 'doing'",
-                (session_id,),
-            ).fetchall()
-        ]
         now = _now_iso()
+        released = self._doing_claims(session_id)
         if release_claims:
-            self._conn.execute(
-                "UPDATE team_task SET status = 'todo', claimed_by = NULL, "
-                "claim_expires_at = NULL, updated_at = ? WHERE claimed_by = ? AND status = 'doing'",
-                (now, session_id),
-            )
+            self._release_doing_claims(session_id, now)
         self._conn.execute(
             "UPDATE team_session SET ended_at = ?, last_seen_at = ? WHERE id = ?",
             (now, now, session_id),
         )
         self._conn.commit()
         return released
+
+    def release_claims(self, session_id: str) -> list[TeamTask]:
+        """Return the session's ``doing`` claims to the pool — its presence row untouched.
+
+        The other half of :meth:`end_session`, on its own: for a session that
+        already ENDED with its claims kept (a fleet agent's ``/clear`` parks
+        them for the start hook that follows) whose fleet row then ended before
+        anything came back for them. Ending the session again would only move
+        its ``ended_at``; the claims are what is owed (review of #135, second
+        round, finding 5).
+        """
+        released = self._doing_claims(session_id)
+        self._release_doing_claims(session_id, _now_iso())
+        self._conn.commit()
+        return released
+
+    def _doing_claims(self, session_id: str) -> list[TeamTask]:
+        return [
+            _row_to_task(row)
+            for row in self._conn.execute(
+                f"SELECT {_TASK_COLUMNS} FROM team_task WHERE claimed_by = ? AND status = 'doing'",
+                (session_id,),
+            ).fetchall()
+        ]
+
+    def _release_doing_claims(self, session_id: str, now: str) -> None:
+        self._conn.execute(
+            "UPDATE team_task SET status = 'todo', claimed_by = NULL, "
+            "claim_expires_at = NULL, updated_at = ? WHERE claimed_by = ? AND status = 'doing'",
+            (now, session_id),
+        )
 
     def upsert_task(self, task: TeamTask) -> tuple[TeamTask, bool]:
         """Add a task; a duplicate ``(project_id, key)`` returns the existing one.
@@ -1649,34 +1685,6 @@ class SqliteStore:
         self._conn.commit()
         return cursor.rowcount == 1
 
-    def reassign_claim(
-        self, task_id: str, from_session: str, to_session: str, lease_until: datetime
-    ) -> bool:
-        """Move a live claim between two ids of the SAME worker; False if none moved.
-
-        A ``/clear`` mints a new session id for the agent that is already working
-        the task. Without this the claim keeps naming an id nobody has: the board
-        shows the work held by a ghost, and the agent's next start does not
-        recognise its own claim and is told to stand down from work in progress
-        (review of #116). Narrow by construction — only a task claimed by exactly
-        ``from_session`` moves, so it can never take a claim from a session that
-        is genuinely someone else.
-
-        Every status that KEEPS a claim, not just ``doing``: ``set_task_status``
-        clears ``claimed_by`` for ``done``/``dropped`` alone, so ``review`` and
-        ``blocked`` carry one too — and those were exactly the two the first cut
-        left naming a dead session (review of #116, round 3). The lease it writes
-        is read only for ``doing`` (``claim_task``, ``renew_leases``), so it is
-        inert on the others.
-        """
-        cursor = self._conn.execute(
-            "UPDATE team_task SET claimed_by = ?, claim_expires_at = ?, updated_at = ? "
-            "WHERE id = ? AND claimed_by = ?",
-            (to_session, lease_until.isoformat(), _now_iso(), task_id, from_session),
-        )
-        self._conn.commit()
-        return cursor.rowcount == 1
-
     def renew_leases(self, session_id: str, lease_until: datetime) -> None:
         """Extend the claim lease on everything this session is working on."""
         self._conn.execute(
@@ -1689,7 +1697,7 @@ class SqliteStore:
         task = self.get_task(task_id)
         if task is None:
             raise KeyError(task_id)
-        if status in ("done", "dropped"):
+        if status in CLOSED_STATUSES:
             # Terminal: clear the claim so the task never *looks* held —
             # a lingering claimed_by invites a bogus "release" back to todo.
             self._conn.execute(
@@ -2154,21 +2162,6 @@ class SqliteStore:
         assert stored is not None  # just written
         return stored
 
-    def bind_fleet_agent_session(self, agent_id: str, session_id: str) -> bool:
-        """Join a LIVE fleet row to the session running in its pane; False if none did.
-
-        A targeted UPDATE, like ``end_fleet_agent``, rather than a read-modify-
-        write of the whole row: the hook that calls this runs in another process
-        from ``fleet stop`` / ``reap``, and writing a stale snapshot back
-        resurrected a stopped agent (review of the first version).
-        """
-        cursor = self._conn.execute(
-            "UPDATE fleet_agent SET session_id = ? WHERE id = ? AND ended_at IS NULL",
-            (session_id, agent_id),
-        )
-        self._conn.commit()
-        return cursor.rowcount == 1
-
     def get_fleet_agent(self, ref: str) -> FleetAgent | None:
         """A fleet agent by id or unambiguous id prefix (git-style)."""
         rows = self._conn.execute(
@@ -2203,6 +2196,69 @@ class SqliteStore:
             (project_id, session_id),
         ).fetchone()
         return _row_to_fleet_agent(row) if row is not None else None
+
+    def adopt_fleet_agent_session(
+        self, agent_id: str, previous: str | None, session_id: str, lease_until: datetime
+    ) -> bool:
+        """Move a LIVE fleet row from ``previous`` to ``session_id``, claims and all.
+
+        ``False`` when nothing moved. One transaction for the two facts that must
+        agree: which session the row is, and who holds the tasks that session
+        claimed. A ``/clear`` mints a new session id for the process that is
+        still working them, so every claim the old id holds — the assigned task
+        and any pool task it took, in every status that keeps a claim
+        (``set_task_status`` clears ``claimed_by`` for the closed ones alone) —
+        is re-addressed to the new id. Committed separately they could disagree:
+        a row bound to the new id while the work stayed with the old one, whose
+        lease then ran out under a working agent (review of #135).
+
+        ``previous`` is part of the WHERE (``IS``, so an unbound row matches
+        ``None``): the hook that calls this runs in another process from
+        ``fleet stop`` and from every other hook, so the row must still be the
+        one that was read — ended, or taken by somebody else in between, and
+        nothing moves. A targeted UPDATE, never a whole-row write, for the same
+        reason (a stale snapshot written back resurrected a stopped agent).
+        """
+        try:
+            cursor = self._conn.execute(
+                "UPDATE fleet_agent SET session_id = ? "
+                "WHERE id = ? AND ended_at IS NULL AND session_id IS ?",
+                (session_id, agent_id, previous),
+            )
+            if cursor.rowcount != 1:
+                self._conn.rollback()
+                return False
+            if previous is not None:
+                self._conn.execute(
+                    "UPDATE team_task SET claimed_by = ?, claim_expires_at = ?, updated_at = ? "
+                    "WHERE claimed_by = ? AND status IN ('doing', 'review', 'blocked')",
+                    (session_id, lease_until.isoformat(), _now_iso(), previous),
+                )
+        except Exception:
+            self._conn.rollback()
+            raise
+        self._conn.commit()
+        return True
+
+    def retire_fleet_assignments(self, task_id: str) -> int:
+        """Forget ``task_id`` on every live fleet row spawned for it; how many did.
+
+        An assignment is over when its task is closed. A row that kept naming a
+        done task re-briefed its agent on every later session start — "already
+        done; tell the manager" — and a nudge went out to the manager each time
+        for nothing; reopened and claimed by someone else, the same row ordered
+        a busy agent to stand down (review of #135). What the operator sees: the
+        agent header's ``task 01k…`` chip goes with it — the agent is no longer
+        on that task — while the label (``coder-<task>``) and the branch keep
+        the task's short id, so the row still says what it was spawned for
+        (review of #135, second round, finding 7).
+        """
+        cursor = self._conn.execute(
+            "UPDATE fleet_agent SET task_id = NULL WHERE task_id = ? AND ended_at IS NULL",
+            (task_id,),
+        )
+        self._conn.commit()
+        return cursor.rowcount
 
     def fleet_agent_by_label(
         self, project_id: str, label: str, *, live_only: bool = True

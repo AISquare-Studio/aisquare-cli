@@ -172,6 +172,12 @@ def isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         "AISQUARE_EFFORT_RUNNER",
         "AISQUARE_EFFORT_VALIDATOR",
         "CLAUDE_EFFORT",
+        # A fleet agent's identity, and the process behind it. Both are ambient
+        # for a developer running the suite from inside a fleet pane or from
+        # inside Claude Code (which exports CLAUDE_PID to every subprocess) —
+        # left set, every session start would resolve THEIR row and THEIR pid.
+        "AISQUARE_FLEET_AGENT",
+        "CLAUDE_PID",
         "AISQUARE_MODEL_PLANNER",
         "AISQUARE_MODEL_CODER",
         "AISQUARE_MODEL_RUNNER",

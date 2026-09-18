@@ -881,7 +881,10 @@ def test_the_prefix_is_built_from_modifiers_so_a_token_added_there_reaches_the_n
     token added to the dict on the floor — the chord emitted under a name with
     the modifier missing, tmux delivering the bare key (review of #161, round
     5). Pinned by the shape of the name rather than by mutating the module."""
-    assert list(dict.fromkeys(MODIFIERS.values())) == ["C-", "M-", "S-"]
+    from aisquare.core.keys import _PREFIX_ORDER
+
+    assert _PREFIX_ORDER == ("C-", "M-", "S-")
+    assert set(_PREFIX_ORDER) == set(MODIFIERS.values())
     assert translate("ctrl+shift+up", None, printable=False) == key("C-S-Up")
     assert translate("alt+ctrl+shift+up", None, printable=False) == key("C-M-S-Up")
     assert translate("meta+shift+up", None, printable=False) == key("M-S-Up")
@@ -982,7 +985,11 @@ def test_a_control_byte_named_after_itself_is_never_sent() -> None:
     assert translate("\x85", "\x85", printable=False) == Drop("no_name")
     assert translate("ctrl+\x85", None, printable=False) == Drop("no_name")
     assert translate("\x85", "\x85", printable=True) == Drop("no_name")
-    assert translate("+", "\x07", printable=True) == Drop("nothing_to_type"), "malformed, a BEL"
+    # A malformed name whose character is a BEL: a keystroke ARRIVED and cannot
+    # be sent, so it is named — the silent reason is for events with no
+    # keystroke in them, and round 5 had routed this one there (round 6).
+    assert translate("+", "\x07", printable=True) == Drop("no_name"), "malformed, a BEL"
+    assert translate("+", None, printable=False) == Drop("nothing_to_type"), "malformed, nothing"
 
 
 def test_return_and_ctrl_at_are_their_meanings() -> None:
@@ -1056,10 +1063,35 @@ def test_a_bare_key_named_after_its_unicode_character_is_that_character() -> Non
     assert translate("devanagari_danda", None, printable=False) == literal("।")  # InScript
     assert translate("greek_question_mark", None, printable=False) == literal("\u037e")
     assert translate("fullwidth_tilde", None, printable=False) == literal("\uff5e")
-    # Controls and the line/paragraph separators are never a literal — and
-    # never silence either: they are not characterless keys, so they are named.
+    # Where the table's boundary is (review of #161, round 6): a combining mark
+    # is a literal — the Indic matras are engraved keys, and a bare mark sent as
+    # text composes with what is already in the buffer, as the terminal itself
+    # would compose it — and so is an ideographic space; a format character
+    # (``Cf``) is not, nor a control or a line/paragraph separator — and none
+    # of those is silence either: they are not characterless keys, so they
+    # are named.
+    assert translate("combining_acute_accent", None, printable=False) == literal("\u0301")
+    assert translate("devanagari_vowel_sign_aa", None, printable=False) == literal("\u093e")
+    assert translate("ideographic_space", None, printable=False) == literal("\u3000")
+    assert translate("zero_width_space", None, printable=False) == Drop("no_name")
     assert translate("null", None, printable=False) == Drop("no_name")
     assert translate("line_separator", None, printable=False) == Drop("no_name")
+
+
+def test_a_chord_on_a_symbol_name_is_refused_without_building_the_read_back() -> None:
+    """The answer for a chord on a symbol name is ``no_name`` whether or not
+    the read-back resolves it — ``M-§`` was never measured — so the table is
+    not consulted, let alone built: ``ctrl+§`` on a European layout paid the
+    whole 7 ms / 0.9 MB for an answer the lookup could not change (review of
+    #161, round 6)."""
+    from aisquare.core.keys import _named_characters
+
+    _named_characters.cache_clear()
+    assert translate("ctrl+section_sign", None, printable=False) == Drop("no_name")
+    assert translate("alt+ideographic_full_stop", None, printable=False) == Drop("no_name")
+    assert _named_characters.cache_info().currsize == 0, "the table was built for nothing"
+    assert translate("section_sign", None, printable=False) == literal("§")
+    assert _named_characters.cache_info().currsize == 1, "the bare key is what builds it"
 
 
 def test_the_unicode_read_back_is_textuals_own_naming() -> None:

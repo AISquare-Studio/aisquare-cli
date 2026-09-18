@@ -151,6 +151,12 @@ MODIFIERS: dict[str, str] = {"ctrl": "C-", "alt": "M-", "meta": "M-", "shift": "
 #: back is these plus :data:`MODIFIERS`.
 UNSPELLABLE_MODIFIERS: frozenset[str] = frozenset({"super", "hyper"})
 
+#: The prefixes in the order tmux spells them, deduped (``alt`` and ``meta`` are
+#: both ``M-``). Derived from :data:`MODIFIERS` once, so a token added there
+#: reaches the chord's name and no keystroke rebuilds the order (review of
+#: #161, round 6); ``tests/test_keys.py`` pins it.
+_PREFIX_ORDER: tuple[str, ...] = tuple(dict.fromkeys(MODIFIERS.values()))
+
 #: The keys Textual can report that have NO character in them, as the kitty
 #: keyboard protocol names them (``textual/_keyboard_protocol.py``): the
 #: fourteen modifiers, the three locks, Menu, PrtSc, Pause, the media and
@@ -317,7 +323,10 @@ def _named_characters() -> MappingProxyType[str, str]:
     underscores were hyphens: ``plus_minus_sign`` (``±``, a key on the Canadian
     layout) and the ``«`` ``»`` of several European ones never resolved that
     way (review of #161, round 3). Over the Basic Multilingual Plane — 5.8k
-    names, 7 ms, 200 KB — built on first use and read-only. Not a Latin-only
+    names, 7 ms to build, ~0.9 MB retained for the process's life (tracemalloc
+    919 KB; round 4's "208 KB" was the 725-name table's figure carried over
+    unchanged, wrong by 4.5x — review of #161, round 6) — built on first use
+    and read-only. Not a Latin-only
     allowlist: round 4 drew one to spare the first bare-Shift press the build,
     and it dropped ``、`` ``。`` ``・`` on a JIS layout, ``،`` ``؟`` on an
     Arabic one, ``।`` on InScript, to a quiet line each; round 5 measured that
@@ -332,6 +341,17 @@ def _named_characters() -> MappingProxyType[str, str]:
     line and paragraph separators; a NO-BREAK SPACE is — AltGr+space on the
     French and Canadian layouts — and ``send-keys -l`` carries it fine, since
     it is not a tmux key NAME and none of the mistyping hazards apply.
+
+    WHERE THE BOUNDARY IS, by category (review of #161, round 6): everything
+    non-alphanumeric that is not a control or a line/paragraph separator —
+    2.7k ``So`` symbols, 0.9k ``Sm`` operators, 0.4k ``Po`` punctuation, 17
+    ``Zs`` spaces (an ``ideographic_space`` is a literal), and 1.3k combining
+    marks (``Mn``/``Mc``/``Me``). The marks are deliberate: the Indic matras are
+    engraved keys, and a bare combining mark sent as text composes with what
+    is already in the agent's buffer — exactly what the terminal itself would
+    do with it, and not what a dead key means (a dead key's own glyph is a
+    spacing modifier letter, ``Sk``/``Lm``, and arrives with its text).
+    ``tests/test_keys.py`` pins one of each.
     """
     table: dict[str, str] = {}
     for codepoint in range(0x20, 0x10000):
@@ -443,8 +463,10 @@ def translate(
     say (reviews of the third to fifth versions of #117, and of #161, which
     each broke a different one of those spellings). Every other reason is the
     table's own, stated at the refusal that knows it: this function adds only
-    the gates — a command modifier, a server too old — and the fallback to
-    reported text (reviews of #161, rounds 3-5).
+    the gates — a command modifier; a modifier token it does not know, which
+    applies the literal rule itself and returns before the fallback, so its
+    refusal is the one the fallback cannot override; a server too old — and
+    the fallback to reported text (reviews of #161, rounds 3-6).
     """
     *modifiers, base = key.split("+")
     if any(modifier in UNSPELLABLE_MODIFIERS for modifier in modifiers):
@@ -455,9 +477,15 @@ def translate(
         # token is a broken NAME, never a modifier that happens to be
         # unspellable and never deliberate aim. The reported character is
         # typed, as it always was; with none there is nothing to say.
-        if printable and character and character.isprintable():
-            return Translation("literal", character)
-        return Drop("nothing_to_type")
+        text = _sendable(character, printable=printable)
+        if text is not None:
+            return Translation("literal", text)
+        # No character: nothing to say. A character that arrived and cannot
+        # be sent — a BEL — is a keystroke lost, and says so: the silent
+        # reason is for events with no keystroke in them (review of #161,
+        # round 6).
+        return Drop("nothing_to_type" if character is None else "no_name")
+    held = frozenset(MODIFIERS[modifier] for modifier in modifiers if modifier in MODIFIERS)
     if any(modifier not in MODIFIERS for modifier in modifiers):
         # A token this module has never met — ``foo+a``, or a modifier Textual
         # starts reporting tomorrow. Not a command (round 4), and not a chord
@@ -467,10 +495,9 @@ def translate(
         # text travels, except alt on a letter — and it is applied here, before
         # the fallback below, which would otherwise type the bare ``p`` of an
         # ``alt+foo+p`` (review of #161, round 5). Past it, a keystroke lost.
-        alt = any(MODIFIERS.get(modifier) == "M-" for modifier in modifiers)
-        text = _reported_text(character, printable=printable, alt=alt)
+        text = _reported_text(character, printable=printable, alt="M-" in held)
         return Translation("literal", text) if text is not None else Drop("no_name")
-    translation = _translate(key, modifiers, base, character, printable=printable)
+    translation = _translate(key, modifiers, base, character, printable=printable, held=held)
     if (
         isinstance(translation, Translation)
         and translation.kind == "key"
@@ -478,14 +505,14 @@ def translate(
         and needs_extended_keys(translation.value)
     ):
         translation = Drop("too_old")
-    if isinstance(translation, Drop) and printable and character and character.isprintable():
+    if isinstance(translation, Drop) and (text := _sendable(character, printable=printable)):
         # Every refusal falls back to the text the terminal reported, which is
-        # what this module did before any chord exception existed. Printable
-        # by the character's own account and not only the caller's flag: the
-        # table's control-byte refusal must hold for any caller of this public
-        # function, not just one honest about ``Key.is_printable`` (review of
-        # #161, round 5).
-        return Translation("literal", character)
+        # what this module did before any chord exception existed — through
+        # ``_sendable``, so a control byte never gets past here whatever a
+        # caller claims (reviews of #161, rounds 5-6). Deliberately NOT
+        # ``_reported_text``: the alt exception does not apply to a refusal —
+        # ``alt+shift+o`` types an ``O`` (docs/fleet.md).
+        return Translation("literal", text)
     return translation
 
 
@@ -493,23 +520,37 @@ def _is_ascii_letter(character: str) -> bool:
     return len(character) == 1 and character.isascii() and character.isalpha()
 
 
-def _reported_text(character: str | None, *, printable: bool, alt: bool) -> str | None:
-    """The text the terminal reported, when that text is what travels.
+def _sendable(character: str | None, *, printable: bool) -> str | None:
+    """The reported text, when the CHARACTER says it is printable — not only the flag.
 
-    Printable by the character's own account and not only the caller's flag
-    (a control byte a caller calls printable is still never sent — review of
-    #161, round 5), and NOT alt on an ASCII letter: there the chord is the
-    meaning and the character is only how the terminal spelt it, which is the
-    alt+p bug (``_translate``'s docstring). One rule, called from the table and
-    from ``translate``'s unknown-token gate, so the two cannot disagree.
+    A control byte a caller calls printable is still never sent: ``translate``
+    is public, and its guard must not depend on a caller being honest about
+    ``Key.is_printable`` (review of #161, round 5). The one spelling of that
+    rule; every fallback in this module calls it (round 6).
     """
-    if not (printable and character and character.isprintable()):
-        return None
-    return None if alt and _is_ascii_letter(character) else character
+    return character if printable and character and character.isprintable() else None
+
+
+def _reported_text(character: str | None, *, printable: bool, alt: bool) -> str | None:
+    """:func:`_sendable`, and NOT alt on an ASCII letter.
+
+    There the chord is the meaning and the character is only how the terminal
+    spelt it, which is the alt+p bug (``_translate``'s docstring). One rule,
+    called from the table and from ``translate``'s unknown-token gate, so the
+    two cannot disagree.
+    """
+    text = _sendable(character, printable=printable)
+    return None if text is not None and alt and _is_ascii_letter(text) else text
 
 
 def _translate(
-    key: str, modifiers: list[str], base: str, character: str | None, *, printable: bool
+    key: str,
+    modifiers: list[str],
+    base: str,
+    character: str | None,
+    *,
+    printable: bool,
+    held: frozenset[str],
 ) -> Translation | Drop:
     """The table itself, capability-blind — ``translate`` applies the version gate.
 
@@ -560,14 +601,13 @@ def _translate(
     ``v``. That is ``translate``'s modifier gate, deliberate and pinned by a
     test (review of the second version of #117).
     """
-    held = {MODIFIERS[modifier] for modifier in modifiers}  # translate has gated the unknown
-    ctrl, alt, shift = "C-" in held, "M-" in held, "S-" in held
+    ctrl, alt, shift = "C-" in held, "M-" in held, "S-" in held  # read once, in translate
     text = _reported_text(character, printable=printable, alt=alt)
     if text is not None:
         return Translation("literal", text)
     if key in CHORDS:
         return Translation("key", CHORDS[key])
-    prefix = "".join(token for token in dict.fromkeys(MODIFIERS.values()) if token in held)
+    prefix = "".join(token for token in _PREFIX_ORDER if token in held)
 
     if base in SPECIAL:
         name = SPECIAL[base]
@@ -595,21 +635,24 @@ def _translate(
             # and ``ctrl+pause`` are as empty as the bare key (#151; reviews of
             # #161, rounds 2-4). Checked before the read-back is ever built.
             return Drop("nothing_to_type")
+        if modifiers:
+            # The text wins above whenever a terminal reports it; the name
+            # says what was typed only for the BARE key. ``M-§`` was never
+            # measured against a tmux, so a chord here is a keystroke lost —
+            # and that answer does not depend on the read-back, so it is given
+            # before the table is ever built: ``ctrl+§`` on a European layout
+            # paid the whole 7 ms / 0.9 MB for nothing (review of #161, round 6).
+            return Drop("no_name")
         # Not a key this table names and not a character it spells: a key
         # Textual named after its Unicode character — ``section_sign``,
         # ``plus_minus_sign``, ``no_break_space`` on a non-US layout — reported
         # without its text, or a name this module cannot resolve at all.
         char = _unicode_character(base)
         if char is None:
-            # Outside the read-back's blocks (an emoji), a name Textual adds
+            # Outside the read-back's plane (an emoji), a name Textual adds
             # tomorrow, a raw control byte with no Unicode name: a keystroke
             # LOST, said once. Silence is stated positively above and is never
             # what a miss falls through to (review of #161, round 4).
-            return Drop("no_name")
-        if modifiers:
-            # The text wins above whenever a terminal reports it; the name
-            # says what was typed only for the BARE key. ``M-§`` was never
-            # measured against a tmux, so a chord here is a keystroke lost.
             return Drop("no_name")
     if unicodedata.category(char)[0] == "C":
         # A control byte as its own name: U+0085 NEL has no Unicode name, so

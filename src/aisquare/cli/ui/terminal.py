@@ -742,8 +742,13 @@ class TerminalPane(Widget, can_focus=True):
         # then calls this — and a cached "extended chords are fine" from a 3.7
         # server would TYPE ``S-Enter`` into an agent on a 3.4 one, as a cached
         # "-F is known" would fail every frame. Re-read lazily: one ``tmux -V``
-        # per attach at most.
+        # per attach at most. The notices go with it: the too-old line names
+        # the server's version, so a line deduped across an attach would
+        # prescribe an upgrade for a server the pane has left while the
+        # keystroke on the new one is lost without a word (review of #161,
+        # round 6). "Once per key name in that pane" is per pane ON A SERVER.
         self._version_read = False
+        self._warned.clear()
         if pane_id is not None and self.server is None:
             # The fleet's server from config — a default like any other (§3.10).
             self.server = fleet_service.server()
@@ -1607,7 +1612,9 @@ class TerminalPane(Widget, can_focus=True):
 
         Once per PANE, not per session: ``_warned`` is this widget's, and the
         app composes a ``TerminalPane`` per view — so that is the scope
-        ``docs/fleet.md`` promises, and no wider (review).
+        ``docs/fleet.md`` promises, and no wider (review). And per ATTACH:
+        ``attach`` clears it beside the version it re-reads, since the too-old
+        line names a server (review of #161, round 6).
         """
         if key in self._warned:
             return

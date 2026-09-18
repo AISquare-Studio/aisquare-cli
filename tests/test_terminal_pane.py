@@ -2981,6 +2981,42 @@ def test_the_too_old_notice_words_an_unknown_version_rather_than_asserting_it_aw
     assert severities == ["warning"]
 
 
+def test_the_too_old_notice_follows_the_pane_to_its_next_server(
+    fake: FakeTmux, tmp_path: Path
+) -> None:
+    """The line names a server's version, and a pane outlives its server: a
+    notice deduped across an attach prescribed an upgrade for the server the
+    pane had LEFT while the keystroke on the new one was lost without a word
+    (review of #161, round 6). ``attach`` clears the dedupe beside the version
+    it re-reads."""
+    fake.version = "tmux 3.3"
+    older = FakeTmux()
+    older.version = "tmux 3.4"
+    older.panes["%1"] = FakePane(screen=["another old server"])
+
+    async def drive() -> tuple[list[str], list[tuple[str, ...]], list[tuple[str, ...]]]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 6)) as pilot:
+            pane = host.pane
+            pane.focus()
+            await pilot.pause()
+            await pilot.press("shift+enter", "shift+enter")
+            await pilot.pause()
+            pane.server = older.server(tmp_path)
+            pane.attach("%1")
+            await pilot.pause()
+            await pilot.press("shift+enter", "shift+enter")
+            await pilot.pause()
+            return list(host.notices), fake.sent(), older.sent()
+
+    notices, first_sent, second_sent = run(drive())
+    assert first_sent == [] and second_sent == []
+    assert notices == [
+        "tmux 3.3 cannot carry shift+enter — 3.5 or newer can",
+        "tmux 3.4 cannot carry shift+enter — 3.5 or newer can",
+    ]
+
+
 def test_attach_re_reads_the_version_for_a_new_server(fake: FakeTmux, tmp_path: Path) -> None:
     """The version is read once PER SERVER, and a pane outlives its server.
 
@@ -3627,8 +3663,10 @@ COMMAND_CHORDS = ("super+k", "super+f5", "hyper+x")
 #: each, never silence, and never a raw byte in the line. ``tests/test_keys.py``
 #: pins the reason; this pins what the pane SAYS for it, which is how a C1
 #: control byte went into the toast verbatim unnoticed for a round (review of
-#: #161, round 5). The control byte is that regression's own key name.
-NAMED_LOSSES = ("f13", "ctrl+comma", "grinning_face", "\x85")
+#: #161, round 5). The two control bytes are that regression's own key names —
+#: two of them, so the dedupe is shown to key on the RAW name while the notice
+#: shows the spelt one (round 6).
+NAMED_LOSSES = ("f13", "ctrl+comma", "grinning_face", "\x85", "\x9b")
 
 
 def test_a_key_with_nothing_to_type_is_ignored_in_silence(fake: FakeTmux, tmp_path: Path) -> None:
@@ -3667,7 +3705,10 @@ def test_a_lost_keystroke_is_named_once_as_information_and_never_as_a_raw_byte(
     nothing sent, and the name spelt so the emulator cannot act on it — U+0085
     as ``U+0085``, not as the byte that moves the cursor (review of #161,
     round 5). Pressed twice each: once per key name is the whole of the
-    promise."""
+    promise. The printable names go through the pilot — the app's own key
+    dispatch, the path the silent list's test measures — and only the raw
+    bytes, which the pilot cannot spell, are posted straight to the pane
+    (round 6)."""
 
     async def drive() -> tuple[list[str], list[str], list[tuple[str, ...]]]:
         host = Host(fake.server(tmp_path), "%1")
@@ -3675,7 +3716,10 @@ def test_a_lost_keystroke_is_named_once_as_information_and_never_as_a_raw_byte(
             host.pane.focus()
             await pilot.pause()
             for name in (*NAMED_LOSSES, *NAMED_LOSSES):
-                host.pane.post_message(events.Key(name, name if len(name) == 1 else None))
+                if name.isprintable():
+                    await pilot.press(name)
+                else:
+                    host.pane.post_message(events.Key(name, name))
             await pilot.pause()
             return host.notices, host.severities, fake.sent()
 
@@ -3686,8 +3730,9 @@ def test_a_lost_keystroke_is_named_once_as_information_and_never_as_a_raw_byte(
         "no way to type ctrl+comma into a tmux pane",
         "no way to type grinning_face into a tmux pane",
         "no way to type U+0085 into a tmux pane",
+        "no way to type U+009B into a tmux pane",  # its own line: deduped on the raw name
     ]
-    assert severities == ["information"] * 4
+    assert severities == ["information"] * 5
     assert all(char.isprintable() for notice in notices for char in notice)
 
 

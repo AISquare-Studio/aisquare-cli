@@ -477,12 +477,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   keypad's centre too. The pane looked each one up in the tmux key table, found
   nothing, and said `left_shift: tmux has no name for this key — dropped` — one
   red toast per key, three or more into an ordinary typing session, reading as
-  tmux failing. None of them is a keystroke, so none of them is mentioned:
-  `core.keys.worth_naming` keeps the notice for a chord you could have meant —
-  a modifier held, or a function key past the twelve tmux knows. That notice
-  stays, once per key name in a pane, but as information — `no way to type f13
-  into a tmux pane` — since tmux did not fail and nothing that could have been
-  sent was dropped.
+  tmux failing. None of them is a keystroke, and neither is a macOS Cmd chord
+  (a command for the terminal, not a request to type the letter under it), so
+  none of them is mentioned: `core.keys.translate` now says *why* a key was
+  not sent, and the pane speaks from that reason. A chord you could have meant
+  — a modifier held, or a function key past the twelve tmux knows — keeps its
+  notice, once per key name in a pane, but as information — `no way to type
+  f13 into a tmux pane` — since tmux did not fail. A chord your tmux is too
+  old to carry is the one loss you can fix, and says so as a warning that
+  names the version (`tmux 3.4 cannot carry shift+enter — 3.5 or newer can`).
+  The numeric keypad's operators, which a terminal may name without reporting
+  their text, are typed rather than filed with the keys nobody pressed.
 - **Alt+letter chords reach the agent as chords.** Claude Code's alt+p (switch
   model) did nothing from a fleet pane — reported 2026-09-02 and again
   2026-09-10 — because Textual's parser reads `ESC p` as `Key("alt+p",

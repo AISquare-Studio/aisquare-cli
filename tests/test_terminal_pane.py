@@ -115,6 +115,7 @@ class Host(SelectionHost):
         self._with_footer = with_footer
         self.escapes = 0
         self.notices: list[str] = []
+        self.severities: list[str] = []
 
     def compose(self) -> ComposeResult:
         if self._with_input:
@@ -146,33 +147,12 @@ class Host(SelectionHost):
         timeout: float | None = None,
         markup: bool = True,
     ) -> None:
+        # Severity beside the text, for every test: an unmappable key must not
+        # read as an alarm (#151), the wheel's fullscreen notice must stay one,
+        # and a second host class that recorded it for two tests left every
+        # other notice test blind to a severity change (review of #161, round 2).
         self.notices.append(message)
-
-
-class Severities(Host):
-    """A host that records the severity of every notice, not just its text.
-
-    Severity is the whole claim of two tests — an unmappable key must not read
-    as an alarm (#151), and the wheel's fullscreen notice must stay one. It was
-    unpinned for the wheel, so a change of severity there was invisible
-    (review).
-    """
-
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        super().__init__(*args, **kwargs)
-        self.severities: list[str] = []
-
-    def notify(
-        self,
-        message: str,
-        *,
-        title: str = "",
-        severity: SeverityLevel = "information",
-        timeout: float | None = None,
-        markup: bool = True,
-    ) -> None:
         self.severities.append(severity)
-        super().notify(message, title=title, severity=severity, timeout=timeout, markup=markup)
 
 
 class SwitcherHost(SelectionHost):
@@ -584,7 +564,7 @@ def test_keys_are_forwarded_in_tmux_vocabulary(fake: FakeTmux, tmp_path: Path) -
 def test_an_untranslatable_key_is_dropped_with_one_notice_per_key_name(
     fake: FakeTmux, tmp_path: Path
 ) -> None:
-    async def drive() -> list[str]:
+    async def drive() -> tuple[list[str], list[str]]:
         host = Host(fake.server(tmp_path), "%1")
         async with host.run_test(size=(40, 6)) as pilot:
             host.pane.focus()
@@ -593,13 +573,14 @@ def test_an_untranslatable_key_is_dropped_with_one_notice_per_key_name(
             await pilot.press("ctrl+comma")  # a second unknown key: its own notice
             await pilot.press("enter")  # a known key: no notice
             await pilot.pause()
-            return host.notices
+            return host.notices, host.severities
 
-    notices = run(drive())
+    notices, severities = run(drive())
     assert len(notices) == 2
     # The notice names the key and blames nothing: "no way to type f13 into a tmux pane" (#151).
     assert notices[0] == "no way to type f13 into a tmux pane"
     assert notices[1] == "no way to type ctrl+comma into a tmux pane"
+    assert severities == ["information", "information"]  # a fact about the key table, not an alarm
     assert fake.sent() == [("Enter",)]  # nothing was mistyped into the agent
 
 
@@ -830,7 +811,7 @@ def test_the_wheel_on_a_plain_alternate_screen_sends_nothing_and_says_why(
     pane.alternate_on, pane.mouse_on = True, False
 
     async def drive() -> tuple[int, list[tuple[str, ...]], list[str], list[str]]:
-        host = Severities(fake.server(tmp_path), "%1")
+        host = Host(fake.server(tmp_path), "%1")
         async with host.run_test(size=(40, 6)) as pilot:
             widget = host.pane
             await wait_until(pilot, lambda: synced(widget))
@@ -2929,17 +2910,19 @@ def test_a_cursor_above_the_shown_window_is_neither_drawn_nor_dirtied(
 # --- the tmux-version key gate -----------------------------------------------------------------
 
 
-def _press_shift_enter(tmux: FakeTmux, tmp_path: Path) -> tuple[list[tuple[str, ...]], list[str]]:
+def _press_shift_enter(
+    tmux: FakeTmux, tmp_path: Path
+) -> tuple[list[tuple[str, ...]], list[str], list[str]]:
     """Press an extended-only chord (then a plain key) into a pane on ``tmux``."""
 
-    async def drive() -> tuple[list[tuple[str, ...]], list[str]]:
+    async def drive() -> tuple[list[tuple[str, ...]], list[str], list[str]]:
         host = Host(tmux.server(tmp_path), "%1")
         async with host.run_test(size=(40, 6)) as pilot:
             host.pane.focus()
             await pilot.pause()
             await pilot.press("shift+enter", "enter")
             await pilot.pause()
-            return tmux.sent(), list(host.notices)
+            return tmux.sent(), list(host.notices), list(host.severities)
 
     return run(drive())
 
@@ -2957,13 +2940,17 @@ def test_the_servers_tmux_version_gates_the_chords_it_would_type_out(
     gate could have been stuck at either value undetected.
     """
     fake.version = "tmux 3.4"
-    old_sent, old_notices = _press_shift_enter(fake, tmp_path)
+    old_sent, old_notices, old_severities = _press_shift_enter(fake, tmp_path)
     modern = FakeTmux()
     modern.panes["%1"] = FakePane(screen=["one row"])
-    modern_sent, modern_notices = _press_shift_enter(modern, tmp_path)
+    modern_sent, modern_notices, _ = _press_shift_enter(modern, tmp_path)
 
     assert old_sent == [("Enter",)], "a chord tmux 3.4 would type out must not be sent"
-    assert old_notices == ["no way to type shift+enter into a tmux pane"]
+    # A keystroke LOST for a reason the reader can fix: a warning, naming the
+    # version — not the "no way to type" line, which is false here (there is a
+    # way, on 3.5) and was information (review of #161, round 2).
+    assert old_notices == ["tmux 3.4 cannot carry shift+enter — 3.5 or newer can"]
+    assert old_severities == ["warning"]
     assert modern.version == "tmux 3.7c"  # the control's premise, spelled out
     assert modern_sent == [("S-Enter",), ("Enter",)]  # …and there the chord goes through
     assert modern_notices == []
@@ -3561,14 +3548,16 @@ def test_a_change_hidden_under_the_corner_marker_leaves_the_highlight_standing(
     assert after_visible is None, "a change under the highlight the user CAN see drops it"
 
 
-#: Keys a focused pane sees that are not keystrokes, written out INDEPENDENTLY of
-#: ``MODIFIER_ONLY_KEYS`` — pressing the constant under test would shrink the loop
-#: rather than fail it when a name goes missing (review; CONTRIBUTING's "emptiness
-#: as both goal and symptom"). Three groups, each a bug that reached a user or a
-#: review: the fourteen modifier names, the locks WITH a modifier held (Textual
-#: keeps the prefix for those, so an exact match on ``event.key`` let them
-#: through), and the whole keys a kitty-protocol terminal reports only because
-#: Textual asks for every key.
+#: Keys a focused pane sees that are not keystrokes aimed at the agent, written
+#: out INDEPENDENTLY of ``MODIFIER_ONLY_KEYS`` — pressing the constant under test
+#: would shrink the loop rather than fail it when a name goes missing (review;
+#: CONTRIBUTING's "emptiness as both goal and symptom"). Four groups, each a bug
+#: that reached a user or a review: the fourteen modifier names, the locks WITH a
+#: modifier held (Textual keeps the prefix for those, so an exact match on
+#: ``event.key`` let them through), the whole keys a kitty-protocol terminal
+#: reports only because Textual asks for every key, and the Cmd chords macOS
+#: hands the pane — commands for the OS, which the round-1 rule read as
+#: deliberate aim and toasted one by one.
 NOTHING_TO_TYPE = (
     "left_shift",
     "left_control",
@@ -3599,6 +3588,9 @@ NOTHING_TO_TYPE = (
     "media_play",
     "media_pause",
     "kp_begin",
+    "super+k",
+    "super+f5",
+    "hyper+x",
 )
 
 
@@ -3628,13 +3620,36 @@ def test_a_key_with_nothing_to_type_is_ignored_in_silence(fake: FakeTmux, tmp_pa
     assert sent == [("C-a",)]  # and not one stray send-keys
 
 
+def test_a_numpad_operator_without_its_text_is_typed_not_swallowed(
+    fake: FakeTmux, tmp_path: Path
+) -> None:
+    """The counterexample to "bare and unnamed means nobody typed it": a terminal
+    that reports every key but not its text sends numpad ``+`` as ``add``, and
+    the round-1 rule filed it with ``menu`` — neither typed nor mentioned, less
+    than the toast it replaced (review of #161, round 2). It is a keystroke."""
+
+    async def drive() -> tuple[list[str], list[tuple[str, ...]]]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 6)) as pilot:
+            host.pane.focus()
+            await pilot.pause()
+            for name in ("add", "divide", "decimal"):
+                host.pane.post_message(events.Key(name, None))
+            await pilot.pause()
+            return host.notices, fake.sent()
+
+    notices, sent = run(drive())
+    assert notices == []
+    assert sent == [("-l", "--", "+"), ("-l", "--", "/"), ("-l", "--", ".")]
+
+
 def test_a_truly_unmappable_key_is_still_named_once_but_as_information(
     fake: FakeTmux, tmp_path: Path
 ) -> None:
     """The remaining notice does not blame tmux or say "dropped" in red (#151)."""
 
     async def drive() -> tuple[list[str], list[str]]:
-        host = Severities(fake.server(tmp_path), "%1")
+        host = Host(fake.server(tmp_path), "%1")
         async with host.run_test(size=(40, 6)) as pilot:
             host.pane.focus()
             await pilot.pause()

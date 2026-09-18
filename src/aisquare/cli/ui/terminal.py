@@ -57,9 +57,11 @@ Input (§4.3). With the pane focused every key goes to tmux through
 ``core.keys.translate`` — literal text via ``send-keys -l``, everything else by
 tmux's key name — except the escape hatch (``F12`` by default), which posts
 :class:`EscapeToSidebar` and is never forwarded. A key tmux has no safe name
-for is dropped, with ONE quiet notice per key name and per pane — and in
-silence where there was nothing to type: a modifier, a lock, or a whole key a
-kitty-protocol terminal reports only because Textual asked for every key
+for is dropped, and ``translate``'s reason decides what is said, once per key
+name and per pane: a chord the reader meant gets ONE quiet notice, a chord this
+tmux is too old to carry a warning that names the version, and a key with
+nothing to type — a modifier, a lock, a Cmd chord, a whole key a kitty-protocol
+terminal reports only because Textual asked for every key — nothing at all
 (#151). ``Paste`` goes through the paste buffer so the agent sees one bracketed
 paste. The wheel scrolls our own offset over the pane's history (clamped to
 ``history_size``); any key returns to live. ``Resize`` is forwarded as
@@ -116,9 +118,9 @@ from textual.widget import Widget
 from aisquare.core.keys import (
     ARGV_SEPARATOR,
     EXTENDED_MINIMUM,
+    Drop,
     Translation,
     translate,
-    worth_naming,
 )
 from aisquare.core.tmux import (
     WRAP_FLAGS_MINIMUM,
@@ -1491,23 +1493,14 @@ class TerminalPane(Widget, can_focus=True):
             printable=event.is_printable,
             extended_keys=self._extended_keys(),
         )
-        if translation is None:
+        if isinstance(translation, Drop):
             # Nothing is typed — mistyping into a running agent is the worse
-            # failure. Whether that is worth saying is core.keys.worth_naming's
-            # question, asked there for every key rather than here for the
-            # fourteen modifier names this branch used to special-case: a
-            # kitty-protocol terminal reports Menu, PrtSc, Pause and the volume
-            # keys exactly as it reports a bare Shift, and a toast for those is
-            # #151 again under another name (review). What survives the rule is
-            # a chord the reader meant — ctrl on a digit, F13 — and it is named
-            # once, as information: tmux did not fail, and nothing that could
-            # have been sent was dropped.
-            if worth_naming(event.key):
-                self._warn_once(
-                    event.key,
-                    f"no way to type {event.key} into a tmux pane",
-                    severity="information",
-                )
+            # failure. What, if anything, to say comes from translate's REASON
+            # and never from the key's shape: the shape misread a Cmd chord as
+            # deliberate aim, numpad + as a key nobody pressed, and a tmux too
+            # old for shift+enter as a chord with no spelling anywhere (review
+            # of #161, round 2).
+            self._explain(event.key, translation)
             return
         if self.text_selection is not None:
             # Typing means the highlight is stale: the next ctrl+c must be the
@@ -1539,16 +1532,37 @@ class TerminalPane(Widget, can_focus=True):
         except TmuxError:
             self._fail(PANE_GONE)
 
+    def _explain(self, key: str, drop: Drop) -> None:
+        """Say what became of a key that was not sent — from ``translate``'s reason.
+
+        Two of the four reasons are silence, and they are the #151 fix: a
+        modifier tapped on its own, a whole key the terminal reports only
+        because Textual asked for every key, a Cmd chord meant for the OS —
+        none was a keystroke aimed at the agent, and a toast for any of them
+        read as tmux failing. The other two are a keystroke LOST, and differ in
+        whether the reader can do anything about it: a chord tmux has no safe
+        spelling for is a fact about the key table, said once as information;
+        a chord this tmux is too old to carry is a warning that names the
+        version, since a newer server delivers it (review of #161, round 2 —
+        the first version gave the old-server loss the "no way to type" line,
+        which is false: there is a way, on tmux 3.5).
+        """
+        if drop.reason == "too_old":
+            version = self._server_version()
+            server = f"tmux {version[0]}.{version[1]}" if version is not None else "this tmux"
+            need = ".".join(str(part) for part in EXTENDED_MINIMUM)
+            self._warn_once(key, f"{server} cannot carry {key} — {need} or newer can")
+        elif drop.reason == "no_name":
+            self._warn_once(key, f"no way to type {key} into a tmux pane", severity="information")
+
     def _warn_once(self, key: str, message: str, *, severity: SeverityLevel = "warning") -> None:
         """Say ``message`` once per ``key``, at ``severity``.
 
         Severity is a property of the MESSAGE and not of the once-per-name
-        mechanism, so each caller keeps its own answer (review). The wheel's
-        "this program is fullscreen" notice is a warning, as it always was; an
-        unmappable key is a fact about the key table rather than a fault in
-        tmux or the pane, so :meth:`on_key` asks for information (#151) — the
-        warning colour read as "something is broken" for a chord that simply
-        has no tmux spelling.
+        mechanism, so each caller keeps its own answer (review): the wheel's
+        "this program is fullscreen" notice and the too-old-tmux notice are
+        warnings, an unmappable chord is information — :meth:`_explain` says
+        which and why.
 
         Once per PANE, not per session: ``_warned`` is this widget's, and the
         app composes a ``TerminalPane`` per view — so that is the scope

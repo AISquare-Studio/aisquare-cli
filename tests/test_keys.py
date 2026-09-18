@@ -610,9 +610,11 @@ def test_the_hole_audit_complains_in_every_direction() -> None:
     assert audit_holes({"ctrl+1": "nothing_to_type"}, dropped, names) == [
         "dropped for a different reason than recorded: ['ctrl+1: no_name -> nothing_to_type']"
     ]
-    # The negative control: an entry Textual no longer has at all is not
+    # The negative control: an entry for a name the sweep does not see is not
     # "healed" — the table may keep covering enum members that came and went.
-    assert audit_holes({}, {"ctrl-at": "nothing_to_type"}, names) == []
+    # An invented name, so the premise cannot drift: round 4 used ``ctrl-at``
+    # here, which Textual does have and this branch made translate (round 5).
+    assert audit_holes({}, {"ctrl+eject": "no_name"}, names) == []
 
 
 def test_the_tmux_grammar_control_rejects_what_tmux_would_mistype() -> None:
@@ -861,9 +863,28 @@ def test_every_modifier_token_textual_emits_is_spelt_or_a_command() -> None:
     assert tokens - set(MODIFIERS) == UNSPELLABLE_MODIFIERS, "the two tmux cannot spell"
     # And ONLY those two are a command: a token this module has never met is a
     # keystroke it cannot spell, said once — never folded into the silent
-    # reason (review of #161, round 4).
+    # reason (review of #161, round 4) — and never a NAME with the token left
+    # out, which would hand tmux the chord with its modifier lost. The text
+    # the terminal reported still travels by the table's own rule, so the one
+    # exception holds too: alt on a letter is the chord, not the letter, and
+    # ``alt+foo+p`` must not reopen the alt+p bug (review of #161, round 5).
     assert translate("foo+a", None, printable=False) == Drop("no_name")
     assert translate("foo+a", "a", printable=True) == literal("a")
+    assert translate("foo+1", "1", printable=True) == literal("1")
+    assert translate("alt+foo+p", "p", printable=True) == Drop("no_name")
+    assert translate("alt+foo+p", None, printable=False) == Drop("no_name")
+
+
+def test_the_prefix_is_built_from_modifiers_so_a_token_added_there_reaches_the_name() -> None:
+    """``MODIFIERS`` is the one place a modifier is read: the values build the
+    prefix, in the dict's order. A hand-built prefix beside it once dropped any
+    token added to the dict on the floor — the chord emitted under a name with
+    the modifier missing, tmux delivering the bare key (review of #161, round
+    5). Pinned by the shape of the name rather than by mutating the module."""
+    assert list(dict.fromkeys(MODIFIERS.values())) == ["C-", "M-", "S-"]
+    assert translate("ctrl+shift+up", None, printable=False) == key("C-S-Up")
+    assert translate("alt+ctrl+shift+up", None, printable=False) == key("C-M-S-Up")
+    assert translate("meta+shift+up", None, printable=False) == key("M-S-Up")
 
 
 def test_the_characterless_keys_are_textuals_and_the_silence_is_stated_not_inherited() -> None:
@@ -955,9 +976,13 @@ def test_a_control_byte_named_after_itself_is_never_sent() -> None:
     names the key after the raw byte; on the round-3 head the bare key reached
     ``send-keys -l`` — a C1 control into a running agent, the one thing this
     module exists to prevent — while the same key with ctrl held was refused
-    (review of #161, round 4). Both are refused, and both say so."""
+    (review of #161, round 4). Both are refused, and both say so — and the
+    refusal holds for a caller that CLAIMS the byte printable: the fallbacks
+    ask the character, not the flag (review of #161, round 5)."""
     assert translate("\x85", "\x85", printable=False) == Drop("no_name")
     assert translate("ctrl+\x85", None, printable=False) == Drop("no_name")
+    assert translate("\x85", "\x85", printable=True) == Drop("no_name")
+    assert translate("+", "\x07", printable=True) == Drop("nothing_to_type"), "malformed, a BEL"
 
 
 def test_return_and_ctrl_at_are_their_meanings() -> None:
@@ -1023,6 +1048,14 @@ def test_a_bare_key_named_after_its_unicode_character_is_that_character() -> Non
     assert translate("no_break_space", None, printable=False) == literal("\u00a0")
     assert translate("euro_sign", None, printable=False) == literal("€")
     assert translate("lozenge", None, printable=False) == literal("◊")  # macOS Option-Shift-V
+    # Not a Latin allowlist: the punctuation engraved on keyboards outside the
+    # Latin world is typed too (review of #161, round 5).
+    assert translate("ideographic_full_stop", None, printable=False) == literal("。")  # JIS
+    assert translate("katakana_middle_dot", None, printable=False) == literal("・")
+    assert translate("arabic_question_mark", None, printable=False) == literal("؟")
+    assert translate("devanagari_danda", None, printable=False) == literal("।")  # InScript
+    assert translate("greek_question_mark", None, printable=False) == literal("\u037e")
+    assert translate("fullwidth_tilde", None, printable=False) == literal("\uff5e")
     # Controls and the line/paragraph separators are never a literal — and
     # never silence either: they are not characterless keys, so they are named.
     assert translate("null", None, printable=False) == Drop("no_name")
@@ -1043,7 +1076,13 @@ def test_the_unicode_read_back_is_textuals_own_naming() -> None:
 
     table = _named_characters()
     assert isinstance(table, MappingProxyType), "read-only: @cache hands out the one instance"
-    assert 500 < len(table) < 1000, len(table)  # the typeable blocks, not the plane
+    assert len(table) > 5000, len(table)  # the plane, not a Latin allowlist (round 5)
+    # The ASCII names PUNCTUATION spells by hand are in the table too; the two
+    # must agree on every shared name, or the redundancy is a fork waiting to
+    # happen (review of #161, round 5).
+    shared = set(table) & set(PUNCTUATION)
+    assert len(shared) > 20
+    assert {name: table[name] for name in shared} == {name: PUNCTUATION[name] for name in shared}
     disagreements = {name for name, char in table.items() if _character_to_key(char) != name}
     assert disagreements == set(KEY_NAME_REPLACEMENTS)
     assert disagreements <= set(PUNCTUATION)

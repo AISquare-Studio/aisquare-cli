@@ -658,20 +658,20 @@ layout) and the numeric keypad's operators are typed even by a terminal that
 names the key without reporting its text (numpad `+` is a `+`) — except the
 keypad's decimal and separator keys, whose text only your layout knows, which
 are named once rather than guessed. A chord your tmux is too old to carry is
-refused rather than mistyped, with a warning that names the version it needs
-(`this tmux cannot carry shift+enter — 3.5 or newer can`). The one exception
-is a modifier tmux cannot spell at all — Cmd (super) or hyper — which is
-dropped rather than typed, and without a word, because Cmd+V is a command for
-your terminal and not a request for a `v`. A key with nothing to type is
-ignored the same way, whatever is held with it: a modifier or a lock (Shift,
-Control, Caps Lock…), and the whole keys a terminal speaking the kitty keyboard
-protocol reports only because we asked it for every key — Menu, PrtSc, Pause,
-the volume and media keys, the keypad's centre. Those are the only silent
-keys; anything else the pane cannot type — a chord you could have meant, a
-function key past F12, a symbol it has no table for — is named in a quiet
-notice instead, once per key name in that pane: `no way to type f13 into a
-tmux pane`. Nothing is sent either way, since mistyping into a running agent
-is the worse failure.
+refused rather than mistyped, with a warning that names the version you have
+and the one it needs (`tmux 3.4 cannot carry shift+enter — 3.5 or newer
+can`). The one exception is a modifier tmux cannot spell at all — Cmd (super)
+or hyper — which is dropped rather than typed, and without a word, because
+Cmd+V is a command for your terminal and not a request for a `v`. A key with
+nothing to type is ignored the same way, whatever is held with it: a modifier
+or a lock (Shift, Control, Caps Lock…), and the whole keys a terminal speaking
+the kitty keyboard protocol reports only because we asked it for every key —
+Menu, PrtSc, Pause, the volume and media keys, the keypad's centre. Those and
+a Cmd chord are the only silent keys; anything else the pane cannot type — a
+chord you could have meant, a function key past F12, a symbol it has no table
+for — is named in a quiet notice instead, once per key name in that pane: `no
+way to type f13 into a tmux pane`. Nothing is sent either way, since mistyping
+into a running agent is the worse failure.
 Paste is bracketed, so Claude Code sees one paste and not one Enter
 per line. The wheel goes to whoever can use it: a program that tracks the mouse
 (Claude Code's fullscreen TUI does) receives it as its own mouse event and

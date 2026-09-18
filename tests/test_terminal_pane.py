@@ -60,6 +60,7 @@ from aisquare.cli.ui.terminal import (
     route_selection_gesture,
 )
 from aisquare.cli.ui.views.agent import AgentView, header_text
+from aisquare.core.keys import Drop
 from aisquare.core.tmux import BUNDLED_CONF, TmuxError, TmuxServer
 from aisquare.models import FleetAgent, FleetAgentStatus
 from tests.pane_harness import (
@@ -2947,15 +2948,37 @@ def test_the_servers_tmux_version_gates_the_chords_it_would_type_out(
 
     assert old_sent == [("Enter",)], "a chord tmux 3.4 would type out must not be sent"
     # A keystroke LOST for a reason the reader can fix: a warning, naming the
-    # version it needs — not the "no way to type" line, which is false here
-    # (there is a way, on 3.5) and was information (review of #161, round 2).
-    # Not the server's own version: wording it meant a branch for a None the
-    # gate had already ruled out (reviews of #161, rounds 3-4).
-    assert old_notices == ["this tmux cannot carry shift+enter — 3.5 or newer can"]
+    # version they have and the one they need — not the "no way to type" line,
+    # which is false here (there is a way, on 3.5) and was information (review
+    # of #161, round 2). The version is the one on_key read for the gate,
+    # handed down (review of #161, round 5).
+    assert old_notices == ["tmux 3.4 cannot carry shift+enter — 3.5 or newer can"]
     assert old_severities == ["warning"]
     assert modern.version == "tmux 3.7c"  # the control's premise, spelled out
     assert modern_sent == [("S-Enter",), ("Enter",)]  # …and there the chord goes through
     assert modern_notices == []
+
+
+def test_the_too_old_notice_words_an_unknown_version_rather_than_asserting_it_away(
+    fake: FakeTmux, tmp_path: Path
+) -> None:
+    """``too_old`` is never produced with an unknown version — the gate fails
+    open — but ``_explain``'s type admits ``None``, and a branch that cannot be
+    reached through the widget was a dead string in one round and an assert
+    in the next (reviews of #161, rounds 3-5). So it is reached directly."""
+
+    async def drive() -> tuple[list[str], list[str]]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 6)) as pilot:
+            await pilot.pause()
+            host.pane._explain("shift+enter", Drop("too_old"), None)
+            host.pane._explain("shift+enter", Drop("too_old"), (3, 4))  # once per key name
+            await pilot.pause()
+            return host.notices, host.severities
+
+    notices, severities = run(drive())
+    assert notices == ["this tmux cannot carry shift+enter — 3.5 or newer can"]
+    assert severities == ["warning"]
 
 
 def test_attach_re_reads_the_version_for_a_new_server(fake: FakeTmux, tmp_path: Path) -> None:
@@ -3600,6 +3623,13 @@ NOTHING_TO_TYPE = (
 #: round 4). The round-1 rule read them as deliberate aim and toasted one by one.
 COMMAND_CHORDS = ("super+k", "super+f5", "hyper+x")
 
+#: Keys the pane cannot type but the reader may have meant — one quiet line
+#: each, never silence, and never a raw byte in the line. ``tests/test_keys.py``
+#: pins the reason; this pins what the pane SAYS for it, which is how a C1
+#: control byte went into the toast verbatim unnoticed for a round (review of
+#: #161, round 5). The control byte is that regression's own key name.
+NAMED_LOSSES = ("f13", "ctrl+comma", "grinning_face", "\x85")
+
 
 def test_a_key_with_nothing_to_type_is_ignored_in_silence(fake: FakeTmux, tmp_path: Path) -> None:
     """#151: a kitty-protocol terminal reports keys that are not keystrokes.
@@ -3628,6 +3658,37 @@ def test_a_key_with_nothing_to_type_is_ignored_in_silence(fake: FakeTmux, tmp_pa
     notices, sent = run(drive())
     assert notices == []  # not one toast
     assert sent == [("C-a",)]  # and not one stray send-keys
+
+
+def test_a_lost_keystroke_is_named_once_as_information_and_never_as_a_raw_byte(
+    fake: FakeTmux, tmp_path: Path
+) -> None:
+    """The pane-level pin for ``no_name``: one information notice per key name,
+    nothing sent, and the name spelt so the emulator cannot act on it — U+0085
+    as ``U+0085``, not as the byte that moves the cursor (review of #161,
+    round 5). Pressed twice each: once per key name is the whole of the
+    promise."""
+
+    async def drive() -> tuple[list[str], list[str], list[tuple[str, ...]]]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 6)) as pilot:
+            host.pane.focus()
+            await pilot.pause()
+            for name in (*NAMED_LOSSES, *NAMED_LOSSES):
+                host.pane.post_message(events.Key(name, name if len(name) == 1 else None))
+            await pilot.pause()
+            return host.notices, host.severities, fake.sent()
+
+    notices, severities, sent = run(drive())
+    assert sent == []
+    assert notices == [
+        "no way to type f13 into a tmux pane",
+        "no way to type ctrl+comma into a tmux pane",
+        "no way to type grinning_face into a tmux pane",
+        "no way to type U+0085 into a tmux pane",
+    ]
+    assert severities == ["information"] * 4
+    assert all(char.isprintable() for notice in notices for char in notice)
 
 
 def test_a_numpad_operator_without_its_text_is_typed_not_swallowed(

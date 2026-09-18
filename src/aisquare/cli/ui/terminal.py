@@ -476,6 +476,20 @@ class EscapeToSidebar(Message):
     """The user pressed the escape hatch: focus goes back to the sidebar."""
 
 
+def _printable_name(key: str) -> str:
+    """``key`` as a notice may carry it: every unprintable character spelt ``U+XXXX``.
+
+    Textual names a key it has no name for after the character itself, so a
+    raw C0/C1 byte a kitty-protocol terminal reports (``CSI 155 u`` is U+009B,
+    a CSI introducer; U+0007 rings the bell) arrived here as the key name and
+    went into the toast verbatim — ``markup=False`` only disables Rich markup,
+    and the emulator honoured the byte (review of #161, round 5). The table's
+    refusal keeps such a byte out of ``send-keys``; this keeps it off the
+    reader's screen.
+    """
+    return "".join(char if char.isprintable() else f"U+{ord(char):04X}" for char in key)
+
+
 class TerminalPane(Widget, can_focus=True):
     """One tmux pane, live. ``attach(pane_id)`` switches what it shows.
 
@@ -1487,6 +1501,7 @@ class TerminalPane(Widget, can_focus=True):
             # ``c`` into the agent for a copy gesture (review).
             self.copy_standing_selection()
             return
+        version = self._server_version()
         translation = translate(
             event.key,
             event.character,
@@ -1499,8 +1514,10 @@ class TerminalPane(Widget, can_focus=True):
             # and never from the key's shape: the shape misread a Cmd chord as
             # deliberate aim, numpad + as a key nobody pressed, and a tmux too
             # old for shift+enter as a chord with no spelling anywhere (review
-            # of #161, round 2).
-            self._explain(event.key, translation)
+            # of #161, round 2). The version the gate just read goes with it,
+            # so the too-old notice can say what the reader HAS as well as
+            # what they need (review of #161, round 5).
+            self._explain(event.key, translation, version)
             return
         if self.text_selection is not None:
             # Typing means the highlight is stale: the next ctrl+c must be the
@@ -1532,7 +1549,7 @@ class TerminalPane(Widget, can_focus=True):
         except TmuxError:
             self._fail(PANE_GONE)
 
-    def _explain(self, key: str, drop: Drop) -> None:
+    def _explain(self, key: str, drop: Drop, version: tuple[int, int] | None) -> None:
         """Say what became of a key that was not sent — from ``translate``'s reason.
 
         Two of the four reasons are silence, and they are the #151 fix: a
@@ -1543,13 +1560,17 @@ class TerminalPane(Widget, can_focus=True):
         whether the reader can do anything about it: a chord tmux has no safe
         spelling for is a fact about the key table, said once as information;
         a chord this tmux is too old to carry is a warning that names the
-        version it needs, since a newer server delivers it (review of #161,
-        round 2 — the first version gave the old-server loss the "no way to
-        type" line, which is false: there is a way, on tmux 3.5). The server's
-        own version is not in the line: reading it here again would mean a
-        branch for a ``None`` the gate has already ruled out, and that branch
-        was dead code in one round and an ``assert`` in the next (reviews of
-        #161, rounds 3-4); ``tmux -V`` is a keystroke away.
+        version it needs AND the one it has, since a newer server delivers it
+        (review of #161, round 2 — the first version gave the old-server loss
+        the "no way to type" line, which is false: there is a way, on tmux
+        3.5). ``version`` is what ``on_key`` read for the gate, handed down
+        rather than read again. ``too_old`` is only ever produced under a
+        version the gate read and found below the minimum — ``_extended_keys``
+        fails open on ``None`` — but the type admits ``None``, so the wording
+        covers it instead of asserting it away, and a direct call pins that
+        wording rather than leaving the branch dead (reviews of #161, rounds
+        3-5, one objection each to a dead string, an assert, and the number
+        gone missing).
 
         TOTAL over ``DropReason``, and the type checker holds it so: a reason
         added to ``core.keys`` that this does not answer is a red ``mypy``, not
@@ -1560,10 +1581,15 @@ class TerminalPane(Widget, can_focus=True):
         match reason:
             case "too_old":
                 need = ".".join(str(part) for part in EXTENDED_MINIMUM)
-                self._warn_once(key, f"this tmux cannot carry {key} — {need} or newer can")
+                have = f"tmux {version[0]}.{version[1]}" if version is not None else "this tmux"
+                self._warn_once(
+                    key, f"{have} cannot carry {_printable_name(key)} — {need} or newer can"
+                )
             case "no_name":
                 self._warn_once(
-                    key, f"no way to type {key} into a tmux pane", severity="information"
+                    key,
+                    f"no way to type {_printable_name(key)} into a tmux pane",
+                    severity="information",
                 )
             case "command" | "nothing_to_type":
                 pass  # nothing was pressed at the agent, and nothing is said

@@ -798,6 +798,9 @@ def test_claude_account_registry_keeps_one_default_unique_aliases_and_a_dense_or
     store.upsert_claude_account(3, Path("/h/.aisquare/claude-accounts/3"))
     store.order_claude_accounts([3, 9])  # 9 does not exist and is ignored
     assert [(r.slot, r.position) for r in store.claude_accounts()] == [(3, 1), (1, 2), (2, 3)]
+    store.order_claude_accounts([2, 2, 3])  # a repeated reference left position 1 unused
+    assert [(r.slot, r.position) for r in store.claude_accounts()] == [(2, 1), (3, 2), (1, 3)]
+    store.order_claude_accounts([3, 1, 2])  # back to the order the rest of the test reads
     assert store.delete_claude_account(1) is True
     assert store.delete_claude_account(1) is False
     assert [(r.slot, r.position) for r in store.claude_accounts()] == [(3, 1), (2, 2)]  # dense

@@ -531,7 +531,11 @@ def format_reset(when: datetime | None, *, now: datetime | None = None) -> str:
     if when is None:
         return ""
     moment = now if now is not None else datetime.now(tz=UTC)
-    remaining = when - moment
+    # In UTC on purpose: two aware datetimes that share one tzinfo subtract by
+    # their WALL CLOCKS (Python ignores the offsets then), so a reset across a
+    # DST change would read an hour long; the endpoint's UTC stamps never hit
+    # this, a caller's zoned pair would (review of #205, second round).
+    remaining = when.astimezone(UTC) - moment.astimezone(UTC)
     if remaining <= timedelta(0):
         return "now"
     total_minutes = int(remaining.total_seconds() // 60)
@@ -544,7 +548,12 @@ def format_reset(when: datetime | None, *, now: datetime | None = None) -> str:
     # between 04:59 and 05:00 from one refresh to the next. Rounding says what
     # a person means by the time of a reset, and the distance still moves.
     local_when = (when.astimezone() + timedelta(seconds=30)).replace(second=0, microsecond=0)
-    local_now = moment.astimezone(local_when.tzinfo)
+    # Each instant in the local zone AS OF THAT INSTANT. ``astimezone()`` with no
+    # argument attaches the fixed offset in force at the value it converts, and
+    # reusing the reset's offset for ``now`` compared the two dates an hour apart
+    # across a DST change — a next-day reset printed as a bare clock time, the
+    # very drift #152 removed (review of #205, second round).
+    local_now = moment.astimezone()
     if remaining < timedelta(hours=1):
         return f"in {max(minutes, 1)}m"
     if days == 0:

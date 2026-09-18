@@ -157,7 +157,7 @@ class ResumeSpec:
     transcript_path: Path
 
 
-@dataclass
+@dataclass(frozen=True)
 class SwitchReceipt:
     """What ``fleet switch`` did: the agent it stopped, the one it started, and how."""
 
@@ -172,7 +172,7 @@ class SwitchReceipt:
     notes: list[str] = field(default_factory=list)
 
 
-@dataclass
+@dataclass(frozen=True)
 class SpawnReceipt:
     """What ``fleet spawn`` did — including the label it ACTUALLY used."""
 
@@ -2518,14 +2518,20 @@ def switch(
     fresh: bool = False,
     reason: str | None = None,
     spawned_by: str = "user",
+    automatic: bool = False,
 ) -> SwitchReceipt:
     """Move a running agent to another Claude account — the hand-over of #146.
 
-    The target is ``to`` (a slot, alias or email) or, without it, the account
-    with the most headroom among the enabled, signed-in ones that are NOT the
-    one the agent is on (``services.claude_accounts.choose`` with ``spread=True``
-    and the current slot excluded — so a machine with ``pick = "default"`` still
-    switches by headroom, because that is the whole point of switching).
+    The target is ``to`` (a slot, alias or email) or, without it, HEADROOM
+    FIRST among the enabled, signed-in accounts that are NOT the one the agent
+    is on (``services.claude_accounts.choose_for_handover``): the role binding
+    and the project default are launch-time choices and do not get to send a
+    limited agent somewhere just as full. ``automatic`` is the hook's
+    hand-over: it takes only an account under ``switch_at`` and otherwise
+    refuses — the least-bad answer, applied twice, moved an agent between two
+    exhausted accounts for the whole window (review of #205, second round). A
+    manual switch keeps the least-bad answer and falls back to the ladder
+    (minus the account being left) when no usage can be read.
 
     The agent is stopped the way ``fleet stop`` stops it (``/exit``, a grace,
     then the kill) and started again under the same label, role, task and
@@ -2563,26 +2569,33 @@ def switch(
         ]
     current = _account_slot_of(agent, session)
     notes: list[str] = []
-    # ONE resolver, as for every launch (tests/test_one_account_resolver.py):
-    # `--to` is the flag rung; without it the headroom rung decides, with the
-    # account the agent is leaving excluded — whatever `[accounts] pick` says,
-    # because moving to the account with room is what a switch is for.
+    # The accounts service decides, as for every launch
+    # (tests/test_one_account_resolver.py): `--to` is the flag rung; without it
+    # headroom decides first, with the account the agent is leaving excluded.
     try:
-        choice = claude_accounts_service.choose(
+        choice = claude_accounts_service.choose_for_handover(
             to,
             role=agent.role,
             project=project,
             exclude=() if current is None else (current,),
-            spread=True,
+            automatic=automatic,
         )
     except claude_accounts_service.NoSuchAccount as exc:
         raise FleetError(str(exc)) from exc
     notes.extend(choice.notes)
     if choice.account is None:
+        where = f" (it is on slot {current})" if current is not None else ""
+        if automatic:
+            raise FleetError(
+                f"no account under the line for {label!r}{where} — every other account is "
+                "over switch_at or unreadable; it stays parked until a reset, or "
+                "`aisquare fleet switch` moves it by hand ("
+                + "; ".join(note for note in choice.notes if note.startswith("headroom:"))
+                + ")"
+            )
         raise FleetError(
-            f"no other account with headroom for {label!r}"
-            + (f" (it is on slot {current})" if current is not None else "")
-            + " — add or enable one (`aisquare accounts`), name one with --to, or wait for "
+            f"no other account with headroom for {label!r}{where}"
+            " — add or enable one (`aisquare accounts`), name one with --to, or wait for "
             "the reset"
         )
     target = choice.account

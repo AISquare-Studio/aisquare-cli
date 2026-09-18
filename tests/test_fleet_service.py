@@ -5394,6 +5394,102 @@ def test_switch_moves_a_limited_agent_to_the_account_with_headroom_and_resumes_i
     assert still is not None and still.status == "doing" and still.claimed_by == agent.session_id
 
 
+def test_the_receipts_are_immutable() -> None:
+    """``SpawnReceipt`` lost ``frozen=True`` when its neighbours were inserted (review of #205,
+    second round); every caller reads a receipt, none may rewrite one."""
+    import dataclasses
+
+    for receipt in (fleet_service.SpawnReceipt, fleet_service.SwitchReceipt):
+        params = getattr(receipt, "__dataclass_params__", None)
+        assert dataclasses.is_dataclass(receipt) and params is not None and params.frozen, receipt
+
+
+def _third_slot_with_usage(
+    monkeypatch: pytest.MonkeyPatch, *, work: float, personal: float, third: float
+) -> None:
+    """Slots 2, 3 and 4 signed in, with one scripted usage endpoint for all three."""
+    from tests.test_usage_aware_accounts import _payload, _slot, _Usage
+
+    _two_slots_with_usage(monkeypatch, work=work, personal=personal)
+    _slot("third@example.com", "tok-third", expires_in=timedelta(days=3650))
+    from aisquare.services import claude_accounts as accounts_service
+
+    monkeypatch.setattr(
+        accounts_service,
+        "_http_get",
+        _Usage(
+            {
+                "tok-work": _payload(work),
+                "tok-personal": _payload(personal),
+                "tok-third": _payload(third),
+            }
+        ),
+    )
+
+
+def test_a_switch_picks_by_headroom_before_the_binding_and_the_automatic_one_refuses_without_room(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #205, second round: the binding and project-default rungs sat above headroom
+    inside ``choose(spread=True)``, so a bound role moved to its bound account however full;
+    and with every account over the line the least-bad answer bounced an agent between two
+    exhausted accounts for the whole window."""
+    from aisquare.services import settings as settings_service
+
+    _third_slot_with_usage(monkeypatch, work=95, personal=99, third=10)
+    settings_service.bind_role("coder", account="3")  # bound to the 99 % account
+    agent = fleet_service.spawn(project, "coder", worktree=False, account="2").agent
+    _with_transcript(agent, None)
+
+    receipt = fleet_service.switch(project, agent.label)
+
+    assert receipt.to_slot == 4  # headroom, not the binding
+    assert any(
+        "headroom:" in note and "account 4 is first under 85%" in note for note in receipt.notes
+    )
+    assert "--to" not in _command(tmux) and _flag(_command(tmux), "--account") == "4"
+
+    # Every account over the line: by hand the least-bad one still moves it (as before)…
+    from aisquare.services import claude_accounts as accounts_service
+    from tests.test_usage_aware_accounts import _payload, _Usage
+
+    monkeypatch.setattr(  # the same three slots, the endpoint re-scripted
+        accounts_service,
+        "_http_get",
+        _Usage({"tok-work": _payload(95), "tok-personal": _payload(99), "tok-third": _payload(90)}),
+    )
+    manual = fleet_service.switch(project, agent.label, to=None)
+    assert manual.to_slot in {2, 3}  # it was on 4; the least-bad of the rest
+    assert any("every account is over 85%" in note for note in manual.notes)
+    # …but the automatic hand-over refuses, stops nothing, and says why.
+    killed_before = list(tmux.killed)
+    with pytest.raises(FleetError, match="no account under the line") as refused:
+        fleet_service.switch(project, agent.label, automatic=True, reason="session limit")
+    assert "every other account is over switch_at" in str(refused.value)
+    assert tmux.killed == killed_before
+    assert [status.agent.label for status in fleet_service.list_agents(project)] == [agent.label]
+
+
+def test_a_manual_switch_falls_back_to_the_ladder_when_no_usage_can_be_read(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from aisquare.services import claude_accounts as accounts_service
+    from tests.test_usage_aware_accounts import _Usage
+
+    _two_slots_with_usage(monkeypatch, work=95, personal=10)
+    accounts_service.set_default("3")
+    agent = fleet_service.spawn(project, "coder", worktree=False, account="2").agent
+    _with_transcript(agent, None)
+    monkeypatch.setattr(accounts_service, "_http_get", _Usage({}))  # every token rejected
+
+    receipt = fleet_service.switch(project, agent.label)
+
+    assert receipt.to_slot == 3  # the machine default, the account being left excluded
+    assert any("no account's usage could be read" in note for note in receipt.notes)
+    with pytest.raises(FleetError, match="no account under the line"):
+        fleet_service.switch(project, agent.label, automatic=True)
+
+
 def test_a_hand_over_that_does_not_complete_leaves_nothing_parked(
     tmux: FakeTmux,
     claude_on_path: Path,

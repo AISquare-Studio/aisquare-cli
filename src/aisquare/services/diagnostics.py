@@ -804,8 +804,14 @@ def _claude_account_headroom_check() -> DoctorCheck | None:
     why it runs only on ``doctor --live``. Warns when EVERY account is over the
     line — a fleet about to stall with nowhere to switch to — and reports the
     numbers otherwise so the operator can see them without opening the page.
-    ``None`` when there is nothing to measure (no signed-in account).
+    ``None`` when there is nothing to measure (no signed-in account) — and
+    ``None`` before ``context.db`` exists, like its two siblings: the arranged
+    list is read through the store, and a doctor run must not create the home
+    it is diagnosing (``tests/test_doctor_does_not_create_state.py``; review
+    of #205, second round).
     """
+    if not paths.db_path().exists():
+        return None
     accounts = [
         account
         for account in claude_accounts_service.list_accounts()

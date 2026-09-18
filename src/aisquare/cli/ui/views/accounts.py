@@ -569,6 +569,7 @@ class AccountsView(Vertical):
                     holder.move_child(row, before=index)
         for stale in existing.values():
             self.usage.pop(stale.slot, None)
+            self.trends.pop(stale.slot, None)  # a re-used slot must not inherit a projection
             stale.remove()
 
     def rows(self) -> list[AccountRow]:

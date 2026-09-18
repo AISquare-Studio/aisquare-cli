@@ -69,6 +69,18 @@ def test_format_reset_says_how_far_and_when(ahead: timedelta, expected: str) -> 
     assert format_reset(NOW + ahead, now=NOW) == expected
 
 
+def test_format_reset_compares_dates_in_the_true_local_zone_across_a_dst_change() -> None:
+    """Spring forward 2026-03-08: measured in the reset's fixed offset, "tomorrow" read as
+    today and the weekday vanished — a bare clock time again (review of #205, second round)."""
+    now = datetime(2026, 3, 7, 23, 30, tzinfo=TORONTO)  # EST
+    when = datetime(2026, 3, 8, 23, 0, tzinfo=TORONTO)  # EDT, the next local day
+    assert format_reset(when, now=now) == "in 22h 30m (Sun 23:00)"
+    fall = datetime(2026, 11, 1, 23, 30, tzinfo=TORONTO)  # the night the clocks go back
+    assert format_reset(fall, now=datetime(2026, 10, 31, 23, 0, tzinfo=TORONTO)).endswith(
+        "(Sun 23:30)"
+    )
+
+
 def test_format_reset_never_renders_a_weekly_reset_as_a_bare_clock_time() -> None:
     """The property the issue states outright, swept over a week of offsets."""
     for hours in range(25, 7 * 24, 7):

@@ -16,9 +16,11 @@ import time
 from collections.abc import Mapping
 
 from rich.text import Text
+from textual import on
 from textual.app import ComposeResult
 from textual.containers import Vertical
 from textual.widgets import Static
+from textual.worker import Worker, WorkerState
 
 from aisquare.cli import fleet as fleet_cli
 from aisquare.cli.ui.sidebar import ROLE_ICON, STATE_CHIP
@@ -32,6 +34,7 @@ from aisquare.services import team as team_service
 SEPARATOR = "  "
 LABELS_TTL = 30.0
 """How long the header keeps the slot labels before asking the registry again."""
+LABELS_WORKER = "agent-account-labels"
 
 
 def account_text(status: FleetAgentStatus, labels: Mapping[int, str] | None = None) -> str:
@@ -105,24 +108,52 @@ class AgentView(Vertical):
         self.server = server or TmuxServer(status.agent.tmux_socket)
         self.escape_key = escape_key or fleet_service.settings().escape_key
         self._labels: Mapping[int, str] = {}
-        self._labels_read_at: float | None = None
+        self._labels_asked_at: float | None = None
 
-    def _account_labels(self) -> Mapping[int, str]:
-        """Slot → label, re-read at most every :data:`LABELS_TTL` seconds (one small store read)."""
+    def _refresh_labels(self) -> None:
+        """Ask the registry for the slot labels OFF the UI thread, at most every LABELS_TTL s.
+
+        A store open is a blocking call with a busy timeout of seconds — the
+        Accounts page runs its writes as thread workers for exactly that
+        reason — so the header never opens it on the event loop: it paints the
+        last good map (the built-in names before the first answer) and repaints
+        when the worker answers (review of #205, second round).
+        """
         now = time.monotonic()
-        if self._labels_read_at is None or now - self._labels_read_at >= LABELS_TTL:
-            self._labels = accounts_service.slot_labels()
-            self._labels_read_at = now
-        return self._labels
+        if self._labels_asked_at is not None and now - self._labels_asked_at < LABELS_TTL:
+            return
+        self._labels_asked_at = now
+        self.run_worker(
+            accounts_service.slot_labels,
+            name=LABELS_WORKER,
+            group=LABELS_WORKER,
+            exclusive=True,
+            thread=True,
+            exit_on_error=False,
+        )
+
+    @on(Worker.StateChanged)
+    def _labels_answered(self, event: Worker.StateChanged) -> None:
+        if event.worker.group != LABELS_WORKER:
+            return
+        if event.state is WorkerState.SUCCESS and isinstance(event.worker.result, dict):
+            self._labels = event.worker.result
+            if self.is_mounted:
+                self.query_one("#agent-header", Static).update(
+                    header_text(self.status, self._labels)
+                )
 
     def compose(self) -> ComposeResult:
-        yield Static(header_text(self.status, self._account_labels()), id="agent-header")
+        yield Static(header_text(self.status, self._labels), id="agent-header")
         yield TerminalPane(
             self.status.agent.pane_id,
             server=self.server,
             escape_key=self.escape_key,
             id="agent-pane",
         )
+
+    def on_mount(self) -> None:
+        self._refresh_labels()
 
     @property
     def pane(self) -> TerminalPane:
@@ -134,6 +165,7 @@ class AgentView(Vertical):
         self.status = status
         if not self.is_mounted:
             return
-        self.query_one("#agent-header", Static).update(header_text(status, self._account_labels()))
+        self.query_one("#agent-header", Static).update(header_text(status, self._labels))
+        self._refresh_labels()
         if status.agent.pane_id != previous.agent.pane_id:
             self.pane.attach(status.agent.pane_id)

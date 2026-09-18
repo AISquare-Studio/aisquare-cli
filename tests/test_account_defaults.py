@@ -379,12 +379,16 @@ def test_remove_forgets_the_default_the_alias_and_every_project_default_that_nam
     assert service.project_default(work) is None
     assert _slots(service.list_accounts()) == [1, 3]
     assert _positions(service.list_accounts()) == [1, 2]
-    # The binding that named the number now names the person — dangling on purpose.
+    # The bindings that named the number AND the alias now name the person — dangling on
+    # purpose; the alias is free again, and naming the next account `work` must not
+    # re-point `tester` (second round).
     bindings = settings_service.role_account_bindings()
-    assert bindings == {"reviewer": "two@example.com", "tester": "work", "coder": "3"}
+    assert bindings == {"reviewer": "two@example.com", "tester": "two@example.com", "coder": "3"}
     assert notes == [
         "role reviewer was bound to slot 2; it now names two@example.com — refused at launch "
-        "until that account is signed in again, or re-bound"
+        "until that account is signed in again, or re-bound",
+        "role tester was bound to alias 'work' (slot 2); it now names two@example.com — "
+        "refused at launch until that account is signed in again, or re-bound",
     ]
     # THE reuse hazard: the next add takes slot 2 again and must inherit nothing.
     again = core.create_account()
@@ -396,6 +400,9 @@ def test_remove_forgets_the_default_the_alias_and_every_project_default_that_nam
     with pytest.raises(service.NoSuchAccount, match=r"reviewer.*two@example\.com"):
         service.choose(role="reviewer", project=work)  # refused with the rung named, not adopted
     assert service.choose(role="coder", project=work).source == "role binding"
+    service.set_alias("2", "work")  # the ordinary thing to do with the newcomer…
+    with pytest.raises(service.NoSuchAccount, match=r"tester.*two@example\.com"):
+        service.choose(role="tester", project=work)  # …and tester does not follow it
 
 
 def test_remove_clears_a_number_binding_to_a_slot_that_never_signed_in(fake_home: Path) -> None:
@@ -441,6 +448,21 @@ def test_a_damaged_store_costs_the_arrangement_never_the_listing_or_the_launch(
     assert core.CONFIG_DIR_VAR not in handover["env"]  # no default could be read, so none applied
     assert "accounts registry unreadable" in launched.stderr
     assert "Traceback" not in launched.output
+
+    # An ALIAS binding cannot be checked against the fallback list (no aliases there): it
+    # costs its rung with a note, never the launch (review of #205, second round).
+    settings_service.bind_role("tester", account="work")
+    choice = service.choose(role="tester", project=work)
+    assert choice.account is None and choice.source is None
+    assert any("names account 'work', which cannot be resolved" in n for n in choice.notes)
+    handover.clear()
+    bound = runner.invoke(app, ["launch", "tester"])
+    assert bound.exit_code == 0, bound.output
+    assert handover and core.CONFIG_DIR_VAR not in handover["env"]
+    assert "cannot be resolved while the accounts registry unreadable" in bound.stderr
+    # A NUMBER binding still resolves on the fallback list, exactly as before.
+    settings_service.bind_role("runner", account="2")
+    assert service.choose(role="runner", project=work).source == "role binding"
 
     refused = runner.invoke(app, ["--json", "accounts", "default", "2"])
     assert refused.exit_code == 1

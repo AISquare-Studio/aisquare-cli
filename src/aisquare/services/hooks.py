@@ -224,7 +224,9 @@ def turn_failed(
         session_id, cwd, error=error, message=message, details=details
     )
     metrics_service.close_turn(session_id)
-    if failure is not None and failure.limited:
+    if failure is not None and failure.limited and not failure.already_limited:
+        # A re-fire for the same window (Claude Code does that) is not a second
+        # hand-over: the first worker is at work, or has already moved the agent.
         _hand_over_if_configured(failure)
 
 
@@ -289,13 +291,24 @@ def _detach(argv: list[str]) -> None:
     )
 
 
+HANDOVER_SPAWNER = "usage-limit"
+"""``FleetAgent.spawned_by`` of a replacement the automatic hand-over started."""
+HANDOVER_COOLDOWN = timedelta(minutes=10)
+"""How soon after a ``switched`` event the same label may be handed over again by the
+automatic path: a cap on the ping-pong a wrong reading could otherwise drive."""
+
+
 def hand_over(session_id: str, *, reason: str | None = None) -> None:
     """Move the limited fleet agent of ``session_id`` — the detached half of the hand-over.
 
     Runs in the worker :func:`_detach` started, after the hook that decided it
     has returned. Silent for a session that is not a fleet agent's (the
-    operator's to move) or is gone. A hand-over that finds no headroom leaves
-    the agent parked, Claude Code's own wait intact, and says so on the board.
+    operator's to move) or is gone. Three brakes, each a board note rather than
+    a move (review of #205, second round): a hand-over already in flight for
+    this session (``team.HANDOVER_STATE``), one that moved this label within
+    :data:`HANDOVER_COOLDOWN`, and — inside ``switch(automatic=True)`` — no
+    account actually under the line. In every case the agent stays parked with
+    Claude Code's own wait intact.
     """
     with store_session() as store:
         session = store.get_session(session_id)
@@ -305,12 +318,32 @@ def hand_over(session_id: str, *, reason: str | None = None) -> None:
         project = store.get_project(session.project_id)
     if agent is None or project is None:
         return
+    if session.state == team_service.HANDOVER_STATE:
+        team_service.hook_note(
+            session.project_id,
+            f"{agent.label}: not switched — a hand-over is already in flight",
+            session_id=session.id,
+        )
+        return
+    # The row bound to the session IS the last hand-over's replacement when it
+    # was spawned by one: its age is the cooldown clock, no event lookup needed.
+    since = datetime.now(tz=UTC) - agent.created_at
+    if agent.spawned_by == HANDOVER_SPAWNER and since < HANDOVER_COOLDOWN:
+        team_service.hook_note(
+            session.project_id,
+            f"{agent.label}: not switched — moved {max(1, int(since.total_seconds() // 60))} "
+            "min ago; waiting for the reset instead",
+            session_id=session.id,
+        )
+        return
     # Lazy: services.fleet imports this module's neighbours; a cycle at import
     # time would cost every hook, and this runs in the worker alone.
     from aisquare.services import fleet as fleet_service
 
     try:
-        fleet_service.switch(project, agent.label, reason=reason, spawned_by="usage-limit")
+        fleet_service.switch(
+            project, agent.label, reason=reason, spawned_by=HANDOVER_SPAWNER, automatic=True
+        )
     except fleet_service.FleetError as exc:
         team_service.hook_note(
             session.project_id, f"{agent.label}: not switched — {exc}", session_id=session.id

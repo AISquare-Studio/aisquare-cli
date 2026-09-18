@@ -65,15 +65,16 @@ MANAGER_ROLE = "manager"
 """The one role whose ``Stop`` hook may keep it going (docs/plans/fleet-tui.md §7.3)."""
 
 CLEAR_REASON = "clear"
+"""Claude Code's ``SessionEnd`` reason for ``/clear``: the session id ends, the process
+does not — and the ``SessionStart`` of the id that follows comes AFTER this end
+(measured on 2.1.272). See rule 2 in the fleet-row section below."""
+
 HANDOVER_STATE = "switching"
 """The ``team_session.state`` ``fleet switch`` sets before it ``/exit``s an agent whose
 SAME session id is about to resume under another account (#146): its ``SessionEnd``
 then parks the claims for that id, as a ``/clear`` does, instead of releasing them
 (review of #205, finding 6). Transient — the resumed session's start hook writes
 ``working`` over it — and unknown to ``fleet._derive``, which falls back to the pane."""
-"""Claude Code's ``SessionEnd`` reason for ``/clear``: the session id ends, the process
-does not — and the ``SessionStart`` of the id that follows comes AFTER this end
-(measured on 2.1.272). See rule 2 in the fleet-row section below."""
 
 #: A numbered SEAT: a first-class role with a crew index glued on — ``coder1``,
 #: ``reviewer2``. ``cli/launch.py`` accepts these because crews run several agents
@@ -1625,6 +1626,10 @@ class TurnFailure:
     session: TeamSession
     error: str
     notice: claude_accounts_core.LimitNotice | None
+    already_limited: bool = False
+    """The row was ``limited`` before this hook fired: Claude Code re-fires
+    ``StopFailure`` for the same window, and a second firing must start no second
+    hand-over (review of #205, second round)."""
 
     @property
     def limited(self) -> bool:
@@ -1690,7 +1695,7 @@ def hook_stop_failure(
         # (it opens its own connection): path 2 types into a WAITING manager;
         # a working one reads the event on its next delta or its own Stop.
         _nudge_manager(session.project_id, reason=f"{label} hit its usage limit")
-    return TurnFailure(refreshed, kind, notice)
+    return TurnFailure(refreshed, kind, notice, already_limited=already_limited)
 
 
 def _limited_text(

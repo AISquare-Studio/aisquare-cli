@@ -354,12 +354,17 @@ def test_the_hook_starts_a_detached_hand_over_only_when_configured_and_the_reset
     _session(work, "sess-fleet")
     _fleet_row(work, "agt_limited2", "coder-db", "sess-fleet")
 
+    def unpark() -> None:  # a re-fire for the SAME window decides nothing (second round)
+        with store_session() as store:
+            store.touch_session("sess-fleet", state="working")
+
     # The default: wait. Nothing is started however far the reset is.
     _fire_limit(runner, work, WEEKLY_LIMIT, "sess-fleet")
     assert started == []
 
     # Configured to switch: a limit whose reset is far away starts the worker…
     _settings(on_limit="switch", wait_if_reset_within_minutes=15)
+    unpark()
     _fire_limit(runner, work, WEEKLY_LIMIT, "sess-fleet")
     assert len(started) == 1
     argv = started[0]
@@ -368,6 +373,7 @@ def test_the_hook_starts_a_detached_hand_over_only_when_configured_and_the_reset
 
     # …one that lifts within the wait window does not (the note says why)…
     soon = (datetime.now().astimezone() + timedelta(minutes=5)).strftime("%I:%M%p").lstrip("0")
+    unpark()
     _fire_limit(
         runner, work, f"You've hit your session limit · resets {soon.lower()}", "sess-fleet"
     )
@@ -384,13 +390,100 @@ def test_the_hook_starts_a_detached_hand_over_only_when_configured_and_the_reset
         raise OSError("no fork for you")
 
     monkeypatch.setattr(hooks_service, "_detach", refuse)
-    with store_session() as store:
-        store.touch_session("sess-fleet", state="working")  # a new window: the limit re-fires
+    unpark()
     _fire_limit(runner, work, WEEKLY_LIMIT, "sess-fleet")
     assert any(
         "not switched — could not start the hand-over worker (no fork for you)" in text
         for _, text in _events(work)
     )
+
+
+def test_a_re_fire_for_the_same_window_starts_no_second_worker(
+    fake_home: Path, work: ProjectInfo, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Claude Code re-fires ``StopFailure`` for one window; the second firing found the row
+    already ``limited`` and still started a second worker — two switches of one agent at
+    once (review of #205, second round). ``TurnFailure.already_limited`` now says so."""
+    monkeypatch.setattr(team_service, "_nudge_manager", lambda project_id, *, reason: None)
+    started: list[list[str]] = []
+    monkeypatch.setattr(hooks_service, "_detach", lambda argv: started.append(list(argv)))
+    _settings(on_limit="switch", wait_if_reset_within_minutes=15)
+    _session(work, "sess-fleet")
+    _fleet_row(work, "agt_refire", "coder-db", "sess-fleet")
+
+    _fire_limit(runner, work, WEEKLY_LIMIT, "sess-fleet")
+    _fire_limit(runner, work, WEEKLY_LIMIT, "sess-fleet")
+    _fire_limit(runner, work, WEEKLY_LIMIT, "sess-fleet")
+
+    assert len(started) == 1
+    # The record itself carries the fact, for any other caller.
+    again = team_service.hook_stop_failure(
+        "sess-fleet", work.root, error="rate_limit", message=WEEKLY_LIMIT, details=None
+    )
+    assert again is not None and again.limited and again.already_limited
+
+
+def test_the_worker_refuses_a_hand_over_in_flight_or_one_that_just_happened(
+    fake_home: Path, work: ProjectInfo, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two brakes in ``hand_over`` (review of #205, second round): a session already marked
+    ``switching``, and a replacement row younger than ``HANDOVER_COOLDOWN`` that the last
+    hand-over spawned. Each is a board line; ``fleet.switch`` is never reached."""
+    monkeypatch.setattr(team_service, "_nudge_manager", lambda project_id, *, reason: None)
+
+    def never(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("a braked hand-over must not switch")
+
+    monkeypatch.setattr(fleet_service, "switch", never)
+    _session(work, "sess-fleet")
+    _fleet_row(work, "agt_inflight", "coder-db", "sess-fleet")
+    with store_session() as store:
+        store.touch_session("sess-fleet", state=team_service.HANDOVER_STATE)
+    assert runner.invoke(app, ["hook", "hand-over", "sess-fleet"]).exit_code == 0
+    assert any("not switched — a hand-over is already in flight" in t for _, t in _events(work))
+
+    _session(work, "sess-moved")
+    with store_session() as store:
+        store.upsert_fleet_agent(
+            FleetAgent(
+                id="agt_justmoved",
+                project_id=work.id,
+                label="coder-db2",
+                role="coder",
+                pane_id="%4",
+                session_id="sess-moved",
+                cwd=work.root,
+                spawned_by=hooks_service.HANDOVER_SPAWNER,
+                created_at=datetime.now(tz=UTC) - timedelta(minutes=3),
+            )
+        )
+    assert runner.invoke(app, ["hook", "hand-over", "sess-moved"]).exit_code == 0
+    assert any(
+        "coder-db2: not switched — moved 3 min ago; waiting for the reset" in t
+        for _, t in _events(work)
+    )
+
+    # Past the cooldown a replacement is handed over again (the switch is reached); a row
+    # of its own, because an upsert keeps the original row's created_at.
+    reached: list[str] = []
+    monkeypatch.setattr(fleet_service, "switch", lambda project, label, **kw: reached.append(label))
+    _session(work, "sess-moved-long-ago")
+    with store_session() as store:
+        store.upsert_fleet_agent(
+            FleetAgent(
+                id="agt_movedlongago",
+                project_id=work.id,
+                label="coder-db3",
+                role="coder",
+                pane_id="%5",
+                session_id="sess-moved-long-ago",
+                cwd=work.root,
+                spawned_by=hooks_service.HANDOVER_SPAWNER,
+                created_at=datetime.now(tz=UTC) - hooks_service.HANDOVER_COOLDOWN,
+            )
+        )
+    assert runner.invoke(app, ["hook", "hand-over", "sess-moved-long-ago"]).exit_code == 0
+    assert reached == ["coder-db3"]
 
 
 def test_the_detach_puts_the_worker_in_its_own_session_without_this_agents_identity(
@@ -423,10 +516,12 @@ def test_the_detached_half_moves_the_agent_and_puts_a_refusal_on_the_board(
     fake_home: Path, work: ProjectInfo, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(team_service, "_nudge_manager", lambda project_id, *, reason: None)
-    switches: list[tuple[str, str | None, str | None]] = []
+    switches: list[tuple[str, str | None, str | None, bool | None]] = []
 
     def fake_switch(project: ProjectInfo, label: str, **kwargs: Any) -> None:
-        switches.append((label, kwargs.get("reason"), kwargs.get("spawned_by")))
+        switches.append(
+            (label, kwargs.get("reason"), kwargs.get("spawned_by"), kwargs.get("automatic"))
+        )
 
     monkeypatch.setattr(fleet_service, "switch", fake_switch)
     _session(work, "sess-fleet")
@@ -434,7 +529,9 @@ def test_the_detached_half_moves_the_agent_and_puts_a_refusal_on_the_board(
 
     moved = runner.invoke(app, ["hook", "hand-over", "sess-fleet", "--reason", "weekly limit"])
     assert moved.exit_code == 0 and moved.stdout == ""
-    assert switches == [("coder-db", "weekly limit", "usage-limit")]
+    assert switches == [
+        ("coder-db", "weekly limit", "usage-limit", True)
+    ]  # automatic: no least-bad
 
     # A refusal is a board line, and the agent stays parked with its own wait intact.
     def refuse(project: ProjectInfo, label: str, **kwargs: Any) -> None:
@@ -575,6 +672,45 @@ def test_a_hand_over_never_re_picks_the_account_it_is_leaving_on_an_arranged_mac
     # Without `exclude` both rungs still win, exactly as before.
     assert service.choose(role="coder", project=work, fetch=fetch).source == "role binding"
     assert service.choose(role="tester", project=work, fetch=fetch).source == "project default"
+
+
+def test_choose_for_handover_asks_headroom_before_the_binding_and_refuses_when_automatic(
+    fake_home: Path, work: ProjectInfo
+) -> None:
+    _slot("work@example.com", "tok-work")
+    _slot("personal@example.com", "tok-personal")
+    from aisquare.services import settings as settings_service
+
+    settings_service.bind_role("coder", account="2")
+    service.set_default("2", project=work)
+    room = _Usage({"tok-work": _payload(95), "tok-personal": _payload(10)})
+    picked = service.choose_for_handover(role="coder", project=work, exclude=(2,), fetch=room)
+    assert picked.account is not None and picked.account.slot == 3 and picked.source == "headroom"
+    assert not any("bound to coder" in note for note in picked.notes)  # never consulted
+
+    full = _Usage({"tok-work": _payload(95), "tok-personal": _payload(99)})
+    by_hand = service.choose_for_handover(role="coder", project=work, exclude=(2,), fetch=full)
+    assert by_hand.account is not None and by_hand.account.slot == 3  # the least bad, by hand
+    automatic = service.choose_for_handover(
+        role="coder", project=work, exclude=(2,), automatic=True, fetch=full
+    )
+    assert automatic.account is None
+    assert any("every account is over 85%; nothing to switch to" in n for n in automatic.notes)
+
+    # `--to` is still the flag rung; nothing readable falls to the ladder minus the current slot.
+    assert (
+        service.choose_for_handover("3", role="coder", project=work, exclude=(2,)).source == "flag"
+    )
+    service.set_default("3")
+    blind = service.choose_for_handover(role="coder", project=work, exclude=(2,), fetch=_Usage({}))
+    assert blind.account is not None and blind.account.slot == 3
+    assert blind.source == "machine default"
+    assert (
+        service.choose_for_handover(
+            role="coder", project=work, exclude=(2,), automatic=True, fetch=_Usage({})
+        ).account
+        is None
+    )
 
 
 def test_one_launch_reads_the_registry_and_the_settings_once(
@@ -771,6 +907,8 @@ def test_doctor_live_headroom_warns_only_when_every_account_is_over_the_line(
     monkeypatch.setattr(
         service, "_http_get", _Usage({"tok-work": _payload(90), "tok-personal": _payload(30)})
     )
+    assert diagnostics._claude_account_headroom_check() is None  # no store yet: nothing created
+    service.list_accounts()  # the registry exists from here on
     check = diagnostics._claude_account_headroom_check()
     assert check is not None and check.status.value == "ok"
     assert "work@" not in check.detail and "account 2 90%" in check.detail
@@ -809,6 +947,7 @@ def test_doctor_live_and_the_page_read_every_account_in_one_round(
         return real(accounts, **kwargs)
 
     monkeypatch.setattr(service, "read_usage", spy)
+    service.list_accounts()  # the registry exists: doctor may read it
 
     check = diagnostics._claude_account_headroom_check()
     assert check is not None and check.status.value == "ok" and rounds == [[2, 3]]

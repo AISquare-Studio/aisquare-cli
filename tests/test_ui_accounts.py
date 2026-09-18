@@ -1044,3 +1044,38 @@ def test_the_row_says_how_long_the_window_has_at_the_current_pace(
     assert sorted(recorded) == [1, 2]  # every signed-in slot was SAMPLED, not merely read
     assert "session ▮▮▮▯▯ 60%" in one and "≈ 1.3 h to the limit" in one
     assert "session ▮▮▮▯▯ 60%" in two and "to the limit" not in two  # no trend yet: no claim
+
+
+def test_a_row_that_leaves_takes_its_projection_with_it(
+    no_network: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``self.trends`` was not pruned beside ``self.usage`` (review of #205, second round):
+    after a remove-then-add the newcomer in the re-used slot painted the old projection."""
+    from aisquare.models import UsageTrend
+
+    no_network["usage"] = ClaudeUsage(
+        available=True, session_percent=60, session_resets_at=NOW + timedelta(hours=3)
+    )
+    monkeypatch.setattr(
+        accounts_service,
+        "usage_trend",
+        lambda slot, latest, **kwargs: UsageTrend(
+            percent=60, per_hour=30.0, minutes_to_limit=80.0, span_minutes=20.0
+        ),
+    )
+    monkeypatch.setattr(accounts_service, "_now", lambda: NOW)
+    both = _overview(_status(1, "me@example.com"), _status(2, "two@example.com"))
+
+    async def go(pilot: Pilot[None]) -> tuple[set[int], set[int], set[int], set[int]]:
+        app = fleet_app(pilot)
+        view = await open_accounts(pilot)
+        await settle(app)
+        await pilot.pause()
+        before = (set(view.usage), set(view.trends))
+        view.show(_overview(_status(1, "me@example.com")))  # slot 2 removed
+        await pilot.pause()
+        return before[0], before[1], set(view.usage), set(view.trends)
+
+    usage_before, trends_before, usage_after, trends_after = drive(go, overview=both)
+    assert usage_before == trends_before == {1, 2}
+    assert usage_after == trends_after == {1}

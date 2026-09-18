@@ -1262,6 +1262,9 @@ class SqliteStore:
                 "team_session",
                 "fleet_agent",
                 "metric",
+                # v15's per-project settings (#145) DO carry the FK, and left
+                # here the whole purge rolled back on it (review of #205).
+                "project_setting",
             ):
                 cursor = self._conn.execute(
                     f"DELETE FROM {table} WHERE project_id = ?", (project_id,)
@@ -2380,7 +2383,9 @@ class SqliteStore:
         already resolved what exists.
         """
         current = [record.slot for record in self.claude_accounts()]
-        wanted = [slot for slot in slots if slot in current]
+        # De-duplicated, first mention wins: `order 2 2 3` wrote slot 2 twice and
+        # left position 1 unused, which is the gap the docstring rules out.
+        wanted = list(dict.fromkeys(slot for slot in slots if slot in current))
         rest = [slot for slot in current if slot not in wanted]
         for position, slot in enumerate([*wanted, *rest], start=1):
             self._conn.execute(

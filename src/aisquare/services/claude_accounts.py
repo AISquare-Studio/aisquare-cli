@@ -402,12 +402,25 @@ def choose(
         notes.append(note)
     if bound:
         try:
-            account = _resolve_in(accounts, bound, note=registry_note)
+            account: ClaudeAccount | None = _resolve_in(accounts, bound, note=registry_note)
         except NoSuchAccount as exc:
-            raise NoSuchAccount(
-                f"the role binding for {role!r} names account {bound!r}: {exc}"
-            ) from exc
-        if account.disabled:
+            if registry_note is None:
+                raise NoSuchAccount(
+                    f"the role binding for {role!r} names account {bound!r}: {exc}"
+                ) from exc
+            # The fallback list carries no aliases, so an alias binding cannot be
+            # checked while the registry is unreadable: that costs this rung and
+            # leaves a note — never the launch, which is the bar
+            # tests/test_launch_survives_a_damaged_store.py holds (review of
+            # #205, second round).
+            account = None
+            notes.append(
+                f"the role binding for {role!r} names account {bound!r}, which cannot be "
+                f"resolved while the {registry_note} — skipped"
+            )
+        if account is None:
+            pass
+        elif account.disabled:
             notes.append(f"{core.label(account)} (bound to {role}) is disabled — skipped")
         elif account.slot in skip:
             notes.append(
@@ -845,8 +858,14 @@ def headroom_choice(
     exclude: Iterable[int] = (),
     fetch: Fetch | None = None,
     now: datetime | None = None,
+    least_bad: bool = True,
 ) -> tuple[ClaudeAccount | None, list[str]]:
     """The account with headroom, and the notes that say how it was picked.
+
+    ``least_bad=False`` withholds the "every account is over the line, take
+    the one with the most room" answer: right for a spawn, it is what made two
+    exhausted accounts hand an agent back and forth for a whole window when
+    applied by the automatic hand-over (review of #205, second round).
 
     Candidates are the enabled, signed-in accounts in priority order, minus
     ``exclude`` (the account a hand-over is leaving). Their usage is read
@@ -885,12 +904,60 @@ def headroom_choice(
     if under is not None:
         notes.append(f"headroom: {summary} — {core.label(under)} is first under {switch_at}%")
         return under, notes
+    if not least_bad:
+        notes.append(
+            f"headroom: {summary} — every account is over {switch_at}%; nothing to switch to"
+        )
+        return None, notes
     least, pct = min(measured, key=lambda pair: pair[1])
     notes.append(
         f"headroom: {summary} — every account is over {switch_at}%; "
         f"{core.label(least)} has the most room ({100 - pct:.0f}% left)"
     )
     return least, notes
+
+
+def choose_for_handover(
+    explicit: str | None = None,
+    *,
+    role: str | None,
+    project: ProjectInfo | None,
+    exclude: Iterable[int],
+    automatic: bool = False,
+    fetch: Fetch | None = None,
+) -> AccountChoice:
+    """The target of a hand-over: HEADROOM FIRST; the ladder only when nothing can be measured.
+
+    A switch exists to move an agent to the account with room, so the binding
+    and project-default rungs — explicit choices for a *launch* — do not get to
+    send it somewhere just as full; ``choose(spread=True)`` let them, because
+    it consults them above the headroom rung (review of #205, second round).
+    ``explicit`` (``--to``) is still the flag rung. ``automatic`` is the
+    hand-over the hook starts: it takes only an account UNDER ``switch_at``
+    (no least-bad answer, see :func:`headroom_choice`) and otherwise refuses,
+    which leaves the agent parked with Claude Code's own wait intact; a manual
+    switch keeps the least-bad answer and, when no usage can be read at all,
+    falls back to the ladder minus the account being left.
+    """
+    if explicit is not None:
+        return choose(explicit, role=role, project=project, exclude=exclude, fetch=fetch)
+    accounts, registry_note = _read_arranged()
+    notes: list[str] = [] if registry_note is None else [registry_note]
+    settings = accounts_settings()
+    picked, more = headroom_choice(
+        accounts,
+        switch_at=settings.switch_at,
+        exclude=exclude,
+        fetch=fetch,
+        least_bad=not automatic,
+    )
+    notes.extend(more)
+    if picked is not None:
+        return AccountChoice(picked, "headroom", notes)
+    if automatic:
+        return AccountChoice(None, None, notes)
+    fallback = choose(None, role=role, project=project, exclude=exclude, spread=False, fetch=fetch)
+    return AccountChoice(fallback.account, fallback.source, [*notes, *fallback.notes])
 
 
 # --- signing in -------------------------------------------------------------------------
@@ -1033,6 +1100,11 @@ def remove(account: ClaudeAccount, *, notes: list[str] | None = None) -> Path:
             "sign out of it inside Claude Code (/logout) instead"
         )
     identity = core.identity(account)  # read before the rename moves the directory
+    # The alias too, from the registry itself: a caller holding a plain
+    # directory record (``core.create_account`` hands one out) knows none.
+    alias = account.alias or next(
+        (a.alias for a in _read_arranged()[0] if a.slot == account.slot), None
+    )
     # The directory is leaving either way; a settings.json we cannot parse is not a stop.
     with contextlib.suppress(Exception):
         agents_service.disconnect(AGENT, account.config_dir)
@@ -1041,22 +1113,27 @@ def remove(account: ClaudeAccount, *, notes: list[str] | None = None) -> Path:
     # directory moves, and a default or alias left behind would be inherited by
     # whatever `add` puts in that slot next.
     forget_arrangement(account.slot)
-    _retarget_bindings(account.slot, identity.email if identity is not None else None, notes)
+    _retarget_bindings(account.slot, alias, identity.email if identity is not None else None, notes)
     return moved
 
 
-def _retarget_bindings(slot: int, email: str | None, notes: list[str] | None) -> None:
-    """Role bindings that named the removed slot by NUMBER now name its email, or nothing.
+def _retarget_bindings(
+    slot: int, alias: str | None, email: str | None, notes: list[str] | None
+) -> None:
+    """Role bindings that named the removed slot by NUMBER or ALIAS now name its email, or nothing.
 
     A project default is a row of ours and ``forget_arrangement`` drops it; a
     role binding is a line in ``config.toml`` that stored the reference as
     typed, and a ``2`` left behind would be inherited by whoever the next
     ``add`` signs into slot 2 — the very hazard the registry guards the default
-    against (review of #205, finding 8). The email keeps the operator's intent
-    and dangles honestly: ``launch`` refuses with the rung named, ``doctor``
-    flags it, and it resolves again the day that person signs back in. With no
-    email to name (a slot that never signed in), the binding's account is
-    cleared instead. Both go through the one config writer, ``bind_role``.
+    against (review of #205, finding 8). The alias has the same hazard one
+    step later: ``forget_arrangement`` frees it, and naming the next account
+    ``work`` again is the ordinary thing to do (second round). The email keeps
+    the operator's intent and dangles honestly: ``launch`` refuses with the
+    rung named, ``doctor`` flags it, and it resolves again the day that person
+    signs back in. With no email to name (a slot that never signed in), the
+    binding's account is cleared instead. Both go through the one config
+    writer, ``bind_role``.
     """
     try:
         bindings = settings_service.role_account_bindings()
@@ -1065,23 +1142,25 @@ def _retarget_bindings(slot: int, email: str | None, notes: list[str] | None) ->
             notes.append(f"role bindings not checked ({type(exc).__name__}: {exc})")
         return
     for role, ref in sorted(bindings.items()):
-        if ref.strip() != str(slot):
+        typed = ref.strip()
+        if typed != str(slot) and (alias is None or typed.lower() != alias):
             continue
+        named = f"slot {slot}" if typed == str(slot) else f"alias {typed!r} (slot {slot})"
         try:
             if email:
                 settings_service.bind_role(role, account=email)
                 note = (
-                    f"role {role} was bound to slot {slot}; it now names {email} — refused at "
+                    f"role {role} was bound to {named}; it now names {email} — refused at "
                     "launch until that account is signed in again, or re-bound"
                 )
             else:
                 settings_service.bind_role(role, clear_account=True)
                 note = (
-                    f"role {role} was bound to slot {slot}, which had no login — the account "
+                    f"role {role} was bound to {named}, which had no login — the account "
                     "binding is cleared"
                 )
         except Exception as exc:
-            note = f"role {role} still names slot {slot} — config.toml could not be written ({exc})"
+            note = f"role {role} still names {named} — config.toml could not be written ({exc})"
         if notes is not None:
             notes.append(note)
 

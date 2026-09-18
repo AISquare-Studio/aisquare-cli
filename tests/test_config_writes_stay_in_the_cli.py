@@ -163,6 +163,28 @@ def _call_graph(roots: list[Path] | None = None) -> tuple[dict[str, Path], dict[
                 name = getattr(inner.func, "id", None) or getattr(inner.func, "attr", None)
                 if name:
                     calls[node.name].add(aliases.get(name, name))
+                # A function handed to a thread or a worker IS called — later, elsewhere,
+                # but by whoever started it. ``Thread(target=self._drain)`` and
+                # ``run_worker(self._drain)`` had no edge, so a config write reached
+                # through such a drain was invisible. Over-approximating is the safe way.
+                passed = [kw.value for kw in inner.keywords if kw.arg == "target"]
+                if name == "run_worker" and inner.args:
+                    passed.append(inner.args[0])
+                # ...and any bound method handed anywhere (`_tell(self._refuse)`,
+                # `set_timer(delay, self.wake)`, `call_after_refresh(self._restore)`).
+                # Every argument would swell the closure past the rebinding test's
+                # tolerance; every `self.<name>` keeps it exact and catches these.
+                passed += [
+                    arg
+                    for arg in (*inner.args, *(kw.value for kw in inner.keywords))
+                    if isinstance(arg, ast.Attribute)
+                    and isinstance(arg.value, ast.Name)
+                    and arg.value.id == "self"
+                ]
+                for handed in passed:
+                    handed_name = getattr(handed, "id", None) or getattr(handed, "attr", None)
+                    if handed_name:
+                        calls[node.name].add(aliases.get(handed_name, handed_name))
     return defines, calls
 
 

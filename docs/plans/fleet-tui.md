@@ -28,7 +28,7 @@ From the owner's brief. Each line is something the finished feature must do.
    UI with mouse support. Scripts and `--help` see exactly what they see today
    (usage, exit 2); `--json` gets a JSON usage object with the same exit code
    (§3.8) — a non-TTY never gets a TUI.
-2. Two panes: a narrow **navigator** on the left, a wide **content area** on the
+2. Two panes (the partition is a draggable divider since #137, remembered across launches): a narrow **navigator** on the left, a wide **content area** on the
    right.
 3. Left: a **Fleet** heading with a `+`. Clicking it opens onboarding on the
    right — browse or type a directory; if it resolves, the UI runs the

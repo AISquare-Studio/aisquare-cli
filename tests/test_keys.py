@@ -148,14 +148,115 @@ def test_keys_tmux_would_mistype_are_dropped(textual: str) -> None:
     assert translate(textual, None, printable=False) is None
 
 
-def test_printable_input_is_always_literal_even_with_modifiers() -> None:
+def test_printable_input_is_literal_under_the_modifiers_tmux_can_carry() -> None:
     assert translate("a", "a", printable=True) == literal("a")
     assert translate("left_square_bracket", "[", printable=True) == literal("[")
     assert translate("é", "é", printable=True) == literal("é")
     assert translate("A", "A", printable=True) == literal("A")
-    # A terminal that reports the character alongside the chord: the text wins.
+    # A terminal that reports the character alongside a shift/ctrl chord: the text wins.
     assert translate("shift+a", "A", printable=True) == literal("A")
     assert translate("ctrl+a", "a", printable=True) == literal("a")
+
+
+def test_a_modifier_tmux_cannot_spell_drops_the_key_rather_than_typing_it() -> None:
+    """``super``/``hyper`` is how macOS Cmd and the kitty protocol's extras
+    arrive. There is no tmux name for the chord, and the character alone is not
+    what was asked for — Cmd+V is not a request to type a ``v``. Moving the
+    printable rule below the modifier gate made this so; the review asked for it
+    to be deliberate and pinned rather than a side effect of the ordering."""
+    assert translate("super+a", "a", printable=True) is None
+    assert translate("hyper+a", "a", printable=True) is None
+    assert translate("super+c", "c", printable=True) is None
+    assert translate("super+f5", None, printable=False) is None
+
+
+def test_alt_only_claims_the_ascii_letters_and_digits_that_were_measured() -> None:
+    """``str.isalnum`` is Unicode-aware, so an AltGr or accented layout — or
+    Escape typed just before the character — put ``M-é`` and ``M-ф`` on the wire.
+    Every name this module emits was measured against a real tmux and those
+    never were, so they stay the text they have always been (review)."""
+    assert translate("alt+é", "é", printable=True) == literal("é")
+    assert translate("alt+ф", "ф", printable=True) == literal("ф")
+    assert translate("alt+٣", "٣", printable=True) == literal("٣")
+    assert translate("alt+³", "³", printable=True) == literal("³")
+    assert translate("alt+p", "p", printable=True) == key("M-p")
+
+
+def test_alt_chords_keep_their_modifier_even_when_the_character_is_reported() -> None:
+    """Textual's parser reads ``ESC p`` as ``Key("alt+p", character="p")`` — the
+    character is always set for alt+letter and it is printable — so the
+    printable-is-literal rule above typed a bare ``p`` into the agent and Claude
+    Code's alt+p (switch model) never fired. Reported 2026-09-02 / 2026-09-10."""
+    assert translate("alt+p", "p", printable=True) == key("M-p")
+    assert translate("meta+p", "p", printable=True) == key("M-p")
+    assert translate("alt+shift+p", "P", printable=True) == key("M-P")
+    assert translate("ctrl+alt+p", "p", printable=True) == key("C-M-p")
+    assert translate("alt+1", "1", printable=True) == key("M-1")
+    # Without the character it always worked; it must keep working.
+    assert translate("alt+p", None, printable=False) == key("M-p")
+
+
+#: Names that are not names: an empty base, an empty modifier token, or both.
+#: Each round of review re-ordered the prologue that reads them and broke a
+#: different one — `ctrl++` and `+` in round 4, `alt+` and `+a` in round 5 —
+#: because the tests pinned the spellings that already worked. The whole shape
+#: is here, asserted in both directions, so the next re-order cannot pick one off.
+MALFORMED = ["", "+", "+a", "+left_square_bracket", "ctrl+", "ctrl++", "alt+", "meta+"]
+
+
+@pytest.mark.parametrize("key", MALFORMED)
+def test_a_malformed_key_name_types_its_character_and_names_nothing(key: str) -> None:
+    assert translate(key, "x", printable=True) == literal("x")
+    assert translate(key, None, printable=False) is None
+
+
+#: Chords the table deliberately refuses a name for, with the character the
+#: terminal reported alongside them. A refusal is not a reason to swallow the
+#: keystroke: what travels is the text, which is what this module did before any
+#: chord exception existed. ``extended_keys=False`` is the tmux 3.2 floor, where
+#: the capability gate is the thing refusing.
+NO_SAFE_NAME = [
+    ("ctrl+alt+1", "1", True),  # the shifted digit is layout-specific
+    ("alt+shift+1", "1", True),
+    ("ctrl+alt+space", " ", False),  # C-M-Space needs tmux >= 3.5
+    ("alt+shift+space", " ", False),
+    ("alt+shift+minus", "_", False),  # shifted punctuation, same gate
+    ("alt+semicolon", ";", True),  # tmux's own argv separator
+]
+
+
+@pytest.mark.parametrize(("key", "character", "extended"), NO_SAFE_NAME)
+def test_a_chord_with_no_safe_name_still_types_its_character(
+    key: str, character: str, extended: bool
+) -> None:
+    assert translate(key, character, printable=True, extended_keys=extended) == literal(character)
+    # Without a character there is nothing to fall back to, and nothing is sent.
+    assert translate(key, None, printable=False, extended_keys=extended) is None
+
+
+def test_alt_space_travels_as_the_chord_the_table_already_had_a_name_for() -> None:
+    """``SPECIAL``'s ``not (ctrl or alt)`` guard exists to emit ``M-Space`` when
+    alt is held, and could never fire: Textual reports ``Key("alt+space", " ")``,
+    a space is printable and is not alnum, so the printable rule returned it as
+    text. The same dead-branch shape this PR was written to fix for alt+letter,
+    on the one non-alnum key the table has a safe tmux name for (review)."""
+    assert translate("alt+space", " ", printable=True) == key("M-Space")
+    assert translate("meta+space", " ", printable=True) == key("M-Space")
+    # Without the character it always worked; it must keep working.
+    assert translate("alt+space", None, printable=False) == key("M-Space")
+    # Alt is what makes it a chord: plain and ctrl+space stay the space they were.
+    assert translate("space", " ", printable=True) == literal(" ")
+    assert translate("ctrl+space", " ", printable=True) == literal(" ")
+
+
+def test_alt_on_punctuation_stays_the_character_it_always_was() -> None:
+    """Through the name table alt+punctuation was dropped (``;``) or turned into
+    a control-sequence introducer (``M-[`` is ``ESC [``) — where before the
+    program simply received the character. Found in review; the letter fix
+    must not widen to this."""
+    assert translate("alt+semicolon", ";", printable=True) == literal(";")
+    assert translate("alt+left_square_bracket", "[", printable=True) == literal("[")
+    assert translate("alt+shift+minus", "_", printable=True, extended_keys=False) == literal("_")
     # Semicolon is text like any other here; escaping is the transport's job.
     assert translate("semicolon", ";", printable=True) == literal(";")
 

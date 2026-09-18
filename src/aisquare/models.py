@@ -616,6 +616,10 @@ class ProjectForgetReport(BaseModel):
     more and the active project again follows the working directory."""
     active_changed: bool = False
     """Whether the forgotten project WAS the active one, so the pin moved."""
+    pin_error: str | None = None
+    """Why the pin could not be moved after the forget, when it could not — the
+    forget itself is complete; the active project follows the working directory
+    until ``project switch`` succeeds."""
 
 
 PruneReason = Literal["missing", "worktree"]
@@ -646,6 +650,9 @@ class ProjectPruneReport(BaseModel):
     purged: bool = False
     active: ProjectInfo | None = None
     active_changed: bool = False
+    pin_error: str | None = None
+    """Why the pin could not be moved after the sweep, when it could not — the
+    registrations are dropped (and purged) regardless."""
 
 
 class AgentConnection(BaseModel):

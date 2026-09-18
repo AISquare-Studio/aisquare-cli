@@ -35,7 +35,7 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from rich.text import Text
-from textual.app import App, ComposeResult
+from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.css.query import NoMatches
@@ -54,7 +54,7 @@ from aisquare.cli.ui.sidebar import (
     SpawnAgent,
     accounts_summary_text,
 )
-from aisquare.cli.ui.terminal import EscapeToSidebar
+from aisquare.cli.ui.terminal import EscapeToSidebar, SelectionHost, TerminalPane
 from aisquare.cli.ui.theme import ThemePicker, remember_theme, restore_theme
 from aisquare.cli.ui.views.accounts import AccountsChanged, AccountsView, read_session, summarise
 from aisquare.cli.ui.views.agent import AgentView
@@ -147,6 +147,7 @@ class HelpScreen(ModalScreen[None]):
             ("↑ ↓ Enter", "move over the sidebar and open the row under the cursor"),
             (self.escape_key.upper(), "hand focus from an agent's pane back to the sidebar"),
             ("wheel", "scroll an agent pane; shift/alt+PgUp/PgDn too, shift+Home/End"),
+            ("drag", "select text in a pane (double-click: a word) — copied on release"),
             ("t", "themes (applied live, autosaved)"),
             ("r", "refresh now"),
             ("F1", "command palette"),
@@ -162,8 +163,14 @@ class HelpScreen(ModalScreen[None]):
         self.dismiss(None)
 
 
-class FleetApp(App[None], inherit_bindings=False):
-    """One `asq` view over every project, agent and session."""
+class FleetApp(SelectionHost, inherit_bindings=False):
+    """One `asq` view over every project, agent and session.
+
+    A :class:`~aisquare.cli.ui.terminal.SelectionHost`: the press, the release
+    and the copy key of a pane selection are the base class's, shared with the
+    pane tests' host so the two cannot drift (review of #120, round 9; review
+    of #135, findings 7 and 10).
+    """
 
     TITLE = "aisquare"
     COMMAND_PALETTE_BINDING = "f1"
@@ -559,6 +566,24 @@ class FleetApp(App[None], inherit_bindings=False):
         await self._show(view_id, lambda: AgentView(status, id=view_id))
         self.sidebar.select(f"agent:{status.agent.id}")
         self._set_doctor_scope(event.project_id)
+        self._focus_pane(view_id)
+
+    def _focus_pane(self, view_id: str) -> None:
+        """Give the agent just selected the keyboard (#147).
+
+        Selecting a row showed the pane and left focus in the sidebar, where the
+        app's bindings are live: a sentence typed at what looked like Claude Code
+        quit the UI on its first ``q``. The pane takes focus once the frame that
+        shows it has been drawn — a view mounted this instant has no size to
+        focus into yet — and ``F12`` stays the deliberate way back.
+        """
+        try:
+            view = self.content.get_child_by_id(view_id)
+        except NoMatches:
+            return
+        pane = getattr(view, "pane", None)
+        if isinstance(pane, TerminalPane):
+            self.call_after_refresh(pane.focus)
 
     def on_spawn_agent(self, event: SpawnAgent) -> None:
         # The Spawn dialog is Phase 7 (§9); until it lands the CLI is the way.

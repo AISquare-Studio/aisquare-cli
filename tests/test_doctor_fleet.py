@@ -93,6 +93,8 @@ class FakeServer(TmuxServer):
         self._version_raises = version_raises
         self._facts_raise = facts_raise
         self.asked: list[str] = []
+        self.scripted: dict[tuple[str, ...], str] = {}
+        """Scripted ``run`` output by argv — the fleet-terminal row's server questions (#147)."""
 
     def binary(self) -> str:
         if not self._present:
@@ -121,6 +123,12 @@ class FakeServer(TmuxServer):
         if self._facts_raise:
             raise TmuxError("unexpected display-message output")
         return self._panes.get(pane_id)
+
+    def run(self, *args: str, stdin: bytes | None = None) -> str:
+        self.asked.append(" ".join(args))
+        if args in self.scripted:
+            return self.scripted[args]
+        raise TmuxError(f"unscripted: {' '.join(args)}")
 
 
 def _agent(
@@ -1076,3 +1084,92 @@ def test_a_symlinked_home_is_a_directory_home(
 
     assert rows["home"].status is CheckStatus.ok, rows["home"]
     assert rows["database"].status is CheckStatus.ok, rows["database"]
+
+
+# --- the fleet terminal row (#147) -------------------------------------------------------------
+
+
+def _terminal_row(server: FakeServer, env: dict[str, str]) -> DoctorCheck:
+    return diagnostics._check_fleet_terminal(server, env)
+
+
+def test_the_fleet_terminal_row_names_the_outer_terminal_tmux_and_the_server() -> None:
+    server = FakeServer(version=(3, 7), absent=False)
+    server.scripted = {
+        ("show-options", "-gv", "prefix"): "None\n",
+        ("show-environment", "-g"): "DISPLAY=:1\nWAYLAND_DISPLAY=wayland-0\n-SSH_AUTH_SOCK\n",
+    }
+    env = {"KITTY_WINDOW_ID": "3", "DISPLAY": ":1", "WAYLAND_DISPLAY": "wayland-0"}
+
+    check = _terminal_row(server, env)
+
+    assert check.name == "fleet terminal" and check.status is CheckStatus.ok
+    assert "outer terminal kitty (kitty keyboard protocol" in check.detail
+    assert "tmux 3.7 carries extended keys" in check.detail
+    assert "server prefix None" in check.detail and "stale" not in check.detail
+
+
+def test_the_fleet_terminal_row_warns_about_a_kept_prefix_and_lists_stale_vars() -> None:
+    server = FakeServer(version=(3, 4), absent=False)
+    server.scripted = {
+        ("show-options", "-gv", "prefix"): "C-b\n",
+        ("show-environment", "-g"): "DISPLAY=:0\n-WAYLAND_DISPLAY\nSSH_AUTH_SOCK=/old\n",
+    }
+    env = {
+        "VTE_VERSION": "7800",
+        "DISPLAY": ":1",
+        "WAYLAND_DISPLAY": "wayland-1",
+        "SSH_AUTH_SOCK": "/old",
+        "COLORTERM": "truecolor",
+    }
+
+    check = _terminal_row(server, env)
+
+    assert check.status is CheckStatus.warn
+    assert "a VTE terminal" in check.detail and "no kitty keyboard protocol" in check.detail
+    assert "tmux 3.4 has no extended keys" in check.detail and "ctrl+j" in check.detail
+    assert "stale on the running server: DISPLAY, WAYLAND_DISPLAY, COLORTERM" in check.detail
+    assert "SSH_AUTH_SOCK" not in check.detail.split("stale on the running server:")[1]
+    assert "still has prefix C-b" in check.detail
+    assert check.fix and "kill-server" in check.fix and "background-tasks" in check.fix
+
+
+def test_the_fleet_terminal_row_never_starts_a_server_and_survives_an_unknown_terminal() -> None:
+    server = FakeServer(version=(3, 7), absent=True)  # no server: nothing is asked of one
+
+    check = _terminal_row(server, {"TERM": "xterm-256color"})
+
+    assert check.status is CheckStatus.ok
+    assert "outer terminal unknown (TERM=xterm-256color) (protocol unknown" in check.detail
+    assert "fleet server not running" in check.detail
+    assert not any(q.startswith("show-") for q in server.asked), server.asked
+
+    missing = FakeServer(present=False)
+    assert "tmux not installed" in _terminal_row(missing, {}).detail
+    broken = FakeServer(version_raises=True, absent=False)
+    assert _terminal_row(broken, {}).status is CheckStatus.ok  # fails open, named
+    assert "not evaluated" in _terminal_row(broken, {}).detail
+    inside = _terminal_row(FakeServer(absent=True), {"TMUX": "/tmp/tmux-1000/default,1,0"})
+    assert "inside tmux" in inside.detail
+    assert "fleet terminal" in _by_name(diagnostics.doctor()), "it reaches the real doctor"
+
+
+@pytest.mark.parametrize(
+    ("env", "name", "kitty"),
+    [
+        ({"KITTY_WINDOW_ID": "1"}, "kitty", True),
+        ({"GHOSTTY_RESOURCES_DIR": "/x"}, "ghostty", True),
+        ({"WEZTERM_EXECUTABLE": "/x"}, "wezterm", True),
+        ({"WT_SESSION": "x"}, "Windows Terminal", False),
+        ({"TERM_PROGRAM": "iTerm.app"}, "iTerm2", False),
+        ({"TERM_PROGRAM": "vscode"}, "the VS Code terminal", False),
+        ({"TERM_PROGRAM": "Apple_Terminal"}, "Terminal.app", False),
+        ({"VTE_VERSION": "7800"}, "a VTE terminal (GNOME Terminal, Tilix, …)", False),
+        ({"TERM": "xterm-kitty"}, "kitty", True),
+        ({"TERM": "foot"}, "foot", True),
+        ({"TERM": "alacritty"}, "alacritty", True),
+        ({}, "unknown", None),
+    ],
+)
+def test_outer_terminal_recognition(env: dict[str, str], name: str, kitty: bool | None) -> None:
+    assert diagnostics.outer_terminal(env) == (name, kitty)

@@ -164,7 +164,11 @@ def session_end() -> None:
     """Mark the session ended on the orchestrator (no output)."""
     try:
         payload = _payload()
-        hooks_service.session_ended(_cwd(payload), session_id=_str(payload, "session_id"))
+        hooks_service.session_ended(
+            _cwd(payload),
+            session_id=_str(payload, "session_id"),
+            reason=_str(payload, "reason"),
+        )
     except Exception as exc:  # never disrupt the agent
         _cost_of_failing_open("session-end", exc)
         return

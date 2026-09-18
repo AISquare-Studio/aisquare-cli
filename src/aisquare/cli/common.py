@@ -47,7 +47,9 @@ def refuse_conflicting_scope(every: bool, project: str | None) -> None:
     The mechanism, not one command's guard: ``--all`` used to win silently in
     ``fleet shutdown`` (meant as one project, took every fleet down) and still
     did in ``metrics show``/``list`` after that was patched per command (rounds
-    4 and 6 of #203). One helper, one wording, one exit code (a usage error).
+    4 and 6 of #203). One helper, one wording, one exit code — 2, a usage
+    error, which the root group renders as ``{"error": "usage", …}`` on stdout
+    under ``--json`` (round 7: a caller that asked for JSON gets JSON or nothing).
     """
     if every and project is not None:
         raise typer.BadParameter(

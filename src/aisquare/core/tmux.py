@@ -706,10 +706,16 @@ class TmuxServer:
         gets the second message for a fleet that is alive elsewhere. That is why
         ``fleet reap --server-down`` stays the operator's word — this predicate
         narrows what the word may act on, it does not replace it.
+
+        A question that could not be put — no client, a wedged server's 30 s
+        timeout, an OS refusal — is no evidence either, like :meth:`answers`.
+        Catching the missing client alone let a timeout raise straight through
+        ``reap --server-down``, the command ``doctor`` prescribes for exactly
+        the silent server that times out (round 7 of #203).
         """
         try:
             completed = self._runner(self.argv("display-message", "-p", "#{version}"), None)
-        except TmuxUnavailable:
+        except TmuxError:  # TmuxUnavailable included
             return False
         if completed.returncode == 0:
             return False

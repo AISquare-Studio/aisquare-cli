@@ -281,12 +281,13 @@ def _raises_unhandled(chain: list[str]) -> BaseException | None:
 
 def test_the_shutdown_plan_is_held_to_it(damaged_store: str) -> None:
     """``fleet shutdown`` is UNINVOKED because it kills real tmux sessions — but
-    ``--json`` without ``--yes`` is its documented read-only dry run, and it
-    opens the store on every path a damaged file would hit (``_shutdown_targets``
-    twice, then the pause scan), several behind handlers that turn a failure
-    into a report field. Exempting the command dropped the one new command with
-    six store opens out of this sweep (review of #203, round 4); the plan keeps
-    the coverage without touching a session."""
+    ``--json`` without ``--yes`` is its documented read-only dry run, so the
+    plan's ONE store open (``shutdown_plan`` → ``_shutdown_targets``) is held
+    to the property here. The opens behind ``--yes`` — the late scan, the pause
+    pass, the per-row record helpers — sit behind handlers that turn a store
+    failure into a report field, and are covered where a fake tmux is at hand:
+    ``tests/test_fleet_service.py::test_shutdown_reports_a_store_damaged_mid_run``
+    (review of #203, rounds 4 and 7)."""
     raised = _raises_unhandled(["fleet", "shutdown", "--json"])
 
     assert raised is None, (

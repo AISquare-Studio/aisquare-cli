@@ -371,7 +371,9 @@ full-fidelity escape hatch. Under `--json` it prints the command it would run
 instead of running it.
 
 **Scope and exit codes.** `--all` and `--project` name different scopes and are
-refused together rather than one silently winning. The command exits **0** when
+refused together rather than one silently winning — a usage error, exit **2**,
+and under `--json` the object `{"error": "usage", "message": …}` on stdout like
+every other usage error. The command exits **0** when
 every row is down and every release landed; **1** when a row was left live, a
 session could not be taken down, the final scan or the pause pass could not run,
 or a claim release was refused — a fleet whose work stays claimed by dead
@@ -401,7 +403,8 @@ only on a socket where tmux itself reports no server (`no server running on …`
 or `error connecting to … (No such file or directory)`); a protocol mismatch or
 a hung server still marks nothing, and so does a missing `tmux` binary.
 
-`--all` and `--project` are refused together. The claims of the rows it ends
+`--all` and `--project` are refused together (a usage error, exit 2, JSON under
+`--json`). The claims of the rows it ends
 or marks lost are released and counted (`claims_released`); a release the store
 refused, or one the board could not be told about, is reported per row and the
 command exits **1**, the same contract as `fleet stop` and `fleet shutdown`.

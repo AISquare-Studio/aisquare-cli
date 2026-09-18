@@ -2245,8 +2245,9 @@ def _retire_late_panes(
         if project.codename and entry not in sessions:
             sessions.append(entry)
     for socket, name, project_id in sessions:
-        # The one take-down sequence; a session the window took with it (as tmux
-        # does) says nothing, hence `expected=False`.
+        # The one take-down sequence. The session IS expected — its pane was just
+        # removed, so a refusal to re-check is a failed kill — but an absent one is
+        # the ordinary shape here: the window took the session with it, as tmux does.
         _take_down_session(
             server_for(socket, config),
             socket,
@@ -2595,56 +2596,55 @@ def shutdown(
     """
     config = settings()
     report = ShutdownReport()
-    _require_usable_tmux(config)
-    targets = _shutdown_targets(project)
-    sockets = _shutdown_sockets(targets, config)
-    _refuse_from_inside(sockets, config)
-    answering = _shutdown_probe(sockets, config)
-    report.servers_absent.extend(socket for socket in sockets if not answering[socket])
-    handled: set[str] = set()
-    stopping: FleetAgent | None = None  # the row in hand when an interrupt lands, if any
-
-    def finish() -> None:
-        _kill_fleet_sessions(targets, sockets, answering, report, config, every=project is None)
-        _record_late_rows(project, handled, report, config, snapshot=targets)
-        _clear_pause(targets, report)
-
+    # Where the run is, for the one sentence an interrupt owes: every
+    # KeyboardInterrupt inside this function — before the first row, during a
+    # row's stop, in the kill phase, the late scan or the pause pass — raises
+    # `FleetInterrupted(report)` with the report of how far it got. A Ctrl-C in
+    # the slow half used to escape as click's `Aborted!` with nothing printed,
+    # after every row was ended and every claim released (rounds 5 to 7).
+    phase = "before anything was stopped"
     try:
-        for current, agents in targets:
-            for agent in agents:
-                stopping = agent
-                handled.add(agent.id)
-                _shutdown_row(current, agent, answering, report, force=force, grace=grace)
-    except KeyboardInterrupt:
-        # The operator's interrupt is theirs to have — nothing else is killed —
-        # but rows before this one are ended and their claims released, each
-        # committed as it went, so the report of how far it got travels with
-        # the interrupt instead of being thrown away with it (round 5). Bound
-        # before the loop: read off the loop variable, an interrupt landing
-        # before any row's turn (a scope with no live rows) raised
-        # `UnboundLocalError` inside this handler, which nothing caught — no
-        # report, no 130, and `finish()` never ran (round 6).
-        where = (
-            f"while stopping {stopping.label}"
-            if stopping is not None
-            else "before the first row was stopped"
-        )
-        report.interrupted = f"interrupted {where}; the rest of the fleet was left as it was"
-        raise FleetInterrupted(report) from None
-    except Exception:
-        # The kill phase runs even if a row could not be recorded: "shutdown
-        # means down" must hold when the store refuses, and a caller that got a
-        # traceback instead of a report was left with a half-recorded fleet, a
-        # live server, and nothing saying how far it got. `_shutdown_row`
-        # catches its own, so this is the belt for a fault in the loop itself.
-        # An ``Exception`` only: a ``finally`` ran the kill on Ctrl-C too, so an
-        # operator interrupting a six-agent graceful stop had the other four
-        # SIGHUP'd with no /exit, recorded under a false reason, the pauses
-        # cleared and no report — the interrupt is theirs to have (review of
-        # the fold).
+        _require_usable_tmux(config)
+        targets = _shutdown_targets(project)
+        sockets = _shutdown_sockets(targets, config)
+        _refuse_from_inside(sockets, config)
+        answering = _shutdown_probe(sockets, config)
+        report.servers_absent.extend(socket for socket in sockets if not answering[socket])
+        handled: set[str] = set()
+
+        def finish() -> None:
+            nonlocal phase
+            phase = "during the kill phase"
+            _kill_fleet_sessions(targets, sockets, answering, report, config, every=project is None)
+            phase = "during the final scan for rows spawned during the shutdown"
+            _record_late_rows(project, handled, report, config, snapshot=targets)
+            phase = "while reconciling the fleet-paused signals"
+            _clear_pause(targets, report)
+
+        try:
+            for current, agents in targets:
+                for agent in agents:
+                    phase = f"while stopping {agent.label}"
+                    handled.add(agent.id)
+                    _shutdown_row(current, agent, answering, report, force=force, grace=grace)
+        except Exception:
+            # The kill phase runs even if a row could not be recorded: "shutdown
+            # means down" must hold when the store refuses, and a caller that got
+            # a traceback instead of a report was left with a half-recorded
+            # fleet, a live server, and nothing saying how far it got.
+            # `_shutdown_row` catches its own, so this is the belt for a fault in
+            # the loop itself — an `Exception` only, never the operator's
+            # interrupt, which the handler below keeps for them.
+            finish()
+            raise
         finish()
-        raise
-    finish()
+    except KeyboardInterrupt:
+        # The operator's interrupt is theirs to have — nothing further is killed
+        # — but rows before it are ended and their claims released, each
+        # committed as it went, so the report of how far it got travels with the
+        # interrupt instead of being thrown away with it.
+        report.interrupted = f"interrupted {phase}; the rest of the fleet was left as it was"
+        raise FleetInterrupted(report) from None
     return report
 
 
@@ -2712,7 +2712,13 @@ def reap(project: ProjectInfo | None = None, *, server_down: bool = False) -> Re
                             # Asked once per socket for the whole sweep, so a
                             # server coming up mid-sweep cannot split the answer.
                             if socket not in absent:
-                                absent[socket] = server_for(socket, config).server_absent()
+                                try:
+                                    absent[socket] = server_for(socket, config).server_absent()
+                                except TmuxError:
+                                    # A question that could not be put is no
+                                    # evidence of absence; the predicate answers
+                                    # False for it too, and this is the belt.
+                                    absent[socket] = False
                             if absent[socket]:
                                 views[socket] = {}  # no server: no panes
                 for agent in live:

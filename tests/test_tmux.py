@@ -445,6 +445,22 @@ def test_spawn_window_takes_the_env_pairs_back_out_of_a_new_sessions_environment
     assert info.pane_id == "%9", "the refusal cost nothing: the window is up and reported"
 
 
+def test_server_absent_reads_a_question_it_could_not_put_as_no_evidence(
+    fake_bin: Path, conf: Path
+) -> None:
+    """Round 7 of #203. ``server_absent`` caught the missing client alone, so a
+    wedged server's timeout — a plain ``TmuxError`` from the runner — raised
+    straight through ``reap --server-down``, the very command ``doctor``
+    prescribes for a silent server: a traceback where the report belongs.
+    Like ``answers``, positive evidence or nothing."""
+
+    def times_out(argv: Sequence[str], stdin: bytes | None) -> Completed:
+        raise TmuxError("tmux display-message timed out after 30 s")
+
+    server = TmuxServer("asq-test", runner=times_out, binary=str(fake_bin), conf=conf)
+    assert server.server_absent() is False
+
+
 def test_spawn_window_adds_a_window_when_the_session_exists(
     fake_bin: Path, conf: Path, tmp_path: Path
 ) -> None:

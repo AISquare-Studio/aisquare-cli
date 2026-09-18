@@ -89,6 +89,7 @@ from __future__ import annotations
 
 import contextlib
 import itertools
+import time
 import weakref
 from bisect import bisect_left
 from collections.abc import Callable
@@ -293,6 +294,15 @@ def _extract(selection: Selection, rows: list[DisplayedRow], width: int) -> str:
     return "".join(pieces).rstrip("\n")
 
 
+DUPLICATE_PRESS_WINDOW = 0.5
+"""Seconds within which a repeat of the pressed button is one press reported twice.
+
+A terminal that double-reports does so within milliseconds; a human whose
+release was lost — the pointer left the window with the button down — presses
+again after a drag's worth of time. The window tells the two apart, and a
+double-click is not in question: its second press finds nothing down."""
+_monotonic: Callable[[], float] = time.monotonic
+
 _MOUNTED_PANES: weakref.WeakSet[TerminalPane] = weakref.WeakSet()
 """Every mounted pane, so the start and end of a gesture reach them without a DOM walk."""
 
@@ -429,6 +439,9 @@ class SelectionHost(App[None]):
         """The button of the press now down, until its release is routed."""
         self._stray: int | None = None
         """A second button pressed while ``_pressed`` was down: dropped, with its release."""
+        self._pressed_at = 0.0
+        """When ``_pressed`` went down — a repeat of it inside :data:`DUPLICATE_PRESS_WINDOW`
+        is the terminal reporting one press twice; later, its release was lost."""
 
     def get_default_screen(self) -> Screen[None]:
         return PaneScreen(id="_default")
@@ -463,18 +476,33 @@ class SelectionHost(App[None]):
         # terminal), and refusing it would leave every later gesture unrouted.
         if pressed:
             assert isinstance(event, events.MouseDown)
-            if self._pressed is not None and event.button != self._pressed:
-                self._stray = event.button
-                return
+            if self._pressed is not None:
+                # One gesture at a time, and that includes a REPEAT of the
+                # gesture's own button: a terminal that reports a press twice
+                # would otherwise re-baseline every pane mid-drag and let the
+                # screen restart its selection at the duplicate's cell — the
+                # dropped copy of round 5, arriving by the press (round 7). A
+                # stray's button is remembered so its own release is dropped too.
+                if event.button != self._pressed:
+                    self._stray = event.button
+                    return
+                if _monotonic() - self._pressed_at < DUPLICATE_PRESS_WINDOW:
+                    return
+                # The same button, pressed again long after: its release was
+                # lost (the pointer left the terminal with it down), and refusing
+                # it would leave every later gesture unrouted (round 4). A new
+                # gesture — and it takes the screen's selection with it, as any
+                # press does.
             # A new gesture starts clean: a stray whose release never arrived
             # (the pointer left the terminal) used to outlive its gesture, and
             # the next press of THAT button was accepted while its release was
             # dropped as the stray's — leaving `_pressed` armed forever, every
             # later left press classified as stray and dropped, and nothing in
-            # the app clickable (review of the fold). This line is the whole of
-            # that fix: the stray is cleared by its own release, or here.
+            # the app clickable (review of the fold). The stray is cleared by its
+            # own release, or here.
             self._stray = None
             self._pressed = event.button
+            self._pressed_at = _monotonic()
             route_gesture_start(self)
         if released:
             assert isinstance(event, events.MouseUp)

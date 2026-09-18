@@ -176,6 +176,30 @@ def test_json_stdout_is_empty_or_parseable(in_both_proxy_states: str, runner: Cl
 
 
 @pytest.mark.parametrize(
+    "argv",
+    [
+        ["fleet", "shutdown", "--project", "alpha", "--all", "--yes"],
+        ["fleet", "reap", "--project", "alpha", "--all"],
+        ["metrics", "show", "--project", "alpha", "--all"],
+        ["metrics", "show", "--limit", "0"],
+        ["fleet", "ls", "--no-such-option"],
+    ],
+    ids=["shutdown-scope", "reap-scope", "metrics-scope", "metrics-range", "unknown-option"],
+)
+def test_every_usage_error_is_json_under_json(argv: list[str], runner: CliRunner) -> None:
+    """The INVARIANT behind round 7 of #203: a caller that asked for JSON gets JSON
+    or nothing. The root group rendered an unknown option as ``{"error":
+    "usage"}`` and let a ``BadParameter`` — the shape the shared scope refusal
+    and click's own range checks raise — fall through to typer's Rich prose on
+    stderr with an EMPTY stdout, exit 2. Every usage error is the same object."""
+    result = runner.invoke(app, ["--json", *argv])
+
+    assert result.exit_code == 2, result.output
+    payload = json.loads(result.stdout)
+    assert payload["error"] == "usage" and payload["message"]
+
+
+@pytest.mark.parametrize(
     ("stdout", "is_json"),
     [
         ('{"enabled": true}', True),

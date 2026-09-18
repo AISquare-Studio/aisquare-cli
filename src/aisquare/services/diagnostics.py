@@ -943,9 +943,11 @@ _ABOUT_TOKENS: frozenset[str] = frozenset(
 #: character of every `command` and `args` string of every server in every
 #: `.claude.json`, the file this row's whole cost lives in (round 5).
 _IDENTIFIER_CHARS = frozenset(string.ascii_letters + string.digits + "_-")
-#: What joins the tokens of a package id: `-` and `_` inside a name, `/` after a
-#: scope (`@playwright/mcp`), `@` before a scope or a version (`…@latest`).
-_TOKEN_SPLIT_RE = re.compile(r"[-_/@]+")
+#: What joins the tokens of a package id: `-` and `_`. A scope (`@playwright/mcp`)
+#: and a version tail (`…@latest`) never reach this — `_IDENTIFIER_CHARS` stops
+#: the walk at `@` and `/`, so the split only ever sees one identifier's own
+#: tokens (round 7 of #203).
+_TOKEN_SPLIT_RE = re.compile(r"[-_]+")
 
 
 def _names_browser_tool(text: str) -> bool:
@@ -953,9 +955,9 @@ def _names_browser_tool(text: str) -> bool:
     for match in _BROWSER_PROVIDER_RE.finditer(text):
         # The identifier around the match: `mcp-server-playwright` for a match on
         # `playwright`, `playwright-report` for the same match. `_` counts as a
-        # joiner exactly as `-` does, so the two spellings are one case; a scoped
-        # match (`@playwright/mcp`) carries its own `@` and `/`, which the split
-        # treats as joiners too.
+        # joiner exactly as `-` does, so the two spellings are one case. A scoped
+        # match (`@playwright/mcp`) is bounded by its own `@` and `/`: the walk
+        # hands the split `playwright` alone.
         start, end = match.span()
         while start > 0 and text[start - 1] in _IDENTIFIER_CHARS:
             start -= 1

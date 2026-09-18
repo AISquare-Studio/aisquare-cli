@@ -1359,6 +1359,33 @@ def _toasts(app: Any) -> str:
     return " | ".join(toast.render().plain for toast in app.screen.query(Toast))
 
 
+def test_the_form_diagnoses_a_key_variable_no_shell_can_export_by_name(
+    tmp_path: Path, script: Script
+) -> None:
+    """Round 7 of #203. The form's own key guard ran before the writer's
+    validation, so a ``$EXPLAINABILITY_API_KEY`` paste with a key typed beside it
+    was diagnosed as "export $$EXPLAINABILITY_API_KEY" — a sentence nobody can
+    act on — while ``key_env_problem``, which names the exact fault, never ran.
+    The writer's question first."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+
+    async def go(pilot: Pilot[None]) -> str:
+        app = fleet_app(pilot)
+        await app.content.add_content(ExplainabilityView(id="tracing"), set_current=True)
+        await pilot.pause()
+        await settle(app)
+        _setup(app, target="stg", key_env="$EXPLAINABILITY_API_KEY", key="wk-secret")
+        app.screen.query_one("#explainability-save", Button).press()
+        await pilot.pause()
+        await settle(app)
+        return _toasts(app)
+
+    rendered = drive(go, notifications=True)
+    assert "without the $" in rendered and "EXPLAINABILITY_API_KEY" in rendered
+    assert "$$" not in rendered, "never a variable nobody can export"
+    assert "stg" not in load_config().explainability.targets, "refused: nothing stored"
+
+
 def test_a_key_typed_for_a_target_that_names_its_own_variable_is_refused(
     tmp_path: Path, script: Script
 ) -> None:

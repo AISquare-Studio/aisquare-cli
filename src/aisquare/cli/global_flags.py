@@ -212,13 +212,18 @@ def _handle_usage_error(error: Any) -> None:
     source :func:`aisquare.cli.common.fail` reads), or returns so the caller
     re-raises for typer's normal stderr rendering — appending a did-you-mean
     when typer's built-in matcher found nothing (synonym-only typos).
-    Anything that is neither an unknown command nor an unknown option passes
-    through untouched.
+    Every other usage error — an unknown option, a bad or missing parameter,
+    two options that conflict — is the same object under ``--json``: a caller
+    that asked for JSON gets JSON or nothing. This rendered ``NoSuchOption``
+    alone and let ``BadParameter`` fall through to typer's stderr prose, so
+    ``--json fleet shutdown --project x --all`` printed nothing on stdout
+    (round 7 of #203). Without ``--json`` it returns so the caller re-raises
+    for typer's normal rendering.
     """
     message = str(getattr(error, "message", error))
     unknown = _NO_SUCH_COMMAND.search(message)
     if unknown is None:
-        if get_state().json_output and type(error).__name__ == "NoSuchOption":
+        if get_state().json_output:
             typer.echo(json.dumps({"error": "usage", "message": message}))
             raise typer.Exit(code=2)
         return

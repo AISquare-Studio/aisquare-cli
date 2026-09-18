@@ -29,7 +29,7 @@ import pytest
 from typer.testing import CliRunner
 
 from aisquare.cli.app import app
-from aisquare.core import codenames, selfcli
+from aisquare.core import codenames, paths, selfcli
 from aisquare.core import store as core_store
 from aisquare.core.config import FleetRoleSettings, FleetSettings
 from aisquare.core.ids import new_agent_id, new_task_id
@@ -4288,10 +4288,101 @@ def test_an_interrupt_before_any_rows_turn_still_carries_the_report(
 
     report = caught.value.report
     assert report.interrupted == (
-        "interrupted before the first row was stopped; the rest of the fleet was left as it was"
+        "interrupted before anything was stopped; the rest of the fleet was left as it was"
     )
     assert report.stopped == [] and tmux.killed_sessions == []
     assert fleet_service.is_paused(project)
+
+
+_SHUTDOWN_PHASES = {
+    "probe": ("_shutdown_probe", "before anything was stopped"),
+    "stop-loop": ("_shutdown_row", "while stopping "),
+    "kill-phase": ("_kill_fleet_sessions", "during the kill phase"),
+    "late-scan": ("_record_late_rows", "during the final scan"),
+    "pause-pass": ("_clear_pause", "while reconciling the fleet-paused signals"),
+}
+
+
+@pytest.mark.parametrize("phase", sorted(_SHUTDOWN_PHASES), ids=sorted(_SHUTDOWN_PHASES))
+def test_an_interrupt_at_any_phase_of_shutdown_carries_the_report(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
+) -> None:
+    """The INVARIANT (rounds 5 to 7 of #203, one phase per round): wherever the
+    operator's Ctrl-C lands inside ``shutdown`` — before the first row, on a
+    row, in the kill phase, the late scan or the pause pass — it raises
+    ``FleetInterrupted(report)`` naming where, with the report of how far it
+    got, and nothing further is killed. A Ctrl-C in the slow half used to be
+    click's ``Aborted!`` with nothing printed."""
+    first = _coder(project)
+    seam, said = _SHUTDOWN_PHASES[phase]
+    real = getattr(fleet_service, seam)
+
+    def interrupt(*args: object, **kwargs: object) -> object:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(fleet_service, seam, interrupt)
+    with pytest.raises(fleet_service.FleetInterrupted) as caught:
+        fleet_service.shutdown(project, force=True)
+
+    report = caught.value.report
+    assert report.interrupted is not None and said in report.interrupted, report.interrupted
+    if phase in ("kill-phase", "late-scan", "pause-pass"):
+        assert [a.id for a in report.stopped] == [first.id], "the row already down is reported"
+    monkeypatch.setattr(fleet_service, seam, real)
+    assert tmux.killed_sessions == [], "nothing beyond the rows in hand was taken down"
+
+
+def test_reap_with_server_down_survives_a_socket_that_cannot_be_asked(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 7 of #203. ``server_absent()`` raised a plain ``TmuxError`` for a
+    wedged server (it caught the missing client alone), and ``reap`` called it
+    unguarded — a traceback, no report, on the command ``doctor`` prescribes
+    for a silent server. The predicate answers False now, and reap has the
+    belt: nothing is marked lost on a question that could not be put."""
+    old = FakeTmux()
+    tmux.per_socket["asq-old"] = old
+    _settings(monkeypatch, tmux_socket="asq-old")
+    stale = _coder(project)
+    old.running = False
+    _settings(monkeypatch, tmux_socket="asq")
+
+    def cannot_ask() -> bool:
+        raise TmuxError("tmux display-message timed out after 30 s")
+
+    monkeypatch.setattr(old, "server_absent", cannot_ask)
+    report = fleet_service.reap(project, server_down=True)
+
+    assert report.lost == [] and report.ended == [], "no evidence, nothing marked"
+    assert _row(stale.id).ended_at is None
+
+
+def test_shutdown_reports_a_store_damaged_mid_run(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 7 of #203 (on round 4's sweep). The store opens behind ``--yes`` —
+    the late scan and the pause pass — sit behind handlers whose job is to
+    turn a store failure into a report field. Damaged AFTER the rows are
+    stopped (the file overwritten mid-run), both fields are set and the report
+    is returned, never a traceback."""
+    coder = _coder(project)
+    real_kill = fleet_service._kill_fleet_sessions
+
+    def kill_then_damage(*args: object, **kwargs: object) -> None:
+        real_kill(*args, **kwargs)  # type: ignore[arg-type]
+        paths.db_path().write_bytes(b"this is not a sqlite database, and open_store must say so")
+
+    monkeypatch.setattr(fleet_service, "_kill_fleet_sessions", kill_then_damage)
+    report = fleet_service.shutdown(project, force=True)
+
+    assert [a.id for a in report.stopped] == [coder.id]
+    assert report.late_scan_failed and "StoreUnopenable" in report.late_scan_failed
+    assert report.pause_scan_failed and "StoreUnopenable" in report.pause_scan_failed
+    assert report.incomplete_projects == [project.id], "an unscanned project is not confirmed down"
 
 
 def test_a_scoped_shutdown_takes_down_a_leftover_session_on_todays_socket(

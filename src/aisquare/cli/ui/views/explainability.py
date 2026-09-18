@@ -362,6 +362,16 @@ class ExplainabilityView(VerticalScroll):
             self.notify(message, severity="warning", timeout=8, markup=False)
             return
 
+        # The writer's own question about the key variable, asked FIRST — it is
+        # pure and needs no config. The `reads_from` guard below compares the
+        # variable with the default, so a `$EXPLAINABILITY_API_KEY` paste or a
+        # `MY VAR` used to be diagnosed as "export $$EXPLAINABILITY_API_KEY",
+        # a sentence nobody can act on, while the exact problem
+        # (`key_env_problem`) never ran (round 7 of #203).
+        if key_env and (problem := explainability_service.key_env_problem(key_env)):
+            self.notify(problem, severity="warning", timeout=8, markup=False)
+            return
+
         # The field asks for a NAME, and a brace is refused with the reason
         # rather than repaired: the first cut stripped at the first brace and
         # stored what preceded it, so the tab kept a template the operator never

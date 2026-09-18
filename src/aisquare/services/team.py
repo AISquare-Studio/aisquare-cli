@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from collections.abc import Mapping
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -64,6 +65,12 @@ MANAGER_ROLE = "manager"
 """The one role whose ``Stop`` hook may keep it going (docs/plans/fleet-tui.md §7.3)."""
 
 CLEAR_REASON = "clear"
+HANDOVER_STATE = "switching"
+"""The ``team_session.state`` ``fleet switch`` sets before it ``/exit``s an agent whose
+SAME session id is about to resume under another account (#146): its ``SessionEnd``
+then parks the claims for that id, as a ``/clear`` does, instead of releasing them
+(review of #205, finding 6). Transient — the resumed session's start hook writes
+``working`` over it — and unknown to ``fleet._derive``, which falls back to the pane."""
 """Claude Code's ``SessionEnd`` reason for ``/clear``: the session id ends, the process
 does not — and the ``SessionStart`` of the id that follows comes AFTER this end
 (measured on 2.1.272). See rule 2 in the fleet-row section below."""
@@ -421,19 +428,20 @@ def session_account(transcript_path: str | None) -> str | None:
     return os.environ.get("CLAUDE_CONFIG_DIR", "").strip() or None
 
 
-def account_label(account: str | None) -> str | None:
+def account_label(account: str | None, labels: Mapping[int, str] | None = None) -> str | None:
     """The short display form of an account.
 
-    ``account N`` for a slot the CLI owns, the directory name otherwise. A
-    managed slot's directory is named by its number alone
-    (``…/claude-accounts/2``), and a bare ``[2]`` beside a session row would
-    read as a count.
+    The slot's label from ``labels`` (``services.claude_accounts.slot_labels``:
+    the alias when one is set) when the caller has them, else ``account N`` for
+    a slot the CLI owns, the directory name otherwise. A managed slot's
+    directory is named by its number alone (``…/claude-accounts/2``), and a
+    bare ``[2]`` beside a session row would read as a count.
     """
     if not account:
         return None
     slot = claude_accounts_core.managed_slot(account)
     if slot is not None:
-        return f"account {slot}"
+        return (labels or {}).get(slot) or f"account {slot}"
     return Path(account).name
 
 
@@ -1694,11 +1702,8 @@ def _limited_text(
     else:
         head = f"{label} hit its {notice.window} limit"
         if notice.resets_at is not None:
-            local = notice.resets_at.astimezone()
-            distance = notice.resets_at - _now()
-            far = distance > timedelta(hours=24)
-            stamp = local.strftime("%a %H:%M") if far else local.strftime("%H:%M")
-            head += f" · resets {stamp}"
+            # The one formatter (#152; review of #205, finding 9).
+            head += f" · resets {claude_accounts_core.format_reset(notice.resets_at, now=_now())}"
     if fleet:
         head += (
             f" — `aisquare fleet switch {label}` moves it to the account with the most headroom"
@@ -1741,6 +1746,12 @@ def hook_session_end(session_id: str, cwd: Path | None, *, reason: str | None = 
         # presence view. Released claims are real work signals and do go out;
         # a clear releases nothing, so it says nothing.
         if reason == CLEAR_REASON and _clearing_its_own_pane(store, session):
+            store.end_session(session.id, release_claims=False)
+        elif session.state == HANDOVER_STATE and _handing_over_a_fleet_row(store, session):
+            # A hand-over (``fleet switch``): the SAME id resumes on another
+            # account moments from now, so its claims wait for it exactly as a
+            # /clear parks them. ``switch`` releases them itself should the
+            # replacement never start (review of #205, finding 6).
             store.end_session(session.id, release_claims=False)
         else:
             _release_session(store, session, why="session ended")
@@ -2188,6 +2199,15 @@ def _adopt(store: ContextStore, agent: FleetAgent, session_id: str) -> bool:
         return False
     lease = _now() + timedelta(minutes=orchestrator.lease_minutes())
     return store.adopt_fleet_agent_session(agent.id, agent.session_id, session_id, lease)
+
+
+def _handing_over_a_fleet_row(store: ContextStore, session: TeamSession) -> bool:
+    """Whether ``session`` is a live fleet row's — the premise of parking its claims for a
+    resume. Fail-open towards RELEASING, like :func:`_clearing_its_own_pane`."""
+    try:
+        return _fleet_row_for(store, session.id, session.project_id) is not None
+    except Exception:
+        return False
 
 
 def _clearing_its_own_pane(store: ContextStore, session: TeamSession) -> bool:

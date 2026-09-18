@@ -276,14 +276,16 @@ def _read_usage(
 ) -> dict[int, tuple[ClaudeUsage, UsageTrend | None]]:
     """Off the UI thread: each account's reading, RECORDED (#146), and the trend it implies.
 
-    ``sample_usage`` rather than ``usage`` so the page's minute tick is what
-    builds the history the trend line reads; ``usage_trend`` reads that history
-    back. Both fail open — a store that cannot be written costs the trend, and
-    the reading still paints.
+    ``read_usage`` (recording, concurrent — review of #205, finding 11) rather
+    than ``usage`` so the page's minute tick is what builds the history the
+    trend line reads, at the cost of one round trip for every account rather
+    than one each; ``usage_trend`` reads that history back. Both fail open — a
+    store that cannot be written costs the trend, and the reading still paints.
     """
+    readings = accounts_service.read_usage(accounts)  # concurrent: one round trip for the page
     fetched: dict[int, tuple[ClaudeUsage, UsageTrend | None]] = {}
     for account in accounts:
-        usage = accounts_service.sample_usage(account)
+        usage = readings.get(account.slot) or ClaudeUsage(available=False, reason="no reading")
         fetched[account.slot] = (usage, accounts_service.usage_trend(account.slot, usage))
     return fetched
 

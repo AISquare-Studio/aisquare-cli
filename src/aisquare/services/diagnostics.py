@@ -782,8 +782,8 @@ def _claude_account_limit_checks() -> list[DoctorCheck]:
     parts = []
     for session, project_name in limited:
         when = (
-            f"resets {session.limit_resets_at.astimezone():%H:%M}"
-            if session.limit_resets_at is not None and session.limit_resets_at > now
+            f"resets {claude_accounts_core.format_reset(session.limit_resets_at, now=now)}"
+            if session.limit_resets_at is not None
             else "reset time unknown"
         )
         parts.append(f"{labels[session.id]} ({project_name}, {when})")
@@ -814,7 +814,7 @@ def _claude_account_headroom_check() -> DoctorCheck | None:
     if not accounts:
         return None
     settings = claude_accounts_service.accounts_settings()
-    readings = {account.slot: claude_accounts_service.sample_usage(account) for account in accounts}
+    readings = claude_accounts_service.read_usage(accounts)
     measured = [
         (account, reading.session_percent)
         for account in accounts

@@ -947,13 +947,14 @@ after it, and a session that continues turns ``working`` on its next prompt)."""
 
 
 def _limit_detail(until: datetime | None, now: datetime) -> str:
-    """``limit resets 12:30`` / ``limit resets Mon 00:00`` / ``usage limit``."""
+    """``limit resets in 2h 10m (12:30)`` / ``limit resets in 2d (Mon 00:00)`` / ``usage limit``.
+
+    Through ``core.claude_accounts.format_reset``, the one formatter every
+    surface that shows a reset goes through (#152; review of #205, finding 9).
+    """
     if until is None:
         return "usage limit"
-    local = until.astimezone()
-    far = until - now > timedelta(hours=24)
-    stamp = local.strftime("%a %H:%M") if far else local.strftime("%H:%M")
-    return f"limit resets {stamp}"
+    return f"limit resets {claude_accounts_core.format_reset(until, now=now)}"
 
 
 def _status(
@@ -1536,8 +1537,18 @@ def stop(
     force: bool = False,
     grace: float = 5.0,
     release_claims: bool = True,
+    handover: bool = False,
 ) -> FleetAgent:
     """``/exit`` the agent, wait ``grace`` seconds, then kill its window.
+
+    ``handover`` is :func:`switch`'s: the same session is about to RESUME under
+    another account, so the ended row's claims are not released (the session
+    was marked ``team.HANDOVER_STATE`` first, and its own ``SessionEnd`` parks
+    them the way a ``/clear`` does), no ``agent_exited`` goes out and the
+    manager is not nudged — ``switch`` closes the loop with ``switched``, a
+    wake kind. Released and announced here, a looper took the resumed agent's
+    task in the gap and the manager respawned an agent that was on its way
+    back (review of #205, finding 6).
 
     The agent's own ``SessionEnd`` hook releases its claims when it exits
     cleanly; ``force`` skips the ``/exit`` and goes straight to the kill — and
@@ -1667,12 +1678,14 @@ def stop(
         # (review of #135, second round, finding 5). ``fleet shutdown`` passes
         # ``release_claims=False``: the release is its report's to make and to
         # count, and it makes it through the same helper (``_release_session``).
-        if release_claims:
+        if release_claims and not handover:
             _team().release_agent_claims(store, ended, why="agent stopped")
-        _emit_exit(store, ended)
+        if not handover:
+            _emit_exit(store, ended)
     # Outside the store session, as ``reap`` does: the nudge types into a pane
     # and must not hold the write lock the woken manager's own hooks will want.
-    nudge_manager(ended.project_id, reason=f"{ended.label} exited")
+    if not handover:
+        nudge_manager(ended.project_id, reason=f"{ended.label} exited")
     return ended
 
 
@@ -2515,14 +2528,23 @@ def switch(
     switches by headroom, because that is the whole point of switching).
 
     The agent is stopped the way ``fleet stop`` stops it (``/exit``, a grace,
-    then the kill — its ``SessionEnd`` hook releases its claims) and started
-    again under the same label, role, task and worktree on the target account.
-    When its transcript is on disk and ``fresh`` is not asked, the replacement
-    RESUMES it: ``claude --resume <transcript path>`` keeps the session id, so
-    the board row, its cursor and its notes carry on and the agent picks up its
-    own context; otherwise it starts fresh with a hand-off prompt built from
-    the board — the task, its detail, the session's last notes — and is told
-    to read the board and the working tree before continuing.
+    then the kill) and started again under the same label, role, task and
+    worktree on the target account. When its transcript is on disk and
+    ``fresh`` is not asked, the replacement RESUMES it: ``claude --resume
+    <transcript path>`` keeps the session id, so the board row, its cursor, its
+    notes AND ITS CLAIMS carry on — the session is marked ``HANDOVER_STATE``
+    before the ``/exit``, so its own ``SessionEnd`` parks the claims for the
+    same id instead of releasing them, and ``stop`` announces no exit — and the
+    resumed agent is told, in one typed line, to continue (``claude --resume``
+    opens the conversation at an idle prompt; review of #205, findings 5 and 6).
+    Otherwise it starts fresh with a hand-off prompt built from the board — the
+    task, its detail, the session's last notes — and is told to read the board
+    and the working tree before continuing.
+
+    Run from the automatic path it is a DETACHED worker, not the limited
+    agent's hook: inline, the ``/exit`` queued behind the still-running hook
+    and the window kill took the hook — and this function — down before
+    ``spawn`` ran (finding 1; ``services.hooks._detach``).
 
     What is deliberately NOT promised: that Claude Code resumes a transcript
     written under one ``CLAUDE_CONFIG_DIR`` from another. The path form is
@@ -2578,20 +2600,35 @@ def switch(
         notes.append(
             "no transcript on disk to resume — the replacement starts fresh with a hand-off prompt"
         )
-    prompt = None if resume is not None else _handoff_prompt(agent, task, recent, reason)
-
-    stopped = stop(project, label)
-    receipt = spawn(
-        project,
-        agent.role,
-        label=label,
-        task_id=agent.task_id,
-        worktree=agent.worktree,
-        prompt=prompt,
-        spawned_by=spawned_by,
-        account=str(target.slot),
-        resume=resume,
-    )
+    if resume is not None:
+        prompt = _resume_prompt(agent, reason)
+    else:
+        prompt = _handoff_prompt(agent, task, recent, reason)
+    handing_over = resume is not None and session is not None
+    if handing_over and session is not None:
+        _mark_handing_over(session)
+    try:
+        stopped = stop(project, label, handover=handing_over)
+    except Exception:
+        if handing_over and session is not None:
+            _unmark_handing_over(session)  # nothing ended: the session keeps its state
+        raise
+    try:
+        receipt = spawn(
+            project,
+            agent.role,
+            label=label,
+            task_id=agent.task_id,
+            worktree=agent.worktree,
+            prompt=prompt,
+            spawned_by=spawned_by,
+            account=str(target.slot),
+            resume=resume,
+        )
+    except Exception:
+        if handing_over:
+            _abandon_handover(stopped)  # no replacement is coming for the parked claims
+        raise
     notes.extend(receipt.notes)
     from_name = f"slot {current}" if current is not None else "its shell's claude"
     how = "resumed its session" if resume is not None else "started fresh with a hand-off prompt"
@@ -2628,6 +2665,41 @@ def _account_slot_of(agent: FleetAgent, session: TeamSession | None) -> int | No
     if session is None or not session.account:
         return None
     return claude_accounts_service.slot_of(session.account)
+
+
+def _mark_handing_over(session: TeamSession) -> None:
+    """The session's own ``SessionEnd`` parks its claims for the id that resumes (rule 2)."""
+    with store_session() as store:
+        store.touch_session(session.id, state=_team().HANDOVER_STATE)
+
+
+def _unmark_handing_over(session: TeamSession) -> None:
+    with contextlib.suppress(Exception), store_session() as store:
+        store.touch_session(session.id, state=session.state)
+
+
+def _abandon_handover(stopped: FleetAgent) -> None:
+    """The replacement never started: release what was parked and record the exit withheld."""
+    with contextlib.suppress(Exception), store_session() as store:
+        _team().release_agent_claims(store, stopped, why="hand-over failed")
+        _emit_exit(store, stopped)
+    nudge_manager(stopped.project_id, reason=f"{stopped.label} exited")
+
+
+def _resume_prompt(agent: FleetAgent, reason: str | None) -> str:
+    """The first message of a RESUMED replacement — one line, so it is typed even past the wait.
+
+    ``claude --resume`` opens the old conversation at an idle prompt and waits
+    for input; without a line the "moved" agent never continued (review of
+    #205, finding 5). One line on purpose: :func:`_type_prompt` types a
+    single-line prompt past its timeout and refuses a multi-line one.
+    """
+    why = reason or "a usage limit"
+    return (
+        f"You are {agent.label}, moved to another Claude account after {why} and resumed "
+        "mid-task: re-read `aisquare board` and `git status`, then continue exactly where "
+        "you left off without redoing work that is already committed."
+    )
 
 
 _HANDOFF_NOTES = 5

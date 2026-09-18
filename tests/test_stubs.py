@@ -61,6 +61,7 @@ IMPLEMENTED: set[tuple[str, ...]] = {
     ("hook", "session-start"),
     ("hook", "user-prompt-submit"),
     ("hook", "stop-failure"),
+    ("hook", "hand-over"),
     ("hook", "session-end"),
     ("hook", "stop"),
     ("hook", "notification"),

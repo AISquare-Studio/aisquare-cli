@@ -417,10 +417,17 @@ def subscription_label(creds: ClaudeCredentials | None) -> str | None:
 
 # --- what a usage-limit error says (#146) ----------------------------------------------------
 
+# The time is matched by a BOUNDED pattern (an optional weekday, a clock time,
+# am/pm — the shape ``_RESET_TIME`` reads) and nothing anchors the end: the
+# rendered line can carry a period, a second sentence or more lines after the
+# zone ("… (America/Toronto).\nUpgrade for more usage."), and an anchor made the
+# whole match fail, which recorded the limit with no window and no reset
+# (review of #205, finding 7).
 _LIMIT_MESSAGE = re.compile(
-    r"hit your (?P<window>session|weekly|Opus|Sonnet|Fable|[A-Za-z]+) limit"
-    r"(?:\s*·\s*resets\s+(?P<when>[^()\n]+?))?"
-    r"(?:\s*\((?P<zone>[A-Za-z_]+(?:/[A-Za-z_+\-0-9]+)*)\))?\s*$",
+    r"hit your (?P<window>[A-Za-z]+) limit"
+    r"(?:\s*·\s*resets\s+(?P<when>(?:(?:mon|tue|wed|thu|fri|sat|sun)[a-z]*\s+)?"
+    r"\d{1,2}(?::\d{2})?\s*(?:am|pm)))?"
+    r"(?:\s*\((?P<zone>[A-Za-z_]+(?:/[A-Za-z_+\-0-9]+)*)\))?",
     re.IGNORECASE,
 )
 _RESET_TIME = re.compile(
@@ -497,6 +504,56 @@ def _resolve_reset(when: str, zone_name: str | None, now: datetime) -> datetime 
     elif candidate < local_now:
         candidate += timedelta(days=1)
     return candidate.astimezone(UTC)
+
+
+def format_reset(when: datetime | None, *, now: datetime | None = None) -> str:
+    """When a rate-limit window lifts, as a distance AND a clock time: ``in 3h 10m (18:00)``.
+
+    The ONE formatter for every surface that shows a reset — ``accounts usage``
+    / ``list --usage``, the Accounts page, the board's ``limited`` line, the
+    agent's ``limit resets …`` detail and doctor's parked-agents line — because
+    copies drifted (#152): two printed a bare ``HH:MM``, which for the seven-day
+    window can be six days away and read as tonight. It lives in core so the
+    services can call it too (review of #205, finding 9).
+
+    The rules, each chosen so nobody has to do calendar arithmetic:
+
+    - under an hour: ``in 12m`` — the clock time adds nothing;
+    - later the same LOCAL day: ``in 3h 10m (18:00)``;
+    - another day: ``in 2d 4h (Tue 02:00)`` — the weekday is what tells a
+      weekly reset from tonight's, and it is never a bare ``HH:MM`` again;
+    - already past (the endpoint's reading is a little stale): ``now``.
+
+    ``now`` is the clock to measure against; production reads the wall clock,
+    tests pass one so the midnight boundary can be pinned. Returns ``""`` for
+    ``None`` so callers can append it unconditionally.
+    """
+    if when is None:
+        return ""
+    moment = now if now is not None else datetime.now(tz=UTC)
+    remaining = when - moment
+    if remaining <= timedelta(0):
+        return "now"
+    total_minutes = int(remaining.total_seconds() // 60)
+    days, rest = divmod(total_minutes, 24 * 60)
+    hours, minutes = divmod(rest, 60)
+    # The clock time is shown to the nearest MINUTE. Measured against the live
+    # endpoint (2026-09-13): the same window's ``resets_at`` came back as
+    # 08:59:59.86, 09:00:00.26 and 08:59:59.62 on three calls seconds apart —
+    # it jitters across the second boundary — so a truncated ``%H:%M`` flickered
+    # between 04:59 and 05:00 from one refresh to the next. Rounding says what
+    # a person means by the time of a reset, and the distance still moves.
+    local_when = (when.astimezone() + timedelta(seconds=30)).replace(second=0, microsecond=0)
+    local_now = moment.astimezone(local_when.tzinfo)
+    if remaining < timedelta(hours=1):
+        return f"in {max(minutes, 1)}m"
+    if days == 0:
+        distance = f"{hours}h" if minutes == 0 else f"{hours}h {minutes:02d}m"
+    else:
+        distance = f"{days}d" if hours == 0 else f"{days}d {hours}h"
+    if local_when.date() == local_now.date():
+        return f"in {distance} ({local_when:%H:%M})"
+    return f"in {distance} ({local_when:%a %H:%M})"
 
 
 # --- launching ------------------------------------------------------------------------

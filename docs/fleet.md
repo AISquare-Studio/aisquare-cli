@@ -495,12 +495,14 @@ c1/c2/c3 shell aliases people write by hand, owned by the tool instead.
   stops the agent as `fleet stop` would and starts it again under the same
   label, task and worktree on the account with the most headroom (`--to` names
   one), **resuming its session** from its transcript (`claude --resume
-  <path>`) when that file is on disk — `--fresh` starts new with a hand-off
-  prompt built from the board instead. With `on_limit = "switch"` (*on a usage
-  limit* on the Settings tab) the fleet does this by itself when the limit
-  lifts more than `wait_if_reset_within_minutes` away; a hand-over that finds
-  no headroom leaves the agent parked, its own wait intact, and says so on the
-  board. `doctor` lists parked agents; `doctor --live` warns when every account
+  <path>`) when that file is on disk — the resumed agent keeps its task claims
+  and is told in one line to continue, and no exit is announced for it —
+  `--fresh` starts new with a hand-off prompt built from the board instead.
+  With `on_limit = "switch"` (*on a usage limit* on the Settings tab) the fleet
+  does this by itself when the limit lifts more than
+  `wait_if_reset_within_minutes` away, in a worker detached from the agent's
+  own hook; a hand-over that finds no headroom leaves the agent parked, its
+  own wait intact, and says so on the board. `doctor` lists parked agents; `doctor --live` warns when every account
   is over the line.
 
 Nothing on this page writes into Claude Code's own files: the email and plan

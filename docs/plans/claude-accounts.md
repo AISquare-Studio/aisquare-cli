@@ -304,9 +304,14 @@ for the long ones.
   tree before continuing. A `switched` event closes the loop.
 - The automatic path lives in the hook (`_hand_over_if_configured`): a limited
   FLEET agent, `on_limit = "switch"`, reset farther than the wait window →
-  `switch`, which starts and records the replacement before it kills the
-  window the hook is a child of. A refusal (no headroom) is a board note and
-  the agent stays parked with Claude Code's own wait intact.
+  `switch` — performed by a worker in its own session (`aisquare hook
+  hand-over`, started detached), because the hook is a child of the very pane
+  `switch` kills and, run inline, went down with it before the replacement was
+  spawned (review of #205). A refusal (no headroom) is a board note and the
+  agent stays parked with Claude Code's own wait intact. A resumed agent keeps
+  its claims — the session is marked `switching` before the `/exit`, so its
+  `SessionEnd` parks them for the same id as a `/clear` does — and is told in
+  one line to continue; no `agent_exited` goes out for a hand-over.
 - `_derive` trusts a `limited` row until its reset (+10 min) rather than the
   30-minute stale window, because a parked agent fires no hook; `⏳ limited`
   chips in the sidebar, project view and `fleet ls`; `ALIVE_STATES` includes it.

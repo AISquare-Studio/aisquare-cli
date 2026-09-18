@@ -20,12 +20,14 @@ default agent does.
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from aisquare.core import insights
+from aisquare.core import insights, selfcli
 from aisquare.core import snapshot as snapshot_core
+from aisquare.core import spawn as spawn_core
 from aisquare.core.injection import build_block
 from aisquare.core.store import store_session
 from aisquare.core.workspace import active_project
@@ -209,12 +211,12 @@ def turn_failed(
     ``wait_if_reset_within_minutes`` — a reset ten minutes away is cheaper than a
     cold start elsewhere, and Claude Code's own wait-and-continue covers it.
 
-    The hand-over runs INSIDE the limited agent's hook, i.e. as a child of the
-    process it is about to replace: ``switch`` starts the replacement and records
-    it before it kills the old window, so this process dying with that window
-    costs nothing that has not already happened. A hand-over that cannot find
-    headroom leaves the agent limited, its own wait intact, and says so on the
-    board — which is the ``wait`` behaviour, and correct.
+    The hand-over is DECIDED here and PERFORMED elsewhere: this hook is a child
+    of the very pane ``switch`` is about to kill, so the work goes to a worker
+    in its own session (:func:`_detach` → ``aisquare hook hand-over`` →
+    :func:`hand_over`), and the hook returns at once. A hand-over that cannot
+    find headroom leaves the agent limited, its own wait intact, and says so on
+    the board — which is the ``wait`` behaviour, and correct.
     """
     if session_id is None:
         return
@@ -247,15 +249,68 @@ def _hand_over_if_configured(failure: team_service.TurnFailure) -> None:
                 session_id=session.id,
             )
             return
+    window = failure.notice.window if failure.notice is not None else "usage"
+    argv = selfcli.argv_for(
+        ["--quiet", "hook", "hand-over", session.id, "--reason", f"{window} limit"]
+    )
+    try:
+        _detach(argv)
+    except OSError as exc:
+        team_service.hook_note(
+            session.project_id,
+            f"{agent.label}: not switched — could not start the hand-over worker ({exc})",
+            session_id=session.id,
+        )
+
+
+def _detach(argv: list[str]) -> None:
+    """Start ``argv`` in its own session, no terminal, without this agent's own identity.
+
+    Run inline, the hand-over died with its caller: the hook is a child of the
+    pane, ``switch``'s ``/exit`` queued behind the still-running hook, the
+    grace elapsed, and the window kill took the hook down before ``spawn`` ever
+    ran — a dead agent, a live row on a gone pane, no replacement, no board
+    line (review of #205, finding 1). ``start_new_session`` puts the worker
+    outside the pane's session, so tmux's kill and its SIGHUP do not reach it
+    (the idiom ``distill.spawn_drain`` uses). The tracing identity and the
+    fleet row's name are dropped from its environment: the worker is neither
+    this agent nor a session of its own. Raises ``OSError`` when the worker
+    cannot be started, for the caller to put on the board.
+    """
+    env = spawn_core.untraced_env()
+    env.pop("AISQUARE_FLEET_AGENT", None)
+    subprocess.Popen(
+        argv,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+        env=env,
+    )
+
+
+def hand_over(session_id: str, *, reason: str | None = None) -> None:
+    """Move the limited fleet agent of ``session_id`` — the detached half of the hand-over.
+
+    Runs in the worker :func:`_detach` started, after the hook that decided it
+    has returned. Silent for a session that is not a fleet agent's (the
+    operator's to move) or is gone. A hand-over that finds no headroom leaves
+    the agent parked, Claude Code's own wait intact, and says so on the board.
+    """
+    with store_session() as store:
+        session = store.get_session(session_id)
+        if session is None:
+            return
+        agent = store.fleet_agent_for_session(session.project_id, session.id)
+        project = store.get_project(session.project_id)
+    if agent is None or project is None:
+        return
     # Lazy: services.fleet imports this module's neighbours; a cycle at import
-    # time would cost every hook, and this branch runs on the rare turn.
+    # time would cost every hook, and this runs in the worker alone.
     from aisquare.services import fleet as fleet_service
 
-    window = failure.notice.window if failure.notice is not None else "usage"
     try:
-        fleet_service.switch(
-            project, agent.label, reason=f"{window} limit", spawned_by="usage-limit"
-        )
+        fleet_service.switch(project, agent.label, reason=reason, spawned_by="usage-limit")
     except fleet_service.FleetError as exc:
         team_service.hook_note(
             session.project_id, f"{agent.label}: not switched — {exc}", session_id=session.id

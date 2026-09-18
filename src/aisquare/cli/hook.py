@@ -10,7 +10,7 @@ import json
 import sqlite3
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
 import typer
 
@@ -227,6 +227,27 @@ def stop_failure() -> None:
         )
     except Exception as exc:  # never disrupt the agent
         _cost_of_failing_open("stop-failure", exc)
+        return
+
+
+@app.command("hand-over", hidden=True)
+def hand_over(
+    session_id: Annotated[str, typer.Argument(help="The limited session's id.")],
+    reason: Annotated[
+        str | None, typer.Option("--reason", help="Why (recorded on the board).")
+    ] = None,
+) -> None:
+    """The detached half of an automatic hand-over (no output; started by ``stop-failure``).
+
+    Not a Claude Code hook: ``stop-failure`` starts this in a worker of its own
+    session, because the hook itself is a child of the pane ``fleet switch``
+    kills (#146; review of #205, finding 1). Silent like every hook; the
+    board carries a refusal (``not switched — …``).
+    """
+    try:
+        hooks_service.hand_over(session_id, reason=reason)
+    except Exception as exc:  # the board carries the refusal; nothing else to disrupt
+        _cost_of_failing_open("hand-over", exc, cost="the limited agent was not moved")
         return
 
 

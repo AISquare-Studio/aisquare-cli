@@ -268,8 +268,20 @@ def resolve(ref: str | int) -> ClaudeAccount:
     ``@``, and an alias starts with a letter and has no ``@``
     (``core.normalise_alias``). Lookups are case-insensitive.
     """
-    text = str(ref).strip()
     accounts, note = _read_arranged()
+    return _resolve_in(accounts, ref, note=note)
+
+
+def _resolve_in(
+    accounts: Sequence[ClaudeAccount], ref: str | int, *, note: str | None = None
+) -> ClaudeAccount:
+    """:func:`resolve` against an arranged list already in hand.
+
+    ``choose`` reads the registry ONCE and resolves the flag and the binding
+    against that read; before, every rung reopened the store and re-ran the
+    reconcile upsert, two or three times per launch (review of #205, finding 12).
+    """
+    text = str(ref).strip()
     if text.isdigit():
         account = next((a for a in accounts if a.slot == int(text)), None)
         if account is None:
@@ -291,6 +303,20 @@ def resolve(ref: str | int) -> ClaudeAccount:
         f"no Claude account is called {text!r} — not a slot, an alias or a signed-in email"
         f"{detail}; see: aisquare accounts"
     )
+
+
+def slot_labels() -> dict[int, str]:
+    """Slot → the label the Accounts page and the launch line use (the alias when one is set).
+
+    For the surfaces that know an agent only by its slot — the agent header,
+    ``fleet ls`` — so an aliased account reads ``work`` everywhere rather than
+    ``account 2`` on two of them (review of #205, finding 10). Fails open to
+    ``{}``: a label is a courtesy, and every caller falls back to ``account N``.
+    """
+    try:
+        return {account.slot: core.label(account) for account in list_accounts()}
+    except Exception:
+        return {}
 
 
 def slot_of(config_dir: str | Path) -> int | None:
@@ -359,27 +385,38 @@ def choose(
     :func:`headroom_choice`, the account with room in its five-hour window,
     ``exclude`` naming the slot a hand-over is leaving. When no account's usage
     can be read, the machine default decides exactly as before.
+
+    ``exclude`` is honoured on EVERY rung: a binding or a project default that
+    names the account being left is skipped with a note and the ladder goes on,
+    so a hand-over on a machine that arranged its accounts does not re-pick the
+    account it is leaving (review of #205, finding 2). The registry and the
+    ``[accounts]`` settings are read once per call (finding 12).
     """
+    skip = set(exclude)
+    accounts, registry_note = _read_arranged()
     if explicit is not None:
-        return AccountChoice(resolve(explicit), "flag")
+        return AccountChoice(_resolve_in(accounts, explicit, note=registry_note), "flag")
     notes: list[str] = []
     bound, note = _role_binding_ref(role)
     if note is not None:
         notes.append(note)
     if bound:
         try:
-            account = resolve(bound)
+            account = _resolve_in(accounts, bound, note=registry_note)
         except NoSuchAccount as exc:
             raise NoSuchAccount(
                 f"the role binding for {role!r} names account {bound!r}: {exc}"
             ) from exc
         if account.disabled:
             notes.append(f"{core.label(account)} (bound to {role}) is disabled — skipped")
+        elif account.slot in skip:
+            notes.append(
+                f"{core.label(account)} (bound to {role}) is the account being left — skipped"
+            )
         else:
             return AccountChoice(account, "role binding", notes)
-    accounts, note = _read_arranged()
-    if note is not None:
-        notes.append(note)
+    if registry_note is not None:
+        notes.append(registry_note)
         return AccountChoice(None, None, notes)
     if project is not None:
         slot = _project_default_slot(project)
@@ -392,17 +429,21 @@ def choose(
                 )
             if preferred.disabled:
                 notes.append(f"{core.label(preferred)} (project default) is disabled — skipped")
+            elif preferred.slot in skip:
+                notes.append(
+                    f"{core.label(preferred)} (project default) is the account being left — skipped"
+                )
             else:
                 return AccountChoice(preferred, "project default", notes)
-    by_headroom = spread if spread is not None else accounts_settings().pick == "headroom"
+    settings = accounts_settings()
+    by_headroom = spread if spread is not None else settings.pick == "headroom"
     if by_headroom:
         picked, more = headroom_choice(
-            accounts, switch_at=accounts_settings().switch_at, exclude=exclude, fetch=fetch
+            accounts, switch_at=settings.switch_at, exclude=exclude, fetch=fetch
         )
         notes.extend(more)
         if picked is not None:
             return AccountChoice(picked, "headroom", notes)
-    skip = set(exclude)
     default = next((a for a in accounts if a.is_default), None)
     if default is not None and default.slot not in skip:
         if default.disabled:
@@ -653,7 +694,22 @@ TREND_WINDOW = timedelta(minutes=60)
 TREND_MINIMUM = timedelta(minutes=2)
 """Two readings closer than this say nothing about a rate — noise, not a trend."""
 HEADROOM_WORKERS = 4
-"""How many usage fetches run at once in a headroom pick (one per account, capped)."""
+"""How many usage fetches run at once when several accounts are read (one per account, capped)."""
+
+RESET_JITTER = timedelta(seconds=60)
+"""How far apart two ``resets_at`` readings may be and still name the SAME window.
+
+Measured on the live endpoint (2026-09-13): one window's reset came back as
+08:59:59.86, 09:00:00.26 and 08:59:59.62 on three calls seconds apart. Compared
+for equality, every reading was a window of its own and no trend was ever
+computed in production (review of #205, finding 3). A new window is hours away,
+never seconds, so a minute tells them apart safely."""
+
+
+def _same_window(a: datetime | None, b: datetime | None) -> bool:
+    if a is None or b is None:
+        return a is None and b is None
+    return abs(a - b) <= RESET_JITTER
 
 
 def accounts_settings() -> AccountsSettings:
@@ -694,7 +750,8 @@ def usage_trend(
     """Where the five-hour window is heading, from this window's readings.
 
     Rates the latest reading against the OLDEST reading of the same window
-    (same ``resets_at``) within :data:`TREND_WINDOW`. Readings from before the
+    (a ``resets_at`` within :data:`RESET_JITTER` of the latest one's) within
+    :data:`TREND_WINDOW`. Readings from before the
     window reset are not a trend — the percentage fell to zero at the reset —
     so they are excluded by the reset time rather than by age. ``None`` when
     there is no usable reading at all; a trend with ``per_hour=None`` when
@@ -712,7 +769,7 @@ def usage_trend(
         s
         for s in samples
         if s.session_percent is not None
-        and s.session_resets_at == latest.session_resets_at
+        and _same_window(s.session_resets_at, latest.session_resets_at)
         and s.fetched_at < moment
     ]
     trend = UsageTrend(percent=latest.session_percent, resets_at=latest.session_resets_at)
@@ -753,6 +810,34 @@ def describe_trend(trend: UsageTrend | None) -> str:
     return f"≈ {minutes / 60:.1f} h to the limit"
 
 
+def read_usage(
+    accounts: Sequence[ClaudeAccount], *, now: datetime | None = None, fetch: Fetch | None = None
+) -> dict[int, ClaudeUsage]:
+    """Every account's reading, RECORDED, read concurrently: one round trip, not one per account.
+
+    The one reader behind a headroom pick, the Accounts page's minute tick and
+    ``doctor --live`` (review of #205, finding 11): four accounts and a slow
+    endpoint cost one ``USAGE_TIMEOUT_SECONDS``, not four. A reader that raises
+    costs its own slot a reading, never the others'.
+    """
+    if not accounts:
+        return {}
+    readings: dict[int, ClaudeUsage] = {}
+    with ThreadPoolExecutor(max_workers=min(HEADROOM_WORKERS, len(accounts))) as pool:
+        futures = {
+            pool.submit(sample_usage, account, now=now, fetch=fetch): account.slot
+            for account in accounts
+        }
+        for future, slot in futures.items():
+            try:
+                readings[slot] = future.result()
+            except Exception as exc:  # one account's failure must not cost the rest
+                readings[slot] = ClaudeUsage(
+                    available=False, reason=f"usage read failed ({type(exc).__name__})"
+                )
+    return readings
+
+
 def headroom_choice(
     accounts: Sequence[ClaudeAccount],
     *,
@@ -765,7 +850,7 @@ def headroom_choice(
 
     Candidates are the enabled, signed-in accounts in priority order, minus
     ``exclude`` (the account a hand-over is leaving). Their usage is read
-    concurrently through :func:`sample_usage`, so a pick costs one round trip,
+    concurrently through :func:`read_usage`, so a pick costs one round trip,
     not one per account. The rule: the FIRST candidate under ``switch_at``
     percent of its five-hour window — priority order is the operator's
     preference, and an account with room keeps it — else the candidate with
@@ -781,19 +866,7 @@ def headroom_choice(
     ]
     if not candidates:
         return None, ["headroom: no enabled, signed-in account to pick from"]
-    readings: dict[int, ClaudeUsage] = {}
-    with ThreadPoolExecutor(max_workers=min(HEADROOM_WORKERS, len(candidates))) as pool:
-        futures = {
-            pool.submit(sample_usage, account, now=now, fetch=fetch): account.slot
-            for account in candidates
-        }
-        for future, slot in futures.items():
-            try:
-                readings[slot] = future.result()
-            except Exception as exc:  # one account's failure must not cost the pick
-                readings[slot] = ClaudeUsage(
-                    available=False, reason=f"usage read failed ({type(exc).__name__})"
-                )
+    readings = read_usage(candidates, now=now, fetch=fetch)
     measured: list[tuple[ClaudeAccount, float]] = []
     notes: list[str] = []
     for account in candidates:
@@ -948,13 +1021,18 @@ def abandon_sign_in(account: ClaudeAccount) -> bool:
 # --- removing -------------------------------------------------------------------------------
 
 
-def remove(account: ClaudeAccount) -> Path:
-    """Forget a managed slot: hooks out of its settings, the directory renamed beside itself."""
+def remove(account: ClaudeAccount, *, notes: list[str] | None = None) -> Path:
+    """Forget a managed slot: hooks out of its settings, the directory renamed beside itself.
+
+    ``notes`` collects what happened to role bindings that named the slot by
+    number (see :func:`_retarget_bindings`), for the caller to show.
+    """
     if not account.managed:
         raise AccountsError(
             "slot 1 is the plain claude of this machine, not an account the CLI added — "
             "sign out of it inside Claude Code (/logout) instead"
         )
+    identity = core.identity(account)  # read before the rename moves the directory
     # The directory is leaving either way; a settings.json we cannot parse is not a stop.
     with contextlib.suppress(Exception):
         agents_service.disconnect(AGENT, account.config_dir)
@@ -963,7 +1041,49 @@ def remove(account: ClaudeAccount) -> Path:
     # directory moves, and a default or alias left behind would be inherited by
     # whatever `add` puts in that slot next.
     forget_arrangement(account.slot)
+    _retarget_bindings(account.slot, identity.email if identity is not None else None, notes)
     return moved
+
+
+def _retarget_bindings(slot: int, email: str | None, notes: list[str] | None) -> None:
+    """Role bindings that named the removed slot by NUMBER now name its email, or nothing.
+
+    A project default is a row of ours and ``forget_arrangement`` drops it; a
+    role binding is a line in ``config.toml`` that stored the reference as
+    typed, and a ``2`` left behind would be inherited by whoever the next
+    ``add`` signs into slot 2 — the very hazard the registry guards the default
+    against (review of #205, finding 8). The email keeps the operator's intent
+    and dangles honestly: ``launch`` refuses with the rung named, ``doctor``
+    flags it, and it resolves again the day that person signs back in. With no
+    email to name (a slot that never signed in), the binding's account is
+    cleared instead. Both go through the one config writer, ``bind_role``.
+    """
+    try:
+        bindings = settings_service.role_account_bindings()
+    except Exception as exc:  # an unreadable config.toml is doctor's to report
+        if notes is not None:
+            notes.append(f"role bindings not checked ({type(exc).__name__}: {exc})")
+        return
+    for role, ref in sorted(bindings.items()):
+        if ref.strip() != str(slot):
+            continue
+        try:
+            if email:
+                settings_service.bind_role(role, account=email)
+                note = (
+                    f"role {role} was bound to slot {slot}; it now names {email} — refused at "
+                    "launch until that account is signed in again, or re-bound"
+                )
+            else:
+                settings_service.bind_role(role, clear_account=True)
+                note = (
+                    f"role {role} was bound to slot {slot}, which had no login — the account "
+                    "binding is cleared"
+                )
+        except Exception as exc:
+            note = f"role {role} still names slot {slot} — config.toml could not be written ({exc})"
+        if notes is not None:
+            notes.append(note)
 
 
 # --- running ------------------------------------------------------------------------------------

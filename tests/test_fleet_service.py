@@ -5319,11 +5319,24 @@ def test_switch_moves_a_limited_agent_to_the_account_with_headroom_and_resumes_i
     transcript = tmp_path / f"{agent.session_id}.jsonl"
     transcript.write_text('{"type":"user"}\n', encoding="utf-8")
     _with_transcript(agent, transcript)
+    now = datetime.now(tz=UTC)
     with store_session() as store:
-        store.mark_limited(agent.session_id or "", datetime.now(tz=UTC) + timedelta(hours=2))
+        store.mark_limited(agent.session_id or "", now + timedelta(hours=2))
+        task, _created = store.upsert_task(
+            TeamTask(
+                id="tsk_keep1",
+                project_id=project.id,
+                key="keep-it",
+                title="Keep it",
+                role="coder",
+                created_at=now,
+                updated_at=now,
+            )
+        )
+    assert team_service.claim_task(task.id, session_ref=agent.session_id or "").status == "doing"
     [before] = fleet_service.list_agents(project)
     assert before.state == "limited" and before.detail is not None
-    assert before.detail.startswith("limit resets ")
+    assert before.detail.startswith("limit resets in ")  # the one formatter: a distance
 
     receipt = fleet_service.switch(project, agent.label, reason="session limit")
 
@@ -5337,15 +5350,109 @@ def test_switch_moves_a_limited_agent_to_the_account_with_headroom_and_resumes_i
     assert receipt.started.pane_id != agent.pane_id
     assert agent.pane_id in tmux.killed  # the old window is gone…
     assert receipt.stopped.ended_at is not None  # …and its row ended
-    assert tmux.typed == [(agent.pane_id, "literal", "/exit"), (agent.pane_id, "key", "Enter")]
+    assert tmux.typed[:2] == [(agent.pane_id, "literal", "/exit"), (agent.pane_id, "key", "Enter")]
+    # The resumed conversation opens at an idle prompt: ONE line tells it to go on
+    # (review of #205, finding 5) — one line, so it is typed even past the wait.
+    new_pane = receipt.started.pane_id
+    pasted = [text for pane, kind, text in tmux.typed if pane == new_pane and kind == "paste"]
+    assert len(pasted) == 1 and "\n" not in pasted[0]
+    assert pasted[0].startswith(
+        f"You are {agent.label}, moved to another Claude account after session limit"
+    )
+    assert "continue exactly where you left off" in pasted[0]
+    assert (new_pane, "key", "Enter") in tmux.typed
     live = fleet_service.list_agents(project)
     assert [status.agent.id for status in live] == [receipt.started.id]
     with store_session() as store:
         kinds = [(e.kind, e.text) for e in store.recent_events(project.id, limit=10)]
+        kept = store.get_task(task.id)
+        marked = store.get_session(agent.session_id or "")
     [switched] = [text for kind, text in kinds if kind == "switched"]
     assert "moved from slot 2 to account 3 (slot 3) (session limit)" in switched
     assert switched.endswith("— resumed its session")
     assert any("headroom:" in note for note in receipt.notes)  # the pick is explained
+    # A hand-over is not an exit (finding 6): the claim stays with the session that resumes,
+    # nothing was released, no `agent_exited` woke the manager to respawn a coming-back agent.
+    assert kept is not None and kept.status == "doing" and kept.claimed_by == agent.session_id
+    assert not any(kind in {"agent_exited", "task_released"} for kind, _ in kinds)
+    assert marked is not None and marked.state == team_service.HANDOVER_STATE
+    # The old process's own SessionEnd lands during the grace: it parks the claims, as a
+    # /clear does, because the session is marked and a live row (the replacement) is bound…
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
+    team_service.hook_session_end(agent.session_id or "", project.root, reason="prompt_input_exit")
+    with store_session() as store:
+        parked = store.get_task(task.id)
+        ended = store.get_session(agent.session_id or "")
+    assert parked is not None and parked.claimed_by == agent.session_id
+    assert ended is not None and ended.ended_at is not None
+    # …and the resumed session's SessionStart, on the SAME id, finds them still its own.
+    team_service.hook_session_start(agent.session_id or "", project.root, "resume")
+    with store_session() as store:
+        revived = store.get_session(agent.session_id or "")
+        still = store.get_task(task.id)
+    assert revived is not None and revived.ended_at is None and revived.state == "working"
+    assert still is not None and still.status == "doing" and still.claimed_by == agent.session_id
+
+
+def test_a_hand_over_that_does_not_complete_leaves_nothing_parked(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The two ways a switch can die after it has marked the session (review of #205, finding 6):
+    a stop that raises leaves the session as it was; a spawn that raises releases the
+    parked claims and records the exit the hand-over withheld."""
+    _two_slots_with_usage(monkeypatch, work=95, personal=10)
+    agent = fleet_service.spawn(project, "coder", worktree=False, account="2").agent
+    transcript = tmp_path / f"{agent.session_id}.jsonl"
+    transcript.write_text('{"type":"user"}\n', encoding="utf-8")
+    _with_transcript(agent, transcript)
+    now = datetime.now(tz=UTC)
+    with store_session() as store:
+        store.mark_limited(agent.session_id or "", now + timedelta(hours=2))
+        task, _created = store.upsert_task(
+            TeamTask(
+                id="tsk_keep2",
+                project_id=project.id,
+                key="keep-it-2",
+                title="Keep it",
+                role="coder",
+                created_at=now,
+                updated_at=now,
+            )
+        )
+    assert team_service.claim_task(task.id, session_ref=agent.session_id or "").status == "doing"
+
+    def stop_refuses(*args: Any, **kwargs: Any) -> FleetAgent:
+        raise FleetError("tmux would not answer")
+
+    real_stop = fleet_service.stop
+    monkeypatch.setattr(fleet_service, "stop", stop_refuses)
+    with pytest.raises(FleetError, match="would not answer"):
+        fleet_service.switch(project, agent.label, reason="session limit")
+    with store_session() as store:
+        session = store.get_session(agent.session_id or "")
+        held = store.get_task(task.id)
+    assert session is not None and session.state == "limited"  # as it was, not `switching`
+    assert held is not None and held.claimed_by == agent.session_id
+    monkeypatch.setattr(fleet_service, "stop", real_stop)
+
+    def spawn_refuses(*args: Any, **kwargs: Any) -> fleet_service.SpawnReceipt:
+        raise FleetError("tmux could not start the window: boom")
+
+    monkeypatch.setattr(fleet_service, "spawn", spawn_refuses)
+    with pytest.raises(FleetError, match="boom"):
+        fleet_service.switch(project, agent.label, reason="session limit")
+    with store_session() as store:
+        released = store.get_task(task.id)
+        kinds = [(e.kind, e.text) for e in store.recent_events(project.id, limit=10)]
+        rows = store.fleet_agents(project.id)
+    assert released is not None and released.status == "todo" and released.claimed_by is None
+    assert any(kind == "task_released" and "hand-over failed" in text for kind, text in kinds)
+    assert any(kind == "agent_exited" for kind, _ in kinds)
+    assert all(row.ended_at is not None for row in rows)  # the old row ended; no replacement
 
 
 def test_switch_starts_fresh_with_a_hand_off_prompt_when_asked_or_when_there_is_no_transcript(

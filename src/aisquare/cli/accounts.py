@@ -356,6 +356,8 @@ def default(
     """
     if project is not None and role is not None:
         fail("--project and --role are mutually exclusive", error="usage")
+    if ref is not None and clear:
+        fail("pass an account or --clear, not both", error="usage")
     target = _project_for(project) if project is not None else None
     if ref is None and not clear:
         _show_defaults(
@@ -572,8 +574,9 @@ def remove(slot: SlotRef) -> None:
     """Forget a managed account: its directory is kept beside itself as <n>.removed-<stamp>."""
     account = _resolve(slot)
     identity = core.identity(account)
+    notes: list[str] = []
     try:
-        moved = accounts_service.remove(account)
+        moved = accounts_service.remove(account, notes=notes)
     except accounts_service.AccountsError as exc:
         fail(str(exc), error="not_removable", ref=slot)
     if get_state().json_output:
@@ -583,18 +586,22 @@ def remove(slot: SlotRef) -> None:
                     "removed": account.slot,
                     "email": identity.email if identity else None,
                     "moved_to": str(moved),
+                    "notes": notes,
                 }
             )
         )
         return
     who = f" ({identity.email})" if identity else ""
-    stdout_console().print(
+    console = stdout_console()
+    console.print(
         Text.assemble(
             ("✓ ", "green"),
             f"removed account {account.slot}{who} — its directory is kept at {moved}; "
             "delete it when you are sure",
         )
     )
+    for note in notes:
+        console.print(f"  · {note}", markup=False)
 
 
 def _exec(binary: str, argv: list[str], env: dict[str, str]) -> None:

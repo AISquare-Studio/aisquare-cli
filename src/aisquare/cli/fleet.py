@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+from collections.abc import Mapping
 from typing import Annotated, NoReturn
 
 import typer
@@ -27,6 +28,7 @@ from aisquare.cli.common import fail
 from aisquare.core.console import stdout_console
 from aisquare.core.state import get_state
 from aisquare.models import FleetAgentStatus, ProjectInfo
+from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import fleet as fleet_service
 
 app = typer.Typer(
@@ -97,7 +99,7 @@ def _project_json(project: ProjectInfo) -> dict[str, object]:
     }
 
 
-def _agent_line(status: FleetAgentStatus) -> str:
+def _agent_line(status: FleetAgentStatus, labels: Mapping[int, str] | None = None) -> str:
     agent = status.agent
     chip = _STATE_CHIP.get(status.state, status.state)
     if status.state == "exited" and agent.exit_status is not None:
@@ -105,9 +107,19 @@ def _agent_line(status: FleetAgentStatus) -> str:
     extra = f"  {status.detail}" if status.detail else ""
     where = "  (worktree)" if agent.worktree else ""
     # The slot the spawn resolved to (#145), so a row says which limit pool it
-    # draws on; absent when nothing chose and the window ran on its shell's claude.
-    on = f"  account {agent.account_slot}" if agent.account_slot is not None else ""
+    # draws on — under the label the launch line, the feed and the Accounts
+    # page use (the alias, or `plain claude` for slot 1; review of #205, finding
+    # 10); absent when nothing chose and the window ran on its shell's claude.
+    on = f"  {slot_label(agent.account_slot, labels)}" if agent.account_slot is not None else ""
     return f"  {agent.label:<24} {agent.role:<10} {chip}{where}{on}{extra}  {agent.pane_id}"
+
+
+def slot_label(slot: int, labels: Mapping[int, str] | None) -> str:
+    """``labels[slot]`` (``services.claude_accounts.slot_labels``), else the built-in name."""
+    named = (labels or {}).get(slot)
+    if named:
+        return named
+    return "plain claude" if slot == 1 else f"account {slot}"
 
 
 def _emit_agents(project: ProjectInfo, agents: list[FleetAgentStatus]) -> None:
@@ -124,8 +136,9 @@ def _emit_agents(project: ProjectInfo, agents: list[FleetAgentStatus]) -> None:
     if not agents:
         console.print("  (no agents) — start one: aisquare fleet spawn manager")
         return
+    labels = accounts_service.slot_labels() if any(s.agent.account_slot for s in agents) else {}
     for status in agents:
-        console.print(_agent_line(status))
+        console.print(_agent_line(status, labels))
 
 
 @app.command(

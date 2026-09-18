@@ -257,6 +257,44 @@ def test_a_disabled_binding_or_default_is_skipped_with_a_note(
     assert choice.notes == ["account 2 (bound to coder) is disabled — skipped"]
 
 
+def test_the_agent_header_and_fleet_ls_name_the_account_as_the_rest_of_the_cli_does(
+    fake_home: Path,
+) -> None:
+    """An aliased account is ``work`` on the launch line, the feed, the page — and now on the
+    agent header and ``fleet ls`` too; slot 1 is ``plain claude`` there as well (review of
+    #205, finding 10)."""
+    from datetime import UTC, datetime
+
+    from aisquare.cli import fleet as fleet_cli
+    from aisquare.cli.ui.views import agent as agent_view
+    from aisquare.models import FleetAgent, FleetAgentStatus
+
+    core.create_account()
+    service.set_alias("2", "work")
+    labels = service.slot_labels()
+    assert labels == {1: "plain claude", 2: "work"}
+
+    def status(slot: int) -> FleetAgentStatus:
+        agent = FleetAgent(
+            id="agt_label",
+            project_id="prj_label",
+            label="coder-1",
+            role="coder",
+            pane_id="%1",
+            cwd=Path("/tmp"),
+            account_slot=slot,
+            created_at=datetime.now(tz=UTC),
+        )
+        return FleetAgentStatus(agent=agent, state="waiting")
+
+    assert agent_view.account_text(status(2), labels) == "work"
+    assert agent_view.account_text(status(1), labels) == "plain claude"
+    assert agent_view.account_text(status(2)) == "account 2"  # no labels: the built-in name
+    assert "  work  " in fleet_cli._agent_line(status(2), labels)
+    assert "  plain claude  " in fleet_cli._agent_line(status(1), {})  # never `account 1`
+    assert "  account 2  " in fleet_cli._agent_line(status(2), {})
+
+
 # --------------------------------------------------------------------------- launch and spawn
 
 
@@ -329,12 +367,25 @@ def test_remove_forgets_the_default_the_alias_and_every_project_default_that_nam
     service.set_alias("2", "work")
     core.create_account()  # slot 3, so the order has something left to renumber
 
-    service.remove(second)
+    _sign_in(second, "two@example.com")
+    settings_service.bind_role("reviewer", account="2")  # by NUMBER: the hazard of finding 8
+    settings_service.bind_role("tester", account="work")  # by alias: dies with the alias
+    settings_service.bind_role("coder", account="3")  # another slot: untouched
+    notes: list[str] = []
+
+    service.remove(second, notes=notes)
 
     assert service.machine_default() is None
     assert service.project_default(work) is None
     assert _slots(service.list_accounts()) == [1, 3]
     assert _positions(service.list_accounts()) == [1, 2]
+    # The binding that named the number now names the person — dangling on purpose.
+    bindings = settings_service.role_account_bindings()
+    assert bindings == {"reviewer": "two@example.com", "tester": "work", "coder": "3"}
+    assert notes == [
+        "role reviewer was bound to slot 2; it now names two@example.com — refused at launch "
+        "until that account is signed in again, or re-bound"
+    ]
     # THE reuse hazard: the next add takes slot 2 again and must inherit nothing.
     again = core.create_account()
     assert again.slot == 2
@@ -342,6 +393,25 @@ def test_remove_forgets_the_default_the_alias_and_every_project_default_that_nam
     assert fresh.alias is None and not fresh.is_default and not fresh.disabled
     with pytest.raises(service.NoSuchAccount):
         service.resolve("work")
+    with pytest.raises(service.NoSuchAccount, match=r"reviewer.*two@example\.com"):
+        service.choose(role="reviewer", project=work)  # refused with the rung named, not adopted
+    assert service.choose(role="coder", project=work).source == "role binding"
+
+
+def test_remove_clears_a_number_binding_to_a_slot_that_never_signed_in(fake_home: Path) -> None:
+    blank = core.create_account()  # slot 2, no login, no email to name
+    settings_service.bind_role("reviewer", account="2", env={"FOO": "bar"})
+    notes: list[str] = []
+
+    service.remove(blank, notes=notes)
+
+    profile = load_config().team.profiles["reviewer"]
+    assert profile.account is None and profile.env == {"FOO": "bar"}  # the rest survives
+    assert notes == [
+        "role reviewer was bound to slot 2, which had no login — the account binding is cleared"
+    ]
+    removed = core.create_account()
+    assert removed.slot == 2 and service.choose(role="reviewer").source is None  # nothing inherited
 
 
 # --------------------------------------------------------------------------- a damaged store
@@ -507,6 +577,20 @@ def test_team_bind_account_resolves_the_reference_before_writing_it(
     assert cleared.exit_code == 0, cleared.output
     profile = load_config().team.profiles["coder"]
     assert profile.account is None and profile.env == {"FOO": "bar"}  # the rest survives
+
+    # `--account X --clear-account` used to clear and report success (review of #205,
+    # finding 13): refused as a usage error, nothing written — on both commands.
+    both = runner.invoke(
+        app, ["--json", "team", "bind", "coder", "--account", "2", "--clear-account"]
+    )
+    assert both.exit_code == 1 and json.loads(both.stdout)["error"] == "usage"
+    assert load_config().team.profiles["coder"].account is None
+    also = runner.invoke(app, ["--json", "accounts", "default", "2", "--role", "coder", "--clear"])
+    assert also.exit_code == 1 and json.loads(also.stdout)["error"] == "usage"
+    assert load_config().team.profiles["coder"].account is None
+    # The writer itself, asked for both, replaces rather than discards.
+    replaced = settings_service.bind_role("coder", account="2", clear_account=True)
+    assert replaced.account == "2"
 
     empty = runner.invoke(app, ["--json", "team", "bind", "tester"])
     assert empty.exit_code == 1 and json.loads(empty.stdout)["error"] == "nothing_to_bind"

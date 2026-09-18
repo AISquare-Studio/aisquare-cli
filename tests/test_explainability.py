@@ -257,6 +257,19 @@ def test_plan_reads_the_session_being_resumed() -> None:
     assert plan.inject_args == ()
 
 
+def test_plan_reads_the_session_id_out_of_a_resumed_transcript_path() -> None:
+    """``--resume`` also takes the transcript's path — the form a fleet hand-over passes —
+    and the id is its stem, not the path (review of #205, finding 4)."""
+    path = "/home/u/.claude/projects/-home-u-repo/0f3c2b1a-5d6e-4f70-8a9b-1c2d3e4f5a6b.jsonl"
+    for args in (["--resume", path], ["-r", path], [f"--resume={path}"]):
+        plan = plan_session_identity("claude", args)
+        assert plan.session_id == "0f3c2b1a-5d6e-4f70-8a9b-1c2d3e4f5a6b", args
+        assert plan.inject_args == (), args
+    # A bare id, and a name that merely ends in the suffix, are taken as given.
+    assert plan_session_identity("claude", ["--resume", "sess-9"]).session_id == "sess-9"
+    assert plan_session_identity("claude", ["--resume", ".jsonl"]).session_id == ".jsonl"
+
+
 def test_plan_leaves_a_run_time_session_choice_unjoined() -> None:
     """--continue and a bare --resume name a session that does not exist yet.
     Minting an id anyway would put a SECOND identity on a row the resumed

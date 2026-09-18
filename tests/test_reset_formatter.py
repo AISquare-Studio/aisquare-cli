@@ -25,6 +25,9 @@ from aisquare.cli import accounts as accounts_cli
 from aisquare.cli.common import format_reset
 from aisquare.cli.ui.views import accounts as accounts_view
 from aisquare.models import ClaudeUsage
+from aisquare.services import diagnostics as diagnostics_service
+from aisquare.services import fleet as fleet_service
+from aisquare.services import team as team_service
 
 TORONTO = ZoneInfo("America/Toronto")
 #: 14:00 local on a Tuesday (18:00 UTC in EDT).
@@ -80,6 +83,22 @@ def test_format_reset_handles_none_and_reads_the_wall_clock_by_default() -> None
     assert format_reset(soon).startswith("in ")  # no `now` given: the wall clock
 
 
+def test_the_services_render_a_reset_through_the_same_formatter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The feed line, the agent detail and doctor say the distance AND the day (finding 9)."""
+    from aisquare.core import claude_accounts as core
+
+    monkeypatch.setattr(team_service, "_now", lambda: NOW)  # the feed line reads its own clock
+    ahead = NOW + timedelta(days=2, hours=4)
+    assert fleet_service._limit_detail(ahead, NOW) == f"limit resets {format_reset(ahead, now=NOW)}"
+    assert "(Thu " in fleet_service._limit_detail(ahead, NOW)  # never a bare clock time
+    assert fleet_service._limit_detail(None, NOW) == "usage limit"
+    notice = core.LimitNotice("weekly", ahead)
+    line = team_service._limited_text("coder-1", "raw", notice, fleet=False)
+    assert line.startswith("coder-1 hit its weekly limit · resets in 2d 4h (")
+
+
 def test_both_surfaces_render_the_same_string() -> None:
     """The page and the table agree to the character — they call the same function."""
     usage = ClaudeUsage(
@@ -120,9 +139,16 @@ def _formats_a_reset_itself(node: ast.FunctionDef) -> bool:
     return False
 
 
-@pytest.mark.parametrize("module", [accounts_cli, accounts_view])
+@pytest.mark.parametrize(
+    "module", [accounts_cli, accounts_view, diagnostics_service, team_service, fleet_service]
+)
 def test_neither_surface_keeps_a_formatter_of_its_own(module: ModuleType) -> None:
-    """One formatter: a surface that spells ``%H:%M`` itself is the drift this fixes."""
+    """One formatter: a surface that spells ``%H:%M`` itself is the drift this fixes.
+
+    The two account surfaces, and — since review of #205, finding 9 — the three
+    services that render a reset too: doctor's parked-agents line, the feed's
+    ``limited`` line and the agent's ``limit resets …`` detail each had a copy.
+    """
     source = Path(module.__file__ or "").read_text(encoding="utf-8")
     tree = ast.parse(source)
     offenders = [

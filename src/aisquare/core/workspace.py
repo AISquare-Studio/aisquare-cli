@@ -14,7 +14,7 @@ from pathlib import Path
 
 from aisquare.core import paths
 from aisquare.core.ids import PROJECT_PREFIX
-from aisquare.core.state_file import read_state, update_state
+from aisquare.core.state_file import StateUnwritableError, read_state, update_state
 from aisquare.core.store import ContextStore
 from aisquare.models import ProjectInfo
 
@@ -135,24 +135,33 @@ def current_project(cwd: Path | None = None) -> ProjectInfo:
 def pinned_project_id() -> str | None:
     """Return the project id pinned by ``project switch``, or ``None``.
 
-    A ``state.json`` that cannot be read, or is not a JSON object, pins nothing
-    (``core.state_file``): the project is then the working directory's, as with
-    no pin at all — it used to raise from here.
+    A ``state.json`` that is not a JSON object pins nothing (``core.state_file``):
+    the project is then the working directory's, as with no pin at all — it
+    used to raise ``AttributeError`` from here. One that EXISTS BUT CANNOT BE
+    READ still raises its ``OSError``: read as "no pin", a permission error would
+    silently point every project-scoped command at whatever directory the user
+    happens to stand in.
     """
-    value = read_state().get(_PIN_KEY)
+    value = read_state(strict=True).get(_PIN_KEY)
     return value if isinstance(value, str) else None
 
 
 def pin_project(project_id: str | None) -> None:
     """Pin (or, with ``None``, unpin) the active project in ``state.json``.
 
-    Raises ``OSError`` when the file could not be updated: the home is not
-    writable, or the file exists and is not a JSON object — it is left as it
-    is, because the other keys in it (the board's theme, the fleet UI's
-    navigator width) are the user's.
+    Unpinning when nothing is pinned is a no-op: a file that is not a JSON
+    object already pins nothing, and removing an absent key is not a failed
+    write. Otherwise raises :class:`StateUnwritableError` when the file could
+    not be updated — the home is not writable, or the file exists and is not a
+    JSON object and is left as it is, because the other keys in it (the board's
+    theme, the fleet UI's navigator width) are the user's.
     """
+    if project_id is None and pinned_project_id() is None:
+        return
     if not update_state(_PIN_KEY, project_id):
-        raise OSError(f"could not update {paths.state_path()}: not writable, or not a JSON object")
+        raise StateUnwritableError(
+            f"could not update {paths.state_path()}: not a JSON object, or not writable"
+        )
 
 
 def active_project(store: ContextStore, cwd: Path | None = None) -> ProjectInfo:

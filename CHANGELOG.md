@@ -486,10 +486,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   pin's readers (the fleet UI did not start), the writers replaced such a file
   wholesale — the theme and the pinned project gone without a word — and two
   processes autosaving at once (`asq` and `board -w`) shared one temp file
-  name. Now a corrupt file reads as empty, is never overwritten (the save is
-  refused and the fleet UI says so once), and every write is a rename of this
-  process's own temp file. `project switch` and `project forget` report an
-  unwritable or corrupt file instead of a traceback.
+  name. Now a corrupt file reads as empty and is never overwritten (the save is
+  refused, and the fleet UI and the board each say so once — for the width and
+  for the theme); every update runs under a lock, so concurrent writers cannot
+  lose each other's key; the write goes through a symlinked `state.json` rather
+  than severing it, and keeps the file's mode. The pin reads strictly — a file
+  that exists but cannot be read raises, rather than silently pointing every
+  project command at the working directory — and unpinning what is not pinned
+  is a no-op. `project switch` reports a refused pin (`state_unwritable`)
+  instead of a traceback; `project forget` and `project prune` finish (rows,
+  data directory) and report a pin they could not move, instead of failing
+  after the purge had already happened.
 - **Alt+letter chords reach the agent as chords.** Claude Code's alt+p (switch
   model) did nothing from a fleet pane — reported 2026-09-02 and again
   2026-09-10 — because Textual's parser reads `ESC p` as `Key("alt+p",

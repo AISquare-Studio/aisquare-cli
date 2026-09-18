@@ -385,8 +385,21 @@ def _build_app_class(interval: float) -> Any:
             parent = getattr(super(), "watch_theme", None)
             if parent is not None:
                 parent(theme_name)
-            if getattr(self, "_theme_restored", False):
-                _save_theme(theme_name)
+            if (
+                getattr(self, "_theme_restored", False)
+                and not _save_theme(theme_name)
+                and not getattr(self, "_theme_warned", False)
+            ):
+                # Once: the picker shows the theme applied, and silence would
+                # promise a memory the file has refused.
+                self._theme_warned = True
+                self.notify(
+                    f"{paths.state_path()} could not be updated (not a JSON object, or not"
+                    " writable) — the theme will not be remembered",
+                    severity="warning",
+                    timeout=8,
+                    markup=False,
+                )
 
     return BoardApp
 

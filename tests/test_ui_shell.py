@@ -172,16 +172,18 @@ def drive(
     *,
     doctor: Callable[[], list[DoctorCheck]] | None = None,
     notifications: bool = False,
+    size: tuple[int, int] = SIZE,
 ) -> T:
     """Run ``fn`` against a mounted ``FleetApp`` (no timer refresh; a stub doctor).
 
     ``notifications`` opts the screen's ``ToastRack`` in — ``run_test`` leaves it
     out by default, and without it a ``notify`` goes nowhere to be read.
+    ``size`` is the terminal's; a test about a laptop passes a narrow one.
     """
 
     async def run() -> T:
         app = FleetApp(refresh_seconds=3600, doctor=doctor or (lambda: []))
-        async with app.run_test(size=SIZE, notifications=notifications) as pilot:
+        async with app.run_test(size=size, notifications=notifications) as pilot:
             await pilot.pause()
             return await fn(pilot)
 
@@ -1809,8 +1811,9 @@ async def _drag(pilot: Pilot[None], from_x: int, to_x: int, y: int = 5) -> None:
 
 
 async def _settled(pilot: Pilot[None]) -> None:
-    """Let a debounced save land."""
-    await pilot.pause(Divider.SAVE_DEBOUNCE * 3)
+    """Let a debounced save land — and stay well inside Textual's half-second click chain,
+    which some tests need to span."""
+    await pilot.pause(Divider.SAVE_DEBOUNCE + 0.05)
 
 
 def _declared(app: FleetApp) -> int:
@@ -2180,7 +2183,9 @@ def test_a_state_file_that_is_not_an_object_is_left_alone_and_said_so_once(
             "toasts": [toast.render().plain for toast in app.screen.query(Toast)],
             "file": path.read_text(),
             "leftovers": sorted(
-                p.name for p in isolated_home.iterdir() if p.name.startswith("state")
+                p.name
+                for p in isolated_home.iterdir()
+                if p.name.startswith("state") and not p.name.endswith(".lock")
             ),
         }
 
@@ -2191,3 +2196,184 @@ def test_a_state_file_that_is_not_an_object_is_left_alone_and_said_so_once(
     assert isinstance(toasts, list) and len(toasts) == 1, "said once, not once per gesture"
     assert "state.json" in toasts[0] and "not be remembered" in toasts[0]
     assert seen["leftovers"] == ["state.json"], "no temp file left behind"
+
+
+def test_a_saved_width_is_bounded_before_it_reaches_the_stylesheet(
+    tmp_path: Path, script: Script, isolated_home: Path
+) -> None:
+    """`on_mount` wrote the file's number straight into `styles.width` before anything bounded
+    it: 100000000 was a `MemoryError` in Rich's cell splitting, 1e400 an `OverflowError` out of
+    the style setter, and 500 gave the content pane one frame at zero columns — a size the
+    agent's pane forwards to tmux. The file is user-editable, and the TUI that would let you
+    fix it was the thing that would not start."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+
+    async def go(pilot: Pilot[None]) -> tuple[int, int, int | None, int]:
+        app = fleet_app(pilot)
+        await pilot.pause()
+        return (
+            app.sidebar.outer_size.width,
+            app.content.outer_size.width,
+            cells(app.sidebar.styles.inline.width),
+            _floor(app),
+        )
+
+    _write_state(isolated_home, {SIDEBAR_WIDTH_KEY: 100_000_000})
+    sidebar, content, inline, floor = drive(go)
+    ceiling = Panes.sidebar_ceiling(SIZE[0], floor)
+    assert (sidebar, content, inline) == (ceiling, Panes.MIN_CONTENT, ceiling), (
+        "bounded, and the bound is what the stylesheet was handed"
+    )
+    _write_state(
+        isolated_home, {SIDEBAR_WIDTH_KEY: 10**400}
+    )  # json gives a big int; float() overflowed
+    assert drive(go)[0] == ceiling
+
+
+def test_a_press_that_never_moved_writes_nothing_and_a_right_click_counts_for_nothing(
+    tmp_path: Path, script: Script, isolated_home: Path
+) -> None:
+    """A bare click settled the width it found and wrote `sidebar_width: 30` to a fresh file (so
+    a reset was undone by the next tap); a press cut short by a pushed screen did the same; and
+    a right click at the handle made the next single left click a "double" that reset the
+    navigator and deleted the key."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+
+    async def go(pilot: Pilot[None]) -> dict[str, object]:
+        app = fleet_app(pilot)
+        seen: dict[str, object] = {"declared": _declared(app)}
+        x = app.sidebar.outer_size.width
+        await _mouse(pilot, events.MouseDown, x, 5)
+        await _mouse(pilot, events.MouseUp, x, 5)
+        await _settled(pilot)
+        seen["after_click"] = _state(isolated_home)
+        await _mouse(pilot, events.MouseDown, x, 5)
+        await app.push_screen(HelpScreen(app.escape_key))
+        await pilot.pause()
+        await app.pop_screen()
+        await _settled(pilot)
+        seen["after_cut_press"] = _state(isolated_home)
+        app.sidebar.focus()
+        await pilot.press("greater_than_sign")
+        await _settled(pilot)
+        x = app.sidebar.outer_size.width
+        seen["after_key"] = (x, _state(isolated_home).get(SIDEBAR_WIDTH_KEY))
+        await _mouse(pilot, events.MouseDown, x, 5, button=3)
+        await _mouse(pilot, events.MouseUp, x, 5, button=3)
+        await _mouse(pilot, events.MouseDown, x, 5)
+        await _mouse(pilot, events.MouseUp, x, 5)
+        await _settled(pilot)
+        seen["after_right_then_left"] = (
+            app.sidebar.outer_size.width,
+            _state(isolated_home).get(SIDEBAR_WIDTH_KEY),
+        )
+        return seen
+
+    seen = drive(go)
+    declared = seen["declared"]
+    assert isinstance(declared, int)
+    assert seen["after_click"] == {}, "a click asked for nothing"
+    assert seen["after_cut_press"] == {}, "neither did a press a pushed screen cut short"
+    assert seen["after_key"] == (declared + RESIZE_STEP, declared + RESIZE_STEP)
+    assert seen["after_right_then_left"] == (declared + RESIZE_STEP, declared + RESIZE_STEP), (
+        "a right click and a left click are not a double click"
+    )
+
+
+def test_a_gesture_on_a_narrow_terminal_keeps_a_wider_remembered_width(
+    tmp_path: Path, script: Script, isolated_home: Path
+) -> None:
+    """Restored on an 80-column laptop, a monitor's 90 shows as the ceiling, 39. A `>` the
+    ceiling swallowed used to settle 39 over the 90 — nothing moved on screen and the
+    preference was gone for good. The ceiling bounds what is shown, not what is remembered."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+    _write_state(isolated_home, {SIDEBAR_WIDTH_KEY: 90})
+
+    async def go(pilot: Pilot[None]) -> dict[str, object]:
+        app = fleet_app(pilot)
+        await pilot.pause()
+        seen: dict[str, object] = {"floor": _floor(app), "shown": app.sidebar.outer_size.width}
+        app.sidebar.focus()
+        await pilot.press("greater_than_sign")
+        await _settled(pilot)
+        seen["after_wider"] = (
+            app.sidebar.outer_size.width,
+            _state(isolated_home)[SIDEBAR_WIDTH_KEY],
+        )
+        await _drag(
+            pilot, app.sidebar.outer_size.width, 70
+        )  # past the ceiling: shows it, keeps the 90
+        await _settled(pilot)
+        seen["after_drag"] = (
+            app.sidebar.outer_size.width,
+            _state(isolated_home)[SIDEBAR_WIDTH_KEY],
+        )
+        await pilot.press("less_than_sign")  # a step the screen shows is a real gesture
+        await _settled(pilot)
+        seen["after_narrower"] = (
+            app.sidebar.outer_size.width,
+            _state(isolated_home)[SIDEBAR_WIDTH_KEY],
+        )
+        return seen
+
+    seen = drive(go, size=(80, SIZE[1]))
+    floor = seen["floor"]
+    assert isinstance(floor, int)
+    small = Panes.sidebar_ceiling(80, floor)
+    assert seen["shown"] == small
+    assert seen["after_wider"] == (small, 90), "a step the ceiling swallowed writes nothing"
+    assert seen["after_drag"] == (small, 90), (
+        "a drag to the ceiling is 'as wide as this screen allows'"
+    )
+    assert seen["after_narrower"] == (small - RESIZE_STEP, small - RESIZE_STEP)
+
+
+def test_a_double_click_with_a_one_row_drift_is_still_a_double_click(
+    tmp_path: Path, script: Script, isolated_home: Path
+) -> None:
+    """`_moved` was set by any motion event: on a tall one-column handle a one-row hand drift
+    between press and release is routine, moved nothing, and made the reset take three clicks."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+
+    async def go(pilot: Pilot[None]) -> tuple[int, int, int]:
+        app = fleet_app(pilot)
+        declared = _declared(app)
+        app.sidebar.focus()
+        await pilot.press("greater_than_sign")
+        await pilot.pause()
+        x = app.sidebar.outer_size.width
+        await _mouse(pilot, events.MouseDown, x, 5)
+        await _mouse(pilot, events.MouseMove, x, 6)  # a row down, the same column: nothing moves
+        await _mouse(pilot, events.MouseUp, x, 6)
+        first = app.sidebar.outer_size.width
+        await _mouse(pilot, events.MouseDown, x, 6)
+        await _mouse(pilot, events.MouseUp, x, 6)
+        return declared, first, app.sidebar.outer_size.width
+
+    declared, first, second = drive(go)
+    assert first == declared + RESIZE_STEP, "the drifting click is a click: it moved nothing"
+    assert second == declared, "two clicks, one of them with a row of drift"
+
+
+def test_a_refused_theme_save_is_said_once(
+    tmp_path: Path, script: Script, isolated_home: Path
+) -> None:
+    """`_save_theme`'s `False` was dropped at both call sites: the picker showed the theme
+    applied, the file refused it, and nothing said so — while the width, saving to the same
+    file in the same session, did."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+    path = _write_state(isolated_home, ["was", "a", "list"])
+    body = path.read_text()
+
+    async def go(pilot: Pilot[None]) -> tuple[list[str], str]:
+        app = fleet_app(pilot)
+        app.theme = "nord"
+        await pilot.pause()
+        app.theme = "dracula"
+        await pilot.pause()
+        return [toast.render().plain for toast in app.screen.query(Toast)], path.read_text()
+
+    toasts, file = drive(go, notifications=True)
+    assert len(toasts) == 1, "said once, not once per pick"
+    assert "state.json" in toasts[0] and "theme will not be remembered" in toasts[0]
+    assert file == body

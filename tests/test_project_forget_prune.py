@@ -597,3 +597,78 @@ def test_json_project_list_carries_the_name_the_table_shows(
 
     (project,) = _json(listed.stdout)
     assert project["name"] == "alpha"
+
+
+def _corrupt_state() -> str:
+    """Make `state.json` a JSON array — a file the shared writer refuses to touch."""
+    body = '["was", "a", "list"]\n'
+    paths.ensure_home()
+    paths.state_path().write_text(body)
+    return body
+
+
+def test_forget_purge_completes_and_reports_a_pin_it_could_not_move(
+    runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`_repin` ran inside the transaction: a `state.json` that refused the pin reported the
+    command FAILED after the purge had committed and before the data directory was removed —
+    orphaned for good, its registration gone — and a re-run said "no project matches"."""
+    alpha = _register(runner, monkeypatch, work_dir / "alpha")
+    beta = _register(runner, monkeypatch, work_dir / "beta")  # cwd is beta: active, unpinned
+    data_dir = paths.project_data_dir(beta)
+    (data_dir / "snapshot").mkdir(parents=True)
+    body = _corrupt_state()
+
+    result = runner.invoke(app, ["--json", "project", "forget", "beta", "--purge"])
+
+    assert result.exit_code == 0, result.output
+    report = _json(result.stdout)
+    assert report["purged"] is True and report["data_dir_removed"] is True
+    assert not data_dir.exists()
+    assert report["active_changed"] is True and report["active"] is None
+    assert "state.json" in report["pin_error"]
+    assert paths.state_path().read_text() == body  # the user's file, untouched
+    assert _listed(runner) == {alpha}
+
+
+def test_forget_the_last_project_on_a_corrupt_state_file_is_complete(
+    runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Unpinning what a corrupt file already does not pin is a no-op — `forget` of the last
+    registration used to exit 1 with `state_unwritable` after tombstoning it."""
+    _register(runner, monkeypatch, work_dir / "alpha")
+    body = _corrupt_state()
+
+    result = runner.invoke(app, ["project", "forget", "alpha"])
+
+    assert result.exit_code == 0, result.output
+    assert "follows your working directory" in result.stdout and "⚠" not in result.stdout
+    assert paths.state_path().read_text() == body
+    assert "No projects registered yet" in runner.invoke(app, ["project", "list"]).stdout
+
+
+def test_prune_reports_a_pin_it_could_not_move_instead_of_a_traceback(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, repo_and_worktree: tuple[Path, Path]
+) -> None:
+    """`prune` reached the same `pin_project` with no handler: a raw traceback, and under
+    `--json` no error envelope at all.
+
+    The pinned project has to be the one dropped, and a corrupt file cannot hold a
+    pin, so the refusal is the writer's own (`update_state` answering False — a
+    read-only home, say) while the file still names the worktree.
+    """
+    repo, worktree = repo_and_worktree
+    wt_id = _register_worktree_as_its_own_project(worktree)
+    principal = _register(runner, monkeypatch, repo)
+    assert runner.invoke(app, ["project", "switch", wt_id]).exit_code == 0
+    assert pinned_project_id() == wt_id
+    body = paths.state_path().read_text()
+    monkeypatch.setattr("aisquare.core.workspace.update_state", lambda key, value: False)
+
+    result = runner.invoke(app, ["project", "prune", "--worktrees", "--yes"])
+
+    assert result.exit_code == 0, result.output
+    assert "✓ forgot 1 registration" in result.stdout
+    assert "⚠ the pin could not be moved" in result.stdout and "state.json" in result.stdout
+    assert _listed(runner) == {principal}
+    assert paths.state_path().read_text() == body, "left as it was — still naming the worktree"

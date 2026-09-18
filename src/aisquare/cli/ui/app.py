@@ -65,6 +65,7 @@ from aisquare.cli.ui.views.doctor import DoctorRefreshed, DoctorView
 from aisquare.cli.ui.views.onboard import OnboardFailed, OnboardView, ProjectOnboarded
 from aisquare.cli.ui.views.project import ProjectView
 from aisquare.cli.ui.views.welcome import WelcomeView
+from aisquare.core import paths
 from aisquare.core.store import store_session
 from aisquare.models import (
     AccountsOverview,
@@ -218,10 +219,19 @@ class Panes(Horizontal):
         """The widest the navigator may be in ``total`` columns; the divider takes one of them."""
         return max(floor, total - 1 - cls.MIN_CONTENT)
 
+    def on_mount(self) -> None:
+        # Before the first layout as well as on every resize, so a width the
+        # divider restores from the file is bounded whenever it is applied.
+        self._fit(self.app.size.width)
+
     def on_resize(self, event: events.Resize) -> None:
+        self._fit(event.size.width)
+
+    def _fit(self, total: int) -> None:
         sidebar = self.sidebar
-        floor = cells(sidebar.styles.min_width) or 1
-        sidebar.styles.max_width = self.sidebar_ceiling(event.size.width, floor)
+        floor = cells(sidebar.styles.min_width)
+        # ``min-width: 0`` is a floor of 0; unset, or not in cells, is 1.
+        sidebar.styles.max_width = self.sidebar_ceiling(total, floor if floor is not None else 1)
 
     def on_resize_sidebar(self, event: ResizeSidebar) -> None:
         """The sidebar's keyboard fallback: step or reset the partition."""
@@ -297,6 +307,8 @@ class FleetApp(App[None], inherit_bindings=False):
         self._doctor_worker: Worker[Any] | None = None
         """The newest doctor run; an older one's result is not ours to paint."""
         self._theme_restored = False
+        self._theme_warned = False
+        """Whether the user has been told this session that the theme cannot be remembered."""
         self._gesture_button: int | None = None
         """Which button began the selection gesture now running, if one is."""
 
@@ -375,8 +387,17 @@ class FleetApp(App[None], inherit_bindings=False):
         parent = getattr(super(), "watch_theme", None)
         if parent is not None:
             parent(theme_name)
-        if self._theme_restored:
-            remember_theme(theme_name)
+        if self._theme_restored and not remember_theme(theme_name) and not self._theme_warned:
+            # Said once, as the divider says it for the width: the picker shows
+            # the theme applied, and silence would promise a memory it has not.
+            self._theme_warned = True
+            self.notify(
+                f"{paths.state_path()} could not be updated (not a JSON object, or not writable)"
+                " — the theme will not be remembered",
+                severity="warning",
+                timeout=8,
+                markup=False,
+            )
 
     def on_mouse_down(self, event: events.MouseDown) -> None:
         """Remember which button began the gesture now running.

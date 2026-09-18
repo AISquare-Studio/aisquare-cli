@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
 
 from aisquare.core.ids import PROJECT_PREFIX
+from aisquare.core.state_file import StateUnwritableError
 from aisquare.core.store import store_session
 from aisquare.core.workspace import (
     active_project,
@@ -84,6 +86,26 @@ def test_a_state_file_that_is_not_an_object_pins_nothing_and_is_not_overwritten(
     body = '["was", "a", "list"]\n'
     path.write_text(body)
     assert pinned_project_id() is None
-    with pytest.raises(OSError, match="not a JSON object"):
+    with pytest.raises(StateUnwritableError, match="not a JSON object"):
         pin_project("prj_abc")
+    pin_project(None)  # unpinning what is not pinned is a no-op, not a failed write
     assert path.read_text() == body
+
+
+@pytest.mark.skipif(
+    hasattr(os, "geteuid") and os.geteuid() == 0, reason="root reads through any file mode"
+)
+def test_an_unreadable_state_file_raises_rather_than_retargeting_the_command(
+    isolated_home: Path,
+) -> None:
+    """Read as "no pin", a permission error would silently point every project-scoped
+    command at whatever directory the user happens to stand in. A corrupt file is tolerated
+    (above); an unreadable one is an error, as it was before the shared reader."""
+    pin_project("prj_abc")
+    path = isolated_home / "state.json"
+    path.chmod(0)
+    try:
+        with pytest.raises(PermissionError):
+            pinned_project_id()
+    finally:
+        path.chmod(0o600)

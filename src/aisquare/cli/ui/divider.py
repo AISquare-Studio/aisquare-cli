@@ -55,7 +55,7 @@ LINE = "│"
 
 def cells(scalar: Scalar | None) -> int | None:
     """A style's value in columns; ``None`` when unset or not in cells (%, fr, auto)."""
-    return int(scalar.value) if scalar is not None and scalar.is_cells else None
+    return None if scalar is None else scalar.cells
 
 
 class Divider(Widget):
@@ -104,9 +104,16 @@ class Divider(Widget):
         """What the last gesture asked for; ``None`` until one did, and after a reset."""
         self._dragging = False
         self._moved = False
-        """Whether the pointer moved during the gesture now running — a drag, not a click."""
+        """Whether the gesture now running changed the width — a drag, not a click.
+
+        Set by a column change, not by a motion event: a one-row hand drift
+        between press and release on this tall handle is routine and moves
+        nothing.
+        """
         self._last_click_still = False
-        """Whether the previous click was a click (no pointer movement) — half of a double click."""
+        """Whether the previous left click was a click (the width did not change)."""
+        self._last_left_click: float | None = None
+        """When the previous left click was, so a stale one cannot be half of a double click."""
         self._remembered: int | None = None
         """The width on disk, as far as this widget knows."""
         self._pending: int | None = None
@@ -122,16 +129,27 @@ class Divider(Widget):
         """The neighbour whose width this handle sets."""
         return self.screen.query_one(self._target)
 
-    def bounds(self) -> tuple[int, int | None]:
-        """The neighbour's ``min-width`` and ``max-width`` in columns, or ``None`` for no bound."""
+    def bounds(self) -> tuple[int, int]:
+        """The neighbour's floor and ceiling in columns.
+
+        The floor is its ``min-width`` (``0`` means 0; unset, or a unit that is
+        not cells, means 1). The ceiling is its ``max-width`` — the container's
+        (``app.Panes``) — and, until one is written, the terminal's width less
+        this column: a neighbour is never wider than the screen, whatever a
+        file says. The floor wins when the two cross.
+        """
         styles = self.target.styles
-        return cells(styles.min_width) or 1, cells(styles.max_width)
+        floor = cells(styles.min_width)
+        lower = floor if floor is not None else 1
+        upper = cells(styles.max_width)
+        if upper is None:
+            upper = self.app.size.width - 1
+        return lower, max(lower, upper)
 
     def clamp(self, wanted: int) -> int:
-        """The width nearest ``wanted`` within the bounds; the floor wins when they cross."""
+        """The width nearest ``wanted`` within the bounds."""
         lower, upper = self.bounds()
-        width = max(lower, int(wanted))
-        return width if upper is None else min(width, max(lower, upper))
+        return max(lower, min(int(wanted), upper))
 
     @property
     def width(self) -> int:
@@ -155,9 +173,16 @@ class Divider(Widget):
         return width
 
     def step(self, delta: int) -> int:
-        """Move the partition by ``delta`` columns and settle there."""
-        width = self.resize_to(self.width + delta)
-        self._settle(width)
+        """Move the partition by ``delta`` columns and settle there — unless the bounds ate it.
+
+        On a terminal narrower than the remembered width the ceiling shows less
+        than the file says; a step the clamp swallows changed nothing on screen
+        and must not write the clamped number over the remembered one.
+        """
+        before = self.width
+        width = self.resize_to(before + delta)
+        if width != before:
+            self._settle(width)
         return width
 
     def reset(self) -> None:
@@ -197,17 +222,24 @@ class Divider(Widget):
             # the neighbour would follow the bare pointer.
             self._end_drag()
             return
-        self._moved = True
-        # The pointer's column IS the partition: the neighbour starts at its
-        # region's left edge, so the width is the distance from there.
-        self.resize_to(event.screen_x - self.target.region.x)
+        self._follow(event.screen_x)
 
     def on_mouse_up(self, event: events.MouseUp) -> None:
         if not self._dragging or event.button != 1:
             return  # a right click mid-drag is a paste gesture, not the end of this one
         event.stop()
-        self.resize_to(event.screen_x - self.target.region.x)
+        self._follow(event.screen_x)
         self._end_drag()
+
+    def _follow(self, screen_x: int) -> None:
+        """Put the partition at the pointer's column; a change of width is what makes this a drag.
+
+        The pointer's column IS the partition: the neighbour starts at its
+        region's left edge, so the width is the distance from there.
+        """
+        before = self.width
+        if self.resize_to(screen_x - self.target.region.x) != before:
+            self._moved = True
 
     def on_mouse_release(self, event: events.MouseRelease) -> None:
         """The app took the capture away (a screen was pushed mid-drag): the drag is over."""
@@ -217,28 +249,45 @@ class Divider(Widget):
         self._end_drag()
 
     def _end_drag(self) -> None:
-        """Settle the width the drag reached and let the mouse go — once, whatever ended it."""
+        """Let the mouse go — once, whatever ended the drag — and settle the width if it moved.
+
+        A press that never moved (a click; a press cut short by a pushed screen)
+        asked for nothing, and settling it would write a preference the user
+        never expressed — on a terminal narrower than the remembered width, the
+        ceiling over that width.
+        """
         if not self._dragging:
             return
         self._dragging = False
         self.remove_class("-dragging")
         if self.app.mouse_captured is self:
             self.release_mouse()
-        self._settle(self.width)
+        if self._moved:
+            self._settle(self.width)
 
     def on_click(self, event: events.Click) -> None:
-        """A double click resets — two clicks that were clicks.
+        """A double click resets — two LEFT clicks that were clicks, close together.
 
-        Textual counts a drag's release as a click (the handle follows the
-        pointer, so the release lands on the widget the press did), and a tap on
-        the handle within half a second of it arrives as ``chain == 2``: the
-        drag would be thrown away and the reset saved. So a click that moved
-        does not count, and neither does the one right after it.
+        Textual's chain counter says only "same cell, within half a second" and
+        counts every button: a drag's release is a click to it (the handle
+        follows the pointer, so the release lands where the press did), and so
+        is a right click, so a tap after a drag — or a left click after a
+        middle-click paste — arrived as ``chain == 2`` and threw the width away.
+        So a click that moved the width does not count, another button never
+        does, and the previous left click has to be as recent as the chain's
+        own threshold: a left click from minutes ago is not half of this one.
         """
+        if event.button != 1:
+            return  # a right or middle click is a paste gesture: it neither resets nor counts
         still = not self._moved
-        double = event.chain >= 2 and still and self._last_click_still
+        recent = (
+            self._last_left_click is not None
+            and event.time - self._last_left_click <= self.app.CLICK_CHAIN_TIME_THRESHOLD
+        )
+        double = event.chain >= 2 and still and recent and self._last_click_still
         self._last_click_still = still
-        if double and event.button == 1:
+        self._last_left_click = event.time
+        if double:
             event.stop()
             self.reset()
 
@@ -250,7 +299,12 @@ class Divider(Widget):
         saved = read_state().get(self._state_key)
         if isinstance(saved, int) and not isinstance(saved, bool):
             self._remembered = saved
-            self.resize_to(saved)
+            # After the first layout, not during mount: by then the container
+            # has written the ceiling, so the file's number is bounded before it
+            # reaches the stylesheet. Applied at mount, a saved 100000000 was
+            # laid out as asked (MemoryError) and a saved 500 gave the content
+            # pane one frame at zero columns — a size the agent's pane forwards.
+            self.call_after_refresh(self.resize_to, saved)
 
     def on_unmount(self) -> None:
         self._dragging = False
@@ -262,11 +316,22 @@ class Divider(Widget):
             return
         if self._save_timer is not None:
             self._save_timer.stop()
-        if width == self._remembered:
-            self._save_due = False  # back where the file already is: a queued save would lie
+        if width == self._remembered or self._ceiling_under_remembered(width):
+            self._save_due = False  # nothing to write; a queued save would lie
             return
         self._pending, self._save_due = width, True
         self._save_timer = self.set_timer(self.SAVE_DEBOUNCE, self._flush_save, name="divider-save")
+
+    def _ceiling_under_remembered(self, width: int | None) -> bool:
+        """Whether ``width`` is this terminal's ceiling with a wider width on file.
+
+        The ceiling bounds what is SHOWN, not what is remembered: a laptop
+        clamps a monitor's 90 to 39, and a gesture that lands on 39 there is
+        "as wide as this screen allows", not a new number to carry back.
+        """
+        if width is None or self._remembered is None:
+            return False
+        return width >= self.bounds()[1] and self._remembered > width
 
     def _flush_save(self) -> None:
         if not self._save_due or self._state_key is None:

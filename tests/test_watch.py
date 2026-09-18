@@ -497,3 +497,34 @@ def test_the_theme_readers_survive_a_state_file_that_is_not_an_object(isolated_h
     assert watch_mod._load_saved_theme() is None
     assert watch_mod._save_theme("nord") is False
     assert path.read_text() == body
+
+
+def test_the_board_says_once_when_the_theme_cannot_be_remembered(
+    runner: CliRunner, work_dir: Path, isolated_home: Path
+) -> None:
+    """`_save_theme`'s `False` was dropped: the picker showed the theme applied, the file
+    refused it, and the board said nothing."""
+    pytest.importorskip("textual", reason="the [tui] extra is not installed")
+    from textual.widgets._toast import Toast
+
+    from aisquare.cli import watch as watch_mod
+
+    team_service.activate()
+    isolated_home.mkdir(parents=True, exist_ok=True)
+    body = '["was", "a", "list"]\n'
+    (isolated_home / "state.json").write_text(body)
+
+    async def pick() -> tuple[int, str]:
+        app_cls = watch_mod._build_app_class(interval=60.0)
+        async with app_cls().run_test(size=(120, 40), notifications=True) as pilot:
+            await pilot.pause()
+            pilot.app.theme = "nord"
+            await pilot.pause()
+            pilot.app.theme = "dracula"
+            await pilot.pause()
+            toasts = list(pilot.app.screen.query(Toast))
+            return len(toasts), toasts[0].render().plain if toasts else ""
+
+    count, text = asyncio.run(pick())
+    assert count == 1 and "theme will not be remembered" in text
+    assert (isolated_home / "state.json").read_text() == body

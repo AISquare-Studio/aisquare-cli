@@ -19,6 +19,7 @@ from aisquare.cli.common import (
 )
 from aisquare.core.console import stdout_console
 from aisquare.core.state import get_state
+from aisquare.core.state_file import StateUnwritableError
 from aisquare.services import project as project_service
 
 app = typer.Typer(
@@ -48,7 +49,7 @@ def switch(name: Annotated[str, typer.Argument(help="Project name or id prefix."
         fail(f"no project matches '{name}'", error="not_found", ref=name)
     except ValueError as exc:
         fail(str(exc), error="ambiguous_project", ref=name)
-    except OSError as exc:
+    except StateUnwritableError as exc:
         fail(str(exc), error="state_unwritable", ref=name)
     emit_project_action(f"✓ switched to {project.root.name or project.id} ({project.id})", project)
 
@@ -94,8 +95,6 @@ def forget(
         fail(str(exc), error="ambiguous_project", ref=ref)
     except project_service.ProjectBusyError as exc:
         fail(str(exc), error="project_busy", ref=exc.project.id, exit_code=2)
-    except OSError as exc:
-        fail(str(exc), error="state_unwritable", ref=ref)
     emit_project_forget(report)
 
 

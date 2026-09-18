@@ -469,6 +469,131 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   never shipped.
 
 ### Fixed
+- **Tapping a key with nothing to type in an agent pane no longer pops a
+  warning toast** (#151). Terminals speaking the kitty keyboard protocol
+  (kitty, ghostty, wezterm, foot, recent alacritty) report Shift, Control, Alt,
+  Super and the locks pressed on their own as key events — and, because Textual
+  asks for every key, Menu, PrtSc, Pause, the volume and media keys and the
+  keypad's centre too. The pane looked each one up in the tmux key table, found
+  nothing, and said `left_shift: tmux has no name for this key — dropped` — one
+  red toast per key, three or more into an ordinary typing session, reading as
+  tmux failing. None of them is a keystroke, and neither is a macOS Cmd chord
+  (a command for the terminal, not a request to type the letter under it), so
+  none of them is mentioned: `core.keys.translate` now says *why* a key was
+  not sent, and the pane speaks from that reason. A chord you could have meant
+  — a modifier held, or a function key past the twelve tmux knows — keeps its
+  notice, once per key name in a pane, but as information — `no way to type
+  f13 into a tmux pane` — since tmux did not fail. A chord your tmux is too
+  old to carry is the one loss you can fix, and says so as a warning that
+  names the version you have and the one it needs (`tmux 3.4 cannot carry
+  shift+enter — 3.5 or newer can`). A key named after its character (`§`,
+  `±`, `«`, `。`, `؟` on a non-US layout) and the keypad's operators, which a
+  terminal may name without reporting their text, are typed rather than filed
+  with the keys nobody pressed — except the keypad's decimal and separator,
+  whose text only the layout knows: named once, never guessed. The silent
+  keys are a closed set (a modifier, a lock, Menu, PrtSc, Pause, the media and
+  volume keys, the keypad's centre — with or without a modifier held — and a
+  Cmd chord); anything else the pane cannot type is named, so a symbol it has
+  no table for is a quiet line and never a keystroke lost without a trace, and
+  a raw control byte a terminal reports as a key is spelt `U+0085` in that
+  line rather than sent to your screen.
+- **Alt+letter chords reach the agent as chords.** Claude Code's alt+p (switch
+  model) did nothing from a fleet pane — reported 2026-09-02 and again
+  2026-09-10 — because Textual's parser reads `ESC p` as `Key("alt+p",
+  character="p")` and the key table's "printable input is literal" rule sent the
+  bare letter. With alt or meta held the chord is the meaning; the character is
+  only how the terminal spelt it, and `translate` now says `M-p`. ASCII letters
+  only, because that is all a parser ever delivers with an alt token and a
+  character — measured by feeding Textual's own parser the bytes a terminal
+  sends, not against hand-built events, which had promised alt+digit and
+  alt+space chords a legacy terminal cannot produce (its `ESC 1` reaches the
+  parser as `¡` and its `ESC Space` as a plain space, with no alt at all; they
+  are typed as such). `M-1` and `M-Space` are real where the terminal sends the
+  chord itself, under the kitty keyboard protocol, and reach the agent from
+  there. Alt on punctuation stays the character, since through the name table it
+  was dropped (`;`) or became `ESC [`, the control-sequence introducer, and every
+  name this module emits was measured against a real tmux — `M-é` never was. An
+  alt chord on a shifted letter keeps its case (`M-A`; a kitty `meta+P` used to
+  come out as a lowercase `M-p`) except N, O and P, whose `ESC` forms are the
+  SS2, SS3 and DCS introducers a program's key parser joins with the next key —
+  those type the letter. Shift and ctrl keep the existing rule. A modifier tmux
+  cannot spell — `super`/`hyper`, which is how macOS Cmd arrives — now drops the
+  key instead of falling through to its character, so Cmd+V no longer types a
+  `v`. A chord tmux has no name for (`alt+shift+1` — the shifted key is
+  layout-specific) falls back to the character the terminal reported, so it
+  still types what it always typed; one an old server cannot carry is dropped
+  rather than mistyped. The parser's limits are documented in `docs/fleet.md`:
+  a terminal that reports the text a key produced (macOS Option) has the `alt`
+  token dropped by Textual, `ESC b`/`ESC f` are read as ctrl+arrows, ctrl+alt
+  on a letter loses the alt, and Escape typed within ~100 ms before a letter
+  reads as that chord.
+- **A spawned agent is told the task it was spawned for.** `fleet spawn --task`
+  recorded the task on the agent's row and named the label and branch after it
+  — and stopped there: the session inside received the generic board and its
+  role's standing cycle, whose `task next` hands out the *oldest* ready task. A
+  coder spawned for task B took task A; two spawned together raced for the same
+  one while their own sat idle; the manager ended up posting "you are coder-x,
+  run task show …" notes by hand (observed 2026-09-10). `fleet spawn` already
+  set `AISQUARE_FLEET_AGENT` on the window; the session-start hook now reads it,
+  joins the session to its row, and puts an **ASSIGNED TO YOU** block at the top
+  of the briefing saying what that task's state asks of *this* role — claim it,
+  verify it, do the rework it came back from review for, clear what blocks it,
+  or leave it with the verifier when it is the agent's own work already in
+  review. Every role whose cycle pulls from the review pool counts as a
+  verifier — `ui-tester` included, which was being told to rework the very
+  work it was spawned to check. Every instruction is one the commands would
+  honour: "claim it" only when `task next` would hand the task out (its needs
+  done) and `task claim` would accept it — so a `doing` task whose holder's
+  lease has run out is offered, not guarded — and a verifier is never told to
+  claim anything: a task it reopened, or one blocked or being worked, is
+  somebody else's turn until it is back in review. The one branch that tells an
+  agent to stand down and ask the manager is the one that earns it: a teammate
+  live on the task right now. An agent meeting its OWN claimed task after a
+  `/clear` carries on — Claude Code fires `SessionEnd(reason: clear)` for the
+  old id *before* the `SessionStart` of the new one, and the end hook used to
+  release the claim into that gap; it now keeps a fleet agent's claims across a
+  clear, and the start that follows moves every one of them (the assigned task
+  and the pool work it took, in every status that keeps a claim) onto the new
+  id together with the row, in one store transaction, so the board names a
+  session that exists and a looper's `task next --claim` in between finds the
+  task still held. `task next` puts the caller's assigned task first through
+  the same query as every other candidate, so parallel spawns stop racing — for
+  the tester, runner and reviewer cycles too, which now pass `--as`, and for the
+  MCP server's `task_next`, which runs under the agent's window and takes the
+  order (never a claim) from it. `AISQUARE_FLEET_AGENT` is inherited by every
+  process the agent starts, so a nested `claude -p` reaches both the hook and
+  `task next`: the row belongs to the *process* in its pane — Claude Code hands
+  every hook the pid of the process that fired it (`CLAUDE_PID`), and the hook
+  compares it with the pane's — so a child is neither briefed on nor able to
+  claim its parent's task, whatever start it reports (`resume`, `fork` and
+  `compact` are all things a child can say), and the manager's task-less row
+  is not rebound under a child either; a binary that exports no pid binds its
+  row on first arrival and keeps that session. An assignment ends with its
+  task: once the task is done or dropped the row forgets it, so a later clear
+  or compaction is not re-briefed on finished work — each such briefing used
+  to tell the agent to send the manager a question note, and each note woke
+  the manager for nothing — and a reopened task claimed by someone else is no
+  order to stand down. `fleet spawn --task` refuses a task that is already
+  `done` or `dropped`. The whole lookup is fail-open on BOTH doors — the
+  briefing's and `task next`'s — as its docstring always claimed: a damaged or
+  locked store, or a tmux that does not answer, costs the assignment line,
+  never the board and never the work loop. The first-prompt board an agent
+  gets when it meets the orchestrator late shows the claim under its new
+  holder, not the old one. And `fleet spawn`'s `AISQUARE_FLEET_AGENT` no longer
+  lingers in the tmux *session* environment after the first window: a window
+  opened by hand in the fleet's session used to inherit the first agent's row.
+  The row is written after the window starts, so `aisquare launch` inside the
+  window now waits for it before starting the agent — a slow or locked store,
+  a relabel or the cap check can delay the agent's start, never strip its
+  briefing. A `/clear`'s hand-off proves the process twice, in two hooks; when
+  tmux fails to answer the second, the bind is tried again at the agent's next
+  prompt and the **ASSIGNED TO YOU** block arrives with it, once — and a row
+  that ends (`fleet stop`, `fleet reap`) releases whatever its session still
+  held, so a claim parked for a clear never outlives the row it was parked
+  for, and a killed agent's claims go back to the pool with its row rather
+  than sitting `doing` under a dead holder for the length of the lease. When
+  an assignment ends, the agent header's `task …` chip goes with it; the label
+  and branch keep the task's short id.
 - **The wheel goes to the program that can use it — Claude Code's fullscreen
   TUI first.** The root of "scroll not working" (reported 2026-09-08 from WSL2
   + Windows Terminal). Claude Code's fullscreen TUI turns on the alternate
@@ -497,6 +622,75 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   history, tracking history that grows under a frozen view, and leaves with
   the offset. None of the keys reach the agent; any other key still returns
   the view to live.
+- **Select and copy text in an agent pane.** Reported from WSL2 + Windows
+  Terminal (2026-09-03): "not able to select and copy text" — an agent printed a
+  command and there was no way to take it. Drag-select was switched off on the
+  widget: a Line API widget has no `render()` for Textual's default selection to
+  read, and switched on alone every drag resolved to select-all, because the
+  compositor takes the drag's content offset from segment metadata only the
+  `render()` path stamped. The pane now stamps the row the terminal library
+  reads when it resolves a press or a drag (that row only — see below), supplies
+  its own extraction (a drag in the blank area below the output used to raise
+  out of the handler), and paints the span itself — as cells, so a row with wide
+  glyphs highlights what is copied, and tinting behind the text rather than over
+  it, since the theme's selection style resolves with foreground equal to
+  background. The text is copied when the gesture ends, wherever on screen it
+  ends — the app sees every press and release itself and tells the panes, so a drag that
+  crosses the pane's edge copies in either direction instead of depending on
+  whether the neighbouring widget happens to capture the mouse. Only a
+  left-button gesture that actually changed a pane's selection copies: a
+  right-button drag across a standing highlight leaves the clipboard alone, and
+  so does a release with nothing to do with a pane — a drag on the footer, a
+  scrollbar, a button. ctrl+c copies again while a selection stands — from the
+  pane or from the sidebar, through one path — and clears it; otherwise it is
+  the agent's interrupt, including when the selection covers nothing. cmd+c is
+  only ever the copy, and types nothing when there is no selection. The
+  highlight does not outlive what it means: a key or a paste into the agent
+  drops it, so does the agent printing something else under it, so a later
+  ctrl+c is the interrupt and never a copy of text nobody selected. Double-click
+  selects a word, a triple click nothing, and the pane is never selected whole
+  — not by a triple click on its header either (Textual's defaults would select
+  the whole pane, and the next ctrl+c would copy it instead of interrupting the
+  agent). A click is a press and a release in one cell, so a drag followed by a
+  click on its end cell is not a double click. The app reads every press and
+  release itself, before they bubble, so a burst of input handled back-to-back
+  cannot route a release with the previous gesture's button; and an empty copy
+  never reaches the terminal, where an empty OSC 52 clears the clipboard.
+  The `(exited 0)` notice row is tinted by the drag that copies it, like every
+  other row, and so is the `[↑k/history]` marker — whatever a row displays is
+  what it highlights and what it copies, cut to the columns the pane shows
+  rather than to the width of a tmux window that outgrew it. A line tmux
+  soft-wrapped is copied as one line (every frame carries tmux's own wrap
+  marks — `capture-pane -F`, tmux 3.7 and later — so the copy joins the rows
+  it shows, keeping a space that fell on the wrap, without a process of its
+  own; an older tmux gets one line per row), a tab is
+  expanded to the cells it occupies on screen so what is highlighted is what
+  the eye sees, and an emoji or a wide glyph is one unit to the highlight, the
+  cursor and the copy alike — the paint, the offsets the terminal library
+  resolves a drag with and the copied text share one grapheme model of the
+  row, cached beside the row's Strip rather than rebuilt for the cursor row
+  on every frame. The tint is visible on reverse-video cells too — under a
+  theme whose selection style names no background as well, where the fallback
+  used to draw the glyph in its own background — and the cursor stays
+  visible inside a highlight. Painting no longer stamps every row with
+  selection offsets: that gave each segment a unique link id and made a plain
+  mouse hover repaint the whole pane (120 pointer moves on a 200x60 pane: 7200
+  row renders, now 0), doubled the CPU per streamed frame (8.2 → 4.0 ms) and
+  held twice the memory in the strip cache; only the terminal library's own
+  offset lookup is stamped now. The highlight and the clipboard read the same
+  rows at the same moment, so they cannot disagree:
+  under an agent that is still printing, a drag copies the text at release.
+  Switching the pane to another agent drops the selection, so does hiding the
+  pane behind another tab or unmounting it, and changing the theme drops the
+  highlight's resolved colour so a theme picked mid-drag does not leave the
+  tint in the old palette. What decides whether a frame dropped the highlight
+  is the row as displayed: a `(pane gone)` notice replacing the row drops it
+  like any other change of the text, while a change hidden under the
+  `[↑k/history]` marker leaves it. A right click seeds no double click, so a
+  right click followed by a left click in the same cell selects nothing; the
+  copy key outside a pane takes the highlight made most recently when two
+  panes hold one; and the end of a gesture is routed even when the app's own
+  handling of it raises, so no press stays armed for the next gesture.
 - **One session is ONE Run again — the launcher owns the Run's trace id.**
   Measured against a production workspace on 2026-09-09: one
   `aisquare launch coder -p …` produced TWO dashboard Runs. `5efb96de…` held the

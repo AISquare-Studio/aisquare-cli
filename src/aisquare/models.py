@@ -466,6 +466,13 @@ class MetricsSummary(BaseModel):
 TaskStatus = Literal["todo", "doing", "review", "blocked", "done", "dropped"]
 """Lifecycle of a shared team task: todo → doing → review → done (or parked)."""
 
+CLOSED_STATUSES: frozenset[TaskStatus] = frozenset({"done", "dropped"})
+"""The statuses after which a task needs nobody: a need it satisfies, a claim it
+cannot carry, a fleet assignment that is over. One constant because the pair was
+spelled out in five places (the store's readiness rule and its claim clearing,
+the fleet's spawn refusal, the briefing, the board's archive split), and a sixth
+status would have had to find them all."""
+
 
 class TeamSession(BaseModel):
     """One live agent session on the orchestrator (id = the agent's session id)."""

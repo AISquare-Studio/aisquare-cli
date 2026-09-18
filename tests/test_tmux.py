@@ -413,6 +413,35 @@ def test_spawn_window_creates_the_session_when_it_is_absent(
     )
 
 
+def test_spawn_window_takes_the_env_pairs_back_out_of_a_new_sessions_environment(
+    fake_bin: Path, conf: Path, tmp_path: Path
+) -> None:
+    """``new-session -e`` writes the pair into the SESSION environment, which every
+    window opened later in that session inherits (measured on 3.7c; the live
+    test below repeats the measurement). ``AISQUARE_FLEET_AGENT`` is an identity,
+    so a window the operator opens by hand would have called itself the first
+    agent (review of #135). The first window's process has its copy; the
+    session's is removed, one ``set-environment -u`` per pair, after the window
+    is up — and a refusal there is swallowed, because the window is up."""
+    fake = FakeTmux(
+        Completed(1, "", "can't find session: asq-amber-fox"),  # has-session
+        Completed(0, f"@4{_SEP}%9\n", ""),  # new-session -P
+        Completed(1, "", "unknown variable: AISQUARE_FLEET_AGENT"),  # a refusal
+    )
+    info = _server(fake, fake_bin, conf).spawn_window(
+        "asq-amber-fox",
+        name="coder-1",
+        cwd=tmp_path,
+        command=["claude"],
+        env={"AISQUARE_FLEET_AGENT": "agt_1", "X": "a=b"},
+    )
+    assert fake.commands()[2:] == [
+        ["set-environment", "-u", "-t", "=asq-amber-fox", "AISQUARE_FLEET_AGENT"],
+        ["set-environment", "-u", "-t", "=asq-amber-fox", "X"],
+    ]
+    assert info.pane_id == "%9", "the refusal cost nothing: the window is up and reported"
+
+
 def test_spawn_window_adds_a_window_when_the_session_exists(
     fake_bin: Path, conf: Path, tmp_path: Path
 ) -> None:
@@ -428,6 +457,7 @@ def test_spawn_window_adds_a_window_when_the_session_exists(
     ]  # fmt: skip
     assert "-x" not in new_window, "an existing session's size is the session's"
     assert (info.window_id, info.pane_id, info.current_command) == ("@5", "%10", "sh")
+    assert len(fake.commands()) == 2, "new-window -e is per window: nothing to take back"
 
 
 def test_spawn_window_without_env_passes_no_dash_e(
@@ -536,6 +566,23 @@ def test_list_windows_parses_each_pane_and_skips_a_malformed_line(
 
     gone = FakeTmux(Completed(1, "", "can't find session: asq-amber-fox"))
     assert _server(gone, fake_bin, conf).list_windows("asq-amber-fox") == []
+
+
+def test_pane_pid_is_the_pid_tmux_started_in_the_pane(fake_bin: Path, conf: Path) -> None:
+    """One question, asked of the pane by id, and the answer checked to be about
+    that pane: an attached client's current pane may answer for a target
+    display-message could not find, exactly as ``pane_facts`` guards against."""
+    fake = FakeTmux(Completed(0, f"%3{_SEP}4242\n", ""))
+    assert _server(fake, fake_bin, conf).pane_pid("%3") == 4242
+    assert fake.commands() == [
+        ["display-message", "-p", "-t", "%3", f"#{{pane_id}}{_SEP}#{{pane_pid}}"]
+    ]
+    gone = FakeTmux(Completed(0, f"{_SEP}\n", ""))  # 3.7c: status 0, every field empty
+    assert _server(gone, fake_bin, conf).pane_pid("%3") is None
+    other = FakeTmux(Completed(0, f"%7{_SEP}4242\n", ""))  # somebody else's pane answered
+    assert _server(other, fake_bin, conf).pane_pid("%3") is None
+    down = FakeTmux(Completed(1, "", "no server running on /tmp/tmux-1000/sock"))
+    assert _server(down, fake_bin, conf).pane_pid("%3") is None
 
 
 def test_pane_facts_parses_a_live_pane(fake_bin: Path, conf: Path) -> None:
@@ -661,6 +708,28 @@ def test_capture_is_one_process_and_keeps_blank_rows(fake_bin: Path, conf: Path)
     ]  # fmt: skip
     assert capture == Capture(lines=rows, facts=tmux_module._facts(_facts_line()), scrollback=0)
     assert len(capture.lines) == 24
+
+
+def test_capture_with_flags_reads_each_rows_wrap_mark_and_strips_the_column(
+    fake_bin: Path, conf: Path
+) -> None:
+    """``-F`` puts a flags column before every row — ``W`` wrapped into the next,
+    ``X`` extended cells, ``-`` none — one space, then the row, escapes and all
+    (measured on 3.7c). The frame carries the marks and the rows come back
+    clean; without ``flags`` the argv is what it always was and ``wrapped`` is
+    ``None`` (review of #135, second round, finding 9)."""
+    rows = ["W \x1b[31mwrapped\x1b[39m ", "- plain", "X tab\tbed", "- ", *["- "] * 20]
+    fake = FakeTmux(_frame(rows, _facts_line()))
+    capture = _server(fake, fake_bin, conf).capture("%3", flags=True)
+    assert fake.commands()[0][:7] == ["capture-pane", "-p", "-e", "-N", "-F", "-S", "0"]
+    assert capture.lines[:4] == ["\x1b[31mwrapped\x1b[39m ", "plain", "tab\tbed", ""]
+    assert capture.wrapped is not None
+    assert capture.wrapped[:4] == [True, False, False, False]
+    assert len(capture.wrapped) == len(capture.lines) == 24
+
+    plain = FakeTmux(_frame([""] * 24, _facts_line()))
+    assert _server(plain, fake_bin, conf).capture("%3").wrapped is None
+    assert "-F" not in plain.commands()[0]
 
 
 def test_capture_slices_a_scrolled_frame_to_the_screen_height(fake_bin: Path, conf: Path) -> None:
@@ -930,6 +999,52 @@ def test_live_spawn_creates_the_session_then_adds_a_window(live: TmuxServer) -> 
 
 
 @requires_tmux
+def test_live_pane_pid_is_the_process_in_the_pane(live: TmuxServer, tmp_path: Path) -> None:
+    """The process tmux starts in the pane writes its own pid; ``pane_pid`` must
+    read the same number. That equality is what lets the session-start hook tell
+    the pane's agent (``CLAUDE_PID`` == this) from a nested child (it is not)."""
+    marker = tmp_path / "pid"
+    window = _spawn(live, "asq-test-fox", "w0", ["sh", "-c", f"echo $$ > {marker}; exec sleep 30"])
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline and not marker.exists():
+        time.sleep(0.05)
+    assert marker.exists(), "the pane's shell never ran"
+    assert live.pane_pid(window.pane_id) == int(marker.read_text(encoding="utf-8").strip())
+    assert live.pane_pid("%999") is None
+
+
+@requires_tmux
+def test_live_new_session_env_does_not_reach_a_window_opened_by_hand(live: TmuxServer) -> None:
+    """The measurement behind ``_forget_session_environment``: with the unset,
+    a second window opened WITHOUT ``-e`` (the operator's ``prefix c``) does not
+    see the first window's variable; the first window's process still does."""
+    first = live.spawn_window(
+        "asq-test-fox",
+        name="w0",
+        cwd=Path("/tmp"),
+        command=["sh", "-c", 'echo "first=${AISQUARE_FLEET_AGENT:-unset}"; exec sleep 30'],
+        env={"AISQUARE_FLEET_AGENT": "agt_first"},
+        width=80,
+        height=24,
+    )
+    by_hand = live.run(
+        "new-window", "-d", "-P", "-F", "#{pane_id}", "-t", "=asq-test-fox:", "--",
+        "sh", "-c", 'echo "hand=${AISQUARE_FLEET_AGENT:-unset}"; exec sleep 30',
+    ).strip()  # fmt: skip
+    deadline = time.monotonic() + 10
+    screens = ("", "")
+    while time.monotonic() < deadline:
+        screens = (_screen(live, first.pane_id), _screen(live, by_hand))
+        if "first=" in screens[0] and "hand=" in screens[1]:
+            break
+        time.sleep(0.05)
+    assert "first=agt_first" in screens[0], screens
+    assert "hand=unset" in screens[1], screens
+    with pytest.raises(TmuxError, match="unknown variable"):
+        live.run("show-environment", "-t", "=asq-test-fox", "AISQUARE_FLEET_AGENT")
+
+
+@requires_tmux
 def test_live_has_session_is_exact_because_of_the_equals(live: TmuxServer) -> None:
     _spawn(live, "asq-test-fox", "w0", CAT)
     assert live.has_session("asq-test-fox") is True
@@ -954,6 +1069,25 @@ def test_live_capture_returns_the_screen_with_colours_and_consumes_the_facts_lin
     assert capture.facts.dead is False and capture.facts.dead_status is None
     assert capture.scrollback == 0
     assert _wait(lambda: live.capture(window.pane_id).facts.current_command == "cat")
+
+
+@requires_tmux
+def test_live_capture_flags_mark_the_rows_tmux_wrapped(live: TmuxServer) -> None:
+    version = live.version()
+    if version is None or version < tmux_module.WRAP_FLAGS_MINIMUM:
+        pytest.skip("capture-pane -F needs tmux 3.7 or newer")
+    long_line = "x" * 100 + " tail"
+    window = _spawn(
+        live, "asq-test-fox", "w0", ["sh", "-c", f'printf "%s\\n" "{long_line}"; exec cat']
+    )
+    assert _wait(lambda: "tail" in _screen(live, window.pane_id))
+
+    capture = live.capture(window.pane_id, flags=True)
+    assert capture.wrapped is not None
+    assert len(capture.wrapped) == len(capture.lines) == 24
+    assert capture.wrapped[:3] == [True, False, False], capture.wrapped[:3]
+    assert capture.lines[0] == "x" * 80, "the flags column is not part of the row"
+    assert capture.lines[1].startswith("x" * 20 + " tail")
 
 
 @requires_tmux

@@ -11,6 +11,7 @@ fake forgot to override fails loudly instead of quietly reaching a real tmux.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -25,12 +26,14 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from typer.testing import CliRunner
 
+from aisquare.cli.app import app
 from aisquare.core import codenames, selfcli
 from aisquare.core.config import FleetRoleSettings, FleetSettings
 from aisquare.core.ids import new_agent_id, new_task_id
 from aisquare.core.orchestrator import team_project
-from aisquare.core.store import store_session
+from aisquare.core.store import SqliteStore, store_session
 from aisquare.core.tmux import (
     _FACTS_FIELDS,
     Completed,
@@ -41,7 +44,7 @@ from aisquare.core.tmux import (
     TmuxUnavailable,
     WindowInfo,
 )
-from aisquare.models import FleetAgent, ProjectInfo, TeamSession, TeamTask
+from aisquare.models import FleetAgent, FleetAgentStatus, ProjectInfo, TeamSession, TeamTask
 from aisquare.services import fleet as fleet_service
 from aisquare.services import team as team_service
 from aisquare.services.fleet import (
@@ -97,6 +100,9 @@ class FakeTmux(TmuxServer):
         self.facts: dict[str, PaneFacts] = {}
         self.output_at: dict[str, datetime] = {}
         """When each pane last printed — what ``#{window_activity}`` reports."""
+        self.pids: dict[str, int] = {}
+        """The pid tmux started in each pane — what ``pane_pid`` answers. Unset
+        means tmux cannot say, which the identity check reads as "cannot tell"."""
         self.spawned: list[dict[str, object]] = []
         self.typed: list[tuple[str, str, str]] = []
         """``(pane_id, kind, text)`` with kind ``literal`` / ``paste`` / ``key``."""
@@ -216,6 +222,12 @@ class FakeTmux(TmuxServer):
     def pane_facts(self, pane_id: str) -> PaneFacts | None:
         self.binary()
         return self.facts.get(pane_id)
+
+    def pane_pid(self, pane_id: str) -> int | None:
+        self.binary()
+        if pane_id not in self.facts:
+            return None
+        return self.pids.get(pane_id)
 
     def kill_window(self, pane_id: str) -> None:
         self.binary()
@@ -1892,6 +1904,1157 @@ def test_stop_leaves_the_row_live_when_tmux_cannot_confirm_the_agent_stopped(
 
 
 # --- reap ----------------------------------------------------------------------------
+
+
+# --- a spawned agent learns the task it was spawned for --------------------------------
+#
+# The row belongs to the PROCESS in its pane (the three rules above
+# ``team._fleet_row_named``). These tests act as that process the way Claude Code
+# would: the fake pane reports a pid, and ``CLAUDE_PID`` — what Claude Code hands
+# every hook, measured on 2.1.272 — carries the same number. A nested child is a
+# different number under the same window variables. A ``/clear`` is fired in the
+# order the real binary fires it: ``SessionEnd(reason=clear)`` for the old id,
+# THEN ``SessionStart(source=clear)`` for the new one (the PR's tests skipped the
+# end, which is where the claim was being lost — review of #135, finding 1).
+
+PANE_PID = 4242
+CHILD_PID = 9999
+
+
+def _task(
+    project: ProjectInfo, title: str, role: str = "coder", needs: list[str] | None = None
+) -> TeamTask:
+    task, _created = team_service.add_task(title, role=role, needs=needs, cwd=project.root)
+    return task
+
+
+def _become(
+    agent: FleetAgent, tmux: FakeTmux, monkeypatch: pytest.MonkeyPatch, *, pid: int, role: str
+) -> None:
+    """Run as ``pid`` under ``agent``'s window: its variables, and the pane's own pid."""
+    monkeypatch.setenv("AISQUARE_FLEET_AGENT", agent.id)
+    monkeypatch.setenv("AISQUARE_ROLE", role)
+    monkeypatch.setenv("CLAUDE_PID", str(pid))
+    tmux.pids[agent.pane_id] = PANE_PID
+
+
+def _stranger(monkeypatch: pytest.MonkeyPatch, role: str) -> None:
+    """Run as a session in some OTHER pane: no window variables, no fleet pid.
+
+    Without this a teammate registered after ``_spawned`` would look like the
+    spawned agent's own process and adopt its row — which is the rule working,
+    on a fixture that lied about who was calling.
+    """
+    monkeypatch.delenv("AISQUARE_FLEET_AGENT", raising=False)
+    monkeypatch.delenv("CLAUDE_PID", raising=False)
+    monkeypatch.setenv("AISQUARE_ROLE", role)
+
+
+def _spawned(
+    project: ProjectInfo,
+    role: str,
+    task_id: str | None,
+    tmux: FakeTmux,
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[FleetAgent, str]:
+    """Spawn ``role`` for ``task_id`` and become the process in its pane.
+
+    Returns the row and the session id minted for it — the id the agent's first
+    ``SessionStart`` reports, since ``launch`` starts it with ``--session-id``.
+    """
+    receipt = fleet_service.spawn(project, role, task_id=task_id, worktree=False)
+    agent = receipt.agent
+    assert agent.session_id is not None, "the fake claude on PATH takes --session-id"
+    _become(agent, tmux, monkeypatch, pid=PANE_PID, role=role)
+    return agent, agent.session_id
+
+
+def _clear(session_id: str, new_id: str, project: ProjectInfo) -> str:
+    """A ``/clear`` as Claude Code fires it; returns the board the new id is handed."""
+    team_service.hook_session_end(session_id, project.root, reason="clear")
+    return team_service.hook_session_start(new_id, project.root, "clear")
+
+
+def _row(agent_id: str) -> FleetAgent:
+    with store_session() as store:
+        row = store.get_fleet_agent(agent_id)
+    assert row is not None
+    return row
+
+
+def _task_now(task_id: str) -> TeamTask:
+    with store_session() as store:
+        task = store.get_task(task_id)
+    assert task is not None
+    return task
+
+
+def _assignment_block(board: str) -> str:
+    """The ASSIGNED TO YOU lines of a briefing, up to the board's sessions list."""
+    assert "ASSIGNED TO YOU" in board, board
+    return board.split("ASSIGNED TO YOU", 1)[1].split("sessions:", 1)[0]
+
+
+def test_a_spawned_agent_is_told_its_task_on_its_first_start(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``fleet spawn --task`` recorded the task on the row and named the label
+    and branch after it — and stopped there. The session inside got the generic
+    board and its role's ``task next``, which hands out the OLDEST ready task;
+    the manager was left posting "you are coder-x, run task show …" notes by
+    hand (observed 2026-09-10). The row's env var now reaches the briefing."""
+    older = _task(project, "the older task")
+    mine = _task(project, "the task this coder is for")
+    agent, first = _spawned(project, "coder", mine.id, tmux, monkeypatch)
+
+    board = team_service.hook_session_start(first, project.root, "startup")
+
+    assert f"ASSIGNED TO YOU: {mine.id} [todo] the task this coder is for" in board
+    assert f"aisquare task claim {mine.id} --as {first[:8]}" in board, "claim it FIRST, by id"
+    assert older.id not in _assignment_block(board)
+    assert _row(agent.id).session_id == first, "the minted id is the row's from the spawn"
+
+
+def test_task_next_prefers_the_callers_assigned_task_over_the_oldest(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Oldest-first is right for a looper picking from a pool and wrong for an
+    agent the manager started FOR a task: two coders spawned together raced
+    for the same oldest task while their own sat idle."""
+    older = _task(project, "the older task")
+    mine = _task(project, "the task this coder is for")
+    _agent, first = _spawned(project, "coder", mine.id, tmux, monkeypatch)
+    team_service.hook_session_start(first, project.root, "startup")
+
+    picked = team_service.next_task(role="coder", claim=True, session_ref=first, cwd=project.root)
+
+    assert picked is not None and picked.id == mine.id
+    assert picked.status == "doing" and picked.claimed_by == first
+    assert _task_now(older.id).status == "todo", "the pool is left alone"
+    # A session with no row keeps the pool order: oldest first.
+    monkeypatch.delenv("AISQUARE_FLEET_AGENT")
+    team_service.hook_session_start("sess-plain-3", project.root, "startup")
+    plain = team_service.next_task(
+        role="coder", claim=True, session_ref="sess-plain-3", cwd=project.root
+    )
+    assert plain is not None and plain.id == older.id
+
+
+def test_an_assigned_task_someone_else_holds_on_a_live_lease_is_reported_not_retaken(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mine = _task(project, "already in hand")
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
+    team_service.hook_session_start("sess-other-4", project.root, "startup")
+    assert team_service.claim_task(mine.id, session_ref="sess-other-4").status == "doing"
+    _agent, first = _spawned(project, "coder", mine.id, tmux, monkeypatch)
+
+    board = team_service.hook_session_start(first, project.root, "startup")
+
+    assert f"ASSIGNED TO YOU: {mine.id} [doing] already in hand" in board
+    assert "already doing by sess-oth" in board
+    assert "ask the manager" in board, "never silently take another task"
+    assert "task claim" not in _assignment_block(board), "a live lease is not to be taken"
+
+
+def test_an_assigned_task_whose_holders_lease_ran_out_is_told_to_claim_it(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The stop order was given for every ``doing`` task somebody else held —
+    including one whose holder died with an expired lease, which ``task claim``
+    accepts (review of #135, finding 12c). A replacement spawned for exactly
+    that task was told to stand down from the work it was started for."""
+    mine = _task(project, "the first holder died on this")
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
+    team_service.hook_session_start("sess-dead-holder", project.root, "startup")
+    team_service.claim_task(mine.id, session_ref="sess-dead-holder")
+    with store_session() as store:
+        store.renew_leases("sess-dead-holder", datetime.now(tz=UTC) - timedelta(minutes=1))
+    _agent, first = _spawned(project, "coder", mine.id, tmux, monkeypatch)
+
+    board = team_service.hook_session_start(first, project.root, "startup")
+
+    block = _assignment_block(board)
+    assert "lease on it has run out" in block and f"aisquare task claim {mine.id}" in block
+    assert "Do not take another" not in block and "ask the manager" not in block
+    # The control: the instruction is one the command honours.
+    assert team_service.claim_task(mine.id, session_ref=first).claimed_by == first
+
+
+def test_a_clear_keeps_the_agents_claim_and_moves_it_to_the_new_id(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Finding 1 of the #135 review. Claude Code fires ``SessionEnd(reason=clear)``
+    for the old id BEFORE ``SessionStart(source=clear)`` for the new one, and the
+    end hook released the claim to the pool: the new id then found an unclaimed
+    task and was told "Claim it FIRST" — or, if a looper had taken it in the
+    gap, to stand down from its own work. The end hook now keeps the claims of
+    a fleet agent that is only clearing, and the start hook moves them."""
+    mine = _task(project, "the task this coder is for")
+    agent, first = _spawned(project, "coder", mine.id, tmux, monkeypatch)
+    team_service.hook_session_start(first, project.root, "startup")
+    team_service.claim_task(mine.id, session_ref=first)
+
+    cleared = _clear(first, "sess-c2", project)
+
+    held = _task_now(mine.id)
+    assert (held.status, held.claimed_by) == ("doing", "sess-c2"), "kept, then moved"
+    assert _row(agent.id).session_id == "sess-c2"
+    assert f"ASSIGNED TO YOU: {mine.id} [doing]" in cleared
+    assert "You are the one working it" in cleared
+    assert "Claim it FIRST" not in cleared and "already doing by" not in cleared
+    with store_session() as store:
+        kinds = [e.kind for e in store.recent_events(project.id, limit=20)]
+    assert "task_released" not in kinds, "nothing was released, so nothing says so"
+    # And again: a second clear starts from the id the first one moved to.
+    again = _clear("sess-c2", "sess-c3", project)
+    assert "You are the one working it" in again
+    assert _task_now(mine.id).claimed_by == "sess-c3"
+    # A resume keeps the id and needs no move at all.
+    resumed = team_service.hook_session_start("sess-c3", project.root, "resume")
+    assert "You are the one working it" in resumed
+
+
+def test_a_looper_in_the_clear_gap_cannot_take_the_clearing_agents_task(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The gap between the two hooks is where a looper's ``task next --claim``
+    used to find the task back in the pool. It must find it still ``doing``."""
+    mine = _task(project, "the task this coder is for")
+    agent, first = _spawned(project, "coder", mine.id, tmux, monkeypatch)
+    team_service.hook_session_start(first, project.root, "startup")
+    team_service.claim_task(mine.id, session_ref=first)
+    _stranger(monkeypatch, "coder")
+    team_service.hook_session_start("sess-looper", project.root, "startup")
+    _become(agent, tmux, monkeypatch, pid=PANE_PID, role="coder")
+
+    team_service.hook_session_end(first, project.root, reason="clear")
+    grabbed = team_service.next_task(
+        role="coder", claim=True, session_ref="sess-looper", cwd=project.root
+    )
+    board = team_service.hook_session_start("sess-c2", project.root, "clear")
+
+    assert grabbed is None, "the pool had nothing: the clearing agent's task is still doing"
+    assert _task_now(mine.id).claimed_by == "sess-c2"
+    assert "You are the one working it" in board
+
+
+def test_the_hook_cli_keeps_a_clearing_fleet_agents_claim_in_claude_codes_order(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    runner: CliRunner,
+) -> None:
+    """The same sequence through the real hook commands, payloads as Claude Code
+    sends them: ``reason`` on the end, ``source`` on the start."""
+    mine = _task(project, "the task this coder is for")
+    _agent, first = _spawned(project, "coder", mine.id, tmux, monkeypatch)
+
+    def hook(name: str, **payload: object) -> str:
+        body = json.dumps({"cwd": str(project.root), **payload})
+        result = runner.invoke(app, ["hook", name], input=body)
+        assert result.exit_code == 0, result.output
+        return result.stdout
+
+    hook("session-start", session_id=first, source="startup")
+    claimed = runner.invoke(app, ["task", "claim", mine.id, "--as", first])
+    assert claimed.exit_code == 0, claimed.output
+    hook("session-end", session_id=first, reason="clear")
+    started = hook("session-start", session_id="sess-cli-c2", source="clear")
+
+    assert "You are the one working it" in started, started
+    assert _task_now(mine.id).claimed_by == "sess-cli-c2"
+
+
+def test_a_child_process_of_the_agent_neither_takes_the_row_nor_the_task(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The window's env is inherited by every descendant: a nested ``claude -p``
+    reaches the same hook under the same ``AISQUARE_FLEET_AGENT``. What tells it
+    apart is the process: its ``CLAUDE_PID`` is not the pid in the row's pane."""
+    mine = _task(project, "the task this coder is for")
+    agent, first = _spawned(project, "coder", mine.id, tmux, monkeypatch)
+    team_service.hook_session_start(first, project.root, "startup")
+    _become(agent, tmux, monkeypatch, pid=CHILD_PID, role="coder")
+
+    child = team_service.hook_session_start("sess-child", project.root, "startup")
+
+    assert "ASSIGNED TO YOU" not in child
+    assert _row(agent.id).session_id == first, "the row stays the parent's"
+    picked = team_service.next_task(role="coder", claim=True, session_ref=first, cwd=project.root)
+    assert picked is not None and picked.id == mine.id, "the parent still gets its own task first"
+
+
+@pytest.mark.parametrize("source", ["resume", "fork", "compact", "clear", "startup"])
+def test_a_child_cannot_take_the_row_whatever_start_it_reports(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    source: str,
+) -> None:
+    """Finding 4 of the #135 review: the guard let any caller whose source was not
+    ``startup`` through — and ``claude -p --resume``, ``--fork-session`` and a
+    long child that compacts all report something else. Identity is the process,
+    and a child's start is refused whatever it says about itself."""
+    mine = _task(project, "the task this coder is for")
+    agent, first = _spawned(project, "coder", mine.id, tmux, monkeypatch)
+    team_service.hook_session_start(first, project.root, "startup")
+    team_service.claim_task(mine.id, session_ref=first)
+    _become(agent, tmux, monkeypatch, pid=CHILD_PID, role="coder")
+
+    child = team_service.hook_session_start("sess-child", project.root, source)
+
+    assert "ASSIGNED TO YOU" not in child
+    assert _row(agent.id).session_id == first
+    assert _task_now(mine.id).claimed_by == first, "the claim never moved"
+
+
+@pytest.mark.parametrize("source", ["clear", "compact", "resume", "startup"])
+def test_the_process_in_the_pane_adopts_its_row_under_any_source(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    source: str,
+) -> None:
+    """The other half of the rule: the source plays no part for the pane's own
+    process either. Compaction keeps the session id in practice; should a start
+    under a new id ever come from the pane's process, it is that process."""
+    mine = _task(project, "the task this coder is for")
+    agent, first = _spawned(project, "coder", mine.id, tmux, monkeypatch)
+    team_service.hook_session_start(first, project.root, "startup")
+    team_service.claim_task(mine.id, session_ref=first)
+
+    board = team_service.hook_session_start("sess-next", project.root, source)
+
+    assert _row(agent.id).session_id == "sess-next"
+    assert _task_now(mine.id).claimed_by == "sess-next"
+    assert "You are the one working it" in board
+
+
+def test_a_child_started_after_prune_retired_the_parents_presence_cannot_take_the_row(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The old guard also asked whether the holder's row was still live — and
+    ``team prune`` retires a silent agent's PRESENCE after thirty minutes while
+    its claims stay (a long tool call is silence). A plain ``startup`` child
+    then rebound the row (finding 4). The parent's own next start still does."""
+    mine = _task(project, "the task this coder is for")
+    agent, first = _spawned(project, "coder", mine.id, tmux, monkeypatch)
+    team_service.hook_session_start(first, project.root, "startup")
+    team_service.claim_task(mine.id, session_ref=first)
+    with store_session() as store:
+        stored = store.get_session(first)
+        assert stored is not None
+        store.upsert_session(
+            stored.model_copy(update={"last_seen_at": datetime.now(tz=UTC) - timedelta(hours=1)})
+        )
+    report = team_service.prune_sessions(cwd=project.root)
+    assert [p.id for p in report.pruned] == [first] and report.released_total == 0
+    _become(agent, tmux, monkeypatch, pid=CHILD_PID, role="coder")
+
+    child = team_service.hook_session_start("sess-child", project.root, "startup")
+
+    assert "ASSIGNED TO YOU" not in child
+    assert _row(agent.id).session_id == first and _task_now(mine.id).claimed_by == first
+    _become(agent, tmux, monkeypatch, pid=PANE_PID, role="coder")
+    own = _clear(first, "sess-c2", project)
+    assert "You are the one working it" in own and _task_now(mine.id).claimed_by == "sess-c2"
+
+
+def test_the_managers_task_less_row_follows_the_manager_and_never_its_child(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The bind used to happen before the "no task" check, so a manager's child
+    rebound the manager's row — after which ``nudge_manager`` read the child's
+    dead session and never woke the manager, and ``fleet tell`` typed into a
+    working one (finding 4). The row must name the manager's live session."""
+    agent, first = _spawned(project, "manager", None, tmux, monkeypatch)
+    assert agent.task_id is None
+    team_service.hook_session_start(first, project.root, "startup")
+    _become(agent, tmux, monkeypatch, pid=CHILD_PID, role="manager")
+
+    team_service.hook_session_start("sess-mgr-child", project.root, "startup")
+
+    assert _row(agent.id).session_id == first
+    _become(agent, tmux, monkeypatch, pid=PANE_PID, role="manager")
+    _clear(first, "sess-mgr-2", project)
+    assert _row(agent.id).session_id == "sess-mgr-2", "the manager's own clear rebinds"
+
+
+def test_a_child_process_cannot_claim_the_parents_assigned_task(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 2 of the #116 review: the hook refused to brief a child, but ``task
+    next`` resolved the row from the inherited variable alone and claimed the
+    parent's task out from under it. A claim needs a session bound to the row."""
+    older = _task(project, "the older task")
+    mine = _task(project, "the task this coder is for")
+    agent, first = _spawned(project, "coder", mine.id, tmux, monkeypatch)
+    team_service.hook_session_start(first, project.root, "startup")
+    _become(agent, tmux, monkeypatch, pid=CHILD_PID, role="coder")
+    team_service.hook_session_start("sess-child-a", project.root, "startup")
+
+    # The child carries the parent's AISQUARE_FLEET_AGENT and asks for work.
+    stolen = team_service.next_task(
+        role="coder", claim=True, session_ref="sess-child-a", cwd=project.root
+    )
+
+    assert stolen is not None and stolen.id == older.id, "a child picks from the pool"
+    picked = team_service.next_task(role="coder", claim=True, session_ref=first, cwd=project.root)
+    assert picked is not None and picked.id == mine.id, "the agent's own task is still there"
+
+
+def test_a_childs_own_clear_still_releases_its_own_claims(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Rule 2 is for the pane's process only: a nested child that ends a session
+    releases what it held, as every session end always did."""
+    pool = _task(project, "pool work")
+    agent, first = _spawned(project, "coder", None, tmux, monkeypatch)
+    team_service.hook_session_start(first, project.root, "startup")
+    _become(agent, tmux, monkeypatch, pid=CHILD_PID, role="coder")
+    team_service.hook_session_start("sess-child", project.root, "startup")
+    team_service.claim_task(pool.id, session_ref="sess-child")
+
+    team_service.hook_session_end("sess-child", project.root, reason="clear")
+
+    released = _task_now(pool.id)
+    assert (released.status, released.claimed_by) == ("todo", None)
+
+
+def test_without_a_process_identity_only_an_unbound_row_binds(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A binary that exports no ``CLAUDE_PID`` cannot be told from its children,
+    so a bound row stays with the session it has — and a row nobody is bound to
+    yet (the binary could not be started on a chosen id) binds on first arrival,
+    because nothing better is known."""
+    mine = _task(project, "the task this coder is for")
+    agent, first = _spawned(project, "coder", mine.id, tmux, monkeypatch)
+    team_service.hook_session_start(first, project.root, "startup")
+    team_service.claim_task(mine.id, session_ref=first)
+    monkeypatch.delenv("CLAUDE_PID")
+
+    cleared = _clear(first, "sess-c2", project)
+
+    assert "ASSIGNED TO YOU" not in cleared and _row(agent.id).session_id == first
+    unbound = fleet_service.spawn(
+        project, "coder", task_id=mine.id, worktree=False, agent_args=["--continue"]
+    ).agent
+    assert unbound.session_id is None, "the premise: no id could be minted"
+    monkeypatch.setenv("AISQUARE_FLEET_AGENT", unbound.id)
+    board = team_service.hook_session_start("sess-first-arrival", project.root, "startup")
+    assert "ASSIGNED TO YOU" in board and _row(unbound.id).session_id == "sess-first-arrival"
+
+
+def test_a_coder_spawned_for_rework_is_told_to_do_the_rework(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Gating ``[review]`` on the verifying roles sent every other role to the
+    generic stop order, so a coder spawned to address review feedback stalled on
+    arrival while holding a slot (review of #116, round 2)."""
+    task = _task(project, "verify the auth flow")
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
+    team_service.hook_session_start("sess-first-coder", project.root, "startup")
+    team_service.claim_task(task.id, session_ref="sess-first-coder")
+    team_service.review_task(task.id, session_ref="sess-first-coder")
+    _agent, first = _spawned(project, "coder", task.id, tmux, monkeypatch)
+
+    board = team_service.hook_session_start(first, project.root, "startup")
+
+    assert f"ASSIGNED TO YOU: {task.id} [review]" in board
+    assert "spawned for the rework" in board
+    assert "Do not take another task on your own" not in board
+
+
+def test_a_blocked_assignment_is_told_to_unblock_it_not_to_stand_down(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``blocked`` fell to the stop order too — and a blocked task is claimable,
+    so there was work to name."""
+    task = _task(project, "needs a decision")
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
+    team_service.hook_session_start("sess-blocker", project.root, "startup")
+    team_service.claim_task(task.id, session_ref="sess-blocker")
+    team_service.block_task(task.id, reason="waiting on the API key", session_ref="sess-blocker")
+    _agent, first = _spawned(project, "coder", task.id, tmux, monkeypatch)
+
+    board = team_service.hook_session_start(first, project.root, "startup")
+
+    assert f"ASSIGNED TO YOU: {task.id} [blocked]" in board
+    assert "names why" in board and f"aisquare task claim {task.id}" in board
+    assert "Do not take another task on your own" not in board
+
+
+def test_an_assigned_task_with_open_needs_is_not_told_to_claim_it(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Finding 12a: the ``todo`` branch said "Claim it FIRST" whatever the task
+    needed, and ``task claim`` accepts any todo task — so the readiness rule
+    ``task next`` enforces was bypassed by the briefing that named the command."""
+    prerequisite = _task(project, "the schema first")
+    mine = _task(project, "the endpoint on top of it", needs=[prerequisite.id])
+    _agent, first = _spawned(project, "coder", mine.id, tmux, monkeypatch)
+
+    board = team_service.hook_session_start(first, project.root, "startup")
+
+    block = _assignment_block(board)
+    assert f"waits on {prerequisite.id[-8:]}" in block
+    assert "Claim it FIRST" not in block and "task claim" not in block
+    picked = team_service.next_task(role="coder", claim=True, session_ref=first, cwd=project.root)
+    assert picked is not None and picked.id == prerequisite.id, "the pool, not the waiting task"
+    team_service.finish_task(prerequisite.id, session_ref=first)
+    ready = team_service.hook_session_start(first, project.root, "resume")
+    assert "Claim it FIRST" in _assignment_block(ready), "ready now, so claim it"
+
+
+@pytest.mark.parametrize("state", ["todo", "blocked", "doing"])
+def test_a_verifier_spawned_for_a_task_that_is_not_in_review_is_not_told_to_claim_it(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    state: str,
+) -> None:
+    """Finding 12b: a tester that reopened its review task was told, on its next
+    clear, to claim it and "work it to review/done" — and ``task claim`` has no
+    role check, so it raced the coder for the rework. A verifier's part is the
+    review; every other state is somebody else's turn."""
+    task = _task(project, "verify the auth flow")
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
+    team_service.hook_session_start("sess-coder", project.root, "startup")
+    team_service.claim_task(task.id, session_ref="sess-coder")
+    team_service.review_task(task.id, session_ref="sess-coder")
+    _agent, first = _spawned(project, "tester", task.id, tmux, monkeypatch)
+    team_service.hook_session_start(first, project.root, "startup")
+    team_service.reopen_task(task.id, reason="FAIL: the login step 500s", session_ref=first)
+    if state == "blocked":
+        team_service.claim_task(task.id, session_ref="sess-coder")
+        team_service.block_task(task.id, reason="needs the fixture", session_ref="sess-coder")
+    elif state == "doing":
+        team_service.claim_task(task.id, session_ref="sess-coder")
+
+    board = _clear(first, "sess-tester-2", project)
+
+    block = _assignment_block(board)
+    assert f"[{state}]" in block and "not in review" in block
+    assert "task claim" not in block and "Do not take another" not in block
+
+
+def test_a_row_with_no_session_id_does_not_read_an_unclaimed_task_as_its_own(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``FleetAgent.session_id`` is None for any binary that cannot be started on
+    a chosen id — ``--continue`` takes that branch here. Testing "is this claim
+    mine?" by membership then compared ``None`` against ``(sid, None)`` and said
+    yes, so an untouched `todo` task was reported as work in flight: the agent
+    was told to carry on, never claimed it, and the pool handed it to somebody
+    else (review of #116, round 3)."""
+    mine = _task(project, "the task this coder is for")
+    receipt = fleet_service.spawn(
+        project, "coder", task_id=mine.id, worktree=False, agent_args=["--continue"]
+    )
+    assert receipt.agent.session_id is None, "the premise: no id could be minted"
+    _become(receipt.agent, tmux, monkeypatch, pid=PANE_PID, role="coder")
+
+    board = team_service.hook_session_start("sess-nosid", project.root, "startup")
+
+    assert f"ASSIGNED TO YOU: {mine.id} [todo]" in board
+    assert f"aisquare task claim {mine.id} --as sess-nos" in board, "claim it FIRST"
+    assert "You are the one working it" not in board
+    assert _row(receipt.agent.id).session_id == "sess-nosid", "and it still binds"
+    # The same `None == None` read, on the branch that does consult it: a task
+    # sent to review without ever being claimed keeps `claimed_by = NULL`.
+    unclaimed = _task(project, "never claimed, straight to review")
+    team_service.review_task(unclaimed.id)
+    second = fleet_service.spawn(
+        project, "coder", task_id=unclaimed.id, worktree=False, agent_args=["--continue"]
+    )
+    _become(second.agent, tmux, monkeypatch, pid=PANE_PID, role="coder")
+
+    review = team_service.hook_session_start("sess-nosid-2", project.root, "startup")
+
+    assert f"ASSIGNED TO YOU: {unclaimed.id} [review]" in review
+    assert "spawned for the rework" in review
+    assert "it is a verifier's now" not in review, "nobody put it there; it is not 'yours'"
+
+
+def test_a_clear_after_review_moves_the_claim_and_does_not_reopen_the_work(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``set_task_status`` clears ``claimed_by`` for done/dropped only, so review
+    and blocked keep theirs — the two statuses the first claim-move missed. And
+    "you hold it, carry on to `task review`" is the wrong thing to tell an agent
+    whose task is already WITH a verifier (review of #116, round 3)."""
+    mine = _task(project, "the task this coder is for")
+    _agent, first = _spawned(project, "coder", mine.id, tmux, monkeypatch)
+    team_service.hook_session_start(first, project.root, "startup")
+    team_service.claim_task(mine.id, session_ref=first)
+    team_service.review_task(mine.id, session_ref=first)
+
+    cleared = _clear(first, "sess-rv2", project)
+
+    assert f"ASSIGNED TO YOU: {mine.id} [review]" in cleared
+    assert "it is a verifier's now" in cleared
+    assert "Carry on" not in cleared and "spawned for the rework" not in cleared
+    assert _task_now(mine.id).claimed_by == "sess-rv2", "the claim follows the agent"
+
+
+def test_adopting_a_row_moves_every_claim_the_old_id_held(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Not only the assigned task: the pool task the agent took, the one it put
+    in review, the one it blocked — every claim the old id holds, or their leases
+    run out under a working agent. A closed task carries no claim and is left."""
+    assigned = _task(project, "assigned")
+    pool = _task(project, "a pool task")
+    reviewed = _task(project, "in review")
+    blocked = _task(project, "blocked")
+    finished = _task(project, "done already")
+    _agent, first = _spawned(project, "coder", assigned.id, tmux, monkeypatch)
+    team_service.hook_session_start(first, project.root, "startup")
+    for task in (assigned, pool, reviewed, blocked, finished):
+        team_service.claim_task(task.id, session_ref=first)
+    team_service.review_task(reviewed.id, session_ref=first)
+    team_service.block_task(blocked.id, reason="waiting", session_ref=first)
+    team_service.finish_task(finished.id, session_ref=first)
+
+    _clear(first, "sess-c2", project)
+
+    holders = {t.id: _task_now(t.id).claimed_by for t in (assigned, pool, reviewed, blocked)}
+    assert holders == {t.id: "sess-c2" for t in (assigned, pool, reviewed, blocked)}
+    assert _task_now(finished.id).claimed_by is None
+
+
+def test_adopting_a_row_moves_the_row_and_the_claims_together_or_not_at_all(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The bind and the claim move used to commit separately, with the second
+    failure swallowed: a row bound to the new id, the work still held by the
+    old one (review of #135). One transaction: a claim move that fails leaves
+    the row where it was."""
+    mine = _task(project, "the task this coder is for")
+    agent, first = _spawned(project, "coder", mine.id, tmux, monkeypatch)
+    team_service.hook_session_start(first, project.root, "startup")
+    team_service.claim_task(mine.id, session_ref=first)
+
+    class RefusesTheClaimMove:
+        """``sqlite3.Connection`` with one statement — the claim move — refused."""
+
+        def __init__(self, conn: sqlite3.Connection) -> None:
+            self._conn = conn
+
+        def execute(self, sql: str, parameters: Sequence[object] = (), /) -> sqlite3.Cursor:
+            if sql.startswith("UPDATE team_task SET claimed_by"):
+                raise sqlite3.OperationalError("database is locked")
+            return self._conn.execute(sql, parameters)
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(self._conn, name)
+
+    lease = datetime.now(tz=UTC) + timedelta(hours=2)
+    with store_session() as store:
+        assert isinstance(store, SqliteStore)
+        store._conn = RefusesTheClaimMove(store._conn)  # type: ignore[assignment]
+        with pytest.raises(sqlite3.OperationalError):
+            store.adopt_fleet_agent_session(agent.id, first, "sess-c2", lease)
+
+    assert _row(agent.id).session_id == first, "the row did not move without its claims"
+    assert _task_now(mine.id).claimed_by == first
+
+
+def test_a_row_that_ends_mid_hook_briefs_nobody(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`fleet stop` and this hook are different processes, which is why the
+    adoption is a targeted UPDATE — so the stop can land between the read and
+    the write. Its False was being discarded, and the stopped session was briefed
+    "claim it FIRST" and held the task under a dead row (review of #116, round 3)."""
+    mine = _task(project, "the task this coder is for")
+    agent, first = _spawned(project, "coder", mine.id, tmux, monkeypatch)
+    team_service.hook_session_start(first, project.root, "startup")
+    original = SqliteStore.adopt_fleet_agent_session
+
+    def stop_first(
+        self: SqliteStore, agent_id: str, previous: str | None, session_id: str, lease: datetime
+    ) -> bool:
+        # The race, made deterministic: the row ends after it was read.
+        self.end_fleet_agent(agent_id, exit_status=0)
+        return original(self, agent_id, previous, session_id, lease)
+
+    monkeypatch.setattr(SqliteStore, "adopt_fleet_agent_session", stop_first)
+
+    board = _clear(first, "sess-raced", project)
+
+    assert "ASSIGNED TO YOU" not in board
+    assert _task_now(mine.id).status == "todo"
+    assert _row(agent.id).session_id == first, "an ended row is not rebound"
+
+
+def test_an_unreadable_fleet_row_costs_the_line_and_not_the_board(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The docstring has promised fail-open since the first version; only
+    AmbiguousIdError was ever caught, so any sqlite error propagated out of
+    `hook_session_start` and took the whole board with it (review of #116)."""
+    task = _task(project, "some task")
+    _agent, first = _spawned(project, "coder", task.id, tmux, monkeypatch)
+
+    def boom(self: SqliteStore, ref: str) -> FleetAgent | None:
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(SqliteStore, "get_fleet_agent", boom)
+
+    board = team_service.hook_session_start(first, project.root, "startup")
+
+    assert "ASSIGNED TO YOU" not in board
+    assert "<aisquare-team>" in board and task.id in board, "the board itself survives"
+    assert "Your standing cycle (coder)" in board
+
+
+def test_a_tmux_that_does_not_answer_costs_the_adoption_and_not_the_board(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The identity check asks tmux; a tmux that raises is "cannot tell". For the
+    end hook that means the claims are RELEASED, as every end always did — parked
+    on an id nothing proven can come back for, they would strand — and for the
+    start hook that a bound row stays put. The board still renders either way."""
+    mine = _task(project, "the task this coder is for")
+    agent, first = _spawned(project, "coder", mine.id, tmux, monkeypatch)
+    team_service.hook_session_start(first, project.root, "startup")
+    team_service.claim_task(mine.id, session_ref=first)
+
+    def wedged(self: FakeTmux, pane_id: str) -> int | None:
+        raise TmuxError("server wedged")
+
+    monkeypatch.setattr(FakeTmux, "pane_pid", wedged)
+
+    board = _clear(first, "sess-c2", project)
+
+    assert "ASSIGNED TO YOU" not in board and "<aisquare-team>" in board
+    assert _row(agent.id).session_id == first, "a bound row is not adopted on a guess"
+    released = _task_now(mine.id)
+    assert (released.status, released.claimed_by) == ("todo", None), "released, not parked"
+
+
+def test_a_bind_the_start_hook_could_not_make_lands_at_the_next_prompt(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Finding 5 of the second #135 review. A ``/clear``'s hand-off proves the
+    pane's process twice, in two hook processes: the end hook keeps the claims,
+    the start hook adopts them. tmux not answering the second time left the row
+    bound to the ended id and the claims parked on it — nothing to adopt them,
+    nothing to release them, for the length of the lease. The bind is tried
+    again at every prompt of a session under a fleet window that no row is
+    bound to, and the briefing it was owed comes with it, once."""
+    mine = _task(project, "the task this coder is for")
+    agent, first = _spawned(project, "coder", mine.id, tmux, monkeypatch)
+    team_service.hook_session_start(first, project.root, "startup")
+    team_service.claim_task(mine.id, session_ref=first)
+    team_service.hook_session_end(first, project.root, reason="clear")  # kept: the pane's process
+    answering = FakeTmux.pane_pid
+
+    def wedged(self: FakeTmux, pane_id: str) -> int | None:
+        raise TmuxError("server wedged")
+
+    monkeypatch.setattr(FakeTmux, "pane_pid", wedged)
+    started = team_service.hook_session_start("sess-c2", project.root, "clear")
+    assert "ASSIGNED TO YOU" not in started
+    parked = _task_now(mine.id)
+    assert parked.claimed_by == first and _row(agent.id).session_id == first, (
+        "the premise: the claim sits on the ended id, the row with it"
+    )
+    still_down = team_service.hook_prompt_heartbeat("sess-c2", project.root)
+    assert "ASSIGNED TO YOU" not in still_down and _row(agent.id).session_id == first
+
+    monkeypatch.setattr(FakeTmux, "pane_pid", answering)
+    prompt = team_service.hook_prompt_heartbeat("sess-c2", project.root)
+
+    assert f"ASSIGNED TO YOU: {mine.id} [doing]" in prompt, prompt
+    assert "You are the one working it" in prompt
+    assert _row(agent.id).session_id == "sess-c2"
+    assert _task_now(mine.id).claimed_by == "sess-c2", "the parked claim moved with the row"
+    again = team_service.hook_prompt_heartbeat("sess-c2", project.root)
+    assert "ASSIGNED TO YOU" not in again, "briefed once; a bound session is not re-briefed"
+
+
+def test_a_bound_session_pays_no_tmux_call_per_prompt(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The retry above runs on every prompt, so its cost has to be nothing for the
+    common case: a session whose row is bound already is two indexed reads and
+    no identity check. A child under the same window pays one ``display-message``
+    per prompt to be refused — as at its start — and never binds."""
+    mine = _task(project, "the task this coder is for")
+    agent, first = _spawned(project, "coder", mine.id, tmux, monkeypatch)
+    team_service.hook_session_start(first, project.root, "startup")
+    asked: list[str] = []
+    answering = FakeTmux.pane_pid
+
+    def counting(self: FakeTmux, pane_id: str) -> int | None:
+        asked.append(pane_id)
+        return answering(self, pane_id)
+
+    monkeypatch.setattr(FakeTmux, "pane_pid", counting)
+    team_service.hook_prompt_heartbeat(first, project.root)
+    team_service.hook_prompt_heartbeat(first, project.root)
+    assert asked == [], "a bound session asks tmux nothing at its prompts"
+
+    _become(agent, tmux, monkeypatch, pid=CHILD_PID, role="coder")
+    team_service.hook_session_start("sess-child", project.root, "startup")
+    team_service.hook_prompt_heartbeat("sess-child", project.root)
+    assert asked == [agent.pane_id, agent.pane_id], "a child is checked at its start and its prompt"
+    assert _row(agent.id).session_id == first, "and never binds"
+
+
+def test_stopping_an_agent_releases_the_claims_parked_on_its_ended_session(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other strand of finding 5: ``fleet stop`` landing in the ``/clear`` gap
+    ends the row while the claims sit on the id the end hook just ended. No
+    start hook adopts an ended row, and the process is dead — so the row's end
+    releases what its session still held, and the board is told why."""
+    mine = _task(project, "the task this coder is for")
+    agent, first = _spawned(project, "coder", mine.id, tmux, monkeypatch)
+    team_service.hook_session_start(first, project.root, "startup")
+    team_service.claim_task(mine.id, session_ref=first)
+    team_service.hook_session_end(first, project.root, reason="clear")
+    assert _task_now(mine.id).claimed_by == first, "the premise: parked for the start hook"
+
+    stopped = fleet_service.stop(project, agent.label, force=True)
+
+    assert stopped.ended_at is not None
+    released = _task_now(mine.id)
+    assert (released.status, released.claimed_by) == ("todo", None)
+    assert "the task this coder is for (agent stopped)" in _events(project, "task_released")
+    with store_session() as store:
+        session = store.get_session(first)
+    assert session is not None and session.ended_at is not None
+
+
+def test_reaping_a_dead_pane_releases_what_its_session_still_held(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A killed agent fires no ``SessionEnd``: its claims stayed ``doing`` under a
+    dead holder until the lease ran out. ``reap`` ends the row for a dead pane
+    and now releases with it; a vanished pane is the same case."""
+    mine = _task(project, "the task this coder is for")
+    agent, first = _spawned(project, "coder", mine.id, tmux, monkeypatch)
+    team_service.hook_session_start(first, project.root, "startup")
+    team_service.claim_task(mine.id, session_ref=first)
+    tmux.die(agent.pane_id, 137)
+
+    report = fleet_service.reap(project)
+
+    assert [a.id for a in report.ended] == [agent.id]
+    released = _task_now(mine.id)
+    assert (released.status, released.claimed_by) == ("todo", None)
+    assert "the task this coder is for (agent exited)" in _events(project, "task_released")
+
+
+def test_a_closed_assignment_leaves_the_header_chip_and_keeps_the_label(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Finding 7 of the second #135 review. ``retire_fleet_assignments`` claimed
+    "nothing the operator sees changes", but the agent header renders its
+    ``task 01k…`` chip from ``task_id``. The chip goes — the agent is no longer
+    on that task — and the docstring now says so; the label, named after the
+    task at spawn, is what keeps the tie visible."""
+    from aisquare.cli.ui.views.agent import header_text
+
+    mine = _task(project, "the task this coder is for")
+    agent, first = _spawned(project, "coder", mine.id, tmux, monkeypatch)
+    short = mine.id.removeprefix("tsk_")[: fleet_service.TASK_SHORT]
+    before = header_text(FleetAgentStatus(agent=agent)).plain
+    assert f"task {mine.id[-8:]}" in before and agent.label == f"coder-{short}"
+
+    team_service.hook_session_start(first, project.root, "startup")
+    team_service.claim_task(mine.id, session_ref=first)
+    team_service.finish_task(mine.id, note="shipped", session_ref=first)
+
+    after = header_text(FleetAgentStatus(agent=_row(agent.id))).plain
+    assert "task " not in after, "the chip goes with the assignment"
+    assert f"coder-{short}" in after, "the label still names the task the agent was spawned for"
+
+
+def test_a_tester_spawned_for_a_review_task_is_told_to_verify_it(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The manager spawns a tester once work reaches review; the assignment must
+    read as 'verify this', not as a coder's 'claim it' or a stop order."""
+    task = _task(project, "verify the auth flow")
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
+    team_service.hook_session_start("sess-coder", project.root, "startup")
+    team_service.claim_task(task.id, session_ref="sess-coder")
+    team_service.review_task(task.id, session_ref="sess-coder")
+    _agent, first = _spawned(project, "tester", task.id, tmux, monkeypatch)
+
+    board = team_service.hook_session_start(first, project.root, "startup")
+
+    assert f"ASSIGNED TO YOU: {task.id} [review]" in board
+    assert "awaits your verification" in board and "Do not take another" not in board
+    picked = team_service.next_task(status="review", session_ref=first, cwd=project.root)
+    assert picked is not None and picked.id == task.id
+
+
+def test_a_verifier_cycle_and_the_mcp_door_get_their_own_review_task_first(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Finding 11 of the #135 review: ``task next`` applied the spawned-for
+    preference only to a session bound to a row — and the tester, runner and
+    reviewer cycles ran ``task next --status review`` with no ``--as``, while
+    the MCP server's ``task_next`` acts as a virtual ``mcp:`` session no row is
+    bound to. Two testers spawned for two review tasks were both handed the
+    older one. The window's variable orders the pool for those callers."""
+    older = _task(project, "the older review task")
+    mine = _task(project, "the review task this tester is for")
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
+    team_service.hook_session_start("sess-coder", project.root, "startup")
+    for task in (older, mine):
+        team_service.claim_task(task.id, session_ref="sess-coder")
+        team_service.review_task(task.id, session_ref="sess-coder")
+    _agent, first = _spawned(project, "tester", mine.id, tmux, monkeypatch)
+    team_service.hook_session_start(first, project.root, "startup")
+    now = datetime.now(tz=UTC)
+    with store_session() as store:
+        store.upsert_session(
+            TeamSession(
+                id="mcp:test:abc123",
+                project_id=project.id,
+                role="remote",
+                started_at=now,
+                last_seen_at=now,
+            )
+        )
+
+    by_cycle = team_service.next_task(status="review", cwd=project.root)
+    by_mcp = team_service.next_task(status="review", session_ref="mcp:test:abc123")
+
+    assert by_cycle is not None and by_cycle.id == mine.id, "the cycle, typed with no --as"
+    assert by_mcp is not None and by_mcp.id == mine.id, "the MCP door"
+    # The control: without the variable the pool order is the oldest first.
+    monkeypatch.delenv("AISQUARE_FLEET_AGENT")
+    plain = team_service.next_task(status="review", cwd=project.root)
+    assert plain is not None and plain.id == older.id
+
+
+def test_the_window_variable_orders_the_pool_but_never_claims_from_it(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The variable is inherited by every process the agent starts, so it is not
+    an identity: a claim on its word alone would let a nested child take its
+    parent's task (review of #116, round 2). A claim keeps needing a session the
+    row is bound to; a caller without one claims in pool order."""
+    older = _task(project, "the older task")
+    mine = _task(project, "the task this coder is for")
+    _agent, first = _spawned(project, "coder", mine.id, tmux, monkeypatch)
+    team_service.hook_session_start(first, project.root, "startup")
+
+    anonymous = team_service.next_task(role="coder", claim=True, cwd=project.root)
+
+    assert anonymous is not None and anonymous.id == older.id
+    assert _task_now(mine.id).status == "todo", "the row's task was not taken on the name"
+
+
+def test_the_verifier_cycles_pass_their_session_to_task_next() -> None:
+    """The cycles are where the missing ``--as`` was: with it, ``task next`` joins
+    the caller to its row by session, which is the identity the claim guard
+    trusts — the env fallback above is for callers that have nothing better."""
+    from aisquare.core import harness
+
+    for role in ("tester", "runner", "reviewer", "ui-tester"):
+        first = harness.role_cycle(role, "abcd1234")[0]
+        assert "task next --status review --as abcd1234" in first, (role, first)
+
+
+def test_every_verifying_role_is_known_to_the_assignment(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The set of roles that VERIFY lives here while the cycles live in the
+    harness, so a role added there can go missing here — `ui-tester` did, and its
+    `[review]` assignment read as the coder's rework briefing: edit and re-submit
+    someone else's work, against its own lane rule (review of #116, round 4).
+
+    The harness is the source of truth: any role whose standing cycle pulls from
+    the review pool is a verifier, whatever it is called."""
+    from aisquare.core import harness
+    from aisquare.services.team import _VERIFYING_ROLES
+
+    pulls_review = {
+        role
+        for role in harness.ROLE_PROFILES
+        if "task next --status review" in " ".join(harness.role_cycle(role, "sess-x"))
+    }
+    assert pulls_review <= _VERIFYING_ROLES, (
+        f"roles that pull from the review pool but get the rework briefing: "
+        f"{sorted(pulls_review - _VERIFYING_ROLES)}"
+    )
+    assert set(harness.ROLE_PROFILES) >= _VERIFYING_ROLES, (
+        f"named here but not a role: {sorted(_VERIFYING_ROLES - set(harness.ROLE_PROFILES))}"
+    )
+
+
+def test_a_ui_tester_spawned_for_a_review_task_is_told_to_verify_it(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`base_role('ui-tester')` is `ui-tester`, and it was not in the verifying
+    set — so the browser verifier was handed "you were spawned for the rework …
+    do not take pool work first" for a task another agent holds."""
+    task = _task(project, "UI: the settings dialog")
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
+    team_service.hook_session_start("sess-ui-coder", project.root, "startup")
+    team_service.claim_task(task.id, session_ref="sess-ui-coder")
+    team_service.review_task(task.id, session_ref="sess-ui-coder")
+    _agent, first = _spawned(project, "ui-tester", task.id, tmux, monkeypatch)
+
+    board = team_service.hook_session_start(first, project.root, "startup")
+
+    assert f"ASSIGNED TO YOU: {task.id} [review]" in board
+    assert "awaits your verification" in board
+    assert "spawned for the rework" not in board and "Do not take another" not in board
+    # And the line names no verdict command: the validator is a verifier whose
+    # cycle is a one-shot GATE note and never runs `task next --status review`.
+    assert "task next --status review" not in board.split("sessions:")[0]
+
+
+def test_a_finished_assignment_is_forgotten_and_never_re_briefed(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Finding 5 of the #135 review: ``fleet_agent.task_id`` never expired, so
+    every later start of an agent that had finished its task re-briefed it
+    through the done branch — "tell the manager: `aisquare note … --kind
+    question`" — and each such note woke the manager for nothing. Reopened and
+    claimed by someone else, the same row ordered the busy agent to stand down."""
+    mine = _task(project, "the task this coder is for")
+    pool = _task(project, "the pool task it took next")
+    agent, first = _spawned(project, "coder", mine.id, tmux, monkeypatch)
+    team_service.hook_session_start(first, project.root, "startup")
+    team_service.claim_task(mine.id, session_ref=first)
+    team_service.review_task(mine.id, session_ref=first)
+    _stranger(monkeypatch, "tester")
+    team_service.hook_session_start("sess-tester", project.root, "startup")
+    team_service.finish_task(mine.id, note="verified", session_ref="sess-tester")
+    _become(agent, tmux, monkeypatch, pid=PANE_PID, role="coder")
+    team_service.claim_task(pool.id, session_ref=first)
+
+    assert _row(agent.id).task_id is None, "the assignment ended with its task"
+    cleared = _clear(first, "sess-c2", project)
+    assert "ASSIGNED TO YOU" not in cleared and "--kind question" not in cleared
+    assert _task_now(pool.id).claimed_by == "sess-c2", "its pool work still moved with it"
+    # Reopened and taken by somebody else: no longer this agent's business.
+    team_service.reopen_task(mine.id, reason="regressed in prod", session_ref="sess-tester")
+    _stranger(monkeypatch, "coder")
+    team_service.hook_session_start("sess-other", project.root, "startup")
+    team_service.claim_task(mine.id, session_ref="sess-other")
+    _become(agent, tmux, monkeypatch, pid=PANE_PID, role="coder")
+    again = _clear("sess-c2", "sess-c3", project)
+    assert "Do not take another" not in again and "ASSIGNED TO YOU" not in again
+
+
+def test_a_task_closed_behind_the_services_back_still_ends_the_assignment(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The briefing forgets a closed task itself, for a row spawned before the
+    rule existed or a task closed by a store write that knew no rows."""
+    mine = _task(project, "closed by hand")
+    agent, first = _spawned(project, "coder", mine.id, tmux, monkeypatch)
+    with store_session() as store:
+        store.set_task_status(mine.id, "dropped")
+    assert _row(agent.id).task_id == mine.id, "the premise: the row still names it"
+
+    board = team_service.hook_session_start(first, project.root, "startup")
+
+    assert "ASSIGNED TO YOU" not in board and "--kind question" not in board
+    assert _row(agent.id).task_id is None
+
+
+def test_the_first_prompt_board_names_the_claim_holder_after_the_move(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The heartbeat's first-prompt door binds a fleet row too, and it computed
+    the assignment as an ARGUMENT of the board render — after the tasks had been
+    read — so the board it handed the agent showed the claim under the old id
+    (review of #135). A session-start hook that failed open is how a session
+    first meets the orchestrator on a prompt."""
+    mine = _task(project, "the task this coder is for")
+    _agent, first = _spawned(project, "coder", mine.id, tmux, monkeypatch)
+    team_service.hook_session_start(first, project.root, "startup")
+    team_service.claim_task(mine.id, session_ref=first)
+    team_service.hook_session_end(first, project.root, reason="clear")
+
+    board = team_service.hook_prompt_heartbeat("sess-c2", project.root)
+
+    assert f"[doing @{team_service.short_id('sess-c2')}] the task this coder is for" in board
+    assert f"@{team_service.short_id(first)}" not in board, "the old holder is gone from the board"
+    assert "You are the one working it" in board
+
+
+def test_task_next_survives_a_fleet_row_it_cannot_read(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`_assignment` was guarded in round 3 and `task next` reaches the same
+    lookup by another door. A row that will not parse turned "which task comes
+    first" into a hard failure of the core work loop — for plain CLI callers
+    too, which had no such dependency before this PR (review of #116, round 4)."""
+    older = _task(project, "the older task")
+    _task(project, "the task this coder is for")
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
+    team_service.hook_session_start("sess-plain-r4", project.root, "startup")
+
+    def boom(self: SqliteStore, project_id: str, session_id: str) -> FleetAgent | None:
+        raise sqlite3.OperationalError("no such column: worktree")
+
+    monkeypatch.setattr(SqliteStore, "fleet_agent_for_session", boom)
+
+    picked = team_service.next_task(
+        role="coder", claim=True, session_ref="sess-plain-r4", cwd=project.root
+    )
+
+    assert picked is not None and picked.id == older.id, "the pool order still works"
+
+
+def test_spawning_for_a_finished_task_is_refused(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Harmless when the id only named a label; now it would brief an agent on
+    work that is over and hold a slot for nothing."""
+    task = _task(project, "already shipped")
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
+    team_service.hook_session_start("sess-x", project.root, "startup")
+    team_service.claim_task(task.id, session_ref="sess-x")
+    team_service.finish_task(task.id, session_ref="sess-x")
+    with pytest.raises(fleet_service.FleetError, match="is done"):
+        fleet_service.spawn(project, "coder", task_id=task.id, worktree=False)
+
+
+def test_a_stopped_agents_row_is_not_resurrected_by_a_late_hook(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The hook runs in another process from ``fleet stop``; a whole-row write
+    from a stale snapshot brought a stopped agent back to life (review)."""
+    mine = _task(project, "some task")
+    agent, first = _spawned(project, "coder", mine.id, tmux, monkeypatch)
+    fleet_service.stop(project, agent.label)
+
+    board = team_service.hook_session_start(first, project.root, "startup")
+
+    assert "ASSIGNED TO YOU" not in board, "an ended row assigns nothing"
+    assert _row(agent.id).ended_at is not None, "still ended"
+
+
+def test_no_assignment_line_without_the_fleet_env(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A plain `launch coder` (no fleet row) reads exactly as before."""
+    _task(project, "some task")
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
+    monkeypatch.delenv("AISQUARE_FLEET_AGENT", raising=False)
+    board = team_service.hook_session_start("sess-plain-6", project.root, "startup")
+    assert "ASSIGNED TO YOU" not in board
+    assert "Your standing cycle (coder)" in board
 
 
 def test_reap_ends_dead_panes_and_tells_the_board(

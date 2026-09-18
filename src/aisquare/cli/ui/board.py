@@ -47,11 +47,10 @@ from textual.widgets.option_list import Option, OptionDoesNotExist
 from aisquare.cli import watch
 from aisquare.cli.common import local_time
 from aisquare.core.store import unmet_needs
-from aisquare.models import ProjectInfo, TeamEvent, TeamSession, TeamTask
+from aisquare.models import CLOSED_STATUSES, ProjectInfo, TeamEvent, TeamSession, TeamTask
 from aisquare.services import team as team_service
 
 OPEN_STATUSES = ("todo", "doing", "review", "blocked")
-CLOSED_STATUSES = ("done", "dropped")
 COLLAPSE_BELOW = 80
 """Panel width (columns) under which the board column hides and the feed takes all:
 the board column is 48 wide and a feed narrower than ~32 shows nothing readable.

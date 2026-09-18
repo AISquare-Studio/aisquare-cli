@@ -76,7 +76,7 @@ import os
 import re
 import shutil
 import subprocess
-from collections.abc import Callable, Collection, Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -723,18 +723,18 @@ class TmuxServer:
         cwd: Path,
         command: Sequence[str],
         env: Mapping[str, str] | None = None,
-        private: Collection[str] = (),
         width: int = 200,
         height: int = 50,
     ) -> WindowInfo:
         """A new window named ``name`` running ``command`` — creating the session if needed.
 
-        ``env`` pairs are set for the new window (``-e``). When the window opens
-        a NEW session tmux also writes them into the session environment, which
-        every window opened later in that session inherits; the keys named in
-        ``private`` are this window's alone and are taken back out of it
-        (:meth:`_forget_session_environment`), the rest stay as the session's
-        defaults. The command is
+        ``env`` pairs are set for the new window (``-e``) and are THIS WINDOW'S
+        ALONE. When the window opens a new session tmux also writes them into
+        the session environment, which every window opened later in that
+        session inherits; they are taken back out
+        (:meth:`_forget_session_environment`), so a window opened by hand in
+        the session inherits the server's environment and nothing of any
+        agent's. The command is
         passed as separate arguments and executed directly, never through a
         shell, so no shell re-interprets it. TMUX still would: an argument that
         ends in ``;`` ends the tmux command even after ``--`` and runs the rest
@@ -770,7 +770,7 @@ class TmuxServer:
                 "-x", str(width), "-y", str(height), *env_flags,
                 "--", *args,
             )  # fmt: skip
-            self._forget_session_environment(session, private)
+            self._forget_session_environment(session, env)
         window_id, _, pane_id = out.strip().partition(_SEP)
         return WindowInfo(
             session=session,
@@ -783,26 +783,30 @@ class TmuxServer:
             activity=False,
         )
 
-    def _forget_session_environment(self, session: str, keys: Collection[str]) -> None:
-        """Take the first window's private ``-e`` pairs back out of the SESSION environment.
+    def _forget_session_environment(self, session: str, env: Mapping[str, str] | None) -> None:
+        """Take the first window's ``-e`` pairs back out of the SESSION environment.
 
         ``new-window -e`` sets a variable for that window alone, but
         ``new-session -e`` writes it into the session environment, which every
         later window of the session inherits — measured on 3.7c:
         ``show-environment`` listed it, a window opened by hand read it, and
-        after ``set-environment -u`` a third window did not. ``AISQUARE_FLEET_AGENT``
-        is an identity: the row the session-start hook briefs whoever reads it
-        on, so a window the operator opens by hand in the fleet's session
+        after ``set-environment -u`` a third window did not. Every pair goes,
+        because every pair is one agent's: ``AISQUARE_FLEET_AGENT`` is an
+        identity, so a window the operator opens by hand in the fleet's session
         (``prefix c``, ``fleet attach``) would have called itself the first
-        agent (review of #135). Only the ``keys`` the caller names as private
-        go: the first cut unset every pair that travelled as ``-e``, and took
-        the session-wide settings with it — the native-teams opt-out and the
-        account's config-dir pins a hand-opened window is meant to inherit
-        (review of #203). The process in the first window already has its
-        copy; only the session's is removed. Best effort, because the window is
-        up either way: a failed unset costs exactly the leak it was closing.
+        agent (review of #135); the account pins are one agent's slot and
+        aisquare home, so a later ``fleet spawn`` with no ``--account`` — which
+        sets none of its own — ran under whichever account the FIRST spawn of
+        the session happened to use, wrong slot and wrong ``context.db``; and
+        the native-teams opt-out is for "the sessions the fleet starts — a
+        user's own ``claude`` sessions keep whatever they had" (§7.6), which a
+        hand-opened window is (review of #203, rounds 3 and 4). What a later
+        window needs, its own spawn sets. The process in the first window
+        already has its copy; only the session's is removed. Best effort,
+        because the window is up either way: a failed unset costs exactly the
+        leak it was closing.
         """
-        for key in keys:
+        for key in env or {}:
             with contextlib.suppress(TmuxError):
                 self.run("set-environment", "-u", "-t", f"={session}", _data_arg(key))
 

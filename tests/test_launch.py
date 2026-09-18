@@ -129,7 +129,7 @@ def test_a_fleet_launch_starts_anyway_when_its_row_never_lands(
     assert result.exit_code == 0, result.output
     assert spy["argv"][0] == "claude", "the agent still started"
     assert clock.now >= launch_cli.FLEET_ROW_TIMEOUT
-    assert "agt_never not recorded after 10s" in result.output
+    assert "agt_never not recorded after 10s" in result.output, "the time actually spent"
 
 
 def test_a_fleet_launch_opens_the_store_once_for_the_whole_wait(
@@ -216,8 +216,13 @@ def test_a_locked_store_is_looked_past_until_the_row_lands(
         yield  # pragma: no cover — unreachable, keeps the generator shape
 
     monkeypatch.setattr(launch_cli, "store_session", broken)
-    assert runner.invoke(app, ["launch", "coder"]).exit_code == 0
+    result = runner.invoke(app, ["launch", "coder"])
+    assert result.exit_code == 0
     assert clock.slept == 0, "an unreadable store ends the wait at once"
+    assert "agt_broken the store could not be read (no such table" in result.output, (
+        "and says so — an agent starting un-briefed over a broken store with nothing "
+        "on stderr is the state the line exists to explain (review of #203, round 4)"
+    )
 
 
 def test_a_launch_outside_the_fleet_never_looks_for_a_row(

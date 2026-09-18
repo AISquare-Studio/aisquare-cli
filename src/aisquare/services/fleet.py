@@ -993,6 +993,10 @@ def spawn(
     ``extra_args`` and the caller's ``agent_args``. ``AISQUARE_FLEET_AGENT``
     carries the row id into the window; ``CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=0``
     keeps Claude's native teams out of the fleet unless configured otherwise (§7.6).
+    Every variable set here is THIS window's: none reaches the tmux session's
+    environment, so a later spawn sets its own account and opt-out rather than
+    inheriting the first spawn's, and a window the operator opens by hand keeps
+    whatever the server had (review of #203, round 4).
 
     The row is written AFTER the window starts (``_record``: the window's
     ``pane_id`` is part of the row, and a label or cap race is settled against
@@ -1118,17 +1122,11 @@ def spawn(
         env.update(carried)
     tmux_session = session_name(codename)
     try:
-        # The identity is the one pair that must not outlive this window in the
-        # session's environment; the opt-out and the account pins are the
-        # session's defaults for a window opened by hand (review of #203).
-        window = srv.spawn_window(
-            tmux_session,
-            name=picked,
-            cwd=cwd,
-            command=command,
-            env=env,
-            private=(orchestrator.FLEET_AGENT_ENV_VAR,),
-        )
+        # Every pair is this window's alone: `spawn_window` keeps them out of
+        # the session environment, so a later spawn — or a window opened by hand
+        # — starts from the server's environment and sets its own (review of
+        # #203, rounds 3 and 4; §7.6 for the opt-out).
+        window = srv.spawn_window(tmux_session, name=picked, cwd=cwd, command=command, env=env)
     except TmuxError as exc:
         raise FleetError(f"tmux could not start the window: {exc}") from exc
 
@@ -1610,9 +1608,7 @@ def _manager_first(agents: list[FleetAgent]) -> list[FleetAgent]:
     return sorted(agents, key=lambda agent: agent.label != MANAGER_LABEL)
 
 
-def _shutdown_targets(
-    project: ProjectInfo | None, config: FleetSettings
-) -> list[tuple[ProjectInfo, list[FleetAgent]]]:
+def _shutdown_targets(project: ProjectInfo | None) -> list[tuple[ProjectInfo, list[FleetAgent]]]:
     """Every project in scope with its live rows — FORGOTTEN registrations included.
 
     ``list_projects()`` hides a tombstoned registration, and a forgotten project
@@ -1758,6 +1754,8 @@ def _fleet_sessions(
     srv: TmuxServer,
     targets: Sequence[tuple[ProjectInfo, list[FleetAgent]]],
     *,
+    socket: str,
+    default_socket: str,
     every: bool,
 ) -> list[tuple[str, str | None]]:
     """The fleet's own sessions on this server: ``(session, project id or None)``.
@@ -1767,9 +1765,22 @@ def _fleet_sessions(
     no project to attribute it to — that is the shape a ``rename`` which failed
     open leaves behind (its docstring says so, and ``attach`` and ``reap`` both
     know it exists), and it is the fleet's session either way.
+
+    Named per SOCKET: a project's session is looked for on the sockets its rows
+    live on, and — for a project with no live row at all — on today's socket,
+    the only one it could have been spawned into. Asked of every socket, a
+    project whose rows were all on the old socket was probed on today's too,
+    and the report gained "``asq-a`` was already gone" for a socket it never
+    lived on, beside the real lines (review of #203, round 4).
     """
     named = {
-        session_name(project.codename): project.id for project, _ in targets if project.codename
+        session_name(project.codename): project.id
+        for project, agents in targets
+        if project.codename
+        and (
+            any(agent.tmux_socket == socket for agent in agents)
+            or (not agents and socket == default_socket)
+        )
     }
     sessions: list[tuple[str, str | None]] = list(named.items())
     if every:
@@ -1821,7 +1832,9 @@ def _kill_fleet_sessions(
             continue
         srv = server_for(socket, config)
         try:
-            here = _fleet_sessions(srv, targets, every=every)
+            here = _fleet_sessions(
+                srv, targets, socket=socket, default_socket=config.tmux_socket, every=every
+            )
         except TmuxError as exc:
             # tmux stopped answering between the probe and here (it can leave
             # PATH mid-run): nothing on this socket can be reported killed, and
@@ -2072,7 +2085,6 @@ def _retire_late_panes(
 def _record_late_rows(
     project: ProjectInfo | None,
     handled: Collection[str],
-    answering: Mapping[str, bool],
     report: ShutdownReport,
     config: FleetSettings,
     *,
@@ -2095,9 +2107,8 @@ def _record_late_rows(
     otherwise the window it kept would hold its session, and the session the
     server, under a report claiming the fleet is down.
     """
-    del answering  # the initial probe is STALE by now; every socket is re-asked below
     try:
-        targets = _shutdown_targets(project, config)
+        targets = _shutdown_targets(project)
     except Exception as exc:
         # A store that died mid-run: the report is still owed to the caller —
         # but a scan that did not run cannot vouch for anything. Silently
@@ -2289,7 +2300,7 @@ def shutdown_plan(project: ProjectInfo | None = None) -> ShutdownPlan:
     """
     config = settings()
     _require_usable_tmux(config)
-    targets = _shutdown_targets(project, config)
+    targets = _shutdown_targets(project)
     sockets = _shutdown_sockets(targets, config)
     _refuse_from_inside(sockets, config)
     answering = _shutdown_probe(sockets, config)
@@ -2309,7 +2320,13 @@ def shutdown_plan(project: ProjectInfo | None = None) -> ShutdownPlan:
             # silently shortened — nothing has been touched at this point.
             sessions += [
                 f"{socket}:{name}"
-                for name, _ in _fleet_sessions(srv, targets, every=project is None)
+                for name, _ in _fleet_sessions(
+                    srv,
+                    targets,
+                    socket=socket,
+                    default_socket=config.tmux_socket,
+                    every=project is None,
+                )
                 if srv.has_session_or_raise(name)
             ]
         except TmuxError as exc:
@@ -2371,7 +2388,7 @@ def shutdown(
     config = settings()
     report = ShutdownReport()
     _require_usable_tmux(config)
-    targets = _shutdown_targets(project, config)
+    targets = _shutdown_targets(project)
     sockets = _shutdown_sockets(targets, config)
     _refuse_from_inside(sockets, config)
     answering = _shutdown_probe(sockets, config)
@@ -2388,7 +2405,7 @@ def shutdown(
         # traceback instead of a report was left with a half-recorded fleet, a
         # live server, and nothing saying how far it got.
         _kill_fleet_sessions(targets, sockets, answering, report, config, every=project is None)
-        _record_late_rows(project, handled, answering, report, config, snapshot=targets)
+        _record_late_rows(project, handled, report, config, snapshot=targets)
         _clear_pause(targets, report)
     return report
 

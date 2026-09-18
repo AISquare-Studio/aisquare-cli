@@ -69,7 +69,10 @@ UNINVOKED = {
     "team spawn": "spawns a real agent process",
     "login": "polls the identity provider until a browser approval arrives",
     "fleet attach": "replaces the process with `tmux attach` (os.execvp)",
-    "fleet shutdown": "kills the fleet's real tmux sessions on the configured socket",
+    "fleet shutdown": (
+        "kills the fleet's real tmux sessions on the configured socket; its read-only "
+        "plan (`--json` without `--yes`) is invoked by test_the_shutdown_plan_is_held_to_it"
+    ),
     "logout": "clears credentials on the developer's own machine",
     "open": "launches a browser",
     "uninstall": "removes the installation running the test",
@@ -274,6 +277,22 @@ def _escaped(raised: BaseException | None) -> BaseException | None:
 def _raises_unhandled(chain: list[str]) -> BaseException | None:
     """The exception a command lets escape, or None."""
     return _escaped(CliRunner().invoke(app, chain, catch_exceptions=True).exception)
+
+
+def test_the_shutdown_plan_is_held_to_it(damaged_store: str) -> None:
+    """``fleet shutdown`` is UNINVOKED because it kills real tmux sessions — but
+    ``--json`` without ``--yes`` is its documented read-only dry run, and it
+    opens the store on every path a damaged file would hit (``_shutdown_targets``
+    twice, then the pause scan), several behind handlers that turn a failure
+    into a report field. Exempting the command dropped the one new command with
+    six store opens out of this sweep (review of #203, round 4); the plan keeps
+    the coverage without touching a session."""
+    raised = _raises_unhandled(["fleet", "shutdown", "--json"])
+
+    assert raised is None, (
+        f"`aisquare fleet shutdown --json` raised {type(raised).__name__} under "
+        f"{damaged_store} damage: {raised}"
+    )
 
 
 def test_the_ratchet_names_only_commands_that_exist() -> None:

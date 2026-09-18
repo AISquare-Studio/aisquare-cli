@@ -269,7 +269,6 @@ class FakeTmux(TmuxServer):
         cwd: Path,
         command: Sequence[str],
         env: Mapping[str, str] | None = None,
-        private: Collection[str] = (),
         width: int = 200,
         height: int = 50,
     ) -> WindowInfo:
@@ -300,7 +299,6 @@ class FakeTmux(TmuxServer):
                 "cwd": cwd,
                 "command": list(command),
                 "env": dict(env or {}),
-                "private": tuple(private),
             }
         )
         return window
@@ -2803,18 +2801,21 @@ def test_adopting_a_row_re_leases_the_doing_claims_alone(
     )
 
 
-def test_spawn_keeps_only_the_identity_out_of_the_sessions_environment(
+def test_spawn_sets_its_own_identity_and_opt_out_on_the_window(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
 ) -> None:
-    """Review of #203. ``spawn_window`` took every ``-e`` pair back out of a new
-    session's environment, and with it the native-teams opt-out and the
-    account pins a window opened by hand in the fleet's session is meant to
-    inherit. The row id is the one pair that is this window's alone."""
+    """Every variable a spawn needs travels on ITS window (``-e``); none is left
+    for a later window to inherit from the session. Round 3 of the #203 review
+    had the identity alone taken back out of a new session's environment, and
+    round 4 found what that leaves: a plain ``fleet spawn coder`` after
+    ``fleet spawn manager --account 2`` ran under the manager's slot. So the
+    window carries everything it needs, and ``spawn_window`` keeps all of it out
+    of the session (``tests/test_tmux.py`` measures that half)."""
     fleet_service.spawn(project, "coder", worktree=False)
-    spawned = tmux.spawned[-1]
-    env = spawned["env"]
-    assert isinstance(env, dict) and "AISQUARE_FLEET_AGENT" in env
-    assert spawned["private"] == ("AISQUARE_FLEET_AGENT",)
+    env = tmux.spawned[-1]["env"]
+    assert isinstance(env, dict)
+    assert "AISQUARE_FLEET_AGENT" in env
+    assert env.get("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS") == "0", "the opt-out is the window's"
 
 
 def test_adopting_a_row_moves_the_row_and_the_claims_together_or_not_at_all(
@@ -4100,6 +4101,36 @@ def test_shutdown_decides_reachability_per_socket(
     assert "asq-old" in report.recorded[0].reason
     assert report.servers_absent == ["asq-old"]
     assert tmux.killed == [fresh.pane_id] and old.killed == []
+
+
+def test_shutdown_asks_each_socket_only_about_the_sessions_that_lived_there(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    plain_project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #203, round 4. The session list was keyed on the project's
+    codename alone and asked of EVERY socket in scope, so with rows on an old
+    socket and today's, a project that only ever lived on one was probed on the
+    other too — and the report gained "``<other>:asq-a`` was already gone" for a
+    session that never existed there, beside the real lines. A project's session
+    is looked for on the sockets its rows live on."""
+    old = FakeTmux()
+    tmux.per_socket["asq-old"] = old
+    _settings(monkeypatch, tmux_socket="asq-old")
+    on_old = _coder(project)  # this project's fleet lives on the old socket only
+    _settings(monkeypatch, tmux_socket="asq")
+    on_new = _coder(plain_project)  # the other project's on today's
+    assert (on_old.tmux_socket, on_new.tmux_socket) == ("asq-old", "asq")
+
+    report = fleet_service.shutdown(None, force=True)
+
+    assert sorted(a.id for a in report.stopped) == sorted([on_old.id, on_new.id])
+    assert sorted(report.sessions_absent) == sorted(
+        [_session_of(project, "asq-old"), _session_of(plain_project, "asq")]
+    ), "each session is named once, on the socket it lived on"
+    assert report.sessions_killed == [] and report.incomplete_projects == []
 
 
 def test_shutdown_clears_the_fleet_paused_signal(

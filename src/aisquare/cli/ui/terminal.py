@@ -427,6 +427,8 @@ class SelectionHost(App[None]):
         super().__init__(*args, **kwargs)
         self._pressed: int | None = None
         """The button of the press now down, until its release is routed."""
+        self._stray: int | None = None
+        """A second button pressed while ``_pressed`` was down: dropped, with its release."""
 
     def get_default_screen(self) -> Screen[None]:
         return PaneScreen(id="_default")
@@ -447,10 +449,30 @@ class SelectionHost(App[None]):
     async def on_event(self, event: events.Event) -> None:
         pressed = isinstance(event, events.MouseDown) and not event.is_forwarded
         released = isinstance(event, events.MouseUp) and not event.is_forwarded
+        # ONE gesture at a time. A second button pressed while one is down is
+        # not a new gesture — and it is not the screen's to see either. Recording
+        # it overwrote ``_pressed`` and re-baselined every pane to the selection
+        # the drag had built so far, so the left button's release routed as the
+        # other button; and forwarded, Textual's screen restarts its selection
+        # at every ``MouseDown`` and reads the ``MouseUp`` that lands on the same
+        # cell as a click that CLEARS it — so the drag's highlight was gone
+        # before its own release arrived, and the copy was silently dropped
+        # (review of #203, round 4). The stray button's press and release are
+        # dropped here, before either reaches the screen. The same button
+        # pressed again re-arms: its release was lost (the pointer left the
+        # terminal), and refusing it would leave every later gesture unrouted.
         if pressed:
             assert isinstance(event, events.MouseDown)
+            if self._pressed is not None and event.button != self._pressed:
+                self._stray = event.button
+                return
             self._pressed = event.button
             route_gesture_start(self)
+        if released:
+            assert isinstance(event, events.MouseUp)
+            if self._stray is not None and event.button == self._stray:
+                self._stray = None
+                return
         try:
             await super().on_event(event)
         finally:
@@ -1095,11 +1117,21 @@ class TerminalPane(Widget, can_focus=True):
             # left the one row a drag COPIES as the only row a selection never
             # tinted (review of #120, round 3).
             strip = Strip([Segment(shown.notice, base + NOTICE)]).adjust_cell_length(width, base)
-            row = DisplayedRow(strip.text.rstrip())
         else:
             strip = self._strip_for(line).apply_style(base).adjust_cell_length(width, base)
-            row = self._frame_row(line, width)
         if y == 0 and shown.marker is not None:
+            # The row's text model is read by the marker alone, so it is built
+            # here and nowhere else: built for the notice row on every render,
+            # it paid an uncached ``Strip.text`` join and a grapheme scan for a
+            # value the notice row — which is never row 0 on a widget taller
+            # than one row — then threw away (review of #203, round 4). The
+            # notice row's model comes from its strip, a frame row's from the
+            # cache, as the overlays read them (``_overlay_row``).
+            row = (
+                DisplayedRow(strip.text.rstrip())
+                if shown.notice is not None and y == height - 1
+                else self._frame_row(line, width)
+            )
             strip = self._with_scroll_marker(strip, width, row, shown.marker)
         return strip
 

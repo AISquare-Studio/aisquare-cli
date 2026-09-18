@@ -2287,6 +2287,40 @@ def test_a_burst_of_gestures_routes_each_release_with_its_own_button(
     assert len(notices) == 1, f"and the right drag copied nothing: {notices}"
 
 
+def test_a_second_button_pressed_mid_drag_does_not_steal_the_drags_release(
+    fake: FakeTmux, tmp_path: Path
+) -> None:
+    """Review of #203, round 4. ``SelectionHost._pressed`` held one button and
+    every press overwrote it: a right button pressed while the left drag was
+    still down re-armed the host with ``3`` AND re-baselined every pane to the
+    selection the drag had built, so the left release routed as a right-button
+    gesture and the copy was silently dropped — a painted highlight, no toast,
+    nothing on the clipboard, and the next ctrl+c the agent's interrupt. A
+    second button while one is down is no gesture at all now; the release that
+    ends the gesture is the one naming the button that began it."""
+
+    async def drive() -> tuple[str, list[str]]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 8)) as pilot:
+            pane = host.pane
+            await wait_until(pilot, lambda: synced(pane))
+            for event in (
+                mouse_event(events.MouseDown, pane, (0, 2), 1),
+                mouse_event(events.MouseMove, pane, (5, 2), 1),
+                mouse_event(events.MouseDown, pane, (5, 2), 3),
+                mouse_event(events.MouseUp, pane, (5, 2), 1),
+                mouse_event(events.MouseUp, pane, (5, 2), 3),
+            ):
+                host.post_message(event)
+            await pilot.pause()
+            await pilot.pause()
+            return host.clipboard, list(host.notices)
+
+    clipboard, notices = run(drive())
+    assert clipboard == "third ", "the left drag's release was routed as the left button"
+    assert len(notices) == 1, f"one copy, and the stray right release copied nothing: {notices}"
+
+
 def test_the_copy_key_outside_the_pane_copies_the_panes_highlight_and_nothing_empty(
     fake: FakeTmux, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

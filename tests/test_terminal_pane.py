@@ -2641,6 +2641,30 @@ def test_a_lost_release_is_recovered_by_the_next_press_after_the_window(
     assert len(notices) == 1, notices
 
 
+def test_the_servers_version_is_asked_once_across_attaches(tmp_path: Path) -> None:
+    """Round 8 of #203. ``_wrap_flags`` needs the version for the FIRST frame, and
+    it was read once per ATTACH — a blocking ``tmux -V`` subprocess on the UI
+    thread at every project switch, tab activation and re-mounted view. Cached
+    by socket, which is what the answer is about."""
+    record: list[tuple[str, ...]] = []
+    fake = FakeTmux(record=record)
+    fake.panes["%1"] = FakePane(screen=["first"])
+    fake.panes["%2"] = FakePane(screen=["other"])
+
+    async def drive() -> int:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 4)) as pilot:
+            pane = host.pane
+            await wait_until(pilot, lambda: screen_text(pane)[0] == "first")
+            pane.attach("%2")
+            await wait_until(pilot, lambda: screen_text(pane)[0] == "other")
+            pane.attach("%1")
+            await wait_until(pilot, lambda: screen_text(pane)[0] == "first")
+            return sum(1 for argv in record if list(argv)[1:] == ["-V"])
+
+    assert run(drive()) == 1, "three attaches, one tmux -V"
+
+
 def test_the_copy_key_outside_the_pane_copies_the_panes_highlight_and_nothing_empty(
     fake: FakeTmux, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -3297,7 +3321,9 @@ def test_attach_re_reads_the_version_for_a_new_server(fake: FakeTmux, tmp_path: 
 
     ``ManagerTab`` assigns ``pane.server`` and then calls ``attach``; a cached
     "extended chords are fine" from a 3.7 server would otherwise type
-    ``S-Enter`` into an agent running on a 3.4 one.
+    ``S-Enter`` into an agent running on a 3.4 one. Since round 8 of #203 the
+    answer is cached by SOCKET, so the other server is on another socket —
+    as two servers always are; a server is its socket.
     """
     old = FakeTmux()
     old.version = "tmux 3.4"
@@ -3312,7 +3338,7 @@ def test_attach_re_reads_the_version_for_a_new_server(fake: FakeTmux, tmp_path: 
             await pilot.press("shift+enter")
             await pilot.pause()
             modern = fake.sent()
-            pane.server = old.server(tmp_path)
+            pane.server = old.server(tmp_path, socket="older")
             pane.attach("%1")
             await pilot.pause()
             await pilot.press("shift+enter")

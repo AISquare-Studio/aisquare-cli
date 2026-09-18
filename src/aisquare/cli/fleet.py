@@ -536,8 +536,17 @@ def shutdown(
                 "dry run: nothing stopped — re-run with --yes to shut the fleet down"
             )
             return
-        noun = "agent" if len(plan.agents) == 1 else "agents"
-        if not typer.confirm(f"Shut down {len(plan.agents)} {noun}?", default=False):
+        # The prompt names BOTH numbers: a plan with no live agent and one
+        # leftover session asked "Shut down 0 agents?" while the real effect —
+        # killing the session — sat only in the lines above (round 8 of #203).
+        parts = []
+        if plan.agents:
+            parts.append(f"{len(plan.agents)} agent{'s' if len(plan.agents) != 1 else ''}")
+        if plan.sessions:
+            parts.append(
+                f"{len(plan.sessions)} tmux session{'s' if len(plan.sessions) != 1 else ''}"
+            )
+        if not typer.confirm(f"Shut down {' and '.join(parts)}?", default=False):
             stdout_console().print("nothing stopped")
             return
     try:

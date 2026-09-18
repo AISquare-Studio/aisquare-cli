@@ -29,6 +29,7 @@ machine-readable error.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 import sqlite3
@@ -224,7 +225,18 @@ def _handle_usage_error(error: Any) -> None:
     unknown = _NO_SUCH_COMMAND.search(message)
     if unknown is None:
         if get_state().json_output:
-            typer.echo(json.dumps({"error": "usage", "message": message}))
+            # `message` is EMPTY on click's `MissingParameter` (its text lives in
+            # `format_message()`) and lacks the `Invalid value for --all:` prefix
+            # on `BadParameter`, so `--json fleet stop` printed
+            # `{"error": "usage", "message": ""}` — the information lost for
+            # both audiences at once (round 8 of #203). `format_message()` is
+            # what typer would have rendered on stderr, so JSON says the same.
+            rendered = message
+            formatter = getattr(error, "format_message", None)
+            if callable(formatter):
+                with contextlib.suppress(Exception):
+                    rendered = str(formatter())
+            typer.echo(json.dumps({"error": "usage", "message": rendered or message or str(error)}))
             raise typer.Exit(code=2)
         return
     given = unknown.group(1)

@@ -862,7 +862,9 @@ def test_shutdown_asks_at_a_terminal_and_stops_nothing_when_the_answer_is_no(
     refused = runner.invoke(app, ["fleet", "shutdown"])
 
     assert refused.exit_code == 0, refused.output
-    assert asked == [("Shut down 2 agents?", False)], "and the default is NOT to do it"
+    assert asked == [("Shut down 2 agents and 1 tmux session?", False)], (
+        "both numbers, and the default is NOT to do it"
+    )
     assert "nothing stopped" in _plain(refused.stdout)
     assert shutdown.calls == []
 
@@ -871,6 +873,31 @@ def test_shutdown_asks_at_a_terminal_and_stops_nothing_when_the_answer_is_no(
 
     assert agreed.exit_code == 0, agreed.output
     assert shutdown.calls[-1] == ((PROJECT,), {"force": False})
+
+
+def test_shutdown_asks_about_the_sessions_when_no_agent_is_live(
+    runner: CliRunner, resolved: Seen, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 8 of #203. A plan with no live agent and one leftover session — the
+    ordinary shape after a clean stop pass — asked "Shut down 0 agents?" while
+    the real effect, killing the session, sat only in the lines above. The
+    destructive prompt names what the run is about to do."""
+    plan = _plan()
+    plan = type(plan)(
+        projects=plan.projects, agents=[], sessions=["asq:asq-ruby-fox"], absent_sockets=[]
+    )
+    _install(monkeypatch, "shutdown_plan", plan)
+    _install(monkeypatch, "shutdown", _report())
+    monkeypatch.setattr("aisquare.cli.fleet._stdin_is_a_terminal", lambda: True)
+    asked: list[str] = []
+
+    def confirm(text: str, *, default: bool = True, **kwargs: object) -> bool:
+        asked.append(text)
+        return False
+
+    monkeypatch.setattr("aisquare.cli.fleet.typer.confirm", confirm)
+    runner.invoke(app, ["fleet", "shutdown"])
+    assert asked == ["Shut down 1 tmux session?"]
 
 
 def test_shutdown_reports_each_row_with_the_reason_the_service_gave(

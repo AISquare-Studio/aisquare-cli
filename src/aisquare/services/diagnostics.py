@@ -936,6 +936,18 @@ _ABOUT_TOKENS: frozenset[str] = frozenset(
         "readme",
         "template",
         "templates",
+        # A test tree is ABOUT the tool too: `/home/me/playwright-tests/run.js`
+        # in a filesystem server's args, `selenium-e2e`, `puppeteer-fixtures`,
+        # `--dir=/srv/playwright-spec` (round 8). No npm id joins a provider to
+        # these words.
+        "test",
+        "tests",
+        "testing",
+        "spec",
+        "specs",
+        "e2e",
+        "fixture",
+        "fixtures",
     }
 )
 

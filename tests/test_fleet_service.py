@@ -4385,6 +4385,65 @@ def test_shutdown_reports_a_store_damaged_mid_run(
     assert report.incomplete_projects == [project.id], "an unscanned project is not confirmed down"
 
 
+def test_a_clean_exit_that_cannot_announce_its_release_says_so_on_stderr(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Round 8 of #203. The agent's own clean ``SessionEnd`` — the commonest
+    release path of all — threw ``Released.unannounced`` away, so the failure
+    the class was built for survived exactly there: claims back in the pool,
+    the board never told, the manager treating the task as held. The hook has
+    no report to ride on, but it has stderr (Claude Code's hook log)."""
+    mine = _task(project, "the task this coder is for")
+    _agent, first = _spawned(project, "coder", mine.id, tmux, monkeypatch)
+    team_service.hook_session_start(first, project.root, "startup")
+    team_service.claim_task(mine.id, session_ref=first)
+    real_emit = team_service._emit
+
+    def refuse_task_released(
+        store: object, project_id: str, kind: str, *a: object, **kw: object
+    ) -> object:
+        if kind == "task_released":
+            raise sqlite3.OperationalError("team_event is locked (fake)")
+        return real_emit(store, project_id, kind, *a, **kw)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(team_service, "_emit", refuse_task_released)
+    team_service.hook_session_end(first, project.root, reason="exit")
+
+    assert _task_now(mine.id).status == "todo" and _task_now(mine.id).claimed_by is None
+    err = capsys.readouterr().err
+    assert "could not announce" in err and mine.id in err and "locked" in err, err
+
+
+def test_the_briefing_falls_back_to_the_sessions_own_row_when_the_named_one_is_refused(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 8 of #203. ``task next`` read the row bound to the session when the
+    name in the environment was a row it may not have; the briefing's resolver
+    gave up on the refused adopt and never consulted the session's own row —
+    so the same session lost its ASSIGNED TO YOU block while ``task next`` still
+    put its task first. One rule for both doors."""
+    task_a = _task(project, "the task A is for")
+    task_b = _task(project, "the task B is for")
+    agent_a, session_a = _spawned(project, "coder", task_a.id, tmux, monkeypatch)
+    team_service.hook_session_start(session_a, project.root, "startup")
+    agent_b, session_b = _spawned(project, "coder", task_b.id, tmux, monkeypatch)
+    team_service.hook_session_start(session_b, project.root, "startup")
+    assert _row(agent_b.id).session_id == session_b, "the premise: B is bound to its own row"
+
+    # Still B's process (its pane's pid), but the environment names A's row —
+    # a row this process may not have, since A's pane is somebody else's.
+    monkeypatch.setenv("AISQUARE_FLEET_AGENT", agent_a.id)
+    tmux.pids[agent_a.pane_id] = PANE_PID + 1
+    board = team_service.hook_session_start(session_b, project.root, "compact")
+
+    assert f"ASSIGNED TO YOU: {task_b.id}" in board, board
+    assert _row(agent_a.id).session_id == session_a, "A's row was not taken"
+
+
 def test_a_scoped_shutdown_takes_down_a_leftover_session_on_todays_socket(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:

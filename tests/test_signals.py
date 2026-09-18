@@ -171,6 +171,19 @@ def test_a_store_held_signal_write_clears_the_previous_receipt(
     assert team_service.read_signal("ready", cwd=work_dir).value == "off"  # type: ignore[union-attr]
 
 
+def test_a_refused_signal_leaves_no_stale_receipt(runner: CliRunner, work_dir: Path) -> None:
+    """Round 8 of #203. Validation moved above the receipt clear, so a refused
+    name or value returned with ``_DELIVERY`` still holding the last successful
+    write's receipt — readable by the next ``last_delivery()`` reader in a
+    long-lived process such as the MCP server."""
+    _start(runner, work_dir)
+    team_service.set_signal("ready", "on", cwd=work_dir)
+    assert team_service._DELIVERY.get() is not None, "the premise: a receipt stands"
+    with pytest.raises(ValueError, match="lowercase token"):
+        team_service.set_signal("Bad Name", "on", cwd=work_dir)
+    assert team_service._DELIVERY.get() is None, "a refused write leaves no receipt behind"
+
+
 def test_signal_validation_rejects_non_tokens(runner: CliRunner, work_dir: Path) -> None:
     _start(runner, work_dir)
     bad_name = runner.invoke(

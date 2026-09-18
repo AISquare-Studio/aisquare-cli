@@ -2715,9 +2715,14 @@ def reap(project: ProjectInfo | None = None, *, server_down: bool = False) -> Re
                                 try:
                                     absent[socket] = server_for(socket, config).server_absent()
                                 except TmuxError:
-                                    # A question that could not be put is no
-                                    # evidence of absence; the predicate answers
-                                    # False for it too, and this is the belt.
+                                    # Unreachable TODAY: `server_absent` promises
+                                    # False for every question it could not put
+                                    # (core/tmux, round 7 of #203). Kept as the
+                                    # belt for a future predicate that raises
+                                    # again — a question that could not be put is
+                                    # no evidence of absence, and this sweep must
+                                    # never end on one. Do not copy the pattern
+                                    # to a call site that has the promise.
                                     absent[socket] = False
                             if absent[socket]:
                                 views[socket] = {}  # no server: no panes

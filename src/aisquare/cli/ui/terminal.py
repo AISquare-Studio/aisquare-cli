@@ -294,6 +294,15 @@ def _extract(selection: Selection, rows: list[DisplayedRow], width: int) -> str:
     return "".join(pieces).rstrip("\n")
 
 
+_SERVER_VERSIONS: dict[str, tuple[int, int]] = {}
+"""``tmux -V`` answers by socket — see :meth:`TerminalPane._server_version`."""
+
+
+def forget_server_versions() -> None:
+    """Drop every cached ``tmux -V`` answer — a new server is a new machine (tests)."""
+    _SERVER_VERSIONS.clear()
+
+
 DUPLICATE_PRESS_WINDOW = 0.5
 """Seconds within which a repeat of the pressed button is one press reported twice.
 
@@ -717,12 +726,26 @@ class TerminalPane(Widget, can_focus=True):
         return self.facts.history_size if self.facts is not None else 0
 
     def _server_version(self) -> tuple[int, int] | None:
-        """The server's version, asked once per attach; ``None`` when it will not say."""
+        """The server's version, asked once per SERVER; ``None`` when it will not say.
+
+        Cached by SOCKET across attaches: ``_wrap_flags`` needs the answer for
+        the FIRST frame, and asking per attach put a blocking ``tmux -V``
+        subprocess on the UI thread at every project switch, tab activation and
+        re-mounted view (round 8 of #203). The server behind a socket is what
+        the answer is about, and it does not change on an attach. Only an answer
+        is cached — a server that will not say is asked again next time.
+        """
         if not self._version_read:
             self._version = None
             if self.server is not None:
-                with contextlib.suppress(TmuxError):
-                    self._version = self.server.version()
+                key = self.server.socket
+                if key in _SERVER_VERSIONS:
+                    self._version = _SERVER_VERSIONS[key]
+                else:
+                    with contextlib.suppress(TmuxError):
+                        self._version = self.server.version()
+                    if self._version is not None:
+                        _SERVER_VERSIONS[key] = self._version
             self._version_read = True
         return self._version
 

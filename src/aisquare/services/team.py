@@ -17,6 +17,7 @@ import json
 import os
 import re
 import sqlite3
+import sys
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -701,8 +702,8 @@ def set_signal(
     signal receipts like any other write.
     """
     _require_enabled()
+    _DELIVERY.set(None)  # FIRST: a refused signal must not leave the last write's receipt readable
     _validate_signal(name, value)  # before any store is opened or board resolved
-    _DELIVERY.set(None)
     with store_session() as store:
         session = _resolve_session(store, session_ref)
         # A caller that names the project by ID resolves the board id-addressed,
@@ -1687,7 +1688,21 @@ def hook_session_end(session_id: str, cwd: Path | None, *, reason: str | None = 
         if reason == CLEAR_REASON and _clearing_its_own_pane(store, session):
             store.end_session(session.id, release_claims=False)
         else:
-            _release_session(store, session, why="session ended")
+            released = _release_session(store, session, why="session ended")
+            if released.unannounced:
+                # The one path with no report to ride on — a hook, whose stderr
+                # goes to Claude Code's hook log — and the one that runs most
+                # often (every graceful /exit). Silently dropping the value the
+                # class was built to carry left the manager treating released
+                # work as held with nothing anywhere saying why (round 8 of
+                # #203). Said where the hook can say it.
+                print(
+                    f"aisquare: session {session.id} released {len(released.tasks)} task(s) back "
+                    f"to the board but could not announce {', '.join(released.unannounced)} "
+                    f"({released.reason}) — the manager will not see them come free until it "
+                    "lists the pool",
+                    file=sys.stderr,
+                )
         root = _project_root(store, session.project_id)
     # Safety drain: catch anything a per-command spawn missed this session.
     distill_service.spawn_drain(cwd, root=root)
@@ -2243,7 +2258,15 @@ def _resolve_assignment(store: ContextStore, session_id: str, project_id: str) -
     if agent is None:
         return None
     if agent.session_id != session_id and not _adopt(store, agent, session_id):
-        return None
+        # The name in the environment is a row this session may not have
+        # (rule 1) — but the session may be bound to a row of its OWN, and
+        # `task next` (`_fleet_row_for`) reads that row for the order. The
+        # two doors read the same row now; this one used to give up here and
+        # the agent lost its ASSIGNED TO YOU block while `task next` still put
+        # its task first (round 8 of #203).
+        agent = store.fleet_agent_for_session(project_id, session_id)
+        if agent is None:
+            return None
     if agent.task_id is None:
         return None
     task = store.get_task(agent.task_id)

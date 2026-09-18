@@ -546,6 +546,13 @@ def test_doctor_declines_to_guess_from_a_name_alone(
                     "playwright-report": {},
                     "playwright_report": {},
                     "playwright-reporter": {},
+                    # A TEST TREE is about the tool too (round 8): a filesystem
+                    # server whose args point into `playwright-tests`, and the
+                    # e2e / spec / fixtures spellings.
+                    "files": {"command": "node", "args": ["/home/me/playwright-tests/server.js"]},
+                    "selenium-e2e": {},
+                    "puppeteer-fixtures": {},
+                    "specs": {"args": ["--dir=/srv/playwright-spec"]},
                     "selenium-grid-docs": {},
                     "selenium-docs-site": {},
                     "puppeteer-recorder": {"args": ["puppeteer-recorder"]},
@@ -568,6 +575,10 @@ def test_doctor_declines_to_guess_from_a_name_alone(
         "playwright-report",
         "playwright_report",
         "playwright-reporter",
+        "mcp files",
+        "selenium-e2e",
+        "puppeteer-fixtures",
+        "mcp specs",
         "selenium-grid-docs",
         "selenium-docs-site",
         "puppeteer-recorder",

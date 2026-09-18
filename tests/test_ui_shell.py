@@ -1814,3 +1814,36 @@ def test_theme_picker_applies_live_and_autosaves(
         return str(fleet_app(pilot).theme)
 
     assert drive(relaunch) == final  # restored on the next launch
+
+
+def test_selecting_an_agent_focuses_its_pane_so_typing_reaches_the_agent_not_the_app(
+    tmp_path: Path, script: Script, no_real_tmux: list[tuple[str, ...]]
+) -> None:
+    """#147 (2026-09-13 addendum): selecting a row showed the pane and left focus in
+    the sidebar, where `q` quits — a sentence typed at what looked like Claude Code
+    closed the fleet UI on its first q. The selected agent's pane takes the keyboard;
+    F12 stays the way back."""
+    seed(tmp_path, ("prj_a", "alpha", "amber-otter"))
+    script["prj_a"] = [status("prj_a", "coder-auth", "coder", "working")]
+
+    async def go(pilot: Pilot[None]) -> tuple[bool, int | None, bool]:
+        app = fleet_app(pilot)
+        await pilot.click(row_for(app, "agt_a_coder-auth"))
+        await pilot.pause()
+        await pilot.pause()
+        view = app.current_view()
+        assert isinstance(view, AgentView)
+        focused_pane = app.focused is view.pane
+        await pilot.press("q")
+        await pilot.pause()
+        alive = app.return_code
+        await pilot.press("f12")
+        await pilot.pause()
+        return focused_pane, alive, app.focused is view.pane
+
+    focused_pane, alive, still_in_pane = drive(go)
+    assert focused_pane, "the pane, not the sidebar, has the keyboard after a selection"
+    assert alive is None, "q went to the agent, not to the app"
+    typed = [argv for argv in no_real_tmux if "send-keys" in argv and argv[-1] == "q"]
+    assert typed, f"q was forwarded to tmux: {no_real_tmux[-3:]}"
+    assert not still_in_pane, "F12 is the deliberate way back to the sidebar"

@@ -98,6 +98,8 @@ def _facts_line(**overrides: str) -> str:
         "pane_current_command": "claude",
         "mouse_any_flag": "0",
         "mouse_sgr_flag": "0",
+        "mouse_button_flag": "0",
+        "mouse_all_flag": "0",
         "pane_title": "fedora",
     }
     values.update(overrides)
@@ -604,6 +606,22 @@ def test_pane_facts_parses_a_live_pane(fake_bin: Path, conf: Path) -> None:
         current_command="claude",
         title="fedora",
     )
+
+
+def test_pane_facts_reads_which_mouse_reports_the_program_asked_for(
+    fake_bin: Path, conf: Path
+) -> None:
+    """``?1000`` alone is presses and releases; ``?1002`` (button-event) or ``?1003``
+    (any-event) is what makes a forwarded drag a report the program asked for (#148)."""
+
+    def facts(**flags: str) -> PaneFacts:
+        fake = FakeTmux(Completed(0, _facts_line(mouse_any_flag="1", **flags) + "\n", ""))
+        return _server(fake, fake_bin, conf).pane_facts("%3")  # type: ignore[return-value]
+
+    assert facts().mouse_on is True and facts().mouse_drag is False
+    assert facts(mouse_button_flag="1").mouse_drag is True
+    assert facts(mouse_all_flag="1").mouse_drag is True
+    assert facts(mouse_sgr_flag="1").mouse_sgr is True and facts().mouse_sgr is False
 
 
 def test_pane_facts_reads_a_dead_pane_and_the_flags(fake_bin: Path, conf: Path) -> None:
@@ -1408,6 +1426,7 @@ def test_live_check_conf_accepts_the_bundled_conf_and_rejects_a_bad_one(
 
 
 _SET = re.compile(r"^set (-g|-s|-ga) (\S+) (.+)$")
+_BIND = re.compile(r"^bind-key -n (\S+) (.+)$")
 
 
 @requires_tmux
@@ -1421,8 +1440,19 @@ def test_live_every_bundled_option_is_applied_with_its_value(live: TmuxServer) -
     """
     _spawn(live, "asq-test-fox", "w0", CAT)
     lines = [line for line in BUNDLED_CONF.splitlines() if line and not line.startswith("#")]
-    rules = [_SET.match(line) for line in lines]
-    assert rules and all(rules), f"every line is a `set`: {lines}"
+    binds = [_BIND.match(line) for line in lines if line.startswith("bind-key")]
+    rules = [_SET.match(line) for line in lines if not line.startswith("bind-key")]
+    assert rules and all(rules), f"every other line is a `set`: {lines}"
+    assert binds and all(binds), "every bind-key line is `bind-key -n <key> <command>`"
+
+    for bind in binds:
+        assert bind is not None
+        pressed, command = bind.groups()
+        # The root table (`-n`): a key that needs no prefix — there is none (#147).
+        # The whole table: `list-keys -T root <key>` answers nothing on 3.7 (measured).
+        table = live.run("list-keys", "-T", "root")
+        rows = [row for row in table.splitlines() if f" {pressed} " in f"{row} "]
+        assert rows and all(command in row for row in rows), f"{pressed}: {table!r}"
 
     for rule in rules:
         assert rule is not None
@@ -1475,3 +1505,36 @@ def test_live_a_frame_fits_the_render_budget(live: TmuxServer, width: int, heigh
     print(f"\ncapture {width}x{height}: median {median:.1f} ms, max {max(samples):.1f} ms")
     assert len(capture.lines) == height and capture.facts.width == width
     assert median < 200, f"a {width}x{height} frame took {median:.0f} ms (median of 20)"
+
+
+# --- the desktop a window is given (#147) ------------------------------------------------------
+
+
+def test_desktop_environment_carries_only_the_variables_this_process_has() -> None:
+    """A window inherits the SERVER's environment, frozen at its first start; these
+    travel per window from the spawner instead. Unset here says nothing about the
+    server's copy, so it is not blanked — `-e` can only set anyway."""
+    from aisquare.core.tmux import DESKTOP_ENV_VARS, desktop_environment
+
+    shell = {
+        "DISPLAY": ":1",
+        "WAYLAND_DISPLAY": "wayland-0",
+        "SSH_AUTH_SOCK": "/run/user/1000/keyring/ssh",
+        "COLORTERM": "truecolor",
+        "DBUS_SESSION_BUS_ADDRESS": "  ",  # blank counts as unset
+        "HOME": "/home/me",  # not a desktop fact
+    }
+    assert desktop_environment(shell) == {
+        "DISPLAY": ":1",
+        "WAYLAND_DISPLAY": "wayland-0",
+        "SSH_AUTH_SOCK": "/run/user/1000/keyring/ssh",
+        "COLORTERM": "truecolor",
+    }
+    assert desktop_environment({}) == {}
+    assert set(desktop_environment(dict.fromkeys(DESKTOP_ENV_VARS, "x"))) == set(DESKTOP_ENV_VARS)
+    # The conf's update-environment names are the same list, minus what tmux carries by default.
+    listed = {
+        line.split()[-1] for line in BUNDLED_CONF.splitlines() if "update-environment" in line
+    }
+    assert listed == set(DESKTOP_ENV_VARS) - {"DISPLAY", "SSH_AUTH_SOCK"}
+    assert "set -g prefix None" in BUNDLED_CONF and "bind-key -n F12 detach-client" in BUNDLED_CONF

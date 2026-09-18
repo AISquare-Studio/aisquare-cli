@@ -372,6 +372,14 @@ def translate(
         and not extended_keys
         and needs_extended_keys(translation.value)
     )
+    if too_old and translation is not None:
+        # An extended-only chord this server cannot spell, whose meaning has a
+        # name every tmux carries: it travels by the older spelling rather than
+        # being dropped (#147). Only the chords in the table change; everything
+        # else too old still falls through to Drop("too_old") below.
+        fallback = LEGACY_FALLBACK.get(translation.value)
+        if fallback is not None:
+            return fallback
     if translation is not None and not too_old:
         return translation
     if printable and character:
@@ -388,6 +396,16 @@ def translate(
     # kitty-protocol terminal reports because Textual asks for every key it has
     # (``KITTY_REPORT_ALL_KEYS``), and nobody's message to an agent.
     return Drop("nothing_to_type")
+
+
+#: What an extended-only chord becomes on a tmux below :data:`EXTENDED_MINIMUM`
+#: when the same meaning has a name every version carries (#147). ``S-Enter``
+#: is Claude Code's newline; so is ``C-j``, in every terminal. The outer
+#: terminal already told us shift was held — only one speaking the kitty
+#: protocol reports the chord at all — so nothing is faked: the meaning travels
+#: by the older spelling instead of being dropped, which typed nothing and
+#: made a shift+enter on a 3.4 server feel like a broken key.
+LEGACY_FALLBACK: dict[str, Translation] = {"S-Enter": Translation("key", "C-j")}
 
 
 def _is_ascii_letter(character: str) -> bool:

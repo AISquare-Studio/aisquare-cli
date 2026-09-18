@@ -102,7 +102,8 @@ tmux can see and its row says so (`no hooks`).
    bell), **💤 exited(N)**, **✗ lost**. **Click an agent** and you see its real
    session; click into the pane and every key you type goes to it. `＋ spawn
    agent` on a project starts one of your own (Phase 4).
-5. **Press `F12`** to hand focus back to the sidebar (it is the one key the pane
+5. Selecting an agent gives its pane the keyboard at once — type, and it reaches
+   Claude Code. **Press `F12`** to hand focus back to the sidebar (it is the one key the pane
    never forwards; configurable). With the sidebar focused: `t` picks a theme,
    `q` quits the UI — and the agents keep running.
 
@@ -680,6 +681,83 @@ tmux copy mode stays tmux's. The keyboard scrolls too: shift+PgUp / shift+PgDn
 scrollback), shift+Home (the top) and shift+End (live) — through the same
 decision as the wheel, so on a Claude Code pane they scroll Claude's transcript.
 A pane scrolled into tmux history shows `[↑k/history]` in its top-right corner.
+
+**Every Claude Code shortcut, and what reaches the agent.** The keys travel
+outer terminal → Textual → `core.keys.translate` → `tmux send-keys` → Claude
+Code, and `aisquare fleet attach` sends them through a raw tmux client instead.
+The table is generated from the translation table itself and pinned by
+`tests/test_keys.py` (one row per documented shortcut, plus the two-key
+sequences in order); `aisquare doctor` prints the `fleet terminal` line —
+which outer terminal it recognises, whether your tmux carries extended keys,
+and whether the running fleet server still has a prefix key.
+
+| Claude Code shortcut | Sent to tmux (3.5+) | tmux 3.2–3.4 | Outer terminal |
+| --- | --- | --- | --- |
+| ctrl+C / D / G / L / O / R / V / B / T / S / Z, ctrl+A / E / K / U / W / Y, ctrl+P / N, ctrl+J | `C-<letter>` | same | every terminal |
+| ctrl+X then ctrl+K / ctrl+E | `C-x`, then `C-k` / `C-e` — one `send-keys` each, in order | same | every terminal |
+| Esc, Esc Esc, ctrl+[ | `Escape`, `C-[` | same | every terminal (`escape-time 0`: Esc is immediate) |
+| ctrl+_ (undo) | `C-_` | same | ctrl+shift+- depends on the terminal reporting it as ctrl+_ |
+| alt+B / F / D / Y / P / T / O / M / V | `M-<letter>` | same | every terminal that sends alt as an ESC prefix (Linux, Windows); on macOS set Option as Meta (Esc+) in the terminal, and see the alt limits below |
+| Option+Enter | `M-Enter` | same | as above |
+| **shift+Enter** | `S-Enter` | `C-j` — Claude Code's newline, the same result | **only a terminal speaking the kitty keyboard protocol reports the shift** (kitty, ghostty, wezterm, foot, alacritty); VTE terminals, iTerm2 and Windows Terminal send a plain Enter and the UI never fakes it — `\` then Enter, or ctrl+J |
+| shift+Tab (mode cycle) | `BTab` | same | every terminal |
+| Tab, Up / Down, PgUp / PgDn, Home / End, Backspace, Delete | `Tab`, `Up`, `PPage`, `Home`, `BSpace`, `DC` | same | every terminal (shift+PgUp / alt+PgUp are the pane's own scroll keys) |
+| `?` `!` `/` `@` `[` `\` and every printable key | the character, literally | same | every terminal |
+| F1–F12 | `F1`…`F12` | same | F12 is the escape hatch (`[fleet] escape_key`) and never reaches the agent; F1 opens the UI's command palette only from the sidebar |
+| ctrl+P | `C-p` — Textual's palette is on F1 in this UI, so ctrl+P is Claude Code's history | same | every terminal |
+| ctrl+Z | `C-z` — suspends Claude Code *inside the pane*; type `fg` there to resume | same | every terminal |
+| ctrl+D | `C-d` — exits Claude Code; the pane reads 💤 exited and offers Restart | same | every terminal |
+| `[` in the transcript viewer | the character — inside tmux "native scrollback" is the pane's 50 000-line history, which shift+PgUp already reads | same | every terminal |
+
+**tmux pitfalls the fleet engineers around.** *Prefix:* the private server runs
+with `prefix None`, so in `fleet attach` ctrl+B is Claude Code's
+background-tasks key rather than tmux's, and **F12 detaches the client** (the
+same key that hands focus back to the sidebar in the UI; the UI's own path,
+`send-keys`, never met the prefix). *Server environment:* a window inherits the
+tmux *server's* environment, frozen at its first start — after a re-login the
+display, the Wayland socket, the user bus, the runtime dir and the SSH agent
+socket go stale, and ctrl+V image paste, notifications and agent-forwarded `gh`
+fail in silence. Each spawn now sets this shell's `DISPLAY`, `WAYLAND_DISPLAY`,
+`XDG_RUNTIME_DIR`, `DBUS_SESSION_BUS_ADDRESS`, `SSH_AUTH_SOCK`, `COLORTERM` and
+`TERM_PROGRAM` on its window, and `fleet attach` refreshes the session's copy
+through `update-environment`; agents already running keep what they had, and
+`doctor` lists what is stale on the running server. *Passthrough:* the server
+keeps `set-clipboard off` and no `allow-passthrough`, and it does not matter for
+the UI — no tmux client is attached to it, so an OSC 52 copy, an OSC 8 link or
+an OSC 9 notification from Claude Code has no terminal to reach; copies arrive
+through the pane (Textual selection, and the paste-buffer mirror below) and
+links are plain text. In `fleet attach` your own terminal is the client and
+tmux's defaults apply. *Multiple clients:* `window-size manual` is deliberately
+absent (it crashes tmux 3.4); the UI pins each window it shows with
+`resize-window`, and a window nobody shows takes tmux's default `latest`
+behaviour — an attached `fleet attach` client resizes it to its own terminal.
+*Rendering:* `default-terminal tmux-256color` with truecolor overrides, so
+italics, dim and 24-bit colour survive `capture-pane -e`; wide glyphs are
+measured by Rich's cell widths against tmux's, which agree on emoji and CJK;
+the cursor's shape is not reported by `display-message`, so the pane draws a
+block. *Two-key sequences:* each key is one `send-keys` process, issued in
+order on the event loop (measured ~2 ms each), so `ctrl+X ctrl+K` and vim's
+`gg`/`dd` arrive in order; coalescing a tick's keys into one call is a
+latency optimisation for the control-mode client (plan §3.1), not a
+correctness fix. *Escape hatch:* `[fleet] escape_key` (default `f12`) is
+yours to change; keep it out of Claude Code's set.
+
+**The mouse in a Claude Code pane.** A program that tracks the mouse — Claude
+Code's fullscreen renderer does — gets your clicks, drags and releases as the
+mouse events it asked for, the way it already got the wheel: click in the
+prompt to place Claude's cursor, click the `✕` on its diff panel, a `/model`
+row or a collapsed tool result, ctrl+click a link, and drag across the
+transcript to select *in Claude Code*, which copies on release by itself
+(double- and triple-click are its word and line selection). Claude's own copy
+runs `wl-copy`/`xclip` in the agent's environment — the tmux server's, which may
+have no display — and inside tmux writes the tmux paste buffer, so after a
+left-button release the UI reads that buffer and mirrors a changed one to your
+clipboard (OSC 52), the same way its own copies arrive. Claude Code's selection
+is copy-only by design: there is no "select in the prompt and paste over it"
+in Claude Code in any terminal. While such a program owns the mouse the UI's
+own drag-select stands down; **shift+drag** is the one gesture that always
+selects locally, in every pane, and copies on release. In a pane whose program
+does not track the mouse (a shell, the classic renderer) nothing changed:
 Drag to select text in a pane (double-click selects a word): it is copied to
 your clipboard on release (OSC 52 — your terminal has to accept it; Windows
 Terminal, kitty, wezterm, iTerm2 and foot do), and ctrl+c or cmd+c copies it

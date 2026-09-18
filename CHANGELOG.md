@@ -469,6 +469,37 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   never shipped.
 
 ### Fixed
+- **Agent panes feel like a terminal: the hotkey audit, and the tmux pitfalls
+  engineered around** (#147). Every Claude Code shortcut now has a row in
+  `docs/fleet.md` saying what reaches the agent (generated from the translation
+  table and pinned by tests). Fixes that fell out of it: selecting an agent
+  gives its pane the keyboard (typing at what looked like Claude Code used to
+  quit the UI on the first `q`); shift+Enter on a tmux below 3.5 travels as
+  ctrl+J — Claude Code's newline — instead of being dropped; the private server
+  runs with `prefix None` so ctrl+B is Claude Code's background-tasks key in
+  `fleet attach` too, and F12 detaches that client; each spawn sets this
+  shell's `DISPLAY`, `WAYLAND_DISPLAY`, `XDG_RUNTIME_DIR`,
+  `DBUS_SESSION_BUS_ADDRESS`, `SSH_AUTH_SOCK`, `COLORTERM` and `TERM_PROGRAM`
+  on its window (a window inherits the tmux server's environment, frozen at
+  its first start, so image paste and agent-forwarded `gh` broke in silence
+  after a re-login) and `fleet attach` refreshes the session's copy; and
+  `doctor` gains `fleet terminal` — the outer terminal it recognises and
+  whether it speaks the kitty keyboard protocol (what decides shift+Enter),
+  whether tmux carries extended keys, and whether the running server still
+  has a prefix or stale desktop variables.
+- **Mouse buttons reach a Claude Code pane** (#148). Only the wheel was
+  forwarded, so in the fleet UI a click did not place Claude Code's cursor, its
+  `✕`, menu rows and collapsed tool results did nothing, and a drag selected
+  nothing in Claude Code (tmux was measured to pass the sequences byte for
+  byte — the pane never sent them). Now a program that tracks the mouse gets
+  presses, drags and releases as SGR events with the modifier bits (shift 4,
+  alt 8, ctrl 16 — so ctrl+click opens a link), X10 when that is what it asked
+  for; the UI's own drag-select stands down while the program owns the mouse,
+  **shift+drag** always selects locally and copies on release, and after a
+  left-button release the UI mirrors a changed tmux paste buffer — what Claude
+  Code's copy-on-select writes inside tmux when the agent's environment has no
+  display — to your clipboard. Documented in `docs/fleet.md`, with the note that
+  Claude Code's selection is copy-only by design.
 - **Tapping a key with nothing to type in an agent pane no longer pops a
   warning toast** (#151). Terminals speaking the kitty keyboard protocol
   (kitty, ghostty, wezterm, foot, recent alacritty) report Shift, Control, Alt,

@@ -13,13 +13,12 @@ so repos that never opted in never see team output.
 
 from __future__ import annotations
 
-import contextlib
-import dataclasses
 import json
 import os
 import re
+import sqlite3
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import NamedTuple
@@ -715,13 +714,11 @@ def set_signal(
             _board_of(store, project_id) if project_id is not None else _board(store, session, cwd)
         )
         state, prev, event = _write_signal(store, board, session, name, value)
-    stored = _record_delivery(event, board)
-    return dataclasses.replace(state, seq=stored.seq), prev
+    _record_delivery(event, board)  # the receipt for this write; `state.seq` is already the row's
+    return state, prev
 
 
-def set_signal_in(
-    store: ContextStore, project_id: str, name: str, value: str
-) -> tuple[SignalState, str | None]:
+def set_signal_in(store: ContextStore, project_id: str, name: str, value: str) -> None:
     """:func:`set_signal` for ``project_id`` through a store the CALLER holds open.
 
     For a pass over many projects — ``fleet shutdown`` clearing every confirmed
@@ -729,13 +726,15 @@ def set_signal_in(
     :func:`set_signal` (connect, WAL switch, migrations each time) on top of one
     per row it ended (review of #203, round 4). Same validation, same
     one-transaction write; no delivery receipt is published, because the caller
-    is not the ``team signal`` command and there is nobody to hand it to.
+    is not the ``team signal`` command and there is nobody to hand it to — and
+    the receipt of an EARLIER write in this process is cleared, so nothing reads
+    it as this one's (round 5). Returns nothing: its one caller reads nothing.
     """
     _require_enabled()
     _validate_signal(name, value)
+    _DELIVERY.set(None)
     board = _board_of(store, project_id)
-    state, prev, _event = _write_signal(store, board, None, name, value)
-    return state, prev
+    _write_signal(store, board, None, name, value)
 
 
 def _validate_signal(name: str, value: str) -> None:
@@ -1694,20 +1693,35 @@ def hook_session_end(session_id: str, cwd: Path | None, *, reason: str | None = 
     distill_service.spawn_drain(cwd, root=root)
 
 
-def _release_session(store: ContextStore, session: TeamSession, *, why: str) -> list[TeamTask]:
+@dataclass(frozen=True)
+class Released:
+    """What a session release did: the claims returned, and any the board was not told about.
+
+    The release is COMMITTED before its ``task_released`` events are written,
+    so a failed event must not read as "nothing was released" — `stop` used to
+    report an empty release over tasks already back on the board (review of the
+    fold). But the event is how the manager learns the work is free
+    (``events_since`` / ``terminal_events``), so a failed one is not swallowed
+    either: it is named here, for the caller to report (review of #203,
+    round 5). ``reason`` is the first failure's text.
+    """
+
+    tasks: list[TeamTask]
+    unannounced: list[str] = field(default_factory=list)
+    reason: str | None = None
+
+
+def _release_session(store: ContextStore, session: TeamSession, *, why: str) -> Released:
     """Return ``session``'s ``doing`` claims to the pool, ending its presence
     unless that already happened, and say so on the board (``task_released``)."""
     if session.ended_at is None:
         released = store.end_session(session.id, release_claims=True)
     else:
         released = store.release_claims(session.id)
-    # The release is COMMITTED by here; the events are its announcement. One
-    # that cannot be written (a locked or damaged event table) must not turn
-    # into "nothing was released" for a caller reading the exception — `stop`
-    # used to report `released=[]` over tasks already back on the board
-    # (review of the fold). The rows are the record; the event is the courtesy.
+    unannounced: list[str] = []
+    reason: str | None = None
     for task in released:
-        with contextlib.suppress(Exception):
+        try:
             _emit(
                 store,
                 session.project_id,
@@ -1716,10 +1730,13 @@ def _release_session(store: ContextStore, session: TeamSession, *, why: str) -> 
                 session_id=session.id,
                 task_id=task.id,
             )
-    return released
+        except sqlite3.Error as exc:  # the store refusing the event; a code fault still raises
+            unannounced.append(task.id)
+            reason = reason or f"{type(exc).__name__}: {exc}"
+    return Released(released, unannounced, reason)
 
 
-def release_agent_claims(store: ContextStore, agent: FleetAgent, *, why: str) -> list[TeamTask]:
+def release_agent_claims(store: ContextStore, agent: FleetAgent, *, why: str) -> Released:
     """A fleet row that has just ENDED holds nothing: release the claims of the
     session bound to it, and retire that presence if it is still up.
 
@@ -1732,10 +1749,10 @@ def release_agent_claims(store: ContextStore, agent: FleetAgent, *, why: str) ->
     #135, second round, finding 5). ``why`` is the board's word for it.
     """
     if agent.session_id is None:
-        return []
+        return Released([])
     session = store.get_session(agent.session_id)
     if session is None:
-        return []
+        return Released([])
     return _release_session(store, session, why=why)
 
 

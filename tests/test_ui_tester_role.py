@@ -600,6 +600,8 @@ def test_doctor_recognises_the_real_package_ids(
                     "bu": {"command": "browser-use-mcp"},
                     "sel": {"command": "selenium-webdriver"},
                     "grid": {"command": "selenium-grid"},
+                    "v2": {"args": ["mcp-server-puppeteer-v2"]},
+                    "one": {"command": "playwright-mcp-1"},
                     "playwright-report": {},
                 }
             }
@@ -607,7 +609,17 @@ def test_doctor_recognises_the_real_package_ids(
     )
     config_dirs(home)
     check = diagnostics._check_browser_tools(tmp_path)
-    for real in ("mcp pup", "mcp pw1", "mcp pw2", "mcp sh", "mcp bu", "mcp sel", "mcp grid"):
+    for real in (
+        "mcp pup",
+        "mcp pw1",
+        "mcp pw2",
+        "mcp sh",
+        "mcp bu",
+        "mcp sel",
+        "mcp grid",
+        "mcp v2",
+        "mcp one",
+    ):
         assert real in check.detail, real
     assert "playwright-report" not in check.detail
 

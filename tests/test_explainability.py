@@ -573,6 +573,32 @@ def test_configure_target_stores_what_it_validated() -> None:
     assert target.api_key_env == "MY_KEY"
 
 
+def test_configure_target_judges_the_name_and_the_identity_as_it_stores_them() -> None:
+    """Round 5: three of the five human-supplied values were stored as validated
+    and two were not. ``--target 'stg '`` created a second config key beside the
+    tab's ``stg``; ``--identity 'nishil-{role} '`` gave every agent a trailing
+    space. Stripped before they are judged, and stored as judged; a name with a
+    line break in it is refused, while ``prod west`` stays a name people use."""
+    config = AppConfig()
+    name = explainability.configure_target(
+        config, target_name=" stg ", identity=" nishil-{role} ", enable=False
+    )
+    assert name == "stg" and set(config.explainability.targets) == {"stg"}
+    assert config.explainability.targets["stg"].agent_name_template == "nishil-{role}"
+    assert config.explainability.target == "stg"
+
+    explainability.configure_target(
+        config, target_name="prod west", gateway_url="https://west.example", enable=False
+    )
+    assert "prod west" in config.explainability.targets
+
+    with pytest.raises(ValueError, match="line break or tab"):
+        explainability.configure_target(config, target_name="stg\nprod", enable=False)
+    with pytest.raises(ValueError, match="is empty"):
+        explainability.configure_target(config, target_name="   ", gateway_url="https://g.example")
+    assert set(config.explainability.targets) == {"stg", "prod west"}, "refused: nothing stored"
+
+
 def test_probe_accepts_the_claude_code_proxy() -> None:
     server, url = _serve({"status": "ok", "service": "aisquare-proxy", "mode": "claude_code"})
     try:

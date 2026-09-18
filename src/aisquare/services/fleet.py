@@ -140,6 +140,18 @@ class NoSuchAgent(FleetError):
     """No live agent with that label in this project."""
 
 
+class FleetInterrupted(FleetError):
+    """The operator interrupted ``shutdown`` mid-loop; ``report`` says how far it got.
+
+    A ``FleetError`` so a caller that only knows the family still stops cleanly;
+    the CLI catches it first, prints the report, and exits 130.
+    """
+
+    def __init__(self, report: ShutdownReport) -> None:
+        super().__init__(report.interrupted or "shutdown interrupted")
+        self.report = report
+
+
 @dataclass(frozen=True)
 class SpawnReceipt:
     """What ``fleet spawn`` did — including the label it ACTUALLY used."""
@@ -174,6 +186,13 @@ class ReapReport:
     the pool — the same count ``shutdown`` reports, where ``reap`` used to
     discard :func:`services.team.release_agent_claims`' answer in both branches
     (review of #203, round 4)."""
+    release_failures: list[str] = field(default_factory=list)
+    """``<label>: <what happened>`` for each ended or lost row whose release did
+    not fully happen — refused by the store, or released and not announced to
+    the board. The row is ended and committed before the release runs, so a
+    raise here used to take the rest of the sweep down with it: the remaining
+    agents, every later project, the worktree pass and the manager nudges, and
+    a traceback instead of a report (round 5)."""
 
 
 @dataclass(frozen=True)
@@ -265,6 +284,11 @@ class ShutdownReport:
     """Project ids the shutdown could not confirm down — the set the pause rule
     and any caller that wants "is it really down?" should read, rather than
     re-deriving it from the other lists."""
+    interrupted: str | None = None
+    """Set when the operator interrupted the stop loop: which row it was on, and
+    that the rest of the fleet was left as it was. Rows before it are ended and
+    their claims released, committed row by row, so the report is owed even
+    then — it travels on :class:`FleetInterrupted` (round 5)."""
     late_scan_failed: str | None = None
     """Why the final re-read of live rows did not happen (a store that refused).
     A scan that did not run cannot vouch for anything, so every project in the
@@ -1630,6 +1654,15 @@ def _stop_row(
         if exit_status is None:
             exit_status = confirmed
     with store_session() as store:
+        # The row as it is NOW, in the one session that ends it: ended meanwhile
+        # — its own hook, a `reap`, another terminal — it went away on its own,
+        # with the status it recorded, and this stop is nobody's (`NoSuchAgent`,
+        # which `shutdown` reads as exactly that). Re-reading a window earlier,
+        # in a connection of its own, neither closed the gap nor paid for itself
+        # (round 5).
+        current = store.get_fleet_agent(agent.id)
+        if current is None or current.ended_at is not None:
+            raise NoSuchAgent(f"{agent.label} ({agent.id}) is no longer live")
         ended = store.end_fleet_agent(agent.id, exit_status=exit_status)
         # The process is dead or gone by here, so whatever its session still
         # holds is nobody's: a clean ``/exit`` released through the agent's own
@@ -1909,12 +1942,32 @@ def _kill_fleet_sessions(
                 report.sessions_left_up.append(qualified)
                 _not_down(report, project_id)
                 continue
+            # Presence first. A name asked for just-in-case (today's socket, no
+            # row of this project on it) that cannot be asked is not a failed
+            # kill and marks nothing not-confirmed-down: nothing was claimed to
+            # be there. Round 4 silenced only the confirmed-absent answer while
+            # widening the probe to every in-scope project, so a transient
+            # `TmuxError` on a socket the project never lived on read as PARTLY
+            # shut down and exit 1 (round 5).
+            try:
+                present = srv.has_session_or_raise(name)
+            except TmuxError as exc:
+                if not expected:
+                    continue
+                report.sessions_failed.append(f"{qualified} (could not be asked: {exc})")
+                _not_down(report, project_id)
+                continue
+            if not present:
+                if expected:
+                    report.sessions_absent.append(qualified)
+                continue
             if any(spared_socket == socket for spared_socket, _ in spared_panes):
                 try:
                     hosted = {(socket, window.pane_id) for window in srv.windows_or_raise(name)}
                 except TmuxError as exc:
                     # Cannot tell whether a left-live pane lives here: not killed,
-                    # and said so — never a kill on a guess.
+                    # and said so — never a kill on a guess. The session IS there,
+                    # so this is a real failed kill whatever brought it here.
                     report.sessions_failed.append(f"{qualified} (could not list its panes: {exc})")
                     _not_down(report, project_id)
                     continue
@@ -1923,10 +1976,6 @@ def _kill_fleet_sessions(
                     _not_down(report, project_id)
                     continue
             try:
-                if not srv.has_session_or_raise(name):
-                    if expected:
-                        report.sessions_absent.append(qualified)
-                    continue
                 srv.kill_session(name)
             except TmuxError:
                 # Tried and did not happen: a wedged server times out at 30 s,
@@ -1958,9 +2007,21 @@ def _release_or_say(
     if agent.session_id is None:
         return [], None
     try:
-        return _team().release_agent_claims(store, agent, why=why), None
+        outcome = _team().release_agent_claims(store, agent, why=why)
     except Exception as exc:
-        return [], f"{type(exc).__name__}: {exc}"
+        return [], (
+            f"could not be released ({type(exc).__name__}: {exc}) — they stay with the ended "
+            "session until the lease lapses; `aisquare task release <id>` frees one now"
+        )
+    if outcome.unannounced:
+        # Released — the rows say so — but the board was not told, and the
+        # manager learns a task is free from that event (round 5).
+        return list(outcome.tasks), (
+            f"released, but the board was not told about {', '.join(outcome.unannounced)} "
+            f"({outcome.reason}) — the manager will not see them come free until it lists "
+            "the pool"
+        )
+    return list(outcome.tasks), None
 
 
 def _release_in(store: ContextStore, agent: FleetAgent, report: ShutdownReport) -> None:
@@ -1984,9 +2045,12 @@ def _release_in(store: ContextStore, agent: FleetAgent, report: ShutdownReport) 
 
 
 def _count_release(
-    report: ShutdownReport, agent: FleetAgent, released: list[TeamTask], failed: str | None
+    report: ShutdownReport | ReapReport,
+    agent: FleetAgent,
+    released: list[TeamTask],
+    failed: str | None,
 ) -> None:
-    """One place that turns a release (or its refusal) into the report's fields."""
+    """One place that turns a release (or what went wrong with it) into a report's fields."""
     report.claims_released.extend(task.id for task in released)
     if failed:
         report.release_failures.append(f"{agent.label}: {failed}")
@@ -2083,14 +2147,11 @@ def _shutdown_row(
         _record_lost(agent, f"no server answered on socket {agent.tmux_socket!r}", report)
         return
     try:
-        # The snapshot's row, re-read by ID: still live, it is stopped — THAT
-        # row, whatever label a later spawn reused; ended meanwhile, it went
-        # away on its own (review of the fold).
-        with store_session() as store:
-            current = store.get_fleet_agent(agent.id)
-        if current is None or current.ended_at is not None:
-            raise NoSuchAgent(f"{agent.label} ({agent.id}) is no longer live")
-        receipt = _stop_row(project, current, force=force, grace=grace)
+        # The snapshot's row is the row stopped — THAT pane, whatever label a
+        # later spawn reused. Whether it ended meanwhile is judged inside the
+        # store session that ends it (`_stop_row` raises `NoSuchAgent` there),
+        # not in a connection of its own a window ahead of it (round 5).
+        receipt = _stop_row(project, agent, force=force, grace=grace)
     except NoSuchAgent as exc:
         _row_that_went_away(agent, str(exc), report)
     except FleetError as exc:
@@ -2435,17 +2496,21 @@ def shutdown_plan(project: ProjectInfo | None = None) -> ShutdownPlan:
             # only the inaccessible session read "nothing to shut down" (review of
             # #121, round 9). A plan that cannot be completed is refused, not
             # silently shortened — nothing has been touched at this point.
-            sessions += [
-                f"{socket}:{name}"
-                for name, _, _ in _fleet_sessions(
-                    srv,
-                    targets,
-                    socket=socket,
-                    default_socket=config.tmux_socket,
-                    every=project is None,
-                )
-                if srv.has_session_or_raise(name)
-            ]
+            for name, _, expected in _fleet_sessions(
+                srv,
+                targets,
+                socket=socket,
+                default_socket=config.tmux_socket,
+                every=project is None,
+            ):
+                try:
+                    present = srv.has_session_or_raise(name)
+                except TmuxError:
+                    if not expected:
+                        continue  # asked just in case; a plan is not refused over it (round 5)
+                    raise
+                if present:
+                    sessions.append(f"{socket}:{name}")
         except TmuxError as exc:
             raise FleetError(
                 f"could not list the fleet's sessions on socket {socket!r} ({exc}) — refusing "
@@ -2522,6 +2587,15 @@ def shutdown(
             for agent in agents:
                 handled.add(agent.id)
                 _shutdown_row(current, agent, answering, report, force=force, grace=grace)
+    except KeyboardInterrupt:
+        # The operator's interrupt is theirs to have — nothing else is killed —
+        # but rows before this one are ended and their claims released, each
+        # committed as it went, so the report of how far it got travels with
+        # the interrupt instead of being thrown away with it (round 5).
+        report.interrupted = (
+            f"interrupted while stopping {agent.label}; the rest of the fleet was left as it was"
+        )
+        raise FleetInterrupted(report) from None
     except Exception:
         # The kill phase runs even if a row could not be recorded: "shutdown
         # means down" must hold when the store refuses, and a caller that got a
@@ -2613,15 +2687,18 @@ def reap(project: ProjectInfo | None = None, *, server_down: bool = False) -> Re
                     pane = observed.get(agent.pane_id)
                     if pane is None:
                         lost = store.end_fleet_agent(agent.id, exit_status=None)
-                        released = _team().release_agent_claims(store, lost, why="agent lost")
-                        report.claims_released.extend(task.id for task in released)
+                        released, failed = _release_or_say(store, lost, why="agent lost")
+                        _count_release(report, lost, released, failed)
                         report.lost.append(lost)
                     elif pane.dead:
                         ended = store.end_fleet_agent(agent.id, exit_status=pane.dead_status)
                         # A crash fires no ``SessionEnd``; a clean exit already
-                        # released, and finds nothing more to release here.
-                        released = _team().release_agent_claims(store, ended, why="agent exited")
-                        report.claims_released.extend(task.id for task in released)
+                        # released, and finds nothing more to release here. The
+                        # release is the courtesy after the row is ended, as in
+                        # `stop`: refused, it is said, never raised out of the
+                        # sweep (round 5).
+                        released, failed = _release_or_say(store, ended, why="agent exited")
+                        _count_release(report, ended, released, failed)
                         report.ended.append(ended)
                         _emit_exit(store, ended)
             _remove_merged_worktrees(store, current, report)

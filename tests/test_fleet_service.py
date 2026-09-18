@@ -4224,18 +4224,28 @@ def test_an_interrupt_during_the_stop_loop_does_not_kill_the_fleet(
     first = _coder(project)
     second = _coder(project)
     fleet_service.pause(project)
+    real_row = fleet_service._shutdown_row
+    turns: list[str] = []
 
-    def interrupted(*args: object, **kwargs: object) -> None:
-        raise KeyboardInterrupt
+    def interrupted_on_the_second(
+        project_: ProjectInfo, agent: FleetAgent, *a: object, **k: object
+    ) -> None:
+        turns.append(agent.label)
+        if len(turns) == 2:  # the first row is down; Ctrl-C lands on the second
+            raise KeyboardInterrupt
+        real_row(project_, agent, *a, **k)  # type: ignore[arg-type]
 
-    monkeypatch.setattr(fleet_service, "_shutdown_row", interrupted)
-    with pytest.raises(KeyboardInterrupt):
+    monkeypatch.setattr(fleet_service, "_shutdown_row", interrupted_on_the_second)
+    with pytest.raises(fleet_service.FleetInterrupted) as caught:
         fleet_service.shutdown(project, force=True)
 
-    assert tmux.killed == [] and tmux.killed_sessions == [], (
-        "nothing was taken down behind the operator"
+    report = caught.value.report
+    assert [a.id for a in report.stopped] == [first.id], "the row already down is reported"
+    assert report.interrupted is not None and second.label in report.interrupted
+    assert tmux.killed == [first.pane_id] and tmux.killed_sessions == [], (
+        "nothing beyond the row in hand was taken down behind the operator"
     )
-    assert _row(first.id).ended_at is None and _row(second.id).ended_at is None
+    assert _row(second.id).ended_at is None
     assert fleet_service.is_paused(project), "and the pause is still the manager's standing order"
 
     # The control: a FAULT in the loop still runs the kill phase — "shutdown means
@@ -4330,8 +4340,64 @@ def test_a_release_whose_board_event_fails_is_still_a_release(
     receipt = fleet_service.stop(project, agent.label, force=True)
 
     assert [t.id for t in receipt.released] == [mine.id], "released — the row says so"
-    assert receipt.release_failed is None
+    assert receipt.release_failed is not None and "board was not told" in receipt.release_failed
+    assert mine.id in receipt.release_failed, "the task the manager will not hear about is named"
     assert _task_now(mine.id).status == "todo" and _task_now(mine.id).claimed_by is None
+
+
+def test_reap_reports_a_refused_release_and_finishes_the_sweep(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 5. ``reap`` was given ``claims_released`` but not the courtesy rule:
+    ``release_agent_claims`` raising after ``end_fleet_agent`` had committed took
+    the whole sweep down — the remaining agents, every later project, the
+    worktree pass, the nudges, and a traceback instead of a report."""
+    mine = _task(project, "the task this coder is for")
+    agent, first = _spawned(project, "coder", mine.id, tmux, monkeypatch)
+    team_service.hook_session_start(first, project.root, "startup")
+    team_service.claim_task(mine.id, session_ref=first)
+    other = _coder(project)
+    for row in (agent, other):
+        tmux.facts[row.pane_id] = replace(tmux.facts[row.pane_id], dead=True, dead_status=0)
+
+    def refuse(*args: object, **kwargs: object) -> object:
+        raise sqlite3.OperationalError("database is locked (fake)")
+
+    monkeypatch.setattr(team_service, "release_agent_claims", refuse)
+    report = fleet_service.reap(project)
+
+    assert sorted(a.id for a in report.ended) == sorted([agent.id, other.id]), "the sweep finished"
+    assert len(report.release_failures) == 2
+    assert all("could not be released" in f and "locked" in f for f in report.release_failures)
+    assert report.claims_released == []
+
+
+def test_a_just_in_case_session_that_cannot_be_asked_is_not_a_failed_kill(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 5. ``expected`` silenced only the confirmed-absent answer while the
+    just-in-case probe was widened to every in-scope project, so a ``TmuxError``
+    on today's socket — for a project whose rows all live on the old one — read
+    as a failed kill: PARTLY shut down, exit 1, and the plan refused outright."""
+    old = FakeTmux()
+    tmux.per_socket["asq-old"] = old
+    _settings(monkeypatch, tmux_socket="asq-old")
+    on_old = _coder(project)
+    _settings(monkeypatch, tmux_socket="asq")
+
+    def cannot_ask(name: str) -> bool:
+        raise TmuxError("error connecting to /tmp/tmux-501/asq (transient)")
+
+    monkeypatch.setattr(tmux, "has_session_or_raise", cannot_ask)  # today's socket only
+
+    plan = fleet_service.shutdown_plan(project)
+    assert plan.sessions == [_session_of(project, "asq-old")], "the plan lists what it can see"
+
+    report = fleet_service.shutdown(project, force=True)
+    assert [a.id for a in report.stopped] == [on_old.id]
+    assert report.sessions_failed == [] and report.incomplete_projects == [], (
+        "a socket the project never lived on cannot fail its shutdown"
+    )
 
 
 def test_the_pause_pass_reads_and_clears_every_signal_through_one_store(
@@ -4506,7 +4572,8 @@ def test_shutdown_reports_a_denied_session_check_as_failed_not_absent(
     socket = fleet_service.settings().tmux_socket
     assert "asq-stray-otter" not in tmux.killed_sessions
     assert "asq-stray-otter" in tmux.sessions, "a survivor is not read as absent"
-    assert f"{socket}:asq-stray-otter" in report.sessions_failed
+    failed = [s for s in report.sessions_failed if s.startswith(f"{socket}:asq-stray-otter")]
+    assert failed and "could not be asked" in failed[0], "a denied check is a failed kill, with why"
     assert f"{socket}:asq-stray-otter" not in report.sessions_absent
 
 

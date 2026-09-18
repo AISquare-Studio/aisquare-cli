@@ -313,7 +313,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `fleet stop` returns what it released — the ended session's claims ride on a
   `StopReceipt` and are named in the output (`claims_released` under `--json`) —
   and `shutdown` counts that receipt instead of turning the release off and
-  making a second one; `fleet reap` reports its releases the same way.
+  making a second one; `fleet reap` reports its releases the same way. A release
+  the store refused, or one the board could not be told about, is named and
+  exits 1 from all three; an interrupted shutdown kills nothing further and
+  still prints how far it got (exit 130); `--all` with `--project` is refused.
 - **A `ui-tester` role: user-facing work is verified in a real browser, with
   evidence — and the role brings its own browser flag.** Eight first-class roles
   now. It takes tasks titled `UI: …` from the review pool and runs their

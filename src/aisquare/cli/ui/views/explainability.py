@@ -63,12 +63,9 @@ class StatusReport:
     one vocabulary every surface speaks — and ``ok`` while it is off. This
     carried ``problem`` and ``caution`` as two booleans derived from it, the
     encoding ``ProxyState`` itself had just shed for being able to say both at
-    once (review of #132)."""
-
-    @property
-    def problem(self) -> bool:
-        """Red: the proxy would not take a session, or ships elsewhere."""
-        return self.severity is CheckStatus.fail
+    once (review of #132). Nothing derives a boolean from it: ``render_status``
+    reads the severity, and a derived ``problem`` re-offered the encoding just
+    removed (round 5)."""
 
 
 def status_report() -> StatusReport:

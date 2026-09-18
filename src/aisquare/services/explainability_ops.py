@@ -1287,10 +1287,13 @@ def _destination(target: ResolvedTarget, verdict: ProxyProbe) -> ProxyState:
         # Offered to adopt only when `configure_target` would take it: a
         # schemeless or garbage report (`other.example:8000`, `unknown`) pasted
         # into the command fails with "needs a scheme" (review of the fold).
-        usable = (
-            bool(verdict.gateway) and url_problem(verdict.gateway or "", what="gateway") is None
+        adopt = (
+            verdict.gateway
+            if verdict.gateway
+            and not foreign_view
+            and url_problem(verdict.gateway, what="gateway") is None
+            else "<url>"
         )
-        adopt = verdict.gateway if verdict.gateway and usable and not foreign_view else "<url>"
         aside = (
             " (its own local view of it, not an address this machine can use)"
             if foreign_view

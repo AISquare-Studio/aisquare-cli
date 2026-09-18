@@ -8,6 +8,7 @@ import json
 import os
 import re
 import shutil
+import string
 import sys
 from collections.abc import Callable, Container, Mapping, Sequence
 from importlib import metadata
@@ -899,15 +900,19 @@ _BROWSER_PROVIDER_RE = re.compile(
 
 #: The tokens a REAL package id joins a provider with — `mcp-server-playwright`,
 #: `@modelcontextprotocol/server-puppeteer`, `playwright-mcp-server`,
-#: `browser-use-mcp`, `selenium-webdriver`, `chrome-devtools-mcp@…`. A declared
-#: table, like the providers themselves: the whole identifier around a match is
-#: split into tokens, and it names the tool only when every token that is not
-#: the provider's own is one of these. `playwright-report`, `playwright_report`,
-#: `selenium-grid-docs`, `puppeteer-examples-repo` and `selenium-docs-site` are
-#: ABOUT a tool and fail that rule; `selenium-grid` (a real Selenium component)
-#: passes it. One rule, where a widened boundary and a list of benign tails had
-#: disagreed about `_` and each other (review of #203, round 4; review of the
-#: fold, twice).
+#: `browser-use-mcp`, `selenium-webdriver` — plus a version tail
+#: (`mcp-server-puppeteer-v2`, `playwright-mcp-1`; see `_VERSION_RE`). A
+#: declared table, like the providers themselves: the whole identifier around a
+#: match is split into tokens, and it names the tool only when every token that
+#: is not the provider's own is one of these. `playwright-report`,
+#: `playwright_report`, `selenium-grid-docs`, `puppeteer-examples-repo` and
+#: `selenium-docs-site` are ABOUT a tool and fail that rule; `selenium-grid` (a
+#: real Selenium component) passes it. One rule, where a widened boundary and a
+#: list of benign tails had disagreed about `_` and each other (review of #203,
+#: round 4; review of the fold, twice). Only tokens that can sit INSIDE an
+#: identifier belong here: `npx` and `@latest` are separated from it by
+#: whitespace and `@`, which bound the identifier, so they never reach the split
+#: (round 5).
 _PACKAGE_TOKENS: frozenset[str] = frozenset(
     {
         "mcp",
@@ -919,10 +924,7 @@ _PACKAGE_TOKENS: frozenset[str] = frozenset(
         "plugin",
         "plugins",
         "official",
-        "latest",
         "node",
-        "npm",
-        "npx",
         "js",
         "ts",
         "py",
@@ -940,7 +942,13 @@ _PACKAGE_TOKENS: frozenset[str] = frozenset(
     }
 )
 
-_IDENTIFIER_RE = re.compile(r"[A-Za-z0-9_-]+")
+#: A version tail inside an identifier: `v2`, `1`, `2.1`, `v0.3.0`.
+_VERSION_RE = re.compile(r"v?\d+(?:\.\d+)*")
+
+#: The characters of an identifier — a set, not a regex: this walk runs once per
+#: character of every `command` and `args` string of every server in every
+#: `.claude.json`, the file this row's whole cost lives in (round 5).
+_IDENTIFIER_CHARS = frozenset(string.ascii_letters + string.digits + "_-")
 #: What joins the tokens of a package id: `-` and `_` inside a name, `/` after a
 #: scope (`@playwright/mcp`), `@` before a scope or a version (`…@latest`).
 _TOKEN_SPLIT_RE = re.compile(r"[-_/@]+")
@@ -956,6 +964,10 @@ def _provider_tokens() -> frozenset[str]:
 _KNOWN_TOKENS = _PACKAGE_TOKENS | _provider_tokens()
 
 
+def _known_token(token: str) -> bool:
+    return token in _KNOWN_TOKENS or _VERSION_RE.fullmatch(token) is not None
+
+
 def _names_browser_tool(text: str) -> bool:
     """Whether ``text`` names a browser-tooling provider, as a whole identifier."""
     for match in _BROWSER_PROVIDER_RE.finditer(text):
@@ -963,12 +975,12 @@ def _names_browser_tool(text: str) -> bool:
         # `playwright`, `playwright-report` for the same match. `_` counts as a
         # joiner exactly as `-` does, so the two spellings are one case.
         start, end = match.span()
-        while start > 0 and _IDENTIFIER_RE.fullmatch(text[start - 1]):
+        while start > 0 and text[start - 1] in _IDENTIFIER_CHARS:
             start -= 1
-        while end < len(text) and _IDENTIFIER_RE.fullmatch(text[end]):
+        while end < len(text) and text[end] in _IDENTIFIER_CHARS:
             end += 1
         tokens = [t.lower() for t in _TOKEN_SPLIT_RE.split(text[start:end]) if t]
-        if all(token in _KNOWN_TOKENS for token in tokens):
+        if all(_known_token(token) for token in tokens):
             return True
     return False
 

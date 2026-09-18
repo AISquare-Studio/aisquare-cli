@@ -36,6 +36,7 @@ from typer.testing import CliRunner
 from aisquare.cli import fleet as fleet_cli
 from aisquare.cli.app import app
 from aisquare.models import FleetAgent, FleetAgentStatus, ProjectInfo, TeamSession, TeamTask
+from aisquare.services import fleet as fleet_service
 from aisquare.services.fleet import (
     FleetError,
     FleetUnavailable,
@@ -665,7 +666,9 @@ def test_shutdown_with_stuck_claims_says_so_in_the_header_and_the_exit_code(
     report = ShutdownReport(
         stopped=[_agent("coder-auth", ended=True, exit_status=0)],
         sessions_killed=[f"asq:{SESSION}"],
-        release_failures=["coder-auth: OperationalError: database is locked"],
+        release_failures=[
+            "coder-auth: could not be released (OperationalError: database is locked)"
+        ],
     )
     _install(monkeypatch, "shutdown", report)
 
@@ -678,7 +681,36 @@ def test_shutdown_with_stuck_claims_says_so_in_the_header_and_the_exit_code(
         in out
     )
     assert "PARTLY" not in out, "every row is down; the claims are what is stuck"
-    assert "claims of coder-auth: OperationalError: database is locked could not be released" in out
+    assert (
+        "⚠ claims of coder-auth: could not be released (OperationalError: database is locked)"
+        in out
+    )
+
+
+def test_an_interrupted_shutdown_prints_how_far_it_got_and_exits_130(
+    runner: CliRunner, resolved: Seen, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 5. Ctrl-C used to propagate past the report to Click's `Aborted!`:
+    rows already ended and claims already released, and the operator told
+    nothing. The interrupt carries the report; the code says it was not the
+    whole fleet."""
+    report = ShutdownReport(
+        stopped=[_agent("manager", "manager", ended=True, exit_status=0)],
+        claims_released=["tsk_01x"],
+        interrupted=(
+            "interrupted while stopping coder-auth; the rest of the fleet was left as it was"
+        ),
+    )
+    _install(monkeypatch, "shutdown", fleet_service.FleetInterrupted(report))
+
+    result = runner.invoke(app, ["fleet", "shutdown", "--yes", "--force"])
+
+    assert result.exit_code == 130
+    out = _plain(result.stdout)
+    assert "⚠ fleet PARTLY shut down: 1 stopped" in out
+    assert "💤 manager (exit 0)" in out, "the row already down is named"
+    assert "🔓 1 claimed task(s) released back to the board" in out
+    assert "interrupted while stopping coder-auth" in out and "fleet ls --all" in out
 
 
 def test_stop_confirms_and_passes_force_through(
@@ -747,22 +779,26 @@ def test_stop_says_when_the_release_was_refused(
 ) -> None:
     """The row is down; the claims that stayed with the ended session are the
     operator's to know about, not a swallowed exception's (review of the fold)."""
+    refused = (
+        "could not be released (OperationalError: database is locked) — they stay with the "
+        "ended session until the lease lapses"
+    )
     _install(
         monkeypatch,
         "stop",
-        StopReceipt(
-            _agent("coder-auth", ended=True, exit_status=0),
-            [],
-            release_failed="OperationalError: database is locked",
-        ),
+        StopReceipt(_agent("coder-auth", ended=True, exit_status=0), [], release_failed=refused),
     )
 
     result = runner.invoke(app, ["fleet", "stop", "coder-auth"])
 
-    assert result.exit_code == 0, result.output
+    assert result.exit_code == 1, "one contract with shutdown: a stuck claim is not a clean stop"
     out = _plain(result.stdout)
     assert "✓ stopped coder-auth" in out
-    assert "its claims could not be released (OperationalError: database is locked)" in out
+    assert f"⚠ claims: {refused}" in out
+
+    as_json = runner.invoke(app, ["--json", "fleet", "stop", "coder-auth"])
+    assert as_json.exit_code == 1, "and the two output modes agree"
+    assert json.loads(as_json.stdout)["release_failed"] == refused
 
 
 # ── shutdown ─────────────────────────────────────────────────────────────────
@@ -931,6 +967,7 @@ def test_shutdown_json_carries_every_group_and_the_reasons(
         "servers_absent",
         "claims_released",
         "release_failures",
+        "interrupted",
         "paused_cleared",
         "paused_kept",
         "incomplete_projects",
@@ -1159,11 +1196,35 @@ def test_reap_json(runner: CliRunner, resolved: Seen, monkeypatch: pytest.Monkey
 
     assert result.exit_code == 0, result.output
     payload = json.loads(result.stdout)
-    assert set(payload) == {"ended", "lost", "worktrees_removed", "claims_released"}
+    assert set(payload) == {
+        "ended",
+        "lost",
+        "worktrees_removed",
+        "claims_released",
+        "release_failures",
+    }
     assert [a["label"] for a in payload["ended"]] == ["coder-auth"]
     assert payload["claims_released"] == []
     assert payload["lost"] == []
     assert payload["worktrees_removed"] == ["/home/me/work/api/.aisquare-worktrees/coder-auth"]
+
+
+def test_reap_names_a_refused_release_and_exits_1(
+    runner: CliRunner, resolved: Seen, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 5: the same contract as `stop` and `shutdown` for the same fact."""
+    report = ReapReport(
+        ended=[_agent("coder-auth", ended=True, exit_status=0)],
+        release_failures=["coder-auth: could not be released (OperationalError: locked)"],
+    )
+    _install(monkeypatch, "reap", report)
+
+    result = runner.invoke(app, ["fleet", "reap"])
+
+    assert result.exit_code == 1
+    assert "⚠ claims of coder-auth: could not be released (OperationalError: locked)" in _plain(
+        result.stdout
+    )
 
 
 # ── rename ───────────────────────────────────────────────────────────────────

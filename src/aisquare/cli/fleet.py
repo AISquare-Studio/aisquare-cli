@@ -295,20 +295,22 @@ def stop(
                 }
             )
         )
-        return
-    console = stdout_console()
-    console.print(f"✓ stopped {agent.label} ({agent.id})")
-    _say_released(console, len(released))
-    # The work the stop returned to the pool is the one thing the next agent
-    # inherits from this one; here the receipt carries the tasks, so they are
-    # named under the one line every fleet command uses for the count.
-    for task in receipt.released:
-        console.print(f"     · {task.title} ({task.id})")
+    else:
+        console = stdout_console()
+        console.print(f"✓ stopped {agent.label} ({agent.id})")
+        _say_released(console, len(released))
+        # The work the stop returned to the pool is the one thing the next agent
+        # inherits from this one; here the receipt carries the tasks, so they are
+        # named under the one line every fleet command uses for the count.
+        for task in receipt.released:
+            console.print(f"     · {task.title} ({task.id})")
+        if receipt.release_failed:
+            console.print(f"  ⚠ claims: {receipt.release_failed}")
     if receipt.release_failed:
-        console.print(
-            f"  ⚠ its claims could not be released ({receipt.release_failed}) — they stay with "
-            "the ended session until the lease lapses; `aisquare task release <id>` frees one now"
-        )
+        # One contract with `shutdown`: a claim left with a session that no
+        # longer exists is not a clean stop, whichever command produced it, and
+        # a script gating on the code must not read it as one (round 5).
+        raise typer.Exit(code=1)
 
 
 def _say_released(console: Console, count: int) -> None:
@@ -411,6 +413,7 @@ def _emit_shutdown(report: fleet_service.ShutdownReport) -> None:
                     "servers_absent": report.servers_absent,
                     "claims_released": report.claims_released,
                     "release_failures": report.release_failures,
+                    "interrupted": report.interrupted,
                     "paused_cleared": report.paused_cleared,
                     "paused_kept": report.paused_kept,
                     "incomplete_projects": report.incomplete_projects,
@@ -460,9 +463,11 @@ def _emit_shutdown(report: fleet_service.ShutdownReport) -> None:
         console.print(f"  · session {session} was already gone with its last window")
     _say_released(console, len(report.claims_released))
     for failure in report.release_failures:
+        console.print(f"  ⚠ claims of {failure}")
+    if report.interrupted:
         console.print(
-            f"  ⚠ claims of {failure} could not be released — they stay with the ended session "
-            "until the lease lapses; `aisquare task release <id>` frees one now"
+            f"  ⚠ {report.interrupted} — `aisquare fleet ls --all` shows what is still running; "
+            "re-run this to finish"
         )
     for name in report.paused_cleared:
         console.print(f"  ▶ the fleet-paused signal on {name} was cleared")
@@ -502,7 +507,10 @@ def _emit_shutdown(report: fleet_service.ShutdownReport) -> None:
 def shutdown(
     project: ProjectRef = None,
     every: Annotated[
-        bool, typer.Option("--all", help="Every project's fleet, not just this one.")
+        bool,
+        typer.Option(
+            "--all", help="Every project's fleet, not just this one (not with --project)."
+        ),
     ] = False,
     yes: Annotated[
         bool, typer.Option("--yes", "-y", help="Shut down without asking; required off a terminal.")
@@ -521,11 +529,13 @@ def shutdown(
     the server, so nothing else on that socket goes with it; a server with
     nothing left on it exits by itself.
 
-    This project by default, `--all` for every project. It prints what it would
-    end and asks first at a terminal; off a terminal it is a dry run unless
-    --yes, and under --json without --yes it prints the plan and changes nothing.
-    Board notes and tasks are kept, the ended rows' claims are released, and a
-    `fleet-paused` signal is cleared. Exits 1 when any row was left live.
+    This project by default, `--all` for every project — one or the other,
+    never both. It prints what it would end and asks first at a terminal; off a
+    terminal it is a dry run unless --yes, and under --json without --yes it
+    prints the plan and changes nothing. Board notes and tasks are kept, the
+    ended rows' claims are released, and a `fleet-paused` signal is cleared.
+    Exits 1 when any row was left live or a claim release was refused, and 130
+    when interrupted — with the report of how far it got either way.
     """
     _refuse_all_with_project(every, project)
     target = None if every else _project(project)
@@ -548,6 +558,12 @@ def shutdown(
             return
     try:
         report = fleet_service.shutdown(target, force=force)
+    except fleet_service.FleetInterrupted as exc:
+        # The operator's Ctrl-C: rows before it are down and their claims
+        # released, committed as they went, so they are told how far it got —
+        # and the code says it was not the whole fleet (round 5).
+        _emit_shutdown(exc.report)
+        raise typer.Exit(code=130) from None
     except fleet_service.FleetError as exc:
         _fail_fleet(exc)
     _emit_shutdown(report)
@@ -565,6 +581,7 @@ def _not_down(report: fleet_service.ShutdownReport) -> bool:
         or report.sessions_failed
         or report.late_scan_failed
         or report.pause_scan_failed
+        or report.interrupted
     )
 
 
@@ -602,7 +619,10 @@ def attach(project: ProjectRef = None) -> None:
 def reap(
     project: ProjectRef = None,
     every: Annotated[
-        bool, typer.Option("--all", help="Every project's fleet, not just this one.")
+        bool,
+        typer.Option(
+            "--all", help="Every project's fleet, not just this one (not with --project)."
+        ),
     ] = False,
     server_down: Annotated[
         bool,
@@ -614,7 +634,11 @@ def reap(
         ),
     ] = False,
 ) -> None:
-    """Record exited agents, mark vanished panes lost, remove merged worktrees."""
+    """Record exited agents, mark vanished panes lost, remove merged worktrees.
+
+    This project by default, `--all` for every project — never both. Exits 1
+    when a released claim could not be given back to the board.
+    """
     _refuse_all_with_project(every, project)
     target = None if every else _project(project)
     try:
@@ -629,9 +653,12 @@ def reap(
                     "lost": [a.model_dump(mode="json") for a in report.lost],
                     "worktrees_removed": [str(p) for p in report.worktrees_removed],
                     "claims_released": list(report.claims_released),
+                    "release_failures": list(report.release_failures),
                 }
             )
         )
+        if report.release_failures:
+            raise typer.Exit(code=1)
         return
     console = stdout_console()
     console.print(
@@ -647,6 +674,10 @@ def reap(
     for path in report.worktrees_removed:
         console.print(f"  🗑 {path}")
     _say_released(console, len(report.claims_released))
+    for failure in report.release_failures:
+        console.print(f"  ⚠ claims of {failure}")
+    if report.release_failures:
+        raise typer.Exit(code=1)  # the same contract as `stop` and `shutdown` (round 5)
 
 
 @app.command("rename")

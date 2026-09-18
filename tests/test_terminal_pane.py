@@ -2388,6 +2388,99 @@ def test_a_copy_over_a_wrapped_row_is_the_panes_width_while_the_pane_is_narrower
     assert copied == "a" * 30 + "tail", copied
 
 
+_ORDERINGS = {
+    "primary-up-first": ("D1", "D3", "U1", "U3"),
+    "stray-up-first": ("D1", "D3", "U3", "U1"),
+    "stray-lost": ("D1", "D3", "U1"),
+    "stray-first-then-primary": ("D3", "D1", "U3", "U1"),
+    "stray-first-primary-up-first": ("D3", "D1", "U1", "U3"),
+    "sequential-not-stray": ("D3", "U3", "D1", "U1"),
+}
+
+
+@pytest.mark.parametrize("ordering", sorted(_ORDERINGS), ids=sorted(_ORDERINGS))
+def test_a_second_button_never_reaches_the_screen_whatever_the_release_order(
+    fake: FakeTmux, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ordering: str
+) -> None:
+    """The INVARIANT, not one ordering of it (round 5 of the #203 review, on the
+    churn of fixing one symptom at a time): while one button is down, a second
+    button's press and release never reach the screen, whichever of them is
+    lifted first and even when the second's release never comes; the gesture's
+    own release always routes with the button that began it; and afterwards the
+    host is clean — an ordinary left drag copies. Measured at the one seam that
+    IS "reaching the screen": ``App.on_event``, the parent this class defers to.
+
+    Sequential presses (``D3 U3 D1 U1``) are the control: two gestures, both
+    forwarded, the left one copies."""
+    forwarded: list[tuple[str, int]] = []
+    real_on_event = App.on_event
+
+    async def spy(self: App[Any], event: events.Event) -> None:
+        if isinstance(event, (events.MouseDown, events.MouseUp)) and not event.is_forwarded:
+            forwarded.append((type(event).__name__, event.button))
+        await real_on_event(self, event)
+
+    monkeypatch.setattr(App, "on_event", spy)
+    steps = _ORDERINGS[ordering]
+    # The stray is a SECOND button pressed while the first is still down.
+    stray = int(steps[1][1]) if steps[1].startswith("D") and steps[1][1] != steps[0][1] else None
+    # The left button's release routes a copy only when the left button was a
+    # gesture of its own (not the stray) — the right button's never does.
+    copies = 1 if "U1" in steps and stray != 1 else 0
+
+    async def drive() -> tuple[list[tuple[str, int]], list[str], bool, bool, bool]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 8)) as pilot:
+            pane = host.pane
+            await wait_until(pilot, lambda: synced(pane))
+            for step in steps:
+                kind = events.MouseDown if step[0] == "D" else events.MouseUp
+                button = int(step[1])
+                if kind is events.MouseDown and button == 1:
+                    host.post_message(mouse_event(events.MouseDown, pane, (0, 2), 1))
+                    host.post_message(mouse_event(events.MouseMove, pane, (5, 2), 1))
+                else:
+                    at = (5, 2) if button == 1 else (1, 1)
+                    host.post_message(mouse_event(kind, pane, at, button))
+            await pilot.pause()
+            await pilot.pause()
+            seen = list(forwarded)
+            after_sequence = list(host.notices)
+            released = host._pressed is None  # every gesture that began has ended
+            # Afterwards: an ordinary left drag must copy — the host is clean.
+            # Over ANOTHER row than the sequence's drag, and counted by the copy
+            # toast: a drag that leaves a standing highlight as it was is not a
+            # copy (class docstring, rule 2), and the clipboard may already hold
+            # the sequence's own text. A stray whose release never came is
+            # cleared HERE, by the next gesture's start.
+            toasts_before = len(host.notices)
+            for event in (
+                mouse_event(events.MouseDown, pane, (0, 0), 1),
+                mouse_event(events.MouseMove, pane, (4, 0), 1),
+                mouse_event(events.MouseUp, pane, (4, 0), 1),
+            ):
+                host.post_message(event)
+            await pilot.pause()
+            await pilot.pause()
+            copied_after = bool(host.clipboard) and len(host.notices) == toasts_before + 1
+            clean_after = host._pressed is None and host._stray is None
+            return seen, after_sequence, released, copied_after, clean_after
+
+    seen, notices, released, copied_after, clean_after = run(drive())
+    assert released, f"[{ordering}] a gesture was still armed after its release"
+    if stray is not None:
+        assert all(button != stray for _, button in seen), (
+            f"[{ordering}] the stray button {stray} reached the screen: {seen}"
+        )
+    else:
+        assert ("MouseDown", 3) in seen and ("MouseUp", 3) in seen, (
+            f"[{ordering}] sequential presses are separate gestures and both reach the screen"
+        )
+    assert len(notices) == copies, f"[{ordering}] copies during the sequence: {notices}"
+    assert copied_after, f"[{ordering}] the host was not clean for the next drag"
+    assert clean_after, f"[{ordering}] _pressed/_stray were not reset by the next gesture"
+
+
 def test_the_copy_key_outside_the_pane_copies_the_panes_highlight_and_nothing_empty(
     fake: FakeTmux, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

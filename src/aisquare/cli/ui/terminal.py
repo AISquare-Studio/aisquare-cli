@@ -471,17 +471,19 @@ class SelectionHost(App[None]):
             # the next press of THAT button was accepted while its release was
             # dropped as the stray's — leaving `_pressed` armed forever, every
             # later left press classified as stray and dropped, and nothing in
-            # the app clickable (review of the fold).
+            # the app clickable (review of the fold). This line is the whole of
+            # that fix: the stray is cleared by its own release, or here.
             self._stray = None
             self._pressed = event.button
             route_gesture_start(self)
         if released:
             assert isinstance(event, events.MouseUp)
-            if (
-                self._pressed is not None
-                and self._stray is not None
-                and event.button == self._stray
-            ):
+            # The stray's release is the stray's, whether the primary button is
+            # still down or was lifted first (`Down(1) Down(3) Up(1) Up(3)` is the
+            # commonest order): dropped before it reaches the screen, where it
+            # would synthesise a Click at the primary press's offset, focus the
+            # pane and zero its double-click chain (review of #203, round 5).
+            if self._stray is not None and event.button == self._stray:
                 self._stray = None
                 return
         try:
@@ -492,11 +494,9 @@ class SelectionHost(App[None]):
             # style, which is arbitrary widget code. Skipped, the release left
             # ``_pressed`` armed with this gesture's button for the next one,
             # and the pairing this class exists for was exact only on the happy
-            # path (review of #135, second round, finding 8). The stray goes
-            # with the gesture it interrupted.
+            # path (review of #135, second round, finding 8).
             if released:
                 button, self._pressed = self._pressed, None
-                self._stray = None
                 route_selection_gesture(self, button)
 
 

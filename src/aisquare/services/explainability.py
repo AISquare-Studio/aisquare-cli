@@ -1099,6 +1099,22 @@ def identity_problem(template: str) -> str | None:
     return None
 
 
+def target_problem(name: str) -> str | None:
+    """Why ``name`` cannot name a deployment target, or ``None``.
+
+    A target name is a config key (``[explainability.targets.<name>]``) and
+    the word every surface prints after ``--target``; one with a line break or a
+    tab in it is neither typeable nor readable back, and an empty one is the
+    active target by accident. Inner spaces are allowed — ``prod west`` is a
+    name people use — so this refuses only what cannot be meant.
+    """
+    if not name:
+        return "target name is empty — name the deployment: --target stg"
+    if any(ch in name for ch in "\n\r\t\x0b\x0c"):
+        return f"target name {name!r} has a line break or tab in it — one line, no tabs"
+    return None
+
+
 def configure_target(
     config: AppConfig,
     *,
@@ -1139,6 +1155,14 @@ def configure_target(
     deployment nobody chose is this integration's headline failure, arrived at
     from the other side.
     """
+    # Judged and stored in ONE spelling, all five: the form strips every field
+    # and the CLI passed `--target 'stg '` and `--identity 'nishil-{role} '`
+    # through as typed, so the tab then read a second, empty target and every
+    # agent name carried a trailing space (review of #203, round 5).
+    target_name = target_name.strip() if target_name else None
+    identity = identity.strip() if identity else None
+    if target_name is not None and (problem := target_problem(target_name)):
+        raise ValueError(problem)
     for what, value in (("gateway", gateway_url), ("proxy", proxy_url)):
         if value and (problem := url_problem(value, what=what)):
             raise ValueError(problem)
@@ -1163,7 +1187,7 @@ def configure_target(
         if proxy_url:
             target.proxy_url = proxy_url.strip().rstrip("/")
         if identity:
-            target.agent_name_template = identity
+            target.agent_name_template = identity  # stripped above, judged as stored
         settings.targets[name] = target
     if enable:
         settings.enabled = True
@@ -1560,9 +1584,14 @@ class _ClientLaneSegment:
         self._run_key = run_key
         self._span: Any = None
         self._token: Any = None
+        self._trace_api: Any = None
+        self._context_api: Any = None
 
     def __enter__(self) -> _ClientLaneSegment:
         otel_trace, otel_context = _otel()
+        # Kept for ``__exit__``: the close must not depend on a lookup that can
+        # itself raise, or nothing is ended and nothing detached.
+        self._trace_api, self._context_api = otel_trace, otel_context
         identity = trace_identity(self._run_key)
         root = otel_trace.SpanContext(
             trace_id=int(identity.trace_id, 16),
@@ -1585,23 +1614,27 @@ class _ClientLaneSegment:
         return self
 
     def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
-        otel_trace, otel_context = _otel()
-        # The detach is what this block OWES: `set_status` and `end` are SDK
-        # calls that can raise (a shut-down tracer provider, a processor that
-        # throws on `end`), and `_drain` catches whatever escapes here and
-        # returns a deferral — so a raise before the detach left a dead segment
-        # attached as the current context for the life of the process, and every
-        # later span in it (the next group of the same sweep included) was
-        # parented under it (review of #203).
+        # Three things are owed, each independently of the one before it: the
+        # status, the span's end, the context's detach. `set_status` and `end`
+        # are SDK calls that can raise (a shut-down tracer provider raises on
+        # the FIRST of them, a processor can throw on the second), and `_drain`
+        # catches whatever escapes here and returns a deferral — so a raise
+        # before the detach left a dead segment attached as the current context
+        # for the life of the process (review of #203), and a raise before
+        # `end` left the span held by its processor, the whole group never
+        # exported (round 5, on the same function). Nested `finally`s, and no
+        # `_otel()` lookup in the way.
         try:
-            if exc_type is not None:
-                self._span.set_status(otel_trace.StatusCode.ERROR, str(exc_val))
-            else:
-                self._span.set_status(otel_trace.StatusCode.OK)
-            self._span.end()
+            try:
+                if exc_type is not None:
+                    self._span.set_status(self._trace_api.StatusCode.ERROR, str(exc_val))
+                else:
+                    self._span.set_status(self._trace_api.StatusCode.OK)
+            finally:
+                self._span.end()
         finally:
             if self._token is not None:
-                otel_context.detach(self._token)
+                self._context_api.detach(self._token)
 
     def set_input(self, value: str) -> None:
         self._span.set_attribute("input.value", value)

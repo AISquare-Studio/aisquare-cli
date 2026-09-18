@@ -621,23 +621,36 @@ def test_a_fail_open_launchs_insights_still_open_their_own_run(
     assert sdk.segments == []
 
 
-def test_the_segment_detaches_its_context_even_when_the_span_refuses_to_end(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize(
+    "raises", ["set_status", "end", "both"], ids=["status-raises", "end-raises", "both-raise"]
+)
+def test_the_segments_close_owes_each_step_whatever_the_span_refuses(
+    monkeypatch: pytest.MonkeyPatch, raises: str
 ) -> None:
-    """Review of #203 (#204 item 1). ``__exit__`` called ``set_status``, ``end``
-    and THEN ``detach``; an SDK span that raises on ``end`` (a shut-down tracer
-    provider, a processor that throws) left the segment attached as the current
-    context for the life of the process, and ``_drain`` — which catches what
-    escapes here and returns a deferral — carried on parenting every later span
-    under it. The detach is what the block owes, so it is in a ``finally``."""
+    """The INVARIANT of ``_ClientLaneSegment.__exit__`` (reviews of #203, round
+    1 finding 7 and round 5 finding 2, on the same function): the status, the
+    span's end and the context's detach are each owed independently of the one
+    before. A shut-down tracer provider raises on ``set_status`` FIRST — the
+    round-1 fix put ``end()`` after it inside one ``try``, so the span was held
+    by its processor for the life of the process and the group never exported;
+    a processor that throws on ``end`` used to leave the segment attached as the
+    current context. Whatever raises, ``end`` is attempted and the detach runs."""
 
-    class _RefusesToEnd(_FakeSpan):
+    class _Refusing(_FakeSpan):
+        def set_status(self, code: Any, description: str | None = None) -> None:
+            if raises in ("set_status", "both"):
+                raise RuntimeError("tracer provider is shut down")
+            super().set_status(code, description)
+
         def end(self) -> None:
-            raise RuntimeError("tracer provider is shut down")
+            self.end_called = True
+            if raises in ("end", "both"):
+                raise RuntimeError("processor threw on end")
+            super().end()
 
     class _Tracer:
         def start_span(self, name: str, *, context: Any, attributes: dict[str, Any]) -> _FakeSpan:
-            return _RefusesToEnd(name, context, attributes)
+            return _Refusing(name, context, attributes)
 
     class _Sdk:
         def get_tracer(self, name: str) -> _Tracer:
@@ -647,13 +660,12 @@ def test_the_segment_detaches_its_context_even_when_the_span_refuses_to_end(
     monkeypatch.setattr(service, "_otel", lambda: (_FakeOtelTrace, otel_context))
 
     with (
-        pytest.raises(RuntimeError, match="shut down"),
-        service._ClientLaneSegment(_Sdk(), "coder", "run-1"),
+        pytest.raises(RuntimeError),
+        service._ClientLaneSegment(_Sdk(), "coder", "run-1") as segment,
     ):
-        pass
-
-    assert len(otel_context.attached) == 1, "the premise: the segment was attached"
-    assert len(otel_context.detached) == 1, "and detached although `end` raised"
+        span = segment._span
+    assert getattr(span, "end_called", False), "end() was attempted"
+    assert len(otel_context.attached) == 1 == len(otel_context.detached), "and detached"
 
 
 def test_a_segment_that_fails_is_closed_and_the_records_stay_queued(

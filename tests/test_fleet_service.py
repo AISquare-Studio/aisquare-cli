@@ -5470,3 +5470,26 @@ def test_fleet_switch_command_reports_the_move_and_its_json(
     refused = runner.invoke(app, ["--json", "fleet", "switch", "ghost", "--project", project.id])
     assert refused.exit_code == 1
     assert json.loads(refused.stdout)["error"] in ("no_such_agent", "fleet")
+
+
+def test_the_bell_clears_when_the_pane_prints_after_the_notice(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """#153: a granted permission (or a classifier verdict) shows as output AFTER the
+    notification; the row must not stay 🔔 until a human types."""
+    agent = fleet_service.spawn(project, "coder", worktree=False).agent
+    _board_session(agent, "attention")
+    [parked] = fleet_service.list_agents(project)
+    assert parked.state == "attention"  # nothing printed since the notice: still needs someone
+
+    tmux.printed(agent.pane_id, ago=timedelta(seconds=30))  # output BEFORE the notice
+    [still] = fleet_service.list_agents(project)
+    assert still.state == "attention"  # that was the prompt being drawn, not an answer
+
+    # Output AFTER the notice. tmux reports `window_activity` in whole seconds and the
+    # hook stamped `last_seen_at` with microseconds, so "after" means a LATER second —
+    # exactly the production rule, which keeps the prompt being drawn (same second as
+    # the hook) from reading as an answer. Two seconds on, then.
+    tmux.printed(agent.pane_id, ago=timedelta(seconds=-2))
+    [moved_on] = fleet_service.list_agents(project)
+    assert moved_on.state == "working"

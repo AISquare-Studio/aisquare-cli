@@ -56,8 +56,12 @@ from textual.widget import Widget
 
 from aisquare.core.state_file import LOCK_WAIT_S, StateUnwritableError, update_state
 
-_by_app: weakref.WeakKeyDictionary[App[Any], list[Autosave]] = weakref.WeakKeyDictionary()
-"""Every saver an app owns, so quit can flush them all against one deadline."""
+_by_app: weakref.WeakKeyDictionary[App[Any], weakref.WeakSet[Autosave]] = (
+    weakref.WeakKeyDictionary()
+)
+"""Every saver an app owns, so quit can flush them all against one deadline. Weak on both sides:
+a saver holds its host, and a strong list of savers would have kept every app ever built alive
+through the theme saver's host — the app itself."""
 
 _POLL_S = 0.005
 
@@ -95,7 +99,8 @@ class Autosave:
         """Why the last hand-over did not land, while the value is still dirty."""
         self._running = False
         self._in_flight: object = None
-        """The value the drain is writing right now, for quit's report when it gives up waiting."""
+        """The value the drain is writing right now — named in quit's report when it gives up
+        waiting for it."""
         self._closing = False
         """Quit's deadline has passed: a drain must not START another write."""
         self._guard = threading.Lock()
@@ -106,7 +111,7 @@ class Autosave:
         self._context: contextvars.Context | None = None
         self._said = False
         app = host if isinstance(host, App) else host.app
-        _by_app.setdefault(app, []).append(self)
+        _by_app.setdefault(app, weakref.WeakSet()).add(self)
 
     # --- what the owner may ask ------------------------------------------------------------
 
@@ -134,7 +139,10 @@ class Autosave:
                 reason = self._refusal or "the write did not finish before the app closed"
                 return f"{self.what} was not saved: {reason}"
             if self._closing and self._running:
-                return f"{self.what} was not saved: the write did not finish before the app closed"
+                return (
+                    f"{self.what} was not saved: the write of {self._in_flight!r} did not finish "
+                    "before the app closed"
+                )
             return None
 
     def remember(self, value: object) -> None:
@@ -250,7 +258,8 @@ class Autosave:
         self._said = True
         try:
             self._host.notify(
-                f"{why} — {self.what} will not be remembered",
+                f"{why} — {self.what} could not be saved; it will be retried at the next change "
+                "and at quit",
                 severity="warning",
                 timeout=8,
                 markup=False,

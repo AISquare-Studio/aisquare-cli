@@ -415,3 +415,16 @@ def test_a_failed_rename_leaves_no_temp_file_behind_and_says_so(
         update_state("sidebar_width", 44)
     assert _path(isolated_home).read_text() == before
     assert _siblings(isolated_home) == ["state.json"]
+
+
+def test_the_same_value_in_another_json_type_is_rewritten(isolated_home: Path) -> None:
+    """`60.0 == 60` and `True == 1` in Python: a width stored as a float by a hand edit read as
+    "already says so" and was never rewritten — while the divider ignores a width that is not
+    an `int`, so the preference could never be saved and nothing said so."""
+    isolated_home.mkdir(parents=True)
+    _path(isolated_home).write_text('{"sidebar_width": 60.0, "flag": true}\n')
+    update_state("sidebar_width", 60)
+    update_state("flag", 1)
+    raw = json.loads(_path(isolated_home).read_text())
+    assert raw == {"sidebar_width": 60, "flag": 1}
+    assert type(raw["sidebar_width"]) is int and type(raw["flag"]) is int

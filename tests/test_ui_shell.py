@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import shutil
 import sqlite3
@@ -69,6 +70,7 @@ from aisquare.cli.ui.views.project import ManagerTab, ProjectView
 from aisquare.core import state_file
 from aisquare.core import tmux as tmux_core
 from aisquare.core.atomic import write_replacing
+from aisquare.core.locking import lock_exclusive, unlock
 from aisquare.core.state_file import update_state
 from aisquare.core.store import ContextStore, store_session
 from aisquare.core.tmux import Completed
@@ -2201,7 +2203,7 @@ def test_a_state_file_that_is_not_an_object_is_left_alone_and_said_so_once(
     assert seen["file"] == body, "left byte for byte as it was — the keys in it are the user's"
     toasts = seen["toasts"]
     assert isinstance(toasts, list) and len(toasts) == 1, "said once, not once per gesture"
-    assert "state.json" in toasts[0] and "not be remembered" in toasts[0]
+    assert "state.json" in toasts[0] and "could not be saved" in toasts[0]
     assert seen["leftovers"] == ["state.json"], "no temp file left behind"
 
 
@@ -2392,7 +2394,7 @@ def test_a_refused_theme_save_is_said_once(
 
     toasts, file = drive(go, notifications=True)
     assert len(toasts) == 1, "said once, not once per pick"
-    assert "state.json" in toasts[0] and "theme will not be remembered" in toasts[0]
+    assert "state.json" in toasts[0] and "the theme could not be saved" in toasts[0]
     assert file == body
 
 
@@ -2623,3 +2625,92 @@ def test_the_ceiling_rule_reads_what_the_saver_was_last_asked_not_the_last_confi
     shown, ask, on_file = drive(go)
     ceiling = Panes.sidebar_ceiling(SIZE[0], 24)
     assert (shown, ask, on_file) == (ceiling, ceiling, ceiling), "screen, ask and file agree"
+
+
+def test_a_refusal_that_arrives_at_quit_is_reported_after_the_run_not_as_a_traceback(
+    tmp_path: Path,
+    script: Script,
+    isolated_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """With the lock held through the quit, the width's refusal lands during `flush_all`'s join,
+    when the divider is already detached: it used to print `Exception in callback …
+    NoActiveAppError` under the shell prompt and say nothing else. Now the app carries the line
+    for the launcher to print, and the toast's callback runs in the loop's own context."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+    monkeypatch.setattr(state_file, "LOCK_WAIT_S", 0.3)
+    update_state("board_theme", "nord")  # creates the lock file
+    fd = os.open(isolated_home / "state.json.lock", os.O_RDONLY)
+    lock_exclusive(fd)
+    apps: list[FleetApp] = []
+
+    async def go(pilot: Pilot[None]) -> None:
+        app = fleet_app(pilot)
+        apps.append(app)
+        app.sidebar.focus()
+        await pilot.press("greater_than_sign")  # and quit inside the debounce
+
+    try:
+        with caplog.at_level(logging.ERROR):
+            drive(go)
+    finally:
+        unlock(fd)
+        os.close(fd)
+    (line,) = apps[0].unsaved
+    assert line.startswith("the navigator's width was not saved: ")
+    assert "state.json.lock is held by another process" in line
+    assert "NoActiveAppError" not in caplog.text and "Exception in callback" not in caplog.text
+
+
+def test_run_ui_says_what_the_quit_could_not_save(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    class _Quit:
+        def __init__(self, **options: object) -> None:
+            self.unsaved = ["the theme was not saved: state.json.lock is held by another process"]
+
+        def run(self) -> None:
+            return None
+
+    monkeypatch.setattr(app_mod, "FleetApp", _Quit)
+    app_mod.run_ui()
+    err = capsys.readouterr().err
+    assert "⚠ the theme was not saved: state.json.lock is held by another process" in err
+
+
+def test_a_quit_in_the_middle_of_a_drag_keeps_the_width_the_drag_reached(
+    tmp_path: Path, script: Script, isolated_home: Path
+) -> None:
+    """`on_unmount` cleared `_dragging` and settled nothing: `q` (or the terminal closing) with the
+    button still held showed 60 and left `state.json` empty."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+
+    async def go(pilot: Pilot[None]) -> None:
+        app = fleet_app(pilot)
+        await _mouse(pilot, events.MouseDown, app.sidebar.outer_size.width, 5)
+        await _mouse(pilot, events.MouseMove, 60, 5)  # and the app exits with the button held
+
+    drive(go)
+    assert _state(isolated_home)[SIDEBAR_WIDTH_KEY] == 60
+
+
+def test_hiding_the_divider_mid_drag_ends_the_drag(
+    tmp_path: Path, script: Script, isolated_home: Path
+) -> None:
+    """`Hide` is one of the capture's exits the module docstring names; nothing pinned it."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+
+    async def go(pilot: Pilot[None]) -> tuple[bool, object, int, object]:
+        app = fleet_app(pilot)
+        divider = app.query_one(Divider)
+        await _mouse(pilot, events.MouseDown, app.sidebar.outer_size.width, 5)
+        await _mouse(pilot, events.MouseMove, 60, 5)
+        divider.display = False
+        await pilot.pause()
+        state = (divider.has_class("-dragging"), app.mouse_captured, app.sidebar.outer_size.width)
+        divider.display = True
+        await _settled(pilot)
+        return (*state, _state(isolated_home).get(SIDEBAR_WIDTH_KEY))
+
+    assert drive(go) == (False, None, 60, 60)

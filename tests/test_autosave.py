@@ -130,7 +130,7 @@ def test_flush_at_quit_waits_for_the_write_in_flight_and_then_writes_the_newest(
         await _in_flight(writer)
         saver.remember(38)
         started = time.monotonic()
-        unsaved = await asyncio.to_thread(saver.flush)
+        unsaved = saver.flush()  # on the loop, where production calls it
         assert time.monotonic() - started < Autosave.JOIN_S, "bounded"
         assert unsaved is None
 
@@ -217,7 +217,7 @@ def test_a_refused_value_is_retried_by_the_next_remember_and_by_the_quit_flush(
         assert not saver.dirty
         saver.remember(38)
         await _settled(saver)  # refused
-        assert await asyncio.to_thread(saver.flush) is None, "the lock is free by quit: it lands"
+        assert saver.flush() is None, "the lock is free by quit: it lands"
 
     _run(go)
     assert writer.calls == [34, 34, 38, 38]
@@ -271,7 +271,7 @@ def test_an_unexpected_error_is_a_toast_that_names_it(
     _run(go, notifications=True)
     assert len(seen) == 1
     assert "could not be saved: RuntimeError('disk on fire')" in seen[0]
-    assert "it will not be remembered" in seen[0]
+    assert "it could not be saved; it will be retried" in seen[0]
 
 
 def test_a_quit_that_runs_out_of_time_says_so_and_starts_no_further_write(
@@ -285,8 +285,8 @@ def test_a_quit_that_runs_out_of_time_says_so_and_starts_no_further_write(
     async def go(saver: Autosave, app: App[None]) -> None:
         saver.remember(34)
         await _in_flight(writer)
-        unsaved = await asyncio.to_thread(saver.flush, 0.1)
-        assert unsaved == "it was not saved: the write did not finish before the app closed"
+        unsaved = saver.flush(0.1)
+        assert unsaved == "it was not saved: the write of 34 did not finish before the app closed"
         saver.remember(38)
         saver.wake()  # closed: nothing more may start
         await asyncio.to_thread(saver.join, 10.0)
@@ -299,9 +299,12 @@ def test_a_quit_that_runs_out_of_time_says_so_and_starts_no_further_write(
 def test_flush_all_joins_every_saver_against_one_deadline(
     isolated_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Flushed one after the other, two slow savers froze the quit twice over."""
+    """Flushed one after the other, two slow savers froze the quit twice over. Called on the
+    loop, as `on_unmount` does, with the debounce timers out of the way: only `flush_all` may
+    wake the drains, or the timers would start both and hide a sequential flush."""
     writer = _Writer(delay=lambda value: 0.4)
     monkeypatch.setattr(autosave_mod, "update_state", writer)
+    monkeypatch.setattr(Autosave, "DEBOUNCE", 5.0)
 
     async def go() -> None:
         async with _Host().run_test(size=(40, 5)) as pilot:
@@ -311,7 +314,7 @@ def test_flush_all_joins_every_saver_against_one_deadline(
             width.remember(34)
             theme.remember("nord")
             started = time.monotonic()
-            unsaved = await asyncio.to_thread(Autosave.flush_all, pilot.app)
+            unsaved = Autosave.flush_all(pilot.app)
             elapsed = time.monotonic() - started
             assert unsaved == []
             assert elapsed < 0.7, f"two 0.4 s writes joined together, not in turn: {elapsed:.2f}s"
@@ -319,3 +322,115 @@ def test_flush_all_joins_every_saver_against_one_deadline(
     asyncio.run(go())
     assert sorted(map(str, writer.calls)) == ["34", "nord"]
     assert read_state() == {"sidebar_width": 34, "board_theme": "nord"}
+
+
+def test_flush_all_closes_a_saver_that_misses_the_deadline_and_names_what_was_cut_off(
+    isolated_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    writer = _Writer(delay=lambda value: 0.8 if value == 34 else 0.0)
+    monkeypatch.setattr(autosave_mod, "update_state", writer)
+    monkeypatch.setattr(Autosave, "DEBOUNCE", 5.0)
+    savers: list[Autosave] = []
+
+    async def go() -> None:
+        async with _Host().run_test(size=(40, 5)) as pilot:
+            await pilot.pause()
+            width = Autosave(pilot.app, "sidebar_width", what="the width")
+            theme = Autosave(pilot.app, "board_theme", what="the theme")
+            savers.extend((width, theme))
+            width.remember(34)
+            theme.remember("nord")
+            unsaved = Autosave.flush_all(pilot.app, timeout=0.2)
+            assert unsaved == [
+                "the width was not saved: the write of 34 did not finish before the app closed"
+            ]
+            width.remember(38)
+            width.wake()  # closed: nothing more may start
+            await asyncio.to_thread(width.join, 10.0)
+
+    asyncio.run(go())
+    assert writer.calls.count(38) == 0, "closed at the deadline: no new write began"
+    assert read_state() == {"sidebar_width": 34, "board_theme": "nord"}
+
+
+class _StallingGuard:
+    """The saver's guard, sleeping after the drain thread's ``n``th release — the window between
+    "found nothing to do" and a later reset of ``_running`` that round 6 #3 closed."""
+
+    def __init__(self, inner: threading.Lock, *, stall_after_release: int, stall: float) -> None:
+        self._inner = inner
+        self._n = stall_after_release
+        self._stall = stall
+        self.releases = 0
+
+    def __enter__(self) -> _StallingGuard:
+        self._inner.acquire()
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self._inner.release()
+        if threading.current_thread().name.startswith("autosave:"):
+            self.releases += 1
+            if self.releases == self._n:
+                time.sleep(self._stall)
+
+
+def test_a_value_queued_as_the_drain_finds_nothing_to_do_is_not_stranded(
+    isolated_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The drain takes the guard three times for one value: to take it, to clear the in-flight
+    mark, and to find nothing left. `_running` is cleared inside that third section; cleared
+    under a fourth acquisition instead, a `remember` + `flush` in between saw a drain "running"
+    that was about to exit and the last step was lost at quit."""
+    writer = _Writer()
+    monkeypatch.setattr(autosave_mod, "update_state", writer)
+
+    async def go(saver: Autosave, app: App[None]) -> None:
+        guard = _StallingGuard(saver._guard, stall_after_release=3, stall=0.4)
+        saver._guard = guard  # type: ignore[assignment]
+        saver.remember(34)
+        for _ in range(500):  # until the drain is inside the stall
+            if guard.releases >= 3:
+                break
+            await asyncio.sleep(0.01)
+        assert guard.releases >= 3, "the drain never reached its exit"
+        saver.remember(38)
+        assert saver.flush() is None
+
+    _run(go)
+    assert writer.calls == [34, 38]
+    assert read_state() == {"sidebar_width": 38}
+
+
+@pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
+def test_a_value_a_crash_interrupted_is_kept_for_the_next_wake(
+    isolated_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    writer = _Writer(fail=lambda value, attempt: _Boom() if attempt == 1 else None)
+    monkeypatch.setattr(autosave_mod, "update_state", writer)
+
+    async def go(saver: Autosave, app: App[None]) -> None:
+        saver.remember(3)
+        await _settled(saver)  # the thread died; the value is dirty again, with the reason
+        assert saver.dirty and (saver.unsaved or "").startswith("it was not saved: sidebar_width")
+        saver.wake()  # no new value: the kept one is what is written
+        await _settled(saver)
+
+    _run(go)
+    assert writer.calls == [3, 3]
+    assert read_state() == {"sidebar_width": 3}
+
+
+def test_an_app_and_its_savers_are_collectable_once_gone(isolated_home: Path) -> None:
+    """The registry was a `WeakKeyDictionary` whose values (a list of savers, each holding its
+    host) kept the key alive: every app ever built stayed in memory — one per `asq` process,
+    hundreds per test run."""
+    import gc
+    import weakref
+
+    app = _Host()
+    Autosave(app, "board_theme", what="the theme")
+    ref = weakref.ref(app)
+    del app
+    gc.collect()
+    assert ref() is None

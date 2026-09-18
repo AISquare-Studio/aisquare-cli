@@ -123,7 +123,10 @@ def update_state(key: str, value: object) -> None:
         if not isinstance(data, dict):
             raise StateUnwritableError(f"{path} is not a JSON object")
         _sweep_stale_temps(target)
-        if (key not in data) if value is None else (key in data and data[key] == value):
+        # The same JSON type too: ``60.0 == 60`` and ``True == 1`` in Python, and a width
+        # stored as a float is one the divider ignores — left alone, it could never be fixed.
+        same = key in data and type(data[key]) is type(value) and data[key] == value
+        if (key not in data) if value is None else same:
             return  # the file already says so
         if value is None:
             data.pop(key, None)

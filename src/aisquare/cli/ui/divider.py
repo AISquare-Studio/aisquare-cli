@@ -107,8 +107,8 @@ class Divider(Widget):
         change). Another button, or a drag, breaks the chain."""
         self._autosave: Autosave | None = None
         """The debounced, off-loop save under ``state_key``; ``None`` when there is no key. Its
-        ``latest`` — what the file holds or is about to — is the width this widget compares a
-        gesture against; every number it hands out was capped at mount."""
+        ``latest`` — the width this process last asked the file to hold, or read from it — is
+        what a gesture is compared against; every number it hands out was capped at mount."""
 
     # --- the neighbour and its bounds ------------------------------------------------
 
@@ -312,6 +312,16 @@ class Divider(Widget):
         self.target.styles.width = ask
 
     def on_unmount(self) -> None:
+        if (
+            self._dragging
+            and self._moved
+            and self._autosave is not None
+            and self._width is not None
+        ):
+            # Quit with the button still held: the drag reached a width the user
+            # asked for. Remembered directly — the neighbour may already be
+            # pruned, so the ceiling rule (which reads its styles) is not consulted.
+            self._autosave.remember(self._width)
         self._dragging = False
         if self._autosave is not None:
             # Start the drain (a stopped timer would never fire it); the app joins
@@ -319,14 +329,19 @@ class Divider(Widget):
             self._autosave.wake()
 
     def _remembered_width(self) -> int | None:
-        """The width the file holds or is about to hold, as the saver knows it."""
+        """The width this process last asked the file to hold (or read from it at start).
+
+        Not a promise about the file: a refused save leaves it a value the file
+        does not hold yet — retried at the next change and at quit, and reported
+        then if it still does not land.
+        """
         latest = None if self._autosave is None else self._autosave.latest
         return latest if isinstance(latest, int) else None
 
     def _remember(self, width: int | None) -> None:
         """Hand the width to the saver — one write per burst, off the event loop — or keep the
-        remembered one when the ceiling rule says so. The saver itself drops a value the file
-        holds or is about to hold."""
+        remembered one when the ceiling rule says so. Whether the file already says so is
+        ``update_state``'s to decide, under its lock."""
         if self._autosave is None:
             return
         remembered = self._remembered_width()

@@ -526,7 +526,7 @@ def test_the_board_says_once_when_the_theme_cannot_be_remembered(
             return len(toasts), toasts[0].render().plain if toasts else ""
 
     count, text = asyncio.run(pick())
-    assert count == 1 and "theme will not be remembered" in text
+    assert count == 1 and "the theme could not be saved; it will be retried" in text
     assert (isolated_home / "state.json").read_text() == body
 
 
@@ -547,3 +547,20 @@ def test_the_board_flushes_a_theme_picked_inside_the_debounce_at_quit(
 
     asyncio.run(pick_and_quit())
     assert json.loads((isolated_home / "state.json").read_text())["board_theme"] == "nord"
+
+
+def test_the_board_launcher_says_what_the_quit_could_not_save(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from aisquare.cli import watch as watch_mod
+
+    class _Quit:
+        def __init__(self) -> None:
+            self.unsaved = ["the theme was not saved: state.json is not a JSON object"]
+
+        def run(self) -> None:
+            return None
+
+    monkeypatch.setattr(watch_mod, "_build_app_class", lambda interval: _Quit)
+    watch_mod._run_tui(60.0)
+    assert "⚠ the theme was not saved: state.json is not a JSON object" in capsys.readouterr().err

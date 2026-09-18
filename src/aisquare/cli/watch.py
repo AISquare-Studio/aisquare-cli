@@ -32,7 +32,7 @@ from rich.text import Text
 from aisquare.cli.common import local_time
 from aisquare.core import harness, paths
 from aisquare.core.console import stderr_console, stdout_console
-from aisquare.core.state_file import read_state, update_state
+from aisquare.core.state_file import StateUnwritableError, read_state, update_state
 from aisquare.core.store import unmet_needs
 from aisquare.models import ProjectInfo, TeamEvent, TeamSession, TeamTask
 from aisquare.services import team as team_service
@@ -235,14 +235,19 @@ def _load_saved_theme() -> str | None:
     return value if isinstance(value, str) else None
 
 
-def _save_theme(name: str) -> bool:
+def _save_theme(name: str) -> str | None:
     """Autosave the board theme (every change persists — no save step).
 
-    ``False`` when ``state.json`` refused it — it is not a JSON object, or not
-    writable — and was left as it was: a theme is a preference, and the file's
-    other keys are worth more than remembering one.
+    Returns why ``state.json`` refused it, when it did — the file is not a JSON
+    object, its lock could not be taken, it could not be written — and was left
+    as it was: a theme is a preference, and the file's other keys are worth
+    more than remembering one.
     """
-    return update_state(_THEME_KEY, name)
+    try:
+        update_state(_THEME_KEY, name)
+    except StateUnwritableError as exc:
+        return str(exc)
+    return None
 
 
 def action_open_transcript(app: App[Any], command: list[str]) -> str | None:
@@ -385,17 +390,15 @@ def _build_app_class(interval: float) -> Any:
             parent = getattr(super(), "watch_theme", None)
             if parent is not None:
                 parent(theme_name)
-            if (
-                getattr(self, "_theme_restored", False)
-                and not _save_theme(theme_name)
-                and not getattr(self, "_theme_warned", False)
-            ):
+            if not getattr(self, "_theme_restored", False):
+                return
+            refused = _save_theme(theme_name)
+            if refused is not None and not getattr(self, "_theme_warned", False):
                 # Once: the picker shows the theme applied, and silence would
                 # promise a memory the file has refused.
                 self._theme_warned = True
                 self.notify(
-                    f"{paths.state_path()} could not be updated (not a JSON object, or not"
-                    " writable) — the theme will not be remembered",
+                    f"{refused} — the theme will not be remembered",
                     severity="warning",
                     timeout=8,
                     markup=False,

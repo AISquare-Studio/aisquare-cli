@@ -82,10 +82,11 @@ def restore_theme(app: App[Any]) -> bool:
     return False
 
 
-def remember_theme(name: str) -> bool:
+def remember_theme(name: str) -> str | None:
     """Autosave ``name`` — every change is the save; there is no save step.
 
-    ``False`` when ``state.json`` refused it and was left as it was; the app
-    tells the user once, since the picker has already shown the theme applied.
+    Returns why ``state.json`` refused it, when it did (the file, its lock, or
+    the write — it was left as it was); the app tells the user once, since the
+    picker has already shown the theme applied.
     """
     return _save_theme(name)

@@ -12,9 +12,8 @@ import hashlib
 import subprocess
 from pathlib import Path
 
-from aisquare.core import paths
 from aisquare.core.ids import PROJECT_PREFIX
-from aisquare.core.state_file import StateUnwritableError, read_state, update_state
+from aisquare.core.state_file import read_state, update_state
 from aisquare.core.store import ContextStore
 from aisquare.models import ProjectInfo
 
@@ -151,17 +150,14 @@ def pin_project(project_id: str | None) -> None:
 
     Unpinning when nothing is pinned is a no-op: a file that is not a JSON
     object already pins nothing, and removing an absent key is not a failed
-    write. Otherwise raises :class:`StateUnwritableError` when the file could
-    not be updated — the home is not writable, or the file exists and is not a
-    JSON object and is left as it is, because the other keys in it (the board's
-    theme, the fleet UI's navigator width) are the user's.
+    write. Otherwise ``core.state_file.StateUnwritableError`` says why the file
+    could not be updated — it is not a JSON object and is left as it is, because
+    the other keys in it (the board's theme, the fleet UI's navigator width) are
+    the user's; its lock could not be taken; it could not be written.
     """
     if project_id is None and pinned_project_id() is None:
         return
-    if not update_state(_PIN_KEY, project_id):
-        raise StateUnwritableError(
-            f"could not update {paths.state_path()}: not a JSON object, or not writable"
-        )
+    update_state(_PIN_KEY, project_id)
 
 
 def active_project(store: ContextStore, cwd: Path | None = None) -> ProjectInfo:

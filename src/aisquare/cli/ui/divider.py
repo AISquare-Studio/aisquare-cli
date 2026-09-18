@@ -42,15 +42,19 @@ from rich.text import Text
 from textual import events
 from textual.app import RenderResult
 from textual.css.scalar import Scalar
-from textual.message import Message
 from textual.timer import Timer
 from textual.widget import Widget
 
-from aisquare.core import paths
-from aisquare.core.state_file import read_state, update_state
+from aisquare.core.state_file import StateUnwritableError, read_state, update_state
 
 LINE = "│"
 """Textual's ``solid`` border glyph, so the partition looks as the border it replaced did."""
+
+
+WIDEST_ASK = 10_000
+"""The one bound a REMEMBERED width gets before the layout's: wider than any
+terminal, small enough for the style setter (``float(10**400)`` overflowed) and
+for a layout with no ceiling. Everything under it is the layout's to clamp."""
 
 
 def cells(scalar: Scalar | None) -> int | None:
@@ -63,9 +67,9 @@ class Divider(Widget):
 
     Mouse-down captures the mouse, so the drag and the release arrive wherever
     the pointer goes; every move with the button held sets the neighbour's width
-    from the pointer's screen column; whatever ends the drag settles the width
-    (:class:`Divider.Resized`, and the save when there is a ``state_key``).
-    Hover tints the column, a drag fills it, and ``-neighbour-focused`` — set by
+    from the pointer's screen column; whatever ends a drag that moved settles
+    the width (the save, when there is a ``state_key``). Hover tints the
+    column, a drag fills it, and ``-neighbour-focused`` — set by
     the container, which sees ``DescendantFocus`` — lights it ``$accent`` while
     the neighbour has focus, the signal the neighbour's own border used to give.
     """
@@ -83,17 +87,6 @@ class Divider(Widget):
     SAVE_DEBOUNCE: float = 0.1
     """Seconds a settled width waits to be written: a held key is one write, not thirty a second."""
 
-    class Resized(Message):
-        """The partition settled — a drag ended, a key stepped it, a reset.
-
-        ``width`` is what the neighbour was set to; ``None`` means the reset put
-        the stylesheet's width back.
-        """
-
-        def __init__(self, width: int | None) -> None:
-            super().__init__()
-            self.width = width
-
     def __init__(self, target: str, *, state_key: str | None = None, id: str | None = None) -> None:
         super().__init__(id=id)
         self._target = target
@@ -101,7 +94,9 @@ class Divider(Widget):
         self._state_key = state_key
         """The ``state.json`` key the width is remembered under; ``None`` remembers nothing."""
         self._width: int | None = None
-        """What the last gesture asked for; ``None`` until one did, and after a reset."""
+        """The ASK: what the last gesture asked for, or what the file remembered — not
+        what is shown. The layout's ceiling bounds the display; a wider terminal
+        later gets the ask back. ``None`` until there is one, and after a reset."""
         self._dragging = False
         self._moved = False
         """Whether the gesture now running changed the width — a drag, not a click.
@@ -111,9 +106,8 @@ class Divider(Widget):
         nothing.
         """
         self._last_click_still = False
-        """Whether the previous left click was a click (the width did not change)."""
-        self._last_left_click: float | None = None
-        """When the previous left click was, so a stale one cannot be half of a double click."""
+        """Whether the previous click was a LEFT click that was a click (the width did not
+        change). Another button, or a drag, breaks the chain."""
         self._remembered: int | None = None
         """The width on disk, as far as this widget knows."""
         self._pending: int | None = None
@@ -180,20 +174,18 @@ class Divider(Widget):
         and must not write the clamped number over the remembered one.
         """
         before = self.width
-        width = self.resize_to(before + delta)
-        if width != before:
-            self._settle(width)
+        width = self.clamp(before + delta)
+        if width == before:
+            return width  # swallowed by the bounds: the ask stands, and nothing is written
+        self.resize_to(width)
+        self._remember(width)
         return width
 
     def reset(self) -> None:
         """Back to the stylesheet's width, and no remembered one."""
         self._width = None
         self.target.styles.width = None
-        self._settle(None)
-
-    def _settle(self, width: int | None) -> None:
-        self.post_message(self.Resized(width))
-        self._remember(width)
+        self._remember(None)
 
     # --- painting -----------------------------------------------------------------------
 
@@ -263,30 +255,26 @@ class Divider(Widget):
         if self.app.mouse_captured is self:
             self.release_mouse()
         if self._moved:
-            self._settle(self.width)
+            self._remember(self.width)
 
     def on_click(self, event: events.Click) -> None:
-        """A double click resets — two LEFT clicks that were clicks, close together.
+        """A double click resets — two LEFT clicks that were clicks, at one cell, close together.
 
-        Textual's chain counter says only "same cell, within half a second" and
+        Textual's chain counter says "same cell, within half a second" and
         counts every button: a drag's release is a click to it (the handle
         follows the pointer, so the release lands where the press did), and so
-        is a right click, so a tap after a drag — or a left click after a
-        middle-click paste — arrived as ``chain == 2`` and threw the width away.
-        So a click that moved the width does not count, another button never
-        does, and the previous left click has to be as recent as the chain's
-        own threshold: a left click from minutes ago is not half of this one.
+        is a right or middle click, so a tap after a drag — or a left click
+        after a middle-click paste — arrived as ``chain == 2`` and threw the
+        width away. So a click that moved the width does not count, and another
+        button BREAKS the chain: with that, ``chain >= 2`` and "the previous
+        click was a still left one" together mean exactly a double left click.
         """
         if event.button != 1:
-            return  # a right or middle click is a paste gesture: it neither resets nor counts
+            self._last_click_still = False  # a paste gesture: it neither resets nor counts
+            return
         still = not self._moved
-        recent = (
-            self._last_left_click is not None
-            and event.time - self._last_left_click <= self.app.CLICK_CHAIN_TIME_THRESHOLD
-        )
-        double = event.chain >= 2 and still and recent and self._last_click_still
+        double = event.chain >= 2 and still and self._last_click_still
         self._last_click_still = still
-        self._last_left_click = event.time
         if double:
             event.stop()
             self.reset()
@@ -300,11 +288,26 @@ class Divider(Widget):
         if isinstance(saved, int) and not isinstance(saved, bool):
             self._remembered = saved
             # After the first layout, not during mount: by then the container
-            # has written the ceiling, so the file's number is bounded before it
-            # reaches the stylesheet. Applied at mount, a saved 100000000 was
-            # laid out as asked (MemoryError) and a saved 500 gave the content
-            # pane one frame at zero columns — a size the agent's pane forwards.
-            self.call_after_refresh(self.resize_to, saved)
+            # has written the ceiling, so the layout bounds what is shown from
+            # the first frame the ask reaches. Applied at mount, a saved 500
+            # gave the content pane one frame at zero columns — a size the
+            # agent's pane forwards to tmux.
+            self.call_after_refresh(self._restore, saved)
+
+    def _restore(self, saved: int) -> None:
+        """Apply the remembered width as the ASK, not as what is shown.
+
+        A drag keeps its ask while ``max-width`` clamps the display, and gets it
+        back when the terminal has room again; a width restored on a narrow
+        terminal must behave the same, or the same preference has two
+        behaviours depending on when the terminal was narrow — and the next
+        step writes the clamped number over it. So only an absolute cap here
+        (a hand-edited ``10**400`` must not reach the style setter); the layout
+        clamps the display, and :attr:`width` clamps the read.
+        """
+        ask = max(0, min(saved, WIDEST_ASK))
+        self._width = ask
+        self.target.styles.width = ask
 
     def on_unmount(self) -> None:
         self._dragging = False
@@ -316,8 +319,16 @@ class Divider(Widget):
             return
         if self._save_timer is not None:
             self._save_timer.stop()
-        if width == self._remembered or self._ceiling_under_remembered(width):
+        if width == self._remembered:
             self._save_due = False  # nothing to write; a queued save would lie
+            return
+        if self._ceiling_under_remembered(width):
+            # "As wide as this screen allows" — so the ask stays the remembered
+            # width too, and comes back on screen when the room does, exactly as
+            # the file will give it back at the next launch.
+            self._save_due = False
+            self._width = self._remembered
+            self.target.styles.width = self._remembered
             return
         self._pending, self._save_due = width, True
         self._save_timer = self.set_timer(self.SAVE_DEBOUNCE, self._flush_save, name="divider-save")
@@ -338,14 +349,16 @@ class Divider(Widget):
             return
         self._save_due = False
         width = self._pending
-        if update_state(self._state_key, width):
-            self._remembered = width
-        elif not self._refused:
-            self._refused = True
-            self.notify(
-                f"{paths.state_path()} could not be updated (not a JSON object, or not writable) — "
-                "the navigator's width will not be remembered",
-                severity="warning",
-                timeout=8,
-                markup=False,
-            )
+        try:
+            update_state(self._state_key, width)
+        except StateUnwritableError as exc:
+            if not self._refused:
+                self._refused = True
+                self.notify(
+                    f"{exc} — the navigator's width will not be remembered",
+                    severity="warning",
+                    timeout=8,
+                    markup=False,
+                )
+            return
+        self._remembered = width

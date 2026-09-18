@@ -615,11 +615,11 @@ class ProjectForgetReport(BaseModel):
     """The active project AFTER the forget — ``None`` when nothing is pinned any
     more and the active project again follows the working directory."""
     active_changed: bool = False
+    """Whether the forgotten project WAS the active one, so the pin moved."""
     pin_error: str | None = None
     """Why the pin could not be moved after the forget, when it could not — the
     forget itself is complete; the active project follows the working directory
     until ``project switch`` succeeds."""
-    """Whether the forgotten project WAS the active one, so the pin moved."""
 
 
 PruneReason = Literal["missing", "worktree"]

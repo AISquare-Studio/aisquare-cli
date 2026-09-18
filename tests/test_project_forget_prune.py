@@ -28,6 +28,7 @@ from typer.testing import CliRunner
 from aisquare.cli.app import app
 from aisquare.core import paths
 from aisquare.core.ids import new_agent_id, new_event_id, new_task_id
+from aisquare.core.state_file import StateUnwritableError
 from aisquare.core.store import store_session
 from aisquare.core.workspace import pinned_project_id, project_id_for, worktree_principal
 from aisquare.models import FleetAgent, ProjectInfo, TeamEvent, TeamSession, TeamTask
@@ -654,8 +655,8 @@ def test_prune_reports_a_pin_it_could_not_move_instead_of_a_traceback(
     `--json` no error envelope at all.
 
     The pinned project has to be the one dropped, and a corrupt file cannot hold a
-    pin, so the refusal is the writer's own (`update_state` answering False — a
-    read-only home, say) while the file still names the worktree.
+    pin, so the refusal is the writer's own (its lock held by another process,
+    say) while the file still names the worktree.
     """
     repo, worktree = repo_and_worktree
     wt_id = _register_worktree_as_its_own_project(worktree)
@@ -663,7 +664,11 @@ def test_prune_reports_a_pin_it_could_not_move_instead_of_a_traceback(
     assert runner.invoke(app, ["project", "switch", wt_id]).exit_code == 0
     assert pinned_project_id() == wt_id
     body = paths.state_path().read_text()
-    monkeypatch.setattr("aisquare.core.workspace.update_state", lambda key, value: False)
+
+    def refuse(key: str, value: object) -> None:
+        raise StateUnwritableError(f"{paths.state_path()}.lock is held by another process")
+
+    monkeypatch.setattr("aisquare.core.workspace.update_state", refuse)
 
     result = runner.invoke(app, ["project", "prune", "--worktrees", "--yes"])
 

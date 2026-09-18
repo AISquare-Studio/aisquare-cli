@@ -9,8 +9,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Added
 - **The navigator is resizable** (#137). The line between the sidebar and the
   content is a divider: drag it (the sidebar never drops below 24 columns, the
-  content never below 40 — a pane narrower than that is not a terminal — and a
-  terminal that shrinks re-bounds it), or with the sidebar focused step it with
+  content never below 40 while the terminal has room for both — a pane narrower
+  than that is not a terminal — and a terminal that shrinks re-bounds it), or
+  with the sidebar focused step it with
   `>` / `<` and put it back with `=`; a double click on the divider does the
   same. The divider is the sidebar's old right border, one column over: it
   lights up while the sidebar has focus. The width is remembered in

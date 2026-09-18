@@ -65,7 +65,6 @@ from aisquare.cli.ui.views.doctor import DoctorRefreshed, DoctorView
 from aisquare.cli.ui.views.onboard import OnboardFailed, OnboardView, ProjectOnboarded
 from aisquare.cli.ui.views.project import ProjectView
 from aisquare.cli.ui.views.welcome import WelcomeView
-from aisquare.core import paths
 from aisquare.core.store import store_session
 from aisquare.models import (
     AccountsOverview,
@@ -387,13 +386,15 @@ class FleetApp(App[None], inherit_bindings=False):
         parent = getattr(super(), "watch_theme", None)
         if parent is not None:
             parent(theme_name)
-        if self._theme_restored and not remember_theme(theme_name) and not self._theme_warned:
+        if not self._theme_restored:
+            return
+        refused = remember_theme(theme_name)
+        if refused is not None and not self._theme_warned:
             # Said once, as the divider says it for the width: the picker shows
             # the theme applied, and silence would promise a memory it has not.
             self._theme_warned = True
             self.notify(
-                f"{paths.state_path()} could not be updated (not a JSON object, or not writable)"
-                " — the theme will not be remembered",
+                f"{refused} — the theme will not be remembered",
                 severity="warning",
                 timeout=8,
                 markup=False,

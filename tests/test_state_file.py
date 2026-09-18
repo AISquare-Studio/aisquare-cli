@@ -18,7 +18,8 @@ from pathlib import Path
 import pytest
 
 from aisquare.core import state_file
-from aisquare.core.state_file import read_state, update_state
+from aisquare.core.locking import lock_exclusive, unlock
+from aisquare.core.state_file import StateUnwritableError, read_state, update_state
 
 _not_root = pytest.mark.skipif(
     hasattr(os, "geteuid") and os.geteuid() == 0, reason="root reads through any file mode"
@@ -53,12 +54,12 @@ def test_read_state_is_empty_for_a_missing_unreadable_or_non_object_file(
 
 
 def test_update_state_keeps_the_other_keys_and_none_drops_one(isolated_home: Path) -> None:
-    assert update_state("board_theme", "nord") is True  # creates the home and the file
-    assert update_state("sidebar_width", 44) is True
+    update_state("board_theme", "nord")  # creates the home and the file
+    update_state("sidebar_width", 44)
     assert read_state() == {"board_theme": "nord", "sidebar_width": 44}
-    assert update_state("sidebar_width", None) is True
+    update_state("sidebar_width", None)
     assert read_state() == {"board_theme": "nord"}
-    assert update_state("never_there", None) is True  # dropping what is not there is fine
+    update_state("never_there", None)  # dropping what is not there is fine
     assert json.loads(_path(isolated_home).read_text()) == {"board_theme": "nord"}
     assert _siblings(isolated_home) == ["state.json"]
 
@@ -69,9 +70,22 @@ def test_update_state_refuses_a_file_that_is_not_an_object_and_leaves_it_as_it_i
 ) -> None:
     isolated_home.mkdir(parents=True)
     _path(isolated_home).write_text(body)
-    assert update_state("sidebar_width", 44) is False
+    with pytest.raises(StateUnwritableError, match=r"state\.json is not a JSON object"):
+        update_state("sidebar_width", 44)
     assert _path(isolated_home).read_text() == body
     assert _siblings(isolated_home) == ["state.json"]
+
+
+@pytest.mark.parametrize("body", ["", "  \n\n"])
+def test_an_empty_file_is_healed_not_refused(isolated_home: Path, body: str) -> None:
+    """A 0-byte `state.json` — what a crash leaves — has no keys to protect; refusing it
+    made `project switch` fail and the theme and width unrememberable until someone deleted
+    the file by hand. Before the shared writer the theme's own writer healed this case."""
+    isolated_home.mkdir(parents=True)
+    _path(isolated_home).write_text(body)
+    assert read_state() == {}
+    update_state("sidebar_width", 44)
+    assert read_state() == {"sidebar_width": 44}
 
 
 def test_a_pathologically_nested_file_reads_as_empty_and_refuses_an_update(
@@ -83,13 +97,17 @@ def test_a_pathologically_nested_file_reads_as_empty_and_refuses_an_update(
     body = "[" * 100_000 + "]" * 100_000
     _path(isolated_home).write_text(body)
     assert read_state() == {}
-    assert update_state("sidebar_width", 44) is False
+    with pytest.raises(StateUnwritableError, match="is not a JSON object"):
+        update_state("sidebar_width", 44)
     assert _path(isolated_home).read_text() == body
 
 
-def test_a_value_json_cannot_encode_is_refused_not_raised(isolated_home: Path) -> None:
-    assert update_state("board_theme", "nord") is True
-    assert update_state("sidebar_width", object()) is False
+def test_a_value_json_cannot_encode_is_refused_not_raised_as_a_type_error(
+    isolated_home: Path,
+) -> None:
+    update_state("board_theme", "nord")
+    with pytest.raises(StateUnwritableError, match="is not JSON"):
+        update_state("sidebar_width", object())
     assert read_state() == {"board_theme": "nord"}
     assert _siblings(isolated_home) == ["state.json"]
 
@@ -117,20 +135,20 @@ def test_two_writers_cannot_lose_each_others_key(
     isolated_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Without the lock: A reads {theme}, B reads {theme}, A writes {theme, width}, B writes
-    {theme: other} — the width is gone and both returned True. The fleet UI's width debounce,
+    {theme: other} — the width is gone and both returned. The fleet UI's width debounce,
     `board -w`'s theme autosave and `project switch` all reach this path."""
-    assert update_state("board_theme", "nord") is True
+    update_state("board_theme", "nord")
     inside, go = threading.Event(), threading.Event()
     real_replace = state_file._replace
     paused = False
 
-    def pausing_replace(target: Path, body: str) -> bool:
+    def pausing_replace(path: Path, target: Path, body: str) -> None:
         nonlocal paused
         if not paused:  # the first writer, mid-critical-section, waits for the test's go
             paused = True
             inside.set()
             assert go.wait(5), "the test never let the first writer finish"
-        return real_replace(target, body)
+        real_replace(path, target, body)
 
     monkeypatch.setattr(state_file, "_replace", pausing_replace)
     first = threading.Thread(target=update_state, args=("sidebar_width", 61))
@@ -147,6 +165,36 @@ def test_two_writers_cannot_lose_each_others_key(
     assert read_state() == {"board_theme": "dracula", "sidebar_width": 61}
 
 
+def test_a_lock_held_too_long_is_a_refusal_that_names_the_lock(
+    isolated_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A blocking `flock` waited forever — on the fleet UI's thread. The wait is bounded and
+    the refusal says which file is in the way, so a toast does not blame `state.json`."""
+    monkeypatch.setattr(state_file, "LOCK_WAIT_S", 0.2)
+    update_state("board_theme", "nord")  # creates the lock file
+    fd = os.open(isolated_home / "state.json.lock", os.O_RDONLY)
+    lock_exclusive(fd)
+    try:
+        with pytest.raises(StateUnwritableError, match=r"state\.json\.lock is held by another"):
+            update_state("sidebar_width", 44)
+    finally:
+        unlock(fd)
+        os.close(fd)
+    assert read_state() == {"board_theme": "nord"}
+    update_state("sidebar_width", 44)  # released: back in business
+    assert read_state() == {"board_theme": "nord", "sidebar_width": 44}
+
+
+def test_a_read_only_lock_file_still_serves(isolated_home: Path) -> None:
+    """Opened for append, a lock file this user cannot write to (left by `sudo`, restored
+    read-only) refused every update — and the refusal blamed `state.json`. Neither lock
+    primitive needs write access."""
+    update_state("board_theme", "nord")
+    (isolated_home / "state.json.lock").chmod(0o444)
+    update_state("sidebar_width", 44)
+    assert read_state() == {"board_theme": "nord", "sidebar_width": 44}
+
+
 def test_the_write_goes_through_a_symlink_and_keeps_the_targets_mode(
     isolated_home: Path, tmp_path: Path
 ) -> None:
@@ -160,7 +208,7 @@ def test_the_write_goes_through_a_symlink_and_keeps_the_targets_mode(
     isolated_home.mkdir(parents=True)
     _path(isolated_home).symlink_to(target)
 
-    assert update_state("sidebar_width", 44) is True
+    update_state("sidebar_width", 44)
 
     assert _path(isolated_home).is_symlink(), "the link is still a link"
     assert json.loads(target.read_text()) == {"board_theme": "nord", "sidebar_width": 44}
@@ -171,19 +219,29 @@ def test_the_write_goes_through_a_symlink_and_keeps_the_targets_mode(
     )
 
 
-def test_the_write_is_a_rename_of_this_processs_own_temp_file(
+def test_the_write_is_a_rename_of_this_processs_own_fsynced_temp_file(
     isolated_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`asq` and `board -w` autosaving at once used to share one `state.json.tmp`."""
+    """`asq` and `board -w` autosaving at once used to share one `state.json.tmp`; and without
+    the fsync a crash after the rename can publish an empty file (XFS), which the
+    refuse-on-corrupt policy would then have made permanent."""
+    calls: list[str] = []
     renamed: list[tuple[str, str]] = []
-    real_replace = os.replace
+    real_fsync, real_replace = os.fsync, os.replace
 
-    def spy(src: str | os.PathLike[str], dst: str | os.PathLike[str]) -> None:
+    def fsync_spy(fd: int) -> None:
+        calls.append("fsync")
+        real_fsync(fd)
+
+    def replace_spy(src: str | os.PathLike[str], dst: str | os.PathLike[str]) -> None:
+        calls.append("replace")
         renamed.append((os.fspath(src), os.fspath(dst)))
         real_replace(src, dst)
 
-    monkeypatch.setattr(os, "replace", spy)
-    assert update_state("sidebar_width", 44) is True
+    monkeypatch.setattr(os, "fsync", fsync_spy)
+    monkeypatch.setattr(os, "replace", replace_spy)
+    update_state("sidebar_width", 44)
+    assert calls == ["fsync", "replace"], "the temp reaches the disk before it is published"
     ((src, dst),) = renamed
     assert dst == str(_path(isolated_home))
     assert Path(src).parent == isolated_home, "a sibling: the rename stays on one filesystem"
@@ -191,16 +249,17 @@ def test_the_write_is_a_rename_of_this_processs_own_temp_file(
     assert _siblings(isolated_home) == ["state.json"]
 
 
-def test_a_failed_rename_leaves_no_temp_file_behind_and_reports_it(
+def test_a_failed_rename_leaves_no_temp_file_behind_and_says_so(
     isolated_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    assert update_state("board_theme", "nord") is True
+    update_state("board_theme", "nord")
     before = _path(isolated_home).read_text()
 
     def refuse(src: object, dst: object) -> None:
         raise PermissionError("read-only")
 
     monkeypatch.setattr(os, "replace", refuse)
-    assert update_state("sidebar_width", 44) is False
+    with pytest.raises(StateUnwritableError, match=r"state\.json could not be written"):
+        update_state("sidebar_width", 44)
     assert _path(isolated_home).read_text() == before
     assert _siblings(isolated_home) == ["state.json"]

@@ -495,7 +495,8 @@ def test_the_theme_readers_survive_a_state_file_that_is_not_an_object(isolated_h
     body = '["was", "a", "list"]\n'
     path.write_text(body)
     assert watch_mod._load_saved_theme() is None
-    assert watch_mod._save_theme("nord") is False
+    refused = watch_mod._save_theme("nord")
+    assert refused is not None and "state.json is not a JSON object" in refused
     assert path.read_text() == body
 
 

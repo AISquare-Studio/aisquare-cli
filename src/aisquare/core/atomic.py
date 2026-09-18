@@ -23,28 +23,36 @@ from pathlib import Path
 from uuid import uuid4
 
 
-def write_replacing(target: Path, body: str, *, keep_mode: bool = True) -> None:
-    """Replace ``target``'s contents with ``body`` in one step, durably.
+def write_replacing(
+    target: Path, body: str, *, keep_mode: bool = True, durable: bool = True
+) -> None:
+    """Replace ``target``'s contents with ``body`` in one step.
 
     ``keep_mode`` copies an existing target's permission bits onto the new
     file (a ``chmod 600`` stays a 600); the temp file is otherwise created at
-    the umask default.
+    the umask default. ``durable`` fsyncs the temp before the rename and the
+    directory after it — the two steps that make the write survive a crash,
+    and the two that cost on a busy or network disk; a cache whose loss is a
+    refetch passes ``False`` and keeps the atomicity alone.
     """
     temporary = target.with_name(f".{target.name}.{os.getpid()}.{uuid4().hex[:8]}.tmp")
     try:
         with temporary.open("w", encoding="utf-8") as handle:
             handle.write(body)
-            handle.flush()
-            os.fsync(handle.fileno())
+            if durable:
+                handle.flush()
+                os.fsync(handle.fileno())
         if keep_mode:
             with contextlib.suppress(FileNotFoundError):
                 os.chmod(temporary, target.stat().st_mode & 0o777)
         os.replace(temporary, target)
     except BaseException:
         with contextlib.suppress(OSError):
+            os.chmod(temporary, 0o600)  # Windows will not delete a read-only file
             temporary.unlink()
         raise
-    _sync_directory(target.parent)
+    if durable:
+        _sync_directory(target.parent)
 
 
 def _sync_directory(directory: Path) -> None:

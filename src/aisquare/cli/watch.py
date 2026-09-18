@@ -344,7 +344,7 @@ def _build_app_class(interval: float) -> Any:
             saved = _load_saved_theme()
             if saved and saved in self.available_themes:
                 self.theme = saved
-            self._theme_autosave = Autosave(self, _THEME_KEY, what="the theme")
+            self._theme_autosave = Autosave(self, _THEME_KEY, what="the theme", initial=saved)
             self._theme_restored = True
 
         def on_unmount(self) -> None:

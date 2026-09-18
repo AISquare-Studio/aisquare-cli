@@ -522,7 +522,7 @@ def test_the_board_says_once_when_the_theme_cannot_be_remembered(
             for name in ("nord", "dracula"):
                 pilot.app.theme = name
                 await pilot.pause(Autosave.DEBOUNCE + 0.05)
-                await pilot.app.workers.wait_for_complete()
+                await asyncio.to_thread(pilot.app._theme_autosave.wait, 5.0)
                 await pilot.pause()
             toasts = list(pilot.app.screen.query(Toast))
             return len(toasts), toasts[0].render().plain if toasts else ""
@@ -530,3 +530,22 @@ def test_the_board_says_once_when_the_theme_cannot_be_remembered(
     count, text = asyncio.run(pick())
     assert count == 1 and "theme will not be remembered" in text
     assert (isolated_home / "state.json").read_text() == body
+
+
+def test_the_board_flushes_a_theme_picked_inside_the_debounce_at_quit(
+    runner: CliRunner, work_dir: Path, isolated_home: Path
+) -> None:
+    """The save is debounced; a `t`, a pick and a `q` within a tenth of a second must still land."""
+    pytest.importorskip("textual", reason="the [tui] extra is not installed")
+    from aisquare.cli import watch as watch_mod
+
+    team_service.activate()
+
+    async def pick_and_quit() -> None:
+        app_cls = watch_mod._build_app_class(interval=60.0)
+        async with app_cls().run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            pilot.app.theme = "nord"  # and out, before the debounce fires
+
+    asyncio.run(pick_and_quit())
+    assert json.loads((isolated_home / "state.json").read_text())["board_theme"] == "nord"

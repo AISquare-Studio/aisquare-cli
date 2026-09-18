@@ -105,11 +105,10 @@ class Divider(Widget):
         self._last_click_still = False
         """Whether the previous click was a LEFT click that was a click (the width did not
         change). Another button, or a drag, breaks the chain."""
-        self._remembered: int | None = None
-        """The width on disk, as far as this widget knows — capped like every number that may
-        reach the style setter."""
         self._autosave: Autosave | None = None
-        """The debounced, off-loop save under ``state_key``; ``None`` when there is no key."""
+        """The debounced, off-loop save under ``state_key``; ``None`` when there is no key. Its
+        ``latest`` — what the file holds or is about to — is the width this widget compares a
+        gesture against; every number it hands out was capped at mount."""
 
     # --- the neighbour and its bounds ------------------------------------------------
 
@@ -280,21 +279,23 @@ class Divider(Widget):
     def on_mount(self) -> None:
         if self._state_key is None:
             return
-        self._autosave = Autosave(
-            self, self._state_key, what="the navigator's width", on_saved=self._saved
-        )
         saved = read_state().get(self._state_key)
+        remembered: int | None = None
         if isinstance(saved, int) and not isinstance(saved, bool):
             # Capped ONCE, here: this is the number every later path may hand
             # the style setter — the restore, and the ceiling rule putting the
             # ask back — and ``float(10**400)`` overflows there.
-            self._remembered = max(0, min(saved, WIDEST_ASK))
+            remembered = max(0, min(saved, WIDEST_ASK))
+        self._autosave = Autosave(
+            self, self._state_key, what="the navigator's width", initial=remembered
+        )
+        if remembered is not None:
             # After the first layout, not during mount: by then the container
             # has written the ceiling, so the layout bounds what is shown from
             # the first frame the ask reaches. Applied at mount, a saved 500
             # gave the content pane one frame at zero columns — a size the
             # agent's pane forwards to tmux.
-            self.call_after_refresh(self._restore, self._remembered)
+            self.call_after_refresh(self._restore, remembered)
 
     def _restore(self, ask: int) -> None:
         """Apply the remembered width as the ASK, not as what is shown.
@@ -315,33 +316,32 @@ class Divider(Widget):
         if self._autosave is not None:
             self._autosave.flush()
 
-    def _saved(self, value: object) -> None:
-        self._remembered = value if isinstance(value, int) else None
+    def _remembered_width(self) -> int | None:
+        """The width the file holds or is about to hold, as the saver knows it."""
+        latest = None if self._autosave is None else self._autosave.latest
+        return latest if isinstance(latest, int) else None
 
     def _remember(self, width: int | None) -> None:
-        """Queue the write — one per burst, off the event loop — or decide there is nothing to."""
+        """Hand the width to the saver — one write per burst, off the event loop — or keep the
+        remembered one when the ceiling rule says so. The saver itself drops a value the file
+        holds or is about to hold."""
         if self._autosave is None:
             return
-        if width == self._remembered:
-            self._autosave.cancel()  # back where the file already is: a queued save would lie
-            return
-        if self._ceiling_under_remembered(width):
+        remembered = self._remembered_width()
+        if remembered is not None and self._ceiling_under(width, remembered):
             # "As wide as this screen allows" — so the ask stays the remembered
             # width too, and comes back on screen when the room does, exactly as
             # the file will give it back at the next launch.
-            self._autosave.cancel()
-            self._width = self._remembered
-            self.target.styles.width = self._remembered
+            self._width = remembered
+            self.target.styles.width = remembered
             return
         self._autosave.remember(width)
 
-    def _ceiling_under_remembered(self, width: int | None) -> bool:
-        """Whether ``width`` is this terminal's ceiling with a wider width on file.
+    def _ceiling_under(self, width: int | None, remembered: int) -> bool:
+        """Whether ``width`` is this terminal's ceiling with a wider width on file (or on its way).
 
         The ceiling bounds what is SHOWN, not what is remembered: a laptop
         clamps a monitor's 90 to 39, and a gesture that lands on 39 there is
         "as wide as this screen allows", not a new number to carry back.
         """
-        if width is None or self._remembered is None:
-            return False
-        return width >= self.bounds()[1] and self._remembered > width
+        return width is not None and width >= self.bounds()[1] and remembered > width

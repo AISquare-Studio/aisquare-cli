@@ -1812,10 +1812,13 @@ async def _drag(pilot: Pilot[None], from_x: int, to_x: int, y: int = 5) -> None:
 
 
 async def _settled(pilot: Pilot[None]) -> None:
-    """Let a debounced save land: the debounce, then the worker it hands the write to — and
-    stay well inside Textual's half-second click chain, which some tests need to span."""
+    """Let a debounced save land: the debounce, then the thread it hands the write to — and stay
+    well inside Textual's half-second click chain, which some tests need to span."""
     await pilot.pause(Autosave.DEBOUNCE + 0.05)
-    await settle(fleet_app(pilot))
+    app = fleet_app(pilot)
+    for saver in (app._theme_autosave, app.query_one(Divider)._autosave):
+        if saver is not None:
+            await asyncio.to_thread(saver.wait, 5.0)
     await pilot.pause()
 
 
@@ -2305,7 +2308,7 @@ def test_a_gesture_on_a_narrow_terminal_keeps_a_wider_remembered_width(
         # Rule 1 on its own: a step the ceiling swallows does not settle — with the
         # ceiling rule stubbed out, so it cannot be the one catching this.
         with monkeypatch.context() as stubbed:
-            stubbed.setattr(Divider, "_ceiling_under_remembered", lambda self, width: False)
+            stubbed.setattr(Divider, "_ceiling_under", lambda self, width, remembered: False)
             await pilot.press("greater_than_sign")
             await _settled(pilot)
             seen["after_wider"] = now()
@@ -2442,6 +2445,9 @@ def test_a_width_the_file_already_has_is_not_rewritten_and_a_save_due_at_quit_is
     tmp_path: Path, script: Script, isolated_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     seed(tmp_path, ("prj_a", "alpha", None))
+    # `<` then `>` must both land inside one debounce; the default left a margin of a few ms
+    # against a loaded runner, so this test's debounce is a generous one.
+    monkeypatch.setattr(Autosave, "DEBOUNCE", 0.5)
     writes: list[tuple[str, object]] = []
 
     def counting(key: str, value: object) -> None:
@@ -2572,3 +2578,17 @@ def test_a_drag_that_ends_off_the_handle_breaks_the_double_click_chain(
         return app.sidebar.outer_size.width, _state(isolated_home).get(SIDEBAR_WIDTH_KEY)
 
     assert drive(go) == (ceiling, ceiling), "a drag breaks the chain, Click or no Click"
+
+
+def test_the_fleet_ui_flushes_a_theme_picked_inside_the_debounce_at_quit(
+    tmp_path: Path, script: Script, isolated_home: Path
+) -> None:
+    """The theme's save is debounced like the width's; a pick and a `q` within a tenth of a
+    second must still land — the width's quit-time flush was tested, the theme's was not."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+
+    async def go(pilot: Pilot[None]) -> None:
+        fleet_app(pilot).theme = "nord"  # and out, before the debounce fires
+
+    drive(go)
+    assert _state(isolated_home)["board_theme"] == "nord"

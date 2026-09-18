@@ -177,3 +177,16 @@ def test_the_replace_precondition_holds_wherever_the_config_lives(tmp_path: Path
         f"{target_dev} — os.replace is not atomic across filesystems, so the "
         "guarantee save_config relies on would be void"
     )
+
+
+def test_a_config_the_operator_tightened_keeps_its_mode(tmp_path: Path) -> None:
+    """`save_config` passes `keep_mode=True` on purpose: a `chmod 600 config.toml` stays 600
+    across a rewrite, where the old recipe reset it to the umask default (review of #167)."""
+    import stat
+
+    target = tmp_path / "config.toml"
+    save_config(AppConfig(), target)
+    target.chmod(0o600)
+    save_config(AppConfig(), target)
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+    assert load_config(target) == AppConfig()

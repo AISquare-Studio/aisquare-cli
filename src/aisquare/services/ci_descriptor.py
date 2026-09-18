@@ -264,7 +264,10 @@ def _replace(target: Path, body: str) -> None:
     """Write ``body`` to ``target`` in one step (``core.atomic``'s recipe). Never raises."""
     with contextlib.suppress(OSError):
         target.parent.mkdir(parents=True, exist_ok=True)
-        write_replacing(target, body, keep_mode=False)
+        # Atomic, not durable: this runs in the first hook of every session, and
+        # a cache lost to a crash is a refetch — not worth two fsyncs on the path
+        # the experiment measures.
+        write_replacing(target, body, keep_mode=False, durable=False)
 
 
 def cached(run: str, now: datetime | None = None) -> DeliveryDescriptor | None:

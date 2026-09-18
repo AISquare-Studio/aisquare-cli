@@ -172,10 +172,16 @@ def _locked(path: Path) -> Iterator[None]:
     """
     lock_path = path.with_name(f"{path.name}.lock")
     try:
+        fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o644)
+    except PermissionError as denied:
         try:
-            fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o644)
-        except PermissionError:
             fd = os.open(lock_path, os.O_RDONLY)
+        except FileNotFoundError:
+            # A home we cannot write to and no lock yet: the refusal is the
+            # permission problem, not a missing file the fallback could not create.
+            raise StateUnwritableError(f"{lock_path} could not be opened: {denied}") from denied
+        except OSError as exc:
+            raise StateUnwritableError(f"{lock_path} could not be opened: {exc}") from exc
     except OSError as exc:
         raise StateUnwritableError(f"{lock_path} could not be opened: {exc}") from exc
     try:

@@ -34,11 +34,10 @@ def _path(isolated_home: Path) -> Path:
 
 
 def _siblings(isolated_home: Path) -> list[str]:
-    """Everything beside the file but the writer's own lock, which stays."""
+    """Every FILE in the home but the writer's own lock, which stays — a leftover temp is
+    `.state.json.<pid>.<hex>.tmp`, and a filter on names starting with `state` let it hide."""
     return sorted(
-        p.name
-        for p in isolated_home.iterdir()
-        if p.name.startswith("state") and not p.name.endswith(".lock")
+        p.name for p in isolated_home.iterdir() if p.is_file() and not p.name.endswith(".lock")
     )
 
 
@@ -212,6 +211,48 @@ def test_a_read_only_lock_file_still_serves(
     update_state("sidebar_width", 44)
     assert opened[1:] == [os.O_RDWR | os.O_CREAT, os.O_RDONLY], "refused for writing: read-only"
     assert read_state() == {"board_theme": "nord", "sidebar_width": 44}
+
+
+@pytest.mark.parametrize("held", sorted(state_file._HELD))
+def test_every_errno_that_means_held_is_waited_for_not_refused(
+    isolated_home: Path, monkeypatch: pytest.MonkeyPatch, held: int
+) -> None:
+    """`EACCES` is what Windows' `msvcrt.locking(LK_NBLCK)` raises for a held lock; the Linux-only
+    CI would not notice it dropping out of `_HELD`, and every contended save on Windows would
+    then be refused at once."""
+    update_state("board_theme", "nord")
+    attempts: list[int] = []
+
+    def held_twice(fd: int) -> None:
+        attempts.append(fd)
+        if len(attempts) <= 2:
+            raise OSError(held, "held")
+        lock_exclusive(fd)
+
+    monkeypatch.setattr(state_file, "lock_exclusive", held_twice)
+    update_state("sidebar_width", 44)
+    assert len(attempts) == 3, "waited through two 'held' answers, then took the lock"
+    assert read_state() == {"board_theme": "nord", "sidebar_width": 44}
+
+
+@_not_root
+def test_a_home_we_cannot_write_to_is_refused_as_a_permission_problem(
+    isolated_home: Path,
+) -> None:
+    """With no lock file yet, the read-only fallback (`O_RDONLY` without `O_CREAT`) raised
+    `ENOENT`, so the toast and `project switch` read 'No such file or directory' for what was a
+    permission problem."""
+    update_state("board_theme", "nord")
+    (isolated_home / "state.json.lock").unlink()
+    isolated_home.chmod(0o555)
+    try:
+        with pytest.raises(StateUnwritableError, match=r"state\.json\.lock could not be opened"):
+            update_state("sidebar_width", 44)
+        with pytest.raises(StateUnwritableError, match="Permission denied"):
+            update_state("sidebar_width", 44)
+    finally:
+        isolated_home.chmod(0o755)
+    assert read_state() == {"board_theme": "nord"}
 
 
 def test_a_lock_error_that_is_not_contention_is_refused_at_once(

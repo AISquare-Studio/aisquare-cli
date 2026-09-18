@@ -459,7 +459,9 @@ def save_config(config: AppConfig, path: Path | None = None) -> Path:
     # on a DrvFs /mnt/c or \\wsl.localhost path the guarantee softens, and
     # nothing in this code can tell which kind of path it is on.
     try:
-        write_replacing(written, payload)
+        # keep_mode: a config the operator tightened to 0600 stays 0600 — the
+        # rewrite used to reset it to the umask default.
+        write_replacing(written, payload, keep_mode=True)
     except OSError as exc:
         if written == target:
             raise

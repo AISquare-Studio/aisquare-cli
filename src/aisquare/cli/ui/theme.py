@@ -93,4 +93,4 @@ def theme_autosave(app: App[Any]) -> Autosave:
     memory the file has refused. Flush it at unmount: a pick inside the debounce
     before ``q`` is a preference the user expressed.
     """
-    return Autosave(app, _THEME_KEY, what="the theme")
+    return Autosave(app, _THEME_KEY, what="the theme", initial=_load_saved_theme())

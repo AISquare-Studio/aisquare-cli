@@ -250,7 +250,8 @@ def usage_(
     table = Table(box=None, pad_edge=False, show_edge=False, header_style="bold")
     table.add_column("slot")
     # The label is never squeezed: a narrow terminal shortens the email instead.
-    table.add_column("label", no_wrap=True, min_width=max((len(t.plain) for t in labels), default=5))
+    widest = max((len(text.plain) for text in labels), default=5)
+    table.add_column("label", no_wrap=True, min_width=widest)
     for column in ("signed in as", "session", "week"):
         table.add_column(column)
     for status, label in zip(statuses, labels, strict=True):

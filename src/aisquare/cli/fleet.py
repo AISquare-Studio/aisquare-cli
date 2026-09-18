@@ -24,7 +24,7 @@ from typing import Annotated, NoReturn
 import typer
 from rich.console import Console
 
-from aisquare.cli.common import fail
+from aisquare.cli.common import fail, refuse_conflicting_scope
 from aisquare.core.console import stdout_console
 from aisquare.core.state import get_state
 from aisquare.models import FleetAgentStatus, ProjectInfo
@@ -319,22 +319,6 @@ def _say_released(console: Console, count: int) -> None:
         console.print(f"  🔓 {count} claimed task(s) released back to the board")
 
 
-def _refuse_all_with_project(every: bool, project: str | None) -> None:
-    """``--all`` and ``--project`` name different scopes; both at once is a mistake to refuse.
-
-    ``--all`` used to win silently: ``fleet shutdown --project alpha --all --yes``,
-    meant as alpha, took every project's fleet down with nothing saying the
-    project flag had been discarded (review of the fold).
-    """
-    if every and project is not None:
-        _fail_fleet(
-            fleet_service.FleetError(
-                "--all and --project conflict: --all is every project's fleet, --project one "
-                "project's — drop one of them"
-            )
-        )
-
-
 def _exec_attach(argv: list[str]) -> None:
     """Replace this process with `tmux attach` (indirection so tests can intercept)."""
     os.execvp(argv[0], argv)
@@ -537,7 +521,7 @@ def shutdown(
     Exits 1 when any row was left live or a claim release was refused, and 130
     when interrupted — with the report of how far it got either way.
     """
-    _refuse_all_with_project(every, project)
+    refuse_conflicting_scope(every, project)
     target = None if every else _project(project)
     if not yes:
         try:
@@ -639,7 +623,7 @@ def reap(
     This project by default, `--all` for every project — never both. Exits 1
     when a released claim could not be given back to the board.
     """
-    _refuse_all_with_project(every, project)
+    refuse_conflicting_scope(every, project)
     target = None if every else _project(project)
     try:
         report = fleet_service.reap(target, server_down=server_down)

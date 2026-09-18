@@ -2394,6 +2394,7 @@ _ORDERINGS = {
     "stray-lost": ("D1", "D3", "U1"),
     "stray-first-then-primary": ("D3", "D1", "U3", "U1"),
     "stray-first-primary-up-first": ("D3", "D1", "U1", "U3"),
+    "stray-up-twice": ("D1", "D3", "U3", "U3", "U1"),
     "sequential-not-stray": ("D3", "U3", "D1", "U1"),
 }
 

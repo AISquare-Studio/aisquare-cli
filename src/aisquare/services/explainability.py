@@ -1099,6 +1099,32 @@ def identity_problem(template: str) -> str | None:
     return None
 
 
+#: A POSIX environment-variable name: what a shell can `export`, so what
+#: `resolve_target` can ever find in `os.environ`.
+_ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def key_env_problem(name: str) -> str | None:
+    """Why ``name`` cannot be the variable a target reads its key from, or ``None``.
+
+    Stored unchecked, ``--key-env 'MY VAR'`` (or ``'$EXPLAINABILITY_API_KEY'``,
+    an easy paste out of a runbook) was accepted, after which nothing could ever
+    export it and every surface read "the key is NOT set" with nothing naming
+    the cause — the "configured, green and stranded" shape this function's four
+    siblings exist to refuse (round 6 of #203).
+    """
+    if not name:
+        return "key variable is empty — name the variable the key is exported in"
+    if name.startswith("$"):
+        return f"key variable {name!r} is a NAME, without the $ — try {name[1:]!r}"
+    if not _ENV_NAME.fullmatch(name):
+        return (
+            f"key variable {name!r} is not a variable name — letters, digits and _ only, not "
+            "starting with a digit"
+        )
+    return None
+
+
 def target_problem(name: str) -> str | None:
     """Why ``name`` cannot name a deployment target, or ``None``.
 
@@ -1161,7 +1187,10 @@ def configure_target(
     # agent name carried a trailing space (review of #203, round 5).
     target_name = target_name.strip() if target_name else None
     identity = identity.strip() if identity else None
+    key_env = key_env.strip() if key_env else None
     if target_name is not None and (problem := target_problem(target_name)):
+        raise ValueError(problem)
+    if key_env is not None and (problem := key_env_problem(key_env)):
         raise ValueError(problem)
     for what, value in (("gateway", gateway_url), ("proxy", proxy_url)):
         if value and (problem := url_problem(value, what=what)):
@@ -1183,7 +1212,7 @@ def configure_target(
         if gateway_url:
             target.gateway_url = gateway_url.strip().rstrip("/")
         if key_env:
-            target.api_key_env = key_env.strip()
+            target.api_key_env = key_env  # stripped above, judged as stored
         if proxy_url:
             target.proxy_url = proxy_url.strip().rstrip("/")
         if identity:

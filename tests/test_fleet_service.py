@@ -4259,6 +4259,41 @@ def test_an_interrupt_during_the_stop_loop_does_not_kill_the_fleet(
     assert tmux.killed_sessions == [_session_of(project).split(":", 1)[1]]
 
 
+def test_an_interrupt_before_any_rows_turn_still_carries_the_report(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 6. The interrupt handler read the inner loop's variable, so a Ctrl-C
+    landing before the first row's turn (a scope whose projects hold no live
+    rows) raised ``UnboundLocalError`` inside the handler — no report, no 130,
+    and the kill phase skipped. The row in hand is bound before the loop."""
+    fleet_service.pause(project)
+    real_targets = fleet_service._shutdown_targets(project)
+
+    class InterruptsOnItsSecondWalk(list):  # type: ignore[type-arg]
+        """The snapshot: walked once for the sockets, then the stop loop itself."""
+
+        walks = 0
+
+        def __iter__(self):  # type: ignore[no-untyped-def]
+            type(self).walks += 1
+            if type(self).walks == 2:
+                raise KeyboardInterrupt
+            return super().__iter__()
+
+    monkeypatch.setattr(
+        fleet_service, "_shutdown_targets", lambda project_: InterruptsOnItsSecondWalk(real_targets)
+    )
+    with pytest.raises(fleet_service.FleetInterrupted) as caught:
+        fleet_service.shutdown(project, force=True)
+
+    report = caught.value.report
+    assert report.interrupted == (
+        "interrupted before the first row was stopped; the rest of the fleet was left as it was"
+    )
+    assert report.stopped == [] and tmux.killed_sessions == []
+    assert fleet_service.is_paused(project)
+
+
 def test_a_scoped_shutdown_takes_down_a_leftover_session_on_todays_socket(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:

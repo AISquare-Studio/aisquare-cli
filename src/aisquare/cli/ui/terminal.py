@@ -478,11 +478,17 @@ class SelectionHost(App[None]):
             route_gesture_start(self)
         if released:
             assert isinstance(event, events.MouseUp)
-            # The stray's release is the stray's, whether the primary button is
-            # still down or was lifted first (`Down(1) Down(3) Up(1) Up(3)` is the
-            # commonest order): dropped before it reaches the screen, where it
-            # would synthesise a Click at the primary press's offset, focus the
-            # pane and zero its double-click chain (review of #203, round 5).
+            # While a gesture is down, the only release that is its own names
+            # the button that began it: anything else — the stray's release, a
+            # DUPLICATE of it from a terminal that reports releases twice — is
+            # dropped before it reaches the screen, where it would synthesise a
+            # Click at the primary press's offset, clear the drag's highlight,
+            # focus the pane and zero its double-click chain (round 5; a
+            # one-shot stray token let the duplicate through, round 6). After
+            # the gesture ended, the stray's own release is still the stray's
+            # (`Down(1) Down(3) Up(1) Up(3)`, the commonest order).
+            if self._pressed is not None and event.button != self._pressed:
+                return
             if self._stray is not None and event.button == self._stray:
                 self._stray = None
                 return

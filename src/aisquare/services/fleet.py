@@ -1942,48 +1942,86 @@ def _kill_fleet_sessions(
                 report.sessions_left_up.append(qualified)
                 _not_down(report, project_id)
                 continue
-            # Presence first. A name asked for just-in-case (today's socket, no
-            # row of this project on it) that cannot be asked is not a failed
-            # kill and marks nothing not-confirmed-down: nothing was claimed to
-            # be there. Round 4 silenced only the confirmed-absent answer while
-            # widening the probe to every in-scope project, so a transient
-            # `TmuxError` on a socket the project never lived on read as PARTLY
-            # shut down and exit 1 (round 5).
-            try:
-                present = srv.has_session_or_raise(name)
-            except TmuxError as exc:
-                if not expected:
-                    continue
-                report.sessions_failed.append(f"{qualified} (could not be asked: {exc})")
-                _not_down(report, project_id)
-                continue
-            if not present:
-                if expected:
-                    report.sessions_absent.append(qualified)
-                continue
-            if any(spared_socket == socket for spared_socket, _ in spared_panes):
-                try:
-                    hosted = {(socket, window.pane_id) for window in srv.windows_or_raise(name)}
-                except TmuxError as exc:
-                    # Cannot tell whether a left-live pane lives here: not killed,
-                    # and said so — never a kill on a guess. The session IS there,
-                    # so this is a real failed kill whatever brought it here.
-                    report.sessions_failed.append(f"{qualified} (could not list its panes: {exc})")
-                    _not_down(report, project_id)
-                    continue
-                if hosted & spared_panes:
-                    report.sessions_left_up.append(qualified)
-                    _not_down(report, project_id)
-                    continue
-            try:
-                srv.kill_session(name)
-            except TmuxError:
-                # Tried and did not happen: a wedged server times out at 30 s,
-                # and tmux can leave PATH between the probe and the kill.
-                report.sessions_failed.append(qualified)
-                _not_down(report, project_id)
-            else:
-                report.sessions_killed.append(qualified)
+            _take_down_session(
+                srv, socket, name, project_id, spared_panes, report, expected=expected
+            )
+
+
+def _take_down_session(
+    srv: TmuxServer,
+    socket: str,
+    name: str,
+    project_id: str | None,
+    spared_panes: set[tuple[str, str]],
+    report: ShutdownReport,
+    *,
+    expected: bool,
+    absent_is_news: bool | None = None,
+    failure_note: str | None = None,
+) -> None:
+    """Take one of the fleet's sessions down, or say why it stands — the ONE sequence.
+
+    Presence first. A name asked for just-in-case (today's socket, no row of
+    this project on it; ``expected=False``) that cannot be asked is not a failed
+    kill and marks nothing not-confirmed-down: nothing was claimed to be there.
+    Round 4 silenced only the confirmed-absent answer while widening the probe to
+    every in-scope project, so a transient ``TmuxError`` on a socket the project
+    never lived on read as PARTLY shut down and exit 1 (round 5). A session that
+    IS there is spared when one of its panes is a row this run left live —
+    killing it would end an agent tmux had just confirmed alive — and otherwise
+    killed; a refused kill is a failed one, never a killed one.
+
+    Written once for the kill phase and for the late-exit reconciliation: the
+    two copies had already drifted, the spare rule living in one and not the
+    other (review of #121, round 9; round 6 of #203). The late path expects its
+    session (its pane was just removed, so a refusal to re-check IS a failed
+    kill) but an absent one is the ordinary shape there — the window took the
+    session with it — hence ``absent_is_news`` apart from ``expected``.
+    ``failure_note`` is the caller's word for a question tmux would not answer.
+    """
+    if absent_is_news is None:
+        absent_is_news = expected
+    qualified = f"{socket}:{name}"
+    try:
+        present = srv.has_session_or_raise(name)
+    except TmuxError as exc:
+        if not expected:
+            return
+        report.sessions_failed.append(
+            f"{qualified} ({failure_note or 'could not be asked'}: {exc})"
+        )
+        _not_down(report, project_id)
+        return
+    if not present:
+        if absent_is_news:
+            report.sessions_absent.append(qualified)
+        return
+    if any(spared_socket == socket for spared_socket, _ in spared_panes):
+        try:
+            hosted = {(socket, window.pane_id) for window in srv.windows_or_raise(name)}
+        except TmuxError as exc:
+            # Cannot tell whether a left-live pane lives here: not killed, and
+            # said so — never a kill on a guess. The session IS there, so this
+            # is a real failed kill whatever brought it here.
+            note = failure_note or "could not list its panes"
+            report.sessions_failed.append(f"{qualified} ({note}: {exc})")
+            _not_down(report, project_id)
+            return
+        if hosted & spared_panes:
+            if qualified not in report.sessions_left_up:
+                report.sessions_left_up.append(qualified)
+            _not_down(report, project_id)
+            return
+    try:
+        srv.kill_session(name)
+    except TmuxError:
+        # Tried and did not happen: a wedged server times out at 30 s, and tmux
+        # can leave PATH between the probe and the kill.
+        report.sessions_failed.append(qualified)
+        _not_down(report, project_id)
+    else:
+        if qualified not in report.sessions_killed:
+            report.sessions_killed.append(qualified)
 
 
 def _not_down(report: ShutdownReport, project_id: str | None) -> None:
@@ -2207,31 +2245,19 @@ def _retire_late_panes(
         if project.codename and entry not in sessions:
             sessions.append(entry)
     for socket, name, project_id in sessions:
-        qualified = f"{socket}:{name}"
-        srv = server_for(socket, config)
-        try:
-            if not srv.has_session_or_raise(name):
-                continue  # the window took the session with it, as tmux does
-            hosted = {(socket, window.pane_id) for window in srv.windows_or_raise(name)}
-        except TmuxError as exc:
-            report.sessions_failed.append(
-                f"{qualified} (could not be re-checked after a row exited late: {exc})"
-            )
-            _not_down(report, project_id)
-            continue
-        if hosted & spared_panes:
-            if qualified not in report.sessions_left_up:
-                report.sessions_left_up.append(qualified)
-            _not_down(report, project_id)
-            continue
-        try:
-            srv.kill_session(name)
-        except TmuxError:
-            report.sessions_failed.append(qualified)
-            _not_down(report, project_id)
-        else:
-            if qualified not in report.sessions_killed:
-                report.sessions_killed.append(qualified)
+        # The one take-down sequence; a session the window took with it (as tmux
+        # does) says nothing, hence `expected=False`.
+        _take_down_session(
+            server_for(socket, config),
+            socket,
+            name,
+            project_id,
+            spared_panes,
+            report,
+            expected=True,
+            absent_is_news=False,
+            failure_note="could not be re-checked after a row exited late",
+        )
 
 
 def _record_late_rows(
@@ -2576,6 +2602,7 @@ def shutdown(
     answering = _shutdown_probe(sockets, config)
     report.servers_absent.extend(socket for socket in sockets if not answering[socket])
     handled: set[str] = set()
+    stopping: FleetAgent | None = None  # the row in hand when an interrupt lands, if any
 
     def finish() -> None:
         _kill_fleet_sessions(targets, sockets, answering, report, config, every=project is None)
@@ -2585,16 +2612,24 @@ def shutdown(
     try:
         for current, agents in targets:
             for agent in agents:
+                stopping = agent
                 handled.add(agent.id)
                 _shutdown_row(current, agent, answering, report, force=force, grace=grace)
     except KeyboardInterrupt:
         # The operator's interrupt is theirs to have — nothing else is killed —
         # but rows before this one are ended and their claims released, each
         # committed as it went, so the report of how far it got travels with
-        # the interrupt instead of being thrown away with it (round 5).
-        report.interrupted = (
-            f"interrupted while stopping {agent.label}; the rest of the fleet was left as it was"
+        # the interrupt instead of being thrown away with it (round 5). Bound
+        # before the loop: read off the loop variable, an interrupt landing
+        # before any row's turn (a scope with no live rows) raised
+        # `UnboundLocalError` inside this handler, which nothing caught — no
+        # report, no 130, and `finish()` never ran (round 6).
+        where = (
+            f"while stopping {stopping.label}"
+            if stopping is not None
+            else "before the first row was stopped"
         )
+        report.interrupted = f"interrupted {where}; the rest of the fleet was left as it was"
         raise FleetInterrupted(report) from None
     except Exception:
         # The kill phase runs even if a row could not be recorded: "shutdown

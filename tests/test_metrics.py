@@ -371,6 +371,21 @@ def test_override_rows_are_counted_apart_and_kept_out_of_the_round_trip_figures(
     assert (summary.median_round_trip_ms, summary.p95_round_trip_ms) == (300, 320)
 
 
+@pytest.mark.parametrize("command", ["show", "list"])
+def test_metrics_refuses_all_together_with_project(
+    command: str, isolated_home: Path, runner: CliRunner
+) -> None:
+    """Round 6 of #203. ``--all`` won silently over ``--project`` here exactly as
+    it had in ``fleet shutdown``: ``metrics show --project alpha --all`` reported
+    every project on the machine with nothing saying the project flag was
+    dropped. One shared refusal now, wherever the pair exists."""
+    with store_session() as store:
+        store.ensure_project(PROJECT)
+    result = runner.invoke(app, ["metrics", command, "--project", "alpha", "--all"])
+    assert result.exit_code != 0
+    assert "--all and --project conflict" in result.output
+
+
 def test_metrics_show_says_when_override_rows_are_present(
     isolated_home: Path, runner: CliRunner
 ) -> None:

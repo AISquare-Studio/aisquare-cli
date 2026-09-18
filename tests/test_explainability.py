@@ -573,6 +573,31 @@ def test_configure_target_stores_what_it_validated() -> None:
     assert target.api_key_env == "MY_KEY"
 
 
+@pytest.mark.parametrize(
+    ("key_env", "said"),
+    [
+        ("MY VAR", "not a variable name"),
+        ("$EXPLAINABILITY_API_KEY", r"without the \$"),
+        ("1KEY", "not a variable name"),
+        ("MY\nVAR", "not a variable name"),
+        ("  ", "is empty"),
+    ],
+)
+def test_configure_target_refuses_a_key_variable_no_shell_can_export(
+    key_env: str, said: str
+) -> None:
+    """Round 6. Four of the five settings were judged before they were stored;
+    the key variable was not, so ``--key-env 'MY VAR'`` was accepted and nothing
+    could ever export it — every surface read "the key is NOT set" with nothing
+    naming the cause. A POSIX name, judged at the same door as the other four."""
+    config = AppConfig()
+    with pytest.raises(ValueError, match=said):
+        explainability.configure_target(config, target_name="stg", key_env=key_env, enable=False)
+    assert "stg" not in config.explainability.targets, "refused: nothing stored"
+    explainability.configure_target(config, target_name="stg", key_env=" MY_KEY_2 ", enable=False)
+    assert config.explainability.targets["stg"].api_key_env == "MY_KEY_2"
+
+
 def test_configure_target_judges_the_name_and_the_identity_as_it_stores_them() -> None:
     """Round 5: three of the five human-supplied values were stored as validated
     and two were not. ``--target 'stg '`` created a second config key beside the

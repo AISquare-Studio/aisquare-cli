@@ -564,18 +564,22 @@ def test_the_loopback_pair_says_what_it_assumes(monkeypatch: pytest.MonkeyPatch)
     assert "taken to be http://127.0.0.1:8000" in proxy.detail
 
 
-def test_a_schemeless_reported_gateway_is_still_a_misroute(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Review of the fold. The local-view rule was written with ``is_loopback``,
-    whose empty-host-is-local reading made ANY schemeless or malformed report
-    (``other.example:8000``, ``unknown``) pass for the proxy's own loopback, and
-    a red misroute went green on the target's host. The rule is a well-formed
-    loopback URL, nothing looser."""
-    monkeypatch.setattr(ops, "probe_proxy", _probes("other.example:8000"))
+@pytest.mark.parametrize("reported", ["other.example:8000", "staging", "localhost:8000", "unknown"])
+def test_a_report_that_is_not_a_url_is_unverifiable_not_a_misroute(
+    monkeypatch: pytest.MonkeyPatch, reported: str
+) -> None:
+    """Rounds 5 and 6, both halves. A report with no parseable host must not pass
+    for the proxy's own loopback view (`is_loopback` reads an empty host as
+    local) and turn a misroute GREEN — nor be folded into "does not agree" and
+    turn a live, correctly routed proxy RED, `status` exiting 1 on a deployment
+    NAME. It cannot be compared either way: amber, with both levers."""
+    monkeypatch.setattr(ops, "probe_proxy", _probes(reported))
     settings = _wired("https://g.example", proxy_url="https://g.example:9443")
     proxy = next(c for c in ops.checks(settings, env=_env()) if c.name == "explainability proxy")
 
-    assert proxy.status is CheckStatus.fail
-    assert "other.example:8000" in proxy.detail
+    assert proxy.status is CheckStatus.warn, reported
+    assert reported in proxy.detail and "cannot be checked from here" in proxy.detail
+    assert proxy.fix
 
 
 def test_a_local_proxys_loopback_report_is_this_machines_and_is_offered(

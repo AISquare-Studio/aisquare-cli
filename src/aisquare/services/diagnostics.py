@@ -898,52 +898,46 @@ _BROWSER_PROVIDER_RE = re.compile(
     re.IGNORECASE,
 )
 
-#: The tokens a REAL package id joins a provider with — `mcp-server-playwright`,
-#: `@modelcontextprotocol/server-puppeteer`, `playwright-mcp-server`,
-#: `browser-use-mcp`, `selenium-webdriver` — plus a version tail
-#: (`mcp-server-puppeteer-v2`, `playwright-mcp-1`; see `_VERSION_RE`). A
-#: declared table, like the providers themselves: the whole identifier around a
-#: match is split into tokens, and it names the tool only when every token that
-#: is not the provider's own is one of these. `playwright-report`,
-#: `playwright_report`, `selenium-grid-docs`, `puppeteer-examples-repo` and
-#: `selenium-docs-site` are ABOUT a tool and fail that rule; `selenium-grid` (a
-#: real Selenium component) passes it. One rule, where a widened boundary and a
-#: list of benign tails had disagreed about `_` and each other (review of #203,
-#: round 4; review of the fold, twice). Only tokens that can sit INSIDE an
-#: identifier belong here: `npx` and `@latest` are separated from it by
-#: whitespace and `@`, which bound the identifier, so they never reach the split
-#: (round 5).
-_PACKAGE_TOKENS: frozenset[str] = frozenset(
+#: Words that make an identifier ABOUT a browser tool rather than the tool:
+#: `playwright-report`, `playwright_report`, `playwright-reporter`,
+#: `selenium-grid-docs`, `selenium-docs-site`, `puppeteer-recorder`,
+#: `puppeteer-examples-repo`, `browser-use-examples`, `chrome-devtools-mcp-docs`.
+#: A small table of ENGLISH, deliberately — the alternative, a table of every
+#: word a real package id may carry beside its provider (`core`, `chromium`,
+#: `standalone`, `extra`, `manager`, `side`, `runner`, …), is the npm registry,
+#: and a closed one rejected seven of twelve real ids that `main` found
+#: (`puppeteer-core`, `selenium-server-standalone`, `webdriver-manager`; round 6
+#: of #203). The row's worst failure is telling an operator to install what
+#: they have, so an identifier that names a provider counts unless a word here
+#: says it is merely about one (rounds 4 to 6).
+_ABOUT_TOKENS: frozenset[str] = frozenset(
     {
-        "mcp",
-        "server",
-        "servers",
-        "cli",
-        "tool",
-        "tools",
-        "plugin",
-        "plugins",
-        "official",
-        "node",
-        "js",
-        "ts",
-        "py",
-        "python",
-        "chrome",
-        "browser",
-        "headless",
-        "web",
-        "automation",
-        "grid",
-        "driver",
-        "webdriver",
-        "devtools",
-        "use",
+        "doc",
+        "docs",
+        "documentation",
+        "example",
+        "examples",
+        "sample",
+        "samples",
+        "demo",
+        "demos",
+        "tutorial",
+        "tutorials",
+        "guide",
+        "guides",
+        "report",
+        "reports",
+        "reporter",
+        "recorder",
+        "site",
+        "repo",
+        "blog",
+        "notes",
+        "readme",
+        "template",
+        "templates",
     }
 )
-
-#: A version tail inside an identifier: `v2`, `1`, `2.1`, `v0.3.0`.
-_VERSION_RE = re.compile(r"v?\d+(?:\.\d+)*")
 
 #: The characters of an identifier — a set, not a regex: this walk runs once per
 #: character of every `command` and `args` string of every server in every
@@ -954,33 +948,21 @@ _IDENTIFIER_CHARS = frozenset(string.ascii_letters + string.digits + "_-")
 _TOKEN_SPLIT_RE = re.compile(r"[-_/@]+")
 
 
-def _provider_tokens() -> frozenset[str]:
-    tokens: set[str] = set()
-    for name in _BROWSER_PROVIDERS:
-        tokens.update(t.lower() for t in _TOKEN_SPLIT_RE.split(name) if t)
-    return frozenset(tokens)
-
-
-_KNOWN_TOKENS = _PACKAGE_TOKENS | _provider_tokens()
-
-
-def _known_token(token: str) -> bool:
-    return token in _KNOWN_TOKENS or _VERSION_RE.fullmatch(token) is not None
-
-
 def _names_browser_tool(text: str) -> bool:
     """Whether ``text`` names a browser-tooling provider, as a whole identifier."""
     for match in _BROWSER_PROVIDER_RE.finditer(text):
         # The identifier around the match: `mcp-server-playwright` for a match on
         # `playwright`, `playwright-report` for the same match. `_` counts as a
-        # joiner exactly as `-` does, so the two spellings are one case.
+        # joiner exactly as `-` does, so the two spellings are one case; a scoped
+        # match (`@playwright/mcp`) carries its own `@` and `/`, which the split
+        # treats as joiners too.
         start, end = match.span()
         while start > 0 and text[start - 1] in _IDENTIFIER_CHARS:
             start -= 1
         while end < len(text) and text[end] in _IDENTIFIER_CHARS:
             end += 1
-        tokens = [t.lower() for t in _TOKEN_SPLIT_RE.split(text[start:end]) if t]
-        if all(_known_token(token) for token in tokens):
+        tokens = {t.lower() for t in _TOKEN_SPLIT_RE.split(text[start:end]) if t}
+        if not tokens & _ABOUT_TOKENS:
             return True
     return False
 

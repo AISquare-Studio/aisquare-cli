@@ -1352,6 +1352,22 @@ def _destination(target: ResolvedTarget, verdict: ProxyProbe) -> ProxyState:
                 severity=CheckStatus.warn,
                 remediation=_PROXY_DESTINATION_FIX,
             )
+        if url_problem(verdict.gateway, what="gateway") is not None:
+            # A report that is not a URL — a deployment NAME, a bare host:port —
+            # cannot be shown to agree with the target, and cannot be shown to
+            # disagree either. Red here said "model traffic lands on the other
+            # deployment" over a proxy that may ship exactly where it should,
+            # and `status` exited 1 on it: the false red this lane exists to
+            # avoid. Amber, like every other shape this cannot check (round 6).
+            return ProxyState(
+                summary=(
+                    f"{alive}, but it reports its gateway as {verdict.gateway!r}, which is not "
+                    f"a URL this can compare with {target.gateway_url}, so whether it ships to "
+                    f"{target.name} cannot be checked from here"
+                ),
+                severity=CheckStatus.warn,
+                remediation=_PROXY_DESTINATION_FIX,
+            )
         if _same_deployment(verdict.gateway, target.gateway_url):
             return ProxyState(
                 summary=f"{alive}, shipping to {target.name}", severity=CheckStatus.ok

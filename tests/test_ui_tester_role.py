@@ -602,6 +602,18 @@ def test_doctor_recognises_the_real_package_ids(
                     "grid": {"command": "selenium-grid"},
                     "v2": {"args": ["mcp-server-puppeteer-v2"]},
                     "one": {"command": "playwright-mcp-1"},
+                    # The real ids `main` found and a closed token table rejected
+                    # (round 6): tails an npm registry has and no list can.
+                    "core": {"command": "npx", "args": ["-y", "puppeteer-core", "--headless"]},
+                    "pwcore": {"args": ["playwright-core"]},
+                    "chromium": {"command": "npx", "args": ["-y", "playwright-chromium"]},
+                    "extra": {"args": ["puppeteer-extra-plugin-stealth"]},
+                    "standalone": {
+                        "command": "java",
+                        "args": ["-jar", "selenium-server-standalone.jar"],
+                    },
+                    "manager": {"command": "webdriver-manager"},
+                    "side": {"args": ["selenium-side-runner"]},
                     "playwright-report": {},
                 }
             }
@@ -619,6 +631,13 @@ def test_doctor_recognises_the_real_package_ids(
         "mcp grid",
         "mcp v2",
         "mcp one",
+        "mcp core",
+        "mcp pwcore",
+        "mcp chromium",
+        "mcp extra",
+        "mcp standalone",
+        "mcp manager",
+        "mcp side",
     ):
         assert real in check.detail, real
     assert "playwright-report" not in check.detail

@@ -636,6 +636,51 @@ def _released_task() -> TeamTask:
     )
 
 
+@pytest.mark.parametrize("command", ["shutdown", "reap"])
+def test_all_and_project_together_are_refused(
+    command: str, runner: CliRunner, resolved: Seen, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of the fold. ``--all`` won silently: ``fleet shutdown --project alpha
+    --all --yes``, meant as alpha, took every project's fleet down with nothing
+    saying the project flag had been discarded. The two name different scopes;
+    both at once is refused before the service is asked anything."""
+    service = _install(monkeypatch, command, RuntimeError("the service must not be called"))
+
+    confirm = ["--yes"] if command == "shutdown" else []  # reap asks nothing
+    result = runner.invoke(app, ["fleet", command, "--project", "alpha", "--all", *confirm])
+
+    assert result.exit_code != 0
+    assert "--all and --project conflict" in _plain(result.output)
+    assert service.calls == [], "refused before the service was asked"
+
+
+def test_shutdown_with_stuck_claims_says_so_in_the_header_and_the_exit_code(
+    runner: CliRunner, resolved: Seen, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of the fold. ``release_failures`` was printed as a ⚠ line under a
+    ``✓ fleet shut down`` header and exit 0, so a cutover script gating on the
+    code proceeded while two tasks stayed claimed by dead sessions. Every row
+    is down — not PARTLY — but the header counts the refusals and the code
+    is non-zero."""
+    report = ShutdownReport(
+        stopped=[_agent("coder-auth", ended=True, exit_status=0)],
+        sessions_killed=[f"asq:{SESSION}"],
+        release_failures=["coder-auth: OperationalError: database is locked"],
+    )
+    _install(monkeypatch, "shutdown", report)
+
+    result = runner.invoke(app, ["fleet", "shutdown", "--yes", "--force"])
+
+    assert result.exit_code == 1
+    out = _plain(result.stdout)
+    assert (
+        "⚠ fleet shut down: 1 stopped, 0 recorded lost, 0 left live, 1 claim release(s) refused"
+        in out
+    )
+    assert "PARTLY" not in out, "every row is down; the claims are what is stuck"
+    assert "claims of coder-auth: OperationalError: database is locked could not be released" in out
+
+
 def test_stop_confirms_and_passes_force_through(
     runner: CliRunner, resolved: Seen, monkeypatch: pytest.MonkeyPatch
 ) -> None:

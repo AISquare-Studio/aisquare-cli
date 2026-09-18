@@ -612,6 +612,36 @@ def test_a_remote_proxys_loopback_report_never_matches_a_loopback_target(
     assert "cannot be checked from here" in proxy.detail
 
 
+def test_the_unset_gateway_amber_offers_only_a_url_the_writer_would_take(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of the fold. With no gateway configured the amber pasted whatever
+    the proxy reported into ``--gateway-url``, so a schemeless or garbage report
+    (``other.example:8000``, ``unknown``) became a command ``configure_target``
+    refuses with "needs a scheme". Offered only when it would be taken."""
+    monkeypatch.setattr(ops, "probe_proxy", _probes("other.example:8000"))
+    settings = ExplainabilitySettings(
+        enabled=True,
+        targets={"stg": ExplainabilityTarget(gateway_url="", proxy_url="https://p.example:9443")},
+    )
+    proxy = next(c for c in ops.checks(settings, env=_env()) if c.name == "explainability proxy")
+
+    assert proxy.status is CheckStatus.warn
+    assert "--gateway-url <url>" in (proxy.fix or "")
+    assert "other.example:8000" not in (proxy.fix or ""), "never a command that will be refused"
+
+
+def test_a_loopback_report_with_an_unusable_port_is_not_a_local_view() -> None:
+    """Review of the fold. ``_loopback_url`` parsed on its own and never read the
+    port, so ``http://127.0.0.1:99999`` passed as the proxy's loopback view
+    while ``url_problem`` called it unusable — the two-parsers drift #132 had
+    just removed from ``_usable_base_url``. One judge."""
+    assert ops._loopback_url("http://127.0.0.1:8000") is True
+    assert ops._loopback_url("http://127.0.0.1:99999") is False
+    assert ops._loopback_url("other.example:8000") is False
+    assert ops._loopback_url("https://g.example") is False
+
+
 def test_the_verdict_cannot_contradict_itself(monkeypatch: pytest.MonkeyPatch) -> None:
     """Review #7. Three independent booleans could express ``problem`` AND
     ``caution`` together, and only ``_check_proxy`` read the third -- so an

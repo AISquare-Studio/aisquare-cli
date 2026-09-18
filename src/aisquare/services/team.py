@@ -13,6 +13,7 @@ so repos that never opted in never see team output.
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import json
 import os
@@ -1700,15 +1701,21 @@ def _release_session(store: ContextStore, session: TeamSession, *, why: str) -> 
         released = store.end_session(session.id, release_claims=True)
     else:
         released = store.release_claims(session.id)
+    # The release is COMMITTED by here; the events are its announcement. One
+    # that cannot be written (a locked or damaged event table) must not turn
+    # into "nothing was released" for a caller reading the exception — `stop`
+    # used to report `released=[]` over tasks already back on the board
+    # (review of the fold). The rows are the record; the event is the courtesy.
     for task in released:
-        _emit(
-            store,
-            session.project_id,
-            "task_released",
-            f"{task.title} ({why})",
-            session_id=session.id,
-            task_id=task.id,
-        )
+        with contextlib.suppress(Exception):
+            _emit(
+                store,
+                session.project_id,
+                "task_released",
+                f"{task.title} ({why})",
+                session_id=session.id,
+                task_id=task.id,
+            )
     return released
 
 

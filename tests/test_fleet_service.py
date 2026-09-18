@@ -3479,14 +3479,14 @@ def test_shutdown_counts_an_agent_that_exited_on_its_own_as_stopped(
     and would make a clean shutdown exit 1; recording it lost would drop the exit
     status the row already has."""
     coder = _coder(project)
-    real_stop = fleet_service.stop
+    real_row = fleet_service._shutdown_row
 
-    def exit_first(*args: object, **kwargs: object) -> fleet_service.StopReceipt:
+    def exit_first(*args: object, **kwargs: object) -> None:
         with store_session() as store:  # its own SessionEnd hook got there first
             store.end_fleet_agent(coder.id, exit_status=7)
-        return real_stop(*args, **kwargs)  # type: ignore[arg-type]
+        real_row(*args, **kwargs)  # type: ignore[arg-type]
 
-    monkeypatch.setattr(fleet_service, "stop", exit_first)
+    monkeypatch.setattr(fleet_service, "_shutdown_row", exit_first)
 
     report = fleet_service.shutdown(project)
 
@@ -3599,14 +3599,14 @@ def test_shutdown_records_a_row_spawned_during_the_run(
     went down with the session — a live row reading `unknown (tmux unavailable)`."""
     manager = fleet_service.spawn(project, "manager").agent
     late: list[FleetAgent] = []
-    real_stop = fleet_service.stop
+    real_stop = fleet_service._stop_row
 
     def stop_and_spawn(*args: object, **kwargs: object) -> fleet_service.StopReceipt:
         if not late:  # the spawn lands while the manager is being stopped
             late.append(_coder(project))
         return real_stop(*args, **kwargs)  # type: ignore[arg-type]
 
-    monkeypatch.setattr(fleet_service, "stop", stop_and_spawn)
+    monkeypatch.setattr(fleet_service, "_stop_row", stop_and_spawn)
 
     report = fleet_service.shutdown(project, force=True)
 
@@ -4210,6 +4210,128 @@ def test_is_paused_opens_no_store_for_a_disabled_orchestrator(
 
     assert fleet_service.is_paused(project) is False
     assert opens == 0, f"a disabled board opened the store {opens} time(s)"
+
+
+def test_an_interrupt_during_the_stop_loop_does_not_kill_the_fleet(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of the fold. The kill, late-scan and pause phases ran in a
+    ``finally``, so Ctrl-C during one agent's graceful /exit still SIGHUP'd every
+    other session with no /exit, recorded them under a false reason, cleared the
+    pauses and then re-raised with no report. ``_shutdown_row`` catches every
+    ``Exception`` of its own, so the belt is for a fault in the loop — never for
+    the operator's interrupt, which is theirs to have."""
+    first = _coder(project)
+    second = _coder(project)
+    fleet_service.pause(project)
+
+    def interrupted(*args: object, **kwargs: object) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(fleet_service, "_shutdown_row", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        fleet_service.shutdown(project, force=True)
+
+    assert tmux.killed == [] and tmux.killed_sessions == [], (
+        "nothing was taken down behind the operator"
+    )
+    assert _row(first.id).ended_at is None and _row(second.id).ended_at is None
+    assert fleet_service.is_paused(project), "and the pause is still the manager's standing order"
+
+    # The control: a FAULT in the loop still runs the kill phase — "shutdown means
+    # down" holds when something other than a row breaks — and re-raises after.
+    def faulted(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("a fault in the loop itself")
+
+    monkeypatch.setattr(fleet_service, "_shutdown_row", faulted)
+    with pytest.raises(RuntimeError, match="fault in the loop"):
+        fleet_service.shutdown(project, force=True)
+    assert tmux.killed_sessions == [_session_of(project).split(":", 1)[1]]
+
+
+def test_a_scoped_shutdown_takes_down_a_leftover_session_on_todays_socket(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of the fold. A project's session was looked for only on the sockets
+    its LIVE rows were on, plus today's when it had none at all — so with live
+    rows on the old socket and a leftover session (dead remain-on-exit panes of
+    rows long ended) standing on today's, a scoped shutdown stopped the rows,
+    printed ✓ and left that session up. Today's socket is always asked."""
+    old = FakeTmux()
+    tmux.per_socket["asq-old"] = old
+    _settings(monkeypatch, tmux_socket="asq-old")
+    on_old = _coder(project)
+    _settings(monkeypatch, tmux_socket="asq")
+    leftover = _session_of(project).split(":", 1)[1]
+    tmux.sessions[leftover] = []  # a session with no live row pointing at it
+
+    report = fleet_service.shutdown(project, force=True)
+
+    assert [a.id for a in report.stopped] == [on_old.id]
+    assert f"asq:{leftover}" in report.sessions_killed, "the leftover on today's socket went too"
+    assert report.incomplete_projects == []
+
+
+def test_a_label_reused_mid_shutdown_stops_the_snapshots_row_and_not_the_new_agent(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of the fold. ``_shutdown_row`` held the snapshot's row but stopped
+    by LABEL, so when that row exited and the manager spawned a new ``coder-1``
+    before its turn, the new agent was stopped under the old one's turn, counted
+    as stopped — and, its id absent from ``handled``, recorded lost as a late row
+    as well: one agent in two lists, released twice. The row in hand is the row
+    stopped; a row that ended meanwhile went away on its own."""
+    old_row = _coder(project)
+    real_probe = fleet_service._shutdown_probe
+    new_ids: list[str] = []
+
+    def exit_and_reuse_the_label(*args: object, **kwargs: object) -> dict[str, bool]:
+        # Between the snapshot and the first row's turn: the old coder-1 exits
+        # on its own (its hook ends the row) and a new coder-1 is spawned.
+        with store_session() as store:
+            store.end_fleet_agent(old_row.id, exit_status=3)
+        new_ids.append(_coder(project).id)
+        return real_probe(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(fleet_service, "_shutdown_probe", exit_and_reuse_the_label)
+    report = fleet_service.shutdown(project, force=True)
+
+    assert _row(new_ids[0]).label == "coder-1" == old_row.label, "the premise: one label, two rows"
+    stopped = [a.id for a in report.stopped]
+    recorded = [row.agent.id for row in report.recorded]
+    assert stopped == [old_row.id], "the snapshot's row, with the status it exited with"
+    assert report.stopped[0].exit_status == 3
+    assert new_ids[0] not in stopped, "the new agent was not stopped under the old one's turn"
+    assert recorded.count(new_ids[0]) + stopped.count(new_ids[0]) <= 1, "counted at most once"
+
+
+def test_a_release_whose_board_event_fails_is_still_a_release(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of the fold. ``_release_session`` commits the release and THEN
+    emits a ``task_released`` event per task; an event write that raised made
+    ``release_agent_claims`` raise, and ``stop`` reported ``released=[]`` with
+    "its claims could not be released" over tasks already back on the board.
+    The rows are the record; the event is the announcement."""
+    mine = _task(project, "the task this coder is for")
+    agent, first = _spawned(project, "coder", mine.id, tmux, monkeypatch)
+    team_service.hook_session_start(first, project.root, "startup")
+    team_service.claim_task(mine.id, session_ref=first)
+    real_emit = team_service._emit
+
+    def refuse_task_released(
+        store: object, project_id: str, kind: str, *a: object, **kw: object
+    ) -> object:
+        if kind == "task_released":
+            raise sqlite3.OperationalError("team_event is locked (fake)")
+        return real_emit(store, project_id, kind, *a, **kw)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(team_service, "_emit", refuse_task_released)
+    receipt = fleet_service.stop(project, agent.label, force=True)
+
+    assert [t.id for t in receipt.released] == [mine.id], "released — the row says so"
+    assert receipt.release_failed is None
+    assert _task_now(mine.id).status == "todo" and _task_now(mine.id).claimed_by is None
 
 
 def test_the_pause_pass_reads_and_clears_every_signal_through_one_store(

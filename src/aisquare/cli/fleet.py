@@ -317,6 +317,22 @@ def _say_released(console: Console, count: int) -> None:
         console.print(f"  🔓 {count} claimed task(s) released back to the board")
 
 
+def _refuse_all_with_project(every: bool, project: str | None) -> None:
+    """``--all`` and ``--project`` name different scopes; both at once is a mistake to refuse.
+
+    ``--all`` used to win silently: ``fleet shutdown --project alpha --all --yes``,
+    meant as alpha, took every project's fleet down with nothing saying the
+    project flag had been discarded (review of the fold).
+    """
+    if every and project is not None:
+        _fail_fleet(
+            fleet_service.FleetError(
+                "--all and --project conflict: --all is every project's fleet, --project one "
+                "project's — drop one of them"
+            )
+        )
+
+
 def _exec_attach(argv: list[str]) -> None:
     """Replace this process with `tmux attach` (indirection so tests can intercept)."""
     os.execvp(argv[0], argv)
@@ -405,16 +421,20 @@ def _emit_shutdown(report: fleet_service.ShutdownReport) -> None:
         )
         return
     console = stdout_console()
-    partial = bool(
-        report.failed
-        or report.sessions_failed
-        or report.late_scan_failed
-        or report.pause_scan_failed
+    partial = _not_down(report)
+    # Stuck claims are not "partly shut down" — every row is down — but they
+    # are the operator's to act on, and a script gating on the exit code must
+    # not read a fleet whose work stays claimed by dead sessions as clean
+    # (review of the fold). Said in the header, and a non-zero exit below.
+    stuck = (
+        f", {len(report.release_failures)} claim release(s) refused"
+        if report.release_failures
+        else ""
     )
     console.print(
-        f"{'⚠' if partial else '✓'} fleet {'PARTLY ' if partial else ''}shut down: "
+        f"{'⚠' if partial or stuck else '✓'} fleet {'PARTLY ' if partial else ''}shut down: "
         f"{len(report.stopped)} stopped, {len(report.recorded)} recorded lost, "
-        f"{len(report.failed)} left live; "
+        f"{len(report.failed)} left live{stuck}; "
         f"sessions killed: {', '.join(report.sessions_killed) or 'none'}"
     )
     for agent in report.stopped:
@@ -507,6 +527,7 @@ def shutdown(
     Board notes and tasks are kept, the ended rows' claims are released, and a
     `fleet-paused` signal is cleared. Exits 1 when any row was left live.
     """
+    _refuse_all_with_project(every, project)
     target = None if every else _project(project)
     if not yes:
         try:
@@ -530,15 +551,21 @@ def shutdown(
     except fleet_service.FleetError as exc:
         _fail_fleet(exc)
     _emit_shutdown(report)
-    if (
+    if _not_down(report) or report.release_failures:
+        # The fleet is not down — or it is, with claims stuck on ended sessions.
+        # Said in the report AND in the exit code, so a script that only reads
+        # the code cannot mistake either for a clean run.
+        raise typer.Exit(code=1)
+
+
+def _not_down(report: fleet_service.ShutdownReport) -> bool:
+    """Whether the report leaves anything of the fleet standing or unverified."""
+    return bool(
         report.failed
         or report.sessions_failed
         or report.late_scan_failed
         or report.pause_scan_failed
-    ):
-        # The fleet is not down. Said in the report AND in the exit code, so a
-        # script that only reads the code cannot mistake a partial run for one.
-        raise typer.Exit(code=1)
+    )
 
 
 @app.command("attach")
@@ -588,6 +615,7 @@ def reap(
     ] = False,
 ) -> None:
     """Record exited agents, mark vanished panes lost, remove merged worktrees."""
+    _refuse_all_with_project(every, project)
     target = None if every else _project(project)
     try:
         report = fleet_service.reap(target, server_down=server_down)

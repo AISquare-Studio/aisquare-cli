@@ -466,11 +466,22 @@ class SelectionHost(App[None]):
             if self._pressed is not None and event.button != self._pressed:
                 self._stray = event.button
                 return
+            # A new gesture starts clean: a stray whose release never arrived
+            # (the pointer left the terminal) used to outlive its gesture, and
+            # the next press of THAT button was accepted while its release was
+            # dropped as the stray's — leaving `_pressed` armed forever, every
+            # later left press classified as stray and dropped, and nothing in
+            # the app clickable (review of the fold).
+            self._stray = None
             self._pressed = event.button
             route_gesture_start(self)
         if released:
             assert isinstance(event, events.MouseUp)
-            if self._stray is not None and event.button == self._stray:
+            if (
+                self._pressed is not None
+                and self._stray is not None
+                and event.button == self._stray
+            ):
                 self._stray = None
                 return
         try:
@@ -481,9 +492,11 @@ class SelectionHost(App[None]):
             # style, which is arbitrary widget code. Skipped, the release left
             # ``_pressed`` armed with this gesture's button for the next one,
             # and the pairing this class exists for was exact only on the happy
-            # path (review of #135, second round, finding 8).
+            # path (review of #135, second round, finding 8). The stray goes
+            # with the gesture it interrupted.
             if released:
                 button, self._pressed = self._pressed, None
+                self._stray = None
                 route_selection_gesture(self, button)
 
 
@@ -1194,11 +1207,20 @@ class TerminalPane(Widget, can_focus=True):
         if shown is None:
             shown = self._shown()
         if wrapped:
+            # The composed strip is padded to the WIDGET's width; a wrapped row's
+            # real extent is the PANE's (where tmux wrapped it). While the two
+            # disagree — the 100 ms resize debounce, a refused resize-window — the
+            # narrower one is the row, stated as such: a narrower pane's row is
+            # cropped to the pane (the strip's padding is not text), and a wider
+            # pane can never show more than the widget paints (reviews of #203,
+            # round 4, and of the fold — both measured; neither reproduced a copy
+            # past either width, and the rule is now written where it is read).
             text = self._composed_strip(y, shown).text
             facts = self.facts
             pane_width = facts.width if facts is not None else self.content_size.width
-            if cell_len(text) > pane_width:
-                text = set_cell_size(text, pane_width)
+            limit = min(pane_width, self.content_size.width)
+            if cell_len(text) > limit:
+                text = set_cell_size(text, limit)
             return DisplayedRow(text, wrapped=True)
         if self._composed(y, shown):
             return DisplayedRow(self._composed_strip(y, shown).text.rstrip())

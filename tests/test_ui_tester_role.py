@@ -544,8 +544,12 @@ def test_doctor_declines_to_guess_from_a_name_alone(
                     # boundary that let `-` end the identifier read each as the
                     # tool it merely names (review of #203).
                     "playwright-report": {},
+                    "playwright_report": {},
+                    "playwright-reporter": {},
                     "selenium-grid-docs": {},
+                    "selenium-docs-site": {},
                     "puppeteer-recorder": {"args": ["puppeteer-recorder"]},
+                    "puppeteer-examples-repo": {},
                     "browser-use-examples": {},
                     "chrome-devtools-mcp-docs": {},
                 }
@@ -562,8 +566,12 @@ def test_doctor_declines_to_guess_from_a_name_alone(
         "browserslist-mcp",
         "chrome-history-reader",
         "playwright-report",
+        "playwright_report",
+        "playwright-reporter",
         "selenium-grid-docs",
+        "selenium-docs-site",
         "puppeteer-recorder",
+        "puppeteer-examples-repo",
         "browser-use-examples",
         "chrome-devtools-mcp-docs",
     ):
@@ -591,6 +599,7 @@ def test_doctor_recognises_the_real_package_ids(
                     "sh": {"args": ["@browserbasehq/mcp-stagehand"]},
                     "bu": {"command": "browser-use-mcp"},
                     "sel": {"command": "selenium-webdriver"},
+                    "grid": {"command": "selenium-grid"},
                     "playwright-report": {},
                 }
             }
@@ -598,7 +607,7 @@ def test_doctor_recognises_the_real_package_ids(
     )
     config_dirs(home)
     check = diagnostics._check_browser_tools(tmp_path)
-    for real in ("mcp pup", "mcp pw1", "mcp pw2", "mcp sh", "mcp bu", "mcp sel"):
+    for real in ("mcp pup", "mcp pw1", "mcp pw2", "mcp sh", "mcp bu", "mcp sel", "mcp grid"):
         assert real in check.detail, real
     assert "playwright-report" not in check.detail
 

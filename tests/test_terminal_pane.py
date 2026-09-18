@@ -2321,6 +2321,73 @@ def test_a_second_button_pressed_mid_drag_does_not_steal_the_drags_release(
     assert len(notices) == 1, f"one copy, and the stray right release copied nothing: {notices}"
 
 
+def test_a_stray_button_whose_release_never_arrives_does_not_lock_the_mouse_out(
+    fake: FakeTmux, tmp_path: Path
+) -> None:
+    """Review of the fold. The stray's bookkeeping was cleared only by its own
+    release. Lost — the pointer left the terminal with the right button down —
+    it outlived the drag; the next right click's press was accepted and its
+    release dropped as the stray's, leaving ``_pressed`` armed for good and
+    every later left press classified as stray: nothing in the app clickable.
+    A stray goes with the gesture it interrupted, and a new gesture starts clean."""
+
+    async def drive() -> tuple[str, list[str]]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 8)) as pilot:
+            pane = host.pane
+            await wait_until(pilot, lambda: synced(pane))
+            for event in (
+                # a left drag with a stray right press whose release is lost
+                mouse_event(events.MouseDown, pane, (0, 2), 1),
+                mouse_event(events.MouseMove, pane, (5, 2), 1),
+                mouse_event(events.MouseDown, pane, (5, 2), 3),
+                mouse_event(events.MouseUp, pane, (5, 2), 1),
+                # later: an ordinary right click, then an ordinary left drag
+                mouse_event(events.MouseDown, pane, (1, 1), 3),
+                mouse_event(events.MouseUp, pane, (1, 1), 3),
+                mouse_event(events.MouseDown, pane, (0, 2), 1),
+                mouse_event(events.MouseMove, pane, (5, 2), 1),
+                mouse_event(events.MouseUp, pane, (5, 2), 1),
+            ):
+                host.post_message(event)
+            await pilot.pause()
+            await pilot.pause()
+            return host.clipboard, list(host.notices)
+
+    clipboard, notices = run(drive())
+    assert clipboard == "third ", "the second left drag copied: its press was not read as stray"
+    assert len(notices) == 2, f"both left drags copied, the right click nothing: {notices}"
+
+
+def test_a_copy_over_a_wrapped_row_is_the_panes_width_while_the_pane_is_narrower(
+    fake: FakeTmux, tmp_path: Path
+) -> None:
+    """Pinned for the review of the fold, which read the wrapped-row crop as
+    reaching only the widget's width while the pane was narrower (the resize
+    debounce, a refused resize-window) — a 30-column command copied padded to 40
+    cells and glued onto its continuation. Measured: the crop to the pane's width
+    already covered it, so this pins the other half of the invariant the wider-pane
+    test above pins — a wrapped row is copied at the NARROWER of the two widths."""
+    fake.apply_resize = False
+    pane_fake = fake.panes["%1"]
+    pane_fake.width, pane_fake.height = 30, 3
+    pane_fake.screen = ["a" * 30, "tail", ""]
+    pane_fake.wrapped = {0}
+
+    async def drive() -> tuple[str | None, int]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 3)) as pilot:
+            pane = host.pane
+            await wait_until(pilot, lambda: pane.facts is not None and "tail" in rows(pane)[1].text)
+            assert pane.facts is not None and pane.facts.width == 30, "the premise: a narrower pane"
+            await drag(pilot, pane, (0, 0), (3, 1))
+            return pane.selected_text(), pane.content_size.width
+
+    copied, width = run(drive())
+    assert width == 40
+    assert copied == "a" * 30 + "tail", copied
+
+
 def test_the_copy_key_outside_the_pane_copies_the_panes_highlight_and_nothing_empty(
     fake: FakeTmux, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

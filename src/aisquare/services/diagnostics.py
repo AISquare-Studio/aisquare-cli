@@ -890,47 +890,85 @@ _BROWSER_PROVIDERS: tuple[str, ...] = (
 #: `selenium-webdriver` all hit; `browserslist-mcp` and `file-browser` do not. A
 #: hyphen is deliberately NOT part of the identifier: the real package ids join
 #: the provider to `server`, `mcp` and a scope with hyphens, and a boundary that
-#: kept them out missed every one of those (review of the fold).
+#: kept them out missed every one of those (review of the fold). What the rest of
+#: the identifier may be is `_names_browser_tool`'s question.
 _BROWSER_PROVIDER_RE = re.compile(
     "|".join(rf"(?<![A-Za-z0-9]){re.escape(name)}(?![A-Za-z0-9])" for name in _BROWSER_PROVIDERS),
     re.IGNORECASE,
 )
 
-#: Tails that make a hyphenated identifier ABOUT a provider rather than the
-#: provider: `playwright-report`, `selenium-grid-docs`, `puppeteer-recorder`,
-#: `browser-use-examples`, `chrome-devtools-mcp-docs`. A declared table, like the
-#: providers themselves — a boundary cannot tell `playwright-report` from
-#: `server-puppeteer`, both have the hyphen adjacent — so the whole identifier
-#: around a match is read, and one ending in a tail here is not the tool
-#: (review of #203, round 4; review of the fold).
-_BROWSER_LOOKALIKE_TAILS: tuple[str, ...] = (
-    "-doc",
-    "-docs",
-    "-example",
-    "-examples",
-    "-report",
-    "-reports",
-    "-recorder",
-    "-grid",
-    "-tutorial",
-    "-demo",
+#: The tokens a REAL package id joins a provider with — `mcp-server-playwright`,
+#: `@modelcontextprotocol/server-puppeteer`, `playwright-mcp-server`,
+#: `browser-use-mcp`, `selenium-webdriver`, `chrome-devtools-mcp@…`. A declared
+#: table, like the providers themselves: the whole identifier around a match is
+#: split into tokens, and it names the tool only when every token that is not
+#: the provider's own is one of these. `playwright-report`, `playwright_report`,
+#: `selenium-grid-docs`, `puppeteer-examples-repo` and `selenium-docs-site` are
+#: ABOUT a tool and fail that rule; `selenium-grid` (a real Selenium component)
+#: passes it. One rule, where a widened boundary and a list of benign tails had
+#: disagreed about `_` and each other (review of #203, round 4; review of the
+#: fold, twice).
+_PACKAGE_TOKENS: frozenset[str] = frozenset(
+    {
+        "mcp",
+        "server",
+        "servers",
+        "cli",
+        "tool",
+        "tools",
+        "plugin",
+        "plugins",
+        "official",
+        "latest",
+        "node",
+        "npm",
+        "npx",
+        "js",
+        "ts",
+        "py",
+        "python",
+        "chrome",
+        "browser",
+        "headless",
+        "web",
+        "automation",
+        "grid",
+        "driver",
+        "webdriver",
+        "devtools",
+        "use",
+    }
 )
 
 _IDENTIFIER_RE = re.compile(r"[A-Za-z0-9_-]+")
+#: What joins the tokens of a package id: `-` and `_` inside a name, `/` after a
+#: scope (`@playwright/mcp`), `@` before a scope or a version (`…@latest`).
+_TOKEN_SPLIT_RE = re.compile(r"[-_/@]+")
+
+
+def _provider_tokens() -> frozenset[str]:
+    tokens: set[str] = set()
+    for name in _BROWSER_PROVIDERS:
+        tokens.update(t.lower() for t in _TOKEN_SPLIT_RE.split(name) if t)
+    return frozenset(tokens)
+
+
+_KNOWN_TOKENS = _PACKAGE_TOKENS | _provider_tokens()
 
 
 def _names_browser_tool(text: str) -> bool:
     """Whether ``text`` names a browser-tooling provider, as a whole identifier."""
     for match in _BROWSER_PROVIDER_RE.finditer(text):
-        # The hyphen-joined identifier around the match: `mcp-server-playwright`
-        # for a match on `playwright`, `playwright-report` for the same match.
+        # The identifier around the match: `mcp-server-playwright` for a match on
+        # `playwright`, `playwright-report` for the same match. `_` counts as a
+        # joiner exactly as `-` does, so the two spellings are one case.
         start, end = match.span()
         while start > 0 and _IDENTIFIER_RE.fullmatch(text[start - 1]):
             start -= 1
         while end < len(text) and _IDENTIFIER_RE.fullmatch(text[end]):
             end += 1
-        identifier = text[start:end].lower()
-        if not identifier.endswith(_BROWSER_LOOKALIKE_TAILS):
+        tokens = [t.lower() for t in _TOKEN_SPLIT_RE.split(text[start:end]) if t]
+        if all(token in _KNOWN_TOKENS for token in tokens):
             return True
     return False
 

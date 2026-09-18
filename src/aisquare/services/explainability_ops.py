@@ -1284,7 +1284,13 @@ def _destination(target: ResolvedTarget, verdict: ProxyProbe) -> ProxyState:
         and not is_loopback(target.proxy_url)
     )
     if not target.gateway_url:
-        adopt = verdict.gateway if verdict.gateway and not foreign_view else "<url>"
+        # Offered to adopt only when `configure_target` would take it: a
+        # schemeless or garbage report (`other.example:8000`, `unknown`) pasted
+        # into the command fails with "needs a scheme" (review of the fold).
+        usable = (
+            bool(verdict.gateway) and url_problem(verdict.gateway or "", what="gateway") is None
+        )
+        adopt = verdict.gateway if verdict.gateway and usable and not foreign_view else "<url>"
         aside = (
             " (its own local view of it, not an address this machine can use)"
             if foreign_view
@@ -1418,14 +1424,10 @@ def _loopback_url(url: str) -> bool:
     must not demand one. Here the question is whether a proxy's reported
     gateway is its own loopback view, and a report with no parseable host is
     not that — it is a report that cannot be shown to agree with anything.
+    :func:`url_problem` is the one judge of "usable http(s) URL" (a port out of
+    range included), so this does not parse on its own (review of the fold).
     """
-    split = split_url(url)
-    return (
-        split is not None
-        and split.scheme in ("http", "https")
-        and bool(split.hostname)
-        and is_loopback(url)
-    )
+    return url_problem(url, what="gateway") is None and is_loopback(url)
 
 
 def _shares_host(one: str, two: str) -> bool:

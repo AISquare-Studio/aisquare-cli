@@ -41,6 +41,24 @@ from aisquare.models import (
 _DEFAULT_EMPTY = 'No context entries yet. Add one with: aisquare remember "…"'
 
 
+def refuse_conflicting_scope(every: bool, project: str | None) -> None:
+    """``--all`` and ``--project`` name different scopes; both at once is refused.
+
+    The mechanism, not one command's guard: ``--all`` used to win silently in
+    ``fleet shutdown`` (meant as one project, took every fleet down) and still
+    did in ``metrics show``/``list`` after that was patched per command (rounds
+    4 and 6 of #203). One helper, one wording, one exit code — 2, a usage
+    error, which the root group renders as ``{"error": "usage", …}`` on stdout
+    under ``--json`` (round 7: a caller that asked for JSON gets JSON or nothing).
+    """
+    if every and project is not None:
+        raise typer.BadParameter(
+            "--all and --project conflict: --all is every project, --project one project — "
+            "drop one of them",
+            param_hint="--all",
+        )
+
+
 def local_time(value: datetime) -> datetime:
     """A stored (UTC) timestamp in the user's local timezone, for display."""
     return value.astimezone()

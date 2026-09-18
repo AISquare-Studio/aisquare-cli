@@ -338,6 +338,27 @@ def test_session_end_releases_claims(
     assert after[0]["claimed_by"] is None
 
 
+def test_a_plain_sessions_clear_still_releases_its_claims(
+    runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Rule 2 of the fleet-row section keeps claims across a ``/clear`` for the
+    process in a fleet pane only. A session with no fleet row has nothing that
+    could adopt them, so its ``reason: clear`` releases exactly as any end does."""
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
+    _start(runner, CODER, work_dir)
+    monkeypatch.delenv("AISQUARE_ROLE")
+    runner.invoke(app, ["task", "add", "wire auth", "--as", "bbbb2222"])
+    listed = json.loads(runner.invoke(app, ["--json", "task", "list"]).stdout)
+    runner.invoke(app, ["task", "claim", listed[0]["id"], "--as", "bbbb2222"])
+
+    payload = json.dumps({"cwd": str(work_dir), "session_id": CODER, "reason": "clear"})
+    end = runner.invoke(app, ["hook", "session-end"], input=payload)
+    assert end.exit_code == 0
+    after = json.loads(runner.invoke(app, ["--json", "task", "list"]).stdout)
+    assert after[0]["status"] == "todo"
+    assert after[0]["claimed_by"] is None
+
+
 def test_master_switch_disables_everything(
     runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

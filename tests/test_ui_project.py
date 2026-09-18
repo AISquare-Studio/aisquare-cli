@@ -177,7 +177,9 @@ class ScriptedServer(TmuxServer):
     def version(self) -> tuple[int, int] | None:
         return (3, 7)
 
-    def capture(self, pane_id: str, *, scrollback: int = 0, height: int | None = None) -> Capture:
+    def capture(
+        self, pane_id: str, *, scrollback: int = 0, height: int | None = None, flags: bool = False
+    ) -> Capture:
         self.captures.append((pane_id, scrollback, height))
         facts = PaneFacts(
             pane_id=pane_id,

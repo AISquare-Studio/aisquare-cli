@@ -2947,9 +2947,11 @@ def test_the_servers_tmux_version_gates_the_chords_it_would_type_out(
 
     assert old_sent == [("Enter",)], "a chord tmux 3.4 would type out must not be sent"
     # A keystroke LOST for a reason the reader can fix: a warning, naming the
-    # version — not the "no way to type" line, which is false here (there is a
-    # way, on 3.5) and was information (review of #161, round 2).
-    assert old_notices == ["tmux 3.4 cannot carry shift+enter — 3.5 or newer can"]
+    # version it needs — not the "no way to type" line, which is false here
+    # (there is a way, on 3.5) and was information (review of #161, round 2).
+    # Not the server's own version: wording it meant a branch for a None the
+    # gate had already ruled out (reviews of #161, rounds 3-4).
+    assert old_notices == ["this tmux cannot carry shift+enter — 3.5 or newer can"]
     assert old_severities == ["warning"]
     assert modern.version == "tmux 3.7c"  # the control's premise, spelled out
     assert modern_sent == [("S-Enter",), ("Enter",)]  # …and there the chord goes through
@@ -3548,17 +3550,15 @@ def test_a_change_hidden_under_the_corner_marker_leaves_the_highlight_standing(
     assert after_visible is None, "a change under the highlight the user CAN see drops it"
 
 
-#: Keys a focused pane sees that are not keystrokes aimed at the agent, written
-#: out here rather than derived from ``core.keys``' tables — a loop over the
-#: thing under test shrinks rather than fails when a name goes missing (review;
-#: CONTRIBUTING's "emptiness as both goal and symptom"). Five groups, each a bug
+#: Keys a focused pane sees that carry no keystroke at all, written out here
+#: rather than derived from ``core.keys``' tables — a loop over the thing under
+#: test shrinks rather than fails when a name goes missing (review;
+#: CONTRIBUTING's "emptiness as both goal and symptom"). Four groups, each a bug
 #: that reached a user or a review: the fourteen modifier names, the locks WITH a
 #: modifier held (Textual keeps the prefix for those, so an exact match on
 #: ``event.key`` let them through), the whole keys a kitty-protocol terminal
-#: reports only because Textual asks for every key, those same keys with a
-#: modifier held (a residue round 1 documented and round 2 lost), and the Cmd
-#: chords macOS hands the pane — commands for the OS, which the round-1 rule
-#: read as deliberate aim and toasted one by one.
+#: reports only because Textual asks for every key, and those same keys with a
+#: modifier held (a residue round 1 documented and round 2 lost).
 NOTHING_TO_TYPE = (
     "left_shift",
     "left_control",
@@ -3592,10 +3592,13 @@ NOTHING_TO_TYPE = (
     "ctrl+pause",
     "shift+menu",
     "alt+media_play",
-    "super+k",
-    "super+f5",
-    "hyper+x",
 )
+
+#: The Cmd chords macOS hands the pane — a DIFFERENT reason (``command``: a
+#: keystroke was pressed, at the OS) that is silent for a different argument,
+#: kept apart so the list's name says what its entries are (review of #161,
+#: round 4). The round-1 rule read them as deliberate aim and toasted one by one.
+COMMAND_CHORDS = ("super+k", "super+f5", "hyper+x")
 
 
 def test_a_key_with_nothing_to_type_is_ignored_in_silence(fake: FakeTmux, tmp_path: Path) -> None:
@@ -3605,7 +3608,10 @@ def test_a_key_with_nothing_to_type_is_ignored_in_silence(fake: FakeTmux, tmp_pa
     volume keys are nobody's message to an agent — so nothing is sent and
     nothing is said. The old path raised one "tmux has no name for this key —
     dropped" toast per key, three red toasts into an ordinary typing session.
-    The control beside it is a chord that USES a modifier and still arrives.
+    The Cmd chords ride the same loop for a different reason that is silent on
+    a different argument (``tests/test_keys.py`` pins the reasons; this pins
+    the silence). The control beside them is a chord that USES a modifier and
+    still arrives.
     """
 
     async def drive() -> tuple[list[str], list[tuple[str, ...]]]:
@@ -3613,7 +3619,7 @@ def test_a_key_with_nothing_to_type_is_ignored_in_silence(fake: FakeTmux, tmp_pa
         async with host.run_test(size=(40, 6)) as pilot:
             host.pane.focus()
             await pilot.pause()
-            for key in NOTHING_TO_TYPE:
+            for key in (*NOTHING_TO_TYPE, *COMMAND_CHORDS):
                 await pilot.press(key)
             await pilot.press("ctrl+a")  # the modifier USED: the chord still arrives
             await pilot.pause()

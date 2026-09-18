@@ -1543,9 +1543,13 @@ class TerminalPane(Widget, can_focus=True):
         whether the reader can do anything about it: a chord tmux has no safe
         spelling for is a fact about the key table, said once as information;
         a chord this tmux is too old to carry is a warning that names the
-        version, since a newer server delivers it (review of #161, round 2 —
-        the first version gave the old-server loss the "no way to type" line,
-        which is false: there is a way, on tmux 3.5).
+        version it needs, since a newer server delivers it (review of #161,
+        round 2 — the first version gave the old-server loss the "no way to
+        type" line, which is false: there is a way, on tmux 3.5). The server's
+        own version is not in the line: reading it here again would mean a
+        branch for a ``None`` the gate has already ruled out, and that branch
+        was dead code in one round and an ``assert`` in the next (reviews of
+        #161, rounds 3-4); ``tmux -V`` is a keystroke away.
 
         TOTAL over ``DropReason``, and the type checker holds it so: a reason
         added to ``core.keys`` that this does not answer is a red ``mypy``, not
@@ -1555,16 +1559,8 @@ class TerminalPane(Widget, can_focus=True):
         reason = drop.reason
         match reason:
             case "too_old":
-                # Only ever produced under a version the gate READ and found
-                # below the minimum — ``_extended_keys`` fails open when the
-                # version is unknown, so there is no unknown version here to
-                # word around (review of #161, round 3).
-                version = self._server_version()
-                assert version is not None
                 need = ".".join(str(part) for part in EXTENDED_MINIMUM)
-                self._warn_once(
-                    key, f"tmux {version[0]}.{version[1]} cannot carry {key} — {need} or newer can"
-                )
+                self._warn_once(key, f"this tmux cannot carry {key} — {need} or newer can")
             case "no_name":
                 self._warn_once(
                     key, f"no way to type {key} into a tmux pane", severity="information"

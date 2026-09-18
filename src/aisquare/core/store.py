@@ -795,6 +795,7 @@ class ContextStore(Protocol):
     # Usage readings (v16, #146): the history behind "how fast is this window filling".
     def add_usage_sample(self, sample: UsageSample) -> None: ...
     def usage_samples(self, slot: int, *, since: datetime) -> list[UsageSample]: ...
+    def delete_usage_samples(self, slot: int) -> int: ...
     # Per-project settings (v15): one key, one value, per project.
     def project_setting(self, project_id: str, key: str) -> str | None: ...
     def set_project_setting(self, project_id: str, key: str, value: str) -> None: ...
@@ -2422,6 +2423,13 @@ class SqliteStore:
             (slot, since.isoformat()),
         ).fetchall()
         return [_row_to_usage_sample(row) for row in rows]
+
+    def delete_usage_samples(self, slot: int) -> int:
+        """Drop every reading of ``slot``: a removed account's history must not rate the
+        next occupant's window (review of #205, third round). Returns the count."""
+        cursor = self._conn.execute("DELETE FROM claude_usage WHERE slot = ?", (slot,))
+        self._conn.commit()
+        return int(cursor.rowcount)
 
     # --- per-project settings (v15) ---------------------------------------------------------
 

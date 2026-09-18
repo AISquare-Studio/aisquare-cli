@@ -480,12 +480,13 @@ def _resolve_reset(when: str, zone_name: str | None, now: datetime) -> datetime 
     clock = _RESET_TIME.match(when.strip())
     if clock is None:
         return None
-    hour = int(clock.group("hour")) % 12
+    raw_hour = int(clock.group("hour"))
+    minute = int(clock.group("minute") or 0)
+    if raw_hour > 12 or minute > 59:  # `13:00pm` is no clock time; `12:30am` is 00:30
+        return None
+    hour = raw_hour % 12
     if clock.group("ampm").lower() == "pm":
         hour += 12
-    minute = int(clock.group("minute") or 0)
-    if hour > 23 or minute > 59:
-        return None
     try:
         zone: tzinfo = ZoneInfo(zone_name) if zone_name else (now.astimezone().tzinfo or UTC)
     except (ZoneInfoNotFoundError, ValueError):

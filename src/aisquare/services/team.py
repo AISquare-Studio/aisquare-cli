@@ -429,6 +429,23 @@ def session_account(transcript_path: str | None) -> str | None:
     return os.environ.get("CLAUDE_CONFIG_DIR", "").strip() or None
 
 
+def slot_labels_via(store: ContextStore) -> Mapping[int, str]:
+    """Slot → label through the caller's OWN store handle, for a board rendered inside a hook.
+
+    The alias everywhere (review of #205, finding 10 and third round) — but a
+    hook renders the board while it holds a session with pending writes, and a
+    second connection opened underneath would wait on that write until the
+    busy timeout, so the labels are read through the handle it already has.
+    Fails open to ``{}``: ``account N`` is the fallback everywhere.
+    """
+    from aisquare.services import claude_accounts as accounts_service  # lazy: no import cycle
+
+    try:
+        return accounts_service.slot_labels(store=store)
+    except Exception:
+        return {}
+
+
 def account_label(account: str | None, labels: Mapping[int, str] | None = None) -> str | None:
     """The short display form of an account.
 
@@ -1357,6 +1374,7 @@ def hook_session_start(
             store.recent_events(project.id, limit=_BOARD_EVENTS),
             me=session,
             assigned=assigned,
+            labels=slot_labels_via(store),
         )
 
 
@@ -1410,6 +1428,7 @@ def hook_prompt_heartbeat(
                 store.recent_events(project.id, limit=_BOARD_EVENTS),
                 me=session,
                 assigned=assigned,
+                labels=slot_labels_via(store),
             )
         # Same check as session_start, on the path that actually runs every turn.
         # It must survive the empty-delta early return below: a collision warning
@@ -1638,7 +1657,6 @@ class TurnFailure:
 
 def hook_stop_failure(
     session_id: str,
-    cwd: Path | None,
     *,
     error: str | None,
     message: str | None,
@@ -1677,8 +1695,13 @@ def hook_stop_failure(
             refreshed = store.get_session(session.id) or session
             return TurnFailure(refreshed, kind, None)
         notice = claude_accounts_core.parse_limit_notice(message, now=_now())
-        already_limited = session.state == "limited"
-        store.mark_limited(session.id, notice.resets_at if notice is not None else None)
+        # A row `fleet switch` has marked HANDOVER_STATE is already handled: a
+        # re-fire during the hand-over must neither start a second worker nor
+        # write `limited` over the mark — its SessionEnd would then release the
+        # claims the resume was to inherit (review of #205, third round).
+        already_limited = session.state in ("limited", HANDOVER_STATE)
+        if session.state != HANDOVER_STATE:
+            store.mark_limited(session.id, notice.resets_at if notice is not None else None)
         agent = store.fleet_agent_for_session(session.project_id, session.id)
         label = agent.label if agent is not None else (session.label or short_id(session.id))
         if not already_limited:
@@ -1960,7 +1983,11 @@ def render_board(
     events: list[TeamEvent],
 ) -> str:
     """The human/board view (``asq board``), without the protocol contract."""
-    return _render_board(project, sessions, tasks, events, me=None)
+    from aisquare.services import claude_accounts as accounts_service  # lazy: no import cycle
+
+    return _render_board(
+        project, sessions, tasks, events, me=None, labels=accounts_service.slot_labels()
+    )
 
 
 def _render_board(
@@ -1971,6 +1998,7 @@ def _render_board(
     *,
     me: TeamSession | None,
     assigned: Assignment | None = None,
+    labels: Mapping[int, str] | None = None,
 ) -> str:
     now = _now()
     lines = ["<aisquare-team>"]
@@ -1990,7 +2018,7 @@ def _render_board(
             parts = [f"  - {short_id(session.id)} {session.role}"]
             if me is not None and session.id == me.id:
                 parts.append("(you)")
-            label = account_label(session.account)
+            label = account_label(session.account, labels)
             # Only worth the noise once several accounts are actually in play.
             if label and accounts > 1:
                 parts.append(f"[{label}]")

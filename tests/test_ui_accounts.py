@@ -47,6 +47,7 @@ from aisquare.cli.ui.views.accounts import (
 from aisquare.core import browser
 from aisquare.core import claude_accounts as core
 from aisquare.core import tmux as tmux_core
+from aisquare.core.store import store_session
 from aisquare.core.tmux import Completed, TmuxServer, WindowInfo
 from aisquare.models import (
     AccountsOverview,
@@ -861,8 +862,10 @@ def test_remove_runs_the_service_and_reports_where_the_directory_went(
 ) -> None:
     removed: list[int] = []
 
-    def remove(account: ClaudeAccount) -> Path:
+    def remove(account: ClaudeAccount, *, notes: list[str] | None = None) -> Path:
         removed.append(account.slot)
+        if notes is not None:  # what the service says about a binding that named the slot
+            notes.append("role coder was bound to slot 2; it now names two@example.com — …")
         return tmp_path / "2.removed-20260909T120000Z"
 
     monkeypatch.setattr(accounts_service, "remove", remove)
@@ -880,6 +883,7 @@ def test_remove_runs_the_service_and_reports_where_the_directory_went(
     said = drive(go, overview=overview)
     assert removed == [2]
     assert said.startswith("✓ removed") and "2.removed-20260909T120000Z" in said
+    assert "role coder was bound to slot 2; it now names two@example.com" in said  # third round
 
 
 # --- arranging (#145): the default badge, the order arrows, disable -----------------------------
@@ -1022,11 +1026,15 @@ def test_the_row_says_how_long_the_window_has_at_the_current_pace(
         2: None,
     }
 
-    def sample_usage(account: ClaudeAccount, **kwargs: Any) -> ClaudeUsage:
-        recorded.append(account.slot)
-        return accounts_service.usage(account, **kwargs)
+    real_usage = accounts_service.usage
 
-    monkeypatch.setattr(accounts_service, "sample_usage", sample_usage)
+    def usage_spy(account: ClaudeAccount, **kwargs: Any) -> ClaudeUsage:
+        recorded.append(account.slot)
+        return real_usage(account, **kwargs)
+
+    # The tick fetches through `read_usage(record=False)` and records in one store
+    # session of its own (third round): the reading is spied, the sample is checked below.
+    monkeypatch.setattr(accounts_service, "usage", usage_spy)
     monkeypatch.setattr(
         accounts_service, "usage_trend", lambda slot, latest, **kwargs: trends.get(slot)
     )
@@ -1041,7 +1049,10 @@ def test_the_row_says_how_long_the_window_has_at_the_current_pace(
         return line(view, 1), line(view, 2)
 
     one, two = drive(go, overview=overview)
-    assert sorted(recorded) == [1, 2]  # every signed-in slot was SAMPLED, not merely read
+    assert sorted(recorded) == [1, 2]  # every signed-in slot was read…
+    with store_session() as store:  # …and SAMPLED, in the page's one store open
+        assert len(store.usage_samples(1, since=NOW - timedelta(days=1))) == 1
+        assert len(store.usage_samples(2, since=NOW - timedelta(days=1))) == 1
     assert "session ▮▮▮▯▯ 60%" in one and "≈ 1.3 h to the limit" in one
     assert "session ▮▮▮▯▯ 60%" in two and "to the limit" not in two  # no trend yet: no claim
 

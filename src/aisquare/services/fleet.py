@@ -2562,11 +2562,14 @@ def switch(
         agent = _live_agent(store, project, label)
         session = store.get_session(agent.session_id) if agent.session_id else None
         task = store.get_task(agent.task_id) if agent.task_id else None
-        recent = [
-            event
-            for event in store.recent_events(project.id, limit=60)
-            if agent.session_id is not None and event.session_id == agent.session_id
-        ]
+        # The session's own newest entries (oldest first), not the project's last
+        # 60 filtered down: on a busy board those all belonged to other agents
+        # and the prompt lost its "last board entries" (review of #205, third round).
+        recent = (
+            store.filtered_events(project.id, session_id=agent.session_id, limit=_HANDOFF_NOTES)
+            if agent.session_id is not None
+            else []
+        )
     current = _account_slot_of(agent, session)
     notes: list[str] = []
     # The accounts service decides, as for every launch

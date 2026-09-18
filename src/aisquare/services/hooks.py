@@ -192,7 +192,6 @@ def needs_attention(
 
 
 def turn_failed(
-    cwd: Path | None,
     *,
     session_id: str | None = None,
     error: str | None = None,
@@ -221,7 +220,7 @@ def turn_failed(
     if session_id is None:
         return
     failure = team_service.hook_stop_failure(
-        session_id, cwd, error=error, message=message, details=details
+        session_id, error=error, message=message, details=details
     )
     metrics_service.close_turn(session_id)
     if failure is not None and failure.limited and not failure.already_limited:

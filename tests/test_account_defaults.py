@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import shutil
 import sqlite3
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -293,6 +294,50 @@ def test_the_agent_header_and_fleet_ls_name_the_account_as_the_rest_of_the_cli_d
     assert "  work  " in fleet_cli._agent_line(status(2), labels)
     assert "  plain claude  " in fleet_cli._agent_line(status(1), {})  # never `account 1`
     assert "  account 2  " in fleet_cli._agent_line(status(2), {})
+
+
+def test_a_disabled_account_cannot_be_made_the_default_and_disabling_the_default_is_said(
+    fake_home: Path, runner: CliRunner
+) -> None:
+    """Accepted silently, the default was a rung every launch skipped (third round)."""
+    core.create_account()
+    core.create_account()
+    service.set_disabled("2", True)
+    with pytest.raises(service.AccountsError, match="enable it first: aisquare accounts enable 2"):
+        service.set_default("2")
+    refused = runner.invoke(app, ["accounts", "default", "2"])
+    assert refused.exit_code == 1 and "enable it first" in refused.output
+    assert service.machine_default() is None
+
+    service.set_default("3")
+    said = runner.invoke(app, ["accounts", "disable", "3"])
+    assert said.exit_code == 0, said.output
+    assert "it is the machine default: launches fall through" in said.stdout
+    assert service.machine_default() is not None  # the choice is kept (a temporary disable)
+
+
+def test_a_slot_removed_between_the_reconcile_and_the_write_is_a_sentence(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The store's ``KeyError`` reached the top as a traceback (third round)."""
+    from aisquare.core.store import SqliteStore
+
+    core.create_account()
+
+    def vanished(self: Any, *args: Any, **kwargs: Any) -> None:
+        raise KeyError(2)
+
+    monkeypatch.setattr(SqliteStore, "set_claude_account_alias", vanished)
+    monkeypatch.setattr(SqliteStore, "set_claude_account_disabled", vanished)
+    monkeypatch.setattr(SqliteStore, "set_claude_account_default", vanished)
+    calls: list[Callable[[], object]] = [
+        lambda: service.set_alias("2", "work"),
+        lambda: service.set_disabled("2", True),
+        lambda: service.set_default("2"),
+    ]
+    for call in calls:
+        with pytest.raises(service.NoSuchAccount, match="removed meanwhile"):
+            call()
 
 
 # --------------------------------------------------------------------------- launch and spawn

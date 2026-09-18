@@ -219,7 +219,6 @@ def stop_failure() -> None:
     try:
         payload = _payload()
         hooks_service.turn_failed(
-            _cwd(payload),
             session_id=_str(payload, "session_id"),
             error=_str(payload, "error"),
             message=_str(payload, "last_assistant_message"),

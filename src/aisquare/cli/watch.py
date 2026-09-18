@@ -35,6 +35,7 @@ from aisquare.core import harness, paths
 from aisquare.core.console import stderr_console, stdout_console
 from aisquare.core.store import unmet_needs
 from aisquare.models import ProjectInfo, TeamEvent, TeamSession, TeamTask
+from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import team as team_service
 
 if TYPE_CHECKING:
@@ -155,6 +156,9 @@ def _session_lines(sessions: list[TeamSession]) -> Text:
         return text
     now = datetime.now(tz=live[0].last_seen_at.tzinfo)
     accounts = len({s.account for s in live if s.account})
+    # The alias, as every other surface shows it (review of #205, third round);
+    # read once per render, and only once several accounts are in play.
+    labels = accounts_service.slot_labels() if accounts > 1 else {}
     for session in live:
         emoji = _ROLE_EMOJI.get(session.role, "🤖")
         style = _ROLE_STYLE.get(session.role, "white")
@@ -164,7 +168,7 @@ def _session_lines(sessions: list[TeamSession]) -> Text:
         text.append(f"  {chip}", style=chip_style)
         if session.state == "limited" and session.limit_resets_at is not None:
             text.append(f" (resets {format_reset(session.limit_resets_at)})", style="magenta")
-        label = team_service.account_label(session.account)
+        label = team_service.account_label(session.account, labels)
         # Only meaningful once the board spans several accounts.
         if label and accounts > 1:
             text.append(f"  {label}", style="cyan dim")

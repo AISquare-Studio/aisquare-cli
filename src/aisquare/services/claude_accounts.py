@@ -240,13 +240,33 @@ def _arranged(store: ContextStore) -> list[ClaudeAccount]:
     return arranged
 
 
-def _read_arranged() -> tuple[list[ClaudeAccount], str | None]:
-    """The arranged list, or the plain directories plus the reason the registry was not read."""
+def _read_registry(
+    project: ProjectInfo | None = None,
+) -> tuple[list[ClaudeAccount], str | None, int | None]:
+    """The arranged list, the reason the registry was not read, and ``project``'s default slot.
+
+    One store open for both, behind one fail-open: the project-default rung
+    used to open a second session of its own with no ``sqlite3.Error`` guard,
+    so a store going unreadable between the two opens raised out of ``choose``
+    and out of ``launch`` (review of #205, third round).
+    """
     try:
         with store_session() as store:
-            return _arranged(store), None
+            accounts = _arranged(store)
+            raw = (
+                store.project_setting(project.id, PROJECT_ACCOUNT_KEY)
+                if project is not None
+                else None
+            )
     except sqlite3.Error as exc:
-        return core.list_accounts(), f"accounts registry unreadable ({exc})"
+        return core.list_accounts(), f"accounts registry unreadable ({exc})", None
+    return accounts, None, int(raw) if raw is not None and raw.isdigit() else None
+
+
+def _read_arranged() -> tuple[list[ClaudeAccount], str | None]:
+    """The arranged list, or the plain directories plus the reason the registry was not read."""
+    accounts, note, _slot = _read_registry()
+    return accounts, note
 
 
 def list_accounts() -> list[ClaudeAccount]:
@@ -305,16 +325,19 @@ def _resolve_in(
     )
 
 
-def slot_labels() -> dict[int, str]:
+def slot_labels(store: ContextStore | None = None) -> dict[int, str]:
     """Slot → the label the Accounts page and the launch line use (the alias when one is set).
 
     For the surfaces that know an agent only by its slot — the agent header,
     ``fleet ls`` — so an aliased account reads ``work`` everywhere rather than
     ``account 2`` on two of them (review of #205, finding 10). Fails open to
     ``{}``: a label is a courtesy, and every caller falls back to ``account N``.
+    ``store`` is a caller's own open handle — a hook rendering the board while it
+    holds one must not open a second connection under its own pending write.
     """
     try:
-        return {account.slot: core.label(account) for account in list_accounts()}
+        accounts = _arranged(store) if store is not None else list_accounts()
+        return {account.slot: core.label(account) for account in accounts}
     except Exception:
         return {}
 
@@ -392,8 +415,8 @@ def choose(
     account it is leaving (review of #205, finding 2). The registry and the
     ``[accounts]`` settings are read once per call (finding 12).
     """
-    skip = set(exclude)
-    accounts, registry_note = _read_arranged()
+    skip = frozenset(exclude)  # once: an iterator would be spent by its first reader
+    accounts, registry_note, project_slot = _read_registry(project)
     if explicit is not None:
         return AccountChoice(_resolve_in(accounts, explicit, note=registry_note), "flag")
     notes: list[str] = []
@@ -432,7 +455,7 @@ def choose(
         notes.append(registry_note)
         return AccountChoice(None, None, notes)
     if project is not None:
-        slot = _project_default_slot(project)
+        slot = project_slot
         if slot is not None:
             preferred = next((a for a in accounts if a.slot == slot), None)
             if preferred is None:
@@ -452,7 +475,7 @@ def choose(
     by_headroom = spread if spread is not None else settings.pick == "headroom"
     if by_headroom:
         picked, more = headroom_choice(
-            accounts, switch_at=settings.switch_at, exclude=exclude, fetch=fetch
+            accounts, switch_at=settings.switch_at, exclude=skip, fetch=fetch
         )
         notes.extend(more)
         if picked is not None:
@@ -467,8 +490,12 @@ def choose(
 
 
 def _project_default_slot(project: ProjectInfo) -> int | None:
-    with store_session() as store:
-        raw = store.project_setting(project.id, PROJECT_ACCOUNT_KEY)
+    """``project``'s default slot, or ``None`` — also when the store cannot be read."""
+    try:
+        with store_session() as store:
+            raw = store.project_setting(project.id, PROJECT_ACCOUNT_KEY)
+    except sqlite3.Error:
+        return None
     return int(raw) if raw is not None and raw.isdigit() else None
 
 
@@ -488,6 +515,13 @@ def set_default(ref: str | None, *, project: ProjectInfo | None = None) -> Claud
     ``remove`` clears every project default that names the slot it removes.
     """
     account = resolve(ref) if ref is not None else None
+    if account is not None and account.disabled:
+        # Accepted silently, the default was a rung `choose` skipped on every
+        # launch, and only doctor said so (review of #205, third round).
+        raise AccountsError(
+            f"{core.label(account)} (slot {account.slot}) is disabled, so no launch would "
+            f"pick it — enable it first: aisquare accounts enable {account.slot}"
+        )
     try:
         with store_session() as store:
             _arranged(store)  # the row must exist before it can be the default
@@ -499,9 +533,20 @@ def set_default(ref: str | None, *, project: ProjectInfo | None = None) -> Claud
                     store.set_project_setting(project.id, PROJECT_ACCOUNT_KEY, str(account.slot))
             else:
                 store.set_claude_account_default(account.slot if account else None)
+    except KeyError as exc:
+        raise NoSuchAccount(_vanished(account)) from exc
     except sqlite3.Error as exc:
         raise AccountsUnreadable(f"the accounts registry cannot be written ({exc})") from exc
     return account
+
+
+def _vanished(account: ClaudeAccount | None) -> str:
+    """The store refused a slot the reconcile had just seen: removed underneath us."""
+    slot = account.slot if account is not None else "?"
+    return (
+        f"no Claude account in slot {slot} any more — it was removed meanwhile; "
+        "see: aisquare accounts"
+    )
 
 
 def project_default(project: ProjectInfo) -> ClaudeAccount | None:
@@ -529,6 +574,8 @@ def set_alias(ref: str, alias: str | None) -> ClaudeAccount:
                 raise AccountsError(
                     f"the alias {normalised!r} is already taken — see: aisquare accounts"
                 ) from exc
+            except KeyError as exc:
+                raise NoSuchAccount(_vanished(account)) from exc
             return next(a for a in _arranged(store) if a.slot == account.slot)
     except sqlite3.Error as exc:
         raise AccountsUnreadable(f"the accounts registry cannot be written ({exc})") from exc
@@ -540,15 +587,28 @@ def set_disabled(ref: str, disabled: bool) -> ClaudeAccount:
     try:
         with store_session() as store:
             _arranged(store)
-            store.set_claude_account_disabled(account.slot, disabled)
+            try:
+                store.set_claude_account_disabled(account.slot, disabled)
+            except KeyError as exc:
+                raise NoSuchAccount(_vanished(account)) from exc
             return next(a for a in _arranged(store) if a.slot == account.slot)
     except sqlite3.Error as exc:
         raise AccountsUnreadable(f"the accounts registry cannot be written ({exc})") from exc
 
 
 def reorder(refs: Sequence[str]) -> list[ClaudeAccount]:
-    """Put ``refs`` first, in that order; everything else keeps its relative order after them."""
-    slots = [resolve(ref).slot for ref in refs]
+    """Put ``refs`` first, in that order; everything else keeps its relative order after them.
+
+    One registry read for every reference, one store open for the write: each
+    ``resolve`` used to reopen the store and rescan the directories, N times
+    per ``↑`` (review of #205, third round).
+    """
+    accounts, note = _read_arranged()
+    slots = [_resolve_in(accounts, ref, note=note).slot for ref in refs]
+    return _write_order(slots)
+
+
+def _write_order(slots: Sequence[int]) -> list[ClaudeAccount]:
     try:
         with store_session() as store:
             _arranged(store)
@@ -562,9 +622,10 @@ Direction = Literal["up", "down", "top", "bottom"]
 
 
 def move(ref: str, direction: Direction) -> list[ClaudeAccount]:
-    """Move one slot a step (or all the way) in the priority order."""
-    account = resolve(ref)
-    order = [a.slot for a in list_accounts()]
+    """Move one slot a step (or all the way) in the priority order — one read, one write."""
+    accounts, note = _read_arranged()
+    account = _resolve_in(accounts, ref, note=note)
+    order = [a.slot for a in accounts]
     index = order.index(account.slot)
     order.pop(index)
     if direction == "up":
@@ -575,7 +636,7 @@ def move(ref: str, direction: Direction) -> list[ClaudeAccount]:
         order.insert(0, account.slot)
     else:
         order.append(account.slot)
-    return reorder([str(slot) for slot in order])
+    return _write_order(order)
 
 
 def forget_arrangement(slot: int) -> None:
@@ -591,6 +652,9 @@ def forget_arrangement(slot: int) -> None:
         for project_id, value in store.project_settings(PROJECT_ACCOUNT_KEY).items():
             if value == str(slot):
                 store.clear_project_setting(project_id, PROJECT_ACCOUNT_KEY)
+        # The readings too: keyed on the slot alone, they would rate the next
+        # occupant's first window against this login's history (third round).
+        store.delete_usage_samples(slot)
 
 
 # --- usage ------------------------------------------------------------------------------
@@ -744,21 +808,31 @@ def sample_usage(
     result = usage(account, now=now, fetch=fetch)
     if result.available:
         with contextlib.suppress(sqlite3.Error), store_session() as store:
-            store.add_usage_sample(
-                UsageSample(
-                    slot=account.slot,
-                    fetched_at=result.fetched_at or now or _now(),
-                    session_percent=result.session_percent,
-                    session_resets_at=result.session_resets_at,
-                    week_percent=result.week_percent,
-                    week_resets_at=result.week_resets_at,
-                )
-            )
+            _record_sample(store, account, result, now)
     return result
 
 
+def _record_sample(
+    store: ContextStore, account: ClaudeAccount, result: ClaudeUsage, now: datetime | None
+) -> None:
+    store.add_usage_sample(
+        UsageSample(
+            slot=account.slot,
+            fetched_at=result.fetched_at or now or _now(),
+            session_percent=result.session_percent,
+            session_resets_at=result.session_resets_at,
+            week_percent=result.week_percent,
+            week_resets_at=result.week_resets_at,
+        )
+    )
+
+
 def usage_trend(
-    slot: int, latest: ClaudeUsage, *, now: datetime | None = None
+    slot: int,
+    latest: ClaudeUsage,
+    *,
+    now: datetime | None = None,
+    store: ContextStore | None = None,
 ) -> UsageTrend | None:
     """Where the five-hour window is heading, from this window's readings.
 
@@ -774,8 +848,11 @@ def usage_trend(
         return None
     moment = latest.fetched_at or now or _now()
     try:
-        with store_session() as store:
+        if store is not None:  # the caller's open handle (the page's tick, one open for all)
             samples = store.usage_samples(slot, since=moment - TREND_WINDOW)
+        else:
+            with store_session() as opened:
+                samples = opened.usage_samples(slot, since=moment - TREND_WINDOW)
     except sqlite3.Error:
         samples = []
     same_window = [
@@ -811,7 +888,10 @@ def describe_trend(trend: UsageTrend | None) -> str:
     if trend is None or trend.per_hour is None:
         return ""
     if trend.minutes_to_limit is None:
-        return "flat"
+        # No limit to project: the window is not filling. A negative rate is a
+        # window EMPTYING (another session ended, or just after a reset), which
+        # "flat" beside a falling percentage misdescribed (third round).
+        return "falling" if trend.per_hour < 0 else "flat"
     minutes = trend.minutes_to_limit
     if trend.resets_at is not None:
         # A window that resets before it fills is not going to fill.
@@ -824,22 +904,28 @@ def describe_trend(trend: UsageTrend | None) -> str:
 
 
 def read_usage(
-    accounts: Sequence[ClaudeAccount], *, now: datetime | None = None, fetch: Fetch | None = None
+    accounts: Sequence[ClaudeAccount],
+    *,
+    now: datetime | None = None,
+    fetch: Fetch | None = None,
+    record: bool = True,
 ) -> dict[int, ClaudeUsage]:
     """Every account's reading, RECORDED, read concurrently: one round trip, not one per account.
 
-    The one reader behind a headroom pick, the Accounts page's minute tick and
-    ``doctor --live`` (review of #205, finding 11): four accounts and a slow
+    The one reader behind a headroom pick, ``accounts usage``, ``list --usage``
+    and ``doctor --live`` (review of #205, finding 11): four accounts and a slow
     endpoint cost one ``USAGE_TIMEOUT_SECONDS``, not four. A reader that raises
-    costs its own slot a reading, never the others'.
+    costs its own slot a reading, never the others'. ``record=False`` fetches
+    without touching the store, for a caller that records in one session of
+    its own (:func:`read_usage_with_trends`).
     """
     if not accounts:
         return {}
+    reader = sample_usage if record else usage
     readings: dict[int, ClaudeUsage] = {}
     with ThreadPoolExecutor(max_workers=min(HEADROOM_WORKERS, len(accounts))) as pool:
         futures = {
-            pool.submit(sample_usage, account, now=now, fetch=fetch): account.slot
-            for account in accounts
+            pool.submit(reader, account, now=now, fetch=fetch): account.slot for account in accounts
         }
         for future, slot in futures.items():
             try:
@@ -849,6 +935,35 @@ def read_usage(
                     available=False, reason=f"usage read failed ({type(exc).__name__})"
                 )
     return readings
+
+
+def read_usage_with_trends(
+    accounts: Sequence[ClaudeAccount], *, now: datetime | None = None, fetch: Fetch | None = None
+) -> dict[int, tuple[ClaudeUsage, UsageTrend | None]]:
+    """The Accounts page's tick: every reading, recorded, and its trend — ONE store open.
+
+    ``read_usage`` fetches without recording (the network part, concurrent),
+    then one session writes every sample and reads every trend; before, each
+    reader thread opened the store to write and each trend opened it again to
+    read, eight opens a minute for four accounts (review of #205, third round).
+    A store that cannot be opened costs the trends, never the readings.
+    """
+    readings = read_usage(accounts, now=now, fetch=fetch, record=False)
+    unread = ClaudeUsage(available=False, reason="no reading")
+    result: dict[int, tuple[ClaudeUsage, UsageTrend | None]] = {}
+    try:
+        with store_session() as store:
+            for account in accounts:
+                reading = readings.get(account.slot) or unread
+                if reading.available:
+                    _record_sample(store, account, reading, now)
+                result[account.slot] = (
+                    reading,
+                    usage_trend(account.slot, reading, now=now, store=store),
+                )
+    except sqlite3.Error:
+        return {a.slot: (readings.get(a.slot) or unread, None) for a in accounts}
+    return result
 
 
 def headroom_choice(
@@ -939,15 +1054,16 @@ def choose_for_handover(
     switch keeps the least-bad answer and, when no usage can be read at all,
     falls back to the ladder minus the account being left.
     """
+    skip = frozenset(exclude)  # read three times below: never an iterator
     if explicit is not None:
-        return choose(explicit, role=role, project=project, exclude=exclude, fetch=fetch)
+        return choose(explicit, role=role, project=project, exclude=skip, fetch=fetch)
     accounts, registry_note = _read_arranged()
     notes: list[str] = [] if registry_note is None else [registry_note]
     settings = accounts_settings()
     picked, more = headroom_choice(
         accounts,
         switch_at=settings.switch_at,
-        exclude=exclude,
+        exclude=skip,
         fetch=fetch,
         least_bad=not automatic,
     )
@@ -956,7 +1072,7 @@ def choose_for_handover(
         return AccountChoice(picked, "headroom", notes)
     if automatic:
         return AccountChoice(None, None, notes)
-    fallback = choose(None, role=role, project=project, exclude=exclude, spread=False, fetch=fetch)
+    fallback = choose(None, role=role, project=project, exclude=skip, spread=False, fetch=fetch)
     return AccountChoice(fallback.account, fallback.source, [*notes, *fallback.notes])
 
 

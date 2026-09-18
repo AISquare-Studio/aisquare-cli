@@ -5580,6 +5580,10 @@ def test_switch_starts_fresh_with_a_hand_off_prompt_when_asked_or_when_there_is_
         team_service._emit(
             store, project.id, "note", "halfway through the router", session_id=agent.session_id
         )
+        # A busy board: seventy newer entries from other agents used to push the
+        # session's own out of the window the prompt was built from (third round).
+        for n in range(70):
+            team_service._emit(store, project.id, "note", f"chatter {n}", session_id="sess-other")
     # The new pane must look ready, or a multi-line prompt is (correctly) not typed.
     original_spawn = tmux.spawn_window
 

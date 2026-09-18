@@ -176,6 +176,13 @@ def test_text_after_the_zone_costs_neither_the_window_nor_the_reset() -> None:
     assert weekly is not None and weekly.resets_at == datetime(2026, 9, 14, 4, 0, tzinfo=UTC)
     bare = core.parse_limit_notice("You've hit your session limit. Try again.", now=SUNDAY)
     assert bare is not None and bare.window == "session" and bare.resets_at is None
+    # `13:00pm` is no clock time: the raw hour is what needed the guard (third round).
+    odd = core.parse_limit_notice(
+        "You've hit your session limit · resets 13:00pm (America/Toronto)", now=SUNDAY
+    )
+    assert odd is not None and odd.window == "session" and odd.resets_at is None
+    fine = core.parse_limit_notice(SESSION_LIMIT, now=SUNDAY)
+    assert fine is not None and fine.resets_at is not None  # 12:30am is still a clock time
 
 
 def test_a_429_that_is_not_a_usage_limit_and_an_unreadable_time_degrade_gracefully() -> None:
@@ -418,9 +425,21 @@ def test_a_re_fire_for_the_same_window_starts_no_second_worker(
     assert len(started) == 1
     # The record itself carries the fact, for any other caller.
     again = team_service.hook_stop_failure(
-        "sess-fleet", work.root, error="rate_limit", message=WEEKLY_LIMIT, details=None
+        "sess-fleet", error="rate_limit", message=WEEKLY_LIMIT, details=None
     )
     assert again is not None and again.limited and again.already_limited
+
+    # [third round] A row mid hand-over is already handled too: no worker, and the
+    # mark `fleet switch` set is not written over — its SessionEnd must still park.
+    with store_session() as store:
+        store.touch_session("sess-fleet", state=team_service.HANDOVER_STATE)
+    _fire_limit(runner, work, WEEKLY_LIMIT, "sess-fleet")
+    assert len(started) == 1
+    assert _state("sess-fleet")[0] == team_service.HANDOVER_STATE
+    mid = team_service.hook_stop_failure(
+        "sess-fleet", error="rate_limit", message=WEEKLY_LIMIT, details=None
+    )
+    assert mid is not None and mid.already_limited
 
 
 def test_the_worker_refuses_a_hand_over_in_flight_or_one_that_just_happened(
@@ -697,6 +716,16 @@ def test_choose_for_handover_asks_headroom_before_the_binding_and_refuses_when_a
     assert automatic.account is None
     assert any("every account is over 85%; nothing to switch to" in n for n in automatic.notes)
 
+    # An iterator as `exclude` is spent by its first reader: normalised once (third round).
+    lazy = service.choose_for_handover(
+        role="coder", project=work, exclude=(slot for slot in (2,)), fetch=room
+    )
+    assert lazy.account is not None and lazy.account.slot == 3
+    lazier = service.choose(
+        role="tester", project=work, exclude=(slot for slot in (2,)), spread=True, fetch=room
+    )
+    assert lazier.account is not None and lazier.account.slot == 3  # never the excluded one
+
     # `--to` is still the flag rung; nothing readable falls to the ladder minus the current slot.
     assert (
         service.choose_for_handover("3", role="coder", project=work, exclude=(2,)).source == "flag"
@@ -725,11 +754,13 @@ def test_one_launch_reads_the_registry_and_the_settings_once(
     settings_service.bind_role("coder", account="2")
     _settings(pick="headroom", switch_at=85)
     reads: list[int] = []
-    real_read = service._read_arranged
+    real_read = service._read_registry
 
-    def counted_read() -> tuple[list[ClaudeAccount], str | None]:
+    def counted_read(
+        project: ProjectInfo | None = None,
+    ) -> tuple[list[ClaudeAccount], str | None, int | None]:
         reads.append(1)
-        return real_read()
+        return real_read(project)
 
     loads: list[int] = []
     real_settings = service.accounts_settings
@@ -738,7 +769,7 @@ def test_one_launch_reads_the_registry_and_the_settings_once(
         loads.append(1)
         return real_settings()
 
-    monkeypatch.setattr(service, "_read_arranged", counted_read)
+    monkeypatch.setattr(service, "_read_registry", counted_read)
     monkeypatch.setattr(service, "accounts_settings", counted_settings)
 
     assert service.choose(role="coder", project=work, fetch=fetch).source == "role binding"
@@ -836,7 +867,7 @@ def test_describe_trend_words(monkeypatch: pytest.MonkeyPatch) -> None:
     assert service.describe_trend(None) == ""
     assert service.describe_trend(UsageTrend(percent=10)) == ""  # no rate yet
     assert service.describe_trend(UsageTrend(percent=10, per_hour=0.0)) == "flat"
-    assert service.describe_trend(UsageTrend(percent=10, per_hour=-3.0)) == "flat"
+    assert service.describe_trend(UsageTrend(percent=10, per_hour=-3.0)) == "falling"
     assert (
         service.describe_trend(UsageTrend(percent=80, per_hour=40.0, minutes_to_limit=30.0))
         == "≈ 30 min to the limit"
@@ -865,6 +896,147 @@ def test_accounts_usage_prints_the_pace_and_records_the_reading(
     assert first.exit_code == 0, first.output
     with store_session() as store:
         assert len(store.usage_samples(account.slot, since=NOW - timedelta(days=1))) == 1
+
+
+def test_accounts_usage_and_list_usage_read_every_account_in_one_round_with_labels(
+    fake_home: Path, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The two CLI usage surfaces go through ``read_usage`` (one round trip) and the arranged
+    list — priority order, the alias, ``(disabled)`` — like every other surface (third round)."""
+    _slot("work@example.com", "tok-work")
+    _slot("personal@example.com", "tok-personal")
+    service.set_alias("2", "work")
+    service.set_disabled("3", True)
+    service.reorder(["3", "2"])
+    monkeypatch.setattr(
+        service, "_http_get", _Usage({"tok-work": _payload(40), "tok-personal": _payload(60)})
+    )
+    rounds: list[list[int]] = []
+    real = service.read_usage
+
+    def spy(accounts: Any, **kwargs: Any) -> dict[int, Any]:
+        rounds.append([account.slot for account in accounts])
+        return real(accounts, **kwargs)
+
+    monkeypatch.setattr(service, "read_usage", spy)
+
+    usage = runner.invoke(app, ["accounts", "usage"])
+    assert usage.exit_code == 0, usage.output
+    assert rounds == [[3, 2]]  # one round, in priority order
+    lines = [line for line in usage.stdout.splitlines() if line.strip()]
+    assert lines[1].startswith("3") and "(disabled)" in lines[1] and "60%" in lines[1]
+    assert lines[2].startswith("2") and "work" in lines[2] and "40%" in lines[2]
+
+    rounds.clear()
+    listing = runner.invoke(app, ["accounts", "list", "--usage"])
+    assert listing.exit_code == 0, listing.output
+    assert rounds == [[3, 2]]
+
+
+def test_reorder_and_move_read_the_registry_once(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each reference used to reopen the store and rescan the directories (third round)."""
+    _slot("work@example.com", "tok-work")
+    _slot("personal@example.com", "tok-personal")
+    reads: list[int] = []
+    real = service._read_registry
+
+    def counted(project: ProjectInfo | None = None) -> Any:
+        reads.append(1)
+        return real(project)
+
+    monkeypatch.setattr(service, "_read_registry", counted)
+    assert [a.slot for a in service.reorder(["3", "work@example.com", "1"])] == [3, 2, 1]
+    assert len(reads) == 1
+    reads.clear()
+    assert [a.slot for a in service.move("1", "top")] == [1, 3, 2]
+    assert len(reads) == 1
+
+
+def test_the_pages_tick_opens_the_store_once_for_every_sample_and_trend(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Eight opens a minute for four accounts before: one now (third round)."""
+    import contextlib
+
+    a = _slot("work@example.com", "tok-work")
+    b = _slot("personal@example.com", "tok-personal")
+    fetch = _Usage({"tok-work": _payload(40), "tok-personal": _payload(60)})
+    service.sample_usage(
+        a, now=NOW - timedelta(minutes=30), fetch=_Usage({"tok-work": _payload(20)})
+    )
+    opens: list[int] = []
+    real_session = store_session
+
+    @contextlib.contextmanager
+    def counted_session() -> Any:
+        opens.append(1)
+        with real_session() as store:
+            yield store
+
+    monkeypatch.setattr("aisquare.services.claude_accounts.store_session", counted_session)
+    fetched = service.read_usage_with_trends([a, b], now=NOW, fetch=fetch)
+
+    assert opens == [1]
+    assert fetched[a.slot][0].session_percent == 40 and fetched[b.slot][0].session_percent == 60
+    trend = fetched[a.slot][1]
+    assert trend is not None and trend.per_hour == pytest.approx(40.0)  # 20 → 40 in 30 min
+    with store_session() as store:
+        assert len(store.usage_samples(a.slot, since=NOW - timedelta(days=1))) == 2
+        assert len(store.usage_samples(b.slot, since=NOW - timedelta(days=1))) == 1
+
+
+def test_the_board_block_and_watch_name_the_account_as_the_rest_does(
+    fake_home: Path, work: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The alias reaches the injected board (through the hook's own store handle) and
+    `aisquare watch` (third round)."""
+    from aisquare.cli.watch import _session_lines
+
+    two = _slot("work@example.com", "tok-work")
+    three = _slot("personal@example.com", "tok-personal")
+    service.set_alias("2", "work")
+    now = datetime.now(tz=UTC)
+    sessions = [
+        TeamSession(
+            id=f"sess-on-{account.slot}",
+            project_id=work.id,
+            role="coder",
+            started_at=now,
+            last_seen_at=now,
+            account=str(account.config_dir),
+        )
+        for account in (two, three)
+    ]
+    assert (
+        "work" in _session_lines(sessions).plain and "account 3" in _session_lines(sessions).plain
+    )
+
+    with store_session() as store:
+        labels = team_service.slot_labels_via(store)  # no second connection under the hook's own
+
+        def no_second_connection() -> Any:
+            raise AssertionError("a second connection under the hook's own")
+
+        monkeypatch.setattr("aisquare.services.claude_accounts.store_session", no_second_connection)
+        again = team_service.slot_labels_via(store)
+    assert labels == {1: "plain claude", 2: "work", 3: "account 3"} and again == labels
+    block = team_service._render_board(work, sessions, [], [], me=None, labels=labels)
+    assert "[work]" in block and "[account 3]" in block and "[account 2]" not in block
+
+
+def test_a_removed_slots_readings_do_not_rate_the_next_occupant(fake_home: Path) -> None:
+    """``forget_arrangement`` drops the slot's ``claude_usage`` rows too (third round)."""
+    account = _slot("work@example.com", "tok-work")
+    service.sample_usage(account, now=NOW, fetch=_Usage({"tok-work": _payload(70)}))
+    with store_session() as store:
+        assert len(store.usage_samples(account.slot, since=NOW - timedelta(days=1))) == 1
+
+    service.forget_arrangement(account.slot)
+
+    with store_session() as store:
+        assert store.usage_samples(account.slot, since=NOW - timedelta(days=1)) == []
 
 
 # --------------------------------------------------------------------------- doctor

@@ -276,18 +276,14 @@ def _read_usage(
 ) -> dict[int, tuple[ClaudeUsage, UsageTrend | None]]:
     """Off the UI thread: each account's reading, RECORDED (#146), and the trend it implies.
 
-    ``read_usage`` (recording, concurrent — review of #205, finding 11) rather
-    than ``usage`` so the page's minute tick is what builds the history the
-    trend line reads, at the cost of one round trip for every account rather
-    than one each; ``usage_trend`` reads that history back. Both fail open — a
-    store that cannot be written costs the trend, and the reading still paints.
+    ``read_usage_with_trends`` (concurrent, recording — review of #205, finding
+    11 and third round) rather than ``usage`` so the page's minute tick is what
+    builds the history the trend line reads, at the cost of one round trip and
+    one store open for every account rather than one each. It fails open — a
+    store that cannot be written costs the trends, and the readings still paint.
     """
-    readings = accounts_service.read_usage(accounts)  # concurrent: one round trip for the page
-    fetched: dict[int, tuple[ClaudeUsage, UsageTrend | None]] = {}
-    for account in accounts:
-        usage = readings.get(account.slot) or ClaudeUsage(available=False, reason="no reading")
-        fetched[account.slot] = (usage, accounts_service.usage_trend(account.slot, usage))
-    return fetched
+    # Concurrent fetch, then ONE store open for every sample and trend (third round).
+    return accounts_service.read_usage_with_trends(accounts)
 
 
 # --- transient state -------------------------------------------------------------------------
@@ -906,8 +902,13 @@ class AccountsView(Vertical):
         if self.login is not None and self.login.account.slot == slot:
             self._notice("✗ finish or cancel the sign-in below first", "error")
             return
+
+        def remove_with_notes() -> tuple[Path, list[str]]:
+            notes: list[str] = []  # what happened to bindings that named the slot
+            return accounts_service.remove(account, notes=notes), notes
+
         self.run_worker(
-            lambda: accounts_service.remove(account),
+            remove_with_notes,
             name=REMOVE_WORKER,
             group=REMOVE_WORKER,
             thread=True,
@@ -915,11 +916,14 @@ class AccountsView(Vertical):
         )
 
     def _remove_finished(self, worker: Worker[Any], state: WorkerState) -> None:
-        if state is WorkerState.SUCCESS and isinstance(worker.result, Path):
-            self._notice(
-                f"✓ removed — its directory is kept at {worker.result}; delete it when sure",
-                "ok",
-            )
+        if state is WorkerState.SUCCESS and isinstance(worker.result, tuple):
+            moved, notes = worker.result
+            line = f"✓ removed — its directory is kept at {moved}; delete it when sure"
+            if (
+                notes
+            ):  # a role binding re-pointed or cleared: the operator must hear it (third round)
+                line += " · " + " · ".join(notes)
+            self._notice(line, "warn" if notes else "ok")
         elif state is WorkerState.ERROR:
             self._notice(f"✗ {worker.error}", "error")
         self.post_message(AccountsChanged())

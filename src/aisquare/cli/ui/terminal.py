@@ -97,7 +97,7 @@ import itertools
 import weakref
 from bisect import bisect_left
 from collections.abc import Callable
-from typing import Any, ClassVar, NamedTuple
+from typing import Any, ClassVar, NamedTuple, assert_never
 
 from rich.cells import cell_len, set_cell_size, split_graphemes
 from rich.segment import Segment
@@ -1546,14 +1546,33 @@ class TerminalPane(Widget, can_focus=True):
         version, since a newer server delivers it (review of #161, round 2 —
         the first version gave the old-server loss the "no way to type" line,
         which is false: there is a way, on tmux 3.5).
+
+        TOTAL over ``DropReason``, and the type checker holds it so: a reason
+        added to ``core.keys`` that this does not answer is a red ``mypy``, not
+        a keystroke silently lost — the mute twin of the #151 bug (review of
+        #161, round 3).
         """
-        if drop.reason == "too_old":
-            version = self._server_version()
-            server = f"tmux {version[0]}.{version[1]}" if version is not None else "this tmux"
-            need = ".".join(str(part) for part in EXTENDED_MINIMUM)
-            self._warn_once(key, f"{server} cannot carry {key} — {need} or newer can")
-        elif drop.reason == "no_name":
-            self._warn_once(key, f"no way to type {key} into a tmux pane", severity="information")
+        reason = drop.reason
+        match reason:
+            case "too_old":
+                # Only ever produced under a version the gate READ and found
+                # below the minimum — ``_extended_keys`` fails open when the
+                # version is unknown, so there is no unknown version here to
+                # word around (review of #161, round 3).
+                version = self._server_version()
+                assert version is not None
+                need = ".".join(str(part) for part in EXTENDED_MINIMUM)
+                self._warn_once(
+                    key, f"tmux {version[0]}.{version[1]} cannot carry {key} — {need} or newer can"
+                )
+            case "no_name":
+                self._warn_once(
+                    key, f"no way to type {key} into a tmux pane", severity="information"
+                )
+            case "command" | "nothing_to_type":
+                pass  # nothing was pressed at the agent, and nothing is said
+            case _ as unreachable:
+                assert_never(unreachable)
 
     def _warn_once(self, key: str, message: str, *, severity: SeverityLevel = "warning") -> None:
         """Say ``message`` once per ``key``, at ``severity``.

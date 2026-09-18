@@ -486,8 +486,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   f13 into a tmux pane` — since tmux did not fail. A chord your tmux is too
   old to carry is the one loss you can fix, and says so as a warning that
   names the version (`tmux 3.4 cannot carry shift+enter — 3.5 or newer can`).
-  The numeric keypad's operators, which a terminal may name without reporting
-  their text, are typed rather than filed with the keys nobody pressed.
+  A key named after its character (`§`, `±`, `«` on a non-US layout) and the
+  keypad's operators, which a terminal may name without reporting their text,
+  are typed rather than filed with the keys nobody pressed — except the
+  keypad's decimal and separator, whose text only the layout knows: named
+  once, never guessed. A modifier held on one of the keys nobody pressed
+  (`ctrl+pause`) is as silent as the key alone.
 - **Alt+letter chords reach the agent as chords.** Claude Code's alt+p (switch
   model) did nothing from a fleet pane — reported 2026-09-02 and again
   2026-09-10 — because Textual's parser reads `ESC p` as `Key("alt+p",

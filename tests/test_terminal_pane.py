@@ -3549,15 +3549,16 @@ def test_a_change_hidden_under_the_corner_marker_leaves_the_highlight_standing(
 
 
 #: Keys a focused pane sees that are not keystrokes aimed at the agent, written
-#: out INDEPENDENTLY of ``MODIFIER_ONLY_KEYS`` — pressing the constant under test
-#: would shrink the loop rather than fail it when a name goes missing (review;
-#: CONTRIBUTING's "emptiness as both goal and symptom"). Four groups, each a bug
+#: out here rather than derived from ``core.keys``' tables — a loop over the
+#: thing under test shrinks rather than fails when a name goes missing (review;
+#: CONTRIBUTING's "emptiness as both goal and symptom"). Five groups, each a bug
 #: that reached a user or a review: the fourteen modifier names, the locks WITH a
 #: modifier held (Textual keeps the prefix for those, so an exact match on
 #: ``event.key`` let them through), the whole keys a kitty-protocol terminal
-#: reports only because Textual asks for every key, and the Cmd chords macOS
-#: hands the pane — commands for the OS, which the round-1 rule read as
-#: deliberate aim and toasted one by one.
+#: reports only because Textual asks for every key, those same keys with a
+#: modifier held (a residue round 1 documented and round 2 lost), and the Cmd
+#: chords macOS hands the pane — commands for the OS, which the round-1 rule
+#: read as deliberate aim and toasted one by one.
 NOTHING_TO_TYPE = (
     "left_shift",
     "left_control",
@@ -3588,6 +3589,9 @@ NOTHING_TO_TYPE = (
     "media_play",
     "media_pause",
     "kp_begin",
+    "ctrl+pause",
+    "shift+menu",
+    "alt+media_play",
     "super+k",
     "super+f5",
     "hyper+x",
@@ -3628,19 +3632,24 @@ def test_a_numpad_operator_without_its_text_is_typed_not_swallowed(
     the round-1 rule filed it with ``menu`` — neither typed nor mentioned, less
     than the toast it replaced (review of #161, round 2). It is a keystroke."""
 
-    async def drive() -> tuple[list[str], list[tuple[str, ...]]]:
+    async def drive() -> tuple[list[str], list[str], list[tuple[str, ...]]]:
         host = Host(fake.server(tmp_path), "%1")
         async with host.run_test(size=(40, 6)) as pilot:
             host.pane.focus()
             await pilot.pause()
-            for name in ("add", "divide", "decimal"):
+            for name in ("add", "divide", "multiply", "decimal"):
                 host.pane.post_message(events.Key(name, None))
             await pilot.pause()
-            return host.notices, fake.sent()
+            return host.notices, host.severities, fake.sent()
 
-    notices, sent = run(drive())
-    assert notices == []
-    assert sent == [("-l", "--", "+"), ("-l", "--", "/"), ("-l", "--", ".")]
+    notices, severities, sent = run(drive())
+    assert sent == [("-l", "--", "+"), ("-l", "--", "/"), ("-l", "--", "*")]
+    # The decimal key's text is the layout's to know — ``,`` on a German numpad
+    # arrives under the same physical key code — so without it nothing is
+    # guessed: one quiet line, the keystroke lost rather than mistyped (review
+    # of #161, round 3).
+    assert notices == ["no way to type decimal into a tmux pane"]
+    assert severities == ["information"]
 
 
 def test_a_truly_unmappable_key_is_still_named_once_but_as_information(

@@ -648,7 +648,8 @@ otherwise map `Key.key`:
 | `home` `end` | `Home` `End` | `pageup` `pagedown` | `PPage` `NPage` |
 | `f1` … `f12` | `F1` … `F12` | `ctrl+<x>` | `C-<x>` |
 | `alt+<x>` | `M-<x>` | `ctrl+shift+<x>` | `C-S-<x>` |
-| `shift+enter` | `S-Enter` (tmux ≥ 3.5; dropped below — 3.3/3.4 mistype it) | anything else | dropped, one-line notice |
+| `shift+enter` | `S-Enter` (tmux ≥ 3.5; below, refused with a warning naming the version — 3.3/3.4 mistype it) | a chord you meant, unspellable | dropped, one quiet line |
+| a modifier, a lock, Menu…, a Cmd chord | dropped in silence — nothing to type (#151) | a key named after its character, no text | that character |
 
 The escape hatch key is consumed by us and never forwarded. Textual 8.2.7 /
 8.2.8 speak the kitty keyboard protocol, so modifier-rich chords arrive **when

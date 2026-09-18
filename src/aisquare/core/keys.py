@@ -32,6 +32,7 @@ from __future__ import annotations
 import re
 import unicodedata
 from dataclasses import dataclass
+from functools import cache
 from typing import Literal
 
 Kind = Literal["literal", "key"]
@@ -59,23 +60,28 @@ DropReason = Literal["command", "nothing_to_type", "no_name", "too_old"]
 class Drop:
     """Nothing is sent, and why — the pane's guide to what, if anything, to say.
 
-    :func:`translate` knows which of its refusals this is by the time it makes
-    it, and the pane cannot recover that from the key's shape: it used to try
-    (review of #161, round 2), and misread a Cmd chord as deliberate aim, a
-    numpad ``+`` as a key nobody pressed, and a tmux too old for shift+enter as
-    a key with no spelling anywhere.
+    Each refusal states its own reason at the site that makes it — the table's
+    eight, the modifier gate's, the version gate's — because the pane cannot
+    recover that from the key's shape, and a heuristic that tried (reviews of
+    #161, rounds 2 and 3) misread a Cmd chord as deliberate aim, numpad ``+``
+    as a key nobody pressed, ``±`` and ``«`` on a European layout as nothing at
+    all, and a tmux too old for shift+enter as a key with no spelling anywhere.
 
     - ``command``: a modifier tmux cannot spell — ``super``/``hyper``, which is
       how macOS Cmd and the kitty protocol's extras arrive. Cmd+V is a command
       for the terminal or the OS, not a request to type a ``v``, and not a
       keystroke aimed at the agent: nothing to say.
-    - ``nothing_to_type``: no keystroke in the event. A modifier or a lock on
-      its own, or a whole key a kitty-protocol terminal reports only because
-      Textual asks it for every key — Menu, PrtSc, Pause, the volume and media
-      keys, the keypad's centre. Nothing to say (#151).
-    - ``no_name``: a chord the reader meant — a modifier held, or a function
-      key past the twelve tmux knows — that tmux would mistype and that arrived
-      without its text. Worth one quiet line, since the keystroke is lost.
+    - ``nothing_to_type``: no keystroke in the event, whatever is held with
+      it. A modifier or a lock, or a whole key a kitty-protocol terminal
+      reports only because Textual asks it for every key — Menu, PrtSc, Pause,
+      the volume and media keys, the keypad's centre: there is no character
+      behind the key, so ``ctrl+pause`` is as empty as ``pause``. A malformed
+      name. Nothing to say (#151).
+    - ``no_name``: a keystroke LOST. A chord the reader meant — a modifier held
+      on a character, a function key past the twelve tmux knows, a chord on a
+      character this table never measured a tmux name for — that arrived
+      without its text; or a keypad key whose text only the layout knows
+      (:data:`KEYPAD_LAYOUT_DEPENDENT`). Worth one quiet line.
     - ``too_old``: this tmux SERVER cannot carry the chord (below
       :data:`EXTENDED_MINIMUM` it would type the chord's NAME into the agent)
       and no text came with it. A loss the reader can fix, so a warning that
@@ -125,44 +131,6 @@ MODIFIERS: dict[str, str] = {"ctrl": "C-", "alt": "M-", "meta": "M-", "shift": "
 #: when the terminal reported it, and nothing is sent when it did not (review of
 #: #135, finding 15).
 ESC_INTRODUCERS: frozenset[str] = frozenset("NOP")
-
-#: A modifier or a lock, as the kitty keyboard protocol reports it and Textual
-#: names it: ``textual/_keyboard_protocol.py``'s ``MODIFIER_FUNCTIONAL_KEYS``
-#: plus the three locks. There is no keystroke in such an event — a modifier is
-#: half of a chord, and the chord arrives as its own event — so :func:`translate`
-#: answers ``Drop("nothing_to_type")`` whatever is held with it (#151).
-#:
-#: BASE names, matched after the modifier tokens are split off, and only the
-#: three locks are load-bearing today: Textual strips the redundant prefix from
-#: the fourteen names in its subset (``_xterm_parser``: "The modifier is
-#: redundant on a modifier key"), so ``left_shift`` with ctrl held is still
-#: ``left_shift`` and a bare name with no tmux spelling is dropped in silence
-#: on its own. The locks are outside that subset and DO arrive prefixed — caps
-#: lock with shift held is ``shift+caps_lock`` — which an exact match on the
-#: event's key let through (review). The fourteen are here as the defence for
-#: the day Textual moves a name OUT of its subset and starts prefixing it:
-#: ``tests/test_keys.py`` pins that the surplus over theirs is the three locks.
-MODIFIER_ONLY_KEYS: frozenset[str] = frozenset(
-    {
-        "left_shift",
-        "left_control",
-        "left_alt",
-        "left_super",
-        "left_hyper",
-        "left_meta",
-        "right_shift",
-        "right_control",
-        "right_alt",
-        "right_super",
-        "right_hyper",
-        "right_meta",
-        "iso_level3_shift",
-        "iso_level5_shift",
-        "caps_lock",
-        "num_lock",
-        "scroll_lock",
-    }
-)
 
 #: Named keys tmux 3.7c refuses to combine with ctrl: ``C-Escape`` and
 #: ``C-BSpace`` come out as those literal strings.
@@ -218,21 +186,27 @@ PUNCTUATION: dict[str, str] = {
     "right_parenthesis": ")",
     "colon": ":",
     # The numeric keypad's operator keys, as the kitty protocol names them
-    # (``KP_ADD`` … ``KP_SEPARATOR``, Textual's ``FUNCTIONAL_KEYS``). A terminal
+    # (``KP_ADD`` … ``KP_EQUAL``, Textual's ``FUNCTIONAL_KEYS``). A terminal
     # that reports the key's text sends ``+`` alongside and the text wins above;
     # one that honours REPORT_ALL_KEYS but not REPORT_ASSOCIATED_TEXT sends the
     # bare name, and these ARE keystrokes — numpad ``+`` is typed, not a key
-    # nobody meant (review of #161, round 2). ``decimal`` and ``separator`` are
-    # the X11 keysym defaults: a locale whose numpad decimal is ``,`` reports
-    # the text on any terminal that reports text at all, and that text wins.
+    # nobody meant (review of #161, round 2). Only the five engraved the same
+    # on every layout; the other two are :data:`KEYPAD_LAYOUT_DEPENDENT`.
     "add": "+",
     "subtract": "-",
     "multiply": "*",
     "divide": "/",
     "equal": "=",
-    "decimal": ".",
-    "separator": ",",
 }
+
+#: The keypad's ``decimal`` and ``separator`` keys. Kitty key codes are physical,
+#: so a German or French numpad's ``,`` key arrives as ``decimal`` too — and the
+#: only terminal that sends the bare name is one that reports no text, which is
+#: exactly when the layout cannot be asked. Guessing ``.`` would type the wrong
+#: character into a running agent, the one thing this module exists to prevent,
+#: so they are a keystroke lost with a word, never a glyph (review of #161,
+#: round 3).
+KEYPAD_LAYOUT_DEPENDENT: frozenset[str] = frozenset({"decimal", "separator"})
 
 #: tmux knows F1-F12 only; Textual can report up to F24.
 MAX_FUNCTION_KEY = 12
@@ -250,23 +224,45 @@ def _base_character(base: str) -> str | None:
     return PUNCTUATION.get(base)
 
 
-def _unicode_character(base: str) -> str | None:
-    """The printable character ``base`` is the Unicode name of, or ``None``.
+@cache
+def _named_characters() -> dict[str, str]:
+    """Textual's name for every typeable character → the character.
 
     Textual names a key it has no word for after ``unicodedata.name`` of its
-    character, lowercased with underscores (``textual.keys._character_to_key``);
-    this is that spelling read back. Controls (``escape``, ``null``, ``tab`` —
-    the named ones are in :data:`SPECIAL` before this is reached) and spaces
-    are never a literal to send, and a name of anything else (``menu``,
-    ``add``, ``f13``) is not a Unicode name at all.
+    character, lowercased, with BOTH hyphens and spaces made underscores
+    (``textual.keys._character_to_key``; ``tests/test_keys.py`` holds this
+    table against it). Read back by table rather than by ``unicodedata.lookup``
+    on a respelt name, because ``lookup`` is exact and cannot know which
+    underscores were hyphens: ``plus_minus_sign`` (``±``, a key on the Canadian
+    layout) and the ``«`` ``»`` of several European ones never resolved that
+    way (review of #161, round 3). Built once, on first use, over the Basic
+    Multilingual Plane — 11 ms, 5.8k names.
+
+    Letters and digits are their own names and never reach this (a one-character
+    base is its character). Controls are never a literal to send, nor are the
+    line and paragraph separators; a NO-BREAK SPACE is — AltGr+space on the
+    French and Canadian layouts — and ``send-keys -l`` carries it fine, since
+    it is not a tmux key NAME and none of the mistyping hazards apply.
     """
-    try:
-        char = unicodedata.lookup(base.replace("_", " ").upper())
-    except KeyError:
-        return None
-    if len(char) != 1 or unicodedata.category(char)[0] in "CZ":
-        return None
-    return char
+    table: dict[str, str] = {}
+    for codepoint in range(0x20, 0x10000):
+        char = chr(codepoint)
+        if char.isalnum():
+            continue
+        category = unicodedata.category(char)
+        if category[0] == "C" or category in ("Zl", "Zp"):
+            continue
+        try:
+            name = unicodedata.name(char)
+        except ValueError:
+            continue
+        table[name.lower().replace("-", "_").replace(" ", "_")] = char
+    return table
+
+
+def _unicode_character(base: str) -> str | None:
+    """The character a bare key named after its Unicode character stands for."""
+    return _named_characters().get(base)
 
 
 EXTENDED_MINIMUM: tuple[int, int] = (3, 5)
@@ -349,45 +345,43 @@ def translate(
     server is too old to carry. There the reported character still travels,
     which is what this module did before any chord exception existed; with no
     character reported there is nothing to type, and the :class:`Drop` says
-    which kind of nothing this was. Each round of review found one more branch
-    that had grown its own answer to that question; it is asked once, here.
+    which kind of nothing this was.
 
     The key name is split ONCE, here, and the parts are handed down: an empty
     token (``"+a"``, ``"ctrl+"``) is a malformed NAME, never a modifier, so it
     is neither gated as one nor read as deliberate aim — the reported
     character is typed, as it always was, and with none there is nothing to
     say (reviews of the third to fifth versions of #117, and of #161, which
-    each broke a different one of those spellings).
+    each broke a different one of those spellings). Every other reason is the
+    table's own, stated at the refusal that knows it: this function adds only
+    the two gates — a modifier tmux cannot spell, a server too old — and the
+    fallback to reported text (review of #161, round 3).
     """
     *modifiers, base = key.split("+")
     if any(modifier and modifier not in MODIFIERS for modifier in modifiers):
         return Drop("command")
-    malformed = not base or not all(modifiers)
-    translation = (
-        None if malformed else _translate(key, modifiers, base, character, printable=printable)
-    )
-    too_old = (
-        translation is not None
+    if not base or not all(modifiers):
+        # A malformed name — ``""``, ``"+"``, ``"+a"``, ``"ctrl+"``, ``"ctrl++"``,
+        # ``"alt+"``. Nothing to look up and no modifier to read: an empty
+        # token is a broken NAME, never a modifier that happens to be
+        # unspellable and never deliberate aim. The reported character is
+        # typed, as it always was; with none there is nothing to say.
+        if printable and character:
+            return Translation("literal", character)
+        return Drop("nothing_to_type")
+    translation = _translate(key, modifiers, base, character, printable=printable)
+    if (
+        isinstance(translation, Translation)
         and translation.kind == "key"
         and not extended_keys
         and needs_extended_keys(translation.value)
-    )
-    if translation is not None and not too_old:
-        return translation
-    if printable and character:
+    ):
+        translation = Drop("too_old")
+    if isinstance(translation, Drop) and printable and character:
+        # Every refusal falls back to the text the terminal reported, which is
+        # what this module did before any chord exception existed.
         return Translation("literal", character)
-    if too_old:
-        return Drop("too_old")
-    if malformed or base in MODIFIER_ONLY_KEYS:
-        return Drop("nothing_to_type")
-    if modifiers or _FUNCTION.fullmatch(base) is not None:
-        # A modifier held, or a function key past the twelve: aimed at the
-        # program on purpose, and lost.
-        return Drop("no_name")
-    # A whole key with no name and no text: Menu, Pause, a volume key — what a
-    # kitty-protocol terminal reports because Textual asks for every key it has
-    # (``KITTY_REPORT_ALL_KEYS``), and nobody's message to an agent.
-    return Drop("nothing_to_type")
+    return translation
 
 
 def _is_ascii_letter(character: str) -> bool:
@@ -396,7 +390,7 @@ def _is_ascii_letter(character: str) -> bool:
 
 def _translate(
     key: str, modifiers: list[str], base: str, character: str | None, *, printable: bool
-) -> Translation | None:
+) -> Translation | Drop:
     """The table itself, capability-blind — ``translate`` applies the version gate.
 
     ``key`` is Textual's ``Key.key`` (``"ctrl+c"``, ``"shift+tab"``, ``"f5"``,
@@ -460,29 +454,44 @@ def _translate(
         if name == "Space" and not (ctrl or alt):
             return Translation("literal", " ")
         if ctrl and name in NO_CTRL:
-            return None
+            return Drop("no_name")
         return Translation("key", prefix + name)
 
     if (match := _FUNCTION.fullmatch(base)) is not None:
         number = int(match.group(1))
         if number > MAX_FUNCTION_KEY:
-            return None
+            return Drop("no_name")
         return Translation("key", f"{prefix}F{number}")
 
     char = _base_character(base)
-    if char is None and not modifiers:
-        # A bare key Textual named after its Unicode character — ``section_sign``,
-        # ``degree_sign``, ``pound_sign`` on a non-US layout — reported without
-        # its text. The text wins above whenever a terminal reports it; where
-        # one does not, the name still says what was typed (review of #161,
-        # round 2). Bare only: ``M-§`` was never measured against a tmux.
+    if char is None:
+        # Not a key this table names and not a character it spells: either a
+        # key Textual named after its Unicode character — ``section_sign``,
+        # ``plus_minus_sign``, ``no_break_space`` on a non-US layout — reported
+        # without its text, or a key with NO character behind it at all.
         char = _unicode_character(base)
-    if char is None or char.isspace():
-        return None
+        if char is None:
+            if base in KEYPAD_LAYOUT_DEPENDENT:
+                return Drop("no_name")
+            # A modifier or a lock, Menu, PrtSc, Pause, a volume or media key,
+            # the keypad's centre — what a kitty-protocol terminal reports
+            # because Textual asks for every key it has, and nobody's message
+            # to an agent. Whatever is held with it: ``shift+caps_lock`` and
+            # ``ctrl+pause`` are as empty as the bare key (#151; reviews of
+            # #161, rounds 2 and 3).
+            return Drop("nothing_to_type")
+        if modifiers:
+            # The text wins above whenever a terminal reports it; the name
+            # says what was typed only for the BARE key. ``M-§`` was never
+            # measured against a tmux, so a chord here is a keystroke lost.
+            return Drop("no_name")
     if not modifiers:
-        # A bare character the terminal did not flag printable (e.g. a control
-        # picture): send it as text, never as a name it could collide with.
+        # A bare character the terminal did not flag printable (a control
+        # picture, a NO-BREAK SPACE): send it as text, never as a name it
+        # could collide with.
         return Translation("literal", char)
+    if char.isspace():
+        return Drop("no_name")
     if char.isalpha():
         # The letter's case IS the shift: ``ESC A`` is what alt+shift+a sends,
         # and a kitty ``meta+P`` names the uppercase base with no shift token.
@@ -490,7 +499,7 @@ def _translate(
         # shift) or after Meta (``M-A`` → ESC A) — never as an introducer.
         if (shift or char.isupper()) and not ctrl:
             if alt and char.upper() in ESC_INTRODUCERS:
-                return None
+                return Drop("no_name")
             return Translation("key" if alt else "literal", ("M-" if alt else "") + char.upper())
         return Translation("key", prefix + char.lower())
     if char.isdigit():
@@ -498,13 +507,13 @@ def _translate(
             # ``C-1`` reaches the agent as ``1``; ``shift+1`` is ``!`` on one
             # layout and ``+`` on another — without the character we cannot know.
             # No name: ``translate`` types the character when there is one.
-            return None
+            return Drop("no_name")
         return Translation("key", prefix + char)
     # Punctuation with a modifier.
     if char == ARGV_SEPARATOR:
-        return None
+        return Drop("no_name")
     if shift and not (ctrl or alt):
-        return None
+        return Drop("no_name")
     if ctrl and char not in CTRL_PUNCTUATION:
-        return None
+        return Drop("no_name")
     return Translation("key", prefix + char)

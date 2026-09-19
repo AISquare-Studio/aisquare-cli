@@ -145,11 +145,18 @@ def test_conftest_clears_everything_the_wiring_stands_down_for() -> None:
     Both spellings are read because they are deliberately two copies —
     ``core`` must not import ``services`` — and covering only one would leave
     the suite inheriting whichever name the other list grows first.
+
+    ``IDENTITY_ENV_VARS``, not ``TRACING_ENV_VARS``: the first version of this
+    guard reached for the narrower of two constants defined twelve lines apart,
+    and so missed the MARKER half — ``AISQUARE_PIPELINE_ID`` and
+    ``AISQUARE_TRACE_AGENT_NAME``, which `core.insights.run_key` reads straight
+    off the environment. ``core/spawn.py``'s own module docstring says which one
+    a stripping seam uses, and this is the same question.
     """
     from aisquare.core import spawn
     from aisquare.services import explainability
 
-    reserved = set(explainability.RESERVED_ENV_VARS) | set(spawn.TRACING_ENV_VARS)
+    reserved = set(explainability.RESERVED_ENV_VARS) | set(spawn.IDENTITY_ENV_VARS)
     missing = sorted(reserved - set(AMBIENT_ENV_VARS))
     assert not missing, (
         f"the wiring stands down on {missing} — 'not overriding your routing, "

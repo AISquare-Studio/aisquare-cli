@@ -148,8 +148,20 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
 #: lists — the four routing names below were missing for exactly as long as there
 #: was nothing to compare against.
 AMBIENT_ENV_VARS = (
+    # Agent detection honours CLAUDE_CONFIG_DIR, and a developer running the
+    # suite from inside a Claude session must never have tests write hooks into
+    # their real config directory. In the tuple rather than on its own
+    # `delenv` line so this really is the single answer to "what does the suite
+    # clear" — the guards below read only this name, so a variable cleared
+    # elsewhere would be reported as uncleared and send the reader to the wrong
+    # file.
+    "CLAUDE_CONFIG_DIR",
     "AISQUARE_TEAM",
     "AISQUARE_ROLE",
+    # Read off the ambient env by `services/mcp_server.py` to attribute remote
+    # calls — same family as the two above, and missed for the same reason.
+    "AISQUARE_SERVE_CLIENT",
+    "AISQUARE_SERVE_ROLE",
     "AISQUARE_TEAM_HUB",
     "AISQUARE_TEAM_DELTA",
     "AISQUARE_TEAM_LEASE_MIN",
@@ -196,6 +208,15 @@ AMBIENT_ENV_VARS = (
     "ANTHROPIC_CUSTOM_HEADERS",  # wire_session
     "CLAUDE_CODE_USE_BEDROCK",  # interfering_env
     "CLAUDE_CODE_USE_VERTEX",  # interfering_env
+    # The MARKER half of a tracing identity (core.spawn.MARKER_ENV_VARS).
+    # `core.insights.run_key` files every insight under AISQUARE_PIPELINE_ID
+    # when it is set, so a suite run from inside a traced session grades
+    # whoever launched it. This is the likeliest name of all to be set for the
+    # audience above: a traced `aisquare launch` / `team spawn` exports it into
+    # every child, and the fleet's tmux server hands its environment to every
+    # window it opens.
+    "AISQUARE_PIPELINE_ID",
+    "AISQUARE_TRACE_AGENT_NAME",
     # A sign-in token in the operator's shell would make every test run as them.
     "AISQUARE_TOKEN",
     "BROWSER",
@@ -210,6 +231,18 @@ AMBIENT_ENV_VARS = (
     "AISQUARE_CI_KEY",
     "AISQUARE_CI_RUN",
     "AISQUARE_CI_DELIVERY_OVERRIDE",
+    # Read off the ambient env, and none of them fails the suite TODAY — swept
+    # out of `src/` rather than waited for, because the docstring above claims
+    # completeness and two guards now read this tuple, so a claim that is only
+    # nearly true is worse than one that is checked.
+    "XDG_CONFIG_HOME",  # diagnostics: resolves the developer's real gh config dir
+    "GH_CONFIG_DIR",  # same
+    "GH_TOKEN",  # diagnostics: "gh is not authenticated" by whose shell
+    "GITHUB_TOKEN",  # same
+    "EDITOR",  # core.editor: a seam that escapes its patch launches the real one
+    "VISUAL",  # same
+    "TERM",  # rendering assertions vary by terminal
+    "TMUX_TMPDIR",  # core.tmux socket path
 )
 
 
@@ -217,13 +250,12 @@ AMBIENT_ENV_VARS = (
 def isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Point AISQUARE_HOME at a temp dir so tests never touch ``~/.aisquare``.
 
-    ``CLAUDE_CONFIG_DIR`` is cleared too: agent detection honours it, and a
-    developer running the suite from inside a Claude session must never have
-    tests write hooks into their real config directory.
+    Everything else it clears is :data:`AMBIENT_ENV_VARS`, which is the single
+    answer to "what does the suite clear" — including ``CLAUDE_CONFIG_DIR``,
+    which used to be cleared on a line of its own here.
     """
     home = tmp_path / "aisquare-home"
     monkeypatch.setenv(HOME_ENV_VAR, str(home))
-    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
     # Read from the ambient env; cleared so the suite is hermetic (an embedding
     # user's AISQUARE_BRAIN_EMBED=1 must not change what tests build/assert),
     # each test opting in explicitly instead.

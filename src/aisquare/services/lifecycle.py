@@ -109,13 +109,18 @@ def initialize(
         # and reports whether the file could really be locked to this account,
         # because on NTFS the 0600 that guarded it is a no-op.
         _, restricted = credentials_store.store(**{credentials_store.API_KEY: api_key})
-        if restricted:
-            notes.append("Stored API key in ~/.aisquare/credentials.")
-        else:
-            notes.append(
-                "Stored API key in ~/.aisquare/credentials — but could NOT restrict it to "
-                "your account; other users on this machine may be able to read it."
+        # One string with one branch, rather than two near-copies sharing a
+        # prefix: the two paths cannot drift into saying different things about
+        # where the key landed.
+        notes.append(
+            "Stored API key in ~/.aisquare/credentials"
+            + (
+                "."
+                if restricted
+                else " — but could NOT restrict it to your account; other users on this "
+                "machine may be able to read it."
             )
+        )
     elif not local:
         notes.append(
             "No API key given — running local-only; re-run with --api-key to connect later."

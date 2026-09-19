@@ -329,8 +329,19 @@ def test_the_sweep_sees_exactly_what_pytest_runs() -> None:
     # so its tests are not "audited and never executed" — they are not part of
     # this platform's suite. Windows reaches this:
     # `test_install_script_functions.py` drives a POSIX shell script.
+    #
+    # "DID it opt out HERE", not "COULD it". The AST check alone is true on
+    # every platform, so the first version of this excused that file's 53 tests
+    # on Linux too — where they run perfectly well, and where a phantom in it (a
+    # lost decorator, a broken walk in `_test_functions`) would then have been
+    # invisible on every leg. Intersecting with what pytest actually collected
+    # is what keeps the exclusion to the platform that earned it, and 53 of
+    # ~1770 is a big enough blast radius to be worth the extra condition.
+    collected_modules = {name.split("::", 1)[0] for name in collected}
     opted_out = {
-        path.name for path in sorted(TESTS.glob("test_*.py")) if _skips_itself_at_module_level(path)
+        path.name
+        for path in TESTS.glob("test_*.py")
+        if _skips_itself_at_module_level(path) and path.name not in collected_modules
     }
     phantom = sorted(n for n in swept - collected if n.split("::", 1)[0] not in opted_out)
     assert not phantom, (

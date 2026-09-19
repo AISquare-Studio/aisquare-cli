@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
-import stat
 import subprocess
 import sys
 import time
@@ -18,6 +16,7 @@ from aisquare.core import brain
 from aisquare.core.orchestrator import team_project
 from aisquare.services import distill
 from aisquare.services import team as team_service
+from tests import fakebin
 
 _FAKE_GBRAIN = r"""# Schema-aware fake: `init` records the embedding choice into config.json
 # exactly like real gbrain, and `query` (hybrid) REJECTS a vectorless brain --
@@ -102,20 +101,17 @@ def fake_gbrain(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     bin_dir.mkdir()
     impl = bin_dir / "fake_gbrain.py"
     impl.write_text(_FAKE_GBRAIN, encoding="utf-8")
-    if sys.platform == "win32":
-        launcher = bin_dir / "gbrain.cmd"
-        launcher.write_text(
-            "@echo off\r\n" + f'"{sys.executable}" "{impl}" %*' + "\r\n", encoding="utf-8"
-        )
-    else:
-        launcher = bin_dir / "gbrain"
-        launcher.write_text(
-            "#!/bin/sh\n" + f'exec "{sys.executable}" "{impl}" "$@"' + "\n", encoding="utf-8"
-        )
-        launcher.chmod(launcher.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-    # Prepend rather than replace: the fake must win, but git and friends have
-    # to stay reachable, and a hardcoded "/usr/bin:/bin" is not portable.
-    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    # `exit_code=None`: this is a LAUNCHER, and several tests below assert on
+    # what the Python implementation exits with. An appended `exit /b 0` would
+    # report success for every one of them.
+    fakebin.executable_fake(
+        bin_dir,
+        "gbrain",
+        posix=f'exec "{sys.executable}" "{impl}" "$@"',
+        windows=f'"{sys.executable}" "{impl}" %*',
+        exit_code=None,
+    )
+    fakebin.prepend_to_path(bin_dir, monkeypatch)
     return bin_dir
 
 

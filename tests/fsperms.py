@@ -25,6 +25,7 @@ machine can actually do keeps the answer honest in both places.
 
 from __future__ import annotations
 
+import contextlib
 import getpass
 import os
 import stat
@@ -133,6 +134,32 @@ def can_deny_writes() -> bool:
                 return True
         except (RuntimeError, OSError):
             return False
+
+
+def can_deny_reads() -> bool:
+    """Whether ``chmod(0o000)`` actually stops THIS user reading a file.
+
+    False for root, and false on NTFS, where the mode bits have no equivalent
+    and the owner reads its own file whatever they say. Measured by writing a
+    file, taking every bit off it and trying to read it back — the same
+    "verify the premise took" rule as :func:`can_deny_writes`, rather than
+    naming the two platforms we happen to know about.
+    """
+    with tempfile.TemporaryDirectory() as raw:
+        probe = Path(raw) / "unreadable"
+        probe.write_text("secret", encoding="utf-8")
+        try:
+            probe.chmod(0o000)
+        except OSError:
+            return False
+        try:
+            probe.read_text(encoding="utf-8")
+        except OSError:
+            return True
+        finally:
+            with contextlib.suppress(OSError):
+                probe.chmod(0o600)
+        return False
 
 
 def can_symlink() -> bool:

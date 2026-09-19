@@ -815,12 +815,21 @@ def test_a_doctor_report_is_painted_only_in_the_scope_it_ran_for(
     # Control: the same string rendered AS MARKUP loses the bracketed segment —
     # the failure this assertion exists to catch, measured here.
     #
-    # Taken on the POSIX spelling on BOTH platforms, because Rich's escape
-    # character is `\` — the Windows path separator. `...\[archive]\repo` reads
-    # as an ESCAPED bracket there, survives markup parsing untouched, and the
-    # control would quietly prove nothing on the one platform where it looks
-    # most alarming. The assertion above is still about the real rendered path.
-    as_markup = f"{path.as_posix()}: init failed: store_unopenable"
+    # Derived FROM `rendered`, not rebuilt from the parts. A control assembled
+    # out of literals stops being a control: it keeps passing if the product
+    # drops the path, changes the separator between path and reason, or reorders
+    # the message — none of which this test would then notice.
+    #
+    # The one thing neutralised is the separator, because Rich's escape
+    # character is `\` and that is also the Windows one: `...\[archive]\repo`
+    # reads as an ESCAPED bracket, survives markup parsing untouched, and the
+    # control would prove nothing on the platform where it looks most alarming.
+    as_markup = rendered.replace("\\", "/")
+    # The segment has to BE there before "markup ate it" means anything —
+    # otherwise an `as_markup` that never contained it satisfies both sides of
+    # the comparison and the control passes having proved nothing. Same
+    # manufacture-then-assert shape as winacl's "the leak was not manufactured".
+    assert "[archive]" in as_markup, as_markup
     assert Content.from_markup(as_markup).plain == as_markup.replace("[archive]", "")
 
 
@@ -866,11 +875,11 @@ def test_the_explainability_views_toasts_keep_bracketed_data(
     # Control: the same string parsed AS MARKUP loses the bracketed directory —
     # the failure this assertion exists to catch, measured here.
     #
-    # On the POSIX spelling on BOTH platforms, for the reason the sibling test
-    # above records: Rich's escape character is `\`, which is also the Windows
-    # separator, so `\[work]` reads as an escaped bracket, survives parsing
-    # untouched, and the control would pass while proving nothing there.
-    as_markup = f"could not write the config: {refused.as_posix()}"
+    # From `rendered` with only the separator neutralised, for the reason the
+    # sibling test above records — a control rebuilt from literals would keep
+    # passing after the product stopped emitting the path at all.
+    as_markup = rendered.replace("\\", "/")
+    assert "[work]" in as_markup, as_markup  # present before markup is asked to eat it
     assert "[work]" not in Content.from_markup(as_markup).plain
 
 

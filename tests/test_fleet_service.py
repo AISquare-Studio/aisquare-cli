@@ -52,6 +52,7 @@ from aisquare.services.fleet import (
     FleetUnavailable,
     NoSuchAgent,
 )
+from tests import fakebin
 
 PYTHON_LAUNCHER = "python3"
 """What ``pane_current_command`` reads while ``python -m aisquare launch`` is resolving."""
@@ -318,17 +319,15 @@ def claude_on_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     fake in test_brain.py, in code written after that one was fixed.
     """
     bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    if sys.platform == "win32":
-        script = bin_dir / "claude.cmd"
-        script.write_text("@echo off\r\necho fake claude: %*\r\nset /p line=\r\n", encoding="utf-8")
-    else:
-        script = bin_dir / "claude"
-        script.write_text(
-            '#!/bin/sh\necho "fake claude: $*"\nread line\nexit 0\n', encoding="utf-8"
-        )
-        script.chmod(0o755)
-    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+    script = fakebin.executable_fake(
+        bin_dir,
+        "claude",
+        # `%*` quoted, or an argument carrying `&`, `|`, `>` or `^` is
+        # interpreted by cmd.exe rather than echoed back.
+        windows='echo fake claude: "%*"\nset /p line=',
+        posix='echo "fake claude: $*"\nread line',
+    )
+    fakebin.prepend_to_path(bin_dir, monkeypatch)
     return script
 
 

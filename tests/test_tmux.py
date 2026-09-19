@@ -51,7 +51,8 @@ from aisquare.core.tmux import (
     _tmux,
     parse_version,
 )
-from tests.fsperms import can_deny_writes
+from tests import fakebin
+from tests.fsperms import can_deny_reads, can_deny_writes
 
 OK = Completed(0, "", "")
 FACTS_FIELDS = len(tmux_module._FACTS_FIELDS)  # what display-message is asked for
@@ -110,20 +111,9 @@ def fake_bin(tmp_path: Path) -> Path:
     """An executable that exists, so ``binary()`` resolves without real tmux.
 
     `TmuxServer.binary` is `shutil.which(...)`, which on Windows resolves
-    through PATHEXT — an extensionless file is not a program there, so every
-    test taking this fixture failed with "tmux is not installed" against a file
-    that was sitting right there. `.cmd` is the shape pip and npm use and the
-    same fix the gbrain fake in test_brain.py already carries.
+    through PATHEXT — see `tests/fakebin.py`, which owns that lesson now.
     """
-    suffix = ".cmd" if sys.platform == "win32" else ""
-    path = tmp_path / "bin" / f"tmux{suffix}"
-    path.parent.mkdir()
-    if sys.platform == "win32":
-        path.write_text("@echo off\r\nexit /b 0\r\n", encoding="utf-8")
-    else:
-        path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-        path.chmod(0o755)
-    return path
+    return fakebin.executable_fake(tmp_path / "bin", "tmux", posix="", windows="")
 
 
 @pytest.fixture
@@ -150,6 +140,15 @@ def _completes(call: Callable[[], None]) -> bool:
 #: Either way the rewrite succeeds and the fail-open branch is never reached, so
 #: the test would assert the opposite of what it claims. `can_deny_writes`
 #: measures it by trying, rather than naming the two platforms it knows about.
+#: Mode 000 is a refusal for an ordinary POSIX user and ADVICE otherwise:
+#: root reads anything, and on NTFS the owner reads its own file whatever
+#: the bits say. Measured the same way `can_deny` is — by asking the
+#: platform rather than by naming the two cases we know about.
+can_read_zero_mode = pytest.mark.skipif(
+    not can_deny_reads(),
+    reason="mode 000 does not stop this user from reading",
+)
+
 can_deny = pytest.mark.skipif(
     not can_deny_writes(),
     reason="writes cannot be denied here — the fail-open branch is unreachable",
@@ -299,16 +298,29 @@ def test_a_conf_that_cannot_be_rewritten_fails_open_instead_of_raising(
     fresh = TmuxServer("s", binary=str(fake_bin), runner=FakeTmux())
     assert fresh.has_session("x") is True, "an unwritable conf does not cost the command"
 
-    # Unreadable AND unwritable: measured on 3.7c, handing tmux an unreadable
-    # -f file kills the server at startup ("server exited unexpectedly"), while
-    # a missing one is fine — so this branch must NOT hand over the path.
-    #
-    # Only this HALF is skipped where mode 000 is not a refusal — NTFS lets the
-    # owner read its own file whatever the bits say, as root does. Everything
-    # above has already run, including the readable-but-unwritable branch, which
-    # is the one the fail-open was written for.
-    if sys.platform == "win32" or os.geteuid() == 0:
-        pytest.skip("mode 000 does not stop this user from reading")
+
+@can_read_zero_mode
+@can_deny
+def test_a_conf_that_cannot_be_READ_is_replaced_by_devnull(
+    fake_bin: Path, isolated_home: Path
+) -> None:
+    """The other half, as its own test so the report says which one ran.
+
+    Measured on 3.7c: handing tmux an UNREADABLE ``-f`` file kills the server at
+    startup ("server exited unexpectedly"), while a MISSING one is fine — so
+    this branch must not hand over the path at all, where the readable-but-
+    unwritable branch above must.
+
+    Split out because it needs a condition its sibling does not: mode 000 has to
+    be a refusal, which it is not for root and not on NTFS, where the owner
+    reads its own file whatever the bits say. As one test with a mid-body skip,
+    both halves reported `passed` on a machine that had only run the first, and
+    nothing in `-ra` said so.
+    """
+    isolated_home.mkdir(parents=True, exist_ok=True)
+    path = isolated_home / CONF_NAME
+    path.write_text("set -g status on  # what the last version wrote\n", encoding="utf-8")
+
     path.chmod(0o000)
     blind = TmuxServer("s", binary=str(fake_bin), runner=FakeTmux())
     assert blind.conf_path() == Path(os.devnull)

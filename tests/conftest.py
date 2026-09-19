@@ -217,6 +217,12 @@ AMBIENT_ENV_VARS = (
     # window it opens.
     "AISQUARE_PIPELINE_ID",
     "AISQUARE_TRACE_AGENT_NAME",
+    # The third. `MARKER_ENV_VARS` "went from two names to three once, and the
+    # copies that were prose rather than reads had to be chased down one at a
+    # time" — its own words. This tuple was one of those copies, and the guard
+    # below is what made it a read: it named this variable on merging main
+    # without anyone going looking.
+    "AISQUARE_RUN_TRACE_ID",
     # A sign-in token in the operator's shell would make every test run as them.
     "AISQUARE_TOKEN",
     "BROWSER",

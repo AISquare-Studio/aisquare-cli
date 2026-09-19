@@ -1204,19 +1204,34 @@ class SqliteStore:
     def recent_prompts(
         self, project_id: str | None = None, *, limit: int = 20
     ) -> list[PromptRecord]:
+        """The most recent prompts, newest first, INSERTION ORDER within a tick.
+
+        The tie-break is ``rowid`` rather than ``id``. An id is a millisecond
+        stamp followed by 128 random bits, so two prompts written inside one
+        tick used to sort by coin flip — and `aisquare board` run twice could
+        show the same two in different orders. Windows showed it most, because
+        its clock is coarser: `time.time()` only gained
+        ``GetSystemTimePreciseAsFileTime`` in 3.13 and the CI lane pins 3.12, so
+        back-to-back inserts routinely land in the same millisecond.
+
+        ``rowid`` is monotonic per insert and costs nothing: ``prompt`` is a
+        plain table (``id TEXT PRIMARY KEY``, no ``WITHOUT ROWID``), so SQLite
+        already maintains one. The suite used to sleep past this; ordering by
+        the column that means "written after" removes the wart instead.
+        """
         # A forgotten project's prompts are hidden with the rest of its history.
         if project_id is None:
             rows = self._conn.execute(
                 f"SELECT {_PROMPT_COLUMNS} FROM prompt "
                 f"WHERE project_id IS NULL OR project_id IN {_VISIBLE_PROJECTS} "
-                "ORDER BY created_at DESC, id DESC LIMIT ?",
+                "ORDER BY created_at DESC, rowid DESC LIMIT ?",
                 (limit,),
             ).fetchall()
         else:
             rows = self._conn.execute(
                 f"SELECT {_PROMPT_COLUMNS} FROM prompt "
                 f"WHERE project_id = ? AND project_id IN {_VISIBLE_PROJECTS} "
-                "ORDER BY created_at DESC, id DESC LIMIT ?",
+                "ORDER BY created_at DESC, rowid DESC LIMIT ?",
                 (project_id, limit),
             ).fetchall()
         return [_row_to_prompt(row) for row in rows]

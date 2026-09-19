@@ -209,6 +209,11 @@ def test_add_linked_repo_unknown_project_raises(store: ContextStore) -> None:
 
 
 def test_add_and_list_prompts(store: ContextStore) -> None:
+    # NO SLEEP. Both prompts are written inside one clock tick on purpose —
+    # which is the case that used to sort by coin flip, because the tie-break
+    # was an id whose tail is 128 random bits. `recent_prompts` breaks ties on
+    # `rowid` now, so "written second" is what "sorts first" means, and this
+    # asserts that rather than sleeping until the clock disambiguates it.
     store.add_prompt("first prompt", PROJECT.id)
     store.add_prompt("second prompt", PROJECT.id)
     prompts = store.recent_prompts(PROJECT.id)

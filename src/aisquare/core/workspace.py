@@ -19,8 +19,56 @@ from aisquare.core.store import ContextStore
 from aisquare.models import ProjectInfo
 
 # Directory markers that identify a project root, nearest-first.
-_ROOT_MARKERS = (".git", ".hg", ".aisquare")
+ROOT_MARKERS = (".git", ".hg", ".aisquare")
 _PIN_KEY = "active_project_id"
+
+
+# Entries that only ever exist inside OUR home directory, never inside a
+# hand-made ``<project>/.aisquare`` opt-in marker (nothing in the codebase
+# creates that one — a user makes it by hand, the way they would ``.git``).
+_HOME_LAYOUT = ("config.toml", "context.db", "agents.json")
+
+
+def _is_aisquare_home(candidate: Path) -> bool:
+    """Whether ``candidate`` is an aisquare *home*, not a project marker.
+
+    Matched structurally rather than by path, because the home that matters is
+    not always the configured one: the test suite redirects ``AISQUARE_HOME``
+    into a temp tree while the developer's real ``~/.aisquare`` is still
+    sitting above ``tempfile.gettempdir()``, and only a structural check sees
+    both for what they are.
+    """
+    if not candidate.is_dir():
+        return False
+    try:
+        if candidate.resolve() == paths.aisquare_home().resolve():
+            return True
+    except OSError:  # pragma: no cover - unresolvable path is not our home
+        pass
+    return any((candidate / entry).exists() for entry in _HOME_LAYOUT)
+
+
+def marks_project_root(directory: Path) -> bool:
+    """Whether ``directory`` carries a project marker.
+
+    ``.aisquare`` is overloaded: ``<project>/.aisquare`` is the opt-in project
+    marker, but ``~/.aisquare`` is *our own state directory*. Counting the
+    latter makes the home directory a project root, so every markerless
+    directory beneath it silently resolves to ``$HOME`` and shares one context
+    pool — and ``serve --stdio``'s "refusing to activate: not a project root"
+    guard, which exists precisely because Claude Desktop launches from ``$HOME``,
+    never fires. It bites hardest on Windows, where ``tempfile`` lives under
+    ``%USERPROFILE%``, but it is not a Windows bug: a POSIX user running
+    ``aisquare`` from a markerless ``~/scratch`` hits exactly the same thing.
+    """
+    for marker in ROOT_MARKERS:
+        candidate = directory / marker
+        if not candidate.exists():
+            continue
+        if marker == ".aisquare" and _is_aisquare_home(candidate):
+            continue
+        return True
+    return False
 
 
 def git_common_root(start: Path) -> Path | None:
@@ -79,7 +127,7 @@ def find_project_root(start: Path) -> Path:
     if common is not None:
         return common
     for directory in (start, *start.parents):
-        if any((directory / marker).exists() for marker in _ROOT_MARKERS):
+        if marks_project_root(directory):
             return directory
     return start
 

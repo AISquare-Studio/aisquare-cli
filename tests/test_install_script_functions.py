@@ -22,13 +22,22 @@ work under whatever `/bin/sh` the developer has, and CI runs the same file with
 from __future__ import annotations
 
 import os
-import pty
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
+
+# `install.sh` is a POSIX shell script and every test here drives it through
+# `sh`, `pty.fork` and `os.execve`. None of that exists on Windows, and `pty`
+# used to be imported at MODULE scope, so the whole file failed COLLECTION
+# there rather than skipping — an error, not a skip, before a single test ran.
+# Skipping at module level is the honest answer and keeps the rest of the
+# suite's Windows run clean.
+if sys.platform == "win32":  # pragma: no cover - the POSIX installer's own tests
+    pytest.skip("install.sh is a POSIX shell script", allow_module_level=True)
 
 REPO = Path(__file__).resolve().parents[1]
 SCRIPT = REPO / "install.sh"
@@ -884,6 +893,12 @@ def _piped_into_sh_with_a_terminal(
             "AISQUARE_INSTALL_VERSION": "",
         }
     )
+
+    # The module-level skip above guarantees this; the assert is what tells
+    # MYPY so, since the suite is type-checked under Windows too now and `pty`
+    # is POSIX-only in typeshed.
+    assert sys.platform != "win32"
+    import pty
 
     read_end, write_end = os.pipe()
     pid, master = pty.fork()

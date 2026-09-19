@@ -465,11 +465,15 @@ def test_worktree_principal_reads_the_git_file_and_ignores_a_main_checkout(
     orphan = tmp_path / "orphan"
     orphan.mkdir()
     (orphan / ".git").write_text("gitdir: /nowhere/repo/.git/worktrees/orphan\n", encoding="utf-8")
-    assert worktree_principal(orphan) == Path("/nowhere/repo")
+    # `.resolve()` on both sides, because the function returns
+    # `principal.resolve()` and a rooted-but-driveless path is not absolute on
+    # Windows: `Path("/nowhere/repo")` resolves against the current drive, so a
+    # bare literal compares an anchored path against an unanchored one.
+    assert worktree_principal(orphan) == Path("/nowhere/repo").resolve()
     bare = tmp_path / "of-bare"
     bare.mkdir()
     (bare / ".git").write_text("gitdir: /srv/repo.git/worktrees/x\n", encoding="utf-8")
-    assert worktree_principal(bare) == Path("/srv/repo.git")
+    assert worktree_principal(bare) == Path("/srv/repo.git").resolve()  # anchored, as above
 
 
 def _register_worktree_as_its_own_project(worktree: Path) -> str:

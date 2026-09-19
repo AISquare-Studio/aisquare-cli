@@ -29,12 +29,14 @@ from __future__ import annotations
 
 import json
 import stat
+import sys
 
 import pytest
 from typer.testing import CliRunner
 
 from aisquare.cli.app import app
 from aisquare.core import credentials, paths
+from tests import winacl
 
 # Assembled rather than written as a literal, so nothing here can be mistaken
 # for a real key by a scanner or a reader.
@@ -89,11 +91,30 @@ def test_a_legacy_bare_file_is_migrated_not_discarded(runner: CliRunner) -> None
 
 
 def test_the_file_stays_owner_only(runner: CliRunner) -> None:
-    """0600 was never the defect and must not become one."""
+    """Owner-only was never the defect and must not become one.
+
+    Asserted per platform, because the mode bits are only the POSIX half of
+    the answer: on NTFS ``S_IMODE`` reports 0o666 however the file is really
+    protected, so an unconditional ``== 0o600`` would fail on Windows while
+    saying nothing about who can actually read the key.
+    """
     runner.invoke(app, ["init", "--yes", "--api-key", _FAKE_KEY], catch_exceptions=False)
 
-    mode = stat.S_IMODE(paths.credentials_path().stat().st_mode)
-    assert mode == 0o600, oct(mode)
+    creds = paths.credentials_path()
+    if sys.platform == "win32":
+        granted = winacl.dacl_trustees(creds)
+        assert granted, "no ACEs read back from the credentials file"
+        me = winacl.current_user_sid()
+        mine = winacl.user_trustees(granted, me)
+        assert mine, (granted, me)
+        # Not "nobody else" — the privileged SIDs are the machine's own
+        # plumbing and an admin can take ownership regardless, the same deal
+        # 0600 offers against root. What must not appear is Users, Everyone
+        # or Authenticated Users.
+        assert not (granted - winacl.PRIVILEGED_TRUSTEES - mine), granted
+    else:
+        mode = stat.S_IMODE(creds.stat().st_mode)
+        assert mode == 0o600, oct(mode)
 
 
 def test_the_token_is_stable_across_calls(runner: CliRunner) -> None:

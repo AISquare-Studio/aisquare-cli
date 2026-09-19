@@ -235,7 +235,13 @@ def test_an_unreachable_server_is_reported(runner: CliRunner) -> None:
     assert result.exit_code == 1
     payload = json.loads(result.stdout)
     assert payload["error"] == "unreachable"
-    assert "127.0.0.1:9" in payload["detail"] or "Connection refused" in payload["detail"]
+    # The reason has to name the address or say it was refused. `Connection
+    # refused` is the POSIX wording; Windows says `[WinError 10061] No
+    # connection could be made because the target machine actively refused it`
+    # and does not repeat the address — so matching either spelling exactly
+    # asserted one platform's strerror rather than the property.
+    detail = payload["detail"]
+    assert "127.0.0.1:9" in detail or "refused" in detail.lower(), detail
 
 
 def test_plain_http_to_a_remote_host_is_refused(runner: CliRunner) -> None:

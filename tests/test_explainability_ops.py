@@ -688,6 +688,7 @@ def test_register_prints_each_identity_with_its_publication_id(
             "aisquare-tester",
             "aisquare-reviewer",
             "aisquare-validator",
+            "aisquare-ui-tester",
             "aisquare-cli",
         ]
     }
@@ -810,6 +811,7 @@ def test_register_renders_the_same_verdict_in_both_forms(
         "aisquare-tester": None,
         "aisquare-reviewer": None,
         "aisquare-validator": None,
+        "aisquare-ui-tester": None,
         "aisquare-cli": None,
     }, payload
 

@@ -78,6 +78,10 @@ narrowing their environment would be change without a reason:
     credentials file to this account on Windows. A permissions tool, not a
     model process; it is also the seam that guards the API key, so an
     inherited base URL is irrelevant to it either way.
+  * ``core/paths.py::_current_user_sid`` — ``whoami /user``, reading this
+    account's SID so the ``icacls`` above can name a trustee that cannot be
+    spoofed by a stray ``USER`` in the environment. Same argument as its
+    caller.
   * ``services/explainability_ops.py::install_sdk`` — ``pip install``.
   * ``services/explainability_ops.py::sdk_doctor`` — the SDK's own doctor
     script. Not stripped: it needs the ``EXPLAINABILITY_*`` environment to
@@ -234,6 +238,11 @@ SEAMS: dict[str, Seam] = {
     ),
     "aisquare/core/paths.py::restrict_to_owner": Seam(
         EXCLUDED, "`icacls` — locks the credentials file to this account; no model"
+    ),
+    "aisquare/core/paths.py::_current_user_sid": Seam(
+        EXCLUDED,
+        "`whoami /user` — reads THIS account's SID for the icacls trustee above. "
+        "An identity question about the operating system, not the model API",
     ),
     "aisquare/services/explainability_ops.py::install_sdk": Seam(
         EXCLUDED, "`pip install` — reaches PyPI, never the model API"

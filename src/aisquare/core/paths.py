@@ -16,12 +16,17 @@ Set ``AISQUARE_HOME`` to relocate the whole tree (tests rely on this).
 
 from __future__ import annotations
 
-import getpass
+import errno
 import os
 import stat
 import subprocess
 import sys
+import time
+from collections.abc import Callable
 from pathlib import Path
+from typing import TypeVar
+
+_T = TypeVar("_T")
 
 HOME_ENV_VAR = "AISQUARE_HOME"
 """Environment variable that overrides the default ``~/.aisquare`` location."""
@@ -35,14 +40,40 @@ def restrict_to_owner(path: Path) -> bool:
     leaves the file readable by every other account on the machine. Since the
     two callers are an API key and a bearer token, "silently" is the problem.
 
-    Two icacls calls, and both are load-bearing. ``/inheritance:r`` removes
-    only *inherited* entries and ``/grant:r`` replaces the grant only for the
-    user it names, so an **explicit** ``BUILTIN\\Users`` ACE — inherited from
-    a widened parent at creation time, or set by hand — survives both and
-    leaves the file readable by every account on the box. ``/reset`` first
-    discards the explicit entries and restores inheritance from the parent;
-    stripping inheritance and granting afterwards then leaves the owner alone
-    on the DACL.
+    ONE icacls call, and each piece of it is load-bearing. ``/inheritance:r``
+    removes only *inherited* entries and ``/grant:r`` replaces the grant only
+    for the principal it names, so an **explicit** ``BUILTIN\\Users`` ACE —
+    inherited from a widened parent at creation time, or set by hand — survives
+    both and leaves the file readable by every account on the box. ``/remove``
+    is what drops an explicit ACE, and it names the three broad principals by
+    SID rather than by display name, which is localised.
+
+    This used to be ``/reset`` followed by a second call, and the pair was not
+    atomic. ``/reset`` discards the explicit entries by RESTORING INHERITANCE
+    FROM THE PARENT — so between the two calls the file sat on the parent's
+    DACL with the secret already written into it, readable by whoever that
+    parent grants, for two ``CreateProcess`` calls' worth of time. Worse, a
+    failure of the second call left the file *wider than before this function
+    was called*, because the first had already thrown away the owner-only DACL
+    a previous call had set: a regression reported as ``False`` rather than a
+    no-op. One call cannot half-apply.
+
+    The trade is stated rather than hidden: ``/remove`` drops the three ACEs it
+    names, where ``/reset`` dropped every explicit ACE. A file carrying an
+    explicit grant to some OTHER principal — a domain group, a service account,
+    a second local user — keeps it. That is a narrower guarantee than before on
+    a file that is, in practice, created by this process in this process's own
+    home; ``tests/test_paths.py`` pins the limit so it is recorded in the suite
+    rather than only here.
+
+    The trustee is a SID from ``whoami``, not ``getpass.getuser()``. CPython
+    returns the first set of ``LOGNAME``, ``USER``, ``LNAME``, ``USERNAME``
+    before asking the OS, and the first three are set by MSYS2, Git Bash and
+    anything sourcing a POSIX profile. With ``USER=alice`` and a Windows
+    account of ``CORP\\a.smith``, ``icacls /grant:r alice:(R,W)`` fails with
+    "No mapping between account names and security IDs was done" — which, in
+    the old two-call shape, failed *after* the reset had stripped the DACL. A
+    SID also sidesteps localised names and domain qualification.
 
     An ``Administrators`` entry can remain when the parent grants one, which is
     not worth chasing: an admin can take ownership regardless, exactly as root
@@ -54,29 +85,60 @@ def restrict_to_owner(path: Path) -> bool:
     if sys.platform != "win32":
         path.chmod(stat.S_IRUSR | stat.S_IWUSR)
         return True
-    try:
-        user = getpass.getuser()
-    except Exception:  # pragma: no cover - getuser needs an identifiable user
+    sid = _current_user_sid()
+    if sid is None:
         return False
-    for argv in (
-        ["icacls", str(path), "/reset"],
-        ["icacls", str(path), "/inheritance:r", "/grant:r", f"{user}:(R,W)"],
-    ):
-        try:
-            result = subprocess.run(
-                argv,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=15,
-                check=False,
-            )
-        except (OSError, subprocess.TimeoutExpired):
-            return False
-        if result.returncode != 0:
-            return False
-    return True
+    argv = [
+        "icacls",
+        str(path),
+        "/inheritance:r",
+        # Users, Everyone, Authenticated Users — by SID, because the display
+        # names are localised and would not match on a non-English Windows.
+        "/remove",
+        "*S-1-5-32-545",
+        "*S-1-1-0",
+        "*S-1-5-11",
+        "/grant:r",
+        f"*{sid}:(R,W)",
+    ]
+    try:
+        result = subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=15,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0
+
+
+def _current_user_sid() -> str | None:
+    """This account's SID from ``whoami``, or ``None`` when it cannot be read.
+
+    ``tests/winacl.py`` reads SIDs the same way and for the same reason — a
+    name-based check would be the same vacuous pass one level down.
+    """
+    try:
+        result = subprocess.run(
+            ["whoami", "/user", "/fo", "csv", "/nh"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=15,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):  # pragma: no cover - needs a broken PATH
+        return None
+    if result.returncode != 0:
+        return None
+    # '"domain\\user","S-1-5-21-..."'
+    sid = result.stdout.strip().split(",")[-1].strip().strip('"')
+    return sid or None
 
 
 def aisquare_home() -> Path:
@@ -236,3 +298,90 @@ def ensure_home() -> Path:
     for directory in (home, cache_dir(), log_dir()):
         directory.mkdir(parents=True, exist_ok=True)
     return home
+
+
+# --- Windows file contention ---------------------------------------------------
+#
+# Here rather than in `core.config` because it is a FILESYSTEM fact, not a
+# config one, and three modules want it: `config.save_config`/`load_config`,
+# `credentials.load_all`, and `services.explainability.store_api_key`. All
+# three already import this module, and `paths` imports nothing from
+# `aisquare`, so it is the one place none of them has to reach sideways for.
+
+
+#: Windows error codes meaning "someone else has this file open right now":
+#: ERROR_ACCESS_DENIED and ERROR_SHARING_VIOLATION.
+_WINDOWS_BUSY = frozenset({5, 32})
+
+
+def _is_contention(exc: PermissionError) -> bool:
+    """Whether ``exc`` is Windows saying "busy" rather than "you may not".
+
+    The two sides report it DIFFERENTLY, which is worth writing down because
+    matching only the obvious one silently disables half the retry:
+
+    * ``os.replace`` raises through the Win32 layer and carries ``winerror``
+      5 or 32.
+    * ``Path.open`` raises through the C runtime, which sets ``errno`` 13 and
+      leaves ``winerror`` as **None** — measured, 122 of 122 racing reads.
+
+    A genuine "you may not read this" is indistinguishable from the second
+    form, so it is retried too and then raised unchanged. That costs ~0.9s on a
+    path that was going to fail anyway, and buys the reader case being covered
+    at all.
+    """
+    winerror = getattr(exc, "winerror", None)
+    if winerror is not None:
+        return winerror in _WINDOWS_BUSY
+    return exc.errno == errno.EACCES
+
+
+#: Backoff for :func:`despite_windows_contention`. Bounded on purpose — these
+#: are operator commands, so a slow failure is nearly as bad as a wrong one.
+#: Ten tries over ~0.9s clears the contention that actually occurs (both the
+#: read and the rename hold the file for microseconds) without turning a
+#: genuine permission problem into a hang.
+_BUSY_ATTEMPTS = 10
+_BUSY_BACKOFF_SECONDS = 0.02
+
+
+def despite_windows_contention(action: Callable[[], _T]) -> _T:
+    """Run ``action``, retrying while Windows reports the file as busy.
+
+    On POSIX this is a plain call: a rename over an existing name always
+    succeeds, and a reader that already has the file open keeps its own inode,
+    so neither side can observe the other.
+
+    NTFS shares no such guarantee, and BOTH sides of this module hit it:
+
+    * ``MoveFileEx`` refuses to replace a file that any other handle has open —
+      including one opened purely for reading — so a second session merely
+      READING the config failed a write with a bare ``Access is denied``.
+    * and for the width of that rename, opening the destination fails too, so
+      the reader takes an ``Access is denied`` of its own.
+
+    Measured directly, not inferred: a replace over a target held open for read
+    raises WinError 5, and a as-fast-as-possible read/write storm produces both
+    directions. The second one is the more expensive of the two, because
+    ``cli/launch.py`` treats an unreadable config as "launch untraced" by
+    design — so on Windows a config write racing a launch silently cost
+    tracing, with nothing raised anywhere to say so.
+
+    Every window here is microseconds wide, which is what makes retrying the
+    right remedy rather than a papering-over. The last failure is re-raised
+    unchanged once the attempts run out, so a genuine permission problem still
+    surfaces as itself rather than as a timeout, and the caller's
+    symlink-aware wrapping still applies.
+    """
+    if sys.platform != "win32":
+        return action()
+    for attempt in range(_BUSY_ATTEMPTS):
+        try:
+            return action()
+        except PermissionError as exc:
+            if not _is_contention(exc):
+                raise
+            if attempt == _BUSY_ATTEMPTS - 1:
+                raise
+            time.sleep(_BUSY_BACKOFF_SECONDS * (attempt + 1))
+    raise AssertionError("unreachable: the loop either returns or raises")

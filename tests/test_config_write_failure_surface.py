@@ -455,6 +455,13 @@ def test_home_blocker_names_the_file_in_the_way_and_nothing_else(
     monkeypatch.setenv(paths.HOME_ENV_VAR, str(blocker / "nested" / "home"))
     assert common.home_blocker() == blocker, "a file ABOVE the home blocks it too"
 
+    # The dangling-link shape needs a real symlink — a privilege the CI runner
+    # holds and an ordinary Windows account does not. Measured rather than
+    # assumed, and placed so the three shapes above have already been asserted:
+    # this is the only one that cannot be built here.
+    if not can_symlink():  # pragma: no cover - a privilege CI holds, a laptop does not
+        pytest.skip("this machine cannot create symlinks (needs privilege on Windows)")
+
     dangling = tmp_path / "dangling"
     dangling.symlink_to(tmp_path / "nowhere")
     monkeypatch.setenv(paths.HOME_ENV_VAR, str(dangling))

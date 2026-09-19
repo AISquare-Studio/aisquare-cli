@@ -38,7 +38,19 @@ def load_all() -> dict[str, str]:
     if not path.exists():
         return {}
     try:
-        raw = path.read_text(encoding="utf-8")
+        # THROUGH THE RETRY, because on NTFS this read takes an `Access is
+        # denied` of its own while another process holds the file for its
+        # write — and a bare `except OSError` below reads that as "nothing
+        # stored". `store()` is read-merge-write over a whole-file
+        # `write_text`, so two concurrent `aisquare` invocations could erase
+        # each other's API key, serve token or IAM session. That is verbatim
+        # the loss this module was written to stop; its own header says
+        # "'empty' is the exact reading that lost data".
+        #
+        # The `except` is unchanged and still means what it says — a file that
+        # genuinely cannot be read is nothing we can name — but contention is
+        # now resolved before it gets there rather than swallowed by it.
+        raw = paths.despite_windows_contention(lambda: path.read_text(encoding="utf-8"))
     except OSError:
         return {}
     try:

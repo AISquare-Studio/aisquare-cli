@@ -132,3 +132,17 @@ def grant_users_group(path: Path) -> None:
     display name is localized.
     """
     _run(["icacls", str(path), "/grant", f"*{USERS_SID}:(R)"])
+
+
+#: An account that is NOT one of the three broad principals `restrict_to_owner`
+#: names. `INTERACTIVE` is a well-known SID granted to anyone logged on
+#: interactively, so it is a real widening, and it exists on every Windows box
+#: without creating a user.
+OTHER_PRINCIPAL_SID = "S-1-5-4"
+OTHER_PRINCIPAL_TRUSTEE = "IU"
+r"""NT AUTHORITY\INTERACTIVE, as icacls abbreviates it."""
+
+
+def grant_other_principal(path: Path) -> None:
+    """Grant a principal `restrict_to_owner` does not name, by SID."""
+    _run(["icacls", str(path), "/grant", f"*{OTHER_PRINCIPAL_SID}:(R)"])

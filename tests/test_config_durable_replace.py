@@ -37,6 +37,19 @@ import pytest
 from aisquare.core.config import AppConfig, load_config, save_config
 
 
+def _is_dir_fd(fd: int) -> bool:
+    """Whether ``fd`` is a directory — asked of the DESCRIPTOR, not of /proc.
+
+    Both fsync spies in this file need this, and both originally asked
+    `os.path.isdir(f"/proc/self/fd/{fd}")`. That predicate is always False off
+    Linux, which does not fail a test — it makes one pass for the wrong reason:
+    the classifier below reads every descriptor as "file", and the injector
+    further down never raises the failure it exists to inject. One helper so
+    the next spy cannot re-learn it.
+    """
+    return stat.S_ISDIR(os.fstat(fd).st_mode)
+
+
 def _record(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str]]:
     """Log ``replace`` and ``fsync`` in call order, tagging what was synced."""
     events: list[tuple[str, str]] = []
@@ -48,11 +61,7 @@ def _record(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str]]:
         real_replace(src, dst, **kwargs)
 
     def _fsync(fd: int) -> None:
-        # `os.fstat`, not `/proc/self/fd/<fd>`: the fd itself already carries
-        # its type, and asking `/proc` made the classifier Linux-only — every
-        # descriptor read as "file" anywhere else, which is the answer that
-        # quietly satisfies the ordering assertion below.
-        kind = "dir" if stat.S_ISDIR(os.fstat(fd).st_mode) else "file"
+        kind = "dir" if _is_dir_fd(fd) else "file"
         events.append(("fsync", kind))
         real_fsync(fd)
 
@@ -85,11 +94,7 @@ def test_the_parent_directory_is_flushed_after_the_rename(
         # says so by construction: `os.open(parent, O_RDONLY)` raises there and
         # the documented fail-open path returns. So the assertion is the half of
         # the recipe that DOES exist, plus the fail-open itself — the write
-        # completed and the file is readable. Asserting `fsync:dir` here would
-        # only ever pin that Windows is not Linux.
-        assert ("fsync", "dir") not in events, (
-            f"a directory flush unexpectedly succeeded on Windows: {events}"
-        )
+        # completed and the file is readable.
         assert file_sync < renamed, f"durable-replace out of order: {kinds}"
         assert load_config(target).profile == "default", "the fail-open cost the write"
         return
@@ -118,11 +123,20 @@ def test_a_directory_that_cannot_be_synced_does_not_cost_the_write(
     real_fsync = os.fsync
 
     def _fail_on_directories(fd: int) -> None:
-        if os.path.isdir(f"/proc/self/fd/{fd}"):
+        if _is_dir_fd(fd):
             raise OSError("this filesystem does not permit directory fsync")
         real_fsync(fd)
 
     monkeypatch.setattr(os, "fsync", _fail_on_directories)
+
+    # Windows never reaches the injection at all: `os.open(parent, O_RDONLY)`
+    # raises there, so `save_config` takes its documented fail-open return and
+    # no directory descriptor is ever fsynced. The test would still PASS — the
+    # write does survive — while having injected nothing, which is the same
+    # vacuity the `/proc/self/fd` predicate used to produce. Said out loud, so
+    # `-ra` shows it rather than a green tick standing in for a run.
+    if sys.platform == "win32":
+        pytest.skip("no directory fsync on Windows, so there is no failure to inject")
 
     save_config(config, target)  # must not raise
     monkeypatch.undo()

@@ -897,7 +897,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   expensive: `cli/launch.py` treats an unreadable config as "launch untraced"
   by design, so a config write racing a launch silently cost tracing with
   nothing raised anywhere to say so. Both sides now retry through one bounded
-  helper (~1.1s, then the original error unchanged). The two paths report
+  helper (~0.9s, then the original error unchanged). The two paths report
   contention DIFFERENTLY — `os.replace` sets `winerror` 5/32, `Path.open`
   goes through the C runtime and sets `errno` 13 with `winerror` **None** —
   and matching only the obvious one covered just the writer.

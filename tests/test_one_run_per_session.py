@@ -1216,10 +1216,22 @@ def _paste(command: str, tmp_path: Path) -> tuple[int, str, dict[str, str]]:
     The child env carries none of the identity — this suite runs inside traced
     sessions, and the point is what the paste exports, not what it inherited.
     """
+    import shutil
     import subprocess
-    import sys
+    import sysconfig
 
     from aisquare.core import spawn
+
+    # A POSIX SHELL, not a POSIX PLATFORM: the printed command is an `sh`
+    # construct (`unset`, `${VAR:+…}`, a `VAR=value cmd` prefix), and Git Bash
+    # ships one that windows-latest carries on PATH. `/bin/sh` as a literal path
+    # does not exist there, so `CreateProcess` failed with WinError 2 before
+    # anything under test ran. Skipping on `which` keeps the assertion wherever
+    # it can mean anything — the same treatment test_harness.py's sibling paste
+    # test already carries.
+    shell = shutil.which("sh")
+    if shell is None:  # pragma: no cover - platform-dependent
+        pytest.skip("no POSIX shell on PATH; the printed spawn command is an sh construct")
 
     stub = tmp_path / "claude"
     stub.write_text(
@@ -1229,11 +1241,18 @@ def _paste(command: str, tmp_path: Path) -> tuple[int, str, dict[str, str]]:
         encoding="utf-8",
     )
     stub.chmod(0o755)
-    venv_bin = Path(sys.executable).parent
+    # sysconfig, not `Path(sys.executable).parent`: the two coincide inside a
+    # venv and diverge wherever pip installs outside one — on a Windows runner
+    # python.exe sits in `x64\` while the console scripts land in `x64\Scripts\`.
+    # And `os.pathsep` with the inherited PATH rather than a hardcoded
+    # "/usr/bin:/bin", which names nothing on Windows.
+    scripts_dir = Path(sysconfig.get_path("scripts"))
     child_env = {k: v for k, v in os.environ.items() if k not in spawn.IDENTITY_ENV_VARS}
-    child_env["PATH"] = f"{tmp_path}:{venv_bin}:/usr/bin:/bin"
+    child_env["PATH"] = os.pathsep.join(
+        [str(tmp_path), str(scripts_dir), os.environ.get("PATH", "")]
+    )
     proc = subprocess.run(
-        ["/bin/sh", "-c", command], capture_output=True, text=True, timeout=120, env=child_env
+        [shell, "-c", command], capture_output=True, text=True, timeout=120, env=child_env
     )
     seen = {
         key: match.group(1)

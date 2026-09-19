@@ -47,6 +47,49 @@ def test_restrict_to_owner_removes_a_broad_grant_on_windows(tmp_path: Path) -> N
     assert not (trustees - winacl.PRIVILEGED_TRUSTEES - mine), trustees
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="NTFS ACLs")
+def test_restrict_to_owner_names_three_principals_and_not_a_fourth(tmp_path: Path) -> None:
+    """The LIMIT of the current approach, pinned so it is a decision, not a surprise.
+
+    `restrict_to_owner` used to run `icacls /reset` first, which discards EVERY
+    explicit ACE. It no longer does: `/reset` restores inheritance from the
+    parent, so between that call and the grant that followed it the file sat on
+    the parent's DACL with the secret already written — and a failure of the
+    second call left the file wider than before it was called.
+
+    The single call that replaced the pair cannot half-apply, but `/remove`
+    drops only the principals it names. This test grants a FOURTH — one the
+    argv does not mention — and asserts it survives. That is not the behaviour
+    anyone wants; it is the behaviour we have, and a suite that only ever
+    manufactured the Users group would report the narrowing as success.
+
+    In practice the file is created by this process under this process's own
+    home, so a stray explicit ACE for a domain group or service account is not
+    a shape we produce. If that ever stops being true, this test is the one
+    that should start failing.
+    """
+    from tests import winacl
+
+    secret = tmp_path / "credentials"
+    secret.write_text("token", encoding="utf-8")
+
+    winacl.grant_users_group(secret)
+    winacl.grant_other_principal(secret)
+    before = winacl.dacl_trustees(secret)
+    assert winacl.USERS_TRUSTEE in before, "the named leak was not manufactured"
+    assert winacl.OTHER_PRINCIPAL_TRUSTEE in before, "the unnamed grant was not manufactured"
+
+    assert paths.restrict_to_owner(secret) is True
+
+    after = winacl.dacl_trustees(secret)
+    assert winacl.USERS_TRUSTEE not in after, ("a named principal survived", after)
+    assert winacl.OTHER_PRINCIPAL_TRUSTEE in after, (
+        "an UNNAMED principal was removed — the implementation grew beyond the "
+        "three SIDs in its argv, and this test's whole subject has changed",
+        after,
+    )
+
+
 def test_sddl_abbreviations_resolve_to_the_current_account() -> None:
     """SDDL writes some account SIDs as abbreviations, depending who is logged in.
 

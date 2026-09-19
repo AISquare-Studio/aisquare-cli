@@ -87,7 +87,7 @@ The reader half is the more expensive one. `cli/launch.py` treats an unreadable
 config as "launch untraced" **by design**, so on Windows a config write racing a
 launch silently cost tracing, with nothing raised anywhere to say so.
 
-Both sides now go through one bounded retry helper (10 attempts, ~1.1s total,
+Both sides now go through one bounded retry helper (10 attempts, ~0.9s total,
 then the original error re-raised unchanged).
 
 > **The subtle bit, and the thing to check me on:** the two paths report
@@ -95,7 +95,7 @@ then the original error re-raised unchanged).
 > `errno` and leaves `winerror` as `None`. My first attempt matched on `winerror`
 > only — it fixed the writer, left the reader broken, and the test still failed.
 > A genuine "you may not read this" is indistinguishable from the second form, so
-> it is retried too and then raised unchanged: ~1.1s on a path that was going to
+> it is retried too and then raised unchanged: ~0.9s on a path that was going to
 > fail anyway.
 
 ### 3.2 The explainability workspace key was world-readable on Windows

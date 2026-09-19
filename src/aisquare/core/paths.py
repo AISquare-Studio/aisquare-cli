@@ -19,7 +19,6 @@ from __future__ import annotations
 import errno
 import os
 import stat
-import subprocess
 import sys
 import time
 from collections.abc import Callable
@@ -85,6 +84,14 @@ def restrict_to_owner(path: Path) -> bool:
     if sys.platform != "win32":
         path.chmod(stat.S_IRUSR | stat.S_IWUSR)
         return True
+    # Imported HERE, not at module scope: `subprocess` pulls `signal`,
+    # `threading`, `select`, `contextlib` and `warnings`, and this module is a
+    # leaf that almost everything imports on a cold start. That is measurable
+    # cost on `aisquare --version` on BOTH platforms to buy something only
+    # Windows uses. The repo already treats this as a rule worth a test —
+    # tests/test_iam_single_reader.py and test_import_cost_of_the_integration.py.
+    import subprocess
+
     sid = _current_user_sid()
     if sid is None:
         return False
@@ -122,6 +129,8 @@ def _current_user_sid() -> str | None:
     ``tests/winacl.py`` reads SIDs the same way and for the same reason — a
     name-based check would be the same vacuous pass one level down.
     """
+    import subprocess  # Windows-only; see restrict_to_owner
+
     try:
         result = subprocess.run(
             ["whoami", "/user", "/fo", "csv", "/nh"],

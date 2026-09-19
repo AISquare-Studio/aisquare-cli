@@ -59,6 +59,12 @@ def executable_fake(
     Returns the path actually written, which carries ``.cmd`` on Windows. Every
     caller must use the RETURN VALUE rather than the name it passed in, or the
     command it goes on to build will name a file that does not exist.
+
+    That includes callers deriving a SIBLING from it — ``path.with_name("x")``
+    silently drops the extension this function added, and the result is not a
+    program on Windows. Use ``with_name("x" + path.suffix)``. A real test made
+    exactly that mistake and only CI caught it, because the case skips on a
+    machine without tmux.
     """
     directory.mkdir(parents=True, exist_ok=True)
     if sys.platform == "win32":

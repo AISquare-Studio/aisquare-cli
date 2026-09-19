@@ -806,7 +806,13 @@ def test_spawn_forwards_a_bound_binary_the_tmux_server_cannot_see(
     decided the role's binary-keyed flags against the wrong executable.
     `docs/fleet.md` promises the variable works for a fleet launch.
     """
-    other = claude_on_path.with_name("claude2")
+    # `+ .suffix`, because the fixture's file is `claude.cmd` on Windows and a
+    # sibling built from a bare name would be `claude2` — which PATHEXT does not
+    # consider a program, so `shutil.which("claude2")` finds nothing and the
+    # spawn refuses. Deriving a NEW name from the fixture's path is the one way
+    # to lose the extension after `executable_fake` went to the trouble of
+    # returning it.
+    other = claude_on_path.with_name("claude2" + claude_on_path.suffix)
     other.write_text(claude_on_path.read_text(encoding="utf-8"), encoding="utf-8")
     other.chmod(0o755)
     monkeypatch.setenv("AISQUARE_BIN_CODER", "claude2")

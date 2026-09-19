@@ -19,6 +19,7 @@ empty" is the exact reading that lost data.
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from typing import Any
 
 from aisquare.core import paths
@@ -63,8 +64,20 @@ def load_all() -> dict[str, str]:
     return {}
 
 
-def store(**values: str) -> tuple[dict[str, str], bool]:
+def store(*, replace: Sequence[str] = (), **values: str) -> tuple[dict[str, str], bool]:
     """Merge ``values`` into whatever is already there, owner-only.
+
+    ``replace`` names keys to clear FIRST, in the same read-modify-write. It
+    exists because ``drop(*KEYS)`` followed by ``store(**values)`` is the same
+    write twice: two whole-file rewrites, two ``restrict_to_owner`` calls — and
+    on Windows that is four ``icacls`` subprocesses per sign-in, each with a 15
+    second timeout. ``store(**values, replace=KEYS)`` is one of each, and the
+    caller gets the report the second write used to throw away.
+
+    It is also the only way to clear a key whose new value is EMPTY. ``values``
+    drops blanks on purpose — an omitted claim must not overwrite a good value
+    with "" — so an expiry or email that is absent this time would otherwise
+    survive from the previous session.
 
     Returns the merged result and whether the file could actually be restricted
     to this account. The second half is not decoration: on NTFS
@@ -73,6 +86,8 @@ def store(**values: str) -> tuple[dict[str, str], bool]:
     reports both facts so neither caller has to ask a second question.
     """
     data = load_all()
+    for key in replace:
+        data.pop(key, None)
     data.update({k: v for k, v in values.items() if v})
     paths.ensure_home()
     path = paths.credentials_path()

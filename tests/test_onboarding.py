@@ -15,6 +15,7 @@ import ast
 import inspect
 import json
 import os
+import shutil
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -40,6 +41,7 @@ from aisquare.services.onboarding import (
     summary_line,
     validate_path,
 )
+from tests import fakebin
 
 # --------------------------------------------------------------------------- fakes
 
@@ -575,14 +577,62 @@ def _hermetic_env(**overrides: str) -> dict[str, str]:
     """This process's environment (the suite's isolated ``AISQUARE_HOME`` included).
 
     ``CLAUDE_CONFIG_DIR`` is always one of ``overrides``: the developer's real
-    one must not be read. On POSIX the PATH is the bare default, so a machine
-    with Node does not pack the directory with its repomix — CI has none, and
-    the answer must be the same on both.
+    one must not be read. The PATH is cut back to a bare default so a machine
+    with Node does not pack the directory with its repomix, and the answer is
+    the same on both platforms.
+
+    This is ``conftest.no_repomix`` carried across a process boundary. That
+    autouse fixture says the policy in one line — "disable the repomix
+    subprocess by default so tests never shell out" — and enforces it with
+    ``monkeypatch``, which reaches every test in this process and NO child of
+    one. For a test that spawns the real CLI, the PATH is the only enforcement
+    there is.
+
+    THAT LAST CLAUSE USED TO BE A CLAIM RATHER THAN A FACT. The cut was guarded
+    by ``if os.name == "posix"``, so the Windows child inherited the whole PATH,
+    found Node, and ran the pack the POSIX child is spared. ``init`` onboards
+    unless told ``--no-onboard``, and ``snapshot._repomix_base`` falls back to
+    ``npx --yes repomix`` — which is an npm-registry DOWNLOAD, on a runner with
+    a cold npx cache, inside a test that believed it was hermetic. Measured here
+    with Node on PATH: ``init`` costs 31.1s, of which 7.5s is repomix and 3.3s
+    is import; on windows-latest it exceeded the 120s budget outright and took
+    the lane from 18/18 to 17/18. Stripping the PATH is what the docstring
+    always said happened, so it now happens.
+
+    System32 stays on the Windows PATH: ``paths.restrict_to_owner`` resolves
+    ``icacls`` and ``whoami`` by name, and dropping those would trade a Node
+    problem for a silently unrestricted credentials file.
     """
     env = {**os.environ, **overrides, "NO_COLOR": "1"}
     if os.name == "posix":
         env["PATH"] = os.defpath
+    else:
+        env["PATH"] = str(Path(os.environ.get("SYSTEMROOT", r"C:\Windows")) / "System32")
     return env
+
+
+@pytest.mark.parametrize("tool", ["npx", "repomix"])
+def test_the_hermetic_env_hides_node_from_the_child_on_every_platform(
+    tool: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The child must not be able to resolve a packer, whatever this machine has.
+
+    The latch on :func:`_hermetic_env`. Asserting "npx is not on the cut PATH" on
+    a machine that has no npx passes for the wrong reason — the vacuity that let
+    the POSIX-only cut sit unnoticed until a Windows runner ran it. So the fake
+    is MANUFACTURED onto the real PATH first, and the control below asserts it is
+    genuinely findable there; only then does the absence mean the cut did it.
+
+    Both names, because ``snapshot._repomix_base`` tries ``repomix`` first and
+    falls back to ``npx --yes repomix``, and hiding only one leaves the other.
+    """
+    fakebin.executable_fake(tmp_path, tool, posix="echo packed", windows="echo packed")
+    fakebin.prepend_to_path(tmp_path, monkeypatch)
+
+    # The control: without the cut, this machine CAN see it.
+    assert shutil.which(tool) is not None, "the fake is not on PATH; the assertion below is vacuous"
+
+    assert shutil.which(tool, path=_hermetic_env()["PATH"]) is None
 
 
 def test_onboard_runs_the_real_cli_in_a_throwaway_home(tmp_path: Path) -> None:

@@ -26,6 +26,7 @@ here is about widgets.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import tomllib
 from collections.abc import Callable, Coroutine, Iterator, Sequence
@@ -41,6 +42,7 @@ from textual.pilot import Pilot
 from textual.widget import Widget
 from textual.widgets import Button, DataTable, Input, OptionList, Select, Static
 from textual.widgets._toast import Toast
+from textual.worker import WorkerError
 from typer.testing import CliRunner
 
 from aisquare.cli.app import app
@@ -137,8 +139,31 @@ def drive(
 
 
 async def settle(pilot: Pilot[None]) -> None:
-    """Let every worker finish and its state-change handler run."""
-    await pilot.app.workers.wait_for_complete()
+    """Let every worker reach a terminal state — whatever that state is — and its
+    state-change handler run.
+
+    NOT ``workers.wait_for_complete()``, which RAISES for a worker that ERRORED.
+    An errored worker is the designed outcome here, not an accident:
+    ``ManagerTab`` runs the spawn with ``exit_on_error=False`` and reports the
+    failure from ``on_worker_state_changed``, so a test that scripts
+    ``FleetUnavailable`` and then reads the error notice off the page was
+    failing inside ``settle`` before it reached its assertion.
+
+    It only failed SOMETIMES, which is why it survived review: the raise needs
+    the worker to still be registered when ``wait_for_complete`` samples the
+    manager, and the spawn is a thread that has usually finished and been pruned
+    by then. Measured on Windows: 1 failure in 20 runs locally, and one on
+    windows-latest, where a loaded runner loses the race more often.
+
+    ``tests/test_ui_accounts.py::settle`` already had this exact shape, and its
+    docstring already named the race — this module is the copy that had not
+    learned it. Same fix, so the two cannot disagree about what settling means.
+    """
+    for worker in list(pilot.app.workers):
+        if worker.group == "_loader":
+            continue
+        with contextlib.suppress(WorkerError):
+            await worker.wait()
     await pilot.pause()
 
 

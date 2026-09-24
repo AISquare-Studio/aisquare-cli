@@ -29,7 +29,7 @@ import pytest
 from textual.containers import Vertical
 from textual.pilot import Pilot
 from textual.widgets import Button, Static
-from textual.worker import WorkerError
+from textual.worker import Worker, WorkerError, WorkerState
 
 from aisquare.cli.ui.app import FleetApp
 from aisquare.cli.ui.sidebar import AccountsSection, AccountsTitle
@@ -47,6 +47,7 @@ from aisquare.cli.ui.views.accounts import (
 from aisquare.core import browser
 from aisquare.core import claude_accounts as core
 from aisquare.core import tmux as tmux_core
+from aisquare.core.store import store_session
 from aisquare.core.tmux import Completed, TmuxServer, WindowInfo
 from aisquare.models import (
     AccountsOverview,
@@ -60,6 +61,7 @@ from aisquare.services import auth as auth_service
 from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import device_flow, iam
 from aisquare.services import fleet as fleet_service
+from tests.pane_harness import asks_a_server, socket_of
 
 T = TypeVar("T")
 SIZE = (140, 40)
@@ -117,11 +119,6 @@ def _session(email: str = "me@aisquare.studio", source: str = "file") -> iam.Ses
     )
 
 
-def _socket_of(argv: Sequence[str]) -> str | None:
-    args = list(argv)
-    return args[args.index("-L") + 1] if "-L" in args else None
-
-
 @pytest.fixture(autouse=True)
 def no_real_tmux(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[tuple[str, ...]]]:
     """Every tmux command here addresses the test's socket; the server never answers."""
@@ -134,7 +131,7 @@ def no_real_tmux(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[tuple[str, ..
     monkeypatch.setattr(tmux_core, "_tmux", record)
     monkeypatch.setattr(fleet_service, "server", lambda config=None: TmuxServer(PRIVATE_SOCKET))
     yield ran
-    wrong = [argv for argv in ran if _socket_of(argv) != PRIVATE_SOCKET]
+    wrong = [argv for argv in ran if asks_a_server(argv) and socket_of(argv) != PRIVATE_SOCKET]
     assert not wrong, f"a UI test addressed a tmux socket that is not the test's: {wrong[:2]}"
 
 
@@ -865,8 +862,10 @@ def test_remove_runs_the_service_and_reports_where_the_directory_went(
 ) -> None:
     removed: list[int] = []
 
-    def remove(account: ClaudeAccount) -> Path:
+    def remove(account: ClaudeAccount, *, notes: list[str] | None = None) -> Path:
         removed.append(account.slot)
+        if notes is not None:  # what the service says about a binding that named the slot
+            notes.append("role coder was bound to slot 2; it now names two@example.com — …")
         return tmp_path / "2.removed-20260909T120000Z"
 
     monkeypatch.setattr(accounts_service, "remove", remove)
@@ -884,6 +883,7 @@ def test_remove_runs_the_service_and_reports_where_the_directory_went(
     said = drive(go, overview=overview)
     assert removed == [2]
     assert said.startswith("✓ removed") and "2.removed-20260909T120000Z" in said
+    assert "role coder was bound to slot 2; it now names two@example.com" in said  # third round
 
 
 # --- arranging (#145): the default badge, the order arrows, disable -----------------------------
@@ -1002,6 +1002,44 @@ def test_default_move_and_disable_buttons_write_through_the_service_and_refresh(
     assert last.startswith("✗ the accounts registry cannot be written")  # the error, not a crash
 
 
+def test_an_arrange_notice_names_the_action_its_own_worker_finished(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The notice was a field on the page, so a second click overwrote it before the first
+    worker's report was handled — a thread worker ``exclusive`` cancels still finishes —
+    and the first one's success was announced as the second action (review of #205,
+    fourth round). The text now travels with the work, as the worker's result."""
+    release = threading.Event()
+
+    async def go(pilot: Pilot[None]) -> tuple[str, str]:
+        app = fleet_app(pilot)
+        view = await open_accounts(pilot)
+        workers: list[Worker[Any]] = []
+        real_run = view.run_worker
+
+        def spy(*args: Any, **kwargs: Any) -> Worker[Any]:
+            worker = real_run(*args, **kwargs)
+            workers.append(worker)
+            return worker
+
+        monkeypatch.setattr(view, "run_worker", spy)
+        view.arrange_accounts(lambda: None, done="✓ slot 2 moved down in the priority order")
+        await settle(app)
+        await pilot.pause()
+        first = notice(view)
+        # The second click, still running when the first worker's report is handled.
+        view.arrange_accounts(release.wait, done="✓ slot 1 disabled — never picked automatically")
+        view._arrange_finished(workers[0], WorkerState.SUCCESS)
+        late = notice(view)
+        release.set()
+        await settle(app)
+        return first, late
+
+    first, late = drive(go)
+    assert first == "✓ slot 2 moved down in the priority order"
+    assert late == first  # the first worker's own action, not the click that came after
+
+
 # --- the pace of the five-hour window (#146) ------------------------------------------------------
 
 
@@ -1026,11 +1064,15 @@ def test_the_row_says_how_long_the_window_has_at_the_current_pace(
         2: None,
     }
 
-    def sample_usage(account: ClaudeAccount, **kwargs: Any) -> ClaudeUsage:
-        recorded.append(account.slot)
-        return accounts_service.usage(account, **kwargs)
+    real_usage = accounts_service.usage
 
-    monkeypatch.setattr(accounts_service, "sample_usage", sample_usage)
+    def usage_spy(account: ClaudeAccount, **kwargs: Any) -> ClaudeUsage:
+        recorded.append(account.slot)
+        return real_usage(account, **kwargs)
+
+    # The tick fetches through `read_usage(record=False)` and records in one store
+    # session of its own (third round): the reading is spied, the sample is checked below.
+    monkeypatch.setattr(accounts_service, "usage", usage_spy)
     monkeypatch.setattr(
         accounts_service, "usage_trend", lambda slot, latest, **kwargs: trends.get(slot)
     )
@@ -1045,6 +1087,44 @@ def test_the_row_says_how_long_the_window_has_at_the_current_pace(
         return line(view, 1), line(view, 2)
 
     one, two = drive(go, overview=overview)
-    assert sorted(recorded) == [1, 2]  # every signed-in slot was SAMPLED, not merely read
+    assert sorted(recorded) == [1, 2]  # every signed-in slot was read…
+    with store_session() as store:  # …and SAMPLED, in the page's one store open
+        assert len(store.usage_samples(1, since=NOW - timedelta(days=1))) == 1
+        assert len(store.usage_samples(2, since=NOW - timedelta(days=1))) == 1
     assert "session ▮▮▮▯▯ 60%" in one and "≈ 1.3 h to the limit" in one
     assert "session ▮▮▮▯▯ 60%" in two and "to the limit" not in two  # no trend yet: no claim
+
+
+def test_a_row_that_leaves_takes_its_projection_with_it(
+    no_network: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``self.trends`` was not pruned beside ``self.usage`` (review of #205, second round):
+    after a remove-then-add the newcomer in the re-used slot painted the old projection."""
+    from aisquare.models import UsageTrend
+
+    no_network["usage"] = ClaudeUsage(
+        available=True, session_percent=60, session_resets_at=NOW + timedelta(hours=3)
+    )
+    monkeypatch.setattr(
+        accounts_service,
+        "usage_trend",
+        lambda slot, latest, **kwargs: UsageTrend(
+            percent=60, per_hour=30.0, minutes_to_limit=80.0, span_minutes=20.0
+        ),
+    )
+    monkeypatch.setattr(accounts_service, "_now", lambda: NOW)
+    both = _overview(_status(1, "me@example.com"), _status(2, "two@example.com"))
+
+    async def go(pilot: Pilot[None]) -> tuple[set[int], set[int], set[int], set[int]]:
+        app = fleet_app(pilot)
+        view = await open_accounts(pilot)
+        await settle(app)
+        await pilot.pause()
+        before = (set(view.usage), set(view.trends))
+        view.show(_overview(_status(1, "me@example.com")))  # slot 2 removed
+        await pilot.pause()
+        return before[0], before[1], set(view.usage), set(view.trends)
+
+    usage_before, trends_before, usage_after, trends_after = drive(go, overview=both)
+    assert usage_before == trends_before == {1, 2}
+    assert usage_after == trends_after == {1}

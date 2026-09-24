@@ -12,6 +12,9 @@ tmux, transcript) are the shell's buttons and land with it.
 
 from __future__ import annotations
 
+import time
+from collections.abc import Mapping
+
 from rich.text import Text
 from textual import on
 from textual.app import ComposeResult
@@ -20,17 +23,22 @@ from textual.message import Message
 from textual.widgets import Button, Static
 from textual.worker import Worker, WorkerState
 
+from aisquare.cli import fleet as fleet_cli
 from aisquare.cli.ui.sidebar import ROLE_ICON, STATE_CHIP
 from aisquare.cli.ui.terminal import TerminalPane
 from aisquare.core.tmux import TmuxServer
 from aisquare.models import FleetAgent, FleetAgentStatus
+from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import fleet as fleet_service
 from aisquare.services import team as team_service
 
 SEPARATOR = "  "
+LABELS_TTL = 30.0
+"""How long the header keeps the slot labels before asking the registry again."""
+LABELS_WORKER = "agent-account-labels"
 
 
-def account_text(status: FleetAgentStatus) -> str:
+def account_text(status: FleetAgentStatus, labels: Mapping[int, str] | None = None) -> str:
     """Which Claude account the agent runs under, or ``""`` when nothing says.
 
     The slot the spawn RESOLVED to comes first (``FleetAgent.account_slot``,
@@ -38,16 +46,20 @@ def account_text(status: FleetAgentStatus) -> str:
     operator chose. Failing that, the config directory the session's first
     hook reported (``TeamSession.account``) — the right answer for an agent
     started by hand or before #145 — through the same label the board uses.
+    ``labels`` (``services.claude_accounts.slot_labels``) names the slot the
+    way the launch line and the Accounts page do — the alias, ``plain claude``
+    for slot 1 — so one account is not ``work`` there and ``account 2`` here
+    (review of #205, finding 10); without them the built-in name is used.
     """
     slot = status.agent.account_slot
     if slot is not None:
-        return "plain claude" if slot == 1 else f"account {slot}"
+        return fleet_cli.slot_label(slot, labels)
     if status.session is not None and status.session.account:
-        return team_service.account_label(status.session.account) or ""
+        return team_service.account_label(status.session.account, labels) or ""
     return ""
 
 
-def header_text(status: FleetAgentStatus) -> Text:
+def header_text(status: FleetAgentStatus, labels: Mapping[int, str] | None = None) -> Text:
     """One line: ``🔨 coder-auth  coder  ▶ working  account 2  task 01k…  ~/repo ⎇  exited 1``."""
     agent = status.agent
     chip, chip_style = STATE_CHIP.get(status.state, ("·", "dim"))
@@ -61,7 +73,7 @@ def header_text(status: FleetAgentStatus) -> Text:
         text.append(f" ({status.detail})", style="dim")
     if status.session is not None and status.session.model:
         text.append(SEPARATOR + status.session.model, style="dim")
-    on = account_text(status)
+    on = account_text(status, labels)
     if on:
         text.append(SEPARATOR + on, style="dim")
     if agent.task_id:
@@ -118,10 +130,45 @@ class AgentView(Vertical):
         # socket names its server; the escape key comes from ``[fleet]``.
         self.server = server or TmuxServer(status.agent.tmux_socket)
         self.escape_key = escape_key or fleet_service.settings().escape_key
+        self._labels: Mapping[int, str] = {}
+        self._labels_asked_at: float | None = None
+
+    def _refresh_labels(self) -> None:
+        """Ask the registry for the slot labels OFF the UI thread, at most every LABELS_TTL s.
+
+        A store open is a blocking call with a busy timeout of seconds — the
+        Accounts page runs its writes as thread workers for exactly that
+        reason — so the header never opens it on the event loop: it paints the
+        last good map (the built-in names before the first answer) and repaints
+        when the worker answers (review of #205, second round).
+        """
+        now = time.monotonic()
+        if self._labels_asked_at is not None and now - self._labels_asked_at < LABELS_TTL:
+            return
+        self._labels_asked_at = now
+        self.run_worker(
+            accounts_service.slot_labels,
+            name=LABELS_WORKER,
+            group=LABELS_WORKER,
+            exclusive=True,
+            thread=True,
+            exit_on_error=False,
+        )
+
+    @on(Worker.StateChanged)
+    def _labels_answered(self, event: Worker.StateChanged) -> None:
+        if event.worker.group != LABELS_WORKER:
+            return
+        if event.state is WorkerState.SUCCESS and isinstance(event.worker.result, dict):
+            self._labels = event.worker.result
+            if self.is_mounted:
+                self.query_one("#agent-header", Static).update(
+                    header_text(self.status, self._labels)
+                )
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="agent-bar"):
-            yield Static(header_text(self.status), id="agent-header")
+            yield Static(header_text(self.status, self._labels), id="agent-header")
             yield Button("Stop", id="agent-stop", compact=True)
             yield Button("Restart", id="agent-restart", compact=True, variant="primary")
         yield TerminalPane(
@@ -133,6 +180,7 @@ class AgentView(Vertical):
 
     def on_mount(self) -> None:
         self._paint_actions()
+        self._refresh_labels()
 
     @property
     def pane(self) -> TerminalPane:
@@ -144,8 +192,9 @@ class AgentView(Vertical):
         self.status = status
         if not self.is_mounted:
             return
-        self.query_one("#agent-header", Static).update(header_text(status))
+        self.query_one("#agent-header", Static).update(header_text(status, self._labels))
         self._paint_actions()
+        self._refresh_labels()
         if status.agent.pane_id != previous.agent.pane_id:
             self.pane.attach(status.agent.pane_id)
 
@@ -234,6 +283,16 @@ class AgentView(Vertical):
             )
         elif event.worker.name == STOP_WORKER:
             self.notify(f"✓ stopped {label}", timeout=5, markup=False)
+            receipt = event.worker.result
+            if isinstance(receipt, fleet_service.StopReceipt) and receipt.release_failed:
+                # `fleet stop` prints this and exits 1: a claim left with the ended
+                # session is not a clean stop, and the button must not read as one.
+                self.notify(
+                    f"claims: {receipt.release_failed}",
+                    severity="warning",
+                    timeout=8,
+                    markup=False,
+                )
         else:
             receipt = event.worker.result
             if isinstance(receipt, fleet_service.RestartReceipt):

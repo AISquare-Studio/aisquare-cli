@@ -904,9 +904,13 @@ def _role_cycle_core(role: str, session_short_id: str) -> list[str]:
         ]
     if role in ("runner", "tester"):
         # `tester` is the fleet's name for `runner` (docs/plans/fleet-tui.md §3.3):
-        # one cycle, two labels, so the two can never drift apart.
+        # one cycle, two labels, so the two can never drift apart. `--as` because
+        # `task next` puts the task a fleet agent was SPAWNED FOR first only for a
+        # session it can join to its fleet row; without it two testers spawned
+        # for two review tasks were both handed the older one (review of #135).
         return [
-            f"Your standing cycle ({role}): `aisquare task next --status review`; if nothing,",
+            f"Your standing cycle ({role}): `aisquare task next --status review --as {sid}`;",
+            "if nothing,",
             "tell the user and stop. You are the adversarial verifier: run the FULL check the",
             "acceptance criteria name — not a smoke test — and try to make the change fail",
             "(edge inputs, a counterexample) before you trust it. Verdicts cite evidence you",
@@ -985,7 +989,8 @@ def _role_cycle_core(role: str, session_short_id: str) -> list[str]:
         # §3.3 — reads the PR as the stranger who will maintain it; findings on the
         # PR through `gh pr review`; read-only (the fleet launches it --restricted).
         return [
-            "Your standing cycle (reviewer): `aisquare task next --status review`; if nothing,",
+            f"Your standing cycle (reviewer): `aisquare task next --status review --as {sid}`;",
+            "if nothing,",
             "tell the user and stop. Read the PR as the stranger who will maintain it —",
             "`gh pr diff`, the task's contract, the tests. You are READ-ONLY: never edit, never",
             "push, never merge. Findings go on the PR (`gh pr review --comment` or",

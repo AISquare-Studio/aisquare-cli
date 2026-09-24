@@ -4100,6 +4100,75 @@ def test_shift_drag_selects_locally_and_copies_while_the_program_owns_the_mouse(
     assert selection == Selection(Offset(2, 1), Offset(8, 1))
 
 
+def test_a_shift_drag_in_a_burst_copies_the_highlight_it_leaves(
+    fake: FakeTmux, tmp_path: Path
+) -> None:
+    """Review of #203, round 1 of the terminal-ux fold. The app routes a release
+    as the driver reports it, and this pane runs the shift+drag from its own
+    queue, so the copy was made from however much of the drag the pane had
+    handled: in a burst, none of it. The highlight stood uncopied — the next
+    ctrl+c copied it instead of interrupting — and with less lag the copy was
+    shorter than the highlight. The pane now copies at its own release, after
+    the last move it was sent."""
+    pane = fake.panes["%1"]
+    pane.alternate_on = pane.mouse_on = pane.mouse_sgr = True
+
+    async def drive() -> tuple[str, int, Selection | None]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 6)) as pilot:
+            widget = host.pane
+            await wait_until(pilot, lambda: synced(widget))
+            for event in (
+                mouse_event(events.MouseMove, widget, (7, 1), 0, shift=True),
+                mouse_event(events.MouseDown, widget, (7, 1), 1, shift=True),
+                mouse_event(events.MouseMove, widget, (3, 1), 1, shift=True),
+                mouse_event(events.MouseMove, widget, (2, 1), 1, shift=True),
+                mouse_event(events.MouseUp, widget, (2, 1), 1, shift=True),
+            ):
+                host.post_message(event)
+            await pilot.pause()
+            await pilot.pause(0.1)
+            toasts = sum(1 for n in host.notices if n.startswith("copied"))
+            return host.clipboard, toasts, widget.text_selection
+
+    copied, toasts, selection = run(drive())
+    assert selection == Selection(Offset(2, 1), Offset(8, 1))
+    assert copied == "second row"[2:8], f"the release copied {copied!r} of the highlight"
+    assert toasts == 1
+
+
+def test_a_shift_click_selects_nothing_so_ctrl_c_is_the_agent_s_interrupt(
+    fake: FakeTmux, tmp_path: Path
+) -> None:
+    """Review of #203, round 1 of the terminal-ux fold. A shift+click under a
+    program that owns the mouse is a press and a release in one cell: the
+    screen reads it as a click and clears the selections, the app's routing
+    found nothing to copy, and then the pane's own release put its one-cell
+    span back. The cell stood highlighted and uncopied, and the ctrl+c that
+    followed copied it and never reached the agent. A shift gesture that ends
+    where it began selects nothing, as a click does everywhere else."""
+    pane = fake.panes["%1"]
+    pane.alternate_on = pane.mouse_on = pane.mouse_sgr = True
+
+    async def drive() -> tuple[Selection | None, str, list[tuple[str, ...]]]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 6)) as pilot:
+            widget = host.pane
+            await wait_until(pilot, lambda: synced(widget))
+            await press(pilot, widget, (2, 1), shift=True)
+            await release(pilot, widget, (2, 1), shift=True)
+            await pilot.pause()
+            selection = widget.text_selection
+            await pilot.press("ctrl+c")
+            await pilot.pause()
+            return selection, host.clipboard, list(fake.sent())
+
+    selection, clipboard, sent = run(drive())
+    assert selection is None, f"the shift+click left {selection!r} highlighted"
+    assert clipboard == ""
+    assert sent == [("C-c",)], "ctrl+c after a shift+click is the agent's interrupt"
+
+
 def test_a_double_click_is_two_presses_for_the_program_not_a_local_word(
     fake: FakeTmux, tmp_path: Path
 ) -> None:

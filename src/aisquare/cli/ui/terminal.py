@@ -711,7 +711,11 @@ class TerminalPane(Widget, can_focus=True):
        it ends (:meth:`selection_gesture_ended`, with the button that began it)
        — at its release, or, when the release was lost, at the first move
        reported with no button held. A pane's own ``on_mouse_down`` only adds
-       what the app cannot know: where in the pane the press landed.
+       what the app cannot know: where in the pane the press landed. The one
+       gesture a pane ends itself is the shift+drag it runs under a program
+       that owns the mouse (#148): it is run from the pane's own queue, which
+       the app's routing does not wait for, so it copies at the pane's own
+       release (:meth:`_end_shift_drag`).
     2. *A release copies by value.* At the start of a gesture a pane notes the
        selection it has (its baseline); at the end it copies exactly when its
        selection differs from that baseline, and only for the left button. An
@@ -856,6 +860,8 @@ class TerminalPane(Widget, can_focus=True):
         """The Textual button whose press went to the program — until its release."""
         self._shift_drag: Offset | None = None
         """Where a shift+drag began, while this widget runs that selection itself."""
+        self._shift_button = 0
+        """The button that began that shift+drag: its end copies for the left one only."""
         self._buffer_before: str | None = None
         """tmux's paste buffer as it stood at a forwarded left press (#148), until
         that press's release takes it to the mirror."""
@@ -2063,7 +2069,8 @@ class TerminalPane(Widget, can_focus=True):
 
         Under one that DOES, shift+drag begins a LOCAL selection this widget runs
         itself — the same bookkeeping, and the mouse captured so the moves and the
-        release arrive wherever they land — while any other press is forwarded as
+        release arrive wherever they land; it ends, and copies, at this widget's
+        own release (:meth:`_end_shift_drag`) — while any other press is forwarded as
         the SGR press the program asked for (#148), the mouse captured for the drag
         and the release to follow. A FORWARDED press makes no selection here, so it
         leaves the baseline the gesture started with: clearing it would make every
@@ -2082,6 +2089,7 @@ class TerminalPane(Widget, can_focus=True):
             self._press = event.offset
             self._baseline = None
             self._shift_drag = Offset(x, y)
+            self._shift_button = event.button
             self._set_own_selection(Selection(Offset(x, y), Offset(x + 1, y)))
             self.capture_mouse()
             return
@@ -2115,17 +2123,22 @@ class TerminalPane(Widget, can_focus=True):
     def on_mouse_up(self, event: events.MouseUp) -> None:
         """End a gesture this widget began: the local shift+drag, or a forwarded button.
 
-        The shift+drag's copy is NOT made here: the app routes this release to
-        :meth:`selection_gesture_ended` (:class:`SelectionHost`), and that copies
-        exactly as it does for a Textual-native drag — one path, one toast. A
-        forwarded left release arms the paste-buffer mirror. A release that never
-        comes is :meth:`gesture_release_lost`.
+        The shift+drag ends with its span at the release's cell and is copied
+        here, after the last move this widget was sent (:meth:`_end_shift_drag`
+        says why not at the app's routing). A release where the press was is a
+        click, which selects nothing. A forwarded left release arms the
+        paste-buffer mirror. A release that never comes is
+        :meth:`gesture_release_lost`.
         """
         if self._shift_drag is not None:
             event.stop()
-            self._set_own_selection(self._shift_span(event))
-            self._shift_drag = None
-            self.release_mouse()
+            # The screen read this release as a click — the offset it pressed at
+            # — and cleared every selection for it (``Screen._forward_event``).
+            # Putting the one-cell span back left a highlight nothing copied,
+            # and the next ctrl+c copied that cell instead of reaching the agent
+            # as its interrupt (review of #203, round 1 of the terminal-ux fold).
+            click = event.offset == self._press
+            self._end_shift_drag(None if click else self._shift_span(event))
             return
         if self._forwarding is None:
             return
@@ -2160,8 +2173,8 @@ class TerminalPane(Widget, can_focus=True):
         was owed where the drag got to — the last cell it was sent, with that
         report's modifier bits — as it would have had the release come there,
         and a left one arms the paste-buffer mirror, since the program copies
-        on that release. A shift+drag's highlight stays where it got to; whether
-        it is copied is the app's routing, as it is for the screen's own drag.
+        on that release. A shift+drag ends with its highlight where it got to,
+        copied as its own release would have copied it (:meth:`_end_shift_drag`).
         """
         self.release_mouse()
         self.call_later(self._end_lost_gesture)
@@ -2169,7 +2182,8 @@ class TerminalPane(Widget, can_focus=True):
     def _end_lost_gesture(self) -> None:
         """:meth:`gesture_release_lost`'s second half, after this widget's queued events."""
         self.release_mouse()
-        self._shift_drag = None
+        if self._shift_drag is not None:
+            self._end_shift_drag(self._own_selection())
         if self._forwarding is None:
             return
         button, self._forwarding = self._forwarding, None
@@ -2179,6 +2193,34 @@ class TerminalPane(Widget, can_focus=True):
         before, self._buffer_before = self._buffer_before, None
         if button == 1:
             self._arm_mirror(before)
+
+    def _end_shift_drag(self, span: Selection | None) -> None:
+        """End the local shift+drag with ``span`` highlighted, and copy it as a release does.
+
+        Here, in this widget's own queue, and not where the app routes the
+        release (:meth:`selection_gesture_ended`, which passes over a pane with a
+        shift+drag running). The app hears a gesture as the driver reports it
+        and this widget runs the drag from its own handlers, so at the routing
+        the span was as far as this widget had got: in a burst, nowhere — the
+        highlight then stood uncopied, and the next ctrl+c copied it instead of
+        interrupting — and with less lag, short of the highlight left on screen
+        (review of #203, round 1 of the terminal-ux fold). The routing's rules
+        hold here: a span with no text under it is dropped, and a left drag is
+        told why nothing was copied; only the left button copies; what this
+        widget copied goes into its baseline, so no later release copies it again.
+        """
+        button, self._shift_drag = self._shift_button, None
+        self.release_mouse()
+        self._set_own_selection(span)
+        if span is None:
+            return
+        if self.selected_text() is None:
+            self._clear_own_selection()
+            if button == 1:
+                self.notify("nothing to copy — no text under the highlight", markup=False)
+            return
+        if button == 1 and self._copy_selection():
+            self._baseline = span
 
     def _cell(self, event: events.MouseEvent) -> tuple[int, int]:
         """The widget cell under the pointer, clamped to the rows and columns shown.
@@ -2347,7 +2389,15 @@ class TerminalPane(Widget, can_focus=True):
         nothing and said nothing, and the ctrl+c the highlight invited went to
         the agent as its interrupt (review of #120, round 11). A left drag was
         a request to copy, so it is told why none happened.
+
+        A shift+drag this pane runs itself (#148) is passed over: this widget
+        has not handled its release yet, so the span here is only as far as the
+        drag had got, and :meth:`_end_shift_drag` copies it at that release. A
+        burst can route the release before this widget has handled the press;
+        its selection is then the baseline still, and nothing is copied here.
         """
+        if self._shift_drag is not None:
+            return
         selection = self._own_selection()
         if selection is None or selection == self._baseline:
             return

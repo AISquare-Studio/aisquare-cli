@@ -189,3 +189,47 @@ def test_a_project_arranged_by_nobody_lands_last(store: ContextStore) -> None:
     stamp = datetime.now(tz=UTC) - timedelta(days=1)
     store.update_project_layout("prj_aaa-new", pinned_at=stamp)
     assert _order(store)[0] == "prj_aaa-new", "a pin is the one thing that beats manual order"
+
+
+def test_a_step_and_a_position_count_the_rows_the_list_shows(store: ContextStore) -> None:
+    """A captured directory is hidden from the sidebar and ``project list`` (#139), so it is
+    not a place: counted, a shift+↓ swapped api with it — nothing moved on screen, and the
+    gesture still took an undo — and ``--position 1`` landed behind it (review of #171)."""
+    store.ensure_project(ProjectInfo(id="prj_bench", root=Path("/w/bench")))  # captured only
+    shown = [p.id for p in store.list_projects()]
+    assert "prj_bench" not in shown and store.get_project("prj_bench") is not None
+
+    def listed() -> list[str]:
+        return [pid for pid in _order(store) if pid in shown]
+
+    groups.step(store, "prj_api", +1)
+    assert listed() == ["prj_cli", "prj_api", "prj_docs", "prj_web"], "one place on screen"
+    groups.step(store, "prj_api", -1)
+    assert listed() == ["prj_api", "prj_cli", "prj_docs", "prj_web"]
+    groups.move_project(store, "prj_web", position=1)
+    assert listed() == ["prj_api", "prj_web", "prj_cli", "prj_docs"], "index 1 of the list"
+    # Every row of the scope is still numbered, the hidden one included: dense, no ties.
+    everything = groups.load_arrangement(store, all=True).loose
+    assert [p.position for p in everything] == list(range(len(everything)))
+    # With the captured rows on screen (the sidebar's `a`), they are places again.
+    first = everything[0].id
+    groups.step(store, first, +1, all=True)
+    assert groups.load_arrangement(store, all=True).loose[1].id == first
+    # At either end there is nowhere to go: nothing moves and nothing is remembered.
+    top = groups.step(store, listed()[0], -1)
+    assert top.description == "nothing to move" and not top.projects
+
+
+def test_undo_puts_a_project_at_the_top_level_when_its_group_was_deleted_since(
+    store: ContextStore,
+) -> None:
+    """``u`` in the sidebar after the group the project came from was deleted from a shell:
+    the old row names a group that is gone, and writing it back failed on the foreign key
+    halfway through the restore (review of #171). It lands at the top level instead."""
+    group, _ = groups.create_group(store, "tools", ["prj_cli", "prj_docs"])
+    out = groups.move_project(store, "prj_cli", to=groups.TOP, position=0)
+    groups.delete_group(store, group.id)  # another surface, between the gesture and the undo
+    assert groups.undo(store, out) == "move cli"
+    cli = store.get_project("prj_cli")
+    assert cli is not None and cli.group_id is None
+    assert set(_order(store)) == {"prj_api", "prj_cli", "prj_docs", "prj_web"}

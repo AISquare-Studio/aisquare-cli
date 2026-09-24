@@ -493,7 +493,9 @@ def test_spawn_window_keeps_a_window_whose_resize_tmux_refuses(
 
     Raised instead, it would reach ``fleet.spawn`` as a failed spawn AFTER the
     window exists — a running agent with no row to show, stop or find it by. A
-    refused size costs geometry only; the UI's own sync sizes the window again.
+    refused size costs geometry only: the window keeps the session's size until
+    a pane shows it and the UI's own sync corrects it — for a headless window,
+    one nobody opens, possibly never.
     """
     fake = FakeTmux(
         OK,  # has-session

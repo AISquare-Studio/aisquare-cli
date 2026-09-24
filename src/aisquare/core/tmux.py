@@ -774,7 +774,11 @@ class TmuxServer:
         which also pins it to manual sizing (the global ``window-size manual``
         crashes tmux 3.4 — see :data:`BUNDLED_CONF`). Without that second
         step a coder spawned into a running manager's session was wide enough
-        for Claude Code to open its diff panel on its own (#149).
+        for Claude Code to open its diff panel on its own (#149). That resize
+        fails open: a window tmux refuses to resize is still returned, at the
+        session's size, which a pane's first attach corrects
+        (``TerminalPane._sync_size``) and a headless window keeps until a pane
+        shows it — nothing sizes a window nobody opens.
         Refuses a ``session`` no other method here could target afterwards and
         a ``cwd`` that is not a directory (tmux would use ``$HOME`` silently).
         """
@@ -807,7 +811,9 @@ class TmuxServer:
             # the resize is what makes the geometry argument mean the same
             # thing on both branches. Fail-open: the window exists and is
             # recorded whatever tmux says about its size — a refused resize
-            # costs geometry, never the agent, and the UI's own sync retries.
+            # costs geometry, never the agent. The geometry is the session's:
+            # a pane that shows the window resizes it (the UI's own sync, which
+            # retries); a headless window keeps it until a pane shows it.
             with contextlib.suppress(TmuxError):
                 self.resize(pane_id, width, height)
         return WindowInfo(

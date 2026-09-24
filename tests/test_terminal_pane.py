@@ -3367,9 +3367,10 @@ def test_a_failed_resize_is_retried_until_the_window_matches_the_widget(
     """One refused ``resize-window`` must not mis-size the pane for the view's life.
 
     ``_sync_size``'s only other caller is a ``Resize`` event, so a failure that
-    is merely swallowed leaves the tmux window at its spawn geometry (200x50 by
-    default) while captures keep succeeding — the widget then shows the bottom
-    ``height`` rows of that screen, each truncated to its width.
+    is merely swallowed leaves the tmux window at its spawn geometry (120x40 by
+    default, ``core.tmux.DEFAULT_WINDOW_WIDTH``/``HEIGHT``) while captures keep
+    succeeding — the widget then shows the bottom ``height`` rows of that
+    screen, each truncated to its width.
     """
     fake.fail_resizes = 1
 

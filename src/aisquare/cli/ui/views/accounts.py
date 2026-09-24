@@ -659,7 +659,13 @@ class AccountsView(Vertical):
         if state is WorkerState.SUCCESS and isinstance(worker.result, iam.Session):
             self.session = worker.result
             who = self.session.email or self.session.sub or "you"
-            self._notice(f"✓ Signed in to AISquare as {who}", "ok")
+            if self.session.unrestricted:
+                # The service warns on stderr, which Textual captures while it runs.
+                self._notice(
+                    f"✓ Signed in to AISquare as {who}, but {iam.unrestricted_warning()}", "warn"
+                )
+            else:
+                self._notice(f"✓ Signed in to AISquare as {who}", "ok")
             self.post_message(AccountsChanged())
         elif state is WorkerState.ERROR:
             error = worker.error

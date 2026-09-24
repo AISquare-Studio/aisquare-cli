@@ -366,6 +366,24 @@ def test_auth_token_prints_only_the_token(runner: CliRunner, idp: IdentityProvid
     }
 
 
+@pytest.mark.parametrize("restricted", [False, True])
+def test_a_stored_session_carries_whether_its_file_could_be_restricted(
+    isolated_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    restricted: bool,
+) -> None:
+    """The warning on stderr reaches a terminal and nothing else. The session carries it, so
+    the fleet UI, whose stderr Textual captures, can say it too (review of #65, R7)."""
+    monkeypatch.setattr(paths, "restrict_to_owner", lambda _path: restricted)
+    session = iam.store_session(
+        api_url="https://api.example", token="t", expires_in=None, scope="s", claims={}
+    )
+    assert session.unrestricted is not restricted
+    warned = "may be able to read your session token" in capsys.readouterr().err
+    assert warned is not restricted
+
+
 def test_logout_revokes_and_forgets_but_keeps_other_credentials(
     runner: CliRunner, idp: IdentityProviderStub
 ) -> None:

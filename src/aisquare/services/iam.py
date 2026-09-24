@@ -149,6 +149,10 @@ class Session:
     sub: str = ""
     email: str = ""
     name: str = ""
+    unrestricted: bool = False
+    """True on the session ``store_session`` returns when the credentials file could NOT be
+    restricted to this account. A surface that cannot see stderr (the fleet UI, where Textual
+    captures it) says so from this flag. A session read back from disk leaves it False."""
 
     def expires_in_days(self, now: datetime | None = None) -> int | None:
         if self.expires_at is None:
@@ -500,12 +504,9 @@ def store_session(
         # The third secret in this file, and the one that had no report. The API
         # key says so through `lifecycle.initialize` and the serve token through
         # `mcp_server.serve_token`; a session token is no less worth saying out
-        # loud, and this is the only place that knows.
-        print(
-            f"warning: could not restrict {paths.credentials_path()} to your account — "
-            "other users on this machine may be able to read your session token.",
-            file=sys.stderr,
-        )
+        # loud, and this is the only place that knows. The returned session
+        # carries it too, for the fleet UI, which never sees this line.
+        print(f"warning: {unrestricted_warning()}", file=sys.stderr)
     return Session(
         api_url=api_url,
         token=token,
@@ -515,6 +516,15 @@ def store_session(
         sub=values[KEY_SUB],
         email=values[KEY_EMAIL],
         name=values[KEY_NAME],
+        unrestricted=not restricted,
+    )
+
+
+def unrestricted_warning() -> str:
+    """What to say when a stored session's file could not be restricted to this account."""
+    return (
+        f"could not restrict {paths.credentials_path()} to your account — "
+        "other users on this machine may be able to read your session token."
     )
 
 

@@ -16,6 +16,7 @@ the slot that must not be discarded.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import os
 import sys
 import threading
@@ -463,12 +464,14 @@ def _script_device_flow(
     script: dict[str, Any],
     *,
     outcome: dict[str, Any] | Exception,
+    unrestricted: bool = False,
 ) -> list[str]:
     """Discovery, the grant and the wait, scripted; what the card asked for is recorded.
 
     A completed sign-in STORES the session, and the page re-reads the store on
     every frame — so the scripted completion sets what ``current_session`` will
-    answer next, as the real one does.
+    answer next, as the real one does. ``unrestricted`` is the store's answer
+    that the credentials file could not be restricted to this account.
     """
     seen: list[str] = []
     endpoints = iam.Endpoints(
@@ -502,7 +505,7 @@ def _script_device_flow(
         api_url: str, e: iam.Endpoints, token: dict[str, Any], *, cancelled: Any
     ) -> iam.Session:
         seen.append(f"complete:{token['access_token']}")
-        session = _session("new@aisquare.studio")
+        session = dataclasses.replace(_session("new@aisquare.studio"), unrestricted=unrestricted)
         script["session"] = session
         return session
 
@@ -541,6 +544,33 @@ def test_sign_in_shows_the_code_then_the_new_session(
     assert said == "✓ Signed in to AISquare as new@aisquare.studio"
     assert not code_shown  # the card folds away once the session is stored
     assert "✓ AISquare" in title  # the section was re-read from the stored session
+
+
+def test_a_sign_in_whose_token_could_not_be_restricted_says_so_on_the_page(
+    monkeypatch: pytest.MonkeyPatch, no_network: dict[str, Any]
+) -> None:
+    """The service's warning is a line on stderr, and Textual captures stderr while it runs,
+    so a Windows sign-in from this page looked clean with the token readable by other
+    accounts (review of #65, R7). The page reads the flag the stored session carries."""
+    _script_device_flow(
+        monkeypatch,
+        no_network,
+        outcome={"access_token": "aisq_new", "expires_in": 1},
+        unrestricted=True,
+    )
+
+    async def go(pilot: Pilot[None]) -> str:
+        app = fleet_app(pilot)
+        view = await open_accounts(pilot)
+        await pilot.click("#aisquare-sign-in")
+        await pilot.pause()
+        await settle(app)
+        await pilot.pause()
+        return notice(view)
+
+    said = drive(go)
+    assert said.startswith("✓ Signed in to AISquare as new@aisquare.studio, but could not"), said
+    assert "other users on this machine may be able to read your session token" in said
 
 
 def test_a_cancelled_or_denied_sign_in_stores_nothing_and_says_so(

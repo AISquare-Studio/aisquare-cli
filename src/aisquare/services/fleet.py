@@ -1953,8 +1953,9 @@ def _handed_over(agent: FleetAgent, session: TeamSession | None, now: datetime) 
     """Whether ``agent`` is the row a hand-over in flight is stopping — that stop's to end.
 
     ``switch``, and ``restart`` of a running agent, mark the SESSION
-    (``team.HANDOVER_STATE``) before the ``/exit``, and only the replacement's
-    own ``SessionStart`` clears the mark. Keyed on the mark alone, the guard
+    (``team.HANDOVER_STATE``) before the ``/exit``, and take the mark back as
+    soon as that stop returns or raises (a resumed replacement's own
+    ``SessionStart`` may clear it first). Keyed on the mark alone, the guard
     also covered rows it was never meant for (review of #163, round 1): a
     resumed replacement shares the session id, so one whose ``claude --resume``
     died before its first hook — the failure ``switch`` names — was skipped by
@@ -3959,10 +3960,16 @@ def restart(
                 _mark_handing_over(session)
             try:
                 handed_over = stop(project, label, handover=True, agent_id=agent.id)
-            except Exception:
-                if session is not None:
-                    _unmark_handing_over(session)  # nothing ended: the session keeps its state
-                raise
+            finally:
+                # Taken back however `stop` ends, as `switch` takes its own: the mark's
+                # one reader, the old process's SessionEnd, has run by then or never
+                # will. Taken back only on an `Exception`, a Ctrl-C in the grace left a
+                # running agent marked, and after a completed resume the mark waited for
+                # the replacement's start hook — which, failed open, left the agent
+                # `switching` through every later prompt, since every state writer keeps
+                # the mark (the #205 fold's rule, met by #163 at the stack's fold).
+                if session is not None and (left := _unmark_handing_over(session)) is not None:
+                    notes.append(left)
             agent = handed_over.agent
         else:
             # A dead pane no listing has recorded yet is recorded as a listing
@@ -4069,11 +4076,11 @@ def _mark_handing_over(session: TeamSession) -> None:
 def _unmark_handing_over(session: TeamSession) -> str | None:
     """Take the mark back; a note for the receipt when it could not be, else ``None``.
 
-    Never raises: it runs in ``switch``'s ``finally``, where a raise would replace
-    the stop's own outcome. Not in silence, though: a mark left on reads
-    ``switching`` until the session's own start replaces it, and one whose start
-    hook failed open too stays there through every prompt (review of the #205
-    fold, round 3).
+    Never raises: it runs in the ``finally`` around ``switch``'s and ``restart``'s
+    stop, where a raise would replace the stop's own outcome. Not in silence,
+    though: a mark left on reads ``switching`` until the session's own start
+    replaces it, and one whose start hook failed open too stays there through
+    every prompt (review of the #205 fold, round 3).
     """
     try:
         # Not through `touch_session`: every state writer but this one keeps the mark.

@@ -8562,6 +8562,62 @@ def test_a_resumed_restart_is_told_in_one_line_to_carry_on(
     assert "aisquare board" in line and "continue" in line
 
 
+def test_a_restart_s_mark_does_not_outlive_the_stop_it_was_set_for(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """``switch``'s rule since the #205 fold's round 2, for the hand-over ``restart`` runs on
+    a running agent (#163), which met it at the stack's fold. ``restart`` took the mark
+    back only for a stop that raised an ``Exception``: a Ctrl-C in the grace is a
+    ``KeyboardInterrupt`` and left the running agent marked, and a completed resume left
+    the mark to the replacement's start hook — every state writer keeps it, so one that
+    failed open left the agent ``switching`` through every later prompt: no ``limited``
+    recorded, no hand-over, no bell. The mark's one reader is the old process's
+    ``SessionEnd``, which has run by the time ``stop`` returns, or never will."""
+    mine = _task(project, "the task this coder is for")
+    agent, first = _spawned(project, "coder", mine.id, tmux, monkeypatch)
+    team_service.hook_session_start(first, project.root, "startup")
+    team_service.claim_task(mine.id, session_ref=first)
+    transcript = tmp_path / f"{first}.jsonl"
+    transcript.write_text('{"type":"user"}\n', encoding="utf-8")
+    _with_transcript(agent, transcript)
+    before = _session_state(first)
+    assert before != team_service.HANDOVER_STATE
+
+    def interrupted(*args: Any, **kwargs: Any) -> fleet_service.StopReceipt:
+        raise KeyboardInterrupt
+
+    real_stop = fleet_service.stop
+    monkeypatch.setattr(fleet_service, "stop", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        fleet_service.restart(project, agent.label)
+    assert _session_state(first) == before  # as it was: the agent is still running
+    monkeypatch.setattr(fleet_service, "stop", real_stop)
+
+    # Completed: the old SessionEnd lands in the grace and parks the claim for the resume…
+    real_kill = tmux.kill_window
+
+    def exit_then_kill(pane_id: str) -> None:
+        if pane_id == agent.pane_id:
+            team_service.hook_session_end(first, project.root, reason="prompt_input_exit")
+        real_kill(pane_id)
+
+    monkeypatch.setattr(tmux, "kill_window", exit_then_kill)
+    receipt = fleet_service.restart(project, agent.label)
+    assert receipt.was_running and receipt.resumed and receipt.started.session_id == first
+    # …the replacement's SessionStart never lands (a start hook that failed open), and the
+    # heartbeat of the line it was typed repairs the row, as every prompt's always did.
+    team_service.hook_prompt_heartbeat(first, project.root)
+    with store_session() as store:
+        resumed = store.get_session(first)
+    assert resumed is not None and resumed.ended_at is None and resumed.state == "working"
+    held = _task_now(mine.id)
+    assert held.status == "doing" and held.claimed_by == first  # parked, never released
+
+
 def test_the_auto_mode_board_line_s_own_way_out_brings_the_agent_back_off_auto(
     tmux: FakeTmux,
     claude_on_path: Path,

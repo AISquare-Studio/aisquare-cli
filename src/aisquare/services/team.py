@@ -89,11 +89,11 @@ when it starts fresh (fourth round). Transient — a resumed session's start hoo
 ``working`` over it, a fresh start retires the old presence — and unknown to
 ``fleet._derive``, which falls back to the pane. The agent's own hooks between the
 ``/exit`` and its end — the turn it finishes first, a notification, a failed turn —
-leave it where it is (review of #163, round 2). Besides that start and ``switch``
+leave it where it is (review of #163, round 2). Besides that start and the command
 taking it back, no state write replaces it: the store keeps it
-(``SqliteStore.touch_session``; review of the #205 fold, round 1). So ``switch``
-takes it back as soon as its ``stop`` returns or raises — the one reader, the old
-process's ``SessionEnd``, has run by then or never will (round 2)."""
+(``SqliteStore.touch_session``; review of the #205 fold, round 1). So ``switch`` and
+``restart`` take it back as soon as their ``stop`` returns or raises — the one reader,
+the old process's ``SessionEnd``, has run by then or never will (round 2)."""
 
 #: A numbered SEAT: a first-class role with a crew index glued on — ``coder1``,
 #: ``reviewer2``. ``cli/launch.py`` accepts these because crews run several agents

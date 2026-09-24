@@ -1879,9 +1879,9 @@ class SqliteStore:
         ``SessionEnd`` released the claims the replacement was to inherit (review
         of the #205 fold, round 1). Kept here, so a state writer added later
         cannot forget it the way those hooks did. Only the session's own start
-        (:meth:`upsert_session`, the resumed agent) and ``switch`` taking its
-        mark back (:meth:`unmark_handover`) replace it. The rest of the heartbeat
-        still lands.
+        (:meth:`upsert_session`, the resumed agent) and ``switch`` or ``restart``
+        taking its mark back (:meth:`unmark_handover`) replace it. The rest of
+        the heartbeat still lands.
         """
         sets, params = ["last_seen_at = ?", "ended_at = NULL"], [_now_iso()]
         if cursor is not None:
@@ -1962,7 +1962,7 @@ class SqliteStore:
         self._conn.commit()
 
     def unmark_handover(self, session_id: str, state: str) -> None:
-        """``fleet switch`` takes its hand-over mark back: the stop it was set for has ended.
+        """``fleet switch`` or ``restart`` takes its hand-over mark back: its stop has ended.
 
         The one writer besides the session's own start that replaces the mark
         (:meth:`touch_session` keeps it), and it replaces only the mark: a row

@@ -2773,6 +2773,49 @@ def test_a_lost_release_ends_the_drag_at_the_first_move_with_no_button_held(
     assert clipboard == "third ", "the second drag was a gesture of its own"
 
 
+def test_a_lost_release_leaves_the_highlight_that_was_copied(
+    fake: FakeTmux, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #203, round 1 of the fold delta. The bare move ended the
+    GESTURE, but Textual's screen was still drag-selecting — only a ``MouseUp``
+    ends that — so every bare move after it carried the highlight's end along
+    with the pointer: the toast had just said "copied 4 characters — ctrl+c
+    copies again while the selection stands", and ctrl+c then copied
+    ``second row\\nthird row``, the rows the pointer had wandered over since.
+    The screen's drag ends with the gesture: the highlight stays what was
+    copied, and the copy key copies exactly that again. (That the next press
+    still drag-selects is the test above's second drag.)"""
+    monkeypatch.setattr(terminal_module, "_monotonic", lambda: 100.0)
+
+    async def drive() -> tuple[str, str | None, str, list[str]]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 8)) as pilot:
+            pane = host.pane
+            await wait_until(pilot, lambda: synced(pane))
+            for event in (
+                mouse_event(events.MouseDown, pane, (0, 1), 1),
+                mouse_event(events.MouseMove, pane, (3, 1), 1),
+                # …the release is lost outside, and the pointer comes back in
+                # and goes on moving with no button held
+                mouse_event(events.MouseMove, pane, (7, 2), 0),
+                mouse_event(events.MouseMove, pane, (9, 2), 0),
+            ):
+                host.post_message(event)
+            await pilot.pause()
+            await pilot.pause()
+            copied, highlighted = host.clipboard, pane.selected_text()
+            host.set_focus(None)
+            await pilot.press("ctrl+c")
+            await pilot.pause()
+            return copied, highlighted, host.clipboard, list(host.notices)
+
+    copied, highlighted, copied_again, notices = run(drive())
+    assert copied == "seco", "the premise: the lost drag copied where it got to"
+    assert highlighted == "seco", f"the highlight followed the bare pointer: {highlighted!r}"
+    assert copied_again == "seco", f"ctrl+c copied something else: {copied_again!r}"
+    assert len(notices) == 2 and notices[1] == "copied 4 characters", notices
+
+
 def test_a_pane_detached_but_still_registered_is_skipped_not_logged_as_failing(
     fake: FakeTmux, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

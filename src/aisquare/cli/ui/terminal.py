@@ -482,6 +482,28 @@ class SelectionHost(App[None]):
             return
         super().copy_to_clipboard(text)
 
+    def _end_screen_drag(self) -> None:
+        """End the active screen's drag-select the way its ``MouseUp`` would have.
+
+        Textual's ``Screen`` drag-selects from a press until a ``MouseUp``
+        clears ``_selecting``, and every move in between carries the
+        highlight's end to the pointer. A lost release never arrives, so ending
+        only the gesture left the screen selecting: each bare move after the
+        copy dragged the highlight along, and the "ctrl+c copies again" the
+        toast had just promised copied the rows the pointer wandered over since
+        (review of #203, round 1 of the fold delta). ``_selecting`` and
+        ``_mouse_down_offset`` are Textual's PRIVATE state, set here exactly as
+        ``Screen._forward_event`` sets them on a release (textual 8.2); a rename
+        of ``_selecting`` fails ``test_a_lost_release_leaves_the_highlight_that_was_copied``.
+        """
+        try:
+            screen = self.screen
+        except Exception as error:  # no screen on the stack
+            self.log.error("lost release: no screen to end the drag on", error)
+            return
+        screen._selecting = False
+        screen._mouse_down_offset = None
+
     async def on_event(self, event: events.Event) -> None:
         pressed = isinstance(event, events.MouseDown) and not event.is_forwarded
         released = isinstance(event, events.MouseUp) and not event.is_forwarded
@@ -500,8 +522,11 @@ class SelectionHost(App[None]):
             # DUPLICATE_PRESS_WINDOW was dropped as a duplicate and the next
             # drag extended the lost one (review of the fold with #167). A stray
             # is left to its own release or the next press: its release reaching
-            # the screen is the damage the stray rule exists to prevent.
+            # the screen is the damage the stray rule exists to prevent. The
+            # screen's drag ends with it, or this move and every one after it
+            # would go on moving the highlight that was just copied.
             lost, self._pressed = self._pressed, None
+            self._end_screen_drag()
             route_selection_gesture(self, lost)
         # ONE gesture at a time. A second button pressed while one is down is
         # not a new gesture — and it is not the screen's to see either. Recording

@@ -16,7 +16,6 @@ the slot that must not be discarded.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import os
 import sys
 import threading
@@ -30,7 +29,7 @@ import pytest
 from textual.containers import Vertical
 from textual.pilot import Pilot
 from textual.widgets import Button, Static
-from textual.worker import Worker, WorkerError, WorkerState
+from textual.worker import Worker, WorkerState
 
 from aisquare.cli.ui.app import FleetApp
 from aisquare.cli.ui.sidebar import AccountsSection, AccountsTitle
@@ -63,6 +62,7 @@ from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import device_flow, iam
 from aisquare.services import fleet as fleet_service
 from tests.pane_harness import asks_a_server, socket_of
+from tests.ui_workers import settle_workers
 
 T = TypeVar("T")
 SIZE = (140, 40)
@@ -199,19 +199,8 @@ def shown(widget: Static) -> str:
 
 
 async def settle(app: FleetApp) -> None:
-    """Wait for every worker of ours to reach a terminal state, whatever that state is.
-
-    ``wait_for_complete`` raises for a worker that ERRORED — and a scripted
-    ``IamError`` is exactly the outcome several tests here go on to read off
-    the page, so that raise would fail the test before its assertion, and only
-    when the worker was still registered when sampled (a race). Each worker is
-    awaited on its own and its failure swallowed; the page shows the result.
-    """
-    for worker in list(app.workers):
-        if worker.group == "_loader":
-            continue
-        with contextlib.suppress(WorkerError):
-            await worker.wait()
+    """Wait for every worker of ours to reach a terminal state; see ``settle_workers``."""
+    await settle_workers(app)
 
 
 def fleet_app(pilot: Pilot[None]) -> FleetApp:

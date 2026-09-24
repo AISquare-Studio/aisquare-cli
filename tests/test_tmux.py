@@ -137,11 +137,6 @@ def _completes(call: Callable[[], None]) -> bool:
     return True
 
 
-#: The permission bits below are ADVICE on two machines, not a refusal: to root,
-#: and on NTFS, where `chmod(0o444)` returns cleanly and the owner writes anyway.
-#: Either way the rewrite succeeds and the fail-open branch is never reached, so
-#: the test would assert the opposite of what it claims. `can_deny_writes`
-#: measures it by trying, rather than naming the two platforms it knows about.
 #: Mode 000 is a refusal for an ordinary POSIX user and ADVICE otherwise:
 #: root reads anything, and on NTFS the owner reads its own file whatever
 #: the bits say. Measured the same way `can_deny` is — by asking the
@@ -151,6 +146,11 @@ can_read_zero_mode = pytest.mark.skipif(
     reason="mode 000 does not stop this user from reading",
 )
 
+#: The permission bits below are ADVICE on two machines, not a refusal: to root,
+#: and on NTFS, where `chmod(0o444)` returns cleanly and the owner writes anyway.
+#: Either way the rewrite succeeds and the fail-open branch is never reached, so
+#: the test would assert the opposite of what it claims. `can_deny_writes`
+#: measures it by trying, rather than naming the two platforms it knows about.
 can_deny = pytest.mark.skipif(
     not can_deny_writes(),
     reason="writes cannot be denied here — the fail-open branch is unreachable",

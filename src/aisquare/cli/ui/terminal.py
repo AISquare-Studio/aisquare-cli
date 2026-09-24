@@ -116,7 +116,7 @@ import weakref
 from bisect import bisect_left
 from collections.abc import Callable
 from functools import partial
-from typing import Any, ClassVar, NamedTuple, assert_never
+from typing import Any, ClassVar, Literal, NamedTuple, assert_never
 
 from rich.cells import cell_len, set_cell_size, split_graphemes
 from rich.segment import Segment
@@ -161,6 +161,10 @@ NOTICE = Style(dim=True, italic=True)
 NO_PANE = "(no agent selected)"
 PANE_GONE = "(pane gone)"
 TMUX_UNAVAILABLE = "(tmux unavailable)"
+NOTHING_TO_COPY = "nothing to copy — no text under the highlight"
+"""What a left drag is told when it left a highlight with no text under it: once for
+the gesture, by :func:`route_selection_gesture`, or by the pane that ran a shift+drag
+itself (:meth:`TerminalPane._end_shift_drag`)."""
 
 
 class DisplayedRow:
@@ -423,6 +427,11 @@ def _tell_panes(app: App[Any], what: str, tell: Callable[[TerminalPane], object]
             app.log.error(f"{what} failed for a pane", error)
 
 
+GestureEnd = Literal["copied", "blank"]
+"""What a release did in one pane (:meth:`TerminalPane.selection_gesture_ended`):
+copied its highlight, or dropped one with no text under it."""
+
+
 def route_gesture_start(app: App[Any]) -> None:
     """A mouse button went down somewhere on ``app``: every pane on the active
     screen notes the selection it has now, which is what a release must differ
@@ -443,8 +452,19 @@ def route_selection_gesture(app: App[Any], button: int | None) -> None:
     armed (review of #120, round 9; review of #135, finding 6). The most
     recently selected pane is told last, so when one drag changed two panes
     the clipboard ends with what the copy key would copy (``_tell_panes``).
+
+    "Nothing to copy" is said here, once for the gesture, and never beside a
+    copy. Each pane used to say its own: a drag from one pane's text into the
+    blank rows of another said "copied 11 characters" and then — the blank
+    pane was where the drag ended, so it was told last — "nothing to copy",
+    with the copy on the clipboard (review of the #167 fold, F1).
     """
-    _tell_panes(app, "selection gesture", lambda pane: pane.selection_gesture_ended(button))
+    ended: list[GestureEnd | None] = []
+    _tell_panes(
+        app, "selection gesture", lambda pane: ended.append(pane.selection_gesture_ended(button))
+    )
+    if button == 1 and "blank" in ended and "copied" not in ended:
+        app.notify(NOTHING_TO_COPY, markup=False)
 
 
 def route_lost_release(app: App[Any]) -> None:
@@ -2266,7 +2286,7 @@ class TerminalPane(Widget, can_focus=True):
         if self.selected_text() is None:
             self._clear_own_selection()
             if button == 1:
-                self.notify("nothing to copy — no text under the highlight", markup=False)
+                self.notify(NOTHING_TO_COPY, markup=False)
             return
         if button == 1 and self._copy_selection():
             self._baseline = span
@@ -2413,7 +2433,7 @@ class TerminalPane(Widget, can_focus=True):
         """
         self._baseline = self._own_selection()
 
-    def selection_gesture_ended(self, button: int | None = None) -> None:
+    def selection_gesture_ended(self, button: int | None = None) -> GestureEnd | None:
         """The button came up somewhere on screen: copy what the gesture left here.
 
         Routed by the app, because the app is the only place the release is
@@ -2437,7 +2457,10 @@ class TerminalPane(Widget, can_focus=True):
         (rule 3). Left standing, it was tinted full width, the release copied
         nothing and said nothing, and the ctrl+c the highlight invited went to
         the agent as its interrupt (review of #120, round 11). A left drag was
-        a request to copy, so it is told why none happened.
+        a request to copy, so it is told why none happened — by the routing,
+        once for the gesture, which is what the answer is for: ``"copied"``,
+        ``"blank"`` for a highlight dropped with nothing under it, else ``None``
+        (:func:`route_selection_gesture`).
 
         A shift+drag this pane runs itself (#148) is passed over: this widget
         has not handled its release yet, so the span here is only as far as the
@@ -2446,19 +2469,17 @@ class TerminalPane(Widget, can_focus=True):
         its selection is then the baseline still, and nothing is copied here.
         """
         if self._shift_drag is not None:
-            return
+            return None
         selection = self._own_selection()
         if selection is None or selection == self._baseline:
-            return
+            return None
         if self.selected_text() is None:
             self._clear_own_selection()
-            if button == 1:
-                self.notify("nothing to copy — no text under the highlight", markup=False)
-            return
-        if button != 1:
-            return
-        if self._copy_selection():
-            self._baseline = selection
+            return "blank"
+        if button != 1 or not self._copy_selection():
+            return None
+        self._baseline = selection
+        return "copied"
 
     def copy_standing_selection(self) -> bool:
         """The copy KEY: copy this pane's standing highlight and clear it; whether there was one.

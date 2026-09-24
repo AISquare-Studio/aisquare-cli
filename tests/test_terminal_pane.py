@@ -180,15 +180,29 @@ class SwitcherHost(SelectionHost):
 class PairHost(SelectionHost):
     """Two panes stacked, BOTH visible — the one shape in which two highlights can
     stand at once, since Textual's own drag replaces every selection and a click
-    clears them all; the tests that need two write them through the screen."""
+    clears them all; the tests that need two write them through the screen.
+    Notices are recorded as ``Host`` records them: at a release that changed both
+    panes, what each one said is part of the answer."""
 
     def __init__(self, server: TmuxServer) -> None:
         super().__init__()
         self._server = server
+        self.notices: list[str] = []
 
     def compose(self) -> ComposeResult:
         yield TerminalPane("%1", server=self._server, id="first")
         yield TerminalPane("%2", server=self._server, id="second")
+
+    def notify(
+        self,
+        message: str,
+        *,
+        title: str = "",
+        severity: SeverityLevel = "information",
+        timeout: float | None = None,
+        markup: bool = True,
+    ) -> None:
+        self.notices.append(message)
 
 
 def run(coro: Coroutine[Any, Any, T]) -> T:
@@ -4728,6 +4742,39 @@ def test_a_drag_across_two_panes_posted_as_one_burst_copies_the_pane_it_ended_in
     down, up = run(drive())
     assert down == ("BBB one\nBBB ", "BBB one\nBBB "), down
     assert up == ("d row\nthird row", "d row\nthird row"), up
+
+
+def test_a_drag_that_copies_in_one_pane_is_not_nothing_to_copy_in_the_other(
+    fake: FakeTmux, tmp_path: Path
+) -> None:
+    """Review of the #167 fold, F1. A drag up from the bottom pane's text into
+    the blank row under the top pane's output changes both highlights: the
+    bottom one copies, the top one has no text under it and is dropped. Each pane
+    said its own piece, and the top pane — where the drag ended, so told last —
+    said "nothing to copy" over the "copied" it followed, with the clipboard
+    holding the bottom pane's text. One toast for the gesture now, and a copy
+    anywhere is what it says. The negative half: a drag over nothing but blank
+    rows is still told "nothing to copy", once."""
+    fake.panes["%2"] = FakePane(screen=["BBB one", "BBB two", "BBB three"], cursor=(0, 0))
+
+    async def drive() -> tuple[str, list[str], bool, list[str]]:
+        host = PairHost(fake.server(tmp_path))
+        async with host.run_test(size=(40, 8)) as pilot:
+            top = host.query_one("#first", TerminalPane)
+            bottom = host.query_one("#second", TerminalPane)
+            await wait_until(pilot, lambda: synced(top) and synced(bottom))
+            assert screen_text(top)[3] == "", "the premise: nothing printed on the top's last row"
+            await drag(pilot, bottom, (3, 1), (5, 3), to=top)
+            copied, notices, standing = host.clipboard, list(host.notices), top.text_selection
+            host.notices.clear()
+            await drag(pilot, top, (1, 3), (12, 3))
+            return copied, notices, standing is not None, list(host.notices)
+
+    copied, notices, standing, blank = run(drive())
+    assert copied == "BBB one\nBBB", copied
+    assert len(notices) == 1 and notices[0].startswith("copied 11 characters"), notices
+    assert not standing, "the top pane's empty highlight is still dropped"
+    assert len(blank) == 1 and blank[0].startswith("nothing to copy"), blank
 
 
 def test_a_failed_frame_drops_the_highlight_on_the_row_its_notice_replaces(

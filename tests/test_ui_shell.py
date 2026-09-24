@@ -3251,6 +3251,27 @@ def test_a_quit_in_the_middle_of_a_drag_keeps_the_width_the_drag_reached(
     assert _state(isolated_home)[SIDEBAR_WIDTH_KEY] == 60
 
 
+def test_a_quit_in_the_middle_of_a_drag_at_the_ceiling_keeps_the_wider_width_on_file(
+    tmp_path: Path, script: Script, isolated_home: Path
+) -> None:
+    """120 on file, the ceiling 99 (review of the #167 fold, F4). A drag in to 60 and back out
+    past the ceiling, then `q` with the button still held: `on_unmount` remembered the 99 it
+    reached without the ceiling rule, and 99 replaced 120 — which a release at the same place
+    keeps (`test_the_ceiling_rule_reads_what_the_saver_was_last_asked_...`)."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+    _write_state(isolated_home, {SIDEBAR_WIDTH_KEY: 120})
+
+    async def go(pilot: Pilot[None]) -> None:
+        app = fleet_app(pilot)
+        await pilot.pause()
+        await _mouse(pilot, events.MouseDown, app.sidebar.outer_size.width, 5)
+        await _mouse(pilot, events.MouseMove, 60, 5)
+        await _mouse(pilot, events.MouseMove, 130, 5)  # and the app exits with the button held
+
+    drive(go)
+    assert _state(isolated_home)[SIDEBAR_WIDTH_KEY] == 120
+
+
 def test_hiding_the_divider_mid_drag_ends_the_drag(
     tmp_path: Path, script: Script, isolated_home: Path
 ) -> None:

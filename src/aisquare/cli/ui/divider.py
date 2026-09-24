@@ -105,6 +105,9 @@ class Divider(Widget):
         self._last_click_still = False
         """Whether the previous click was a LEFT click that was a click (the width did not
         change). Another button, or a drag, breaks the chain."""
+        self._drag_ceiling: int | None = None
+        """The ceiling the drag now running last met, for a quit before its release
+        (:meth:`on_unmount`): the neighbour whose styles give it may be pruned by then."""
         self._autosave: Autosave | None = None
         """The debounced, off-loop save under ``state_key``; ``None`` when there is no key. Its
         ``latest`` — the width this process last asked the file to hold, or read from it — is
@@ -226,6 +229,7 @@ class Divider(Widget):
         before = self.width
         if self.resize_to(screen_x - self.target.region.x) != before:
             self._moved = True
+        self._drag_ceiling = self.bounds()[1]
 
     def on_mouse_release(self, event: events.MouseRelease) -> None:
         """The app took the capture away (a screen was pushed mid-drag): the drag is over."""
@@ -319,9 +323,16 @@ class Divider(Widget):
             and self._width is not None
         ):
             # Quit with the button still held: the drag reached a width the user
-            # asked for. Remembered directly — the neighbour may already be
-            # pruned, so the ceiling rule (which reads its styles) is not consulted.
-            self._autosave.remember(self._width)
+            # asked for, settled as its release would have settled it — the
+            # ceiling rule included, or a narrow terminal's ceiling replaced a
+            # wider width on file (review of the #167 fold, F4). Judged against
+            # the ceiling the drag last met, not the neighbour's styles: Textual
+            # prunes the siblings together, so the neighbour may be gone already.
+            remembered = self._remembered_width()
+            if remembered is None or not self._ceiling_under(
+                self._width, remembered, self._drag_ceiling
+            ):
+                self._autosave.remember(self._width)
         self._dragging = False
         if self._autosave is not None:
             # Start the drain (a stopped timer would never fire it); the app joins
@@ -354,11 +365,16 @@ class Divider(Widget):
             return
         self._autosave.remember(width)
 
-    def _ceiling_under(self, width: int | None, remembered: int) -> bool:
+    def _ceiling_under(
+        self, width: int | None, remembered: int, ceiling: int | None = None
+    ) -> bool:
         """Whether ``width`` is this terminal's ceiling with a wider width on file (or on its way).
 
         The ceiling bounds what is SHOWN, not what is remembered: a laptop
         clamps a monitor's 90 to 39, and a gesture that lands on 39 there is
         "as wide as this screen allows", not a new number to carry back.
+        ``ceiling`` stands in for the bounds' when the neighbour cannot be
+        asked (a quit mid-drag).
         """
-        return width is not None and width >= self.bounds()[1] and remembered > width
+        upper = self.bounds()[1] if ceiling is None else ceiling
+        return width is not None and width >= upper and remembered > width

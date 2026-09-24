@@ -19,7 +19,7 @@ import os
 import re
 import sqlite3
 import sys
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -1451,7 +1451,7 @@ def hook_session_start(
             store.recent_events(project.id, limit=_BOARD_EVENTS),
             me=session,
             assigned=assigned,
-            labels=slot_labels_via(store),
+            labels=lambda: slot_labels_via(store),
         )
 
 
@@ -1505,7 +1505,7 @@ def hook_prompt_heartbeat(
                 store.recent_events(project.id, limit=_BOARD_EVENTS),
                 me=session,
                 assigned=assigned,
-                labels=slot_labels_via(store),
+                labels=lambda: slot_labels_via(store),
             )
         # Same check as session_start, on the path that actually runs every turn.
         # It must survive the empty-delta early return below: a collision warning
@@ -2112,7 +2112,7 @@ def render_board(
     from aisquare.services import claude_accounts as accounts_service  # lazy: no import cycle
 
     return _render_board(
-        project, sessions, tasks, events, me=None, labels=accounts_service.slot_labels()
+        project, sessions, tasks, events, me=None, labels=accounts_service.slot_labels
     )
 
 
@@ -2124,7 +2124,7 @@ def _render_board(
     *,
     me: TeamSession | None,
     assigned: Assignment | None = None,
-    labels: Mapping[int, str] | None = None,
+    labels: Mapping[int, str] | Callable[[], Mapping[int, str]] | None = None,
 ) -> str:
     now = _now()
     lines = ["<aisquare-team>"]
@@ -2137,6 +2137,11 @@ def _render_board(
             lines += _assignment_lines(assigned, me)
     live = [s for s in sessions if s.ended_at is None]
     accounts = len({s.account for s in live if s.account})
+    if callable(labels):
+        # Read only when a label is shown, as `watch` does: every SessionStart
+        # read them — a store read and a directory scan — for a board on one
+        # account, which prints none (review of the #205 fold, round 1).
+        labels = labels() if accounts > 1 else None
     if live:
         lines.append("sessions:")
         for session in live:

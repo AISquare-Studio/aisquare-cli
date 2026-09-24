@@ -1365,6 +1365,43 @@ def test_the_board_block_and_watch_name_the_account_as_the_rest_does(
     assert "[work]" in block and "[account 3]" in block and "[account 2]" not in block
 
 
+def test_a_board_on_one_account_reads_no_labels(
+    fake_home: Path, work: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of the #205 fold, round 1: every SessionStart read the slot labels — a store
+    read and a directory scan — for a label only a board spanning several accounts prints.
+    Read only then now, as ``watch`` already did."""
+    two = _slot("work@example.com", "tok-work")
+    reads: list[int] = []
+    real = service.slot_labels
+
+    def counted(store: Any = None) -> dict[int, str]:
+        reads.append(1)
+        return real(store=store)
+
+    monkeypatch.setattr(service, "slot_labels", counted)
+
+    def transcript(config_dir: Path, session_id: str) -> str:
+        return str(config_dir / "projects" / "-repo" / f"{session_id}.jsonl")
+
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
+    alone = team_service.hook_session_start(
+        "sess-plain", work.root, "startup", transcript_path=transcript(fake_home / ".claude", "p")
+    )
+    assert reads == [] and "[plain claude]" not in alone
+    with store_session() as store:
+        sessions = store.team_sessions(work.id)
+    team_service.render_board(work, sessions, [], [])  # `asq board` too
+    assert reads == []
+
+    # A second account live: the labels are shown, so they are read.
+    monkeypatch.setenv(core.CONFIG_DIR_VAR, str(two.config_dir))
+    both = team_service.hook_session_start(
+        "sess-work", work.root, "startup", transcript_path=transcript(two.config_dir, "w")
+    )
+    assert reads == [1] and "[plain claude]" in both and "[account 2]" in both
+
+
 def test_a_removed_slots_readings_do_not_rate_the_next_occupant(fake_home: Path) -> None:
     """``forget_arrangement`` drops the slot's ``claude_usage`` rows too (third round)."""
     account = _slot("work@example.com", "tok-work")

@@ -69,7 +69,10 @@ UNINVOKED = {
     "team spawn": "spawns a real agent process",
     "login": "polls the identity provider until a browser approval arrives",
     "fleet attach": "replaces the process with `tmux attach` (os.execvp)",
-    "fleet shutdown": "kills the fleet's real tmux sessions on the configured socket",
+    "fleet shutdown": (
+        "kills the fleet's real tmux sessions on the configured socket; its read-only "
+        "plan (`--json` without `--yes`) is invoked by test_the_shutdown_plan_is_held_to_it"
+    ),
     "logout": "clears credentials on the developer's own machine",
     "open": "launches a browser",
     "uninstall": "removes the installation running the test",
@@ -274,6 +277,23 @@ def _escaped(raised: BaseException | None) -> BaseException | None:
 def _raises_unhandled(chain: list[str]) -> BaseException | None:
     """The exception a command lets escape, or None."""
     return _escaped(CliRunner().invoke(app, chain, catch_exceptions=True).exception)
+
+
+def test_the_shutdown_plan_is_held_to_it(damaged_store: str) -> None:
+    """``fleet shutdown`` is UNINVOKED because it kills real tmux sessions — but
+    ``--json`` without ``--yes`` is its documented read-only dry run, so the
+    plan's ONE store open (``shutdown_plan`` → ``_shutdown_targets``) is held
+    to the property here. The opens behind ``--yes`` — the late scan, the pause
+    pass, the per-row record helpers — sit behind handlers that turn a store
+    failure into a report field, and are covered where a fake tmux is at hand:
+    ``tests/test_fleet_service.py::test_shutdown_reports_a_store_damaged_mid_run``
+    (review of #203, rounds 4 and 7)."""
+    raised = _raises_unhandled(["fleet", "shutdown", "--json"])
+
+    assert raised is None, (
+        f"`aisquare fleet shutdown --json` raised {type(raised).__name__} under "
+        f"{damaged_store} damage: {raised}"
+    )
 
 
 def test_the_ratchet_names_only_commands_that_exist() -> None:

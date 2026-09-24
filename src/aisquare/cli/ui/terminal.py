@@ -89,6 +89,7 @@ from __future__ import annotations
 
 import contextlib
 import itertools
+import time
 import weakref
 from bisect import bisect_left
 from collections.abc import Callable
@@ -293,6 +294,24 @@ def _extract(selection: Selection, rows: list[DisplayedRow], width: int) -> str:
     return "".join(pieces).rstrip("\n")
 
 
+_SERVER_VERSIONS: dict[str, tuple[int, int]] = {}
+"""``tmux -V`` answers by socket — see :meth:`TerminalPane._server_version`."""
+
+
+def forget_server_versions() -> None:
+    """Drop every cached ``tmux -V`` answer — a new server is a new machine (tests)."""
+    _SERVER_VERSIONS.clear()
+
+
+DUPLICATE_PRESS_WINDOW = 0.5
+"""Seconds within which a repeat of the pressed button is one press reported twice.
+
+A terminal that double-reports does so within milliseconds; a human whose
+release was lost — the pointer left the window with the button down — presses
+again after a drag's worth of time. The window tells the two apart, and a
+double-click is not in question: its second press finds nothing down."""
+_monotonic: Callable[[], float] = time.monotonic
+
 _MOUNTED_PANES: weakref.WeakSet[TerminalPane] = weakref.WeakSet()
 """Every mounted pane, so the start and end of a gesture reach them without a DOM walk."""
 
@@ -427,6 +446,11 @@ class SelectionHost(App[None]):
         super().__init__(*args, **kwargs)
         self._pressed: int | None = None
         """The button of the press now down, until its release is routed."""
+        self._stray: int | None = None
+        """A second button pressed while ``_pressed`` was down: dropped, with its release."""
+        self._pressed_at = 0.0
+        """When ``_pressed`` went down — a repeat of it inside :data:`DUPLICATE_PRESS_WINDOW`
+        is the terminal reporting one press twice; later, its release was lost."""
 
     def get_default_screen(self) -> Screen[None]:
         return PaneScreen(id="_default")
@@ -447,10 +471,64 @@ class SelectionHost(App[None]):
     async def on_event(self, event: events.Event) -> None:
         pressed = isinstance(event, events.MouseDown) and not event.is_forwarded
         released = isinstance(event, events.MouseUp) and not event.is_forwarded
+        # ONE gesture at a time. A second button pressed while one is down is
+        # not a new gesture — and it is not the screen's to see either. Recording
+        # it overwrote ``_pressed`` and re-baselined every pane to the selection
+        # the drag had built so far, so the left button's release routed as the
+        # other button; and forwarded, Textual's screen restarts its selection
+        # at every ``MouseDown`` and reads the ``MouseUp`` that lands on the same
+        # cell as a click that CLEARS it — so the drag's highlight was gone
+        # before its own release arrived, and the copy was silently dropped
+        # (review of #203, round 4). The stray button's press and release are
+        # dropped here, before either reaches the screen. The same button
+        # pressed again re-arms: its release was lost (the pointer left the
+        # terminal), and refusing it would leave every later gesture unrouted.
         if pressed:
             assert isinstance(event, events.MouseDown)
+            if self._pressed is not None:
+                # One gesture at a time, and that includes a REPEAT of the
+                # gesture's own button: a terminal that reports a press twice
+                # would otherwise re-baseline every pane mid-drag and let the
+                # screen restart its selection at the duplicate's cell — the
+                # dropped copy of round 5, arriving by the press (round 7). A
+                # stray's button is remembered so its own release is dropped too.
+                if event.button != self._pressed:
+                    self._stray = event.button
+                    return
+                if _monotonic() - self._pressed_at < DUPLICATE_PRESS_WINDOW:
+                    return
+                # The same button, pressed again long after: its release was
+                # lost (the pointer left the terminal with it down), and refusing
+                # it would leave every later gesture unrouted (round 4). A new
+                # gesture — and it takes the screen's selection with it, as any
+                # press does.
+            # A new gesture starts clean: a stray whose release never arrived
+            # (the pointer left the terminal) used to outlive its gesture, and
+            # the next press of THAT button was accepted while its release was
+            # dropped as the stray's — leaving `_pressed` armed forever, every
+            # later left press classified as stray and dropped, and nothing in
+            # the app clickable (review of the fold). The stray is cleared by its
+            # own release, or here.
+            self._stray = None
             self._pressed = event.button
+            self._pressed_at = _monotonic()
             route_gesture_start(self)
+        if released:
+            assert isinstance(event, events.MouseUp)
+            # While a gesture is down, the only release that is its own names
+            # the button that began it: anything else — the stray's release, a
+            # DUPLICATE of it from a terminal that reports releases twice — is
+            # dropped before it reaches the screen, where it would synthesise a
+            # Click at the primary press's offset, clear the drag's highlight,
+            # focus the pane and zero its double-click chain (round 5; a
+            # one-shot stray token let the duplicate through, round 6). After
+            # the gesture ended, the stray's own release is still the stray's
+            # (`Down(1) Down(3) Up(1) Up(3)`, the commonest order).
+            if self._pressed is not None and event.button != self._pressed:
+                return
+            if self._stray is not None and event.button == self._stray:
+                self._stray = None
+                return
         try:
             await super().on_event(event)
         finally:
@@ -648,12 +726,26 @@ class TerminalPane(Widget, can_focus=True):
         return self.facts.history_size if self.facts is not None else 0
 
     def _server_version(self) -> tuple[int, int] | None:
-        """The server's version, asked once per attach; ``None`` when it will not say."""
+        """The server's version, asked once per SERVER; ``None`` when it will not say.
+
+        Cached by SOCKET across attaches: ``_wrap_flags`` needs the answer for
+        the FIRST frame, and asking per attach put a blocking ``tmux -V``
+        subprocess on the UI thread at every project switch, tab activation and
+        re-mounted view (round 8 of #203). The server behind a socket is what
+        the answer is about, and it does not change on an attach. Only an answer
+        is cached — a server that will not say is asked again next time.
+        """
         if not self._version_read:
             self._version = None
             if self.server is not None:
-                with contextlib.suppress(TmuxError):
-                    self._version = self.server.version()
+                key = self.server.socket
+                if key in _SERVER_VERSIONS:
+                    self._version = _SERVER_VERSIONS[key]
+                else:
+                    with contextlib.suppress(TmuxError):
+                        self._version = self.server.version()
+                    if self._version is not None:
+                        _SERVER_VERSIONS[key] = self._version
             self._version_read = True
         return self._version
 
@@ -927,8 +1019,16 @@ class TerminalPane(Widget, can_focus=True):
         """
         changed = notice != self.notice or self._cursor is not None
         height = self.content_size.height
-        stale = notice != self.notice and self._highlight_is_stale(
-            Shown(self._lines, notice, self._marker), {height - 1}
+        # A failure can arrive before Textual has sized the widget — the first
+        # capture of ``attach`` or ``on_mount`` raising — and ``height - 1`` is
+        # then ``-1``, which ``_displayed_row`` reads as the frame's LAST row
+        # (``lines[-1]``) and compares under a span meant for the notice row:
+        # a verdict about a row nobody highlighted (review of #203). No rows,
+        # no row the notice replaces.
+        stale = (
+            height > 0
+            and notice != self.notice
+            and self._highlight_is_stale(Shown(self._lines, notice, self._marker), {height - 1})
         )
         self.notice = notice
         self._cursor = None
@@ -1087,11 +1187,21 @@ class TerminalPane(Widget, can_focus=True):
             # left the one row a drag COPIES as the only row a selection never
             # tinted (review of #120, round 3).
             strip = Strip([Segment(shown.notice, base + NOTICE)]).adjust_cell_length(width, base)
-            row = DisplayedRow(strip.text.rstrip())
         else:
             strip = self._strip_for(line).apply_style(base).adjust_cell_length(width, base)
-            row = self._frame_row(line, width)
         if y == 0 and shown.marker is not None:
+            # The row's text model is read by the marker alone, so it is built
+            # here and nowhere else: built for the notice row on every render,
+            # it paid an uncached ``Strip.text`` join and a grapheme scan for a
+            # value the notice row — which is never row 0 on a widget taller
+            # than one row — then threw away (review of #203, round 4). The
+            # notice row's model comes from its strip, a frame row's from the
+            # cache, as the overlays read them (``_overlay_row``).
+            row = (
+                DisplayedRow(strip.text.rstrip())
+                if shown.notice is not None and y == height - 1
+                else self._frame_row(line, width)
+            )
             strip = self._with_scroll_marker(strip, width, row, shown.marker)
         return strip
 
@@ -1154,11 +1264,20 @@ class TerminalPane(Widget, can_focus=True):
         if shown is None:
             shown = self._shown()
         if wrapped:
+            # The composed strip is padded to the WIDGET's width; a wrapped row's
+            # real extent is the PANE's (where tmux wrapped it). While the two
+            # disagree — the 100 ms resize debounce, a refused resize-window — the
+            # narrower one is the row, stated as such: a narrower pane's row is
+            # cropped to the pane (the strip's padding is not text), and a wider
+            # pane can never show more than the widget paints (reviews of #203,
+            # round 4, and of the fold — both measured; neither reproduced a copy
+            # past either width, and the rule is now written where it is read).
             text = self._composed_strip(y, shown).text
             facts = self.facts
             pane_width = facts.width if facts is not None else self.content_size.width
-            if cell_len(text) > pane_width:
-                text = set_cell_size(text, pane_width)
+            limit = min(pane_width, self.content_size.width)
+            if cell_len(text) > limit:
+                text = set_cell_size(text, limit)
             return DisplayedRow(text, wrapped=True)
         if self._composed(y, shown):
             return DisplayedRow(self._composed_strip(y, shown).text.rstrip())

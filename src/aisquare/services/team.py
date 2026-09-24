@@ -16,9 +16,11 @@ from __future__ import annotations
 import json
 import os
 import re
+import sqlite3
+import sys
 from collections.abc import Mapping
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import NamedTuple
@@ -730,14 +732,8 @@ def set_signal(
     signal receipts like any other write.
     """
     _require_enabled()
-    _DELIVERY.set(None)
-    if not _SIGNAL_NAME.fullmatch(name):
-        raise ValueError(
-            f"signal name {name!r} must be a lowercase token "
-            "([a-z0-9._-], starting alphanumeric, max 64)"
-        )
-    if not _SIGNAL_VALUE.fullmatch(value):
-        raise ValueError(f"signal value {value!r} must be a single token (no whitespace)")
+    _DELIVERY.set(None)  # FIRST: a refused signal must not leave the last write's receipt readable
+    _validate_signal(name, value)  # before any store is opened or board resolved
     with store_session() as store:
         session = _resolve_session(store, session_ref)
         # A caller that names the project by ID resolves the board id-addressed,
@@ -748,36 +744,84 @@ def set_signal(
         board = (
             _board_of(store, project_id) if project_id is not None else _board(store, session, cwd)
         )
-        key = _signal_key(board.id, name)
-        prior = store.get_meta(key)
-        prev = _signal_state(name, prior).value if prior is not None else None
-        text = f"{name}: {value}" if prev is None else f"{name}: {value} (was {prev})"
-        now = _now()
-        event = store.add_signal_event(
-            TeamEvent(
-                id=new_event_id(),
-                project_id=board.id,
-                session_id=session.id if session else None,
-                kind="signal",
-                text=text,
-                created_at=now,
-            ),
-            key,
-            {
-                "value": value,
-                "session_id": session.id if session else None,
-                "updated_at": now.isoformat(),
-            },
+        state, prev, event = _write_signal(store, board, session, name, value)
+    _record_delivery(event, board)  # the receipt for this write; `state.seq` is already the row's
+    return state, prev
+
+
+def set_signal_in(store: ContextStore, project_id: str, name: str, value: str) -> None:
+    """:func:`set_signal` for ``project_id`` through a store the CALLER holds open.
+
+    For a pass over many projects — ``fleet shutdown`` clearing every confirmed
+    project's pause — which used to open a connection per project through
+    :func:`set_signal` (connect, WAL switch, migrations each time) on top of one
+    per row it ended (review of #203, round 4). Same validation, same
+    one-transaction write; no delivery receipt is published, because the caller
+    is not the ``team signal`` command and there is nobody to hand it to — and
+    the receipt of an EARLIER write in this process is cleared, so nothing reads
+    it as this one's (round 5). Returns nothing: its one caller reads nothing.
+    """
+    _require_enabled()
+    _validate_signal(name, value)
+    _DELIVERY.set(None)
+    board = _board_of(store, project_id)
+    _write_signal(store, board, None, name, value)
+
+
+def _validate_signal(name: str, value: str) -> None:
+    """Names and values are single tokens by contract (#23); refused before any write."""
+    if not _SIGNAL_NAME.fullmatch(name):
+        raise ValueError(
+            f"signal name {name!r} must be a lowercase token "
+            "([a-z0-9._-], starting alphanumeric, max 64)"
         )
-    stored = _record_delivery(event, board)
+    if not _SIGNAL_VALUE.fullmatch(value):
+        raise ValueError(f"signal value {value!r} must be a single token (no whitespace)")
+
+
+def _write_signal(
+    store: ContextStore,
+    board: _Board,
+    session: TeamSession | None,
+    name: str,
+    value: str,
+) -> tuple[SignalState, str | None, TeamEvent]:
+    """The one write behind :func:`set_signal` and :func:`set_signal_in`.
+
+    Validation is the CALLER's, before it opens or resolves anything:
+    ``_board`` runs ``ensure_project``, which revives a forgotten project's
+    tombstone, so a signal that was going to be refused used to register the
+    directory first (review of the fold).
+    """
+    key = _signal_key(board.id, name)
+    prior = store.get_meta(key)
+    prev = _signal_state(name, prior).value if prior is not None else None
+    text = f"{name}: {value}" if prev is None else f"{name}: {value} (was {prev})"
+    now = _now()
+    event = store.add_signal_event(
+        TeamEvent(
+            id=new_event_id(),
+            project_id=board.id,
+            session_id=session.id if session else None,
+            kind="signal",
+            text=text,
+            created_at=now,
+        ),
+        key,
+        {
+            "value": value,
+            "session_id": session.id if session else None,
+            "updated_at": now.isoformat(),
+        },
+    )
     state = SignalState(
         name=name,
         value=value,
         set_by=session.id if session else None,
-        seq=stored.seq,
+        seq=event.seq,
         updated_at=now,
     )
-    return state, prev
+    return state, prev, event
 
 
 def read_signal(
@@ -794,8 +838,19 @@ def read_signal(
         board = (
             _board_of(store, project_id) if project_id is not None else _board(store, session, cwd)
         )
-        blob = store.get_meta(_signal_key(board.id, name))
-        return _signal_state(name, blob) if blob is not None else None
+        return _read_signal(store, board.id, name)
+
+
+def read_signal_in(store: ContextStore, project_id: str, name: str) -> SignalState | None:
+    """:func:`read_signal` for ``project_id`` through a store the CALLER holds open
+    (see :func:`set_signal_in` for why)."""
+    _require_enabled()
+    return _read_signal(store, project_id, name)
+
+
+def _read_signal(store: ContextStore, project_id: str, name: str) -> SignalState | None:
+    blob = store.get_meta(_signal_key(project_id, name))
+    return _signal_state(name, blob) if blob is not None else None
 
 
 def list_signals(*, session_ref: str | None = None, cwd: Path | None = None) -> list[SignalState]:
@@ -1782,32 +1837,70 @@ def hook_session_end(session_id: str, cwd: Path | None, *, reason: str | None = 
             # replacement never start (review of #205, finding 6).
             store.end_session(session.id, release_claims=False)
         else:
-            _release_session(store, session, why="session ended")
+            released = _release_session(store, session, why="session ended")
+            if released.unannounced:
+                # The one path with no report to ride on — a hook, whose stderr
+                # goes to Claude Code's hook log — and the one that runs most
+                # often (every graceful /exit). Silently dropping the value the
+                # class was built to carry left the manager treating released
+                # work as held with nothing anywhere saying why (round 8 of
+                # #203). Said where the hook can say it.
+                print(
+                    f"aisquare: session {session.id} released {len(released.tasks)} task(s) back "
+                    f"to the board but could not announce {', '.join(released.unannounced)} "
+                    f"({released.reason}) — the manager will not see them come free until it "
+                    "lists the pool",
+                    file=sys.stderr,
+                )
         root = _project_root(store, session.project_id)
     # Safety drain: catch anything a per-command spawn missed this session.
     distill_service.spawn_drain(cwd, root=root)
 
 
-def _release_session(store: ContextStore, session: TeamSession, *, why: str) -> list[TeamTask]:
+@dataclass(frozen=True)
+class Released:
+    """What a session release did: the claims returned, and any the board was not told about.
+
+    The release is COMMITTED before its ``task_released`` events are written,
+    so a failed event must not read as "nothing was released" — `stop` used to
+    report an empty release over tasks already back on the board (review of the
+    fold). But the event is how the manager learns the work is free
+    (``events_since`` / ``terminal_events``), so a failed one is not swallowed
+    either: it is named here, for the caller to report (review of #203,
+    round 5). ``reason`` is the first failure's text.
+    """
+
+    tasks: list[TeamTask]
+    unannounced: list[str] = field(default_factory=list)
+    reason: str | None = None
+
+
+def _release_session(store: ContextStore, session: TeamSession, *, why: str) -> Released:
     """Return ``session``'s ``doing`` claims to the pool, ending its presence
     unless that already happened, and say so on the board (``task_released``)."""
     if session.ended_at is None:
         released = store.end_session(session.id, release_claims=True)
     else:
         released = store.release_claims(session.id)
+    unannounced: list[str] = []
+    reason: str | None = None
     for task in released:
-        _emit(
-            store,
-            session.project_id,
-            "task_released",
-            f"{task.title} ({why})",
-            session_id=session.id,
-            task_id=task.id,
-        )
-    return released
+        try:
+            _emit(
+                store,
+                session.project_id,
+                "task_released",
+                f"{task.title} ({why})",
+                session_id=session.id,
+                task_id=task.id,
+            )
+        except sqlite3.Error as exc:  # the store refusing the event; a code fault still raises
+            unannounced.append(task.id)
+            reason = reason or f"{type(exc).__name__}: {exc}"
+    return Released(released, unannounced, reason)
 
 
-def release_agent_claims(store: ContextStore, agent: FleetAgent, *, why: str) -> list[TeamTask]:
+def release_agent_claims(store: ContextStore, agent: FleetAgent, *, why: str) -> Released:
     """A fleet row that has just ENDED holds nothing: release the claims of the
     session bound to it, and retire that presence if it is still up.
 
@@ -1820,10 +1913,10 @@ def release_agent_claims(store: ContextStore, agent: FleetAgent, *, why: str) ->
     #135, second round, finding 5). ``why`` is the board's word for it.
     """
     if agent.session_id is None:
-        return []
+        return Released([])
     session = store.get_session(agent.session_id)
     if session is None:
-        return []
+        return Released([])
     return _release_session(store, session, why=why)
 
 
@@ -2328,7 +2421,15 @@ def _resolve_assignment(store: ContextStore, session_id: str, project_id: str) -
     if agent is None:
         return None
     if agent.session_id != session_id and not _adopt(store, agent, session_id):
-        return None
+        # The name in the environment is a row this session may not have
+        # (rule 1) — but the session may be bound to a row of its OWN, and
+        # `task next` (`_fleet_row_for`) reads that row for the order. The
+        # two doors read the same row now; this one used to give up here and
+        # the agent lost its ASSIGNED TO YOU block while `task next` still put
+        # its task first (round 8 of #203).
+        agent = store.fleet_agent_for_session(project_id, session_id)
+        if agent is None:
+            return None
     if agent.task_id is None:
         return None
     task = store.get_task(agent.task_id)

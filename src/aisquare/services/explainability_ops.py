@@ -46,7 +46,6 @@ from http.client import HTTPException, IncompleteRead
 from importlib.metadata import PackageNotFoundError, version
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
 from aisquare.core.config import (
@@ -501,13 +500,20 @@ def _request(
     # the network.
     # Both spellings of "malformed" are verdicts: a URL with no scheme, and a
     # URL the parser itself rejects (`https://[::1` — "Invalid IPv6 URL" is
-    # raised by `urlsplit`, so the check has to sit inside a handler too;
-    # review of #107, round 3).
-    try:
-        usable = urlsplit(url).scheme in ("http", "https")
-    except ValueError as exc:
-        return HttpVerdict(ok=False, status=None, detail=f"not a usable URL: {url!r} ({exc})")
-    if not usable:
+    # raised by `urlsplit`; review of #107, round 3). Parsed through
+    # `split_url`, the one guarded parser every URL in this package goes
+    # through, rather than a private `try` around `urlsplit` that this module
+    # kept beside its import of the helper (review of #203). Stripped first so
+    # the parse and the request read the same text: `split_url` strips on its
+    # own, and a stray space from a pasted config value would have passed the
+    # check and then failed `Request` as "unreachable".
+    url = url.strip()
+    split = split_url(url)
+    if split is None:
+        return HttpVerdict(
+            ok=False, status=None, detail=f"not a usable URL: {url!r} (it cannot be parsed)"
+        )
+    if split.scheme not in ("http", "https"):
         return HttpVerdict(
             ok=False,
             status=None,
@@ -1262,16 +1268,46 @@ def _destination(target: ResolvedTarget, verdict: ProxyProbe) -> ProxyState:
     """
     alive = f"claude_code proxy healthy at {target.proxy_url}"
     ships = f", and it says it ships to {verdict.gateway}" if verdict.gateway else ""
+    # A gateway a REMOTE proxy names from its own vantage: a hosted proxy beside
+    # its gateway talks to it over loopback (the SDK's own `.env` default is
+    # `http://127.0.0.1:8000`), and that address means nothing from this
+    # machine. Never offered as a URL to adopt, and never held against the
+    # configured one as a misroute (review of #132). Strictly a loopback URL —
+    # `is_loopback` reads an EMPTY host as local, so a schemeless or malformed
+    # report (`other.example:8000`, `unknown`) would have passed for the proxy's
+    # own loopback and turned a red misroute green — and only when the proxy is
+    # not itself on this machine: a local proxy's `127.0.0.1` IS this box's
+    # (review of the fold).
+    foreign_view = (
+        verdict.gateway is not None
+        and _loopback_url(verdict.gateway)
+        and not is_loopback(target.proxy_url)
+    )
     if not target.gateway_url:
+        # Offered to adopt only when `configure_target` would take it: a
+        # schemeless or garbage report (`other.example:8000`, `unknown`) pasted
+        # into the command fails with "needs a scheme" (review of the fold).
+        adopt = (
+            verdict.gateway
+            if verdict.gateway
+            and not foreign_view
+            and url_problem(verdict.gateway, what="gateway") is None
+            else "<url>"
+        )
+        aside = (
+            " (its own local view of it, not an address this machine can use)"
+            if foreign_view
+            else ""
+        )
         return ProxyState(
             summary=(
-                f"{alive}{ships}, but no gateway is configured for target "
+                f"{alive}{ships}{aside}, but no gateway is configured for target "
                 f"{target.name!r}, so that cannot be compared with anything"
             ),
             severity=CheckStatus.warn,
             remediation=(
                 f"Name the deployment: aisquare explainability enable --target {target.name} "
-                f"--gateway-url {verdict.gateway or '<url>'}"
+                f"--gateway-url {adopt}"
             ),
         )
     unusable = url_problem(target.gateway_url, what="gateway")
@@ -1288,6 +1324,50 @@ def _destination(target: ResolvedTarget, verdict: ProxyProbe) -> ProxyState:
             ),
         )
     if verdict.gateway:
+        if foreign_view:
+            # A remote proxy naming a loopback gateway is naming the one beside
+            # it — never this machine's, so it is judged BEFORE any comparison
+            # with the configured gateway (a loopback target would otherwise
+            # read as the same deployment). On the target's host that IS the
+            # deployment's own proxy talking to its own gateway
+            # (`hosted_proxy_for`'s convention) — green, not the false red that
+            # would turn the real hosted topology red the day the SDK ships this
+            # field. Elsewhere it is a proxy whose gateway is local to IT, which
+            # from here cannot be compared with the target: amber, not red
+            # (review of #132; review of the fold).
+            if _shares_host(target.proxy_url, target.gateway_url):
+                return ProxyState(
+                    summary=(
+                        f"{alive}, shipping to {target.name} (it names its gateway as "
+                        f"{verdict.gateway}: the one beside it, on {target.name}'s host)"
+                    ),
+                    severity=CheckStatus.ok,
+                )
+            return ProxyState(
+                summary=(
+                    f"{alive}, but it names its gateway as {verdict.gateway} — local to the "
+                    f"proxy's own host, which is not {target.gateway_url}'s — so whether that "
+                    f"is {target.name} cannot be checked from here"
+                ),
+                severity=CheckStatus.warn,
+                remediation=_PROXY_DESTINATION_FIX,
+            )
+        if url_problem(verdict.gateway, what="gateway") is not None:
+            # A report that is not a URL — a deployment NAME, a bare host:port —
+            # cannot be shown to agree with the target, and cannot be shown to
+            # disagree either. Red here said "model traffic lands on the other
+            # deployment" over a proxy that may ship exactly where it should,
+            # and `status` exited 1 on it: the false red this lane exists to
+            # avoid. Amber, like every other shape this cannot check (round 6).
+            return ProxyState(
+                summary=(
+                    f"{alive}, but it reports its gateway as {verdict.gateway!r}, which is not "
+                    f"a URL this can compare with {target.gateway_url}, so whether it ships to "
+                    f"{target.name} cannot be checked from here"
+                ),
+                severity=CheckStatus.warn,
+                remediation=_PROXY_DESTINATION_FIX,
+            )
         if _same_deployment(verdict.gateway, target.gateway_url):
             return ProxyState(
                 summary=f"{alive}, shipping to {target.name}", severity=CheckStatus.ok
@@ -1301,9 +1381,23 @@ def _destination(target: ResolvedTarget, verdict: ProxyProbe) -> ProxyState:
             severity=CheckStatus.fail,
             remediation=_PROXY_DESTINATION_FIX,
         )
-    if _shares_host(target.proxy_url, target.gateway_url) or (
-        is_loopback(target.proxy_url) and is_loopback(target.gateway_url)
-    ):
+    if is_loopback(target.proxy_url) and is_loopback(target.gateway_url):
+        # The self-hosted topology: both on this machine. Green, because the
+        # operator who started the sidecar also runs the gateway it was
+        # pointed at — but the mechanism is the same one the amber below names
+        # for a remote gateway (a local proxy ships wherever
+        # EXPLAINABILITY_GATEWAY_URL pointed when it was started), so the
+        # summary says what is assumed rather than "by construction" (review
+        # of #132).
+        return ProxyState(
+            summary=(
+                f"{alive}; it does not report a gateway, and a local proxy ships wherever "
+                f"EXPLAINABILITY_GATEWAY_URL pointed when it was started — taken to be "
+                f"{target.gateway_url}, the local gateway beside it"
+            ),
+            severity=CheckStatus.ok,
+        )
+    if _shares_host(target.proxy_url, target.gateway_url):
         return ProxyState(summary=alive, severity=CheckStatus.ok)
     # The deployment's own proxy, by this module's convention -- the thing to
     # point at instead, spelled out rather than left as a placeholder.
@@ -1339,6 +1433,20 @@ def _destination(target: ResolvedTarget, verdict: ProxyProbe) -> ProxyState:
             f"--proxy-url {hosted}"
         ),
     )
+
+
+def _loopback_url(url: str) -> bool:
+    """Whether ``url`` is a well-formed http(s) URL whose host is this machine's.
+
+    Stricter than :func:`is_loopback`, which reads an EMPTY host as local because
+    its callers decide whether a workspace key may be omitted and a bare path
+    must not demand one. Here the question is whether a proxy's reported
+    gateway is its own loopback view, and a report with no parseable host is
+    not that — it is a report that cannot be shown to agree with anything.
+    :func:`url_problem` is the one judge of "usable http(s) URL" (a port out of
+    range included), so this does not parse on its own (review of the fold).
+    """
+    return url_problem(url, what="gateway") is None and is_loopback(url)
 
 
 def _shares_host(one: str, two: str) -> bool:

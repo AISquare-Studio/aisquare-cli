@@ -27,9 +27,11 @@ answers for ``launch`` and ``fleet spawn`` alike.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 import shutil
+import sqlite3
 import time
 from collections.abc import Callable
 from typing import Annotated
@@ -42,7 +44,7 @@ from aisquare.core import claude_accounts as claude_accounts_core
 from aisquare.core import harness, orchestrator
 from aisquare.core.config import load_config
 from aisquare.core.console import stderr_console
-from aisquare.core.store import store_session
+from aisquare.core.store import ContextStore, is_locked_error, store_session
 from aisquare.services import claude_accounts as claude_accounts_service
 from aisquare.services import explainability as explainability_service
 from aisquare.services import explainability_ops
@@ -74,12 +76,16 @@ _SEAT = re.compile(rf"^({'|'.join(ROLES)})\d+$")
 DEFAULT_AGENT = "claude"
 
 FLEET_ROW_TIMEOUT = 10.0
-"""Seconds a fleet launch waits for its row before starting the agent anyway.
+"""Seconds of LOOKS a fleet launch spends on its row before starting the agent anyway.
 
 Twice the store's default busy timeout (``_DEFAULT_BUSY_MS``): the spawn's
 insert waits that long on a locked ``context.db`` before it fails, and a spawn
 that fails kills this window, so a wait past the timeout is one that was never
-going to be answered."""
+going to be answered. Not a cap on the wall clock: the one open of the store
+retries a locked database for the store's own budget (three times the busy
+timeout, 15 s at the default) before this clock is consulted, so a launch on a
+locked store can hold longer than this — the line printed names the time it
+actually took (review of #203, round 4)."""
 FLEET_ROW_POLL = 0.05
 """Seconds between looks for the row — one store read each, and rarely more
 than one: the row lands while this interpreter is still starting."""
@@ -129,27 +135,56 @@ def _await_fleet_row() -> None:
     the agent, so it is the one place that can hold the door: ordinarily the
     row is there on the first look, while this interpreter is still warming
     up. Fail-open at the timeout and on a store that cannot be read — the
-    hook fails open the same way — with one line saying what it cost.
+    hook fails open the same way — with one line saying what it cost, on
+    BOTH exits: an agent that starts un-briefed over a corrupt store with
+    nothing on stderr is the state the line exists to explain (review of
+    #203, round 4).
+
+    ONE connection for the whole wait. Opening a store connects, switches the
+    journal mode and runs the migrations, and the first cut did that on every
+    50 ms look — up to two hundred opens, each contending on ``context.db``
+    with the very insert this loop waits for — and gave up on the first
+    "database is locked", the one condition it exists to wait out (review of
+    #203). A lock, on the open or on a look, is looked past until the deadline;
+    any other failure of the store ends the wait, never the launch. The
+    deadline bounds the looks: one open that is itself waiting out a lock holds
+    for the store's own retry budget first (:data:`FLEET_ROW_TIMEOUT`).
     """
     agent_id = orchestrator.env_fleet_agent()
     if agent_id is None:
         return
-    deadline = _monotonic() + FLEET_ROW_TIMEOUT
-    while True:
-        try:
-            with store_session() as store:
+    started = _monotonic()
+    deadline = started + FLEET_ROW_TIMEOUT
+    with contextlib.ExitStack() as stack:
+        store: ContextStore | None = None
+        while True:
+            try:
+                if store is None:
+                    store = stack.enter_context(store_session())
                 if store.get_fleet_agent(agent_id) is not None:
                     return
-        except Exception:  # an unreadable store costs the wait, never the launch
-            return
-        if _monotonic() >= deadline:
-            stderr_console().print(
-                f"fleet: row {agent_id} not recorded after {FLEET_ROW_TIMEOUT:.0f}s — "
-                "starting anyway; the session-start briefing may miss its assignment",
-                style="dim",
-            )
-            return
-        _sleep(FLEET_ROW_POLL)
+            except sqlite3.OperationalError as exc:
+                if not is_locked_error(exc):
+                    _starting_unbriefed(agent_id, f"the store could not be read ({exc})")
+                    return
+            except Exception as exc:  # an unreadable store costs the wait, never the launch
+                _starting_unbriefed(
+                    agent_id, f"the store could not be read ({type(exc).__name__}: {exc})"
+                )
+                return
+            if _monotonic() >= deadline:
+                _starting_unbriefed(agent_id, f"not recorded after {_monotonic() - started:.0f}s")
+                return
+            _sleep(FLEET_ROW_POLL)
+
+
+def _starting_unbriefed(agent_id: str, why: str) -> None:
+    """The one line every fail-open exit of :func:`_await_fleet_row` prints."""
+    stderr_console().print(
+        f"fleet: row {agent_id} {why} — starting anyway; the session-start briefing "
+        "may miss its assignment",
+        style="dim",
+    )
 
 
 def launch(

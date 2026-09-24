@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import itertools
 import os
 import re
 import shutil
@@ -36,7 +37,7 @@ from rich.cells import cell_len, split_graphemes
 from rich.style import Style
 from textual import events
 from textual.app import App, ComposeResult
-from textual.geometry import Offset, Region
+from textual.geometry import Offset, Region, Size
 from textual.notifications import SeverityLevel
 from textual.pilot import Pilot
 from textual.screen import ModalScreen
@@ -54,6 +55,7 @@ from aisquare.cli.ui.terminal import (
     DisplayedRow,
     EscapeToSidebar,
     SelectionHost,
+    Shown,
     TerminalPane,
     _extract,
     route_gesture_start,
@@ -2286,6 +2288,383 @@ def test_a_burst_of_gestures_routes_each_release_with_its_own_button(
     assert len(notices) == 1, f"and the right drag copied nothing: {notices}"
 
 
+def test_a_second_button_pressed_mid_drag_does_not_steal_the_drags_release(
+    fake: FakeTmux, tmp_path: Path
+) -> None:
+    """Review of #203, round 4. ``SelectionHost._pressed`` held one button and
+    every press overwrote it: a right button pressed while the left drag was
+    still down re-armed the host with ``3`` AND re-baselined every pane to the
+    selection the drag had built, so the left release routed as a right-button
+    gesture and the copy was silently dropped — a painted highlight, no toast,
+    nothing on the clipboard, and the next ctrl+c the agent's interrupt. A
+    second button while one is down is no gesture at all now; the release that
+    ends the gesture is the one naming the button that began it."""
+
+    async def drive() -> tuple[str, list[str]]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 8)) as pilot:
+            pane = host.pane
+            await wait_until(pilot, lambda: synced(pane))
+            for event in (
+                mouse_event(events.MouseDown, pane, (0, 2), 1),
+                mouse_event(events.MouseMove, pane, (5, 2), 1),
+                mouse_event(events.MouseDown, pane, (5, 2), 3),
+                mouse_event(events.MouseUp, pane, (5, 2), 1),
+                mouse_event(events.MouseUp, pane, (5, 2), 3),
+            ):
+                host.post_message(event)
+            await pilot.pause()
+            await pilot.pause()
+            return host.clipboard, list(host.notices)
+
+    clipboard, notices = run(drive())
+    assert clipboard == "third ", "the left drag's release was routed as the left button"
+    assert len(notices) == 1, f"one copy, and the stray right release copied nothing: {notices}"
+
+
+def test_a_stray_button_whose_release_never_arrives_does_not_lock_the_mouse_out(
+    fake: FakeTmux, tmp_path: Path
+) -> None:
+    """Review of the fold. The stray's bookkeeping was cleared only by its own
+    release. Lost — the pointer left the terminal with the right button down —
+    it outlived the drag; the next right click's press was accepted and its
+    release dropped as the stray's, leaving ``_pressed`` armed for good and
+    every later left press classified as stray: nothing in the app clickable.
+    A stray goes with the gesture it interrupted, and a new gesture starts clean."""
+
+    async def drive() -> tuple[str, list[str]]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 8)) as pilot:
+            pane = host.pane
+            await wait_until(pilot, lambda: synced(pane))
+            for event in (
+                # a left drag with a stray right press whose release is lost
+                mouse_event(events.MouseDown, pane, (0, 2), 1),
+                mouse_event(events.MouseMove, pane, (5, 2), 1),
+                mouse_event(events.MouseDown, pane, (5, 2), 3),
+                mouse_event(events.MouseUp, pane, (5, 2), 1),
+                # later: an ordinary right click, then an ordinary left drag
+                mouse_event(events.MouseDown, pane, (1, 1), 3),
+                mouse_event(events.MouseUp, pane, (1, 1), 3),
+                mouse_event(events.MouseDown, pane, (0, 2), 1),
+                mouse_event(events.MouseMove, pane, (5, 2), 1),
+                mouse_event(events.MouseUp, pane, (5, 2), 1),
+            ):
+                host.post_message(event)
+            await pilot.pause()
+            await pilot.pause()
+            return host.clipboard, list(host.notices)
+
+    clipboard, notices = run(drive())
+    assert clipboard == "third ", "the second left drag copied: its press was not read as stray"
+    assert len(notices) == 2, f"both left drags copied, the right click nothing: {notices}"
+
+
+def test_a_copy_over_a_wrapped_row_is_the_panes_width_while_the_pane_is_narrower(
+    fake: FakeTmux, tmp_path: Path
+) -> None:
+    """Pinned for the review of the fold, which read the wrapped-row crop as
+    reaching only the widget's width while the pane was narrower (the resize
+    debounce, a refused resize-window) — a 30-column command copied padded to 40
+    cells and glued onto its continuation. Measured: the crop to the pane's width
+    already covered it, so this pins the other half of the invariant the wider-pane
+    test above pins — a wrapped row is copied at the NARROWER of the two widths."""
+    fake.apply_resize = False
+    pane_fake = fake.panes["%1"]
+    pane_fake.width, pane_fake.height = 30, 3
+    pane_fake.screen = ["a" * 30, "tail", ""]
+    pane_fake.wrapped = {0}
+
+    async def drive() -> tuple[str | None, int]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 3)) as pilot:
+            pane = host.pane
+            await wait_until(pilot, lambda: pane.facts is not None and "tail" in rows(pane)[1].text)
+            assert pane.facts is not None and pane.facts.width == 30, "the premise: a narrower pane"
+            await drag(pilot, pane, (0, 0), (3, 1))
+            return pane.selected_text(), pane.content_size.width
+
+    copied, width = run(drive())
+    assert width == 40
+    assert copied == "a" * 30 + "tail", copied
+
+
+_ORDERINGS = {
+    "primary-up-first": ("D1", "D3", "U1", "U3"),
+    "stray-up-first": ("D1", "D3", "U3", "U1"),
+    "stray-lost": ("D1", "D3", "U1"),
+    "stray-first-then-primary": ("D3", "D1", "U3", "U1"),
+    "stray-first-primary-up-first": ("D3", "D1", "U1", "U3"),
+    "stray-up-twice": ("D1", "D3", "U3", "U3", "U1"),
+    "sequential-not-stray": ("D3", "U3", "D1", "U1"),
+}
+
+
+@pytest.mark.parametrize("ordering", sorted(_ORDERINGS), ids=sorted(_ORDERINGS))
+def test_a_second_button_never_reaches_the_screen_whatever_the_release_order(
+    fake: FakeTmux, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ordering: str
+) -> None:
+    """The INVARIANT, not one ordering of it (round 5 of the #203 review, on the
+    churn of fixing one symptom at a time): while one button is down, a second
+    button's press and release never reach the screen, whichever of them is
+    lifted first and even when the second's release never comes; the gesture's
+    own release always routes with the button that began it; and afterwards the
+    host is clean — an ordinary left drag copies. Measured at the one seam that
+    IS "reaching the screen": ``App.on_event``, the parent this class defers to.
+
+    Sequential presses (``D3 U3 D1 U1``) are the control: two gestures, both
+    forwarded, the left one copies."""
+    forwarded: list[tuple[str, int]] = []
+    real_on_event = App.on_event
+
+    async def spy(self: App[Any], event: events.Event) -> None:
+        if isinstance(event, (events.MouseDown, events.MouseUp)) and not event.is_forwarded:
+            forwarded.append((type(event).__name__, event.button))
+        await real_on_event(self, event)
+
+    monkeypatch.setattr(App, "on_event", spy)
+    steps = _ORDERINGS[ordering]
+    # The stray is a SECOND button pressed while the first is still down.
+    stray = int(steps[1][1]) if steps[1].startswith("D") and steps[1][1] != steps[0][1] else None
+    # The left button's release routes a copy only when the left button was a
+    # gesture of its own (not the stray) — the right button's never does.
+    copies = 1 if "U1" in steps and stray != 1 else 0
+
+    async def drive() -> tuple[list[tuple[str, int]], list[str], bool, bool, bool]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 8)) as pilot:
+            pane = host.pane
+            await wait_until(pilot, lambda: synced(pane))
+            for step in steps:
+                kind = events.MouseDown if step[0] == "D" else events.MouseUp
+                button = int(step[1])
+                if kind is events.MouseDown and button == 1:
+                    host.post_message(mouse_event(events.MouseDown, pane, (0, 2), 1))
+                    host.post_message(mouse_event(events.MouseMove, pane, (5, 2), 1))
+                else:
+                    at = (5, 2) if button == 1 else (1, 1)
+                    host.post_message(mouse_event(kind, pane, at, button))
+            await pilot.pause()
+            await pilot.pause()
+            seen = list(forwarded)
+            after_sequence = list(host.notices)
+            released = host._pressed is None  # every gesture that began has ended
+            # Afterwards: an ordinary left drag must copy — the host is clean.
+            # Over ANOTHER row than the sequence's drag, and counted by the copy
+            # toast: a drag that leaves a standing highlight as it was is not a
+            # copy (class docstring, rule 2), and the clipboard may already hold
+            # the sequence's own text. A stray whose release never came is
+            # cleared HERE, by the next gesture's start.
+            toasts_before = len(host.notices)
+            for event in (
+                mouse_event(events.MouseDown, pane, (0, 0), 1),
+                mouse_event(events.MouseMove, pane, (4, 0), 1),
+                mouse_event(events.MouseUp, pane, (4, 0), 1),
+            ):
+                host.post_message(event)
+            await pilot.pause()
+            await pilot.pause()
+            copied_after = bool(host.clipboard) and len(host.notices) == toasts_before + 1
+            clean_after = host._pressed is None and host._stray is None
+            return seen, after_sequence, released, copied_after, clean_after
+
+    seen, notices, released, copied_after, clean_after = run(drive())
+    assert released, f"[{ordering}] a gesture was still armed after its release"
+    if stray is not None:
+        assert all(button != stray for _, button in seen), (
+            f"[{ordering}] the stray button {stray} reached the screen: {seen}"
+        )
+    else:
+        assert ("MouseDown", 3) in seen and ("MouseUp", 3) in seen, (
+            f"[{ordering}] sequential presses are separate gestures and both reach the screen"
+        )
+    assert len(notices) == copies, f"[{ordering}] copies during the sequence: {notices}"
+    assert copied_after, f"[{ordering}] the host was not clean for the next drag"
+    assert clean_after, f"[{ordering}] _pressed/_stray were not reset by the next gesture"
+
+
+def _mouse(kind: type[events.MouseEvent], button: int) -> events.MouseEvent:
+    """One bare mouse event, as the driver posts it, at a fixed cell."""
+    return kind(None, 3, 3, 0, 0, button, False, False, False, screen_x=3, screen_y=3)
+
+
+def test_every_button_sequence_up_to_five_events_keeps_the_gesture_invariant(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """EXHAUSTIVE, not one ordering per round (rounds 4 to 7 of #203 each fixed
+    the complement of the last): every sequence over {D1, D2, D3, U1, U2, U3} up
+    to five events — 9 330 of them, duplicates and lost releases included — is
+    driven through ``SelectionHost.on_event`` against a reference model of the
+    one rule, and both are compared event by event:
+
+    * a press when nothing is down begins a gesture with that button: forwarded,
+      every pane baselined; while one is down, ANY press is dropped (a second
+      button becomes the stray; a repeat of the gesture's own button is one
+      press reported twice);
+    * the only release that ends the gesture names the button that began it:
+      forwarded, routed once with that button; every other release while one is
+      down is dropped;
+    * with nothing down, the stray's own release is dropped once and any other
+      release is forwarded and routed with no button.
+
+    Measured at the two seams that matter — ``App.on_event`` (the screen) and
+    the two route functions — on a bare host, with the clock frozen so a repeat
+    press is always inside :data:`DUPLICATE_PRESS_WINDOW`."""
+    forwarded: list[tuple[str, int]] = []
+    routed: list[tuple[str, int | None]] = []
+
+    async def screen(self: App[Any], event: events.Event) -> None:
+        if isinstance(event, (events.MouseDown, events.MouseUp)):
+            forwarded.append((type(event).__name__, event.button))
+
+    monkeypatch.setattr(App, "on_event", screen)
+    monkeypatch.setattr(
+        terminal_module, "route_gesture_start", lambda app: routed.append(("start", None))
+    )
+    monkeypatch.setattr(
+        terminal_module,
+        "route_selection_gesture",
+        lambda app, button: routed.append(("end", button)),
+    )
+    monkeypatch.setattr(terminal_module, "_monotonic", lambda: 100.0)
+
+    alphabet = [("D", 1), ("D", 2), ("D", 3), ("U", 1), ("U", 2), ("U", 3)]
+
+    def model(
+        steps: list[tuple[str, int]],
+    ) -> tuple[list[tuple[str, int]], list[tuple[str, int | None]]]:
+        pressed: int | None = None
+        stray: int | None = None
+        fwd: list[tuple[str, int]] = []
+        rt: list[tuple[str, int | None]] = []
+        for kind, b in steps:
+            if kind == "D":
+                if pressed is not None:
+                    if b != pressed:
+                        stray = b
+                    continue
+                stray, pressed = None, b
+                rt.append(("start", None))
+                fwd.append(("MouseDown", b))
+            else:
+                if pressed is not None and b != pressed:
+                    continue
+                if stray is not None and b == stray:
+                    stray = None
+                    continue
+                fwd.append(("MouseUp", b))
+                rt.append(("end", pressed))
+                pressed = None
+        return fwd, rt
+
+    async def drive(steps: list[tuple[str, int]]) -> None:
+        host = SelectionHost()
+        for kind, b in steps:
+            await host.on_event(_mouse(events.MouseDown if kind == "D" else events.MouseUp, b))
+        assert host._pressed is None or any(k == "D" for k, _ in steps)
+
+    checked = 0
+    for length in range(1, 6):
+        for steps in itertools.product(alphabet, repeat=length):
+            forwarded.clear()
+            routed.clear()
+            asyncio.run(drive(list(steps)))
+            expected_fwd, expected_rt = model(list(steps))
+            assert forwarded == expected_fwd, f"{steps}: forwarded {forwarded} != {expected_fwd}"
+            assert routed == expected_rt, f"{steps}: routed {routed} != {expected_rt}"
+            checked += 1
+    assert checked == 6 + 36 + 216 + 1296 + 7776
+
+
+def test_a_duplicated_primary_press_does_not_restart_the_drag(
+    fake: FakeTmux, tmp_path: Path
+) -> None:
+    """Round 7 of #203, the press-side complement of the duplicated release: a
+    repeat of the gesture's own button used to be forwarded, so the screen
+    restarted its selection at the duplicate's cell and every pane was
+    re-baselined mid-drag — the drag's highlight gone before its own release,
+    the copy dropped. One gesture at a time includes the gesture's own button."""
+
+    async def drive() -> tuple[str, list[str]]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 8)) as pilot:
+            pane = host.pane
+            await wait_until(pilot, lambda: synced(pane))
+            for event in (
+                mouse_event(events.MouseDown, pane, (0, 2), 1),
+                mouse_event(events.MouseMove, pane, (5, 2), 1),
+                mouse_event(events.MouseDown, pane, (5, 2), 1),  # reported twice
+                mouse_event(events.MouseUp, pane, (5, 2), 1),
+            ):
+                host.post_message(event)
+            await pilot.pause()
+            await pilot.pause()
+            return host.clipboard, list(host.notices)
+
+    clipboard, notices = run(drive())
+    assert clipboard == "third ", "the drag copied what it selected"
+    assert len(notices) == 1, notices
+
+
+def test_a_lost_release_is_recovered_by_the_next_press_after_the_window(
+    fake: FakeTmux, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other half of the duplicate-press rule (round 4's lock-out, kept): a
+    press of the gesture's own button LONG after it went down is not a report
+    of the same press, it is a new gesture whose predecessor's release was lost
+    with the pointer outside the terminal. Refusing it would leave every later
+    gesture unrouted."""
+    now = {"t": 100.0}
+    monkeypatch.setattr(terminal_module, "_monotonic", lambda: now["t"])
+
+    async def drive() -> tuple[str, list[str]]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 8)) as pilot:
+            pane = host.pane
+            await wait_until(pilot, lambda: synced(pane))
+            host.post_message(mouse_event(events.MouseDown, pane, (0, 1), 1))
+            host.post_message(mouse_event(events.MouseMove, pane, (3, 1), 1))
+            await pilot.pause()  # …and the release is lost with the pointer outside
+            now["t"] += terminal_module.DUPLICATE_PRESS_WINDOW + 1.0
+            for event in (
+                mouse_event(events.MouseDown, pane, (0, 2), 1),
+                mouse_event(events.MouseMove, pane, (5, 2), 1),
+                mouse_event(events.MouseUp, pane, (5, 2), 1),
+            ):
+                host.post_message(event)
+            await pilot.pause()
+            await pilot.pause()
+            return host.clipboard, list(host.notices)
+
+    clipboard, notices = run(drive())
+    assert clipboard == "third ", "the new gesture was accepted and copied"
+    assert len(notices) == 1, notices
+
+
+def test_the_servers_version_is_asked_once_across_attaches(tmp_path: Path) -> None:
+    """Round 8 of #203. ``_wrap_flags`` needs the version for the FIRST frame, and
+    it was read once per ATTACH — a blocking ``tmux -V`` subprocess on the UI
+    thread at every project switch, tab activation and re-mounted view. Cached
+    by socket, which is what the answer is about."""
+    record: list[tuple[str, ...]] = []
+    fake = FakeTmux(record=record)
+    fake.panes["%1"] = FakePane(screen=["first"])
+    fake.panes["%2"] = FakePane(screen=["other"])
+
+    async def drive() -> int:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 4)) as pilot:
+            pane = host.pane
+            await wait_until(pilot, lambda: screen_text(pane)[0] == "first")
+            pane.attach("%2")
+            await wait_until(pilot, lambda: screen_text(pane)[0] == "other")
+            pane.attach("%1")
+            await wait_until(pilot, lambda: screen_text(pane)[0] == "first")
+            return sum(1 for argv in record if list(argv)[1:] == ["-V"])
+
+    assert run(drive()) == 1, "three attaches, one tmux -V"
+
+
 def test_the_copy_key_outside_the_pane_copies_the_panes_highlight_and_nothing_empty(
     fake: FakeTmux, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2942,7 +3321,9 @@ def test_attach_re_reads_the_version_for_a_new_server(fake: FakeTmux, tmp_path: 
 
     ``ManagerTab`` assigns ``pane.server`` and then calls ``attach``; a cached
     "extended chords are fine" from a 3.7 server would otherwise type
-    ``S-Enter`` into an agent running on a 3.4 one.
+    ``S-Enter`` into an agent running on a 3.4 one. Since round 8 of #203 the
+    answer is cached by SOCKET, so the other server is on another socket —
+    as two servers always are; a server is its socket.
     """
     old = FakeTmux()
     old.version = "tmux 3.4"
@@ -2957,7 +3338,7 @@ def test_attach_re_reads_the_version_for_a_new_server(fake: FakeTmux, tmp_path: 
             await pilot.press("shift+enter")
             await pilot.pause()
             modern = fake.sent()
-            pane.server = old.server(tmp_path)
+            pane.server = old.server(tmp_path, socket="older")
             pane.attach("%1")
             await pilot.pause()
             await pilot.press("shift+enter")
@@ -3384,6 +3765,81 @@ def test_a_failed_frame_drops_the_highlight_on_the_row_its_notice_replaces(
             return pane.text_selection
 
     assert run(elsewhere()) is not None, "a highlight the notice does not touch stands"
+
+
+def test_a_failure_before_the_widget_has_rows_asks_no_row_about_its_highlight(
+    fake: FakeTmux, tmp_path: Path
+) -> None:
+    """Review of #203. ``_fail`` can run before Textual has sized the widget —
+    ``attach``'s first capture raising, ``on_mount``'s ``refresh_frame`` before
+    the first layout — and ``content_size.height - 1`` is then ``-1``, which
+    ``_displayed_row`` reads as the frame's LAST row and compares under a span
+    meant for the notice row: a staleness verdict about a row nobody
+    highlighted. No rows, no question asked."""
+
+    async def drive() -> tuple[list[int], str | None, bool]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 3)) as pilot:
+            pane = host.pane
+            await wait_until(pilot, lambda: synced(pane))
+            await drag(pilot, pane, (0, 0), (3, 0))
+            asked: list[int] = []
+            real = pane._highlight_is_stale
+
+            def spy(after: Shown, rows: set[int]) -> bool:
+                asked.extend(sorted(rows))
+                return real(after, rows)
+
+            pane._highlight_is_stale = spy  # type: ignore[method-assign]
+            with unsized(pane):
+                changed = pane._fail("(pane gone)")
+            return asked, pane.notice, changed
+
+    asked, notice, changed = run(drive())
+    assert asked == [], f"an unsized widget has no notice row to ask about; asked {asked}"
+    assert notice == "(pane gone)" and changed, "the notice itself still lands"
+
+
+@contextlib.contextmanager
+def unsized(pane: TerminalPane) -> Iterator[None]:
+    """``content_size`` as it reads before the first layout pass: zero rows."""
+    original = TerminalPane.content_size
+    TerminalPane.content_size = property(lambda self: Size(40, 0))  # type: ignore[assignment, method-assign]
+    try:
+        yield
+    finally:
+        TerminalPane.content_size = original  # type: ignore[method-assign]
+
+
+def test_a_copy_over_a_wrapped_row_never_reaches_past_the_widget(
+    fake: FakeTmux, tmp_path: Path
+) -> None:
+    """Pinned for the review of #203, which read ``_displayed_row``'s crop of a
+    wrapped row to the PANE's width as a copy that could reach past the widget
+    while the pane is wider — between a ``Resize`` and its debounced
+    ``resize-window``. It cannot: the row is read off ``_composed_strip``,
+    which is already the widget's width, so the pane-width crop only ever
+    narrows. Measured here with the resize held off, a 60-column pane under a
+    40-column widget: the copy of a wrapped row is the 40 cells that were
+    painted, joined to the row it wraps into."""
+    fake.apply_resize = False
+    pane_fake = fake.panes["%1"]
+    pane_fake.width, pane_fake.height = 60, 3
+    pane_fake.screen = ["a" * 60, "tail", ""]
+    pane_fake.wrapped = {0}
+
+    async def drive() -> tuple[str | None, int]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 3)) as pilot:
+            pane = host.pane
+            await wait_until(pilot, lambda: pane.facts is not None and "tail" in rows(pane)[1].text)
+            assert pane.facts is not None and pane.facts.width == 60, "the premise: a wider pane"
+            await drag(pilot, pane, (0, 0), (3, 1))
+            return pane.selected_text(), pane.content_size.width
+
+    copied, width = run(drive())
+    assert width == 40
+    assert copied == "a" * 40 + "tail", copied
 
 
 def test_unmounting_a_pane_takes_its_selection_entry_with_it(

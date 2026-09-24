@@ -706,10 +706,16 @@ class TmuxServer:
         gets the second message for a fleet that is alive elsewhere. That is why
         ``fleet reap --server-down`` stays the operator's word — this predicate
         narrows what the word may act on, it does not replace it.
+
+        A question that could not be put — no client, a wedged server's 30 s
+        timeout, an OS refusal — is no evidence either, like :meth:`answers`.
+        Catching the missing client alone let a timeout raise straight through
+        ``reap --server-down``, the command ``doctor`` prescribes for exactly
+        the silent server that times out (round 7 of #203).
         """
         try:
             completed = self._runner(self.argv("display-message", "-p", "#{version}"), None)
-        except TmuxUnavailable:
+        except TmuxError:  # TmuxUnavailable included
             return False
         if completed.returncode == 0:
             return False
@@ -728,7 +734,13 @@ class TmuxServer:
     ) -> WindowInfo:
         """A new window named ``name`` running ``command`` — creating the session if needed.
 
-        ``env`` pairs are set for the new window only (``-e``); the command is
+        ``env`` pairs are set for the new window (``-e``) and are THIS WINDOW'S
+        ALONE. When the window opens a new session tmux also writes them into
+        the session environment, which every window opened later in that
+        session inherits; they are taken back out
+        (:meth:`_forget_session_environment`), so a window opened by hand in
+        the session inherits the server's environment and nothing of any
+        agent's. The command is
         passed as separate arguments and executed directly, never through a
         shell, so no shell re-interprets it. TMUX still would: an argument that
         ends in ``;`` ends the tmux command even after ``--`` and runs the rest
@@ -784,13 +796,21 @@ class TmuxServer:
         ``new-session -e`` writes it into the session environment, which every
         later window of the session inherits — measured on 3.7c:
         ``show-environment`` listed it, a window opened by hand read it, and
-        after ``set-environment -u`` a third window did not. ``AISQUARE_FLEET_AGENT``
-        is an identity: the row the session-start hook briefs whoever reads it
-        on, so a window the operator opens by hand in the fleet's session
+        after ``set-environment -u`` a third window did not. Every pair goes,
+        because every pair is one agent's: ``AISQUARE_FLEET_AGENT`` is an
+        identity, so a window the operator opens by hand in the fleet's session
         (``prefix c``, ``fleet attach``) would have called itself the first
-        agent (review of #135). The process in the first window already has its
-        copy; only the session's is removed. Best effort, because the window is
-        up either way: a failed unset costs exactly the leak it was closing.
+        agent (review of #135); the account pins are one agent's slot and
+        aisquare home, so a later ``fleet spawn`` with no ``--account`` — which
+        sets none of its own — ran under whichever account the FIRST spawn of
+        the session happened to use, wrong slot and wrong ``context.db``; and
+        the native-teams opt-out is for "the sessions the fleet starts — a
+        user's own ``claude`` sessions keep whatever they had" (§7.6), which a
+        hand-opened window is (review of #203, rounds 3 and 4). What a later
+        window needs, its own spawn sets. The process in the first window
+        already has its copy; only the session's is removed. Best effort,
+        because the window is up either way: a failed unset costs exactly the
+        leak it was closing.
         """
         for key in env or {}:
             with contextlib.suppress(TmuxError):

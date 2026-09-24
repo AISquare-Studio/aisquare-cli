@@ -556,6 +556,87 @@ def test_header_unsafe_role_fails_open() -> None:
 # ── the probe itself, against real listeners ─────────────────────────────────
 
 
+def test_a_base_url_the_agents_client_refuses_is_not_usable() -> None:
+    """#132 follow-up 2. ``_usable_base_url`` parsed on its own and accepted
+    ``https://proxy.example:99999`` — a port ``urlsplit`` takes and ``.port``
+    then refuses, so the agent's first request died on it — while ``url_problem``
+    refused the same value. One validator now."""
+    assert explainability._usable_base_url("https://proxy.example:99999") is False
+    assert explainability._usable_base_url("https://proxy.example:9443") is True
+    assert explainability._usable_base_url("proxy.example") is False
+
+
+def test_configure_target_stores_what_it_validated() -> None:
+    """#132 follow-up 6. The proxy URL was validated stripped and slash-less and
+    stored raw, so a pasted ``https://g.example:9443/`` kept its slash — and every
+    downstream comparison is a string comparison: ``_proxy_source`` read a
+    top-level default with a slash as a CHOSEN proxy."""
+    config = AppConfig()
+    explainability.configure_target(
+        config,
+        target_name="stg",
+        gateway_url="  https://g.example/  ",
+        proxy_url="https://g.example:9443/",
+        key_env=" MY_KEY ",
+        enable=False,
+    )
+    target = config.explainability.targets["stg"]
+    assert target.gateway_url == "https://g.example"
+    assert target.proxy_url == "https://g.example:9443"
+    assert target.api_key_env == "MY_KEY"
+
+
+@pytest.mark.parametrize(
+    ("key_env", "said"),
+    [
+        ("MY VAR", "not a variable name"),
+        ("$EXPLAINABILITY_API_KEY", r"without the \$"),
+        ("1KEY", "not a variable name"),
+        ("MY\nVAR", "not a variable name"),
+        ("  ", "is empty"),
+    ],
+)
+def test_configure_target_refuses_a_key_variable_no_shell_can_export(
+    key_env: str, said: str
+) -> None:
+    """Round 6. Four of the five settings were judged before they were stored;
+    the key variable was not, so ``--key-env 'MY VAR'`` was accepted and nothing
+    could ever export it — every surface read "the key is NOT set" with nothing
+    naming the cause. A POSIX name, judged at the same door as the other four."""
+    config = AppConfig()
+    with pytest.raises(ValueError, match=said):
+        explainability.configure_target(config, target_name="stg", key_env=key_env, enable=False)
+    assert "stg" not in config.explainability.targets, "refused: nothing stored"
+    explainability.configure_target(config, target_name="stg", key_env=" MY_KEY_2 ", enable=False)
+    assert config.explainability.targets["stg"].api_key_env == "MY_KEY_2"
+
+
+def test_configure_target_judges_the_name_and_the_identity_as_it_stores_them() -> None:
+    """Round 5: three of the five human-supplied values were stored as validated
+    and two were not. ``--target 'stg '`` created a second config key beside the
+    tab's ``stg``; ``--identity 'nishil-{role} '`` gave every agent a trailing
+    space. Stripped before they are judged, and stored as judged; a name with a
+    line break in it is refused, while ``prod west`` stays a name people use."""
+    config = AppConfig()
+    name = explainability.configure_target(
+        config, target_name=" stg ", identity=" nishil-{role} ", enable=False
+    )
+    assert name == "stg" and set(config.explainability.targets) == {"stg"}
+    assert config.explainability.targets["stg"].agent_name_template == "nishil-{role}"
+    assert config.explainability.target == "stg"
+
+    explainability.configure_target(
+        config, target_name="prod west", gateway_url="https://west.example", enable=False
+    )
+    assert "prod west" in config.explainability.targets
+
+    with pytest.raises(ValueError, match="line break or tab"):
+        explainability.configure_target(config, target_name="stg\nprod", enable=False)
+    with pytest.raises(ValueError, match="is empty"):
+        explainability.configure_target(config, target_name="   ", gateway_url="https://g.example")
+    assert set(config.explainability.targets) == {"stg", "prod west"}, "refused: nothing stored"
+
+
 def test_probe_accepts_the_claude_code_proxy() -> None:
     server, url = _serve({"status": "ok", "service": "aisquare-proxy", "mode": "claude_code"})
     try:
@@ -602,6 +683,62 @@ def test_probe_survives_valid_json_that_is_not_an_object(payload: object) -> Non
         server.shutdown()
     assert verdict.healthy is False
     assert "not a health object" in verdict.reason
+
+
+@pytest.mark.parametrize(
+    "proxy_url",
+    ["http://127.0.0.1:ab", "http://exa mple.com"],
+    ids=["nonnumeric-port", "space-in-host"],
+)
+def test_probe_answers_a_url_urllib_refuses_instead_of_raising(proxy_url: str) -> None:
+    """Review of #203. ``urlopen`` raises ``http.client.InvalidURL`` for these
+    before any network call, and ``InvalidURL`` is an ``HTTPException``, not an
+    ``OSError`` — so it escaped the probe's handler, and through
+    ``wire_session``, which calls the probe unguarded, stopped the agent from
+    starting over a proxy URL a hand-edited config carried."""
+    verdict = probe_proxy(proxy_url)
+    assert verdict.healthy is False
+    assert "proxy unreachable" in verdict.reason
+
+
+class _TruncatedHandler(BaseHTTPRequestHandler):
+    """Headers that promise 400 bytes, a body of 12: ``read()`` raises ``IncompleteRead``."""
+
+    def do_GET(self) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", "400")
+        self.end_headers()
+        self.wfile.write(b'{"status": "')
+        self.wfile.flush()
+        self.close_connection = True
+
+    def log_message(self, *args: object) -> None:
+        return
+
+
+def test_probe_answers_a_truncated_health_body_instead_of_raising() -> None:
+    """Review of #203, the other ``HTTPException``: a body shorter than its
+    Content-Length raises ``IncompleteRead`` from ``read()``, inside the same
+    handler that only listed ``OSError``."""
+    server = HTTPServer(("127.0.0.1", 0), _TruncatedHandler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        verdict = probe_proxy(f"http://127.0.0.1:{server.server_address[1]}")
+    finally:
+        server.shutdown()
+    assert verdict.healthy is False
+    assert "proxy unreachable" in verdict.reason
+
+
+def test_a_proxy_url_urllib_refuses_launches_untraced() -> None:
+    """The blast radius the probe's hole had: ``wire_session`` asks the real
+    probe unguarded, so this used to be a traceback out of ``aisquare launch``
+    rather than an untraced session with a reason (review of #203)."""
+    wiring = wire_session(_settings(proxy_url="http://127.0.0.1:ab"), "coder")
+    assert wiring.traced is False
+    assert "launching untraced" in wiring.reason
+    assert wiring.env == {}
 
 
 def test_probe_reads_the_gateway_a_proxy_reports() -> None:

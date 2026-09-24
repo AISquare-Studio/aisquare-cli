@@ -270,8 +270,15 @@ aisquare fleet stop coder-auth --force
 ```
 
 Sends `/exit`, waits a grace period, then kills the window. The agent's own
-`SessionEnd` hook releases its task claims on the way out. `--force` skips the
-graceful exit.
+`SessionEnd` hook releases its task claims on the way out; whatever the ended
+session still held (a killed process fires no hook) is released here and named
+in the output — `🔓 N claimed task(s) released back to the board`, each task
+listed under it, `claims_released` under `--json` — so the work the next agent
+inherits is visible. A release the store refused — or one the board could not
+be told about — is reported, never swallowed: the row is down, the operator is
+told which claims stayed with the ended session, and the command **exits 1**,
+the same contract `fleet shutdown` and `fleet reap` keep for the same fact.
+`--force` skips the graceful exit.
 
 **When tmux cannot confirm the pane died** — a wedged server, a `tmux` that
 left `PATH`, a socket that is there but refuses this user (`Permission denied`)
@@ -365,6 +372,17 @@ Replaces this terminal with `tmux attach` on the project's fleet session — the
 full-fidelity escape hatch. Under `--json` it prints the command it would run
 instead of running it.
 
+**Scope and exit codes.** `--all` and `--project` name different scopes and are
+refused together rather than one silently winning — a usage error, exit **2**,
+and under `--json` the object `{"error": "usage", "message": …}` on stdout like
+every other usage error. The command exits **0** when
+every row is down and every release landed; **1** when a row was left live, a
+session could not be taken down, the final scan or the pause pass could not run,
+or a claim release was refused — a fleet whose work stays claimed by dead
+sessions is not a clean shutdown; and **130** when interrupted, after printing
+the report of the rows already ended and the claims already released. Nothing
+else is killed on an interrupt.
+
 ### `fleet reap`
 
 ```sh
@@ -386,6 +404,12 @@ gone (a reboot swept `/tmp`; `kill-server`). Even with it, rows are marked lost
 only on a socket where tmux itself reports no server (`no server running on …`
 or `error connecting to … (No such file or directory)`); a protocol mismatch or
 a hung server still marks nothing, and so does a missing `tmux` binary.
+
+`--all` and `--project` are refused together (a usage error, exit 2, JSON under
+`--json`). The claims of the rows it ends
+or marks lost are released and counted (`claims_released`); a release the store
+refused, or one the board could not be told about, is reported per row and the
+command exits **1**, the same contract as `fleet stop` and `fleet shutdown`.
 
 ### `fleet rename`
 

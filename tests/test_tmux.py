@@ -418,11 +418,14 @@ def test_spawn_window_takes_the_env_pairs_back_out_of_a_new_sessions_environment
 ) -> None:
     """``new-session -e`` writes the pair into the SESSION environment, which every
     window opened later in that session inherits (measured on 3.7c; the live
-    test below repeats the measurement). ``AISQUARE_FLEET_AGENT`` is an identity,
-    so a window the operator opens by hand would have called itself the first
-    agent (review of #135). The first window's process has its copy; the
-    session's is removed, one ``set-environment -u`` per pair, after the window
-    is up — and a refusal there is swallowed, because the window is up."""
+    test below repeats the measurement). Every pair is one agent's — the row id
+    is an identity, the account pins are one agent's slot and home, the
+    native-teams opt-out is for the sessions the fleet starts and not a window
+    the operator opens by hand (§7.6) — so every pair goes, one
+    ``set-environment -u`` each, after the window is up; a refusal there is
+    swallowed, because the window is up (review of #135; review of #203, round 4,
+    which found a later ``fleet spawn`` with no ``--account`` inheriting the
+    first spawn's slot when only the identity was taken back)."""
     fake = FakeTmux(
         Completed(1, "", "can't find session: asq-amber-fox"),  # has-session
         Completed(0, f"@4{_SEP}%9\n", ""),  # new-session -P
@@ -433,13 +436,29 @@ def test_spawn_window_takes_the_env_pairs_back_out_of_a_new_sessions_environment
         name="coder-1",
         cwd=tmp_path,
         command=["claude"],
-        env={"AISQUARE_FLEET_AGENT": "agt_1", "X": "a=b"},
+        env={"AISQUARE_FLEET_AGENT": "agt_1", "CLAUDE_CONFIG_DIR": "/home/a/.claude-2"},
     )
     assert fake.commands()[2:] == [
         ["set-environment", "-u", "-t", "=asq-amber-fox", "AISQUARE_FLEET_AGENT"],
-        ["set-environment", "-u", "-t", "=asq-amber-fox", "X"],
+        ["set-environment", "-u", "-t", "=asq-amber-fox", "CLAUDE_CONFIG_DIR"],
     ]
     assert info.pane_id == "%9", "the refusal cost nothing: the window is up and reported"
+
+
+def test_server_absent_reads_a_question_it_could_not_put_as_no_evidence(
+    fake_bin: Path, conf: Path
+) -> None:
+    """Round 7 of #203. ``server_absent`` caught the missing client alone, so a
+    wedged server's timeout — a plain ``TmuxError`` from the runner — raised
+    straight through ``reap --server-down``, the very command ``doctor``
+    prescribes for a silent server: a traceback where the report belongs.
+    Like ``answers``, positive evidence or nothing."""
+
+    def times_out(argv: Sequence[str], stdin: bytes | None) -> Completed:
+        raise TmuxError("tmux display-message timed out after 30 s")
+
+    server = TmuxServer("asq-test", runner=times_out, binary=str(fake_bin), conf=conf)
+    assert server.server_absent() is False
 
 
 def test_spawn_window_adds_a_window_when_the_session_exists(
@@ -1016,20 +1035,29 @@ def test_live_pane_pid_is_the_process_in_the_pane(live: TmuxServer, tmp_path: Pa
 @requires_tmux
 def test_live_new_session_env_does_not_reach_a_window_opened_by_hand(live: TmuxServer) -> None:
     """The measurement behind ``_forget_session_environment``: with the unset,
-    a second window opened WITHOUT ``-e`` (the operator's ``prefix c``) does not
-    see the first window's variable; the first window's process still does."""
+    a second window opened WITHOUT ``-e`` (the operator's ``prefix c``) sees
+    none of the first window's variables — the identity or the pins and
+    opt-out beside it — while the first window's process still has them all.
+    A window opened by hand is the operator's own session, and "a user's own
+    ``claude`` sessions keep whatever they had" (§7.6; review of #203, round 4)."""
     first = live.spawn_window(
         "asq-test-fox",
         name="w0",
         cwd=Path("/tmp"),
-        command=["sh", "-c", 'echo "first=${AISQUARE_FLEET_AGENT:-unset}"; exec sleep 30'],
-        env={"AISQUARE_FLEET_AGENT": "agt_first"},
+        command=[
+            "sh",
+            "-c",
+            'echo "first=${AISQUARE_FLEET_AGENT:-unset} teams=${TEAMS_OPT_OUT:-unset}"; '
+            "exec sleep 30",
+        ],
+        env={"AISQUARE_FLEET_AGENT": "agt_first", "TEAMS_OPT_OUT": "0"},
         width=80,
         height=24,
     )
+    by_hand_says = 'echo "hand=${AISQUARE_FLEET_AGENT:-unset} teams=${TEAMS_OPT_OUT:-unset}"'
     by_hand = live.run(
         "new-window", "-d", "-P", "-F", "#{pane_id}", "-t", "=asq-test-fox:", "--",
-        "sh", "-c", 'echo "hand=${AISQUARE_FLEET_AGENT:-unset}"; exec sleep 30',
+        "sh", "-c", f"{by_hand_says}; exec sleep 30",
     ).strip()  # fmt: skip
     deadline = time.monotonic() + 10
     screens = ("", "")
@@ -1038,10 +1066,11 @@ def test_live_new_session_env_does_not_reach_a_window_opened_by_hand(live: TmuxS
         if "first=" in screens[0] and "hand=" in screens[1]:
             break
         time.sleep(0.05)
-    assert "first=agt_first" in screens[0], screens
-    assert "hand=unset" in screens[1], screens
-    with pytest.raises(TmuxError, match="unknown variable"):
-        live.run("show-environment", "-t", "=asq-test-fox", "AISQUARE_FLEET_AGENT")
+    assert "first=agt_first teams=0" in screens[0], screens
+    assert "hand=unset teams=unset" in screens[1], screens
+    for key in ("AISQUARE_FLEET_AGENT", "TEAMS_OPT_OUT"):
+        with pytest.raises(TmuxError, match="unknown variable"):
+            live.run("show-environment", "-t", "=asq-test-fox", key)
 
 
 @requires_tmux

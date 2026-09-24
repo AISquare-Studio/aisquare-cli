@@ -35,7 +35,8 @@ from typer.testing import CliRunner
 
 from aisquare.cli import fleet as fleet_cli
 from aisquare.cli.app import app
-from aisquare.models import FleetAgent, FleetAgentStatus, ProjectInfo, TeamSession
+from aisquare.models import FleetAgent, FleetAgentStatus, ProjectInfo, TeamSession, TeamTask
+from aisquare.services import fleet as fleet_service
 from aisquare.services.fleet import (
     FleetError,
     FleetUnavailable,
@@ -46,6 +47,7 @@ from aisquare.services.fleet import (
     ShutdownReport,
     ShutdownRow,
     SpawnReceipt,
+    StopReceipt,
     TellResult,
 )
 
@@ -621,10 +623,102 @@ def test_tell_an_unknown_label_is_no_such_agent(
 # ── stop ─────────────────────────────────────────────────────────────────────
 
 
+def _released_task() -> TeamTask:
+    """A task a stop returned to the pool, as ``StopReceipt.released`` carries it."""
+    now = datetime.now(tz=UTC)
+    return TeamTask(
+        id="tsk_01x",
+        project_id=PROJECT.id,
+        key="k",
+        title="the task it held",
+        status="todo",
+        created_at=now,
+        updated_at=now,
+    )
+
+
+@pytest.mark.parametrize("command", ["shutdown", "reap"])
+def test_all_and_project_together_are_refused(
+    command: str, runner: CliRunner, resolved: Seen, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of the fold. ``--all`` won silently: ``fleet shutdown --project alpha
+    --all --yes``, meant as alpha, took every project's fleet down with nothing
+    saying the project flag had been discarded. The two name different scopes;
+    both at once is refused before the service is asked anything."""
+    service = _install(monkeypatch, command, RuntimeError("the service must not be called"))
+
+    confirm = ["--yes"] if command == "shutdown" else []  # reap asks nothing
+    result = runner.invoke(app, ["fleet", command, "--project", "alpha", "--all", *confirm])
+
+    assert result.exit_code != 0
+    assert "--all and --project conflict" in _plain(result.output)
+    assert service.calls == [], "refused before the service was asked"
+
+
+def test_shutdown_with_stuck_claims_says_so_in_the_header_and_the_exit_code(
+    runner: CliRunner, resolved: Seen, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of the fold. ``release_failures`` was printed as a ⚠ line under a
+    ``✓ fleet shut down`` header and exit 0, so a cutover script gating on the
+    code proceeded while two tasks stayed claimed by dead sessions. Every row
+    is down — not PARTLY — but the header counts the refusals and the code
+    is non-zero."""
+    report = ShutdownReport(
+        stopped=[_agent("coder-auth", ended=True, exit_status=0)],
+        sessions_killed=[f"asq:{SESSION}"],
+        release_failures=[
+            "coder-auth: could not be released (OperationalError: database is locked)"
+        ],
+    )
+    _install(monkeypatch, "shutdown", report)
+
+    result = runner.invoke(app, ["fleet", "shutdown", "--yes", "--force"])
+
+    assert result.exit_code == 1
+    out = _plain(result.stdout)
+    assert (
+        "⚠ fleet shut down: 1 stopped, 0 recorded lost, 0 left live, 1 claim release(s) refused"
+        in out
+    )
+    assert "PARTLY" not in out, "every row is down; the claims are what is stuck"
+    assert (
+        "⚠ claims of coder-auth: could not be released (OperationalError: database is locked)"
+        in out
+    )
+
+
+def test_an_interrupted_shutdown_prints_how_far_it_got_and_exits_130(
+    runner: CliRunner, resolved: Seen, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 5. Ctrl-C used to propagate past the report to Click's `Aborted!`:
+    rows already ended and claims already released, and the operator told
+    nothing. The interrupt carries the report; the code says it was not the
+    whole fleet."""
+    report = ShutdownReport(
+        stopped=[_agent("manager", "manager", ended=True, exit_status=0)],
+        claims_released=["tsk_01x"],
+        interrupted=(
+            "interrupted while stopping coder-auth; the rest of the fleet was left as it was"
+        ),
+    )
+    _install(monkeypatch, "shutdown", fleet_service.FleetInterrupted(report))
+
+    result = runner.invoke(app, ["fleet", "shutdown", "--yes", "--force"])
+
+    assert result.exit_code == 130
+    out = _plain(result.stdout)
+    assert "⚠ fleet PARTLY shut down: 1 stopped" in out
+    assert "💤 manager (exit 0)" in out, "the row already down is named"
+    assert "🔓 1 claimed task(s) released back to the board" in out
+    assert "interrupted while stopping coder-auth" in out and "fleet ls --all" in out
+
+
 def test_stop_confirms_and_passes_force_through(
     runner: CliRunner, resolved: Seen, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    stop = _install(monkeypatch, "stop", _agent("coder-auth", ended=True, exit_status=0))
+    stop = _install(
+        monkeypatch, "stop", StopReceipt(_agent("coder-auth", ended=True, exit_status=0), [])
+    )
 
     gentle = runner.invoke(app, ["fleet", "stop", "coder-auth"])
     assert gentle.exit_code == 0, gentle.output
@@ -639,16 +733,72 @@ def test_stop_confirms_and_passes_force_through(
 def test_stop_json_returns_the_agent_row(
     runner: CliRunner, resolved: Seen, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _install(monkeypatch, "stop", _agent("coder-auth", ended=True, exit_status=0))
+    released = _released_task()
+    _install(
+        monkeypatch,
+        "stop",
+        StopReceipt(_agent("coder-auth", ended=True, exit_status=0), [released]),
+    )
 
     result = runner.invoke(app, ["--json", "fleet", "stop", "coder-auth"])
 
     assert result.exit_code == 0, result.output
     payload = json.loads(result.stdout)
-    assert set(payload) == {"agent"}
+    assert set(payload) == {"agent", "claims_released", "release_failed"}
     assert payload["agent"]["label"] == "coder-auth"
     assert payload["agent"]["ended_at"] is not None
     assert payload["agent"]["exit_status"] == 0
+    assert payload["claims_released"] == ["tsk_01x"], "what the stop returned to the pool"
+    assert payload["release_failed"] is None
+
+
+def test_stop_names_the_claims_it_released(
+    runner: CliRunner, resolved: Seen, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The work a stop returns to the pool is the one thing the next agent
+    inherits from this one, so it is named, not counted (review of #203)."""
+    released = _released_task()
+    _install(
+        monkeypatch,
+        "stop",
+        StopReceipt(_agent("coder-auth", ended=True, exit_status=0), [released]),
+    )
+
+    result = runner.invoke(app, ["fleet", "stop", "coder-auth"])
+
+    assert result.exit_code == 0, result.output
+    out = _plain(result.stdout)
+    assert "🔓 1 claimed task(s) released back to the board" in out, (
+        "the one line every command uses"
+    )
+    assert "· the task it held (tsk_01x)" in out, "and the receipt's tasks named under it"
+
+
+def test_stop_says_when_the_release_was_refused(
+    runner: CliRunner, resolved: Seen, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The row is down; the claims that stayed with the ended session are the
+    operator's to know about, not a swallowed exception's (review of the fold)."""
+    refused = (
+        "could not be released (OperationalError: database is locked) — they stay with the "
+        "ended session until the lease lapses"
+    )
+    _install(
+        monkeypatch,
+        "stop",
+        StopReceipt(_agent("coder-auth", ended=True, exit_status=0), [], release_failed=refused),
+    )
+
+    result = runner.invoke(app, ["fleet", "stop", "coder-auth"])
+
+    assert result.exit_code == 1, "one contract with shutdown: a stuck claim is not a clean stop"
+    out = _plain(result.stdout)
+    assert "✓ stopped coder-auth" in out
+    assert f"⚠ claims: {refused}" in out
+
+    as_json = runner.invoke(app, ["--json", "fleet", "stop", "coder-auth"])
+    assert as_json.exit_code == 1, "and the two output modes agree"
+    assert json.loads(as_json.stdout)["release_failed"] == refused
 
 
 # ── shutdown ─────────────────────────────────────────────────────────────────
@@ -712,7 +862,9 @@ def test_shutdown_asks_at_a_terminal_and_stops_nothing_when_the_answer_is_no(
     refused = runner.invoke(app, ["fleet", "shutdown"])
 
     assert refused.exit_code == 0, refused.output
-    assert asked == [("Shut down 2 agents?", False)], "and the default is NOT to do it"
+    assert asked == [("Shut down 2 agents and 1 tmux session?", False)], (
+        "both numbers, and the default is NOT to do it"
+    )
     assert "nothing stopped" in _plain(refused.stdout)
     assert shutdown.calls == []
 
@@ -721,6 +873,31 @@ def test_shutdown_asks_at_a_terminal_and_stops_nothing_when_the_answer_is_no(
 
     assert agreed.exit_code == 0, agreed.output
     assert shutdown.calls[-1] == ((PROJECT,), {"force": False})
+
+
+def test_shutdown_asks_about_the_sessions_when_no_agent_is_live(
+    runner: CliRunner, resolved: Seen, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 8 of #203. A plan with no live agent and one leftover session — the
+    ordinary shape after a clean stop pass — asked "Shut down 0 agents?" while
+    the real effect, killing the session, sat only in the lines above. The
+    destructive prompt names what the run is about to do."""
+    plan = _plan()
+    plan = type(plan)(
+        projects=plan.projects, agents=[], sessions=["asq:asq-ruby-fox"], absent_sockets=[]
+    )
+    _install(monkeypatch, "shutdown_plan", plan)
+    _install(monkeypatch, "shutdown", _report())
+    monkeypatch.setattr("aisquare.cli.fleet._stdin_is_a_terminal", lambda: True)
+    asked: list[str] = []
+
+    def confirm(text: str, *, default: bool = True, **kwargs: object) -> bool:
+        asked.append(text)
+        return False
+
+    monkeypatch.setattr("aisquare.cli.fleet.typer.confirm", confirm)
+    runner.invoke(app, ["fleet", "shutdown"])
+    assert asked == ["Shut down 1 tmux session?"]
 
 
 def test_shutdown_reports_each_row_with_the_reason_the_service_gave(
@@ -816,6 +993,8 @@ def test_shutdown_json_carries_every_group_and_the_reasons(
         "sessions_left_up",
         "servers_absent",
         "claims_released",
+        "release_failures",
+        "interrupted",
         "paused_cleared",
         "paused_kept",
         "incomplete_projects",
@@ -1044,10 +1223,35 @@ def test_reap_json(runner: CliRunner, resolved: Seen, monkeypatch: pytest.Monkey
 
     assert result.exit_code == 0, result.output
     payload = json.loads(result.stdout)
-    assert set(payload) == {"ended", "lost", "worktrees_removed"}
+    assert set(payload) == {
+        "ended",
+        "lost",
+        "worktrees_removed",
+        "claims_released",
+        "release_failures",
+    }
     assert [a["label"] for a in payload["ended"]] == ["coder-auth"]
+    assert payload["claims_released"] == []
     assert payload["lost"] == []
     assert payload["worktrees_removed"] == ["/home/me/work/api/.aisquare-worktrees/coder-auth"]
+
+
+def test_reap_names_a_refused_release_and_exits_1(
+    runner: CliRunner, resolved: Seen, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 5: the same contract as `stop` and `shutdown` for the same fact."""
+    report = ReapReport(
+        ended=[_agent("coder-auth", ended=True, exit_status=0)],
+        release_failures=["coder-auth: could not be released (OperationalError: locked)"],
+    )
+    _install(monkeypatch, "reap", report)
+
+    result = runner.invoke(app, ["fleet", "reap"])
+
+    assert result.exit_code == 1
+    assert "⚠ claims of coder-auth: could not be released (OperationalError: locked)" in _plain(
+        result.stdout
+    )
 
 
 # ── rename ───────────────────────────────────────────────────────────────────
@@ -1163,7 +1367,7 @@ def test_pause_of_an_unknown_project_is_not_found(
         (["fleet", "ls"], {"list_agents": [_status(_agent())]}),
         (["fleet", "status"], {"list_agents": []}),
         (["fleet", "tell", "coder-auth", "hi"], {"tell": TellResult(True, "typed")}),
-        (["fleet", "stop", "coder-auth"], {"stop": _agent()}),
+        (["fleet", "stop", "coder-auth"], {"stop": StopReceipt(_agent(), [])}),
         (["fleet", "attach"], {"attach_argv": list(ATTACH_ARGV)}),
         (["fleet", "reap"], {"reap": ReapReport()}),
         (["fleet", "rename", "ruby-fox"], {"rename": PROJECT}),

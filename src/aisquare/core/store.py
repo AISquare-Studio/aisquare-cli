@@ -36,6 +36,7 @@ from typing import Any, Protocol
 from aisquare.core import paths
 from aisquare.core.ids import new_prompt_id
 from aisquare.models import (
+    CLAIM_KEEPING_STATUSES,
     CLOSED_STATUSES,
     ClaudeAccountRecord,
     ContextEntry,
@@ -2211,8 +2212,8 @@ class SqliteStore:
         claimed. A ``/clear`` mints a new session id for the process that is
         still working them, so every claim the old id holds — the assigned task
         and any pool task it took, in every status that keeps a claim
-        (``set_task_status`` clears ``claimed_by`` for the closed ones alone) —
-        is re-addressed to the new id. Committed separately they could disagree:
+        (:data:`CLAIM_KEEPING_STATUSES`) — is re-addressed to the new id, and
+        the ``doing`` ones take the new lease. Committed separately they could disagree:
         a row bound to the new id while the work stayed with the old one, whose
         lease then ran out under a working agent (review of #135).
 
@@ -2233,10 +2234,19 @@ class SqliteStore:
                 self._conn.rollback()
                 return False
             if previous is not None:
+                # Every claim the old id holds moves; the LEASE is stamped on the
+                # ``doing`` ones alone. Stamped on a review or blocked task too,
+                # it was a lease nothing renews (``renew_leases``) and nothing
+                # reclaims (``claim_task``): "lease until 14:07" on the board
+                # for a claim that had lapsed and could not be taken (review of
+                # #203). One named set for the statuses that keep a claim.
+                statuses = tuple(sorted(CLAIM_KEEPING_STATUSES))
                 self._conn.execute(
-                    "UPDATE team_task SET claimed_by = ?, claim_expires_at = ?, updated_at = ? "
-                    "WHERE claimed_by = ? AND status IN ('doing', 'review', 'blocked')",
-                    (session_id, lease_until.isoformat(), _now_iso(), previous),
+                    "UPDATE team_task SET claimed_by = ?, updated_at = ?, "
+                    "claim_expires_at = CASE WHEN status = 'doing' THEN ? "
+                    "ELSE claim_expires_at END "
+                    f"WHERE claimed_by = ? AND status IN ({', '.join('?' * len(statuses))})",
+                    (session_id, _now_iso(), lease_until.isoformat(), previous, *statuses),
                 )
         except Exception:
             self._conn.rollback()

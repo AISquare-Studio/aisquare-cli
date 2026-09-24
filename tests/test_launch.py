@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import contextlib
 import shutil
+import sqlite3
 import uuid
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -14,7 +17,7 @@ from typer.testing import CliRunner
 from aisquare.cli import launch as launch_cli
 from aisquare.cli.app import app
 from aisquare.core.orchestrator import team_project
-from aisquare.core.store import store_session
+from aisquare.core.store import ContextStore, store_session
 from aisquare.models import FleetAgent
 from aisquare.services.explainability import join_records
 
@@ -126,7 +129,100 @@ def test_a_fleet_launch_starts_anyway_when_its_row_never_lands(
     assert result.exit_code == 0, result.output
     assert spy["argv"][0] == "claude", "the agent still started"
     assert clock.now >= launch_cli.FLEET_ROW_TIMEOUT
-    assert "agt_never not recorded after 10s" in result.output
+    assert "agt_never not recorded after 10s" in result.output, "the time actually spent"
+
+
+def test_a_fleet_launch_opens_the_store_once_for_the_whole_wait(
+    runner: CliRunner,
+    work_dir: Path,
+    spy: dict[str, Any],
+    clock: _Clock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #203. Every 50 ms look used to open a store of its own —
+    connect, WAL switch, migrations — up to two hundred times, all contending
+    on ``context.db`` with the very insert the loop waits for. One connection
+    now, held for the whole wait; the looks re-read through it."""
+    monkeypatch.setenv("AISQUARE_FLEET_AGENT", "agt_slow")
+    opens = 0
+    real_session = store_session
+
+    @contextlib.contextmanager
+    def counting_session() -> Iterator[ContextStore]:
+        nonlocal opens
+        opens += 1
+        with real_session() as store:
+            yield store
+
+    monkeypatch.setattr(launch_cli, "store_session", counting_session)
+    real_sleep = clock.sleep
+
+    def sleep_then_record(seconds: float) -> None:
+        real_sleep(seconds)
+        if clock.slept == 5:
+            _fleet_row("agt_slow", work_dir)
+
+    monkeypatch.setattr(launch_cli, "_sleep", sleep_then_record)
+
+    result = runner.invoke(app, ["launch", "coder"])
+
+    assert result.exit_code == 0, result.output
+    assert spy["argv"][0] == "claude" and clock.slept == 5
+    assert opens == 1, f"six looks, one connection — not {opens}"
+
+
+def test_a_locked_store_is_looked_past_until_the_row_lands(
+    runner: CliRunner,
+    work_dir: Path,
+    spy: dict[str, Any],
+    clock: _Clock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #203. "database is locked" is the condition this wait exists
+    for — the spawn's insert holding the store — and the first cut answered it
+    by giving up on the first occurrence. Looked past until the deadline: the
+    first open is refused as locked, the second answers, the row is there."""
+    monkeypatch.setenv("AISQUARE_FLEET_AGENT", "agt_locked")
+    _fleet_row("agt_locked", work_dir)
+    real_session = store_session
+    refusals = 0
+
+    @contextlib.contextmanager
+    def locked_once() -> Iterator[ContextStore]:
+        nonlocal refusals
+        if refusals == 0:
+            refusals += 1
+            raise sqlite3.OperationalError("database is locked")
+        with real_session() as store:
+            yield store
+
+    monkeypatch.setattr(launch_cli, "store_session", locked_once)
+
+    result = runner.invoke(app, ["launch", "coder"])
+
+    assert result.exit_code == 0, result.output
+    assert spy["argv"][0] == "claude", "the agent started"
+    assert refusals == 1 and clock.slept == 1, "one lock, one look later the row was read"
+    assert "not recorded" not in result.output, "the row was found, so nothing was given up"
+
+    # The control: a store that is broken rather than busy still costs the
+    # wait and never the launch — no retry loop over a fault that will not clear.
+    monkeypatch.setenv("AISQUARE_FLEET_AGENT", "agt_broken")
+    clock.slept = 0
+
+    @contextlib.contextmanager
+    def broken() -> Iterator[ContextStore]:
+        raise sqlite3.OperationalError("no such table: fleet_agent")
+        yield  # pragma: no cover — unreachable, keeps the generator shape
+
+    monkeypatch.setattr(launch_cli, "store_session", broken)
+    result = runner.invoke(app, ["launch", "coder"])
+    assert result.exit_code == 0
+    assert clock.slept == 0, "an unreadable store ends the wait at once"
+    assert "agt_broken the store could not be read (no such table" in result.output, (
+        "and says so — an agent starting un-briefed over a broken store with nothing "
+        "on stderr is the state the line exists to explain (review of #203, round 4)"
+    )
 
 
 def test_a_launch_outside_the_fleet_never_looks_for_a_row(

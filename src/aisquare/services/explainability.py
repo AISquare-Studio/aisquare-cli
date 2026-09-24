@@ -66,6 +66,7 @@ import uuid
 from collections.abc import Callable, Mapping, MutableMapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from http.client import HTTPException
 from pathlib import Path
 from typing import Any
 from urllib.error import URLError
@@ -599,10 +600,11 @@ def _usable_base_url(value: str) -> bool:
     and nothing about whether anyone is listening, which is the probe's job.
     It exists for one reason: to stop a value the AGENT cannot parse from
     reaching its environment, because that failure mode is not a lost trace,
-    it is a dead session.
+    it is a dead session. It IS :func:`url_problem`'s answer: the two used to be
+    separate parsers, and ``https://proxy.example:99999`` — a port the agent's
+    client refuses — passed this one and failed the other (review of #132).
     """
-    split = split_url(value)
-    return split is not None and split.scheme in ("http", "https") and bool(split.netloc)
+    return url_problem(value, what="base URL") is None
 
 
 def probe_proxy(proxy_url: str, timeout: float = _PROBE_TIMEOUT_SECONDS) -> ProxyProbe:
@@ -619,7 +621,16 @@ def probe_proxy(proxy_url: str, timeout: float = _PROBE_TIMEOUT_SECONDS) -> Prox
             if response.status != 200:
                 return ProxyProbe(False, f"proxy /health returned HTTP {response.status}")
             payload = json.loads(response.read().decode("utf-8"))
-    except (URLError, OSError, TimeoutError, ValueError) as exc:
+    except (URLError, HTTPException, OSError, TimeoutError, ValueError) as exc:
+        # ``HTTPException`` is not an ``OSError``: ``urlopen`` raises
+        # ``http.client.InvalidURL`` for a port that is not a number or a
+        # stray space in the host before any network call, and ``read()``
+        # raises ``IncompleteRead`` for a body shorter than its Content-Length.
+        # Unlisted, both escaped through ``wire_session`` — which calls this
+        # unguarded — and stopped the agent from starting over a proxy URL a
+        # hand-edited config carried (review of #203). A verdict keeps "tracing
+        # may cost a trace and never a launch"; ``_request`` in
+        # ``explainability_ops`` closed the same hole the same way.
         return ProxyProbe(False, f"proxy unreachable at {url}: {exc}")
     # `[]` and `"ok"` are valid JSON and have no `.get`; the decode succeeded, so
     # the handler above is already past. Four attribute reads follow, and any
@@ -1103,6 +1114,48 @@ def identity_problem(template: str) -> str | None:
     return None
 
 
+#: A POSIX environment-variable name: what a shell can `export`, so what
+#: `resolve_target` can ever find in `os.environ`.
+_ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def key_env_problem(name: str) -> str | None:
+    """Why ``name`` cannot be the variable a target reads its key from, or ``None``.
+
+    Stored unchecked, ``--key-env 'MY VAR'`` (or ``'$EXPLAINABILITY_API_KEY'``,
+    an easy paste out of a runbook) was accepted, after which nothing could ever
+    export it and every surface read "the key is NOT set" with nothing naming
+    the cause — the "configured, green and stranded" shape this function's four
+    siblings exist to refuse (round 6 of #203).
+    """
+    if not name:
+        return "key variable is empty — name the variable the key is exported in"
+    if name.startswith("$"):
+        return f"key variable {name!r} is a NAME, without the $ — try {name[1:]!r}"
+    if not _ENV_NAME.fullmatch(name):
+        return (
+            f"key variable {name!r} is not a variable name — letters, digits and _ only, not "
+            "starting with a digit"
+        )
+    return None
+
+
+def target_problem(name: str) -> str | None:
+    """Why ``name`` cannot name a deployment target, or ``None``.
+
+    A target name is a config key (``[explainability.targets.<name>]``) and
+    the word every surface prints after ``--target``; one with a line break or a
+    tab in it is neither typeable nor readable back, and an empty one is the
+    active target by accident. Inner spaces are allowed — ``prod west`` is a
+    name people use — so this refuses only what cannot be meant.
+    """
+    if not name:
+        return "target name is empty — name the deployment: --target stg"
+    if any(ch in name for ch in "\n\r\t\x0b\x0c"):
+        return f"target name {name!r} has a line break or tab in it — one line, no tabs"
+    return None
+
+
 def configure_target(
     config: AppConfig,
     *,
@@ -1143,6 +1196,17 @@ def configure_target(
     deployment nobody chose is this integration's headline failure, arrived at
     from the other side.
     """
+    # Judged and stored in ONE spelling, all five: the form strips every field
+    # and the CLI passed `--target 'stg '` and `--identity 'nishil-{role} '`
+    # through as typed, so the tab then read a second, empty target and every
+    # agent name carried a trailing space (review of #203, round 5).
+    target_name = target_name.strip() if target_name else None
+    identity = identity.strip() if identity else None
+    key_env = key_env.strip() if key_env else None
+    if target_name is not None and (problem := target_problem(target_name)):
+        raise ValueError(problem)
+    if key_env is not None and (problem := key_env_problem(key_env)):
+        raise ValueError(problem)
     for what, value in (("gateway", gateway_url), ("proxy", proxy_url)):
         if value and (problem := url_problem(value, what=what)):
             raise ValueError(problem)
@@ -1154,14 +1218,20 @@ def configure_target(
         settings.target = target_name
     if gateway_url or key_env or proxy_url or identity:
         target = settings.targets.get(name, ExplainabilityTarget())
+        # Stored as VALIDATED: stripped, no trailing slash. `url_problem` judged
+        # that spelling, and every comparison downstream (`_proxy_source`
+        # against the shipped default, `chosen_proxy`, the remediation lines)
+        # is a string comparison — a pasted `https://g.example:9443/` used to
+        # be stored with its slash and read as a chosen, non-default proxy
+        # (review of #132).
         if gateway_url:
-            target.gateway_url = gateway_url.rstrip("/")
+            target.gateway_url = gateway_url.strip().rstrip("/")
         if key_env:
-            target.api_key_env = key_env
+            target.api_key_env = key_env  # stripped above, judged as stored
         if proxy_url:
-            target.proxy_url = proxy_url
+            target.proxy_url = proxy_url.strip().rstrip("/")
         if identity:
-            target.agent_name_template = identity
+            target.agent_name_template = identity  # stripped above, judged as stored
         settings.targets[name] = target
     if enable:
         settings.enabled = True
@@ -1558,9 +1628,14 @@ class _ClientLaneSegment:
         self._run_key = run_key
         self._span: Any = None
         self._token: Any = None
+        self._trace_api: Any = None
+        self._context_api: Any = None
 
     def __enter__(self) -> _ClientLaneSegment:
         otel_trace, otel_context = _otel()
+        # Kept for ``__exit__``: the close must not depend on a lookup that can
+        # itself raise, or nothing is ended and nothing detached.
+        self._trace_api, self._context_api = otel_trace, otel_context
         identity = trace_identity(self._run_key)
         root = otel_trace.SpanContext(
             trace_id=int(identity.trace_id, 16),
@@ -1583,14 +1658,27 @@ class _ClientLaneSegment:
         return self
 
     def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
-        otel_trace, otel_context = _otel()
-        if exc_type is not None:
-            self._span.set_status(otel_trace.StatusCode.ERROR, str(exc_val))
-        else:
-            self._span.set_status(otel_trace.StatusCode.OK)
-        self._span.end()
-        if self._token is not None:
-            otel_context.detach(self._token)
+        # Three things are owed, each independently of the one before it: the
+        # status, the span's end, the context's detach. `set_status` and `end`
+        # are SDK calls that can raise (a shut-down tracer provider raises on
+        # the FIRST of them, a processor can throw on the second), and `_drain`
+        # catches whatever escapes here and returns a deferral — so a raise
+        # before the detach left a dead segment attached as the current context
+        # for the life of the process (review of #203), and a raise before
+        # `end` left the span held by its processor, the whole group never
+        # exported (round 5, on the same function). Nested `finally`s, and no
+        # `_otel()` lookup in the way.
+        try:
+            try:
+                if exc_type is not None:
+                    self._span.set_status(self._trace_api.StatusCode.ERROR, str(exc_val))
+                else:
+                    self._span.set_status(self._trace_api.StatusCode.OK)
+            finally:
+                self._span.end()
+        finally:
+            if self._token is not None:
+                self._context_api.detach(self._token)
 
     def set_input(self, value: str) -> None:
         self._span.set_attribute("input.value", value)

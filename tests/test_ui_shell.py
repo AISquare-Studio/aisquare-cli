@@ -1250,27 +1250,34 @@ def test_a_schemeless_gateway_is_refused_rather_than_stored(tmp_path: Path, scri
     assert load_config().explainability.targets == {}, "nothing is stored"
 
 
-def test_a_prefix_typed_as_a_template_is_taken_as_a_name(tmp_path: Path, script: Script) -> None:
-    """Review #10. An operator who has read the ``--identity`` examples types
-    ``nishil-{role}``; composed again that is ``nishil-{role}-{role}`` ->
-    ``nishil-coder-coder``, and a stray brace makes every ``.format`` raise, so
-    ``agent_names`` empties and the tab shows ``agents: (none)``."""
+@pytest.mark.parametrize("prefix", ["nishil-{role}", "nishil}", "team-{env}-{role}"])
+def test_a_prefix_with_braces_is_refused_not_repaired(
+    tmp_path: Path, script: Script, prefix: str
+) -> None:
+    """Review #10 and blocker B, re-decided in the #132 follow-ups. The field
+    asks for a NAME; an operator who has read the ``--identity`` examples types
+    ``nishil-{role}``, and composed again that is ``nishil-coder-coder``. The
+    first cuts REPAIRED the input — stripped at the first brace and stored what
+    preceded it — so the tab kept a template the operator never typed
+    (``team-{env}-{role}`` became ``team-{role}``) while the CLI's ``--identity``
+    refused the same input. One answer now: refused, with the reason, and
+    nothing stored."""
     seed(tmp_path, ("prj_a", "alpha", None))
 
-    async def go(pilot: Pilot[None]) -> None:
+    async def go(pilot: Pilot[None]) -> str:
         app = fleet_app(pilot)
         await app.content.add_content(ExplainabilityView(id="tracing"), set_current=True)
         await pilot.pause()
         await settle(app)
-        _setup(app, target="stg", prefix="nishil-{role}")
+        _setup(app, target="stg", prefix=prefix)
         app.screen.query_one("#explainability-save", Button).press()
         await pilot.pause()
         await settle(app)
+        return _toasts(app)
 
-    drive(go, notifications=True)
-    template = load_config().explainability.targets["stg"].agent_name_template
-    assert template == "nishil-{role}"
-    assert template.format(role="coder") == "nishil-coder"
+    rendered = drive(go, notifications=True)
+    assert "is a name, not a template" in rendered
+    assert "stg" not in load_config().explainability.targets, "refused: nothing was stored"
 
 
 def test_the_form_can_name_the_key_variable(tmp_path: Path, script: Script) -> None:
@@ -1352,14 +1359,14 @@ def _toasts(app: Any) -> str:
     return " | ".join(toast.render().plain for toast in app.screen.query(Toast))
 
 
-def test_a_prefix_with_a_stray_closing_brace_is_still_taken_as_a_name(
+def test_the_form_diagnoses_a_key_variable_no_shell_can_export_by_name(
     tmp_path: Path, script: Script
 ) -> None:
-    """Review blocker B. The guard detected ``}`` and stripped at ``{`` only, so
-    ``nishil}`` passed through whole and was stored as ``nishil}-{role}`` — which
-    raises in ``.format``, so every launch went untraced and the tab read
-    ``agents: (none)`` under a success line. The toast now quotes what was
-    stored, because that is the name the operator will look for."""
+    """Round 7 of #203. The form's own key guard ran before the writer's
+    validation, so a ``$EXPLAINABILITY_API_KEY`` paste with a key typed beside it
+    was diagnosed as "export $$EXPLAINABILITY_API_KEY" — a sentence nobody can
+    act on — while ``key_env_problem``, which names the exact fault, never ran.
+    The writer's question first."""
     seed(tmp_path, ("prj_a", "alpha", None))
 
     async def go(pilot: Pilot[None]) -> str:
@@ -1367,17 +1374,16 @@ def test_a_prefix_with_a_stray_closing_brace_is_still_taken_as_a_name(
         await app.content.add_content(ExplainabilityView(id="tracing"), set_current=True)
         await pilot.pause()
         await settle(app)
-        _setup(app, target="stg", prefix="nishil}")
+        _setup(app, target="stg", key_env="$EXPLAINABILITY_API_KEY", key="wk-secret")
         app.screen.query_one("#explainability-save", Button).press()
         await pilot.pause()
         await settle(app)
         return _toasts(app)
 
     rendered = drive(go, notifications=True)
-    template = load_config().explainability.targets["stg"].agent_name_template
-    assert template == "nishil-{role}"
-    assert template.format(role="coder") == "nishil-coder"
-    assert "'nishil-{role}'" in rendered, "the toast quotes what was stored"
+    assert "without the $" in rendered and "EXPLAINABILITY_API_KEY" in rendered
+    assert "$$" not in rendered, "never a variable nobody can export"
+    assert "stg" not in load_config().explainability.targets, "refused: nothing stored"
 
 
 def test_a_key_typed_for_a_target_that_names_its_own_variable_is_refused(

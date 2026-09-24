@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import threading
 from collections.abc import Iterator
 from http.client import IncompleteRead
 from pathlib import Path
@@ -18,10 +20,21 @@ from aisquare.cli.app import app
 from aisquare.core.store import store_session
 from aisquare.core.workspace import pin_project, project_id_for
 from aisquare.models import ProjectInfo
+from aisquare.services import auth as auth_service
+from aisquare.services import credits as credits_service
 from aisquare.services import iam
 from tests.idp_stub import IdentityProviderStub
 from tests.test_credits import BALANCE
-from tests.test_ui_accounts import drive, fleet_app, open_accounts, settle, shown
+from tests.test_ui_accounts import (
+    _overview,
+    _status,
+    drive,
+    fleet_app,
+    open_accounts,
+    settle,
+    shown,
+)
+from tests.test_ui_shell import composited
 
 WORKSPACES = [
     {"id": 42, "uid": "ws-uid-42", "name": "acme", "type": "team", "effective_role": "ADMIN"},
@@ -134,6 +147,35 @@ def test_the_accounts_page_draws_the_destination_workspaces_bars(
     assert session is not None
     monkeypatch.setattr(iam, "current_session", lambda api_url=None: session)
 
+    async def go(pilot: Pilot[None]) -> tuple[str, str]:
+        app_ = fleet_app(pilot)
+        view = await open_accounts(pilot)
+        await settle(app_)
+        await pilot.pause()
+        widget = view.query_one("#aisquare-credits", Static)
+        return shown(widget), composited(widget)
+
+    line, drawn = drive(go)
+    assert line.startswith("acme [low]  run today ▮▮▮▮▯ 76% · resets")
+    assert "run month ▮▮▯▯▯ 40%" in line and "build today unlimited" in line
+    # Review of #173, round 1: the band came LAST on a no-wrap line and the
+    # page's width cut it off (140x40 leaves ~106 cells; the line is longer),
+    # while `.plain` still ended with it. It leads now, and the drawn strip —
+    # what the eye gets — is what carries it.
+    assert drawn.startswith("acme [low]  run today"), drawn
+    assert len(drawn.rstrip()) < len(line), "the fixture's line is wider than the page"
+
+
+def test_the_accounts_page_reads_credits_with_no_claude_slot_signed_in(
+    idp: IdentityProviderStub, pointed: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #173, round 1: the credits line rode the tail of the Claude
+    usage refresh and inherited its early return — no signed-in Claude slot, no
+    credits, for a user signed in to AISquare with a workspace chosen."""
+    session = iam.current_session()
+    assert session is not None
+    monkeypatch.setattr(iam, "current_session", lambda api_url=None: session)
+
     async def go(pilot: Pilot[None]) -> str:
         app_ = fleet_app(pilot)
         view = await open_accounts(pilot)
@@ -141,10 +183,40 @@ def test_the_accounts_page_draws_the_destination_workspaces_bars(
         await pilot.pause()
         return shown(view.query_one("#aisquare-credits", Static))
 
-    line = drive(go)
-    assert line.startswith("acme  run today ▮▮▮▮▯ 76% · resets")
-    assert "run month ▮▮▯▯▯ 40%" in line and "build today unlimited" in line
-    assert line.rstrip().endswith("[low]")
+    line = drive(go, overview=_overview(_status(1, None, signed_in=False)))
+    assert line.startswith("acme [low]  run today ▮▮▮▮▯ 76%"), line
+
+
+def test_signing_out_on_the_accounts_page_clears_the_credits_line(
+    idp: IdentityProviderStub, pointed: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #173, round 1: sign-in and sign-out repainted the card and not
+    the credits, so the signed-out page kept the last session's bars."""
+    session = iam.current_session()
+    assert session is not None
+    current: dict[str, iam.Session | None] = {"session": session}
+    monkeypatch.setattr(iam, "current_session", lambda api_url=None: current["session"])
+
+    def sign_out(_session: iam.Session) -> bool:
+        current["session"] = None
+        return True
+
+    monkeypatch.setattr(auth_service, "sign_out", sign_out)
+
+    async def go(pilot: Pilot[None]) -> tuple[str, str]:
+        app_ = fleet_app(pilot)
+        view = await open_accounts(pilot)
+        await settle(app_)
+        await pilot.pause()
+        before = shown(view.query_one("#aisquare-credits", Static))
+        await pilot.click("#aisquare-sign-out")
+        await settle(app_)
+        await pilot.pause()
+        return before, shown(view.query_one("#aisquare-credits", Static))
+
+    before, after = drive(go)
+    assert before.startswith("acme [low]"), before
+    assert after == "", after
 
 
 def test_a_truncated_answer_is_a_reason_on_the_row_not_a_traceback(
@@ -172,3 +244,83 @@ def test_a_truncated_answer_is_a_reason_on_the_row_not_a_traceback(
     who = runner.invoke(app, ["whoami"])
     assert who.exit_code == 0, who.output
     assert "credits: acme: credits unavailable" in who.output
+
+
+def test_a_sign_in_or_out_in_another_terminal_follows_on_the_next_frame(
+    idp: IdentityProviderStub, pointed: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The shell hands the page a frame every few seconds with the session
+    re-read; one that differs from the last re-reads the credits then, not on
+    the minute tick — a ``logout`` elsewhere empties the line, a ``login``
+    fills it again."""
+    session = iam.current_session()
+    assert session is not None
+    current: dict[str, iam.Session | None] = {"session": session}
+    monkeypatch.setattr(iam, "current_session", lambda api_url=None: current["session"])
+
+    async def go(pilot: Pilot[None]) -> tuple[str, str, str]:
+        app_ = fleet_app(pilot)
+        view = await open_accounts(pilot)
+        await settle(app_)
+        await pilot.pause()
+        line = view.query_one("#aisquare-credits", Static)
+        before = shown(line)
+        current["session"] = None  # `aisquare logout` in another terminal
+        app_.refresh_accounts()
+        await pilot.pause()
+        signed_out = shown(line)
+        current["session"] = session  # and `aisquare login` again
+        app_.refresh_accounts()
+        await settle(app_)
+        await pilot.pause()
+        return before, signed_out, shown(line)
+
+    before, signed_out, again = drive(go)
+    assert before.startswith("acme [low]"), before
+    assert signed_out == "", signed_out
+    assert again.startswith("acme [low]"), again
+
+
+def test_a_reading_in_flight_at_sign_out_is_never_painted(
+    idp: IdentityProviderStub, pointed: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A balance request still out when the session goes (5 s ceiling) is
+    cancelled, and its answer — the previous session's bars — is dropped."""
+    session = iam.current_session()
+    assert session is not None
+    current: dict[str, iam.Session | None] = {"session": session}
+    monkeypatch.setattr(iam, "current_session", lambda api_url=None: current["session"])
+    asked, release = threading.Event(), threading.Event()
+    real = credits_service.for_destination
+
+    def slow(*args: Any, **kwargs: Any) -> credits_service.WorkspaceCredits | None:
+        asked.set()
+        release.wait(5)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(credits_service, "for_destination", slow)
+
+    def sign_out(_session: iam.Session) -> bool:
+        current["session"] = None
+        return True
+
+    monkeypatch.setattr(auth_service, "sign_out", sign_out)
+
+    async def go(pilot: Pilot[None]) -> str:
+        app_ = fleet_app(pilot)
+        view = await open_accounts(pilot)
+        try:
+            assert await asyncio.to_thread(asked.wait, 5), "the page asked for the credits"
+            await pilot.click("#aisquare-sign-out")
+            for _ in range(20):
+                await pilot.pause()
+                if view.session is None:
+                    break
+        finally:
+            release.set()
+        await settle(app_)
+        await asyncio.sleep(0.2)  # the discarded thread's answer has had time to land
+        await pilot.pause()
+        return shown(view.query_one("#aisquare-credits", Static))
+
+    assert drive(go) == ""

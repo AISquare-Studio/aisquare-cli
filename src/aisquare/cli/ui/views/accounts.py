@@ -171,39 +171,45 @@ def usage_bar(percent: float) -> Text:
 
 
 def credits_text(readings: list[WorkspaceCredits], *, now: datetime | None = None) -> Text:
-    """One line per destination workspace (#143): ``acme  run today ▮▮▮▮▯ 76% · resets …``.
+    """One line per destination workspace (#143): ``acme [low]  run today ▮▮▮▮▯ 76% · resets …``.
 
     The same bars as the Claude rows below — used, not remaining, so the two
     halves of the page read alike — and ``unlimited`` where the API says ``-1``.
-    The server's band is the suffix when it is not ``ok``.
+    The server's band follows the name when it is not ``ok``: FIRST, because
+    the line does not wrap and the page's width cuts what comes last — as a
+    suffix it was the part a 140-column terminal never showed (review of
+    #173, round 1).
     """
     text = Text(no_wrap=True, overflow="ellipsis")
     for index, reading in enumerate(readings):
         if index:
             text.append("\n")
-        text.append(f"{reading.workspace_name}  ", style="bold")
+        text.append(reading.workspace_name, style="bold")
+        if reading.state and reading.state != "ok":
+            tone = "bold red" if reading.state == "exhausted" else "yellow"
+            text.append(f" [{reading.state}]", style=tone)
+        text.append("  ")
         if not reading.available:
             text.append(f"credits: {reading.reason or 'unavailable'}", style="dim")
             continue
-        shown_any = False
+        spans: list[Text] = []
         for pool in ("run", "build"):
             for span, word in (("daily", "today"), ("monthly", "month")):
                 window = reading.window(pool, span)
                 if window is None:
                     continue
-                shown_any = True
-                text.append(f"{pool} {word} ", style="dim")
-                if window.percent is None:
-                    text.append("unlimited", style="dim")
+                piece = Text(f"{pool} {word} ", style="dim")
+                percent = window.percent
+                if percent is None:
+                    piece.append("unlimited", style="dim")
                 else:
-                    text.append_text(usage_bar(window.percent))
-                    text.append(_resets(window.resets_at, now=now), style="dim")
-                text.append("  ")
-        if not shown_any:
+                    piece.append_text(usage_bar(percent))
+                    piece.append(_resets(window.resets_at, now=now), style="dim")
+                spans.append(piece)
+        if spans:
+            text.append_text(Text("  ").join(spans))
+        else:
             text.append("no pools reported", style="dim")
-        if reading.state and reading.state != "ok":
-            tone = "bold red" if reading.state == "exhausted" else "yellow"
-            text.append(f"[{reading.state}]", style=tone)
     return text
 
 
@@ -527,11 +533,11 @@ class AccountsView(Vertical):
         self._paint_aisquare()
         if self.overview is not None:
             self._paint_claude(self.overview)
-        self._usage_timer = self.set_interval(USAGE_SECONDS, self.refresh_usage)
+        self._usage_timer = self.set_interval(USAGE_SECONDS, self.refresh_readings)
 
     def on_show(self) -> None:
         self._on_screen = True
-        self.refresh_usage()
+        self.refresh_readings()
 
     def on_hide(self) -> None:
         self._on_screen = False
@@ -574,13 +580,20 @@ class AccountsView(Vertical):
     # --- data in ----------------------------------------------------------------------------
 
     def show(self, overview: AccountsOverview) -> None:
-        """A fresh frame from the shell: paint it, and re-read the AISquare session beside it."""
+        """A fresh frame from the shell: paint it, and re-read the AISquare session beside it.
+
+        A session that changed since the last frame — a ``login`` or ``logout``
+        in another terminal — re-reads the credits under the card at once
+        rather than on the next minute tick: they are that session's.
+        """
         self.overview = overview
-        self.session = self._read_session()
+        previous, self.session = self.session, self._read_session()
         if not self.is_mounted:
             return
         self._paint_aisquare()
         self._paint_claude(overview)
+        if self.session != previous:
+            self.refresh_credits()
 
     def _env_token(self) -> bool:
         """Whether ``AISQUARE_TOKEN`` is what aisquare is using — not a session this page owns."""
@@ -647,6 +660,18 @@ class AccountsView(Vertical):
 
     # --- usage (the one thing here that costs a request) ---------------------------------------
 
+    def refresh_readings(self) -> None:
+        """The page's minute tick: the Claude slots' usage and the workspaces' credits.
+
+        Two refreshes side by side, not one riding the other's tail: each has
+        its own reason to stop short (no signed-in Claude slot; no AISquare
+        session), and the credits used to inherit the usage refresh's — a
+        user signed in to AISquare with no Claude slot signed in never saw
+        them (review of #173, round 1).
+        """
+        self.refresh_usage()
+        self.refresh_credits()
+
     def refresh_usage(self) -> None:
         """Ask about every signed-in slot off the UI thread, if the page is on screen.
 
@@ -668,13 +693,22 @@ class AccountsView(Vertical):
             thread=True,
             exit_on_error=False,
         )
-        self.refresh_credits()
 
     def refresh_credits(self) -> None:
-        """The destination workspaces' credits (#143), on the same tick, when signed in."""
+        """The destination workspaces' credits (#143), off the UI thread, for this session.
+
+        Called on the minute tick and whenever the session changes (a sign-in
+        or sign-out here, or a frame that read a different one). With no
+        session the line empties at once and a reading still in flight for the
+        previous one is cancelled, never painted: the signed-out page must not
+        keep the last session's bars.
+        """
         session = self.session
-        if not self._on_screen or session is None:
+        if session is None:
+            self.workers.cancel_group(self, CREDITS_WORKER)
             self.query_one("#aisquare-credits", Static).update("")
+            return
+        if not self._on_screen:
             return
         self.run_worker(
             lambda: _read_credits(session),
@@ -686,6 +720,8 @@ class AccountsView(Vertical):
         )
 
     def _show_credits(self, readings: list[WorkspaceCredits]) -> None:
+        if self.session is None:
+            return  # signed out while it was in flight; the line stays empty
         self.query_one("#aisquare-credits", Static).update(credits_text(readings))
 
     def _show_usage(self, fetched: dict[int, tuple[ClaudeUsage, UsageTrend | None]]) -> None:
@@ -760,6 +796,7 @@ class AccountsView(Vertical):
             who = self.session.email or self.session.sub or "you"
             self._notice(f"✓ Signed in to AISquare as {who}", "ok")
             self.post_message(AccountsChanged())
+            self.refresh_credits()  # the new session's workspaces, not a minute from now
         elif state is WorkerState.ERROR:
             error = worker.error
             if isinstance(error, iam.IamError) and error.code == "cancelled":
@@ -798,6 +835,7 @@ class AccountsView(Vertical):
         elif state is WorkerState.ERROR:
             self._notice(f"✗ sign-out failed: {worker.error}", "error")
         self._paint_aisquare()
+        self.refresh_credits()
 
     # --- Claude Code: a sign-in window, watched --------------------------------------------------
 

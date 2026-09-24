@@ -12,6 +12,7 @@ fake forgot to override fails loudly instead of quietly reaching a real tmux.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import shutil
@@ -3169,22 +3170,27 @@ def test_every_verifying_role_is_known_to_the_assignment(
     someone else's work, against its own lane rule (review of #116, round 4).
 
     The harness is the source of truth: any role whose standing cycle pulls from
-    the review pool is a verifier, whatever it is called."""
+    the review pool is a verifier, whatever it is called — and no other role is.
+    Pinned both ways (review of #116, round 5): a subset check caught the missing
+    `ui-tester` and could not see the extra `validator`, whose cycle is one GATE
+    note over the whole deliverable, never a verdict on a task. The roles whose
+    verdict is a GATE note are the gating set, the same way."""
     from aisquare.core import harness
-    from aisquare.services.team import _VERIFYING_ROLES
+    from aisquare.services.team import _GATING_ROLES, _VERIFYING_ROLES
 
-    pulls_review = {
-        role
-        for role in harness.ROLE_PROFILES
-        if "task next --status review" in " ".join(harness.role_cycle(role, "sess-x"))
-    }
-    assert pulls_review <= _VERIFYING_ROLES, (
-        f"roles that pull from the review pool but get the rework briefing: "
-        f"{sorted(pulls_review - _VERIFYING_ROLES)}"
+    cycles = {role: " ".join(harness.role_cycle(role, "sess-x")) for role in harness.ROLE_PROFILES}
+    pulls_review = {role for role, cycle in cycles.items() if "task next --status review" in cycle}
+    gates = {role for role, cycle in cycles.items() if 'note "GATE:' in cycle}
+    assert pulls_review == _VERIFYING_ROLES, (
+        f"pull from the review pool but get the rework briefing: "
+        f"{sorted(pulls_review - _VERIFYING_ROLES)}; told to verify but never pull "
+        f"review work: {sorted(_VERIFYING_ROLES - pulls_review)}"
     )
-    assert set(harness.ROLE_PROFILES) >= _VERIFYING_ROLES, (
-        f"named here but not a role: {sorted(_VERIFYING_ROLES - set(harness.ROLE_PROFILES))}"
+    assert gates == _GATING_ROLES, (
+        f"gate but get a task briefing: {sorted(gates - _GATING_ROLES)}; told to gate "
+        f"but write no GATE note: {sorted(_GATING_ROLES - gates)}"
     )
+    assert not _VERIFYING_ROLES & _GATING_ROLES, "one role, one briefing"
 
 
 def test_a_ui_tester_spawned_for_a_review_task_is_told_to_verify_it(
@@ -3205,9 +3211,42 @@ def test_a_ui_tester_spawned_for_a_review_task_is_told_to_verify_it(
     assert f"ASSIGNED TO YOU: {task.id} [review]" in board
     assert "awaits your verification" in board
     assert "spawned for the rework" not in board and "Do not take another" not in board
-    # And the line names no verdict command: the validator is a verifier whose
-    # cycle is a one-shot GATE note and never runs `task next --status review`.
+    # And the line names no verdict command: the verifiers' verdicts differ (a
+    # tester's `task done`/`task reopen`, a reviewer's PR review), and the
+    # standing cycle carries each one.
     assert "task next --status review" not in board.split("sessions:")[0]
+
+
+@pytest.mark.parametrize("status", ["todo", "review"])
+def test_a_validator_spawned_for_a_task_is_told_to_gate_in_every_state(
+    status: str,
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #116, round 5. The validator sat in the verifying set, so at
+    `[review]` it was sent to "the verdict your standing cycle below describes"
+    — a cycle that gates the whole deliverable once and describes no verdict on
+    a task — and at `[todo]` to "take review work with your standing cycle", a
+    cycle that takes none. Out of that set, it would have been handed a coder's
+    claim or rework. It gates: the task is context, in every state."""
+    task = _task(project, "assemble the release")
+    if status == "review":
+        monkeypatch.setenv("AISQUARE_ROLE", "coder")
+        team_service.hook_session_start("sess-gate-coder", project.root, "startup")
+        team_service.claim_task(task.id, session_ref="sess-gate-coder")
+        team_service.review_task(task.id, session_ref="sess-gate-coder")
+    _agent, first = _spawned(project, "validator", task.id, tmux, monkeypatch)
+
+    board = team_service.hook_session_start(first, project.root, "startup")
+
+    block = board.split("sessions:")[0]
+    assert f"ASSIGNED TO YOU: {task.id} [{status}]" in block
+    assert "You gate the assembled deliverable" in block
+    assert f"aisquare task show {task.id}" in block
+    for told in ("Claim it", "task claim", "awaits your verification", "not in review"):
+        assert told not in block, f"{told!r} is not the validator's to hear: {block}"
 
 
 def test_a_finished_assignment_is_forgotten_and_never_re_briefed(
@@ -3304,6 +3343,51 @@ def test_task_next_survives_a_fleet_row_it_cannot_read(
     )
 
     assert picked is not None and picked.id == older.id, "the pool order still works"
+
+
+def test_a_fleet_row_task_next_cannot_read_is_logged_not_swallowed(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Review of #116, round 5. The fail-open catch took a `TypeError` from a
+    changed signature as quietly as a locked database, and `task next` went back
+    to oldest-first with nothing in the notes or the logs to say the preference
+    had stopped working — the race the PR fixed, made invisible. Both doors log
+    one line naming what they swallowed: the row the session is bound to, and
+    the row the window's variable names (a cycle with no session)."""
+    older = _task(project, "the older task")
+    mine = _task(project, "the task this coder is for")
+    _agent, first = _spawned(project, "coder", mine.id, tmux, monkeypatch)
+    team_service.hook_session_start(first, project.root, "startup")
+
+    def changed(self: SqliteStore, *args: object) -> FleetAgent | None:
+        raise TypeError("fleet_agent_for_session() takes 2 positional arguments")
+
+    monkeypatch.setattr(SqliteStore, "fleet_agent_for_session", changed)
+    monkeypatch.setattr(SqliteStore, "get_fleet_agent", changed)
+
+    ours = "aisquare.services.team"
+    with caplog.at_level(logging.WARNING, logger=ours):
+        bound = team_service.next_task(role="coder", session_ref=first, cwd=project.root)
+        named = team_service.next_task(role="coder", cwd=project.root)
+
+    assert bound is not None and bound.id == older.id, "still fail-open: the pool order"
+    assert named is not None and named.id == older.id
+    lines = [record for record in caplog.records if record.name == ours]
+    assert any(
+        f"session {first}" in record.getMessage() and "TypeError" in record.getMessage()
+        for record in lines
+    ), caplog.text
+    assert any(
+        "AISQUARE_FLEET_AGENT" in record.getMessage() and "TypeError" in record.getMessage()
+        for record in lines
+    ), caplog.text
+    assert all(record.levelno == logging.WARNING and not record.exc_info for record in lines), (
+        "one line each, no traceback"
+    )
 
 
 def test_spawning_for_a_finished_task_is_refused(

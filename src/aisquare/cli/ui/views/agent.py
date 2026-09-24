@@ -78,6 +78,11 @@ STOP_WORKER = "agent-stop"
 RESTART_WORKER = "agent-restart"
 #: States in which there is a process to stop; anything else is a row to restart.
 _STOPPABLE: frozenset[str] = frozenset({"working", "waiting", "attention", "limited", "unknown"})
+#: Where **Stop** is offered: a process to stop, or an exited agent's dead window —
+#: `remain-on-exit` keeps it for the last screen, and Stop on the 💤 row removes it,
+#: which takes the row off the listing (``fleet stop`` on an ended row). Without it a
+#: 💤 row whose restart is refused (a coder whose task is done) could not be cleared.
+_SHOWS_STOP: frozenset[str] = _STOPPABLE | {"exited"}
 
 
 class AgentView(Vertical):
@@ -145,12 +150,30 @@ class AgentView(Vertical):
             self.pane.attach(status.agent.pane_id)
 
     def _paint_actions(self) -> None:
-        """Stop while there is a process; Restart always (an exited row is exactly its case)."""
-        busy = any(worker.name in (STOP_WORKER, RESTART_WORKER) for worker in self.workers)
+        """Stop while there is a process or a dead window; Restart always (an exited row is
+        exactly its case).
+
+        Greyed while THIS view's own stop or restart runs, and only then: ``self.workers``
+        is the app's whole list, and a finished worker is still in it when its
+        ``StateChanged`` arrives — nothing else repaints the buttons afterwards (the shell
+        feeds a view only when its status changed), so a failed restart would otherwise
+        stay greyed with no way to retry it.
+        """
+        busy = any(
+            worker.node is self
+            and worker.name in (STOP_WORKER, RESTART_WORKER)
+            and not worker.is_finished
+            for worker in self.workers
+        )
         stop = self.query_one("#agent-stop", Button)
-        stop.display = self.status.state in _STOPPABLE
+        stop.display = self.status.state in _SHOWS_STOP
         stop.disabled = busy
-        stop.tooltip = "/exit, a grace period, then the window is killed (aisquare fleet stop)"
+        stop.tooltip = (
+            "/exit, a grace period, then the window is killed (aisquare fleet stop)"
+            if self.status.state in _STOPPABLE
+            else "Remove the dead window tmux kept for the last screen; the row leaves the "
+            "listing (aisquare fleet stop)"
+        )
         restart = self.query_one("#agent-restart", Button)
         restart.disabled = busy
         restart.label = "Restart" if self.status.state in _STOPPABLE else "Restart (resume)"

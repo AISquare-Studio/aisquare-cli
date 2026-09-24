@@ -1811,7 +1811,7 @@ def test_restart_from_the_agent_view_selects_the_new_row_in_the_shell(
         # The pane's own "(pane gone)" toast is there too: read them all.
         toasts = [toast.render().plain for toast in app.screen.query(Toast)]
         rows = [shown(row) for row in card_for(app, "prj_a").query(AgentRow)]
-        assert stop_shown is False
+        assert stop_shown is True  # the 💤 row's Stop removes its dead window
         return (current.id if current else None), app.sidebar.selected_key, toasts, rows
 
     current, selected, toasts, rows = drive(go, notifications=True)

@@ -2725,9 +2725,10 @@ def test_agent_view_refreshes_its_header_and_reattaches_on_a_new_pane(
 def test_agent_view_offers_stop_and_restart_and_routes_them_through_the_service(
     fake: FakeTmux, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """#138: the two actions §4.2 promised. Stop shows only while there is a process;
-    Restart always (an exited row is exactly its case). Both run the service off
-    the UI thread, then ask the app for a fresh frame — the view guesses nothing."""
+    """#138: the two actions §4.2 promised. Stop shows while there is a process or,
+    on the 💤 row, a dead window to remove; Restart always (an exited row is exactly
+    its case). Both run the service off the UI thread, then ask the app for a fresh
+    frame — the view guesses nothing."""
     from textual.widgets import Button
 
     from aisquare.cli.ui.views import agent as agent_view_module
@@ -2759,6 +2760,7 @@ def test_agent_view_offers_stop_and_restart_and_routes_them_through_the_service(
     monkeypatch.setattr(fleet_service, "stop", fake_stop)
     monkeypatch.setattr(fleet_service, "restart", fake_restart)
     posted: list[FleetAgent] = []
+    tips: list[str] = []
 
     class ViewHost(App[None]):
         def compose(self) -> ComposeResult:
@@ -2778,11 +2780,13 @@ def test_agent_view_offers_stop_and_restart_and_routes_them_through_the_service(
             restart = view.query_one("#agent-restart", Button)
             await pilot.pause()
             stop_on_exited, restart_label = stop.display, str(restart.label)
+            exited_tip = str(stop.tooltip)
             await pilot.click("#agent-restart")
             await wait_until(pilot, lambda: len(refreshed) >= 1 and len(posted) == 1)
             view.refresh_status(_status(state="working"))
             await pilot.pause()
             stop_on_working, restart_label_working = stop.display, str(restart.label)
+            tips.extend([exited_tip, str(stop.tooltip)])
             await pilot.click("#agent-stop")
             await wait_until(pilot, lambda: len(refreshed) >= 2)
             return (
@@ -2794,14 +2798,111 @@ def test_agent_view_offers_stop_and_restart_and_routes_them_through_the_service(
             )
 
     stop_on_exited, restart_label, stop_on_working, restart_label_working, size = run(drive())
-    assert stop_on_exited is False and restart_label == "Restart (resume)"
+    assert stop_on_exited is True and restart_label == "Restart (resume)"
     assert stop_on_working is True and restart_label_working == "Restart"
+    exited_tip, working_tip = tips
+    assert "dead window" in exited_tip and "/exit" not in exited_tip  # nothing to /exit
+    assert working_tip.startswith("/exit, a grace period")
     assert calls == [
         ("restart", "prj_1", "coder-1", size),
         ("stop", "prj_1", "coder-1"),
     ]
     assert [agent.id for agent in posted] == ["fa_2"]  # the shell is told which row to show
     assert len(refreshed) == 2  # one fresh frame per action, never an optimistic repaint
+
+
+def test_agent_view_buttons_come_back_when_their_own_worker_ends_whatever_other_views_run(
+    fake: FakeTmux, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #138. "Busy" was any stop/restart worker in the APP, and a finished
+    worker is still in that list when its ``StateChanged`` arrives — so a restart that
+    failed left Restart greyed with nothing to retry it, a Stop left both buttons dead,
+    and one view's running Stop greyed every other view's. Nothing else repaints them:
+    the shell hands a view a new status only when the status changed. Pressed here
+    with no ``refresh_status`` between the steps, which is what hid it."""
+    import threading
+
+    from textual.containers import Vertical
+    from textual.widgets import Button
+
+    from aisquare.models import ProjectInfo
+    from aisquare.services import fleet as fleet_service
+
+    fake.panes["%2"] = FakePane(screen=["the other agent"])
+    server = fake.server(tmp_path)
+    project = ProjectInfo(id="prj_1", root=Path("/home/me/repo"), linked_repos=[])
+    exited = _status(state="exited", exit_status=0)
+    other = _status(label="coder-2", pane_id="%2", state="working")
+    restarts: list[str] = []
+    stopped: list[str] = []
+    release = threading.Event()
+    refreshed: list[bool] = []
+
+    def failing_restart(
+        target: ProjectInfo, label: str, **kwargs: object
+    ) -> fleet_service.RestartReceipt:
+        restarts.append(label)
+        raise fleet_service.FleetError("task tsk_0123456789abcdef is done")
+
+    def fake_stop(target: ProjectInfo, label: str, **kwargs: object) -> FleetAgent:
+        if label == "coder-2":
+            release.wait(5)  # the OTHER view's stop, still running while this one acts
+        stopped.append(label)
+        return exited.agent
+
+    monkeypatch.setattr(fleet_service, "project_of", lambda agent: project)
+    monkeypatch.setattr(fleet_service, "restart", failing_restart)
+    monkeypatch.setattr(fleet_service, "stop", fake_stop)
+
+    class ViewHost(App[None]):
+        def compose(self) -> ComposeResult:
+            with Vertical():
+                yield AgentView(exited, server=server, escape_key="f12", id="mine")
+                yield AgentView(other, server=server, escape_key="f12", id="theirs")
+
+        def refresh_data(self) -> None:
+            refreshed.append(True)
+
+    def enabled(view: AgentView) -> tuple[bool, bool]:
+        stop = view.query_one("#agent-stop", Button)
+        restart = view.query_one("#agent-restart", Button)
+        return not stop.disabled, not restart.disabled
+
+    async def drive() -> list[tuple[bool, bool]]:
+        host = ViewHost()
+        seen: list[tuple[bool, bool]] = []
+        async with host.run_test(size=(80, 24)) as pilot:
+            mine = host.query_one("#mine", AgentView)
+            theirs = host.query_one("#theirs", AgentView)
+            await pilot.pause()
+            theirs.query_one("#agent-stop", Button).press()
+            await wait_until(pilot, lambda: not enabled(theirs)[0])
+            mine.query_one("#agent-restart", Button).press()
+            await wait_until(pilot, lambda: len(refreshed) == 1)
+            await pilot.pause()
+            seen.append(enabled(mine))  # the failure ended: retry is possible at once
+            assert seen[-1] == (True, True), "a failed restart left its buttons greyed"
+            mine.query_one("#agent-restart", Button).press()
+            await wait_until(pilot, lambda: len(refreshed) == 2)
+            await pilot.pause()
+            mine.query_one("#agent-stop", Button).press()
+            await wait_until(pilot, lambda: len(refreshed) == 3)
+            await pilot.pause()
+            seen.append(enabled(mine))  # a finished Stop greys nothing
+            seen.append(enabled(theirs))  # …while the other view's Stop still runs
+            release.set()
+            await wait_until(pilot, lambda: len(refreshed) == 4)
+            await pilot.pause()
+            seen.append(enabled(theirs))
+        return seen
+
+    after_failure, after_stop, theirs_running, theirs_done = run(drive())
+    assert after_failure == (True, True)
+    assert restarts == ["coder-1", "coder-1"], "the failed restart could be pressed again"
+    assert after_stop == (True, True)
+    assert theirs_running == (False, False)  # a view's own running worker still greys it
+    assert theirs_done == (True, True)
+    assert stopped == ["coder-1", "coder-2"]
 
 
 # --- against a real tmux ------------------------------------------------------------------------

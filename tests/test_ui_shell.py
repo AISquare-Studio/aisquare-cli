@@ -2418,6 +2418,21 @@ async def _settled(pilot: Pilot[None]) -> None:
     await pilot.pause()
 
 
+async def _restored(pilot: Pilot[None]) -> None:
+    """Wait for a saved width to be applied AND laid out, by the screen's refreshes, not a pause.
+
+    ``Divider.on_mount`` applies the saved width with ``call_after_refresh``, so it lands after
+    the first refresh, and the layout that shows it comes one refresh later. One
+    ``pilot.pause()`` usually spans both. On the Windows leg of run 36033742930 it did not: a
+    relaunch over a saved ``10**400`` read the navigator at its declared 30, and the same
+    test had passed on the run before. Each ``wait_for_refresh`` returns only after an
+    after-refresh callback queued behind the previous one has run."""
+    await pilot.pause()
+    divider = fleet_app(pilot).query_one(Divider)
+    await divider.wait_for_refresh()  # the restore queued at mount has run
+    await divider.wait_for_refresh()  # and the layout it asked for has been done
+
+
 def _declared(app: FleetApp) -> int:
     """The navigator's width with nothing saved and no gesture: the stylesheet's."""
     width = cells(app.sidebar.styles.base.width)
@@ -2495,7 +2510,7 @@ def test_dragging_the_divider_resizes_the_sidebar_within_bounds_and_remembers_it
     }
 
     async def relaunch(pilot: Pilot[None]) -> int:
-        await pilot.pause()
+        await _restored(pilot)
         return fleet_app(pilot).sidebar.outer_size.width
 
     assert drive(relaunch) == 61, "restored on the next launch — the width itself"
@@ -2812,7 +2827,7 @@ def test_a_saved_width_is_bounded_before_it_reaches_the_stylesheet(
 
     async def go(pilot: Pilot[None]) -> tuple[int, int, int | None, int]:
         app = fleet_app(pilot)
-        await pilot.pause()
+        await _restored(pilot)
         return (
             app.sidebar.outer_size.width,
             app.content.outer_size.width,
@@ -2894,7 +2909,7 @@ def test_a_gesture_on_a_narrow_terminal_keeps_a_wider_remembered_width(
 
     async def go(pilot: Pilot[None]) -> dict[str, object]:
         app = fleet_app(pilot)
-        await pilot.pause()
+        await _restored(pilot)
         seen: dict[str, object] = {"floor": _floor(app), "shown": app.sidebar.outer_size.width}
         app.sidebar.focus()
 
@@ -3125,7 +3140,7 @@ def test_a_gesture_at_the_ceiling_with_a_huge_width_on_file_does_not_reach_the_s
 
     async def go(pilot: Pilot[None]) -> tuple[int, int | None, object]:
         app = fleet_app(pilot)
-        await pilot.pause()
+        await _restored(pilot)
         x = app.sidebar.outer_size.width  # the ceiling
         await _mouse(pilot, events.MouseDown, x, 5)
         await _mouse(pilot, events.MouseMove, 60, 5)

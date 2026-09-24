@@ -8,6 +8,7 @@ the narrow one nobody selects it with.
 
 from __future__ import annotations
 
+import os
 import sys
 from collections.abc import Iterator
 from importlib.metadata import PackageNotFoundError
@@ -146,7 +147,8 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
 #: A module constant rather than an inline tuple because
 #: ``tests/test_conftest_is_hermetic.py`` compares it against the product's own
 #: lists — the four routing names below were missing for exactly as long as there
-#: was nothing to compare against.
+#: was nothing to compare against. The per-role families, which no list of names
+#: can cover, are :data:`AMBIENT_ENV_PREFIXES` below.
 AMBIENT_ENV_VARS = (
     # Agent detection honours CLAUDE_CONFIG_DIR, and a developer running the
     # suite from inside a Claude session must never have tests write hooks into
@@ -162,6 +164,12 @@ AMBIENT_ENV_VARS = (
     # calls — same family as the two above, and missed for the same reason.
     "AISQUARE_SERVE_CLIENT",
     "AISQUARE_SERVE_ROLE",
+    # `aisquare serve`'s --port and --close-after, read through typer's
+    # `envvar=` rather than `os.environ`, so a sweep for the latter misses them.
+    # Measured: AISQUARE_SERVE_PORT=1 in the shell fails test_serve.py's
+    # show-token tests, which print the port a client should dial.
+    "AISQUARE_SERVE_PORT",
+    "AISQUARE_SERVE_CLOSE_AFTER",
     "AISQUARE_TEAM_HUB",
     "AISQUARE_TEAM_DELTA",
     "AISQUARE_TEAM_LEASE_MIN",
@@ -186,6 +194,11 @@ AMBIENT_ENV_VARS = (
     "AISQUARE_MODEL_CODER",
     "AISQUARE_MODEL_RUNNER",
     "AISQUARE_MODEL_VALIDATOR",
+    # The executable every role launches on unless something more specific
+    # names one (`core.harness.resolve_binary`). Left set, `launch` and
+    # `fleet spawn` resolve the developer's wrapper instead of the default —
+    # measured: test_role_profile.py's launch tests fail with it exported.
+    "AISQUARE_AGENT_BIN",
     "ANTHROPIC_MODEL",
     "CLAUDE_CODE_SUBAGENT_MODEL",
     "ANTHROPIC_DEFAULT_FABLE_MODEL",
@@ -199,6 +212,17 @@ AMBIENT_ENV_VARS = (
     "AISQUARE_EXPLAINABILITY_TARGET",
     "EXPLAINABILITY_GATEWAY_URL",
     "EXPLAINABILITY_API_KEY",
+    # The same file's inbox path: `_load_sdk` keeps an operator's instead of
+    # pinning one under the isolated home. Its AISQUARE_AGENT_NAME and
+    # EXPLAINABILITY_AGENTS are not here because this package never reads them
+    # — only the SDK does, and the checkout the suite grades cannot have the
+    # SDK installed beside it (`services.explainability.EDITABLE_INSTALL_HINT`).
+    "EXPLAINABILITY_INBOX_PATH",
+    # The escape hatch that keeps `--session-id` out of the agent's argv. An
+    # operator who turned pinning off would fail every test asserting a pinned
+    # launch — measured on test_role_profile.py's
+    # test_an_unbound_role_still_gets_its_id_pinned.
+    "AISQUARE_PIN_SESSION_ID",
     # The routing half, and the half that was missing. Two mechanisms read these
     # and both do the right thing on finding them set, which is what made the
     # omission invisible: `core.harness.interfering_env` REPORTS them, and
@@ -255,16 +279,28 @@ AMBIENT_ENV_VARS = (
     "VISUAL",  # same
     "TERM",  # rendering assertions vary by terminal
     "TMUX_TMPDIR",  # core.tmux socket path
+    "TMUX",  # services.fleet: shutdown's "inside the fleet's own server" guard
 )
+
+#: The per-role FAMILIES the harness reads — ``<PREFIX><ROLE>`` for whatever role
+#: it is asked about (``core.harness._bin_env_var``, ``role_model_override``,
+#: ``role_effort_override``). A team profile can bind a role no list knows, and
+#: ``code-reviewer`` reads ``AISQUARE_BIN_CODE_REVIEWER``, so no tuple of names
+#: can be complete: ``isolated_home`` clears every ambient name under these. The
+#: MODEL and EFFORT names spelled out above predate this and cover four of
+#: ``cli.launch.ROLES``' eight roles; tester, reviewer, manager and ui-tester
+#: were read and not cleared.
+AMBIENT_ENV_PREFIXES = ("AISQUARE_BIN_", "AISQUARE_MODEL_", "AISQUARE_EFFORT_")
 
 
 @pytest.fixture(autouse=True)
 def isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Point AISQUARE_HOME at a temp dir so tests never touch ``~/.aisquare``.
 
-    Everything else it clears is :data:`AMBIENT_ENV_VARS`, which is the single
-    answer to "what does the suite clear" — including ``CLAUDE_CONFIG_DIR``,
-    which used to be cleared on a line of its own here.
+    Everything else it clears is :data:`AMBIENT_ENV_VARS` and every name under
+    :data:`AMBIENT_ENV_PREFIXES`, which together are the single answer to "what
+    does the suite clear" — including ``CLAUDE_CONFIG_DIR``, which used to be
+    cleared on a line of its own here.
     """
     home = tmp_path / "aisquare-home"
     monkeypatch.setenv(HOME_ENV_VAR, str(home))
@@ -273,6 +309,8 @@ def isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     # each test opting in explicitly instead.
     for knob in AMBIENT_ENV_VARS:
         monkeypatch.delenv(knob, raising=False)
+    for knob in [name for name in os.environ if name.startswith(AMBIENT_ENV_PREFIXES)]:
+        monkeypatch.delenv(knob)
     # The command sweeps invoke `login` with no arguments. Without this it would
     # resolve config.toml's default and contact the REAL API from inside the test
     # suite. A loopback port nothing listens on refuses instantly, so the command

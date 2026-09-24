@@ -61,6 +61,19 @@ DIRTY_SHELL = {
     "ANTHROPIC_CUSTOM_HEADERS": "X-Pipeline-Id: someone-elses-run",
     "CLAUDE_CODE_USE_BEDROCK": "1",
     "CLAUDE_CODE_USE_VERTEX": "1",
+    # A developer running the suite from a fleet pane, with a wrapper bound and
+    # session-id pinning turned off. The per-role names are ones conftest spells
+    # out nowhere — fleet roles, and a role only a team profile would bind — so
+    # only its AMBIENT_ENV_PREFIXES can clear them.
+    "TMUX": "/tmp/tmux-1000/aisquare-fleet,4242,0",
+    "AISQUARE_AGENT_BIN": "claude-wrapper",
+    "AISQUARE_BIN_UI_TESTER": "claude-wrapper",
+    "AISQUARE_BIN_CODE_REVIEWER": "claude-wrapper",
+    "AISQUARE_MODEL_TESTER": "claude-someone-elses-pin",
+    "AISQUARE_EFFORT_REVIEWER": "low",
+    "AISQUARE_PIN_SESSION_ID": "0",
+    "AISQUARE_SERVE_PORT": "1",
+    "EXPLAINABILITY_INBOX_PATH": "/somewhere/theirs.db",
 }
 
 
@@ -104,6 +117,28 @@ def test_the_harness_sees_a_clean_machine() -> None:
         "the harness still sees interfering variables inside a test, so anything "
         "asserting an unpinned model or a traced launch is at the mercy of the "
         "caller's shell"
+    )
+
+
+def test_every_role_resolves_to_the_trees_defaults() -> None:
+    """The harness's per-role answers are this tree's, whichever role is asked.
+
+    ``AISQUARE_BIN_<ROLE>``, ``AISQUARE_MODEL_<ROLE>`` and
+    ``AISQUARE_EFFORT_<ROLE>`` are families rather than names, so the roles read
+    here are every role ``launch`` offers plus one only a team profile would
+    bind — a name no list in conftest could have spelled out. Session-id
+    pinning is asked too: a shell that turned it off fails every test asserting
+    a pinned launch.
+    """
+    from aisquare.cli.launch import ROLES
+    from aisquare.services import explainability
+
+    for role in (*ROLES, "code-reviewer"):
+        assert harness.resolve_binary(role).source == "default", role
+        assert harness.role_model_override(role) is None, role
+        assert harness.role_effort_override(role) is None, role
+    assert explainability.accepts_session_id(harness.DEFAULT_AGENT_BINARY), (
+        "the caller's AISQUARE_PIN_SESSION_ID turned session-id pinning off inside a test"
     )
 
 

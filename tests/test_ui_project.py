@@ -1107,6 +1107,53 @@ def test_the_explainability_tab_registers_the_roster_under_its_projects_key(
     assert any(m.startswith("✓ registered") for m, _ in notices), notices
 
 
+def test_under_a_hub_the_explainability_tab_is_about_the_hub_its_launches_join(
+    project: ProjectInfo,
+    quiet_explainability: dict[str, int],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``AISQUARE_TEAM_HUB`` puts a fleet window's ``launch`` on the hub's board, so its
+    agents authenticate with the hub's key — the one ``key set`` binds from any
+    repo under the hub. The tab showed, attached and registered under the PAGE's
+    key, which no launch from the page read (review of #170)."""
+    from aisquare.core.workspace import project_id_for
+
+    config = load_config()
+    config.explainability.targets = {
+        "stg": ExplainabilityTarget(gateway_url="https://stg.example"),
+    }
+    save_config(config)
+    monkeypatch.delenv("EXPLAINABILITY_API_KEY", raising=False)
+    hub = (tmp_path / "hub").resolve()
+    hub.mkdir()
+    monkeypatch.setenv("AISQUARE_TEAM_HUB", str(hub))
+    keys: list[str | None] = []
+
+    def register_roster(target: ops.ResolvedTarget, names: tuple[str, ...]) -> ops.HttpVerdict:
+        keys.append(target.api_key)
+        return ops.HttpVerdict(ok=True, status=200, detail="HTTP 200", payload={"agents": []})
+
+    monkeypatch.setattr(ops, "register_roster", register_roster)
+
+    async def scenario(pilot: Pilot[None], host: Host) -> str:
+        host.query_one(ProjectView).active = "tab-explainability"
+        await settle(pilot)
+        host.query_one("#explainability-key-value", Input).value = "pk-hub-0123456789"
+        await pilot.click("#explainability-attach-key")
+        await settle(pilot)
+        await pilot.click("#explainability-register")
+        await settle(pilot)
+        return host.query_one(ExplainabilityView).status_text
+
+    status = drive(project, scenario)
+    with store_session() as store:
+        assert store.project_explainability(project_id_for(hub)) is not None
+        assert store.project_explainability(project.id) is None, "not the page under a hub"
+    assert "hub: its own key for target stg (in use)" in status
+    assert keys == ["pk-hub-0123456789"]
+
+
 def test_the_key_row_names_a_missing_file_instead_of_contradicting_itself(
     project: ProjectInfo, quiet_explainability: dict[str, int]
 ) -> None:

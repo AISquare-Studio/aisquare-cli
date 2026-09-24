@@ -30,7 +30,7 @@ from textual.containers import Horizontal, VerticalScroll
 from textual.widgets import Button, Input, Static
 from textual.worker import Worker, WorkerState
 
-from aisquare.core import outbox
+from aisquare.core import orchestrator, outbox
 from aisquare.core.config import AppConfig, load_config, save_config
 from aisquare.models import ProjectInfo
 from aisquare.services import explainability as explainability_service
@@ -63,13 +63,28 @@ class StatusReport:
     """Tracing is on and the proxy would not take a session — the red state."""
 
 
-def status_report(project: ProjectInfo | None = None) -> StatusReport:
+def key_project(page: ProjectInfo | None) -> ProjectInfo | None:
+    """The project whose key a launch from ``page`` authenticates with (#141).
+
+    A fleet window runs ``launch`` in the page's root, and ``launch`` joins
+    ``orchestrator.team_project`` from there — ``AISQUARE_TEAM_HUB`` when it is
+    set, else this checkout — the one answer the CLI's ``key``, ``env``,
+    ``status`` and ``register`` give. This tab answered with the page itself,
+    so under a hub it showed and attached the page's key while the page's
+    agents launched with the hub's (review of #170). The row names whichever
+    project it is, so a hub is visible as the hub.
+    """
+    return orchestrator.team_project(page.root) if page is not None else None
+
+
+def status_report(page: ProjectInfo | None = None) -> StatusReport:
     """Gather what ``status`` shows: the proxy lane, the client lane, the spool.
 
     The probe dials only when tracing is on (``ops.proxy_state`` decides, as it
     does for the CLI), so a machine that never asked for tracing costs nothing.
-    The key is resolved for ``project`` — the page this tab sits on (#141).
+    The key is resolved for the project ``page``'s launches join (:func:`key_project`).
     """
+    project = key_project(page)
     config = load_config()
     settings = config.explainability
     target = ops.resolve_target(settings, None, project_id=project.id if project else None)
@@ -120,15 +135,16 @@ def _project_key_row(project: ProjectInfo | None, target: ops.ResolvedTarget) ->
     return f"{name}: its own key for target {binding.target} ({state})"
 
 
-def attach_project_key(value: str, project: ProjectInfo | None) -> Notice:
-    """What the Attach button does: ``project``'s own key, for the active target.
+def attach_project_key(value: str, page: ProjectInfo | None) -> Notice:
+    """What the Attach button does: a project's own key, for the active target.
 
-    ``project`` is the page this tab sits on — the project the page's agents
-    are launched in — never the ``project switch`` pin (review of #170).
+    The project is the one ``page``'s agents launch into (:func:`key_project`) —
+    never the ``project switch`` pin (review of #170).
     """
     key = value.strip()
     if not key:
         return Notice("paste the workspace key first — nothing was attached", "warning")
+    project = key_project(page)
     if project is None:
         return Notice("no project to attach a key to", "error")
     settings = load_config().explainability
@@ -153,15 +169,19 @@ def render_status(report: StatusReport) -> Text:
     return text
 
 
-def register_roster(project_id: str | None = None) -> Notice:
+def register_roster(page: ProjectInfo | None = None) -> Notice:
     """What ``aisquare explainability register`` does, as a notice instead of an exit code.
 
-    Under ``project_id``'s own key when it has one (#141), as the CLI's
-    ``register`` does: registering at machine level left a project pointed at
-    another workspace refused 409 on every span (review of #170).
+    Under the key of the project ``page``'s launches join (:func:`key_project`)
+    when that project has its own (#141), as the CLI's ``register`` does:
+    registering at machine level left a project pointed at another workspace
+    refused 409 on every span (review of #170).
     """
+    project = key_project(page)
     settings = load_config().explainability
-    target = ops.resolve_target(settings, None, project_id=project_id)
+    target = ops.resolve_target(
+        settings, None, project_id=project.id if project is not None else None
+    )
     if not target.gateway_url:
         return Notice(
             f"target '{target.name}' has no gateway URL — set one with: "
@@ -245,7 +265,7 @@ class ExplainabilityView(VerticalScroll):
     def __init__(self, project: ProjectInfo | None = None, *, id: str | None = None) -> None:
         super().__init__(id=id)
         self.project = project
-        """The project page this tab sits on: its key is the one shown and attached (#141)."""
+        """The page this tab sits on; the key shown is the one its launches use (#141)."""
         self.status_text = ""
         """The plain text of the status block (what a test reads)."""
 
@@ -325,7 +345,7 @@ class ExplainabilityView(VerticalScroll):
 
     @on(Button.Pressed, "#explainability-attach-key")
     def _attach_key(self) -> None:
-        """Attach the pasted key to this page's project (#141); the field is cleared either way."""
+        """Attach the pasted key where this page's agents launch (#141); clears the field."""
         field = self.query_one("#explainability-key-value", Input)
         try:
             notice = attach_project_key(field.value, self.project)
@@ -383,8 +403,7 @@ class ExplainabilityView(VerticalScroll):
 
     @on(Button.Pressed, "#explainability-register")
     def _register(self) -> None:
-        project_id = self.project.id if self.project is not None else None
-        self._start_network_work(REGISTER_WORKER, partial(register_roster, project_id))
+        self._start_network_work(REGISTER_WORKER, partial(register_roster, self.project))
 
     @on(Button.Pressed, "#explainability-ship")
     def _ship(self) -> None:

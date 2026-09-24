@@ -20,8 +20,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (`$AISQUARE_TEAM_HUB`, else this checkout — never the `project switch` pin)
   everywhere: `launch`, `fleet spawn`, `explainability env [--project]` and
   `register [--project]` use the project's key, `status` shows its origin,
-  and each project page's Explainability tab shows its own and gains an
-  *Attach key* field. The client lane (`ship`) still uses the machine key.
+  and each project page's Explainability tab shows the key its launches use
+  (the hub's under a hub) and gains an *Attach key* field. The client lane (`ship`) still uses the machine key.
 - **A restart is the same agent, and the UI comes back where it was** (#144).
   `fleet_agent` rows record a `launch_spec` at spawn — the binary, the
   permission mode actually passed, the arguments after the role's own, the

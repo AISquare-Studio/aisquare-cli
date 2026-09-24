@@ -308,11 +308,12 @@ knows this machine's agent identities — every span is refused 409
 `agent_not_registered` — so run `explainability register` there once;
 `register [--project P]` registers under the same project's key. `status`
 shows the origin for that project, and each project page's Explainability tab
-shows its own, with an *Attach key* field (the key is pasted, never echoed) and
-a *Register roster* button that registers under it. The client lane — the
-insights this CLI buffers and `ship` drains — still ships under the machine
-key, and `doctor --live` checks the machine's workspace; per-project shipping
-is a follow-up.
+shows the key its launches use — the project they join from the page's root,
+so the hub's under `$AISQUARE_TEAM_HUB` — with an *Attach key* field (the key
+is pasted, never echoed) and a *Register roster* button that registers under
+it. The client lane — the insights this CLI buffers and `ship` drains — still
+ships under the machine key, and `doctor --live` checks the machine's
+workspace; per-project shipping is a follow-up.
 `init --explainability` keeps writing the machine key, so a single-workspace
 machine is unaffected.
 

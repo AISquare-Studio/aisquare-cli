@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import threading
 import tomllib
 from collections.abc import Callable, Coroutine, Iterator, Sequence
 from datetime import UTC, datetime
@@ -952,6 +953,46 @@ def test_start_manager_spawns_at_the_panes_own_size(
     assert isinstance(size, tuple) and len(size) == 2
     width, height = size
     # The pane is hidden until the manager exists, so the tab's own size stands in:
-    # the pane's width, and the rows left under the header and the button.
+    # the pane's width, and an estimate of the rows it will have under the header.
     assert width == tab_width and 0 < height < tab_height
-    assert width < 144, "a UI spawn must never be born wide enough to open the diff panel"
+    # Uncapped on purpose: the pane's first attach widens the window to the pane
+    # whatever it was born at, so a pane 144 or more columns wide shows Claude Code's
+    # panel either way (docs/fleet.md). What stays under that line is a window nobody
+    # sized — the headless default (test_tmux, test_fleet_service).
+
+
+def test_start_manager_reads_the_panes_size_on_the_ui_thread_and_spawns_off_it(
+    project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The geometry is read when the button is pressed, the spawn runs in the worker.
+
+    Textual's DOM is not thread-safe: reading a widget's ``content_size`` from the
+    worker thread can rebuild the compositor's map off the event loop. So the size
+    is taken on the UI thread and handed to the worker, and only the slow part —
+    ``fleet.spawn`` and its tmux calls — runs off it.
+    """
+    fleet: dict[str, FleetAgent | None] = {"manager": None}
+    on_ui_thread: dict[str, bool] = {}
+    measure = ManagerTab._pane_size
+
+    def pane_size(tab: ManagerTab) -> tuple[int, int] | None:
+        on_ui_thread["measure"] = threading.current_thread() is threading.main_thread()
+        return measure(tab)
+
+    def spawn(target: ProjectInfo, role: str, **kwargs: object) -> fleet_service.SpawnReceipt:
+        on_ui_thread["spawn"] = threading.current_thread() is threading.main_thread()
+        fleet["manager"] = fake_agent(target)
+        return fleet_service.SpawnReceipt(
+            agent=fake_agent(target), asked_label=None, tmux_session="asq-amber-otter"
+        )
+
+    monkeypatch.setattr(ManagerTab, "_pane_size", pane_size)
+    monkeypatch.setattr(fleet_service, "spawn", spawn)
+    monkeypatch.setattr(fleet_service, "manager_of", lambda target: fleet["manager"])
+
+    async def scenario(pilot: Pilot[None], host: Host) -> None:
+        await pilot.click("#start-manager")
+        await settle(pilot)
+
+    drive(project, scenario)
+    assert on_ui_thread == {"measure": True, "spawn": False}

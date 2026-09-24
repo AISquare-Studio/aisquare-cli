@@ -524,17 +524,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   never shipped.
 
 ### Fixed
-- **Fleet windows are born the width they will be shown, and never wide
-  enough to grow Claude Code's diff panel on their own** (#149). Every window
-  started at 200x50 and only shrank to its pane when the UI attached it; past
-  144 columns Claude Code's fullscreen renderer opens the diff panel by itself
-  as soon as a file is edited, remembers that for later sessions, and inside
-  the fleet nothing could close it — clicks are not forwarded (#148) and a
-  `/diff` typed while Claude works is queued. The default is now 120x40
-  (`core.tmux.DEFAULT_WINDOW_WIDTH/HEIGHT`, under 144 and above the 110
-  `/diff` needs on demand), and a spawn from the UI's *Start manager* passes
-  the pane's real size. `docs/fleet.md` says how to close a panel that did
-  open: `/diff` once the agent is idle.
+- **Fleet windows are born the width they will be shown, and a headless one
+  under the width at which Claude Code grows its diff panel on its own**
+  (#149). Every window started at 200x50 and only shrank to its pane when the
+  UI attached it; past 144 columns Claude Code's fullscreen renderer opens the
+  diff panel by itself as soon as a file is edited, remembers that for later
+  sessions, and inside the fleet nothing could close it — clicks are not
+  forwarded (#148) and a `/diff` typed while Claude works is queued. The
+  default is now 120x40 (`core.tmux.DEFAULT_WINDOW_WIDTH/HEIGHT`, under 144
+  and above the 110 `/diff` needs on demand), and a spawn from the UI's
+  *Start manager* is born at the size its pane will have — a pane that is
+  itself 144 columns or wider still shows the panel. `docs/fleet.md` says how
+  to close a panel that did open: `/diff` once the agent is idle.
 - **The sidebar bell rings for a real prompt, not for every notification**
   (#153). Every Claude Code `Notification` flipped a session to 🔔 `attention`,
   and 164 of the 183 bells on the reporting machine were the routine idle notice

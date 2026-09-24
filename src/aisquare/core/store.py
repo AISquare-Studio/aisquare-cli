@@ -716,6 +716,7 @@ class ContextStore(Protocol):
     def touch_session(
         self, session_id: str, *, cursor: int | None = None, state: str | None = None
     ) -> None: ...
+    def replace_session_state(self, session_id: str, expected: str, state: str) -> bool: ...
     def mark_attention(self, session_id: str) -> bool: ...
     def mark_limited(self, session_id: str, resets_at: datetime | None) -> None: ...
     def end_session(self, session_id: str, *, release_claims: bool = True) -> list[TeamTask]: ...
@@ -1509,6 +1510,25 @@ class SqliteStore:
             (*params, session_id),
         )
         self._conn.commit()
+
+    def replace_session_state(self, session_id: str, expected: str, state: str) -> bool:
+        """Set ``state`` on a session whose state is still ``expected`` — and nothing else.
+
+        A compare-and-set for a writer that takes a state BACK: a hand-over that
+        did not happen returning its mark (``team.HANDOVER_STATE``) to what the
+        session said before. :meth:`touch_session` is a heartbeat — it bumps
+        ``last_seen_at`` and clears ``ended_at`` — and taking a mark back is no
+        evidence of life: a session whose ``SessionEnd`` had already run came back
+        to the board as a live teammate (review of #163, round 2). Nor is it
+        newer than a state written since the mark, which it leaves alone. Returns
+        whether the row changed.
+        """
+        cursor = self._conn.execute(
+            "UPDATE team_session SET state = ? WHERE id = ? AND state = ?",
+            (state, session_id, expected),
+        )
+        self._conn.commit()
+        return cursor.rowcount == 1
 
     def mark_attention(self, session_id: str) -> bool:
         """Flip a session into the attention state, atomically.

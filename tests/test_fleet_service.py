@@ -7386,7 +7386,8 @@ def test_a_running_agent_is_not_stopped_for_a_restart_its_account_or_binary_woul
     an account no longer on this machine — reachable for a slotless row through its
     session's config dir, whose slot number outlives the slot — or a binary gone from
     PATH were refused inside ``spawn``, AFTER the stop, leaving no agent at all. Both
-    are asked first now, as ``switch`` resolves its account before its stop."""
+    are asked first now, as ``switch`` resolves its account before its stop, and so is
+    the role, which ``spawn`` refuses before either."""
     from aisquare.core import claude_accounts as accounts_core
 
     agent = _coder(project)
@@ -7417,8 +7418,18 @@ def test_a_running_agent_is_not_stopped_for_a_restart_its_account_or_binary_woul
                 last_seen_at=now,
             )
         )
-    monkeypatch.setenv("PATH", str(tmp_path / "nowhere"))
-    with pytest.raises(FleetError, match="cannot restart 'coder-1': 'claude' is not on your PATH"):
+    with monkeypatch.context() as patched:
+        patched.setenv("PATH", str(tmp_path / "nowhere"))
+        with pytest.raises(
+            FleetError, match="cannot restart 'coder-1': 'claude' is not on your PATH"
+        ):
+            fleet_service.restart(project, agent.label)
+    assert tmux.typed == [] and tmux.killed == []
+    # A role whose declaration left the config after the agent started: `spawn` refuses
+    # it before anything else, and that refusal came after the stop (review of #163,
+    # round 2).
+    monkeypatch.setattr(fleet_service, "_role_ok", lambda role: False)
+    with pytest.raises(FleetError, match="cannot restart 'coder-1': unknown role 'coder'"):
         fleet_service.restart(project, agent.label)
     assert tmux.typed == [] and tmux.killed == []
     with store_session() as store:
@@ -7996,3 +8007,330 @@ def test_a_stop_whose_death_a_listing_recorded_asks_again_for_the_release_it_cou
     assert receipt.release_failed is None
     assert _task_now(mine.id).claimed_by is None
     assert _events(project, "agent_exited") == [f"{agent.label} exited (0)"]  # still once
+
+
+# --- review of #163, round 2: the mark outlives the agent's own hooks; one hand-over at a time --
+
+
+@pytest.mark.parametrize("landing", ["stop", "attention", "wakeup"])
+def test_a_turn_that_ends_inside_a_restart_s_grace_leaves_the_hand_over_its_mark(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    landing: str,
+) -> None:
+    """``restart`` hands a running agent over as ``switch`` does: the session is marked
+    ``HANDOVER_STATE``, then ``/exit`` is typed. An agent in the middle of a turn finishes
+    it first, and its own hooks wrote over the mark: ``hook_stop`` wrote ``waiting``, a
+    manager's wake-up ``working``, a permission prompt ``attention``. The ``SessionEnd``
+    that followed released the claims the replacement was to inherit, a listing ended the
+    row under the hand-over, and the hand-over's stop raised after the kill: the agent
+    gone, nothing started, the task back in the pool. A marked session's own hooks leave
+    the mark to the hand-over now, and a manager on its way out is not kept going."""
+    role = "manager" if landing == "wakeup" else "coder"
+    mine = _task(project, "the task this agent holds")
+    agent, first = _spawned(project, role, mine.id if role == "coder" else None, tmux, monkeypatch)
+    team_service.hook_session_start(first, project.root, "startup")
+    team_service.claim_task(mine.id, session_ref=first)
+    if landing == "wakeup":
+        with store_session() as store:  # a decision on the board since its cursor
+            team_service._emit(store, project.id, "question", "which schema version?")
+    nudges = _recorded_nudges(monkeypatch)
+    real_keys = tmux.send_keys
+    decisions: list[team_service.StopDecision | None] = []
+
+    def enter_then_the_turn_ends(pane_id: str, *keys: str) -> None:
+        real_keys(pane_id, *keys)
+        if pane_id == agent.pane_id and not decisions:
+            if landing == "attention":
+                team_service.hook_notification(
+                    first,
+                    project.root,
+                    "Claude needs your permission to use Bash",
+                    notification_type="permission_prompt",
+                )
+            decisions.append(team_service.hook_stop(first, project.root))
+            team_service.hook_session_end(first, project.root, reason="prompt_input_exit")
+            fleet_service.list_agents(project)  # the UI's tick
+
+    monkeypatch.setattr(tmux, "send_keys", enter_then_the_turn_ends)
+
+    receipt = fleet_service.restart(project, agent.label)
+
+    assert decisions == [None]  # no wake-up for an agent on its way out
+    assert receipt.was_running is True and receipt.started.ended_at is None
+    assert len(tmux.spawned) == 2
+    held = _task_now(mine.id)
+    assert held.status == "doing" and held.claimed_by == receipt.started.session_id
+    assert _events(project, "agent_exited") == [] and _events(project, "task_released") == []
+    assert _events(project, "attention") == []
+    assert nudges == []
+
+
+@pytest.mark.parametrize("starts", [True, False], ids=["replaced", "spawn-refused"])
+@pytest.mark.parametrize("unguarded", ["no-session", "mark-lost"])
+@pytest.mark.parametrize("command", ["restart", "switch"])
+def test_a_hand_over_whose_row_a_listing_ended_after_its_exit_is_a_stop_that_worked(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    command: str,
+    unguarded: str,
+    starts: bool,
+) -> None:
+    """A listing leaves a hand-over's row alone only while its session carries the mark,
+    and nothing marks a session that is not on the board yet (its ``SessionStart`` not
+    in, or the orchestrator off), nor keeps a mark a writer that does not know it
+    overwrites. A listing then records the death the hand-over's own ``/exit`` caused,
+    released and announced as any death is, and the hand-over's stop raised "no longer
+    live" after the kill: the agent gone and nothing started. It is a stop that worked,
+    as it always was for a plain one, and the replacement starts. What that listing
+    announced is not announced again should the replacement never start."""
+    if command == "switch":
+        _two_slots_with_usage(monkeypatch, work=95, personal=10)
+    mine = _task(project, "the task this coder is for")
+    agent, first = _spawned(project, "coder", mine.id, tmux, monkeypatch)
+    if unguarded == "mark-lost":
+        team_service.hook_session_start(first, project.root, "startup")
+        team_service.claim_task(mine.id, session_ref=first)
+    nudges = _recorded_nudges(monkeypatch)
+    if not starts:
+
+        def refused(*args: Any, **kwargs: Any) -> fleet_service.SpawnReceipt:
+            raise FleetError("tmux refused the window (fake)")
+
+        monkeypatch.setattr(fleet_service, "spawn", refused)
+    real_keys = tmux.send_keys
+    listed: list[list[FleetAgentStatus]] = []
+
+    def enter_then_a_listing(pane_id: str, *keys: str) -> None:
+        real_keys(pane_id, *keys)
+        if pane_id == agent.pane_id and not listed:
+            if unguarded == "mark-lost":
+                with store_session() as store:
+                    store.touch_session(first, state="working")
+            listed.append(fleet_service.list_agents(project))  # the UI's tick
+
+    monkeypatch.setattr(tmux, "send_keys", enter_then_a_listing)
+
+    def hand_over() -> tuple[FleetAgent, FleetAgent]:
+        if command == "restart":
+            restarted = fleet_service.restart(project, agent.label)
+            assert restarted.was_running is True
+            return restarted.replaced, restarted.started
+        switched = fleet_service.switch(project, agent.label, reason="session limit")
+        return switched.stopped, switched.started
+
+    if starts:
+        replaced, started = hand_over()
+        assert replaced.id == agent.id and replaced.ended_at is not None
+        assert started.ended_at is None and len(tmux.spawned) == 2
+    else:
+        with pytest.raises(FleetError, match="refused the window"):
+            hand_over()
+    [[recorded]] = listed
+    assert recorded.agent.id == agent.id and recorded.agent.ended_at is not None
+    assert _events(project, "agent_exited") == [f"{agent.label} exited (0)"]  # the listing's
+    assert nudges == [f"{agent.label} exited"]
+
+
+@pytest.mark.parametrize("intruder", ["restart", "switch"])
+def test_a_restart_or_a_switch_inside_a_switch_is_refused_and_leaves_the_hand_over_to_it(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    intruder: str,
+) -> None:
+    """The listing and ``reap`` leave a row a hand-over is stopping to it; ``restart`` read
+    that same dead pane, found ``_end_dead_rows`` skipping it, and fell through to a plain
+    ``stop``: the parked claims went back to the pool, ``agent_exited`` went out, the
+    switch failed on its own row and the restart's replacement did not hold the task. A
+    second ``switch`` (by hand, while the automatic one waits out its grace) stopped the
+    row itself and started a replacement of its own. Both are refused while the hand-over
+    holds the row, as the automatic path refuses a session already in flight."""
+    _two_slots_with_usage(monkeypatch, work=95, personal=10)
+    task = _task(project, "keep it across the move")
+    agent = fleet_service.spawn(
+        project, "coder", worktree=False, account="2", task_id=task.id
+    ).agent
+    _coder(project, label="coder-other")  # keeps the session, and the server, up
+    old = agent.session_id or ""
+    _with_transcript(agent, None)
+    assert team_service.claim_task(task.id, session_ref=old).status == "doing"
+    nudges = _recorded_nudges(monkeypatch)
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
+    refusals: list[str] = []
+    real_keys = tmux.send_keys
+
+    def exit_then_another_hand_over(pane_id: str, *keys: str) -> None:
+        real_keys(pane_id, *keys)
+        if pane_id == agent.pane_id and not refusals:
+            team_service.hook_session_end(old, project.root, reason="prompt_input_exit")
+            try:
+                if intruder == "restart":
+                    fleet_service.restart(project, agent.label)
+                else:
+                    fleet_service.switch(project, agent.label)
+            except FleetError as exc:
+                refusals.append(str(exc))
+            else:
+                refusals.append("not refused")
+
+    monkeypatch.setattr(tmux, "send_keys", exit_then_another_hand_over)
+
+    receipt = fleet_service.switch(project, agent.label, reason="session limit")
+
+    [refusal] = refusals
+    assert "a hand-over is already moving it" in refusal
+    assert receipt.stopped.id == agent.id and receipt.started.ended_at is None
+    assert len(tmux.spawned) == 3  # the two above, and the switch's replacement alone
+    held = _task_now(task.id)
+    assert held.status == "doing" and held.claimed_by == receipt.started.session_id
+    with store_session() as store:
+        kinds = [e.kind for e in store.recent_events(project.id, limit=20)]
+    assert "agent_exited" not in kinds and "task_released" not in kinds
+    assert nudges == []
+
+
+def test_a_hand_over_refused_after_its_agent_s_session_ended_leaves_that_session_ended(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A hand-over whose stop is refused puts the session's state back, and did it with
+    ``touch_session``: a heartbeat, which also clears ``ended_at``. Refused after the
+    agent's own ``SessionEnd`` (the operator's ``fleet stop`` ended the row in the
+    grace), that brought a dead session back to the board as a live teammate. Only the
+    mark is taken back now, and only while it is still there."""
+    mine = _task(project, "the task this coder is for")
+    agent, first = _spawned(project, "coder", mine.id, tmux, monkeypatch)
+    team_service.hook_session_start(first, project.root, "startup")
+    team_service.claim_task(mine.id, session_ref=first)
+    real_keys = tmux.send_keys
+    stopped: list[fleet_service.StopReceipt] = []
+
+    def exit_then_the_operator_stops_it(pane_id: str, *keys: str) -> None:
+        real_keys(pane_id, *keys)
+        if pane_id == agent.pane_id and not stopped:
+            team_service.hook_session_end(first, project.root, reason="prompt_input_exit")
+            stopped.append(fleet_service.stop(project, agent.label))  # another terminal
+
+    monkeypatch.setattr(tmux, "send_keys", exit_then_the_operator_stops_it)
+
+    with pytest.raises(NoSuchAgent, match="no longer live"):
+        fleet_service.restart(project, agent.label)
+
+    [operator] = stopped
+    assert operator.agent.id == agent.id and len(tmux.spawned) == 1  # that stop stands
+    with store_session() as store:
+        session = store.get_session(first)
+    assert session is not None and session.ended_at is not None
+    assert session.state != team_service.HANDOVER_STATE
+
+
+def test_a_resumed_restart_is_told_in_one_line_to_carry_on(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """``claude --resume`` opens the conversation at an idle prompt, and ``switch`` types
+    its replacement a line to continue for that reason (review of #205, finding 5).
+    ``restart`` typed nothing, so a resumed agent sat idle — a running one's restart
+    holding its task's claim the while — and a resumed manager, ``working`` from its
+    start hook with no turn to end, was refused the board's nudges while that row
+    stayed fresh."""
+    mine = _task(project, "the task this coder is for")
+    agent, first = _spawned(project, "coder", mine.id, tmux, monkeypatch)
+    team_service.hook_session_start(first, project.root, "startup")
+    team_service.claim_task(mine.id, session_ref=first)
+    transcript = tmp_path / f"{first}.jsonl"
+    transcript.write_text('{"type":"user"}\n', encoding="utf-8")
+    with store_session() as store:
+        store.upsert_session(
+            TeamSession(
+                id=first,
+                project_id=project.id,
+                role="coder",
+                started_at=datetime.now(tz=UTC),
+                last_seen_at=datetime.now(tz=UTC),
+                transcript_path=str(transcript),
+            )
+        )
+
+    receipt = fleet_service.restart(project, agent.label)
+
+    assert receipt.resumed is True and receipt.started.session_id == first
+    assert _task_now(mine.id).claimed_by == first  # the same session carries the claim on
+    [line] = [
+        text for pane, kind, text in tmux.typed if pane == receipt.started.pane_id and kind != "key"
+    ]
+    assert "\n" not in line and line.startswith(f"You are {agent.label}, restarted")
+    assert "aisquare board" in line and "continue" in line
+
+
+def test_restarting_a_death_no_listing_recorded_announces_it_but_wakes_no_manager(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """``restart`` records a death no listing has seen yet the way a listing records it,
+    and that nudged the manager: woken by "coder-1 exited" just as the replacement
+    started, before ``restarted`` was on the board, it could run its own ``fleet restart
+    coder-1`` — by label, onto the replacement. The death is still announced; the
+    manager is not woken for an agent that is already coming back."""
+    manager = _waiting_manager(tmux, project)
+    coder = _coder(project, label="coder-1")
+    tmux.die(coder.pane_id, 1)
+
+    receipt = fleet_service.restart(project, "coder-1")
+
+    assert receipt.replaced.id == coder.id and receipt.replaced.exit_status == 1
+    assert _events(project, "agent_exited") == ["coder-1 exited (1)"]
+    assert [typed for typed in tmux.typed if typed[0] == manager.pane_id] == []
+
+
+def test_a_switch_whose_agent_a_restart_resumed_meanwhile_leaves_that_session_s_state_alone(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """``switch`` refuses a row whose label passed to a newcomer during its headroom lookup
+    (round 1), but it marked the session first and refused in the stop. A newcomer that
+    is a ``fleet restart`` resuming the transcript shares the session id: the mark landed
+    on its live session, and the take-back wrote the switch's snapshot (``limited``,
+    read before the agent exited) over the state the newcomer's own start hook wrote.
+    The refusal comes before the mark now."""
+    from aisquare.services import claude_accounts as accounts_service
+
+    _two_slots_with_usage(monkeypatch, work=95, personal=10)
+    agent = fleet_service.spawn(project, "coder", worktree=False, account="2").agent
+    sid = agent.session_id or ""
+    transcript = tmp_path / f"{sid}.jsonl"
+    transcript.write_text('{"type":"user"}\n', encoding="utf-8")
+    _with_transcript(agent, transcript)
+    with store_session() as store:
+        store.mark_limited(sid, None)  # it hit its limit: the state the switch reads
+    real_choose = accounts_service.choose_for_handover
+    newcomer: list[FleetAgent] = []
+
+    def choose_while_it_is_restarted(*args: Any, **kwargs: Any) -> Any:
+        tmux.die(agent.pane_id, 0)
+        newcomer.append(fleet_service.restart(project, agent.label).started)
+        with store_session() as store:
+            store.touch_session(sid, state="working")  # the resumed session's start hook
+        return real_choose(*args, **kwargs)
+
+    monkeypatch.setattr(accounts_service, "choose_for_handover", choose_while_it_is_restarted)
+
+    with pytest.raises(NoSuchAgent, match="another agent now"):
+        fleet_service.switch(project, agent.label, reason="session limit")
+
+    [new] = newcomer
+    assert new.session_id == sid and _row(new.id).ended_at is None
+    with store_session() as store:
+        session = store.get_session(sid)
+    assert session is not None and session.state == "working"
+    assert [typed for typed in tmux.typed if typed[0] == new.pane_id and typed[2] == "/exit"] == []

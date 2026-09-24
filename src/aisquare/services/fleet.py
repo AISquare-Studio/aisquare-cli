@@ -244,8 +244,9 @@ class StopReceipt:
     on ``stop`` and a second release of its own — two paths that had to agree
     the pane was dead, and a caller that forgot the flag double-released
     (review of #203, round 4). One release, in ``stop``, reported here — and
-    none under ``handover`` (``switch``), whose claims wait for the
-    replacement, so its ``released`` is empty whatever the session held.
+    none under ``handover`` (``switch``, and ``restart`` of a running agent),
+    whose claims wait for the replacement, so its ``released`` is empty
+    whatever the session held.
     """
 
     agent: FleetAgent
@@ -256,6 +257,13 @@ class StopReceipt:
     vanished session row) costs the release and is SAID here — never the stop,
     which used to raise out of ``shutdown`` and report a dead, ended row as
     LEFT LIVE, keep the project's pause and exit 1 (review of the fold)."""
+    withheld: bool = False
+    """A hand-over's stop ended the row itself, releasing and announcing nothing:
+    the claims wait for the replacement, and if it never starts
+    :func:`_abandon_handover` gives them back and announces the exit. False for
+    a plain stop, and for a hand-over whose row a listing ended first — that
+    listing released and announced it, and nothing is left to give back
+    (:func:`_stop_row`)."""
 
 
 @dataclass(frozen=True)
@@ -1086,6 +1094,16 @@ def _role_ok(role: str) -> bool:
     return launch._role_ok(role)
 
 
+def _require_role(role: str) -> None:
+    """Refuse a role :func:`_role_ok` does not know — ``spawn``'s first refusal, and
+    ``restart``'s before it stops anything."""
+    if not _role_ok(role):
+        raise FleetError(
+            f"unknown role {role!r} — expected one of: {', '.join(FLEET_ROLES)}, a harness "
+            "role, or one bound with `aisquare team bind`"
+        )
+
+
 def _task_for(store: ContextStore, project: ProjectInfo, task_id: str | None) -> TeamTask | None:
     """The board task an agent is spawned for — on THIS project's board, or refused."""
     if task_id is None:
@@ -1128,6 +1146,18 @@ def _replaced(label: str, current: FleetAgent, agent_id: str) -> NoSuchAgent:
     return NoSuchAgent(
         f"{label!r} is another agent now ({current.id}) — {agent_id} ended and was "
         "replaced since; nothing was done to either (`aisquare fleet ls` shows who is running)"
+    )
+
+
+def _in_hand_over(verb: str, label: str) -> FleetError:
+    """The refusal of a ``restart`` or a ``switch`` of a row a hand-over is already moving
+    (:func:`_handed_over`) — the automatic path's own brake, for the commands. It names
+    the grace, since a hand-over interrupted on its way holds the row until that lapses."""
+    minutes = int(HANDOVER_GRACE.total_seconds() // 60)
+    return FleetError(
+        f"cannot {verb} {label!r}: a hand-over is already moving it and starts the "
+        f"replacement itself — nothing was done (`aisquare fleet ls` shows it come back; "
+        f"one that was interrupted lets go of it within {minutes} min)"
     )
 
 
@@ -1209,11 +1239,7 @@ def spawn(
     size, and a note says so (``WindowInfo.resize_refused``).
     """
     config = settings()
-    if not _role_ok(role):
-        raise FleetError(
-            f"unknown role {role!r} — expected one of: {', '.join(FLEET_ROLES)}, a harness "
-            "role, or one bound with `aisquare team bind`"
-        )
+    _require_role(role)
     srv = server(config)
     _require_tmux(srv)
     resolution = _binary_for(role, override=binary)
@@ -1725,6 +1751,11 @@ def _handed_over(agent: FleetAgent, session: TeamSession | None, now: datetime) 
     :data:`HANDOVER_GRACE`, which bounds the rest — the old row of a switch
     killed mid-way, and a fresh replacement left on the old id by a claims move
     the store refused after its predecessor fired no ``SessionEnd``.
+
+    The one rule for who may touch such a row: the listing and ``reap`` leave
+    it alone, ``restart`` and ``switch`` refuse it, and the hand-over's own stop
+    reads a row ended WITHOUT it holding as a listing's record of its ``/exit``
+    (review of #163, round 2).
     """
     return (
         session is not None
@@ -1786,6 +1817,7 @@ def _end_dead_rows(
     views: Mapping[str, dict[str, _PaneView] | None],
     *,
     best_effort: bool = False,
+    nudge: bool = True,
 ) -> list[FleetAgent]:
     """Record every LIVE row whose observed pane is dead as ended — reap's rule, on every read.
 
@@ -1818,6 +1850,11 @@ def _end_dead_rows(
     ``exited`` from its pane meanwhile (:func:`_derive`). A spawn or a restart
     decides on what this recorded (a dead manager still "live" refuses the new
     one), so there the store's error is the answer, not a refusal it explains.
+
+    ``nudge=False`` is a RESTART's: the death is still announced, but the
+    manager is not woken for an agent already on its way back — woken, it read
+    "exited" before ``restarted`` was on the board and could restart the label
+    itself, onto the replacement (review of #163, round 2).
     """
     dead = [
         (agent, pane)
@@ -1852,8 +1889,9 @@ def _end_dead_rows(
                 row = store.get_fleet_agent(agent.id)
             if row is not None:
                 ended.append(row)
-    for row in mine:
-        nudge_manager(row.project_id, reason=f"{row.label} exited")
+    if nudge:
+        for row in mine:
+            nudge_manager(row.project_id, reason=f"{row.label} exited")
     return ended
 
 
@@ -2084,16 +2122,18 @@ def _stop_row(
     turn, count it as stopped, and then record it lost as a late row too
     (review of the fold).
 
-    ``handover`` is :func:`switch`'s: the agent is about to start again under
-    another account — resuming the same session, or a fresh one that takes the
-    claims over — so the ended row's claims are not released (the session was
-    marked ``team.HANDOVER_STATE`` first, and its own ``SessionEnd`` parks them
-    the way a ``/clear`` does), no ``agent_exited`` goes out and the manager is
-    not nudged — ``switch`` closes the loop with ``switched``, a wake kind.
-    Released and announced here, a looper took the moving agent's task in the
-    gap and the manager respawned an agent that was on its way back (review of
-    #205, finding 6; the fresh start, fourth round). Its receipt's ``released``
-    is therefore empty: the claims are PARKED for the replacement, not returned.
+    ``handover`` is the HAND-OVER's — :func:`switch`, and :func:`restart` of a
+    running agent: the agent is about to start again — resuming the same
+    session, or a fresh one that takes the claims over — so the ended row's
+    claims are not released (the session was marked ``team.HANDOVER_STATE``
+    first, and its own ``SessionEnd`` parks them the way a ``/clear`` does), no
+    ``agent_exited`` goes out and the manager is not nudged — the caller closes
+    the loop with its own event: ``switched``, a wake kind, or ``restarted``,
+    which asks the manager for nothing. Released and announced here, a looper
+    took the moving agent's task in the gap and the manager respawned an agent
+    that was on its way back (review of #205, finding 6; the fresh start, fourth
+    round). Its receipt's ``released`` is therefore empty and ``withheld`` set:
+    the claims are PARKED for the replacement, not returned.
 
     The agent's own ``SessionEnd`` hook releases its claims when it exits
     cleanly; ``force`` skips the ``/exit`` and goes straight to the kill — and
@@ -2236,10 +2276,23 @@ def _stop_row(
                 # stopped; "no longer live" failed a stop that worked. Its release
                 # is asked for again, though: a listing has no report to carry one
                 # the store refused, and this stop has (review of #163, round 1;
-                # after the listing's went through it finds nothing). A hand-over's
-                # row is not ended by a listing (`_handed_over`), so one ended
-                # meanwhile is still somebody else's doing.
+                # after the listing's went through it finds nothing).
                 return StopReceipt(current, *_release_or_say(store, current, why="agent stopped"))
+            if current is not None and exited_here and handover:
+                # A hand-over's row is one no listing ends while its mark holds
+                # (`_handed_over`), so with the mark holding, whoever ended it meanwhile
+                # stopped it past the mark — the operator's `fleet stop`, a `shutdown` —
+                # and this stop is nobody's. With no mark to hold — a session not on the
+                # board yet, which nothing could mark, or a mark a writer that does not
+                # know it replaced — a listing records the death this `/exit` caused,
+                # releases and announces it, and the hand-over is a stop that worked:
+                # raised here, after the kill, the agent was gone and nothing started
+                # (review of #163, round 2). Nothing is withheld, so there is nothing to
+                # give back, and nothing is asked again: what that release left on the
+                # session is the replacement's to inherit.
+                marked = store.get_session(current.session_id) if current.session_id else None
+                if not _handed_over(current, marked, _now()):
+                    return StopReceipt(current, [])
             raise NoSuchAgent(f"{agent.label} ({agent.id}) is no longer live")
         # The process is dead or gone by here, so whatever its session still
         # holds is nobody's: a clean ``/exit`` released through the agent's own
@@ -2258,7 +2311,7 @@ def _stop_row(
     # and must not hold the write lock the woken manager's own hooks will want.
     if not handover:
         nudge_manager(ended.project_id, reason=f"{ended.label} exited")
-    return StopReceipt(ended, released, release_failed)
+    return StopReceipt(ended, released, release_failed, withheld=handover)
 
 
 def _manager_first(agents: list[FleetAgent]) -> list[FleetAgent]:
@@ -3309,6 +3362,14 @@ def switch(
     with store_session() as store:
         agent = _live_agent(store, project, label)
         session = store.get_session(agent.session_id) if agent.session_id else None
+        if _handed_over(agent, session, _now()):
+            # The automatic path refuses a session already in flight
+            # (`services.hooks.hand_over`); a switch by hand, or a restart, did not. The
+            # second stopped the row itself — its pane already dead of the first one's
+            # `/exit` — and started a replacement of its own, the first failed on its
+            # own row, and its take-back wrote a stale state over the second's mark
+            # (review of #163, round 2).
+            raise _in_hand_over("switch", label)
         task = store.get_task(agent.task_id) if agent.task_id else None
         # The session's own newest entries (oldest first), not the project's last
         # 60 filtered down: on a busy board those all belonged to other agents
@@ -3367,15 +3428,21 @@ def switch(
     # Pinned to the row read above (`agent_id`): the headroom lookup reads every
     # account's usage over the network, and an agent that exited and was started
     # again under this label meanwhile was the one stopped, then replaced by a
-    # resume of the OLD session (review of #163, round 1).
+    # resume of the OLD session (review of #163, round 1). That refusal is asked
+    # BEFORE the mark, too: a `fleet restart` that resumed the transcript shares the
+    # session id, so the mark landed on the newcomer's live session and the
+    # take-back wrote this switch's stale snapshot over it (round 2).
+    with store_session() as store:
+        _live_agent(store, project, label, agent_id=agent.id)
     if session is not None:
         _mark_handing_over(session)
     try:
-        stopped = stop(project, label, handover=True, agent_id=agent.id).agent
+        handed_over = stop(project, label, handover=True, agent_id=agent.id)
     except Exception:
         if session is not None:
             _unmark_handing_over(session)  # nothing ended: the session keeps its state
         raise
+    stopped = handed_over.agent
     try:
         receipt, resumed, more = _respawn(
             project,
@@ -3393,7 +3460,8 @@ def switch(
             spawned_by=spawned_by,
         )
     except Exception:
-        _abandon_handover(stopped)  # no replacement is coming for the parked claims
+        if handed_over.withheld:
+            _abandon_handover(stopped)  # no replacement is coming for the parked claims
         raise
     notes.extend(more)
     from_name = f"slot {current}" if current is not None else "its shell's claude"
@@ -3517,15 +3585,18 @@ def restart(
     transcript is on disk and ``fresh`` is not asked — RESUMES the same session
     (``claude --resume <transcript>``), so a manager killed with ctrl+c comes
     back with its intake, its contracts and the state of every coder it
-    steered; without a transcript it starts new with a hand-off prompt built
-    from the board.
+    steered, and it is typed one line telling it to carry on (``claude
+    --resume`` opens at an idle prompt, see :func:`_resume_prompt`); without a
+    transcript it starts new with a hand-off prompt built from the board.
     For the manager that is "end the dead row, then spawn manager again" — the
     fix the issue asks for — with the session carried over when it can be.
 
-    Every refusal that does not depend on the stop — the task, the binary, the
-    account — is given BEFORE anything is stopped or recorded: a running agent
-    stopped for a restart that is then refused is an agent lost for nothing, and
-    a refused restart leaves the 💤 row and its last screen as they were.
+    Every refusal that does not depend on the stop — the role, the task, the
+    binary, the account — is given BEFORE anything is stopped or recorded: a
+    running agent stopped for a restart that is then refused is an agent lost
+    for nothing, and a refused restart leaves the 💤 row and its last screen as
+    they were. So is a row a hand-over is already moving (:func:`_handed_over`):
+    that hand-over ends it and starts the replacement itself.
     ``agent_id`` pins the row, as for :func:`stop`: the agent view's Restart
     means the row it shows, never a replacement that took the label since.
     """
@@ -3540,6 +3611,13 @@ def restart(
         if agent_id is not None and agent.id != agent_id:
             raise _replaced(label, agent, agent_id)
         session = store.get_session(agent.session_id) if agent.session_id else None
+        if agent.ended_at is None and _handed_over(agent, session, _now()):
+            # A `switch` (or another restart) is between its `/exit` and its end: the
+            # pane reads dead, the listing leaves the row to it, and a restart that
+            # fell through to a plain `stop` here released the parked claims,
+            # announced the exit and failed the switch on its own row — with the
+            # restart's replacement not holding the task (review of #163, round 2).
+            raise _in_hand_over("restart", label)
         try:
             # `spawn`'s refusal for the task (done, dropped, gone from the board).
             task = _task_for(store, project, agent.task_id)
@@ -3558,6 +3636,7 @@ def restart(
     # slot — and the replacement is started on what was resolved here.
     slot = _account_slot_of(agent, session)
     try:
+        _require_role(agent.role)
         _binary_for(agent.role)
         choice = claude_accounts_service.choose(
             str(slot) if slot is not None else None, role=agent.role, project=project
@@ -3569,7 +3648,7 @@ def restart(
     # asks the same ladder and gives them itself.
     notes = [f"accounts: {note}" for note in choice.notes] if account is not None else []
     was_running = False
-    handed_over: FleetAgent | None = None
+    handed_over: StopReceipt | None = None
     if agent.ended_at is None:
         # Measured BEFORE anything is done, so the operator does not read
         # "stopped and restarted" for an agent that was not running.
@@ -3582,23 +3661,26 @@ def restart(
             # word. Stopped as `fleet stop` stops it, the task went back to the pool
             # and `agent_exited` woke the manager while `_respawn` was still starting
             # the replacement: the second worker #205's fourth round shut out of
-            # `switch` (review of #163, round 1).
+            # `switch` (review of #163, round 1). A session not on the board yet has
+            # no claims to park and nothing to mark; a listing that records the death
+            # meanwhile leaves the stop one that worked (`_stop_row`), not a failure.
             if session is not None:
                 _mark_handing_over(session)
             try:
-                handed_over = stop(project, label, handover=True, agent_id=agent.id).agent
+                handed_over = stop(project, label, handover=True, agent_id=agent.id)
             except Exception:
                 if session is not None:
                     _unmark_handing_over(session)  # nothing ended: the session keeps its state
                 raise
-            agent = handed_over
+            agent = handed_over.agent
         else:
             # A dead pane no listing has recorded yet is recorded as a listing
-            # records it, and its window LEFT like any 💤 row's (below). Only a
-            # pane that is gone — or a tmux that will not say — goes through
+            # records it — announced, but with no manager woken for an agent that
+            # is coming back — and its window LEFT like any 💤 row's (below). Only
+            # a pane that is gone — or a tmux that will not say — goes through
             # `stop`, which ends a vanished pane's row and refuses on a silent tmux.
             tmux_session = session_name(current.codename) if current.codename else None
-            ended = _end_dead_rows([agent], _observe_sockets([agent], tmux_session))
+            ended = _end_dead_rows([agent], _observe_sockets([agent], tmux_session), nudge=False)
             if ended:
                 agent = ended[0]
             else:
@@ -3625,11 +3707,12 @@ def restart(
             reason="restarted",
             spawned_by=spawned_by,
             size=size,
+            resume_prompt=_restart_prompt(agent),
             takes_over=handed_over is not None,
         )
     except Exception:
-        if handed_over is not None:
-            _abandon_handover(handed_over)  # no replacement is coming for the parked claims
+        if handed_over is not None and handed_over.withheld:
+            _abandon_handover(handed_over.agent)  # no replacement is coming for the parked claims
         raise
     notes.extend(more)
     how = "resumed its session" if resumed else "started fresh with a hand-off prompt"
@@ -3692,8 +3775,15 @@ def _mark_handing_over(session: TeamSession) -> None:
 
 
 def _unmark_handing_over(session: TeamSession) -> None:
+    """The hand-over did not happen: the mark goes back to the state ``session`` had.
+
+    Only the mark, and only while it is there (a compare-and-set): a heartbeat
+    here un-retired a session whose ``SessionEnd`` had run and brought it back
+    to the board as a live teammate, and wrote its stale state over whatever
+    came after the mark (review of #163, round 2).
+    """
     with contextlib.suppress(Exception), store_session() as store:
-        store.touch_session(session.id, state=session.state)
+        store.replace_session_state(session.id, _team().HANDOVER_STATE, session.state)
 
 
 def _abandon_handover(stopped: FleetAgent) -> None:
@@ -3702,6 +3792,21 @@ def _abandon_handover(stopped: FleetAgent) -> None:
         _team().release_agent_claims(store, stopped, why="hand-over failed")
         _emit_exit(store, stopped)
     nudge_manager(stopped.project_id, reason=f"{stopped.label} exited")
+
+
+def _restart_prompt(agent: FleetAgent) -> str:
+    """The first message of a RESUMED restart — one line, for :func:`_resume_prompt`'s reasons.
+
+    Without it the replacement sat at the idle prompt ``claude --resume`` opens
+    at: a running agent's holding its task's claim the while, and a manager —
+    ``working`` from its start hook, with no turn to end — refused the board's
+    nudges for as long as that row stayed fresh (review of #163, round 2).
+    """
+    return (
+        f"You are {agent.label}, restarted and resumed mid-session: re-read `aisquare board` "
+        "and `git status`, then continue exactly where you left off without redoing work "
+        "that is already committed."
+    )
 
 
 def _resume_prompt(agent: FleetAgent, reason: str | None) -> str:

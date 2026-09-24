@@ -973,14 +973,18 @@ it is up, so the sidebar never shows two rows called manager); `doctor` names
 a project whose manager exited while agents are still running
 (`fleet-manager`). A restart that is refused — a coder whose task is done, an
 account no longer on this machine — leaves the 💤 row and its last screen as
-they were (**Stop** clears them), and a running agent whose task, account or
-binary would refuse the restart is refused before it is stopped. A running
-agent is handed over the way `fleet switch` hands one over: its task stays
-claimed for the replacement, and the board says `restarted`, not
-`agent_exited`, so the manager is not woken to staff that task again. The agent
-view's **Stop** and **Restart** act on the row it shows: once its label has
-passed to a replacement (the manager restarted that coder), they say so and
-leave the replacement alone.
+they were (**Stop** clears them), and a running agent whose role, task,
+account or binary would refuse the restart is refused before it is stopped. A
+running agent is handed over the way `fleet switch` hands one over: its task
+stays claimed for the replacement, and the board says `restarted`, not
+`agent_exited`, so the manager is not woken to staff that task again. A resumed
+agent is typed one line telling it to carry on, as `fleet switch` types it, so
+it does not sit at the idle prompt `claude --resume` opens at. An agent a
+hand-over is already moving (a `fleet switch`, by hand or on a usage limit, or
+another restart) is not restarted or switched again: that hand-over starts the
+replacement itself. The agent view's **Stop** and **Restart** act on the row it
+shows: once its label has passed to a replacement (the manager restarted that
+coder), they say so and leave the replacement alone.
 
 **A panel reading "No changes this session" sits beside an agent's conversation
 and will not go away.** That is Claude Code's own diff panel (fullscreen

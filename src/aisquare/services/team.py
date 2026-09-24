@@ -81,12 +81,15 @@ does not — and the ``SessionStart`` of the id that follows comes AFTER this en
 
 HANDOVER_STATE = "switching"
 """The ``team_session.state`` ``fleet switch`` sets before it ``/exit``s an agent that is
-about to start again under another account (#146): its ``SessionEnd`` then parks the
-claims, as a ``/clear`` does, instead of releasing them (review of #205, finding 6) —
-for the SAME id when the replacement resumes the session, for the replacement's new
-id to take over when it starts fresh (fourth round). Transient — a resumed session's
-start hook writes ``working`` over it, a fresh start retires the old presence — and
-unknown to ``fleet._derive``, which falls back to the pane."""
+about to start again under another account (#146), and ``fleet restart`` before it
+``/exit``s a running one (#163): its ``SessionEnd`` then parks the claims, as a
+``/clear`` does, instead of releasing them (review of #205, finding 6) — for the SAME
+id when the replacement resumes the session, for the replacement's new id to take over
+when it starts fresh (fourth round). Transient — a resumed session's start hook writes
+``working`` over it, a fresh start retires the old presence — and unknown to
+``fleet._derive``, which falls back to the pane. The agent's own hooks between the
+``/exit`` and its end — the turn it finishes first, a notification, a failed turn —
+leave it where it is (review of #163, round 2)."""
 
 #: A numbered SEAT: a first-class role with a crew index glued on — ``coder1``,
 #: ``reviewer2``. ``cli/launch.py`` accepts these because crews run several agents
@@ -1564,6 +1567,10 @@ def hook_stop(
     The wake-up is an extra on top of the contract, so it fails open on its own:
     the row is marked waiting first, then :class:`ManagerWakeupError` carries the
     cause to the CLI's cost line.
+
+    A session a hand-over has marked (:data:`HANDOVER_STATE`) keeps the mark and
+    is not kept going: ``/exit`` has been typed into it, and the turn ending is
+    only what that ``/exit`` waits behind.
     """
     if not orchestrator.team_enabled():
         return None
@@ -1572,6 +1579,15 @@ def hook_stop(
         if session is None:
             return None
         store.renew_leases(session.id, _now() + timedelta(minutes=orchestrator.lease_minutes()))
+        if session.state == HANDOVER_STATE:
+            # `fleet switch`, or `fleet restart` of a running agent, marked it and typed
+            # `/exit`, which an agent mid-turn runs once the turn is over. `waiting`
+            # written here (or a manager's wake-up writing `working`) replaced the mark,
+            # so the `SessionEnd` that followed released the claims the replacement was
+            # to inherit, and a listing ended the row under the hand-over (review of
+            # #163, round 2). A manager woken here would take its news down with it:
+            # the events stay past its cursor, for whatever comes back.
+            return None
         failure: Exception | None = None
         deferred: str | None = None
         if session.role == MANAGER_ROLE:
@@ -1778,6 +1794,12 @@ def hook_notification(
                 message or notification_type or "notification",
                 session_id=session.id,
             )
+            return
+        if session.state == HANDOVER_STATE:
+            # A prompt that came up in a pane a hand-over is closing: nobody is to
+            # answer it, and `attention` written over the mark had the `SessionEnd`
+            # that follows release the claims the replacement was to inherit (review
+            # of #163, round 2) — as `hook_stop` and `hook_stop_failure` keep it too.
             return
         if store.mark_attention(session.id):
             _emit(

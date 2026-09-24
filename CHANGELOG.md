@@ -849,8 +849,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (`claude --resume <transcript>`), else fresh with a hand-off prompt from the
   board; a running agent is stopped first and handed over as `fleet switch`
   hands one over (its claims wait for the replacement and no exit is
-  announced), one whose task, account or binary would refuse the restart is
-  refused before it is stopped, and a refused restart
+  announced), a resumed one is typed one line telling it to carry on, one
+  whose role, task, account or binary would refuse the restart is refused
+  before it is stopped, one a hand-over is already moving is refused (and so
+  is a second `fleet switch` of it), and a refused restart
   leaves the 💤 row and its last screen as they were. **Stop** on an exited row
   removes the dead window, and so does spawning the same label again once the
   replacement is up (it supersedes the old window — no two rows called

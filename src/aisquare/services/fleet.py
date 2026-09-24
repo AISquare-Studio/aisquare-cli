@@ -1428,7 +1428,7 @@ def list_agents(project: ProjectInfo, *, live_only: bool = True) -> list[FleetAg
         agents = [a for a in agents if a.ended_at is None or a.ended_at >= cutoff]
     tmux_session = session_name(current.codename) if current.codename else None
     views = _observe_sockets(agents, tmux_session)
-    ended = {row.id: row for row in _end_dead_rows(agents, views)}
+    ended = {row.id: row for row in _end_dead_rows(agents, views, best_effort=True)}
     if ended:
         agents = [ended.get(agent.id, agent) for agent in agents]
     if live_only:
@@ -1446,7 +1446,10 @@ def list_agents(project: ProjectInfo, *, live_only: bool = True) -> list[FleetAg
 
 
 def _end_dead_rows(
-    agents: Sequence[FleetAgent], views: Mapping[str, dict[str, _PaneView] | None]
+    agents: Sequence[FleetAgent],
+    views: Mapping[str, dict[str, _PaneView] | None],
+    *,
+    best_effort: bool = False,
 ) -> list[FleetAgent]:
     """Record every LIVE row whose observed pane is dead as ended — reap's rule, on every read.
 
@@ -1456,11 +1459,15 @@ def _end_dead_rows(
     Only a row THIS call ends gets the ``agent_exited`` event and the manager's
     nudge. Every read reconciles now — the UI's tick, the manager's own ``fleet
     ls``, a spawn, a restart — so two readers routinely see the same death, and
-    the one that finds the row already ended (re-read one statement before the
-    write, not taken from its snapshot) stays quiet rather than wake the
-    manager twice. And it is best effort: a listing must not fail for this
-    write, so a store locked past its busy timeout leaves the row to the next
-    read — it reads ``exited`` from its pane meanwhile (:func:`_derive`).
+    the one whose write finds the row already ended
+    (:meth:`~aisquare.core.store.ContextStore.end_fleet_agent_if_live`, a
+    compare-and-set) stays quiet rather than wake the manager twice.
+
+    ``best_effort`` is a LISTING's: it must not fail for this write, so a store
+    locked past its busy timeout leaves the row to the next read — it reads
+    ``exited`` from its pane meanwhile (:func:`_derive`). A spawn or a restart
+    decides on what this recorded (a dead manager still "live" refuses the new
+    one), so there the store's error is the answer, not a refusal it explains.
     """
     dead = [
         (agent, pane)
@@ -1476,13 +1483,15 @@ def _end_dead_rows(
     mine: list[FleetAgent] = []
     # Locked past its busy timeout, or unopenable (StoreUnopenable is an sqlite3.Error):
     # what was recorded stands, the rest waits for the next read.
-    with suppress(sqlite3.Error), store_session() as store:
+    tolerated = (sqlite3.Error,) if best_effort else ()
+    with suppress(*tolerated), store_session() as store:
         for agent, pane in dead:
-            row = store.get_fleet_agent(agent.id)
-            if row is not None and row.ended_at is None:
-                row = store.end_fleet_agent(agent.id, exit_status=pane.dead_status)
+            row = store.end_fleet_agent_if_live(agent.id, exit_status=pane.dead_status)
+            if row is not None:
                 _emit_exit(store, row)
                 mine.append(row)
+            else:  # another reader ended it first, and announced it
+                row = store.get_fleet_agent(agent.id)
             if row is not None:
                 ended.append(row)
     for row in mine:
@@ -2158,9 +2167,14 @@ def reap(project: ProjectInfo | None = None, *, server_down: bool = False) -> Re
                     if pane is None:
                         report.lost.append(store.end_fleet_agent(agent.id, exit_status=None))
                     elif pane.dead:
-                        ended = store.end_fleet_agent(agent.id, exit_status=pane.dead_status)
-                        report.ended.append(ended)
-                        _emit_exit(store, ended)
+                        # A compare-and-set, as for every read's reconcile: a listing
+                        # that recorded this death since `live` was read announced it.
+                        ended = store.end_fleet_agent_if_live(
+                            agent.id, exit_status=pane.dead_status
+                        )
+                        if ended is not None:
+                            report.ended.append(ended)
+                            _emit_exit(store, ended)
             _remove_merged_worktrees(store, current, report)
     for ended in report.ended:
         nudge_manager(ended.project_id, reason=f"{ended.label} exited")

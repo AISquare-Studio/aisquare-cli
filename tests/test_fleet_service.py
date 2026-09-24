@@ -3705,11 +3705,13 @@ def test_a_listing_still_lists_when_the_store_will_not_take_the_exit(
     coder = _coder(project)
     tmux.die(coder.pane_id, 3)
 
-    def locked(self: SqliteStore, agent_id: str, *, exit_status: int | None = None) -> FleetAgent:
+    def locked(
+        self: SqliteStore, agent_id: str, *, exit_status: int | None = None
+    ) -> FleetAgent | None:
         raise sqlite3.OperationalError("database is locked")
 
     with monkeypatch.context() as patched:
-        patched.setattr(SqliteStore, "end_fleet_agent", locked)
+        patched.setattr(SqliteStore, "end_fleet_agent_if_live", locked)
         [status] = fleet_service.list_agents(project)
         assert status.state == "exited" and status.detail == "exit 3"
         result = runner.invoke(app, ["fleet", "ls", "--project", project.id])
@@ -3748,3 +3750,70 @@ def test_a_fresh_switch_still_tells_the_replacement_it_moved_to_another_account(
         f"You are {agent.label}, taking over from a previous session of this agent "
         "(it stopped on 5h limit under another Claude account)."
     )
+
+
+# --- the review of #138, round 2 -----------------------------------------------------------------
+
+
+def test_one_death_two_writers_record_at_once_is_announced_once(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A death was "announced once" with two holes: ``_end_dead_rows`` re-read the row
+    one statement before its write, and ``reap`` wrote and announced from a snapshot
+    taken before its tmux calls. Another writer landing in either gap announced the
+    same death twice. The end is a compare-and-set now, and only the writer whose
+    UPDATE ended the row posts ``agent_exited``."""
+    coder = _coder(project)
+    tmux.die(coder.pane_id, 1)
+    views = fleet_service._observe_sockets([coder], f"asq-{_codename(project)}")
+    read = SqliteStore.get_fleet_agent
+    interleaved: list[bool] = []
+
+    def another_reader_lands_after(self: SqliteStore, ref: str) -> FleetAgent | None:
+        row = read(self, ref)
+        if not interleaved:
+            interleaved.append(True)
+            fleet_service._end_dead_rows([coder], views)
+        return row
+
+    with monkeypatch.context() as patched:
+        patched.setattr(SqliteStore, "get_fleet_agent", another_reader_lands_after)
+        [row] = fleet_service._end_dead_rows([coder], views)
+    assert row.exit_status == 1
+    assert _events(project, "agent_exited") == ["coder-1 exited (1)"]
+
+    # reap, with a listing landing between its read of the live rows and its write.
+    second = _coder(project, label="coder-2")
+    tmux.die(second.pane_id, 2)
+    observe = fleet_service._observe_sockets
+
+    def a_listing_meanwhile(*args: Any, **kwargs: Any) -> Any:
+        seen = observe(*args, **kwargs)
+        monkeypatch.setattr(fleet_service, "_observe_sockets", observe)
+        fleet_service.list_agents(project)  # the UI's tick
+        return seen
+
+    monkeypatch.setattr(fleet_service, "_observe_sockets", a_listing_meanwhile)
+    report = fleet_service.reap(project)
+    assert _events(project, "agent_exited") == ["coder-1 exited (1)", "coder-2 exited (2)"]
+    assert report.ended == []  # the listing recorded it first
+
+
+def test_a_spawn_under_a_store_that_will_not_take_the_exit_says_so(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reconcile's best effort is a LISTING's: a spawn that could not record the dead
+    manager refused with "already has a manager — fleet stop manager first", which the
+    store's own error explains and that advice does not."""
+    manager = fleet_service.spawn(project, "manager").agent
+    tmux.die(manager.pane_id, 130)
+
+    def locked(self: SqliteStore, agent_id: str, **kwargs: object) -> FleetAgent | None:
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(SqliteStore, "end_fleet_agent_if_live", locked)
+    with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+        fleet_service.spawn(project, "manager")
+    [status] = fleet_service.list_agents(project)  # a listing still lists
+    assert status.agent.id == manager.id and status.state == "exited"
+    assert len(tmux.spawned) == 1

@@ -781,6 +781,9 @@ class ContextStore(Protocol):
         self, project_id: str, label: str, *, live_only: bool = True
     ) -> FleetAgent | None: ...
     def end_fleet_agent(self, agent_id: str, *, exit_status: int | None = None) -> FleetAgent: ...
+    def end_fleet_agent_if_live(
+        self, agent_id: str, *, exit_status: int | None = None
+    ) -> FleetAgent | None: ...
     # The Claude account registry (v15, #145): the arrangement of the slots.
     def claude_accounts(self) -> list[ClaudeAccountRecord]: ...
     def upsert_claude_account(self, slot: int, config_dir: Path) -> ClaudeAccountRecord: ...
@@ -2217,16 +2220,32 @@ class SqliteStore:
 
     def end_fleet_agent(self, agent_id: str, *, exit_status: int | None = None) -> FleetAgent:
         """Mark an agent ended (idempotent: an already-ended row keeps its first end)."""
-        self._conn.execute(
+        self.end_fleet_agent_if_live(agent_id, exit_status=exit_status)
+        agent = self.get_fleet_agent(agent_id)
+        if agent is None:
+            raise KeyError(agent_id)
+        return agent
+
+    def end_fleet_agent_if_live(
+        self, agent_id: str, *, exit_status: int | None = None
+    ) -> FleetAgent | None:
+        """End a LIVE agent's row and return it; ``None`` when it was already ended.
+
+        The UPDATE is a compare-and-set on ``ended_at IS NULL``, for a caller that
+        announces the end: every fleet read records a dead pane (#138), so two
+        readers routinely see one death, and only the one whose write ended the
+        row may post ``agent_exited``. A re-read before the write left a statement
+        for the other to land in (review of #138).
+        """
+        cursor = self._conn.execute(
             "UPDATE fleet_agent SET ended_at = ?, exit_status = ? "
             "WHERE id = ? AND ended_at IS NULL",
             (_now_iso(), exit_status, agent_id),
         )
         self._conn.commit()
-        agent = self.get_fleet_agent(agent_id)
-        if agent is None:
-            raise KeyError(agent_id)
-        return agent
+        if cursor.rowcount == 0:
+            return None
+        return self.get_fleet_agent(agent_id)
 
     # --- the Claude account registry (v15, #145) --------------------------------------------
     #

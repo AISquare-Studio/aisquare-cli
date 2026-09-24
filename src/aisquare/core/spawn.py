@@ -82,6 +82,9 @@ narrowing their environment would be change without a reason:
     account's SID so the ``icacls`` above can name a trustee that cannot be
     spoofed by a stray ``USER`` in the environment. Same argument as its
     caller.
+  * ``core/paths.py::_dacl_trustees`` — ``icacls /save``, reading the DACL back
+    so the narrowing can report what it actually achieved rather than that it
+    ran. Read-only; same argument again.
   * ``services/explainability_ops.py::install_sdk`` — ``pip install``.
   * ``services/explainability_ops.py::sdk_doctor`` — the SDK's own doctor
     script. Not stripped: it needs the ``EXPLAINABILITY_*`` environment to
@@ -243,6 +246,12 @@ SEAMS: dict[str, Seam] = {
         EXCLUDED,
         "`whoami /user` — reads THIS account's SID for the icacls trustee above. "
         "An identity question about the operating system, not the model API",
+    ),
+    "aisquare/core/paths.py::_dacl_trustees": Seam(
+        EXCLUDED,
+        "`icacls /save` — reads the DACL back so `restrict_to_owner` can report "
+        "whether the file really ended up restricted. Read-only, and the same "
+        "permissions tool as its caller",
     ),
     "aisquare/services/explainability_ops.py::install_sdk": Seam(
         EXCLUDED, "`pip install` — reaches PyPI, never the model API"

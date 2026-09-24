@@ -18,17 +18,38 @@ from __future__ import annotations
 
 import errno
 import os
+import re
 import stat
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import TypeVar
 
 _T = TypeVar("_T")
 
+#: One SDDL ACE: ``(type;flags;rights;object;inherit;trustee)``.
+_ACE = re.compile(r"\(([^)]*)\)")
+
 HOME_ENV_VAR = "AISQUARE_HOME"
 """Environment variable that overrides the default ``~/.aisquare`` location."""
+
+
+def _system32(tool: str) -> str:
+    """``tool`` under System32, named ABSOLUTELY. Windows only.
+
+    ``CreateProcess`` with ``lpApplicationName`` NULL — which is what
+    ``subprocess`` passes for a bare name — searches the application directory
+    and then the CURRENT DIRECTORY before it reaches System32. So
+    ``aisquare init`` run inside a checkout that happens to contain a
+    ``whoami.exe`` executes that one.
+
+    In a function whose whole job is guarding a secret, that is a hijack rather
+    than a curiosity: a fake ``whoami`` reporting ``S-1-1-0`` sends the
+    ``/grant:r`` to **Everyone**, and ``restrict_to_owner`` then returns True
+    because ``icacls`` exited 0. The caller reports the key as protected.
+    """
+    return str(Path(os.environ.get("SYSTEMROOT", r"C:\Windows")) / "System32" / tool)
 
 
 def restrict_to_owner(path: Path) -> bool:
@@ -65,6 +86,18 @@ def restrict_to_owner(path: Path) -> bool:
     home; ``tests/test_paths.py`` pins the limit so it is recorded in the suite
     rather than only here.
 
+    WHICH IS WHY THE ANSWER IS READ BACK. For a while this returned the exit
+    status of the narrowing, and ``icacls`` exits 0 for "I applied what you
+    asked", not "the file is now yours alone". With a surviving grant to a
+    fourth principal — ``INTERACTIVE``, ``Domain Users``, a second local
+    account — the narrowing applies, the ACE stays, and the four callers that
+    key off this bool (``credentials.store``, ``lifecycle``, ``serve``, ``iam``)
+    told the operator the key was protected. A bool whose two values are
+    "protected" and "could not protect" must not have a third meaning hidden in
+    the first, so :func:`_dacl_trustees` reads the result and
+    :func:`unexpected_trustees` judges it. The read cannot widen anything, so
+    the single-call no-window property survives.
+
     The trustee is a SID from ``whoami``, not ``getpass.getuser()``. CPython
     returns the first set of ``LOGNAME``, ``USER``, ``LNAME``, ``USERNAME``
     before asking the OS, and the first three are set by MSYS2, Git Bash and
@@ -96,7 +129,7 @@ def restrict_to_owner(path: Path) -> bool:
     if sid is None:
         return False
     argv = [
-        "icacls",
+        _system32("icacls.exe"),
         str(path),
         "/inheritance:r",
         # Users, Everyone, Authenticated Users — by SID, because the display
@@ -120,7 +153,104 @@ def restrict_to_owner(path: Path) -> bool:
         )
     except (OSError, subprocess.TimeoutExpired):
         return False
-    return result.returncode == 0
+    if result.returncode != 0:
+        return False
+    # `icacls` exiting 0 means the narrowing APPLIED, not that the file ended up
+    # restricted — `/remove` drops the three principals it names and leaves any
+    # other explicit grant standing. Returning True on that told four callers
+    # (`credentials.store`, `lifecycle`, `serve`, `iam`) to report the secret as
+    # protected while, say, INTERACTIVE could still read it. So the answer is
+    # read back rather than assumed.
+    trustees = _dacl_trustees(path)
+    if trustees is None:
+        return False
+    return not unexpected_trustees(trustees, sid)
+
+
+#: SDDL trustees whose presence on a DACL is not a leak. An administrator can
+#: take ownership of any file regardless, which is the same deal POSIX offers:
+#: 0600 never excluded root. Abbreviations AND spelled-out SIDs, because which
+#: form ``icacls`` emits varies by host.
+PRIVILEGED_TRUSTEES = frozenset(
+    {
+        "SY",
+        "S-1-5-18",  # NT AUTHORITY\SYSTEM
+        "BA",
+        "S-1-5-32-544",  # BUILTIN\Administrators
+        "OW",
+        "S-1-3-4",  # OWNER RIGHTS
+        "CO",
+        "S-1-3-0",  # CREATOR OWNER
+    }
+)
+
+#: SDDL abbreviates some ACCOUNT SIDs too, not only group ones, and which one
+#: appears depends on who is logged in. ``windows-latest`` runs as the built-in
+#: Administrator, so on CI this account's own SID comes back as ``LA`` rather
+#: than spelled out — invisible on a desktop, where the login has a RID well
+#: above 500. Without this mapping the OWNER reads as an intruder there and
+#: :func:`restrict_to_owner` reports its own success as a failure, on the one
+#: machine nobody can attach a debugger to.
+_ACCOUNT_ABBREVIATIONS = {"LA": "-500", "LG": "-501"}
+
+
+def unexpected_trustees(trustees: Iterable[str], sid: str) -> set[str]:
+    """Those of ``trustees`` that are neither the account ``sid`` nor privileged.
+
+    Split out from the ``icacls`` call so it can be tested on any platform.
+    The interesting case — the built-in Administrator abbreviated to ``LA`` —
+    occurs only on CI, where a failure is a red lane and not a debuggable one.
+    """
+    unexpected: set[str] = set()
+    for trustee in trustees:
+        if trustee in PRIVILEGED_TRUSTEES or trustee == sid:
+            continue
+        suffix = _ACCOUNT_ABBREVIATIONS.get(trustee)
+        if suffix is not None and sid.endswith(suffix):
+            continue
+        unexpected.add(trustee)
+    return unexpected
+
+
+def _dacl_trustees(path: Path) -> set[str] | None:
+    """Every trustee on ``path``'s DACL, or None when it cannot be read.
+
+    ``icacls /save`` because a plain ``icacls <path>`` prints LOCALISED display
+    names containing spaces (``NT AUTHORITY\\SYSTEM``), which neither parse nor
+    compare on a non-English machine. ``/save`` emits SDDL: SIDs and well-known
+    abbreviations, no name resolution, and the same binary already in use here.
+
+    Read-only, so it cannot widen anything — which is what lets it run AFTER the
+    narrowing without reopening the window that one-call narrowing closed.
+    """
+    import subprocess  # Windows-only; see restrict_to_owner
+    import tempfile
+
+    with tempfile.TemporaryDirectory(prefix="aisquare-acl-") as scratch:
+        saved = Path(scratch) / "acl.txt"
+        try:
+            result = subprocess.run(
+                [_system32("icacls.exe"), str(path), "/save", str(saved)],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=15,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):  # pragma: no cover - needs a broken System32
+            return None
+        if result.returncode != 0 or not saved.exists():
+            return None
+        text = saved.read_bytes().decode("utf-16", errors="replace")
+
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("D:"):
+            continue
+        # Each ACE is (type;flags;rights;object;inherit;TRUSTEE).
+        return {fields[5] for ace in _ACE.findall(stripped) if len(fields := ace.split(";")) >= 6}
+    return None
 
 
 def _current_user_sid() -> str | None:
@@ -133,7 +263,7 @@ def _current_user_sid() -> str | None:
 
     try:
         result = subprocess.run(
-            ["whoami", "/user", "/fo", "csv", "/nh"],
+            [_system32("whoami.exe"), "/user", "/fo", "csv", "/nh"],
             capture_output=True,
             text=True,
             encoding="utf-8",

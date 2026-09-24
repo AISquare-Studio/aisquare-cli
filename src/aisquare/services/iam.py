@@ -149,6 +149,21 @@ class Session:
     sub: str = ""
     email: str = ""
     name: str = ""
+    restricted: bool | None = None
+    """Whether the write that created this session could lock the file down.
+
+    Only a WRITE knows this, so it is ``None`` for a session read back from
+    disk or taken from the environment — "not applicable" rather than a
+    cheerful ``True`` that no one checked.
+
+    It rides on the session because ``stderr`` does not reach every surface.
+    The CLI sign-in prints a warning and the operator sees it; the TUI signs in
+    inside a Textual worker, and Textual captures ``stderr`` for the life of the
+    app, so the same warning went nowhere and the accounts pane reported a clean
+    sign-in over an unrestricted token. ``AccountsView`` already holds the
+    ``Session`` returned by that worker, so a field here reaches it with no
+    plumbing.
+    """
 
     def expires_in_days(self, now: datetime | None = None) -> int | None:
         if self.expires_at is None:
@@ -515,6 +530,7 @@ def store_session(
         sub=values[KEY_SUB],
         email=values[KEY_EMAIL],
         name=values[KEY_NAME],
+        restricted=restricted,
     )
 
 

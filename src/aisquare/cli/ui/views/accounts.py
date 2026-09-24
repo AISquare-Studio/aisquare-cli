@@ -561,6 +561,17 @@ class AccountsView(Vertical):
             self.session = worker.result
             who = self.session.email or self.session.sub or "you"
             self._notice(f"✓ Signed in to AISquare as {who}", "ok")
+            if self.session.restricted is False:
+                # `iam.store_session` also writes this to stderr, which Textual
+                # captures for the life of the app — so on Windows this pane
+                # reported a clean sign-in over a token every other account on
+                # the machine could read. The flag rides on the Session so the
+                # surface that has a user in front of it can say so.
+                self._notice(
+                    "⚠ could not restrict the credentials file to your account — "
+                    "other users on this machine may be able to read your session token.",
+                    "error",
+                )
             self.post_message(AccountsChanged())
         elif state is WorkerState.ERROR:
             error = worker.error

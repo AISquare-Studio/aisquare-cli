@@ -6569,7 +6569,8 @@ def test_a_fresh_switch_whose_old_presence_cannot_be_retired_still_moves_the_cla
     one: the transaction stays open with the retirement in it. Refused before any SQL,
     as this test first did, it could not see that the claim move's commit then carried
     the retirement, so the session WAS ended under a note saying it was not (review of
-    the #205 fold, A1 and A3). The note and the store must agree."""
+    the #205 fold, A1 and A3). The note and the store must agree, and the note's advice
+    must be what a prune does (A2)."""
     _two_slots_with_usage(monkeypatch, work=95, personal=10)
     task = _task(project, "moved though the presence stayed")
     agent = fleet_service.spawn(
@@ -6579,6 +6580,7 @@ def test_a_fresh_switch_whose_old_presence_cannot_be_retired_still_moves_the_cla
     _with_transcript(agent, None)
     team_service.claim_task(task.id, session_ref=old)
     original = SqliteStore.end_session
+    refusing = True
 
     class RefusesTheCommit:
         """``sqlite3.Connection`` whose COMMIT is refused, leaving the transaction open."""
@@ -6593,7 +6595,7 @@ def test_a_fresh_switch_whose_old_presence_cannot_be_retired_still_moves_the_cla
             return getattr(self._conn, name)
 
     def locked(self: SqliteStore, session_id: str, **kwargs: Any) -> list[TeamTask]:
-        if session_id != old:
+        if session_id != old or not refusing:
             return original(self, session_id, **kwargs)
         real = self._conn
         self._conn = RefusesTheCommit(real)  # type: ignore[assignment]
@@ -6618,6 +6620,18 @@ def test_a_fresh_switch_whose_old_presence_cannot_be_retired_still_moves_the_cla
         "the switch said the old session was not marked ended, and the claim move's "
         "commit ended it anyway"
     )
+    # The note's advice holds too. It said "until `aisquare team prune` retires it",
+    # but the old id heartbeat up to the switch and a prune spares it until it has been
+    # silent past the board's stale mark, so it names that wait (A2).
+    stale = team_service._STALE_AFTER
+    note = next(note for note in receipt.notes if marked in note)
+    assert f"silent for {int(stale.total_seconds() // 60)} minutes" in note, note
+    refusing = False
+    assert old not in [p.id for p in team_service.prune_sessions(cwd=project.root).pruned]
+    with store_session() as store:
+        silent = datetime.now(tz=UTC) - stale - timedelta(minutes=1)
+        store.upsert_session(kept.model_copy(update={"last_seen_at": silent}))
+    assert old in [p.id for p in team_service.prune_sessions(cwd=project.root).pruned]
 
 
 def test_a_switch_whose_courtesy_event_cannot_be_written_still_reports_the_move(

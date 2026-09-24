@@ -1346,7 +1346,10 @@ def _take_over(agent: FleetAgent, previous: str, session_id: str, notes: list[st
     and not a live ``switching`` presence nothing retires before the prune
     (review of #205, fifth round). A store that refuses the retirement itself
     costs only the retirement: the move still runs, and a note says the old id
-    stays on the board until ``aisquare team prune`` retires it.
+    stays on the board as a live session. Not "until the prune": it heartbeat
+    up to the switch, and ``aisquare team prune`` spares a session until it has
+    been silent past the board's stale mark (``services.team._STALE_AFTER``),
+    so the note names that wait (review of the #205 fold, A2).
 
     Fail-open, because the window is running and its row is recorded: a store
     that refuses the move leaves the row on ``previous`` with the claims, and
@@ -1367,10 +1370,12 @@ def _take_over(agent: FleetAgent, previous: str, session_id: str, notes: list[st
                 try:
                     store.end_session(previous, release_claims=False)
                 except sqlite3.Error as exc:
+                    stale = int(_team()._STALE_AFTER.total_seconds() // 60)
                     notes.append(
                         f"the previous session {_team().short_id(previous)} was not marked ended "
                         f"({type(exc).__name__}: {exc}) — it shows on the board as a live "
-                        "session until `aisquare team prune` retires it"
+                        f"session, marked (stale) once it has been silent for {stale} minutes; "
+                        "from then on `aisquare team prune` retires it"
                     )
             store.adopt_fleet_agent_session(agent.id, previous, session_id, lease)
             current = store.get_fleet_agent(agent.id)

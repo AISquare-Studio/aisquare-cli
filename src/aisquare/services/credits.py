@@ -35,7 +35,6 @@ import json
 import math
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
-from http.client import HTTPException
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -204,6 +203,10 @@ def fetch(
     problem. A 401 here IS a session problem (the endpoint takes the token),
     so ``iam.request``'s own reading of it stands.
     """
+    # Here, not at module scope: http.client pulls in what the import-time
+    # ratchet keeps out of every command that never asks the network.
+    from http.client import HTTPException
+
     moment = now or datetime.now(tz=UTC)
     try:
         result = iam.request(

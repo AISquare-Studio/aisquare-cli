@@ -613,6 +613,31 @@ def test_accounts_default_sets_shows_and_clears_at_all_three_levels(
     assert "coder" not in load_config().team.profiles  # a refused reference binds nothing
 
 
+def test_a_project_default_lists_the_project_it_is_set_for(
+    fake_home: Path, work: ProjectInfo, runner: CliRunner
+) -> None:
+    """`accounts default <slot> --project` registered the project the way a hooked
+    prompt does, so since #139 a project configured on purpose stayed off `project
+    list` and the sidebar. Choosing its account is choosing it; clearing adds nothing."""
+    core.create_account()
+
+    def listed() -> set[str]:
+        with store_session() as store:
+            return {project.id for project in store.list_projects()}
+
+    assert work.id not in listed(), "the fixture's registration is a capture"
+    cleared = runner.invoke(app, ["accounts", "default", "--clear", "--project", "."])
+    assert cleared.exit_code == 0, cleared.output
+    assert work.id not in listed(), "clearing a default is not an add"
+
+    chosen = runner.invoke(app, ["accounts", "default", "2", "--project", "."])
+
+    assert chosen.exit_code == 0, chosen.output
+    assert work.id in listed()
+    default = service.project_default(work)
+    assert default is not None and default.slot == 2
+
+
 def test_accounts_alias_order_move_disable_and_enable_commands(
     fake_home: Path, runner: CliRunner
 ) -> None:

@@ -1247,6 +1247,13 @@ def spawn(
     role_config = role_settings(role, config)
     notes: list[str] = []
     with store_session() as store:
+        # A spawn is a deliberate add (#139) whatever the row already carries, so
+        # it onboards here and not only through `ensure_codename`'s assignment: a
+        # forget keeps the codename, and the next prompt there brings the row back
+        # captured. Not moved into `ensure_codename` itself: `_stop_row` and
+        # `attach_argv` call it too, and a shutdown stops a forgotten project's
+        # rows without reviving its registration (review of #121, round 7).
+        store.onboard_project(project)
         project = ensure_codename(project, store)
         codename = project.codename or codenames.codename_for(project.id)
         rows = store.fleet_agents(project.id, live_only=False)

@@ -1395,6 +1395,39 @@ def test_spawn_without_the_agent_binary_names_it_and_who_chose_it(
     assert tmux.spawned == []
 
 
+@pytest.mark.parametrize("via", ["spawn", "restart"])
+def test_a_spawn_onboards_a_captured_project_that_already_has_a_codename(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, via: str
+) -> None:
+    """A spawn is a deliberate add (#139) whatever the row already carries. The
+    onboarding rode on ``ensure_codename``'s assignment, which a codenamed row never
+    reaches — and ``project forget`` keeps the codename while clearing the mark. So
+    forget, a prompt there (the row comes back captured), then ``fleet spawn`` — or a
+    ``restart``/``switch``, which spawn through ``_respawn`` — recorded live agents on
+    a project neither the sidebar nor ``project list`` showed."""
+    from aisquare.services import project as project_service
+
+    first = _coder(project)
+    fleet_service.stop(project, first.label, force=True)
+    project_service.forget(project.id)
+    with store_session() as store:
+        store.ensure_project(project)  # the next prompt there: captured again, not listed
+        captured = store.get_project(project.id)
+        assert captured is not None and captured.codename and captured.onboarded_at is None
+        assert project.id not in {p.id for p in store.list_projects()}
+
+    if via == "spawn":
+        _coder(captured)
+    else:
+        fleet_service.restart(captured, first.label)
+
+    with store_session() as store:
+        live = store.fleet_agents(project.id, live_only=True)
+        listed = {p.id for p in store.list_projects()}
+    assert len(live) == 1
+    assert project.id in listed, "the project its agent runs in is listed"
+
+
 # --- derived state (§5.1) --------------------------------------------------------------
 
 

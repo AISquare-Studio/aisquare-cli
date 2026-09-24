@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import shutil
 import sqlite3
@@ -29,8 +30,8 @@ from typing import Any, TypeVar
 
 import pytest
 from textual import Logger, events
-from textual.app import ScreenStackError
-from textual.containers import Vertical, VerticalScroll
+from textual.app import App, ComposeResult, ScreenStackError
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.content import Content
 from textual.geometry import Region
 from textual.pilot import Pilot
@@ -39,8 +40,11 @@ from textual.widgets._toast import Toast
 from textual.worker import Worker, WorkerState
 
 from aisquare.cli.ui import app as app_mod
-from aisquare.cli.ui.app import FleetApp, HelpScreen
+from aisquare.cli.ui.app import SIDEBAR_WIDTH_KEY, FleetApp, HelpScreen, Panes
+from aisquare.cli.ui.autosave import Autosave
+from aisquare.cli.ui.divider import WIDEST_ASK, Divider, cells
 from aisquare.cli.ui.sidebar import (
+    RESIZE_STEP,
     Activatable,
     AgentRow,
     Disclosure,
@@ -64,8 +68,12 @@ from aisquare.cli.ui.views.doctor import DoctorRefreshed, DoctorView
 from aisquare.cli.ui.views.explainability import ExplainabilityView
 from aisquare.cli.ui.views.onboard import OnboardFailed, ProjectOnboarded
 from aisquare.cli.ui.views.project import ManagerTab, ProjectView
+from aisquare.core import state_file
 from aisquare.core import tmux as tmux_core
+from aisquare.core.atomic import write_replacing
 from aisquare.core.config import load_config, save_config
+from aisquare.core.locking import lock_exclusive, unlock
+from aisquare.core.state_file import update_state
 from aisquare.core.store import ContextStore, store_session
 from aisquare.core.tmux import Completed
 from aisquare.models import CheckStatus, DoctorCheck, FleetAgent, FleetAgentStatus, ProjectInfo
@@ -167,16 +175,18 @@ def drive(
     *,
     doctor: Callable[[], list[DoctorCheck]] | None = None,
     notifications: bool = False,
+    size: tuple[int, int] = SIZE,
 ) -> T:
     """Run ``fn`` against a mounted ``FleetApp`` (no timer refresh; a stub doctor).
 
     ``notifications`` opts the screen's ``ToastRack`` in — ``run_test`` leaves it
     out by default, and without it a ``notify`` goes nowhere to be read.
+    ``size`` is the terminal's; a test about a laptop passes a narrow one.
     """
 
     async def run() -> T:
         app = FleetApp(refresh_seconds=3600, doctor=doctor or (lambda: []))
-        async with app.run_test(size=SIZE, notifications=notifications) as pilot:
+        async with app.run_test(size=size, notifications=notifications) as pilot:
             await pilot.pause()
             return await fn(pilot)
 
@@ -2323,3 +2333,940 @@ def test_theme_picker_applies_live_and_autosaves(
         return str(fleet_app(pilot).theme)
 
     assert drive(relaunch) == final  # restored on the next launch
+
+
+# --- the partition (#137) -----------------------------------------------------------------
+
+
+def _state(isolated_home: Path) -> dict[str, object]:
+    path = isolated_home / "state.json"
+    return json.loads(path.read_text()) if path.exists() else {}
+
+
+def _write_state(isolated_home: Path, data: object) -> Path:
+    isolated_home.mkdir(parents=True, exist_ok=True)
+    path = isolated_home / "state.json"
+    path.write_text(json.dumps(data) + "\n")
+    return path
+
+
+async def _mouse(
+    pilot: Pilot[None], kind: type[events.MouseEvent], x: int, y: int, *, button: int = 1
+) -> None:
+    """One mouse event the way the driver delivers it — through ``App.on_event``.
+
+    ``Pilot``'s mouse helpers hand their events straight to ``screen._forward_event``
+    ("Bypass event processing in App.on_event"), so nothing they post reaches the
+    click-chain counter that turns two releases into a double click, and a
+    ``hover`` never carries a button. A drag is a press, moves WITH the button
+    held and a release; this is the only way to make one.
+    """
+    pilot.app.post_message(kind(None, x, y, 0, 0, button, False, False, False))
+    await pilot.pause()
+
+
+async def _drag(pilot: Pilot[None], from_x: int, to_x: int, y: int = 5) -> None:
+    await _mouse(pilot, events.MouseDown, from_x, y)
+    await _mouse(pilot, events.MouseMove, to_x, y)
+    await _mouse(pilot, events.MouseUp, to_x, y)
+
+
+async def _settled(pilot: Pilot[None]) -> None:
+    """Let every save land — by the savers' own state, never the clock: the debounce fires and
+    the drain finishes (or a refusal stands) before this returns."""
+    app = fleet_app(pilot)
+    for saver in (app._theme_autosave, app.query_one(Divider)._autosave):
+        if saver is not None:
+            assert await asyncio.to_thread(saver.settled, 5.0), "a save never settled"
+    await pilot.pause()
+
+
+def _declared(app: FleetApp) -> int:
+    """The navigator's width with nothing saved and no gesture: the stylesheet's."""
+    width = cells(app.sidebar.styles.base.width)
+    assert width is not None
+    return width
+
+
+def _floor(app: FleetApp) -> int:
+    width = cells(app.sidebar.styles.min_width)
+    assert width is not None
+    return width
+
+
+def test_the_navigators_ceiling_keeps_the_content_usable_and_the_navigator_readable() -> None:
+    floor = 24
+    assert (
+        Panes.sidebar_ceiling(SIZE[0], floor) == SIZE[0] - 1 - Panes.MIN_CONTENT
+    )  # one is the divider's
+    assert Panes.sidebar_ceiling(50, floor) == floor, (
+        "too narrow for both minimums: the navigator's wins"
+    )
+
+
+def test_dragging_the_divider_resizes_the_sidebar_within_bounds_and_remembers_it(
+    tmp_path: Path, script: Script, isolated_home: Path
+) -> None:
+    """The partition was `Sidebar { width: 30 }` and nothing could move it (#137)."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+    # The other surfaces' keys are in the file FIRST: a save must merge, not replace.
+    _write_state(isolated_home, {"board_theme": "nord", "active_project_id": "prj_abc"})
+
+    async def go(pilot: Pilot[None]) -> dict[str, object]:
+        app = fleet_app(pilot)
+        seen: dict[str, object] = {"declared": _declared(app), "floor": _floor(app)}
+        seen["before"] = app.sidebar.outer_size.width
+        await _mouse(pilot, events.MouseDown, app.sidebar.outer_size.width, 5)
+        await _mouse(pilot, events.MouseMove, 40, 5)
+        seen["mid"] = app.sidebar.outer_size.width
+        await _mouse(pilot, events.MouseMove, 50, 5)
+        await _mouse(pilot, events.MouseUp, 50, 5)
+        seen["widened"] = app.sidebar.outer_size.width
+        seen["selections"] = dict(app.screen.selections)
+        await _settled(pilot)
+        seen["saved_after_drag"] = _state(isolated_home).get(SIDEBAR_WIDTH_KEY)
+        # Past both bounds: clamped, never a broken layout.
+        await _drag(pilot, 50, 3)
+        seen["narrowest"] = app.sidebar.outer_size.width
+        await _drag(pilot, app.sidebar.outer_size.width, SIZE[0] - 2)
+        seen["widest"] = app.sidebar.outer_size.width
+        seen["content"] = app.content.outer_size.width
+        seen["divider_x"] = app.query_one(Divider).region.x
+        # And back to a width that is neither bound, so the relaunch below proves
+        # the number itself came back — not whatever the ceiling clamps to.
+        await _drag(pilot, app.sidebar.outer_size.width, 61)
+        await _settled(pilot)
+        seen["state"] = _state(isolated_home)
+        return seen
+
+    seen = drive(go)
+    declared, floor = seen["declared"], seen["floor"]
+    assert isinstance(floor, int)
+    assert seen["before"] == declared, "nothing saved: the stylesheet's width"
+    assert seen["mid"] == 40, "the width follows the pointer while dragging"
+    assert seen["widened"] == 50
+    assert seen["selections"] == {}, "a drag on the handle selects no text"
+    assert seen["saved_after_drag"] == 50, "the release is the save"
+    assert seen["narrowest"] == floor
+    widest = Panes.sidebar_ceiling(SIZE[0], floor)
+    assert seen["widest"] == widest
+    assert seen["content"] == Panes.MIN_CONTENT and seen["divider_x"] == widest
+    assert seen["state"] == {
+        "board_theme": "nord",
+        "active_project_id": "prj_abc",
+        SIDEBAR_WIDTH_KEY: 61,
+    }
+
+    async def relaunch(pilot: Pilot[None]) -> int:
+        await pilot.pause()
+        return fleet_app(pilot).sidebar.outer_size.width
+
+    assert drive(relaunch) == 61, "restored on the next launch — the width itself"
+    _write_state(isolated_home, {SIDEBAR_WIDTH_KEY: 500})
+    assert drive(relaunch) == widest, "a saved width past the ceiling is bounded by it"
+    _write_state(isolated_home, {SIDEBAR_WIDTH_KEY: "wide"})
+    assert drive(relaunch) == declared, "a saved width that is not a number is ignored"
+
+
+def test_a_terminal_that_shrinks_re_clamps_the_navigator_and_keeps_the_divider_on_screen(
+    tmp_path: Path, script: Script, isolated_home: Path
+) -> None:
+    """The content's minimum held only at drag time: at 80 columns a 99-wide navigator
+    left the agent's pane one column and the handle off screen, with no mouse route back."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+
+    async def go(pilot: Pilot[None]) -> dict[str, object]:
+        app = fleet_app(pilot)
+        seen: dict[str, object] = {"floor": _floor(app)}
+        await _drag(pilot, app.sidebar.outer_size.width, SIZE[0] - 2)
+        seen["wide"] = app.sidebar.outer_size.width
+        await pilot.resize_terminal(80, SIZE[1])
+        await pilot.pause()
+        seen["shrunk"] = (
+            app.sidebar.outer_size.width,
+            app.content.outer_size.width,
+            app.query_one(Divider).region.x,
+        )
+        await pilot.resize_terminal(*SIZE)
+        await pilot.pause()
+        seen["back"] = app.sidebar.outer_size.width
+        # A key at the small size steps from what is ON SCREEN, not from the wide screen's number.
+        await pilot.resize_terminal(80, SIZE[1])
+        await pilot.pause()
+        app.sidebar.focus()
+        await pilot.press("less_than_sign")
+        await pilot.pause()
+        seen["stepped"] = app.sidebar.outer_size.width
+        await _settled(pilot)
+        seen["saved"] = _state(isolated_home).get(SIDEBAR_WIDTH_KEY)
+        return seen
+
+    seen = drive(go)
+    floor = seen["floor"]
+    assert isinstance(floor, int)
+    assert seen["wide"] == Panes.sidebar_ceiling(SIZE[0], floor)
+    small = Panes.sidebar_ceiling(80, floor)
+    assert seen["shrunk"] == (small, Panes.MIN_CONTENT, small), "re-clamped, the handle in reach"
+    assert seen["back"] == seen["wide"], "room again: the width the user asked for returns"
+    assert seen["stepped"] == small - RESIZE_STEP and seen["saved"] == small - RESIZE_STEP
+
+
+def test_a_drag_survives_a_right_button_and_ends_on_a_lost_release_or_a_pushed_screen(
+    tmp_path: Path, script: Script, isolated_home: Path
+) -> None:
+    """The capture and `-dragging` were released only by a left `MouseUp`: a release that
+    never arrived left every mouse event in the app routed here and the navigator following
+    the bare pointer, a screen pushed mid-drag left the column lit for good, and a right
+    click mid-drag (a paste gesture) ended and committed the drag."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+
+    async def go(pilot: Pilot[None]) -> dict[str, object]:
+        app = fleet_app(pilot)
+        divider = app.query_one(Divider)
+        seen: dict[str, object] = {}
+
+        def state() -> tuple[bool, bool, int]:
+            return (
+                divider.has_class("-dragging"),
+                app.mouse_captured is divider,
+                app.sidebar.outer_size.width,
+            )
+
+        await _mouse(pilot, events.MouseDown, app.sidebar.outer_size.width, 5)
+        await _mouse(pilot, events.MouseMove, 40, 5)
+        await _mouse(pilot, events.MouseUp, 40, 5, button=3)
+        seen["after_right_release"] = state()
+        await _mouse(pilot, events.MouseMove, 44, 5)
+        await _mouse(pilot, events.MouseUp, 44, 5)
+        seen["after_left_release"] = state()
+        # The release never arrives (let go outside the terminal): the first move
+        # with no button held ends the drag where it got to.
+        await _mouse(pilot, events.MouseDown, 44, 5)
+        await _mouse(pilot, events.MouseMove, 50, 5)
+        await _mouse(pilot, events.MouseMove, 95, 5, button=0)
+        seen["after_lost_release"] = state()
+        await _mouse(pilot, events.MouseMove, 100, 5, button=0)
+        seen["after_bare_move"] = state()
+        # A screen pushed mid-drag takes the capture away: the drag is over, nothing stays lit.
+        await _mouse(pilot, events.MouseDown, 50, 5)
+        await _mouse(pilot, events.MouseMove, 60, 5)
+        await app.push_screen(HelpScreen(app.escape_key))
+        await pilot.pause()
+        seen["after_push"] = (divider.has_class("-dragging"), app.mouse_captured)
+        await app.pop_screen()
+        await _settled(pilot)
+        seen["saved"] = _state(isolated_home).get(SIDEBAR_WIDTH_KEY)
+        return seen
+
+    seen = drive(go)
+    assert seen["after_right_release"] == (True, True, 40), (
+        "a right click is not the end of a left drag"
+    )
+    assert seen["after_left_release"] == (False, False, 44)
+    assert seen["after_lost_release"] == (False, False, 50), (
+        "where the drag got to, not where the bare pointer went"
+    )
+    assert seen["after_bare_move"] == (False, False, 50)
+    assert seen["after_push"] == (False, None)
+    assert seen["saved"] == 60, (
+        "whatever ended the drag, the width it reached is the one remembered"
+    )
+
+
+def test_a_tap_after_a_drag_keeps_the_drag_and_two_clicks_reset_and_forget_the_width(
+    tmp_path: Path, script: Script, isolated_home: Path
+) -> None:
+    """Textual counts a drag's release as a click (the handle follows the pointer, so the
+    release lands on the widget the press did): a tap on the handle within half a second
+    read as `chain == 2`, threw the drag away and saved the reset. `pilot.click(times=2)`
+    could not see it — Pilot builds `Click(chain=2)` itself, past `App.on_event`."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+
+    async def go(pilot: Pilot[None]) -> dict[str, object]:
+        app = fleet_app(pilot)
+        seen: dict[str, object] = {"declared": _declared(app)}
+        await _drag(pilot, app.sidebar.outer_size.width, 60)
+        await _mouse(pilot, events.MouseDown, 60, 5)  # a tap right after: Textual says chain == 2
+        await _mouse(pilot, events.MouseUp, 60, 5)
+        seen["tapped"] = app.sidebar.outer_size.width
+        await _settled(pilot)
+        seen["saved"] = _state(isolated_home).get(SIDEBAR_WIDTH_KEY)
+        await _mouse(
+            pilot, events.MouseDown, 60, 5
+        )  # the tap and this one: two clicks that were clicks
+        await _mouse(pilot, events.MouseUp, 60, 5)
+        seen["reset"] = app.sidebar.outer_size.width
+        await _settled(pilot)
+        seen["state"] = _state(isolated_home)
+        return seen
+
+    seen = drive(go)
+    assert seen["tapped"] == 60, "a tap on the handle after a drag is not half a double click"
+    assert seen["saved"] == 60
+    assert seen["reset"] == seen["declared"], "two clicks that were clicks: the stylesheet's width"
+    state = seen["state"]
+    assert isinstance(state, dict)
+    assert SIDEBAR_WIDTH_KEY not in state, (
+        "a reset forgets the preference, it does not save a number"
+    )
+
+
+def test_the_keyboard_steps_the_partition_from_the_sidebar_and_a_held_key_is_one_save(
+    tmp_path: Path, script: Script, isolated_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seed(tmp_path, ("prj_a", "alpha", None))
+    script["prj_a"] = [status("prj_a", "coder-auth", "coder", "working")]
+    writes: list[tuple[str, object]] = []
+
+    def counting(key: str, value: object) -> None:
+        writes.append((key, value))
+        update_state(key, value)
+
+    monkeypatch.setattr("aisquare.cli.ui.autosave.update_state", counting)
+
+    async def go(pilot: Pilot[None]) -> dict[str, object]:
+        app = fleet_app(pilot)
+        seen: dict[str, object] = {"declared": _declared(app)}
+        app.sidebar.focus()
+        widths: list[int] = []
+        for key in ("greater_than_sign", "greater_than_sign", "less_than_sign", "equals_sign"):
+            await pilot.press(key)
+            await pilot.pause()
+            widths.append(app.sidebar.outer_size.width)
+        seen["widths"] = widths
+        await _settled(pilot)
+        seen["state_after_reset"] = _state(isolated_home)
+        # Autorepeat: five presses queued back to back, no layout pass between them.
+        before = len(writes)
+        for _ in range(5):
+            app.post_message(events.Key("greater_than_sign", ">"))
+        await pilot.pause()
+        seen["burst"] = app.sidebar.outer_size.width
+        await _settled(pilot)
+        seen["burst_writes"] = writes[before:]
+        # With a pane focused the same keys are text for the agent, not a resize.
+        pane = RecordingPane()
+        await app.content.add_content(pane, set_current=True)
+        pane.focus()
+        await pilot.pause()
+        await pilot.press("greater_than_sign")
+        await pilot.pause()
+        seen["with_pane"] = (app.sidebar.outer_size.width, list(pane.keys))
+        # The fallback exists for terminals without mouse reporting; ? is where they look.
+        app.sidebar.focus()
+        await pilot.press("question_mark")
+        await pilot.pause()
+        seen["help"] = shown(app.screen.query_one("#helpbox Static", Static))
+        await pilot.press("escape")
+        await pilot.pause()
+        return seen
+
+    seen = drive(go)
+    declared = seen["declared"]
+    assert isinstance(declared, int)
+    step = RESIZE_STEP
+    assert seen["widths"] == [declared + step, declared + 2 * step, declared + step, declared]
+    state = seen["state_after_reset"]
+    assert isinstance(state, dict) and SIDEBAR_WIDTH_KEY not in state, "reset: nothing to remember"
+    assert seen["burst"] == declared + 5 * step, "a held key loses no step"
+    assert seen["burst_writes"] == [(SIDEBAR_WIDTH_KEY, declared + 5 * step)], "one write per burst"
+    assert seen["with_pane"] == (declared + 5 * step, ["greater_than_sign"]), (
+        "a focused pane keeps the key — and the partition stays where it was"
+    )
+    help_text = seen["help"]
+    assert isinstance(help_text, str)
+    assert "> < =" in help_text and "divider" in help_text, (
+        "the keys are where a keyboard user looks"
+    )
+
+
+def test_the_divider_is_the_line_and_lights_while_the_navigator_has_focus(
+    tmp_path: Path, script: Script
+) -> None:
+    """The handle sat beside the sidebar's `border-right`, so the line the eye saw was the
+    inert one a column over — and with no `render` the column spelt `Divider#divider`
+    down the screen."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+
+    async def go(pilot: Pilot[None]) -> dict[str, object]:
+        app = fleet_app(pilot)
+        divider = app.query_one(Divider)
+        seen: dict[str, object] = {
+            "declared": _declared(app),
+            "painted": [strip.text for strip in divider.render_lines(Region(0, 0, 1, 3))],
+            "columns": (app.sidebar.region.right, divider.region.x, app.content.region.x),
+            "pointer": str(divider.styles.pointer),
+            "sidebar_border": app.sidebar.styles.border_right[0],
+        }
+        app.sidebar.focus()
+        await pilot.pause()
+        seen["lit_with_sidebar"] = divider.has_class("-neighbour-focused")
+        pane = RecordingPane()
+        await app.content.add_content(pane, set_current=True)
+        pane.focus()
+        await pilot.pause()
+        seen["lit_with_pane"] = divider.has_class("-neighbour-focused")
+        app.sidebar.focus()
+        await pilot.pause()
+        seen["lit_again"] = divider.has_class("-neighbour-focused")
+        return seen
+
+    seen = drive(go)
+    declared = seen["declared"]
+    assert isinstance(declared, int)
+    assert seen["painted"] == ["│", "│", "│"], "a line, not the widget's CSS identifier"
+    assert seen["columns"] == (declared, declared, declared + 1), (
+        "one column between the panes: the line the eye sees is the one the hand grabs"
+    )
+    assert seen["sidebar_border"] == ""
+    assert seen["pointer"] == "ew-resize"
+    assert (seen["lit_with_sidebar"], seen["lit_with_pane"], seen["lit_again"]) == (
+        True,
+        False,
+        True,
+    )
+
+
+def test_a_state_file_that_is_not_an_object_is_left_alone_and_said_so_once(
+    tmp_path: Path, script: Script, isolated_home: Path
+) -> None:
+    """The width's reader raised `AttributeError` on such a file from `on_mount` — the UI
+    did not start — and its writer replaced the file wholesale, theme and pin included."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+    body = '["was", "a", "list"]\n'
+    path = _write_state(isolated_home, ["was", "a", "list"])
+    assert path.read_text() == body
+
+    async def go(pilot: Pilot[None]) -> dict[str, object]:
+        app = fleet_app(pilot)  # the launch itself is the first claim
+        await _drag(pilot, app.sidebar.outer_size.width, 50)
+        await _settled(pilot)
+        await _drag(pilot, 50, 60)
+        await _settled(pilot)
+        return {
+            "width": app.sidebar.outer_size.width,
+            "toasts": [toast.render().plain for toast in app.screen.query(Toast)],
+            "file": path.read_text(),
+            "leftovers": sorted(
+                p.name
+                for p in isolated_home.iterdir()
+                if p.name.startswith("state") and not p.name.endswith(".lock")
+            ),
+        }
+
+    seen = drive(go, notifications=True)
+    assert seen["width"] == 60, "the UI works; only the memory is refused"
+    assert seen["file"] == body, "left byte for byte as it was — the keys in it are the user's"
+    toasts = seen["toasts"]
+    assert isinstance(toasts, list) and len(toasts) == 1, "said once, not once per gesture"
+    assert "state.json" in toasts[0] and "could not be saved" in toasts[0]
+    assert seen["leftovers"] == ["state.json"], "no temp file left behind"
+
+
+def test_a_saved_width_is_bounded_before_it_reaches_the_stylesheet(
+    tmp_path: Path, script: Script, isolated_home: Path
+) -> None:
+    """`on_mount` wrote the file's number straight into `styles.width` before anything bounded
+    it: 100000000 was a `MemoryError` in Rich's cell splitting, 1e400 an `OverflowError` out of
+    the style setter, and 500 gave the content pane one frame at zero columns — a size the
+    agent's pane forwards to tmux. The file is user-editable, and the TUI that would let you
+    fix it was the thing that would not start."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+
+    async def go(pilot: Pilot[None]) -> tuple[int, int, int | None, int]:
+        app = fleet_app(pilot)
+        await pilot.pause()
+        return (
+            app.sidebar.outer_size.width,
+            app.content.outer_size.width,
+            cells(app.sidebar.styles.inline.width),
+            _floor(app),
+        )
+
+    _write_state(isolated_home, {SIDEBAR_WIDTH_KEY: 100_000_000})
+    sidebar, content, inline, floor = drive(go)
+    ceiling = Panes.sidebar_ceiling(SIZE[0], floor)
+    assert (sidebar, content) == (ceiling, Panes.MIN_CONTENT), "the layout bounds what is shown"
+    assert inline == WIDEST_ASK, "the ask reaches the stylesheet with only the absolute cap"
+    _write_state(
+        isolated_home, {SIDEBAR_WIDTH_KEY: 10**400}
+    )  # json gives a big int; float() overflowed
+    assert drive(go)[0] == ceiling
+
+
+def test_a_press_that_never_moved_writes_nothing_and_a_right_click_counts_for_nothing(
+    tmp_path: Path, script: Script, isolated_home: Path
+) -> None:
+    """A bare click settled the width it found and wrote `sidebar_width: 30` to a fresh file (so
+    a reset was undone by the next tap); a press cut short by a pushed screen did the same; and
+    a right click at the handle made the next single left click a "double" that reset the
+    navigator and deleted the key."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+
+    async def go(pilot: Pilot[None]) -> dict[str, object]:
+        app = fleet_app(pilot)
+        seen: dict[str, object] = {"declared": _declared(app)}
+        x = app.sidebar.outer_size.width
+        await _mouse(pilot, events.MouseDown, x, 5)
+        await _mouse(pilot, events.MouseUp, x, 5)
+        await _settled(pilot)
+        seen["after_click"] = _state(isolated_home)
+        await _mouse(pilot, events.MouseDown, x, 5)
+        await app.push_screen(HelpScreen(app.escape_key))
+        await pilot.pause()
+        await app.pop_screen()
+        await _settled(pilot)
+        seen["after_cut_press"] = _state(isolated_home)
+        app.sidebar.focus()
+        await pilot.press("greater_than_sign")
+        await _settled(pilot)
+        x = app.sidebar.outer_size.width
+        seen["after_key"] = (x, _state(isolated_home).get(SIDEBAR_WIDTH_KEY))
+        await _mouse(pilot, events.MouseDown, x, 5, button=3)
+        await _mouse(pilot, events.MouseUp, x, 5, button=3)
+        await _mouse(pilot, events.MouseDown, x, 5)
+        await _mouse(pilot, events.MouseUp, x, 5)
+        await _settled(pilot)
+        seen["after_right_then_left"] = (
+            app.sidebar.outer_size.width,
+            _state(isolated_home).get(SIDEBAR_WIDTH_KEY),
+        )
+        return seen
+
+    seen = drive(go)
+    declared = seen["declared"]
+    assert isinstance(declared, int)
+    assert seen["after_click"] == {}, "a click asked for nothing"
+    assert seen["after_cut_press"] == {}, "neither did a press a pushed screen cut short"
+    assert seen["after_key"] == (declared + RESIZE_STEP, declared + RESIZE_STEP)
+    assert seen["after_right_then_left"] == (declared + RESIZE_STEP, declared + RESIZE_STEP), (
+        "a right click and a left click are not a double click"
+    )
+
+
+def test_a_gesture_on_a_narrow_terminal_keeps_a_wider_remembered_width(
+    tmp_path: Path, script: Script, isolated_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Restored on an 80-column laptop, a monitor's 90 shows as the ceiling, 39. A `>` the
+    ceiling swallowed used to settle 39 over the 90 — nothing moved on screen and the
+    preference was gone for good; and a restore that stored the CLAMPED 39 as the ask never
+    gave the 90 back when the room returned. The ceiling bounds what is shown, not what is
+    remembered — and not what is asked for."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+    _write_state(isolated_home, {SIDEBAR_WIDTH_KEY: 90})
+
+    async def go(pilot: Pilot[None]) -> dict[str, object]:
+        app = fleet_app(pilot)
+        await pilot.pause()
+        seen: dict[str, object] = {"floor": _floor(app), "shown": app.sidebar.outer_size.width}
+        app.sidebar.focus()
+
+        def now() -> tuple[int, object]:
+            return app.sidebar.outer_size.width, _state(isolated_home).get(SIDEBAR_WIDTH_KEY)
+
+        # Rule 1 on its own: a step the ceiling swallows does not settle — with the
+        # ceiling rule stubbed out, so it cannot be the one catching this.
+        with monkeypatch.context() as stubbed:
+            stubbed.setattr(Divider, "_ceiling_under", lambda self, width, remembered: False)
+            await pilot.press("greater_than_sign")
+            await _settled(pilot)
+            seen["after_wider"] = now()
+        # Rule 2 on its own: a drag that MOVES and then lands on the ceiling in one gesture.
+        x = app.sidebar.outer_size.width
+        await _mouse(pilot, events.MouseDown, x, 5)
+        await _mouse(pilot, events.MouseMove, 30, 5)  # in: moved
+        await _mouse(pilot, events.MouseMove, 70, 5)  # back out, past the ceiling
+        await _mouse(pilot, events.MouseUp, 70, 5)
+        await _settled(pilot)
+        seen["after_drag"] = now()
+        # The ask survives: room again, and the 90 is what is shown.
+        await pilot.resize_terminal(140, SIZE[1])
+        await pilot.pause()
+        seen["after_room"] = now()
+        await pilot.resize_terminal(80, SIZE[1])
+        await pilot.pause()
+        await pilot.press("less_than_sign")  # a step the screen shows is a real gesture
+        await _settled(pilot)
+        seen["after_narrower"] = now()
+        return seen
+
+    seen = drive(go, size=(80, SIZE[1]))
+    floor = seen["floor"]
+    assert isinstance(floor, int)
+    small = Panes.sidebar_ceiling(80, floor)
+    assert seen["shown"] == small
+    assert seen["after_wider"] == (small, 90), "a step the ceiling swallowed writes nothing"
+    assert seen["after_drag"] == (small, 90), (
+        "a drag that lands on the ceiling is 'as wide as this screen allows'"
+    )
+    assert seen["after_room"] == (90, 90), "restored on a narrow terminal, the ask comes back"
+    assert seen["after_narrower"] == (small - RESIZE_STEP, small - RESIZE_STEP)
+
+
+def test_a_double_click_with_a_one_row_drift_is_still_a_double_click(
+    tmp_path: Path, script: Script, isolated_home: Path
+) -> None:
+    """`_moved` was set by any motion event: on a tall one-column handle a one-row hand drift
+    between press and release is routine, moved nothing, and made the reset take three clicks."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+
+    async def go(pilot: Pilot[None]) -> tuple[int, int, int]:
+        app = fleet_app(pilot)
+        declared = _declared(app)
+        app.sidebar.focus()
+        await pilot.press("greater_than_sign")
+        await pilot.pause()
+        x = app.sidebar.outer_size.width
+        await _mouse(pilot, events.MouseDown, x, 5)
+        await _mouse(pilot, events.MouseMove, x, 6)  # a row down, the same column: nothing moves
+        await _mouse(pilot, events.MouseUp, x, 6)
+        first = app.sidebar.outer_size.width
+        await _mouse(pilot, events.MouseDown, x, 6)
+        await _mouse(pilot, events.MouseUp, x, 6)
+        return declared, first, app.sidebar.outer_size.width
+
+    declared, first, second = drive(go)
+    assert first == declared + RESIZE_STEP, "the drifting click is a click: it moved nothing"
+    assert second == declared, "two clicks, one of them with a row of drift"
+
+
+def test_a_refused_theme_save_is_said_once(
+    tmp_path: Path, script: Script, isolated_home: Path
+) -> None:
+    """The save's refusal was dropped at both call sites: the picker showed the theme applied,
+    the file refused it, and nothing said so — while the width, saving to the same file in the
+    same session, did. The save is debounced and runs on a worker, like the width's."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+    path = _write_state(isolated_home, ["was", "a", "list"])
+    body = path.read_text()
+
+    async def go(pilot: Pilot[None]) -> tuple[list[str], str]:
+        app = fleet_app(pilot)
+        app.theme = "nord"
+        await _settled(pilot)
+        app.theme = "dracula"
+        await _settled(pilot)
+        return [toast.render().plain for toast in app.screen.query(Toast)], path.read_text()
+
+    toasts, file = drive(go, notifications=True)
+    assert len(toasts) == 1, "said once, not once per pick"
+    assert "state.json" in toasts[0] and "the theme could not be saved" in toasts[0]
+    assert file == body
+
+
+def test_another_button_breaks_the_double_click_chain(
+    tmp_path: Path, script: Script, isolated_home: Path
+) -> None:
+    """Textual's chain counter is button-agnostic: a middle click between two left clicks fifteen
+    rows apart, or a right click between two at one cell, made the second left click
+    `chain == 2` — and a time check on the previous left click let both through."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+
+    async def go(pilot: Pilot[None]) -> dict[str, object]:
+        app = fleet_app(pilot)
+        seen: dict[str, object] = {"declared": _declared(app)}
+        app.sidebar.focus()
+        await pilot.press("greater_than_sign")
+        await _settled(pilot)
+        x = app.sidebar.outer_size.width
+        await _mouse(pilot, events.MouseDown, x, 5)
+        await _mouse(pilot, events.MouseUp, x, 5)
+        await _mouse(pilot, events.MouseDown, x, 20, button=2)
+        await _mouse(pilot, events.MouseUp, x, 20, button=2)
+        await _mouse(pilot, events.MouseDown, x, 20)
+        await _mouse(pilot, events.MouseUp, x, 20)
+        seen["left_middle_left"] = app.sidebar.outer_size.width
+        await _mouse(pilot, events.MouseDown, x, 8)
+        await _mouse(pilot, events.MouseUp, x, 8)
+        await _mouse(pilot, events.MouseDown, x, 8, button=3)
+        await _mouse(pilot, events.MouseUp, x, 8, button=3)
+        await _mouse(pilot, events.MouseDown, x, 8)
+        await _mouse(pilot, events.MouseUp, x, 8)
+        seen["left_right_left"] = app.sidebar.outer_size.width
+        await _mouse(pilot, events.MouseDown, x, 8)  # and the real thing, right after
+        await _mouse(pilot, events.MouseUp, x, 8)
+        seen["left_left"] = app.sidebar.outer_size.width
+        await _settled(pilot)
+        seen["state"] = _state(isolated_home)
+        return seen
+
+    seen = drive(go)
+    declared = seen["declared"]
+    assert isinstance(declared, int)
+    assert seen["left_middle_left"] == declared + RESIZE_STEP
+    assert seen["left_right_left"] == declared + RESIZE_STEP
+    assert seen["left_left"] == declared, "two left clicks at one cell, close together: the reset"
+    state = seen["state"]
+    assert isinstance(state, dict) and SIDEBAR_WIDTH_KEY not in state
+
+
+def test_a_width_the_file_already_has_is_not_rewritten_and_a_save_due_at_quit_is_not_lost(
+    tmp_path: Path, script: Script, isolated_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seed(tmp_path, ("prj_a", "alpha", None))
+    # `<` then `>` must both land inside one debounce; the default left a margin of a few ms
+    # against a loaded runner, so this test's debounce is a generous one.
+    monkeypatch.setattr(Autosave, "DEBOUNCE", 0.5)
+    rewrites: list[object] = []
+
+    def spy(target: Path, body: str, *, keep_mode: bool = True, durable: bool = True) -> None:
+        rewrites.append(json.loads(body).get(SIDEBAR_WIDTH_KEY))
+        write_replacing(target, body, keep_mode=keep_mode, durable=durable)
+
+    monkeypatch.setattr(state_file, "write_replacing", spy)
+
+    async def go(pilot: Pilot[None]) -> int:
+        app = fleet_app(pilot)
+        declared = _declared(app)
+        app.sidebar.focus()
+        await pilot.press("greater_than_sign")
+        await _settled(pilot)  # one write: 34
+        await pilot.press("less_than_sign")  # 30 queued...
+        await pilot.press("greater_than_sign")  # ...and back to what the file says: handed
+        await _settled(pilot)  # over, not rewritten — the file decides, under its lock
+        await pilot.press("greater_than_sign")  # 38 queued — and the app quits inside the debounce
+        return declared
+
+    declared = drive(go)
+    step = RESIZE_STEP
+    assert rewrites == [declared + step, declared + 2 * step]
+    assert _state(isolated_home)[SIDEBAR_WIDTH_KEY] == declared + 2 * step, "flushed at quit"
+
+
+class _Split(App[None]):
+    """A divider whose neighbour may collapse to nothing: `min-width: 0` is a floor of 0."""
+
+    CSS = """
+    #left { width: 10; min-width: 0; height: 1fr; }
+    #right { width: 1fr; height: 1fr; }
+    """
+
+    def compose(self) -> ComposeResult:
+        with Horizontal():
+            yield Static("L", id="left")
+            yield Divider("#left", id="handle")
+            yield Static("R", id="right")
+
+
+def test_a_min_width_of_zero_is_a_floor_of_zero(tmp_path: Path, script: Script) -> None:
+    """`cells(...) or 1` read a declared `min-width: 0` as 1 — at both sites."""
+
+    async def collapse() -> tuple[tuple[int, int], int]:
+        async with _Split().run_test(size=(40, 6)) as pilot:
+            await pilot.pause()
+            handle = pilot.app.query_one(Divider)
+            bounds = handle.bounds()
+            await _mouse(pilot, events.MouseDown, 10, 2)
+            await _mouse(pilot, events.MouseMove, 0, 2)
+            await _mouse(pilot, events.MouseUp, 0, 2)
+            return bounds, pilot.app.query_one("#left").outer_size.width
+
+    bounds, collapsed = asyncio.run(collapse())
+    assert bounds == (0, 39), (
+        "the floor is the stylesheet's 0; the ceiling the screen less this column"
+    )
+    assert collapsed == 0
+
+    async def ceiling(pilot: Pilot[None]) -> int | None:
+        app = fleet_app(pilot)
+        app.sidebar.styles.min_width = 0
+        await pilot.resize_terminal(1 + Panes.MIN_CONTENT, SIZE[1])  # room for the content alone
+        await pilot.pause()
+        return cells(app.sidebar.styles.max_width)
+
+    assert drive(ceiling) == 0, "the container's ceiling honours a floor of 0 too"
+
+
+def test_a_gesture_at_the_ceiling_with_a_huge_width_on_file_does_not_reach_the_style_setter(
+    tmp_path: Path, script: Script, isolated_home: Path
+) -> None:
+    """The ceiling rule wrote the UNCAPPED remembered width into `styles.width`: with `10**400`
+    on file a drag that landed on the ceiling died with `OverflowError` — the launch had been
+    made safe, the first gesture had not."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+    _write_state(isolated_home, {SIDEBAR_WIDTH_KEY: 10**400})
+
+    async def go(pilot: Pilot[None]) -> tuple[int, int | None, object]:
+        app = fleet_app(pilot)
+        await pilot.pause()
+        x = app.sidebar.outer_size.width  # the ceiling
+        await _mouse(pilot, events.MouseDown, x, 5)
+        await _mouse(pilot, events.MouseMove, 60, 5)
+        await _mouse(pilot, events.MouseMove, 130, 5)
+        await _mouse(pilot, events.MouseUp, 130, 5)
+        await _settled(pilot)
+        return (
+            app.sidebar.outer_size.width,
+            cells(app.sidebar.styles.inline.width),
+            _state(isolated_home)[SIDEBAR_WIDTH_KEY],
+        )
+
+    shown, inline, on_file = drive(go)
+    assert shown == Panes.sidebar_ceiling(SIZE[0], 24)
+    assert inline == WIDEST_ASK, "the ask put back by the ceiling rule is the capped one"
+    assert on_file == 10**400, "and the file is left as the user wrote it"
+
+
+def test_a_drag_that_ends_off_the_handle_breaks_the_double_click_chain(
+    tmp_path: Path, script: Script, isolated_home: Path
+) -> None:
+    """Textual sends a `Click` only when the release lands on the widget the press did; a drag
+    out past the ceiling ends on the content, so `on_click` never ran and the chain stayed armed
+    from the click before it — one later left click reset the width and deleted the key."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+    ceiling = Panes.sidebar_ceiling(SIZE[0], 24)
+    _write_state(isolated_home, {SIDEBAR_WIDTH_KEY: ceiling})
+
+    async def go(pilot: Pilot[None]) -> tuple[int, object]:
+        app = fleet_app(pilot)
+        await pilot.pause()
+        await _mouse(pilot, events.MouseDown, ceiling, 5)  # a still left click at the handle
+        await _mouse(pilot, events.MouseUp, ceiling, 5)
+        await _mouse(pilot, events.MouseDown, ceiling, 5)  # a drag in and back out past the ceiling
+        await _mouse(pilot, events.MouseMove, 60, 5)
+        await _mouse(pilot, events.MouseMove, 130, 5)
+        await _mouse(pilot, events.MouseUp, 130, 5)  # released on the content: no Click
+        await _mouse(pilot, events.MouseDown, ceiling, 5)  # one left click, within the chain window
+        await _mouse(pilot, events.MouseUp, ceiling, 5)
+        await _settled(pilot)
+        return app.sidebar.outer_size.width, _state(isolated_home).get(SIDEBAR_WIDTH_KEY)
+
+    assert drive(go) == (ceiling, ceiling), "a drag breaks the chain, Click or no Click"
+
+
+def test_the_fleet_ui_flushes_a_theme_picked_inside_the_debounce_at_quit(
+    tmp_path: Path, script: Script, isolated_home: Path
+) -> None:
+    """The theme's save is debounced like the width's; a pick and a `q` within a tenth of a
+    second must still land — the width's quit-time flush was tested, the theme's was not."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+
+    async def go(pilot: Pilot[None]) -> None:
+        fleet_app(pilot).theme = "nord"  # and out, before the debounce fires
+
+    drive(go)
+    assert _state(isolated_home)["board_theme"] == "nord"
+
+
+def test_the_ceiling_rule_reads_what_the_saver_was_last_asked_not_the_last_confirmed_write(
+    tmp_path: Path, script: Script, isolated_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """120 on file, the ceiling 99. Drag to 60 and release; while 60 is in flight drag back out
+    past the ceiling. Read against the last CONFIRMED write (120), the rule kept the ask at 120
+    and wrote nothing, and the in-flight 60 landed: shown 99, ask 120, file 60."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+    _write_state(isolated_home, {SIDEBAR_WIDTH_KEY: 120})
+    real_update = update_state
+
+    def slow(key: str, value: object) -> None:
+        time.sleep(0.4)
+        real_update(key, value)
+
+    monkeypatch.setattr("aisquare.cli.ui.autosave.update_state", slow)
+
+    async def go(pilot: Pilot[None]) -> tuple[int, int | None, object]:
+        app = fleet_app(pilot)
+        await pilot.pause()
+        ceiling = app.sidebar.outer_size.width
+        await _drag(pilot, ceiling, 60)
+        await pilot.pause(Autosave.DEBOUNCE + 0.1)  # 60 is being written now
+        await _drag(pilot, 60, 130)  # back out, past the ceiling
+        await _settled(pilot)
+        return (
+            app.sidebar.outer_size.width,
+            app.query_one(Divider)._width,
+            _state(isolated_home)[SIDEBAR_WIDTH_KEY],
+        )
+
+    shown, ask, on_file = drive(go)
+    ceiling = Panes.sidebar_ceiling(SIZE[0], 24)
+    assert (shown, ask, on_file) == (ceiling, ceiling, ceiling), "screen, ask and file agree"
+
+
+def test_a_refusal_that_arrives_at_quit_is_reported_after_the_run_not_as_a_traceback(
+    tmp_path: Path,
+    script: Script,
+    isolated_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """With the lock held through the quit, the width's refusal lands during `flush_all`'s join,
+    when the divider is already detached: it used to print `Exception in callback …
+    NoActiveAppError` under the shell prompt and say nothing else. Now the app carries the line
+    for the launcher to print, and the toast's callback runs in the loop's own context."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+    monkeypatch.setattr(state_file, "LOCK_WAIT_S", 0.3)
+    update_state("board_theme", "nord")  # creates the lock file
+    fd = os.open(isolated_home / "state.json.lock", os.O_RDONLY)
+    lock_exclusive(fd)
+    apps: list[FleetApp] = []
+
+    async def go(pilot: Pilot[None]) -> None:
+        app = fleet_app(pilot)
+        apps.append(app)
+        app.sidebar.focus()
+        await pilot.press("greater_than_sign")  # and quit inside the debounce
+
+    try:
+        with caplog.at_level(logging.ERROR):
+            drive(go)
+    finally:
+        unlock(fd)
+        os.close(fd)
+    (line,) = apps[0].unsaved
+    assert line.startswith("the navigator's width was not saved: ")
+    assert "state.json.lock is held by another process" in line
+    assert "NoActiveAppError" not in caplog.text and "Exception in callback" not in caplog.text
+
+
+def test_run_ui_says_what_the_quit_could_not_save(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    class _Quit:
+        def __init__(self, **options: object) -> None:
+            self.unsaved = ["the theme was not saved: state.json.lock is held by another process"]
+
+        def run(self) -> None:
+            return None
+
+    monkeypatch.setattr(app_mod, "FleetApp", _Quit)
+    app_mod.run_ui()
+    err = capsys.readouterr().err
+    assert "⚠ the theme was not saved: state.json.lock is held by another process" in err
+
+
+def test_a_quit_in_the_middle_of_a_drag_keeps_the_width_the_drag_reached(
+    tmp_path: Path, script: Script, isolated_home: Path
+) -> None:
+    """`on_unmount` cleared `_dragging` and settled nothing: `q` (or the terminal closing) with the
+    button still held showed 60 and left `state.json` empty."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+
+    async def go(pilot: Pilot[None]) -> None:
+        app = fleet_app(pilot)
+        await _mouse(pilot, events.MouseDown, app.sidebar.outer_size.width, 5)
+        await _mouse(pilot, events.MouseMove, 60, 5)  # and the app exits with the button held
+
+    drive(go)
+    assert _state(isolated_home)[SIDEBAR_WIDTH_KEY] == 60
+
+
+def test_hiding_the_divider_mid_drag_ends_the_drag(
+    tmp_path: Path, script: Script, isolated_home: Path
+) -> None:
+    """`Hide` is one of the capture's exits the module docstring names; nothing pinned it."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+
+    async def go(pilot: Pilot[None]) -> tuple[bool, object, int, object]:
+        app = fleet_app(pilot)
+        divider = app.query_one(Divider)
+        await _mouse(pilot, events.MouseDown, app.sidebar.outer_size.width, 5)
+        await _mouse(pilot, events.MouseMove, 60, 5)
+        divider.display = False
+        await pilot.pause()
+        state = (divider.has_class("-dragging"), app.mouse_captured, app.sidebar.outer_size.width)
+        divider.display = True
+        await _settled(pilot)
+        return (*state, _state(isolated_home).get(SIDEBAR_WIDTH_KEY))
+
+    assert drive(go) == (False, None, 60, 60)

@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from rich.text import Text
+from textual import events
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
@@ -44,24 +45,28 @@ from textual.widget import Widget
 from textual.widgets import ContentSwitcher, Footer, Static
 from textual.worker import Worker, WorkerState
 
+from aisquare.cli.ui.autosave import Autosave
+from aisquare.cli.ui.divider import Divider, cells
 from aisquare.cli.ui.sidebar import (
     AccountsSelected,
     AddProject,
     AgentSelected,
     DoctorSelected,
     ProjectSelected,
+    ResizeSidebar,
     Sidebar,
     SpawnAgent,
     accounts_summary_text,
 )
 from aisquare.cli.ui.terminal import EscapeToSidebar, SelectionHost
-from aisquare.cli.ui.theme import ThemePicker, remember_theme, restore_theme
+from aisquare.cli.ui.theme import ThemePicker, restore_theme, theme_autosave
 from aisquare.cli.ui.views.accounts import AccountsChanged, AccountsView, read_session, summarise
 from aisquare.cli.ui.views.agent import AgentView
 from aisquare.cli.ui.views.doctor import DoctorRefreshed, DoctorView
 from aisquare.cli.ui.views.onboard import OnboardFailed, OnboardView, ProjectOnboarded
 from aisquare.cli.ui.views.project import ProjectView
 from aisquare.cli.ui.views.welcome import WelcomeView
+from aisquare.core.console import stderr_console
 from aisquare.core.store import store_session
 from aisquare.models import (
     AccountsOverview,
@@ -86,6 +91,11 @@ _DoctorReport = tuple[Path | None, list[DoctorCheck]]
 _DOCTOR_WORKER = "doctor"
 _CHECK_SYMBOL = {CheckStatus.ok: "✓", CheckStatus.warn: "⚠", CheckStatus.fail: "✗"}
 _CHECK_STYLE = {CheckStatus.ok: "green", CheckStatus.warn: "yellow", CheckStatus.fail: "bold red"}
+
+SIDEBAR_WIDTH_KEY = "sidebar_width"
+"""The ``state.json`` key the navigator's width is remembered under (#137) — beside
+``board_theme`` and ``active_project_id``; ``core.state_file`` is the file's one
+reader and writer."""
 
 
 def _doctor_report(result: object) -> _DoctorReport | None:
@@ -148,6 +158,8 @@ class HelpScreen(ModalScreen[None]):
             (self.escape_key.upper(), "hand focus from an agent's pane back to the sidebar"),
             ("wheel", "scroll an agent pane; shift/alt+PgUp/PgDn too, shift+Home/End"),
             ("drag", "select text in a pane (double-click: a word) — copied on release"),
+            ("divider", "drag the line beside the sidebar to resize it; double-click puts it back"),
+            ("> < =", "from the sidebar: widen, narrow, reset the divider"),
             ("t", "themes (applied live, autosaved)"),
             ("r", "refresh now"),
             ("F1", "command palette"),
@@ -161,6 +173,93 @@ class HelpScreen(ModalScreen[None]):
 
     def action_close_help(self) -> None:
         self.dismiss(None)
+
+
+class Panes(Horizontal):
+    """The two panes and the partition between them — and the partition's wiring (#137).
+
+    ``Sidebar`` and ``Divider`` are siblings, so a message that bubbles from one
+    can never reach the other; it reaches this container, which is where the
+    sidebar's keyboard request (``ResizeSidebar``) meets the handle. Two more
+    things are the container's because they are about the layout, not about
+    either child:
+
+    - **The content's minimum.** A ``TerminalPane`` under :data:`MIN_CONTENT`
+      columns wraps every prompt line and Claude Code's own layout gives up.
+      Rather than re-derive that bound on every gesture — which left it
+      unenforced when the TERMINAL shrank, collapsing the pane to one column
+      with the handle off screen — the container writes it as the sidebar's
+      ``max-width`` whenever its own width changes, and Textual clamps against
+      ``max-width`` on every layout pass. Too narrow for both minimums, the
+      navigator's wins: one you can read beats a pane you cannot, and the pane
+      says so with its own placeholder.
+    - **The focus signal.** Focus is in the sidebar or in a pane (§4.3), and
+      the sidebar's ``border-right`` used to say which. The divider is that
+      line now — one column, the one the hand grabs — and lights ``$accent``
+      while focus is in the sidebar.
+
+    The app keeps no handler for any of it, and nothing here assumes there is
+    one ``Divider`` on the screen: the handle and the navigator are this
+    container's direct children, and a later split inside a view is not its
+    business.
+    """
+
+    MIN_CONTENT: ClassVar[int] = 40
+    """The columns the content pane keeps, whatever the drag or the terminal's size."""
+
+    @property
+    def sidebar(self) -> Sidebar:
+        return self.query_children(Sidebar).first()
+
+    @property
+    def divider(self) -> Divider:
+        return self.query_children(Divider).first()
+
+    @classmethod
+    def sidebar_ceiling(cls, total: int, floor: int) -> int:
+        """The widest the navigator may be in ``total`` columns; the divider takes one of them."""
+        return max(floor, total - 1 - cls.MIN_CONTENT)
+
+    def on_mount(self) -> None:
+        # Before the first layout as well as on every resize, so a width the
+        # divider restores from the file is bounded whenever it is applied.
+        self._fit(self.app.size.width)
+
+    def on_resize(self, event: events.Resize) -> None:
+        self._fit(event.size.width)
+
+    def _fit(self, total: int) -> None:
+        sidebar = self.sidebar
+        floor = cells(sidebar.styles.min_width)
+        # ``min-width: 0`` is a floor of 0; unset, or not in cells, is 1.
+        sidebar.styles.max_width = self.sidebar_ceiling(total, floor if floor is not None else 1)
+
+    def on_resize_sidebar(self, event: ResizeSidebar) -> None:
+        """The sidebar's keyboard fallback: step or reset the partition."""
+        event.stop()
+        if event.delta is None:
+            self.divider.reset()
+        else:
+            self.divider.step(event.delta)
+
+    def on_descendant_focus(self, event: events.DescendantFocus) -> None:
+        self._mark_focus()
+
+    def on_descendant_blur(self, event: events.DescendantBlur) -> None:
+        self._mark_focus()
+
+    def _mark_focus(self) -> None:
+        """Light the divider iff focus is in the sidebar — read off the screen, not the event.
+
+        A pane's ``DescendantBlur`` bubbles up through the content switcher while
+        the sidebar's ``DescendantFocus`` is posted straight here, so the two can
+        arrive in either order; the screen's ``focused`` is already settled by
+        the time either does.
+        """
+        focused = self.screen.focused
+        sidebar = self.sidebar
+        beside = focused is not None and (focused is sidebar or sidebar in focused.ancestors)
+        self.divider.set_class(beside, "-neighbour-focused")
 
 
 class FleetApp(SelectionHost, inherit_bindings=False):
@@ -215,12 +314,19 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         self._doctor_worker: Worker[Any] | None = None
         """The newest doctor run; an older one's result is not ours to paint."""
         self._theme_restored = False
+        self._theme_autosave = theme_autosave(self)
+        self.unsaved: list[str] = []
+        """What the quit-time flush could not land (a preference each), for ``run_ui`` to say
+        once the screen is gone."""
 
     # --- layout -------------------------------------------------------------------
 
     def compose(self) -> ComposeResult:
-        with Horizontal(id="main"):
+        with Panes(id="main"):
             yield Sidebar(id="sidebar")
+            # The partition is a widget, not a border: drag it, or step it with
+            # < > = from the sidebar; the width is remembered (#137).
+            yield Divider("#sidebar", state_key=SIDEBAR_WIDTH_KEY, id="divider")
             with ContentSwitcher(id="content", initial="welcome"):
                 yield WelcomeView(escape_key=self.escape_key, id="welcome")
                 # The Onboard view is built on the first `+` (on_add_project): its
@@ -289,7 +395,12 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         if parent is not None:
             parent(theme_name)
         if self._theme_restored:
-            remember_theme(theme_name)
+            self._theme_autosave.remember(theme_name)
+
+    def on_unmount(self) -> None:
+        # Every saver — the theme's here, the divider's — started first and joined
+        # against ONE deadline, so quit waits once, not once per preference.
+        self.unsaved = Autosave.flush_all(self)
 
     # --- help / refresh ---------------------------------------------------------------
 
@@ -638,5 +749,8 @@ class FleetApp(SelectionHost, inherit_bindings=False):
 
 
 def run_ui(**options: Any) -> None:
-    """Run the fleet UI until the user quits."""
-    FleetApp(**options).run()
+    """Run the fleet UI until the user quits; then say what its last saves could not land."""
+    app = FleetApp(**options)
+    app.run()
+    for line in app.unsaved:
+        stderr_console().print(f"⚠ {line}", markup=False, highlight=False)

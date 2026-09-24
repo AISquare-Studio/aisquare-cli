@@ -212,3 +212,22 @@ def test_onboard_reports_a_legacy_too_large_verdict_with_its_numbers(
         "ignore (aisquare config set snapshot.ignore '<glob>,<glob>') or a .repomixignore at "
         "the repo root. Re-pack: aisquare project onboard --refresh"
     ) in result.stdout
+
+
+def test_switch_says_so_when_the_state_file_is_not_a_json_object(
+    runner: CliRunner, work_dir: Path
+) -> None:
+    """`pin_project` used to raise the JSON error itself, which `switch` reported as
+    `ambiguous_project`; a refused pin has its own error now, and the file is left as it is."""
+    from aisquare.core import paths
+
+    runner.invoke(app, ["context", "add", "a note", "--project"])  # registers the cwd project
+    paths.ensure_home()
+    body = '["was", "a", "list"]\n'
+    paths.state_path().write_text(body)
+
+    result = runner.invoke(app, ["--json", "project", "switch", "work"])
+
+    assert result.exit_code == 1, result.output
+    assert _json(result.stdout)["error"] == "state_unwritable"
+    assert paths.state_path().read_text() == body

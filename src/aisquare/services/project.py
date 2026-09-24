@@ -10,6 +10,7 @@ from aisquare.core import paths
 from aisquare.core import snapshot as snapshot_core
 from aisquare.core.config import SnapshotSettings, load_config
 from aisquare.core.entries import new_entry
+from aisquare.core.state_file import StateUnwritableError
 from aisquare.core.store import ContextStore, store_session
 from aisquare.core.workspace import (
     active_project,
@@ -155,7 +156,7 @@ def forget(ref: str, *, purge: bool = False) -> ProjectForgetReport:
         removed = store.purge_project(project.id) if purge else {}
         if not purge:
             store.forget_project(project.id)
-        active = _repin(store) if was_active else None
+        active, pin_error = _repin(store) if was_active else (None, None)
     return ProjectForgetReport(
         project=project,
         purged=purge,
@@ -163,6 +164,7 @@ def forget(ref: str, *, purge: bool = False) -> ProjectForgetReport:
         data_dir_removed=purge and _remove_data_dir(project.id),
         active=active,
         active_changed=was_active,
+        pin_error=pin_error,
     )
 
 
@@ -240,7 +242,7 @@ def prune(candidates: list[PruneCandidate], *, purge: bool) -> ProjectPruneRepor
                 store.forget_project(project_id)
             dropped.append(project_id)
         active_changed = active_id in dropped
-        active = _repin(store) if active_changed else None
+        active, pin_error = _repin(store) if active_changed else (None, None)
     if purge:
         for project_id in dropped:
             _remove_data_dir(project_id)
@@ -252,19 +254,32 @@ def prune(candidates: list[PruneCandidate], *, purge: bool) -> ProjectPruneRepor
         purged=purge,
         active=active,
         active_changed=active_changed,
+        pin_error=pin_error,
     )
 
 
-def _repin(store: ContextStore) -> ProjectInfo | None:
-    """Pin the most recently touched remaining project; clear the pin when none remain."""
+def _repin(store: ContextStore) -> tuple[ProjectInfo | None, str | None]:
+    """Pin the most recently touched remaining project (clear the pin when none remain).
+
+    Returns the project now pinned and, when the pin could not be written, why.
+    The pin is the least important thing in a forget that has already
+    committed — with ``--purge`` the rows are gone and the data directory is
+    about to be — so a ``state.json`` that refuses it is reported in the result
+    and never raised over a purge that has already happened: raised, it told
+    the operator the command failed, left the data directory orphaned (its
+    registration gone, nothing left to name it), and a re-run said "no project
+    matches".
+    """
     remaining = store.list_projects()
-    if not remaining:
-        pin_project(None)
-        return None
-    activity = store.project_activity()
-    newest = max(remaining, key=lambda project: activity.get(project.id, ""))
-    pin_project(newest.id)
-    return newest
+    newest: ProjectInfo | None = None
+    if remaining:
+        activity = store.project_activity()
+        newest = max(remaining, key=lambda project: activity.get(project.id, ""))
+    try:
+        pin_project(None if newest is None else newest.id)
+    except StateUnwritableError as exc:
+        return None, str(exc)
+    return newest, None
 
 
 def _remove_data_dir(project_id: str) -> bool:

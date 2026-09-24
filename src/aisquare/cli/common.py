@@ -243,10 +243,21 @@ def emit_project_action(message: str, project: ProjectInfo) -> None:
         stdout_console().print(message)
 
 
-def _active_note(active: ProjectInfo | None, *, changed: bool) -> str | None:
-    """One line saying where the active project went, or None when it did not move."""
+def _active_note(
+    active: ProjectInfo | None, *, changed: bool, pin_error: str | None = None
+) -> str | None:
+    """One line saying where the active project went, or None when it did not move.
+
+    A pin the state file refused is said here rather than as a failure: the
+    forget (or the sweep) is complete, and only where the pin landed is in doubt.
+    """
     if not changed:
         return None
+    if pin_error is not None:
+        return (
+            f"⚠ the pin could not be moved — {pin_error}; the active project follows your "
+            "working directory until `project switch` succeeds"
+        )
     if active is None:
         return "no projects remain — the active project follows your working directory again"
     return (
@@ -273,7 +284,7 @@ def emit_project_forget(report: ProjectForgetReport) -> None:
             "  its context entries, prompt history and board rows stay in the store, hidden "
             "— --purge deletes them; registering the root again brings them back"
         )
-    note = _active_note(report.active, changed=report.active_changed)
+    note = _active_note(report.active, changed=report.active_changed, pin_error=report.pin_error)
     if note is not None:
         console.print(f"  {note}")
 
@@ -323,7 +334,7 @@ def emit_prune(report: ProjectPruneReport) -> None:
             "  their context entries, prompt history and board rows stay in the store, hidden "
             "— --purge deletes them"
         )
-    note = _active_note(report.active, changed=report.active_changed)
+    note = _active_note(report.active, changed=report.active_changed, pin_error=report.pin_error)
     if note is not None:
         console.print(f"  {note}")
 

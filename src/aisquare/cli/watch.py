@@ -16,13 +16,13 @@ Two implementations behind one entry point:
 Only presentation lives here; all data comes from ``services.team``. The pure
 renderers (``feed_line``, ``_session_lines``, the detail texts, the transcript
 helpers) live here rather than beside the widgets because the fallback needs
-them without Textual, and ``_load_saved_theme`` / ``_save_theme`` are imported
-by the fleet UI, which reuses the theme persistence verbatim.
+them without Textual, and ``_load_saved_theme`` and the theme's key are imported
+by the fleet UI, which reuses the theme persistence verbatim (the save itself is
+``cli.ui.autosave``'s, for both apps).
 """
 
 from __future__ import annotations
 
-import json
 import time
 from datetime import datetime
 from pathlib import Path
@@ -33,6 +33,7 @@ from rich.text import Text
 from aisquare.cli.common import local_time
 from aisquare.core import harness, paths
 from aisquare.core.console import stderr_console, stdout_console
+from aisquare.core.state_file import read_state
 from aisquare.core.store import unmet_needs
 from aisquare.models import ProjectInfo, TeamEvent, TeamSession, TeamTask
 from aisquare.services import team as team_service
@@ -225,37 +226,14 @@ _THEME_KEY = "board_theme"
 
 
 def _load_saved_theme() -> str | None:
-    """The autosaved board theme from ``state.json``, if any."""
-    path = paths.state_path()
-    if not path.exists():
-        return None
-    try:
-        value = json.loads(path.read_text(encoding="utf-8")).get(_THEME_KEY)
-    except json.JSONDecodeError:
-        return None
-    return value if isinstance(value, str) else None
+    """The autosaved board theme from ``state.json``, if any.
 
-
-def _save_theme(name: str) -> None:
-    """Autosave the board theme (every change persists — no save step).
-
-    Tolerates a corrupt state.json (same anticipation as the loader) and
-    writes atomically (tmp + rename) so a mid-write crash can never leave
-    the shared state file truncated.
+    The file has one reader (``core.state_file``): a missing, corrupt or
+    non-object file is no theme, never an exception — ``.get`` on a list used to
+    raise ``AttributeError`` from here, one line into the fleet UI's mount.
     """
-    try:
-        paths.ensure_home()
-        path = paths.state_path()
-        try:
-            data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
-        except (OSError, ValueError):
-            data = {}
-        data[_THEME_KEY] = name
-        temp = path.with_suffix(".json.tmp")
-        temp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-        temp.replace(path)
-    except OSError:
-        return
+    value = read_state().get(_THEME_KEY)
+    return value if isinstance(value, str) else None
 
 
 def action_open_transcript(app: App[Any], command: list[str]) -> str | None:
@@ -297,6 +275,7 @@ def _build_app_class(interval: float) -> Any:
     from textual.widgets import Footer, OptionList, Static
     from textual.widgets.option_list import Option
 
+    from aisquare.cli.ui.autosave import Autosave
     from aisquare.cli.ui.board import BoardPanel
 
     class ThemePicker(ModalScreen[None]):
@@ -365,7 +344,13 @@ def _build_app_class(interval: float) -> Any:
             saved = _load_saved_theme()
             if saved and saved in self.available_themes:
                 self.theme = saved
+            self._theme_autosave = Autosave(self, _THEME_KEY, what="the theme", initial=saved)
             self._theme_restored = True
+
+        def on_unmount(self) -> None:
+            # Started first, joined against one deadline; what did not land is said
+            # by ``_run_tui`` once the screen is gone.
+            self.unsaved = Autosave.flush_all(self)
 
         def on_board_panel_refreshed(self, event: BoardPanel.Refreshed) -> None:
             self.title = f"aisquare board — {event.project.root.name or event.project.id}"
@@ -394,18 +379,22 @@ def _build_app_class(interval: float) -> Any:
 
         def watch_theme(self, theme_name: str) -> None:
             # Fires on ANY theme change (our picker or the command palette):
-            # every change is the save. Restored on the next launch.
+            # every change is the save — debounced and off the event loop, a
+            # refusal said once. Restored on the next launch.
             parent = getattr(super(), "watch_theme", None)
             if parent is not None:
                 parent(theme_name)
             if getattr(self, "_theme_restored", False):
-                _save_theme(theme_name)
+                self._theme_autosave.remember(theme_name)
 
     return BoardApp
 
 
 def _run_tui(interval: float) -> None:
-    _build_app_class(interval)().run()
+    app = _build_app_class(interval)()
+    app.run()
+    for line in getattr(app, "unsaved", ()):
+        stderr_console().print(f"⚠ {line}", markup=False, highlight=False)
 
 
 # --- the Rich fallback ------------------------------------------------------------

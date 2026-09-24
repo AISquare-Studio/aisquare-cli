@@ -293,6 +293,50 @@ def test_a_kitty_meta_shift_letter_keeps_its_case(parsed: Parse) -> None:
     assert arrived("\x1b[112;34;80u", parsed) == [literal("P")]
 
 
+#: Kitty chords on a character beyond ASCII, reported without their text.
+BEYOND_ASCII: list[tuple[str, str]] = [
+    ("\x1b[224;5u", "ctrl+à"),  # the unshifted 0 key on French AZERTY
+    ("\x1b[233;5u", "ctrl+é"),
+    ("\x1b[224;6u", "ctrl+shift+à"),
+    ("\x1b[224;7u", "alt+ctrl+à"),
+    ("\x1b[223;4u", "alt+shift+ß"),  # 'ß'.upper() == 'SS'
+    ("\x1b[304;5u", "ctrl+İ"),  # 'İ'.lower() is two characters
+    ("\x1b[329;4u", "alt+shift+ŉ"),  # two characters again, past ESC_INTRODUCERS
+    ("\x1b[233;2u", "shift+é"),  # AZERTY's é key shifts to 2, not É
+    ("\x1b[233;3u", "alt+é"),
+    ("\x1b[1092;3u", "alt+ф"),
+    ("\x1b[178;3u", "alt+²"),  # a digit to isdigit()
+    ("\x1b[188;4u", "alt+shift+¼"),  # alphanumeric, so no shifted-punctuation gate
+]
+
+
+@pytest.mark.parametrize(("sequence", "chord"), BEYOND_ASCII)
+def test_a_chord_on_a_character_beyond_ascii_is_named_never_spelt(
+    parsed: Parse, sequence: str, chord: str
+) -> None:
+    """A kitty terminal that reports every key but not its text hands over the
+    key's own character, and the name table spelt a chord on it as it spells
+    ``C-a``. Measured on tmux 3.7c: ``C-à`` arrives as a bare ``à`` — the ctrl
+    silently dropped, the ``C-1`` failure — and ``M-SS`` and ``C-i̇`` are TYPED
+    into the agent, since a case change can be more than one character. None
+    of those names was ever sent to 3.2-3.4 (review of #161, round 7). So the
+    chord is a keystroke lost, said once — never a name."""
+    [event] = parsed(sequence)
+    assert (event.key, event.character) == (chord, None), "the premise: a chord, no text"
+    assert arrived(sequence, parsed) == [Drop("no_name")]
+
+
+def test_beyond_ascii_the_text_and_the_bare_key_still_travel(parsed: Parse) -> None:
+    """The guard is on the NAME only: reported text wins as for every key, a
+    bare key named after its character is typed, and ASCII chords are named."""
+    assert arrived("\x1b[224;5;224u", parsed) == [literal("à")], "ctrl+à with its text"
+    assert translate("alt+shift+ß", "?", printable=True) == literal("?")
+    assert translate("à", None, printable=False) == literal("à")
+    assert translate("ß", None, printable=False) == literal("ß")
+    assert arrived("\x1b[97;5u", parsed) == [key("C-a")], "the control: ctrl+a"
+    assert arrived("\x1b[97;4u", parsed) == [key("M-A")], "the control: alt+shift+a"
+
+
 def test_super_and_shift_chords_through_the_parser(parsed: Parse) -> None:
     assert arrived("\x1b[99;9;99u", parsed) == [Drop("command")], "super+c: a command, dropped"
     assert arrived("\x1b[97;2;65u", parsed) == [literal("A")], "shift+a: the text"
@@ -762,6 +806,28 @@ def test_the_swept_vocabulary_is_everything_translate_emits() -> None:
     assert all(TMUX_NAME.match(name) for name in EMITTED)
 
 
+def test_no_base_the_sweep_leaves_out_reaches_a_name() -> None:
+    """``BASES`` is ASCII, and ``EXTENDED_MINIMUM`` rests on the sweep being
+    ALL of ``translate``'s names. A one-character base is whatever character a
+    terminal reported a key for, so every one in the plane goes through every
+    modifier set here and none may come out as a name the sweep did not send.
+    Round 6's head emitted over 250k such names — ``C-à``, ``M-SS``, ``M-ª`` …
+    — none of them ever measured against a tmux (review of #161, round 7)."""
+    swept = set(EMITTED)
+    stray: set[str] = set()
+    for mods in filter(None, MODIFIER_SETS):
+        for codepoint in range(0x21, 0x10000):
+            translation = translate(f"{mods}+{chr(codepoint)}", None, printable=False)
+            if (
+                isinstance(translation, Translation)
+                and translation.kind == "key"
+                and translation.value not in swept
+            ):
+                stray.add(translation.value)
+    assert not stray, sorted(stray)[:20]
+    assert all(name.isascii() for name in EMITTED)
+
+
 _needs_tmux = pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux is not installed")
 
 
@@ -799,13 +865,15 @@ def test_real_tmux_types_none_of_our_names_literally(
     the control at the end must see for ``Bogus`` and ``C-BSpace``, or the
     read-back proves nothing.
 
-    All 470 of :data:`EMITTED` on 3.7c: 1.4 s, none typed literally. The same
-    sweep was run by hand in containers on 2026-08-31 for the versions this
-    machine cannot install — 3.2a (ubuntu:22.04), 3.3a (debian:bookworm) and
-    3.4 (ubuntu:24.04, the CI runner). There the 352 names left after the
-    :func:`needs_extended_keys` gate all arrived as keys too, and of the 118 the
-    gate holds back, 117 were typed literally by those versions; the 118th is
-    ``C-M-Space``, gated with the class it belongs to.
+    All 470 of :data:`EMITTED` on 3.7c: 1.4 s, none typed literally (467 now,
+    every one of them among the 470: ``M-N``/``M-O``/``M-P`` are refused since,
+    as :data:`ESC_INTRODUCERS`). The same sweep was run by hand in containers on
+    2026-08-31 for the versions this machine cannot install — 3.2a
+    (ubuntu:22.04), 3.3a (debian:bookworm) and 3.4 (ubuntu:24.04, the CI
+    runner). There the 352 names left after the :func:`needs_extended_keys`
+    gate all arrived as keys too, and of the 118 the gate holds back, 117 were
+    typed literally by those versions; the 118th is ``C-M-Space``, gated with
+    the class it belongs to.
     """
     window = real_server.spawn_window(
         "keys",
@@ -880,9 +948,15 @@ def test_the_prefix_is_built_from_modifiers_so_a_token_added_there_reaches_the_n
     prefix, in the dict's order. A hand-built prefix beside it once dropped any
     token added to the dict on the floor — the chord emitted under a name with
     the modifier missing, tmux delivering the bare key (review of #161, round
-    5). Pinned by the shape of the name rather than by mutating the module."""
+    5). Pinned by the shape of the name rather than by mutating the module —
+    which cannot be done: the order is derived once, at import, so ``MODIFIERS``
+    is read-only, and a token added at runtime cannot pass the gate while
+    missing from the order (review of #161, round 7)."""
     from aisquare.core.keys import _PREFIX_ORDER
 
+    with pytest.raises(TypeError):
+        MODIFIERS["hyper"] = "H-"  # type: ignore[index]
+    assert "hyper" not in MODIFIERS
     assert _PREFIX_ORDER == ("C-", "M-", "S-")
     assert set(_PREFIX_ORDER) == set(MODIFIERS.values())
     assert translate("ctrl+shift+up", None, printable=False) == key("C-S-Up")
@@ -990,6 +1064,10 @@ def test_a_control_byte_named_after_itself_is_never_sent() -> None:
     # keystroke in them, and round 5 had routed this one there (round 6).
     assert translate("+", "\x07", printable=True) == Drop("no_name"), "malformed, a BEL"
     assert translate("+", None, printable=False) == Drop("nothing_to_type"), "malformed, nothing"
+    # An EMPTY character is no keystroke either: round 6's ``is None`` read it
+    # as one lost and toasted "no way to type +" (review of #161, round 7).
+    assert translate("+", "", printable=True) == Drop("nothing_to_type"), "malformed, empty"
+    assert translate("ctrl+", "", printable=False) == Drop("nothing_to_type")
 
 
 def test_return_and_ctrl_at_are_their_meanings() -> None:
@@ -1078,6 +1156,24 @@ def test_a_bare_key_named_after_its_unicode_character_is_that_character() -> Non
     assert translate("line_separator", None, printable=False) == Drop("no_name")
 
 
+@pytest.fixture
+def cold_read_back() -> Iterator[None]:
+    """The read-back table unbuilt for the test, and unbuilt again after it.
+
+    ``_named_characters`` is a process-wide cache: a test that clears it by
+    hand leaves it in whatever state its last passing line did, and a failure
+    part-way would hand every later test a table in a state nobody chose
+    (review of #161, round 7). Cleared on both sides, it is rebuilt on its
+    next use, as it is in a fresh process.
+    """
+    from aisquare.core.keys import _named_characters
+
+    _named_characters.cache_clear()
+    yield
+    _named_characters.cache_clear()
+
+
+@pytest.mark.usefixtures("cold_read_back")
 def test_a_chord_on_a_symbol_name_is_refused_without_building_the_read_back() -> None:
     """The answer for a chord on a symbol name is ``no_name`` whether or not
     the read-back resolves it — ``M-§`` was never measured — so the table is
@@ -1086,7 +1182,7 @@ def test_a_chord_on_a_symbol_name_is_refused_without_building_the_read_back() ->
     #161, round 6)."""
     from aisquare.core.keys import _named_characters
 
-    _named_characters.cache_clear()
+    assert _named_characters.cache_info().currsize == 0, "the fixture's premise"
     assert translate("ctrl+section_sign", None, printable=False) == Drop("no_name")
     assert translate("alt+ideographic_full_stop", None, printable=False) == Drop("no_name")
     assert _named_characters.cache_info().currsize == 0, "the table was built for nothing"

@@ -4,11 +4,14 @@ The fleet UI forwards every key the embedded pane receives to the agent
 running inside tmux. Printable characters travel as literal text
 (``send-keys -l``); everything else must be spelled in tmux's own key
 vocabulary (``Enter``, ``BSpace``, ``C-c``, ``M-x``, ``S-Enter``…). A key this
-table has no safe name for is dropped — silently sending the wrong thing to a
-running agent is worse than sending nothing — and :func:`translate` says WHY,
-as a :class:`Drop`, because the caller's answer depends on it: a chord the
-reader meant is named once, a tmux too old to carry it is a warning, and a
-modifier tapped on its own or a Cmd chord is not mentioned at all (#151).
+table has no safe name for is never sent under a guessed one: the text the
+terminal reported with it is typed instead, as it always was — a Cmd chord
+aside, which is a command and not text — and with no text nothing is sent at
+all, since silently sending the wrong thing to a running agent is worse than
+sending nothing (review of #117). For what was not sent, :func:`translate`
+says WHY, as a :class:`Drop`, because the caller's answer depends on it: a
+chord the reader meant is named once, a tmux too old to carry it is a warning,
+and a modifier tapped on its own or a Cmd chord is not mentioned at all (#151).
 
 Why the table is conservative: tmux TYPES AN UNKNOWN KEY NAME LITERALLY.
 Measured against tmux 3.7c on 2026-08-28 with a raw-mode ``cat -v`` pane:
@@ -140,8 +143,13 @@ CHORDS: dict[str, str] = {
 #: what following the tests' own advice ("``MODIFIERS`` is the place to
 #: answer it") would otherwise have done (review of #161, round 5). A new
 #: prefix is a new tmux name, and the live sweep in ``tests/test_keys.py``
-#: would need to carry it.
-MODIFIERS: dict[str, str] = {"ctrl": "C-", "alt": "M-", "meta": "M-", "shift": "S-"}
+#: would need to carry it. Read-only, so "a token added here" can only mean a
+#: source edit: :data:`_PREFIX_ORDER` is derived from it once, at import, and a
+#: token added at runtime would pass ``translate``'s gate yet never reach that
+#: order — the chord emitted with its modifier missing (review of #161, round 7).
+MODIFIERS: MappingProxyType[str, str] = MappingProxyType(
+    {"ctrl": "C-", "alt": "M-", "meta": "M-", "shift": "S-"}
+)
 
 #: The two modifier tokens that mean a COMMAND was pressed — macOS Cmd, the
 #: kitty protocol's extras — and drop the chord in silence. Exactly two: a token
@@ -324,9 +332,9 @@ def _named_characters() -> MappingProxyType[str, str]:
     layout) and the ``«`` ``»`` of several European ones never resolved that
     way (review of #161, round 3). Over the Basic Multilingual Plane — 5.8k
     names, 7 ms to build, ~0.9 MB retained for the process's life (tracemalloc
-    919 KB; round 4's "208 KB" was the 725-name table's figure carried over
-    unchanged, wrong by 4.5x — review of #161, round 6) — built on first use
-    and read-only. Not a Latin-only
+    919 KB; the "200 KB" round 5 wrote here was never measured against this
+    5.8k-name table — reviews of #161, rounds 6-7) — built on first use and
+    read-only. Not a Latin-only
     allowlist: round 4 drew one to spare the first bare-Shift press the build,
     and it dropped ``、`` ``。`` ``・`` on a JIS layout, ``،`` ``؟`` on an
     Arabic one, ``।`` on InScript, to a quiet line each; round 5 measured that
@@ -385,17 +393,21 @@ while 3.5a delivers the entire emitted set. Everything with a legacy escape
 sequence (``S-Up``, ``C-S-DC``, ``BTab``, ``M-Enter``…) is fine on every
 version back to the fleet's 3.2 minimum.
 
-Re-measured 2026-08-31 against the WHOLE emittable vocabulary — all 470 names
-:func:`translate` can produce, not a hand-listed sample — on 3.2a
-(ubuntu:22.04), 3.3a (debian:bookworm), 3.4 (ubuntu:24.04, the CI runner) and
-3.7c. That found one class the sample had missed, now gated: SHIFTED
-PUNCTUATION. Every ``C-S-<punct>``, ``M-S-<punct>`` and ``C-M-S-<punct>`` —
-``M-S--`` from alt+shift+minus, ``C-S-@``, ``M-S-{`` … — is typed literally by
-all three old versions, as are ``C-M--`` and ``C-M-/`` (tmux's own aliases for
-``C-M-_``, which itself is fine). Everything else the sweep added arrives as a
-key on every version: the triple-modifier stacks on cursor keys and function
-keys (``C-M-S-Up``, ``C-M-S-F5``), ``C-S-F1``, ``M-S-F12``, ``C-M-<letter>``,
-``C-M-@``/``[``/``\\``/``]``/``^``/``_`` and ``M-<uppercase letter>``.
+Re-measured 2026-08-31 against the WHOLE emittable vocabulary, not a
+hand-listed sample — every name :func:`translate` could produce, 470 then (467
+now: ``M-N``, ``M-O`` and ``M-P`` are refused since, as :data:`ESC_INTRODUCERS`),
+and every one ASCII: a chord on a character beyond ASCII is never named, and
+``tests/test_keys.py`` holds every one-character base in the plane to that
+(review of #161, round 7) — on 3.2a (ubuntu:22.04), 3.3a (debian:bookworm), 3.4
+(ubuntu:24.04, the CI runner) and 3.7c. That found one class the sample had
+missed, now gated: SHIFTED PUNCTUATION. Every ``C-S-<punct>``, ``M-S-<punct>``
+and ``C-M-S-<punct>`` — ``M-S--`` from alt+shift+minus, ``C-S-@``, ``M-S-{`` …
+— is typed literally by all three old versions, as are ``C-M--`` and ``C-M-/``
+(tmux's own aliases for ``C-M-_``, which itself is fine). Everything else the
+sweep added arrives as a key on every version: the triple-modifier stacks on
+cursor keys and function keys (``C-M-S-Up``, ``C-M-S-F5``), ``C-S-F1``,
+``M-S-F12``, ``C-M-<letter>``, ``C-M-@``/``[``/``\\``/``]``/``^``/``_`` and
+``M-<uppercase letter>``.
 """
 
 _EXTENDED_BASES = frozenset({"Enter", "Escape", "Space", "Tab", "BSpace"})
@@ -480,12 +492,11 @@ def translate(
         text = _sendable(character, printable=printable)
         if text is not None:
             return Translation("literal", text)
-        # No character: nothing to say. A character that arrived and cannot
-        # be sent — a BEL — is a keystroke lost, and says so: the silent
-        # reason is for events with no keystroke in them (review of #161,
-        # round 6).
-        return Drop("nothing_to_type" if character is None else "no_name")
-    held = frozenset(MODIFIERS[modifier] for modifier in modifiers if modifier in MODIFIERS)
+        # No character, or an empty one: nothing to say. A character that
+        # arrived and cannot be sent — a BEL — is a keystroke lost, and says
+        # so: the silent reason is for events with no keystroke in them
+        # (reviews of #161, rounds 6-7).
+        return Drop("no_name" if character else "nothing_to_type")
     if any(modifier not in MODIFIERS for modifier in modifiers):
         # A token this module has never met — ``foo+a``, or a modifier Textual
         # starts reporting tomorrow. Not a command (round 4), and not a chord
@@ -495,9 +506,14 @@ def translate(
         # text travels, except alt on a letter — and it is applied here, before
         # the fallback below, which would otherwise type the bare ``p`` of an
         # ``alt+foo+p`` (review of #161, round 5). Past it, a keystroke lost.
-        text = _reported_text(character, printable=printable, alt="M-" in held)
+        alt = any(MODIFIERS.get(modifier) == "M-" for modifier in modifiers)
+        text = _reported_text(character, printable=printable, alt=alt)
         return Translation("literal", text) if text is not None else Drop("no_name")
-    translation = _translate(key, modifiers, base, character, printable=printable, held=held)
+    # Built only past the gate, and by indexing: were the gate ever moved or
+    # short-circuited, an unknown token is a KeyError here rather than a prefix
+    # quietly built without it (review of #161, round 7).
+    held = frozenset(MODIFIERS[modifier] for modifier in modifiers)
+    translation = _translate(key, base, character, printable=printable, held=held)
     if (
         isinstance(translation, Translation)
         and translation.kind == "key"
@@ -505,14 +521,18 @@ def translate(
         and needs_extended_keys(translation.value)
     ):
         translation = Drop("too_old")
-    if isinstance(translation, Drop) and (text := _sendable(character, printable=printable)):
-        # Every refusal falls back to the text the terminal reported, which is
-        # what this module did before any chord exception existed — through
-        # ``_sendable``, so a control byte never gets past here whatever a
-        # caller claims (reviews of #161, rounds 5-6). Deliberately NOT
-        # ``_reported_text``: the alt exception does not apply to a refusal —
-        # ``alt+shift+o`` types an ``O`` (docs/fleet.md).
-        return Translation("literal", text)
+    if isinstance(translation, Drop):
+        text = _sendable(character, printable=printable)
+        if text is not None:
+            # Every refusal falls back to the text the terminal reported, which
+            # is what this module did before any chord exception existed —
+            # through ``_sendable``, so a control byte never gets past here
+            # whatever a caller claims (reviews of #161, rounds 5-6). Tested as
+            # ``is not None``, as the malformed-name branch does, so the two
+            # cannot part on an empty text (round 7). Deliberately NOT
+            # ``_reported_text``: the alt exception does not apply to a
+            # refusal — ``alt+shift+o`` types an ``O`` (docs/fleet.md).
+            return Translation("literal", text)
     return translation
 
 
@@ -544,22 +564,19 @@ def _reported_text(character: str | None, *, printable: bool, alt: bool) -> str 
 
 
 def _translate(
-    key: str,
-    modifiers: list[str],
-    base: str,
-    character: str | None,
-    *,
-    printable: bool,
-    held: frozenset[str],
+    key: str, base: str, character: str | None, *, printable: bool, held: frozenset[str]
 ) -> Translation | Drop:
     """The table itself, capability-blind — ``translate`` applies the version gate.
 
     ``key`` is Textual's ``Key.key`` (``"ctrl+c"``, ``"shift+tab"``, ``"f5"``,
-    ``"a"``), already split by ``translate`` into its ``modifiers`` and ``base``
-    (a well-formed name: no empty token); ``character`` is ``Key.character``
-    and ``printable`` its ``Key.is_printable``. Printable input is literal, so a pasted ``é`` or a
-    typed ``[`` never goes through the name table at all — and neither does a
-    shifted symbol, whose meaning only the keyboard layout knows.
+    ``"a"``), already split by ``translate`` into its ``base`` (a well-formed
+    name: no empty token) and ``held``, the tmux prefixes its modifiers spell —
+    every token known, ``translate`` gated the rest, so ``held`` is empty
+    exactly when no modifier is (review of #161, round 7). ``character`` is
+    ``Key.character`` and ``printable`` its ``Key.is_printable``. Printable
+    input is literal, so a pasted ``é`` or a typed ``[`` never goes through the
+    name table at all — and neither does a shifted symbol, whose meaning only
+    the keyboard layout knows.
 
     EXCEPT alt/meta on an ASCII LETTER. Textual's parser reads a legacy
     terminal's ``ESC p`` as ``Key("alt+p", character="p")`` — the character is
@@ -635,7 +652,7 @@ def _translate(
             # and ``ctrl+pause`` are as empty as the bare key (#151; reviews of
             # #161, rounds 2-4). Checked before the read-back is ever built.
             return Drop("nothing_to_type")
-        if modifiers:
+        if held:
             # The text wins above whenever a terminal reports it; the name
             # says what was typed only for the BARE key. ``M-§`` was never
             # measured against a tmux, so a chord here is a keystroke lost —
@@ -659,7 +676,7 @@ def _translate(
         # Textual names the key after the byte itself, and ``\x1b[133u`` once
         # reached ``send-keys -l`` (review of #161, round 4). Never sent.
         return Drop("no_name")
-    if not modifiers:
+    if not held:
         # A bare character the terminal did not flag printable (a control
         # picture, a NO-BREAK SPACE): send it as text, never as a name it
         # could collide with.
@@ -671,6 +688,20 @@ def _translate(
         # Textual spells out (``space``, ``no_break_space``), so the raw
         # character never arrives — and kept because ``translate`` is public:
         # ``M- `` was never measured against a tmux (review of #161, round 5).
+        return Drop("no_name")
+    if not char.isascii():
+        # A chord on a character beyond ASCII, reported without its text — a
+        # kitty terminal that reports every key but not what it types: ``à``
+        # is the unshifted 0 key on French AZERTY, ``ß`` a letter key on German.
+        # No such name was measured on the versions EXTENDED_MINIMUM rests on,
+        # and tmux 3.7c answers them with the wrong bytes: ``C-à`` arrives as a
+        # bare ``à``, the ctrl silently dropped — the ``C-1`` failure — and a
+        # case change can be more than one character: ``'ß'.upper()`` made
+        # ``M-SS`` and ``'İ'.lower()`` a two-character ``C-i̇``, names tmux
+        # TYPES into the agent. Nor is plain shift safe: AZERTY's ``é`` key
+        # shifts to ``2``, not ``É``. So every name this module emits is ASCII
+        # (past here ``upper``/``lower`` are one character each), and a bare
+        # character went as text above (review of #161, round 7).
         return Drop("no_name")
     if char.isalpha():
         # The letter's case IS the shift: ``ESC A`` is what alt+shift+a sends,

@@ -121,10 +121,12 @@ class FakeTmux:
         """Every argv this fake was asked to run, when a caller wants them — the
         shell tests' socket guard reads them after the test."""
 
-    def server(self, tmp_path: Path) -> TmuxServer:
+    def server(self, tmp_path: Path, socket: str = "fake") -> TmuxServer:
         # ``binary`` must resolve through ``shutil.which`` on a machine WITHOUT
-        # tmux: an absolute executable path does, and is never run.
-        return TmuxServer("fake", binary=sys.executable, conf=tmp_path / "fake.conf", runner=self)
+        # tmux: an absolute executable path does, and is never run. ``socket``
+        # names the server: two fakes standing for two SERVERS take two sockets,
+        # as two servers do (the widget keys its too-old notice by socket).
+        return TmuxServer(socket, binary=sys.executable, conf=tmp_path / "fake.conf", runner=self)
 
     def sent(self) -> list[tuple[str, ...]]:
         """Every ``send-keys`` after ``-t <pane>``."""

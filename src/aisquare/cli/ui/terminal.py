@@ -629,7 +629,8 @@ class TerminalPane(Widget, can_focus=True):
         self._resize_timer: Timer | None = None
         self._resize_retry: float = self.RESIZE_RETRY
         self._synced: tuple[str, int, int] | None = None
-        self._warned: set[str] = set()
+        self._warned: set[tuple[str | None, str]] = set()
+        """``(server socket or None, key)`` per notice said — see :meth:`_warn_once`."""
         self._reported_gone = False
         self._wheel_queue: list[tuple[bool, int, int]] = []
         """Notches (up?, pane column, pane row) awaiting one forwarding call."""
@@ -742,13 +743,11 @@ class TerminalPane(Widget, can_focus=True):
         # then calls this — and a cached "extended chords are fine" from a 3.7
         # server would TYPE ``S-Enter`` into an agent on a 3.4 one, as a cached
         # "-F is known" would fail every frame. Re-read lazily: one ``tmux -V``
-        # per attach at most. The notices go with it: the too-old line names
-        # the server's version, so a line deduped across an attach would
-        # prescribe an upgrade for a server the pane has left while the
-        # keystroke on the new one is lost without a word (review of #161,
-        # round 6). "Once per key name in that pane" is per pane ON A SERVER.
+        # per attach at most. The notices are NOT cleared with it: an attach is
+        # as often a restarted agent or a sign-in on the SAME server, and the
+        # one line that names a server is deduped per server by ``_warn_once``
+        # (reviews of #161, rounds 6-7).
         self._version_read = False
-        self._warned.clear()
         if pane_id is not None and self.server is None:
             # The fleet's server from config — a default like any other (§3.10).
             self.server = fleet_service.server()
@@ -1588,7 +1587,9 @@ class TerminalPane(Widget, can_focus=True):
                 need = ".".join(str(part) for part in EXTENDED_MINIMUM)
                 have = f"tmux {version[0]}.{version[1]}" if version is not None else "this tmux"
                 self._warn_once(
-                    key, f"{have} cannot carry {_printable_name(key)} — {need} or newer can"
+                    key,
+                    f"{have} cannot carry {_printable_name(key)} — {need} or newer can",
+                    server=self.server.socket if self.server is not None else None,
                 )
             case "no_name":
                 self._warn_once(
@@ -1601,8 +1602,15 @@ class TerminalPane(Widget, can_focus=True):
             case _ as unreachable:
                 assert_never(unreachable)
 
-    def _warn_once(self, key: str, message: str, *, severity: SeverityLevel = "warning") -> None:
-        """Say ``message`` once per ``key``, at ``severity``.
+    def _warn_once(
+        self,
+        key: str,
+        message: str,
+        *,
+        severity: SeverityLevel = "warning",
+        server: str | None = None,
+    ) -> None:
+        """Say ``message`` once per ``key`` — and per ``server``, when it names one.
 
         Severity is a property of the MESSAGE and not of the once-per-name
         mechanism, so each caller keeps its own answer (review): the wheel's
@@ -1612,13 +1620,20 @@ class TerminalPane(Widget, can_focus=True):
 
         Once per PANE, not per session: ``_warned`` is this widget's, and the
         app composes a ``TerminalPane`` per view — so that is the scope
-        ``docs/fleet.md`` promises, and no wider (review). And per ATTACH:
-        ``attach`` clears it beside the version it re-reads, since the too-old
-        line names a server (review of #161, round 6).
+        ``docs/fleet.md`` promises, and no wider (review). A line about a
+        SERVER passes that server's socket as ``server`` — a server is its
+        socket, and ``views/project.py`` builds a fresh ``TmuxServer`` for the
+        same one at every attach — and is said once per key name on EACH: the
+        too-old line names the version, so a pane moved to another server hears
+        it for that one (review of #161, round 6). Everything else is keyed by
+        the key alone, and an attach re-arms nothing: round 6 cleared the whole
+        set there, and a restarted agent or a sign-in — a new pane on the same
+        server — brought back the ``f13`` line, a fact about the key table, and
+        the fullscreen one, the very re-toasting #151 is about (round 7).
         """
-        if key in self._warned:
+        if (server, key) in self._warned:
             return
-        self._warned.add(key)
+        self._warned.add((server, key))
         self.notify(message, severity=severity, markup=False)
 
     def on_paste(self, event: events.Paste) -> None:

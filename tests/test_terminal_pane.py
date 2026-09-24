@@ -2985,10 +2985,10 @@ def test_the_too_old_notice_follows_the_pane_to_its_next_server(
     fake: FakeTmux, tmp_path: Path
 ) -> None:
     """The line names a server's version, and a pane outlives its server: a
-    notice deduped across an attach prescribed an upgrade for the server the
+    notice deduped across servers prescribed an upgrade for the server the
     pane had LEFT while the keystroke on the new one was lost without a word
-    (review of #161, round 6). ``attach`` clears the dedupe beside the version
-    it re-reads."""
+    (review of #161, round 6). The line is deduped per server — per socket,
+    as two servers always are — so the next one hears it (round 7)."""
     fake.version = "tmux 3.3"
     older = FakeTmux()
     older.version = "tmux 3.4"
@@ -3000,20 +3000,54 @@ def test_the_too_old_notice_follows_the_pane_to_its_next_server(
             pane = host.pane
             pane.focus()
             await pilot.pause()
-            await pilot.press("shift+enter", "shift+enter")
+            await pilot.press("ctrl+shift+enter", "ctrl+shift+enter")
             await pilot.pause()
-            pane.server = older.server(tmp_path)
+            pane.server = older.server(tmp_path, socket="older")
             pane.attach("%1")
             await pilot.pause()
-            await pilot.press("shift+enter", "shift+enter")
+            await pilot.press("ctrl+shift+enter", "ctrl+shift+enter")
             await pilot.pause()
             return list(host.notices), fake.sent(), older.sent()
 
     notices, first_sent, second_sent = run(drive())
     assert first_sent == [] and second_sent == []
     assert notices == [
-        "tmux 3.3 cannot carry shift+enter — 3.5 or newer can",
-        "tmux 3.4 cannot carry shift+enter — 3.5 or newer can",
+        "tmux 3.3 cannot carry ctrl+shift+enter — 3.5 or newer can",
+        "tmux 3.4 cannot carry ctrl+shift+enter — 3.5 or newer can",
+    ]
+
+
+def test_a_new_pane_on_the_same_server_repeats_no_notice(fake: FakeTmux, tmp_path: Path) -> None:
+    """An attach is as often a restarted agent (``views/agent.py``,
+    ``views/project.py``) or a sign-in (``views/accounts.py``) as a new server:
+    a new pane on the SAME one, under a fresh ``TmuxServer`` for its socket.
+    Round 6 cleared every notice at each attach, so a restart brought back the
+    ``f13`` line — a fact about the key table, never about a server — and the
+    too-old line the reader had already had for that server: the re-toasting
+    #151 is about (review of #161, round 7)."""
+    fake.version = "tmux 3.4"
+    fake.panes["%2"] = FakePane(screen=["the restarted agent"])
+
+    async def drive() -> tuple[list[str], list[tuple[str, ...]]]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 6)) as pilot:
+            pane = host.pane
+            pane.focus()
+            await pilot.pause()
+            await pilot.press("ctrl+shift+enter", "f13")
+            await pilot.pause()
+            pane.server = fake.server(tmp_path)  # a fresh handle, as views/project.py makes
+            pane.attach("%2")
+            await pilot.pause()
+            await pilot.press("ctrl+shift+enter", "f13")
+            await pilot.pause()
+            return list(host.notices), fake.sent()
+
+    notices, sent = run(drive())
+    assert sent == []
+    assert notices == [
+        "tmux 3.4 cannot carry ctrl+shift+enter — 3.5 or newer can",
+        "no way to type f13 into a tmux pane",
     ]
 
 

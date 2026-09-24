@@ -11,6 +11,11 @@ included, so a Ctrl-C mid-write leaves nothing beside the file an operator
 reads. ``core.state_file`` and ``services.ci_descriptor`` each had their own
 copy with parts missing; this is the one they share.
 
+On NTFS the rename is refused while any other process has the target open,
+even only to read it, so it retries through
+``paths.despite_windows_contention``: here, not at each caller, so every file
+written with this recipe keeps the retry ``save_config`` was given for it.
+
 Raises ``OSError`` for what the caller has to explain (a directory it cannot
 write, a disk that is full); the caller decides whether that is fatal.
 """
@@ -22,6 +27,8 @@ import os
 import stat
 from pathlib import Path
 from uuid import uuid4
+
+from aisquare.core.paths import despite_windows_contention
 
 
 def write_replacing(
@@ -59,7 +66,7 @@ def write_replacing(
                 os.fsync(handle.fileno())
         if kept is not None:
             os.chmod(temporary, kept)  # exactly the target's: the umask may have narrowed them
-        os.replace(temporary, target)
+        despite_windows_contention(lambda: os.replace(temporary, target))
     except BaseException:
         with contextlib.suppress(OSError):
             os.chmod(temporary, 0o600)  # Windows will not delete a read-only file

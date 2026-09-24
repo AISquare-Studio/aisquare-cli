@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import pytest
@@ -19,6 +18,7 @@ from aisquare.core.workspace import (
     project_id_for,
 )
 from aisquare.models import ProjectInfo
+from tests.fsperms import can_deny_reads
 
 
 def test_root_is_nearest_marker_ancestor(tmp_path: Path) -> None:
@@ -92,9 +92,7 @@ def test_a_state_file_that_is_not_an_object_pins_nothing_and_is_not_overwritten(
     assert path.read_text() == body
 
 
-@pytest.mark.skipif(
-    hasattr(os, "geteuid") and os.geteuid() == 0, reason="root reads through any file mode"
-)
+@pytest.mark.skipif(not can_deny_reads(), reason="mode 000 does not stop this user from reading")
 def test_an_unreadable_state_file_raises_rather_than_retargeting_the_command(
     isolated_home: Path,
 ) -> None:
@@ -109,3 +107,39 @@ def test_an_unreadable_state_file_raises_rather_than_retargeting_the_command(
             pinned_project_id()
     finally:
         path.chmod(0o600)
+
+
+def test_a_handmade_project_marker_still_resolves(tmp_path: Path) -> None:
+    """``<project>/.aisquare`` is an opt-in marker and must keep working."""
+    (tmp_path / ".aisquare").mkdir()
+    nested = tmp_path / "src"
+    nested.mkdir()
+    assert find_project_root(nested) == tmp_path.resolve()
+
+
+def test_our_own_home_is_not_a_project_root(tmp_path: Path) -> None:
+    """``~/.aisquare`` is state, not a project.
+
+    Without this, every markerless directory under ``$HOME`` resolves to
+    ``$HOME`` and shares one context pool. The home is recognised by its
+    layout, so a *different* home than the configured one (what the suite
+    itself creates, and what a developer's real ``~/.aisquare`` is relative to
+    a temp tree) is caught too.
+    """
+    home = tmp_path / ".aisquare"
+    home.mkdir()
+    (home / "config.toml").write_text("", encoding="utf-8")
+    bare = tmp_path / "scratch"
+    bare.mkdir()
+    assert find_project_root(bare) == bare.resolve()
+
+
+def test_a_git_marker_beats_an_aisquare_home(tmp_path: Path) -> None:
+    """Skipping our home must not skip a real marker in the same directory."""
+    home = tmp_path / ".aisquare"
+    home.mkdir()
+    (home / "context.db").write_text("", encoding="utf-8")
+    (tmp_path / ".git").mkdir()
+    nested = tmp_path / "src"
+    nested.mkdir()
+    assert find_project_root(nested) == tmp_path.resolve()

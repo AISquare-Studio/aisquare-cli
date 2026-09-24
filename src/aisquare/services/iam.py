@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -489,9 +490,22 @@ def store_session(
         KEY_CLIENT_ID: CLIENT_ID,
     }
     # store() merges only non-empty values. Replace this session's keys first
-    # so an unknown expiry or omitted claim cannot survive from the old token.
-    credentials.drop(*CREDENTIAL_KEYS)
-    credentials.store(**values)
+    # so an unknown expiry or omitted claim cannot survive from the old token —
+    # in ONE write, not a `drop` followed by a `store`. That pair rewrote the
+    # whole file twice and restricted it twice, which on Windows is four
+    # `icacls` subprocesses per sign-in, each with a 15 second timeout, and two
+    # separate moments with the token on disk before the DACL was applied.
+    _, restricted = credentials.store(**values, replace=CREDENTIAL_KEYS)
+    if not restricted:
+        # The third secret in this file, and the one that had no report. The API
+        # key says so through `lifecycle.initialize` and the serve token through
+        # `mcp_server.serve_token`; a session token is no less worth saying out
+        # loud, and this is the only place that knows.
+        print(
+            f"warning: could not restrict {paths.credentials_path()} to your account — "
+            "other users on this machine may be able to read your session token.",
+            file=sys.stderr,
+        )
     return Session(
         api_url=api_url,
         token=token,

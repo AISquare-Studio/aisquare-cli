@@ -51,6 +51,8 @@ from aisquare.core.tmux import (
     _tmux,
     parse_version,
 )
+from tests import fakebin
+from tests.fsperms import can_deny_reads, can_deny_writes
 
 OK = Completed(0, "", "")
 FACTS_FIELDS = len(tmux_module._FACTS_FIELDS)  # what display-message is asked for
@@ -108,12 +110,12 @@ def _facts_line(**overrides: str) -> str:
 
 @pytest.fixture
 def fake_bin(tmp_path: Path) -> Path:
-    """An executable that exists, so ``binary()`` resolves without real tmux."""
-    path = tmp_path / "bin" / "tmux"
-    path.parent.mkdir()
-    path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-    path.chmod(0o755)
-    return path
+    """An executable that exists, so ``binary()`` resolves without real tmux.
+
+    `TmuxServer.binary` is `shutil.which(...)`, which on Windows resolves
+    through PATHEXT — see `tests/fakebin.py`, which owns that lesson now.
+    """
+    return fakebin.executable_fake(tmp_path / "bin", "tmux", posix="", windows="")
 
 
 @pytest.fixture
@@ -135,11 +137,23 @@ def _completes(call: Callable[[], None]) -> bool:
     return True
 
 
-#: The permission bits below are advice to root, not a refusal, so a suite run
-#: as root would prove the opposite of what the test claims.
-not_root = pytest.mark.skipif(
-    hasattr(os, "getuid") and os.getuid() == 0,
-    reason="root writes an unwritable file anyway — the fail-open branch is unreachable",
+#: The permission bits below are ADVICE on two machines, not a refusal: to root,
+#: and on NTFS, where `chmod(0o444)` returns cleanly and the owner writes anyway.
+#: Either way the rewrite succeeds and the fail-open branch is never reached, so
+#: the test would assert the opposite of what it claims. `can_deny_writes`
+#: measures it by trying, rather than naming the two platforms it knows about.
+#: Mode 000 is a refusal for an ordinary POSIX user and ADVICE otherwise:
+#: root reads anything, and on NTFS the owner reads its own file whatever
+#: the bits say. Measured the same way `can_deny` is — by asking the
+#: platform rather than by naming the two cases we know about.
+can_read_zero_mode = pytest.mark.skipif(
+    not can_deny_reads(),
+    reason="mode 000 does not stop this user from reading",
+)
+
+can_deny = pytest.mark.skipif(
+    not can_deny_writes(),
+    reason="writes cannot be denied here — the fail-open branch is unreachable",
 )
 
 
@@ -257,7 +271,7 @@ def test_an_explicit_conf_is_used_verbatim_and_never_written(fake_bin: Path, con
     assert server.conf_fallback is None
 
 
-@not_root
+@can_deny
 def test_a_conf_that_cannot_be_rewritten_fails_open_instead_of_raising(
     fake_bin: Path, isolated_home: Path
 ) -> None:
@@ -286,9 +300,29 @@ def test_a_conf_that_cannot_be_rewritten_fails_open_instead_of_raising(
     fresh = TmuxServer("s", binary=str(fake_bin), runner=FakeTmux())
     assert fresh.has_session("x") is True, "an unwritable conf does not cost the command"
 
-    # Unreadable AND unwritable: measured on 3.7c, handing tmux an unreadable
-    # -f file kills the server at startup ("server exited unexpectedly"), while
-    # a missing one is fine — so this branch must NOT hand over the path.
+
+@can_read_zero_mode
+@can_deny
+def test_a_conf_that_cannot_be_READ_is_replaced_by_devnull(
+    fake_bin: Path, isolated_home: Path
+) -> None:
+    """The other half, as its own test so the report says which one ran.
+
+    Measured on 3.7c: handing tmux an UNREADABLE ``-f`` file kills the server at
+    startup ("server exited unexpectedly"), while a MISSING one is fine — so
+    this branch must not hand over the path at all, where the readable-but-
+    unwritable branch above must.
+
+    Split out because it needs a condition its sibling does not: mode 000 has to
+    be a refusal, which it is not for root and not on NTFS, where the owner
+    reads its own file whatever the bits say. As one test with a mid-body skip,
+    both halves reported `passed` on a machine that had only run the first, and
+    nothing in `-ra` said so.
+    """
+    isolated_home.mkdir(parents=True, exist_ok=True)
+    path = isolated_home / CONF_NAME
+    path.write_text("set -g status on  # what the last version wrote\n", encoding="utf-8")
+
     path.chmod(0o000)
     blind = TmuxServer("s", binary=str(fake_bin), runner=FakeTmux())
     assert blind.conf_path() == Path(os.devnull)
@@ -510,9 +544,14 @@ def test_spawn_window_escapes_the_separator_in_every_argument_it_carries(
         command=["claude", "--flag", "a;b", ";", "kill-server", "trailing;"],
         env={"K": "v;"},
     )
+    # Built from `directory`, not `f"{tmp_path}/dir"`: the separator between the
+    # two is the platform's, and a hardcoded "/" asserted the POSIX spelling of a
+    # path tmux is handed on both. The `;` escaping is what this test is about
+    # and is applied here exactly as the code applies it.
+    escaped_cwd = str(directory).replace(";", "\\;")
     assert fake.commands()[1] == [
         "new-window", "-d", "-P", "-F", f"#{{window_id}}{_SEP}#{{pane_id}}",
-        "-t", "=asq-amber-fox:", "-n", "coder\\;", "-c", f"{tmp_path}/dir\\;",
+        "-t", "=asq-amber-fox:", "-n", "coder\\;", "-c", escaped_cwd,
         "-e", "K=v\\;",
         # "a;b" is data to tmux already: only a LAST ";" separates commands.
         "--", "claude", "--flag", "a;b", "\\;", "kill-server", "trailing\\;",
@@ -689,6 +728,13 @@ def test_numeric_fields_never_raise_on_junk() -> None:
 
 @pytest.mark.skipif(not hasattr(os, "getuid"), reason="no uid, no tmux socket (see the next test)")
 def test_socket_path_follows_tmux_tmpdir_then_tmp(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The decorator is the runtime guard; this is the one MYPY reads, which now
+    # matters because the suite is type-checked under Windows too. `os.getuid`
+    # is POSIX-only and typeshed says so, a decorator narrows nothing, and an
+    # `assert` does not prune the branch either — mypy's platform reachability
+    # keys on `if`. `pytest.skip` is `NoReturn`, so this narrows and never runs.
+    if sys.platform == "win32":  # pragma: no cover - the skipif above got here first
+        pytest.skip("no uid on Windows")
     uid = os.getuid()
     monkeypatch.delenv("TMUX_TMPDIR", raising=False)
     assert TmuxServer("asq").socket_path() == Path("/tmp") / f"tmux-{uid}" / "asq"

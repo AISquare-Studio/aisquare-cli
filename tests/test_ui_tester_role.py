@@ -453,8 +453,14 @@ def test_doctor_names_the_directory_beside_each_tool(
     (b / ".claude.json").write_text(json.dumps({"mcpServers": {"cdp": {"args": ["puppeteer"]}}}))
     config_dirs(a, b)
     check = diagnostics._check_browser_tools(tmp_path)
-    assert f"mcp pw ({a})" in check.detail
-    assert f"mcp cdp ({b})" in check.detail
+    # Through `_short_path`, which is what builds the detail: it renders a path
+    # under the user's home as `~/…`. On Windows `tmp_path` IS under the home
+    # (`%USERPROFILE%\AppData\Local\Temp`), so the raw path is not in the string
+    # and never could be; on POSIX `/tmp` is outside it and the two spellings
+    # coincide, which is why a literal survived there. The question this test
+    # asks — is each tool named with ITS OWN directory — is unchanged.
+    assert f"mcp pw ({diagnostics._short_path(a)})" in check.detail
+    assert f"mcp cdp ({diagnostics._short_path(b)})" in check.detail
 
 
 def test_doctor_reads_the_default_installs_claude_json_beside_the_directory(

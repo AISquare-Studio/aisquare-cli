@@ -18,12 +18,14 @@ a tool is the mandate this project has repeatedly declined to write.
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
 
 from aisquare.models import CheckStatus
 from aisquare.services import diagnostics
+from tests.fsperms import can_symlink
 
 # Two real lines from this machine's /proc/self/mountinfo, trimmed to the fields
 # the parser reads. Using the real shape matters: the fstype sits AFTER the
@@ -36,6 +38,20 @@ MOUNTINFO = """\
 """
 
 
+# The mount table is a POSIX artefact and so are the paths inside it: matching a
+# mount point against a target needs POSIX path semantics, and on Windows
+# `Path("/mnt/c/nested/x").resolve()` becomes `<drive>:\mnt\c\nested\x`, which is
+# no longer under `Path("/mnt/c/nested")`. The product is already right there —
+# `/proc/self/mountinfo` does not exist, so `filesystem_of` returns the honest
+# None through its fail-open path, which the Windows test at the bottom pins.
+_parses_mountinfo = pytest.mark.skipif(
+    sys.platform == "win32", reason="mountinfo matching needs POSIX path semantics"
+)
+_needs_symlink = pytest.mark.skipif(
+    not can_symlink(), reason="this machine cannot create symlinks (needs privilege on Windows)"
+)
+
+
 @pytest.fixture
 def mountinfo(tmp_path: Path) -> Path:
     path = tmp_path / "mountinfo"
@@ -43,6 +59,7 @@ def mountinfo(tmp_path: Path) -> Path:
     return path
 
 
+@_parses_mountinfo
 def test_the_longest_mount_point_wins(mountinfo: Path) -> None:
     """Mounts nest, so the first match is not the right one.
 
@@ -137,6 +154,7 @@ def test_the_line_reports_a_plain_config_file(
     assert "regular file" in diagnostics._check_home_filesystem().detail
 
 
+@_needs_symlink
 def test_the_line_names_what_a_symlinked_config_points_at(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -178,6 +196,7 @@ def test_the_file_kind_never_raises(monkeypatch: pytest.MonkeyPatch, tmp_path: P
     assert diagnostics._config_file_kind() == "unreadable"
 
 
+@_needs_symlink
 def test_a_dangling_symlink_target_is_flagged(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -208,6 +227,7 @@ def test_a_dangling_symlink_target_is_flagged(
     assert check.status is not CheckStatus.fail, "a detector must not fail the machine"
 
 
+@_needs_symlink
 def test_a_live_symlink_is_not_flagged_as_missing(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -270,3 +290,15 @@ def test_the_warn_branch_reads_as_a_sentence_too(monkeypatch: pytest.MonkeyPatch
 
     assert check.status is CheckStatus.warn
     assert "config is a" not in check.detail, "the warn branch kept the old wording"
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="the Windows answer")
+def test_the_unknown_answer_is_what_windows_gets() -> None:
+    """Windows has no mount table, and `filesystem_of` must say so rather than guess.
+
+    The parser test above skips here, so without this the Windows behaviour of
+    the function would be asserted nowhere at all. Unknown is the honest answer
+    and the caller already renders it as one — what must never happen is a
+    raise, because this feeds `doctor`.
+    """
+    assert diagnostics.filesystem_of(Path.home() / ".aisquare") is None

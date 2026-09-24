@@ -19,7 +19,7 @@ empty" is the exact reading that lost data.
 from __future__ import annotations
 
 import json
-import stat
+from collections.abc import Sequence
 from typing import Any
 
 from aisquare.core import paths
@@ -39,7 +39,19 @@ def load_all() -> dict[str, str]:
     if not path.exists():
         return {}
     try:
-        raw = path.read_text(encoding="utf-8")
+        # THROUGH THE RETRY, because on NTFS this read takes an `Access is
+        # denied` of its own while another process holds the file for its
+        # write — and a bare `except OSError` below reads that as "nothing
+        # stored". `store()` is read-merge-write over a whole-file
+        # `write_text`, so two concurrent `aisquare` invocations could erase
+        # each other's API key, serve token or IAM session. That is verbatim
+        # the loss this module was written to stop; its own header says
+        # "'empty' is the exact reading that lost data".
+        #
+        # The `except` is unchanged and still means what it says — a file that
+        # genuinely cannot be read is nothing we can name — but contention is
+        # now resolved before it gets there rather than swallowed by it.
+        raw = paths.despite_windows_contention(lambda: path.read_text(encoding="utf-8"))
     except OSError:
         return {}
     try:
@@ -52,15 +64,35 @@ def load_all() -> dict[str, str]:
     return {}
 
 
-def store(**values: str) -> dict[str, str]:
-    """Merge ``values`` into whatever is already there, 0600. Returns the result."""
+def store(*, replace: Sequence[str] = (), **values: str) -> tuple[dict[str, str], bool]:
+    """Merge ``values`` into whatever is already there, owner-only.
+
+    ``replace`` names keys to clear FIRST, in the same read-modify-write. It
+    exists because ``drop(*KEYS)`` followed by ``store(**values)`` is the same
+    write twice: two whole-file rewrites, two ``restrict_to_owner`` calls — and
+    on Windows that is four ``icacls`` subprocesses per sign-in, each with a 15
+    second timeout. ``store(**values, replace=KEYS)`` is one of each, and the
+    caller gets the report the second write used to throw away.
+
+    It is also the only way to clear a key whose new value is EMPTY. ``values``
+    drops blanks on purpose — an omitted claim must not overwrite a good value
+    with "" — so an expiry or email that is absent this time would otherwise
+    survive from the previous session.
+
+    Returns the merged result and whether the file could actually be restricted
+    to this account. The second half is not decoration: on NTFS
+    ``chmod(0o600)`` returns cleanly and protects nothing, so a caller that
+    assumed success would promise a guard it does not have. The one writer
+    reports both facts so neither caller has to ask a second question.
+    """
     data = load_all()
+    for key in replace:
+        data.pop(key, None)
     data.update({k: v for k, v in values.items() if v})
     paths.ensure_home()
     path = paths.credentials_path()
     path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-    path.chmod(stat.S_IRUSR | stat.S_IWUSR)
-    return data
+    return data, paths.restrict_to_owner(path)
 
 
 def drop(*keys: str) -> dict[str, str]:
@@ -78,5 +110,11 @@ def drop(*keys: str) -> dict[str, str]:
     paths.ensure_home()
     path = paths.credentials_path()
     path.write_text(json.dumps(remaining, indent=2) + "\n", encoding="utf-8")
-    path.chmod(stat.S_IRUSR | stat.S_IWUSR)
+    # Through the same helper `store` uses, not `chmod`: dropping one key
+    # REWRITES the file that still holds the others, so a sign-out on Windows
+    # would otherwise leave the remaining secrets on a default DACL. The
+    # unrestricted case is not reported here the way `store` reports it —
+    # `drop`'s callers are removing a value, not promising a guard on a new
+    # one — but the file must still end up owner-only.
+    paths.restrict_to_owner(path)
     return remaining

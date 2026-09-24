@@ -289,7 +289,10 @@ def row_for(app: FleetApp, agent_id: str) -> AgentRow:
 def test_short_path_collapses_the_home_directory_only() -> None:
     home = Path("/home/me")
     assert short_path(home / "work" / "api", home) == "~/work/api"
-    assert short_path(Path("/srv/api"), home) == "/srv/api"  # not under home: untouched
+    # "untouched" means `str(path)`, which is the platform's spelling — the `~/`
+    # branch above is `as_posix()` on purpose and stays a forward-slash literal.
+    outside = Path("/srv/api")
+    assert short_path(outside, home) == str(outside)  # not under home: untouched
 
 
 def test_ordered_agents_puts_the_manager_first_then_by_creation() -> None:
@@ -1116,7 +1119,23 @@ def test_a_doctor_report_is_painted_only_in_the_scope_it_ran_for(
     assert "[archive]" in rendered
     # Control: the same string rendered AS MARKUP loses the bracketed segment —
     # the failure this assertion exists to catch, measured here.
-    assert Content.from_markup(rendered).plain == rendered.replace("[archive]", "")
+    #
+    # Derived FROM `rendered`, not rebuilt from the parts. A control assembled
+    # out of literals stops being a control: it keeps passing if the product
+    # drops the path, changes the separator between path and reason, or reorders
+    # the message — none of which this test would then notice.
+    #
+    # The one thing neutralised is the separator, because Rich's escape
+    # character is `\` and that is also the Windows one: `...\[archive]\repo`
+    # reads as an ESCAPED bracket, survives markup parsing untouched, and the
+    # control would prove nothing on the platform where it looks most alarming.
+    as_markup = rendered.replace("\\", "/")
+    # The segment has to BE there before "markup ate it" means anything —
+    # otherwise an `as_markup` that never contained it satisfies both sides of
+    # the comparison and the control passes having proved nothing. Same
+    # manufacture-then-assert shape as winacl's "the leak was not manufactured".
+    assert "[archive]" in as_markup, as_markup
+    assert Content.from_markup(as_markup).plain == as_markup.replace("[archive]", "")
 
 
 def test_the_setup_form_wires_a_machine_without_a_shell(tmp_path: Path, script: Script) -> None:
@@ -1657,11 +1676,23 @@ def test_the_explainability_views_toasts_keep_bracketed_data(
         return app.screen.query_one(Toast).render().plain
 
     rendered = drive(go, notifications=True)
-    assert str(refused) in rendered and "[work]" in rendered
+    # The message carries the OSError, and `OSError.__str__` renders its filename
+    # through `repr()` — which doubles every backslash. So a raw `str(refused)`
+    # is not in the toast on Windows even though the path is: the same escaped-
+    # rendering trap as the `json.dumps` assertions ported earlier. Comparing
+    # against the error's own text asserts the same thing on both platforms.
+    assert str(OSError(30, "Read-only file system", str(refused))) in rendered
+    assert "[work]" in rendered
     assert rendered.startswith("could not write the config:")
     # Control: the same string parsed AS MARKUP loses the bracketed directory —
     # the failure this assertion exists to catch, measured here.
-    assert "[work]" not in Content.from_markup(rendered).plain
+    #
+    # From `rendered` with only the separator neutralised, for the reason the
+    # sibling test above records — a control rebuilt from literals would keep
+    # passing after the product stopped emitting the path at all.
+    as_markup = rendered.replace("\\", "/")
+    assert "[work]" in as_markup, as_markup  # present before markup is asked to eat it
+    assert "[work]" not in Content.from_markup(as_markup).plain
 
 
 def test_project_onboarded_refreshes_and_selects_the_project(

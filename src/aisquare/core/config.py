@@ -6,6 +6,7 @@ stubbed. Unknown keys in the file are ignored so old configs keep loading.
 
 from __future__ import annotations
 
+import contextlib
 import errno
 import os
 import tomllib
@@ -17,6 +18,7 @@ from pydantic import BaseModel, Field
 
 from aisquare.core import paths
 from aisquare.core.atomic import write_replacing
+from aisquare.core.paths import despite_windows_contention
 from aisquare.models import Pool, RedactionLevel
 
 
@@ -392,8 +394,13 @@ def load_config(path: Path | None = None) -> AppConfig:
     target = path or paths.config_path()
     if not target.exists():
         return AppConfig()
-    with target.open("rb") as fh:
-        data: dict[str, Any] = tomllib.load(fh)
+
+    def _read() -> dict[str, Any]:
+        with target.open("rb") as fh:
+            loaded: dict[str, Any] = tomllib.load(fh)
+            return loaded
+
+    data = despite_windows_contention(_read)
     return AppConfig.model_validate(data)
 
 
@@ -479,11 +486,23 @@ def save_config(config: AppConfig, path: Path | None = None) -> Path:
         # _keep_unknown. Reading fails open on purpose — a config we cannot parse
         # is exactly the state a write is most likely trying to repair, and
         # refusing to write would strand the operator with the broken file.
-        try:
+        #
+        # THROUGH THE RETRY, like the rename in `write_replacing` below and
+        # `load_config` above. A
+        # `PermissionError` IS an `OSError`, so under the NTFS contention this
+        # module measures, the fail-open silently skipped the unknown-key
+        # preservation — and `_keep_unknown`'s own docstring says what that
+        # costs: "exit 0, no warning, and because the tracing seam is fail-open
+        # the result is a green-looking machine with no tracing". Failing open
+        # is right for a config we cannot PARSE; it is not right for one that is
+        # busy for 40 microseconds.
+        def _read_existing() -> dict[str, Any]:
             with written.open("rb") as handle:
-                dumped = _keep_unknown(tomllib.load(handle), dumped, config)
-        except (OSError, tomllib.TOMLDecodeError):
-            pass
+                loaded: dict[str, Any] = tomllib.load(handle)
+                return loaded
+
+        with contextlib.suppress(OSError, tomllib.TOMLDecodeError):
+            dumped = _keep_unknown(despite_windows_contention(_read_existing), dumped, config)
     payload = tomli_w.dumps(dumped)
 
     # Written BESIDE the target and renamed over it, never into the target
@@ -501,7 +520,11 @@ def save_config(config: AppConfig, path: Path | None = None) -> Path:
     # is removed on any failure rather than left next to the file an operator
     # reads. POSIX rename semantics hold because ~/.aisquare is a native disk;
     # on a DrvFs /mnt/c or \\wsl.localhost path the guarantee softens, and
-    # nothing in this code can tell which kind of path it is on.
+    # nothing in this code can tell which kind of path it is on. On NTFS the
+    # rename is refused while another process has the config open, even only
+    # to read it; ``write_replacing`` retries it through
+    # ``paths.despite_windows_contention``, so every file written with that
+    # recipe gets the retry, not only this one.
     try:
         # keep_mode: a config the operator tightened to 0600 stays 0600 — the
         # rewrite used to reset it to the umask default.

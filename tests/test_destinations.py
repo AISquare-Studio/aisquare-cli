@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import ast
 import json
+import shlex
+import sqlite3
 import stat
 from collections.abc import Iterator
 from pathlib import Path
@@ -26,7 +28,7 @@ import aisquare
 from aisquare.cli import auth as auth_cli
 from aisquare.cli.app import app
 from aisquare.core.config import AppConfig, ExplainabilityTarget, load_config, save_config
-from aisquare.core.store import store_session
+from aisquare.core.store import SqliteStore, store_session
 from aisquare.core.workspace import pin_project, project_id_for
 from aisquare.models import ProjectInfo, TraceDestination
 from aisquare.services import destinations as dest
@@ -79,12 +81,25 @@ def signed_in(runner: CliRunner, idp: IdentityProviderStub, isolated_home: Path)
     return session
 
 
+@pytest.fixture(autouse=True)
+def run_from_web(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every command runs from the ``web`` checkout, the project most tests make.
+
+    Without ``--project``, ``use``, ``studios``, ``status`` and ``whoami`` ask
+    about the project a launch here joins — this checkout — and not the
+    ``project switch`` pin, which launches ignore (review of #170). So the
+    working directory, not a pin, is what makes ``web`` the default.
+    """
+    web = tmp_path / "web"
+    web.mkdir()
+    monkeypatch.chdir(web)
+
+
 def _project(root: Path) -> ProjectInfo:
     root.mkdir(parents=True, exist_ok=True)
     info = ProjectInfo(id=project_id_for(root.resolve()), root=root.resolve(), linked_repos=[])
     with store_session() as store:
         store.onboard_project(info)
-    pin_project(info.id)
     return info
 
 
@@ -572,6 +587,100 @@ def test_key_set_after_a_refused_mint_binds_the_destinations_deployment(
     assert explicit["target"] == "stg"
 
 
+# --- the next step `use` names is a check that passes for what it set up ------------------------
+
+
+def _trace_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Tracing enabled, and the destination's proxy answering (nothing listens in a test)."""
+    config = load_config()
+    config.explainability.enabled = True
+    save_config(config)
+    monkeypatch.setattr(ops, "probe_proxy", lambda _url: service.ProxyProbe(True, "proxy healthy"))
+
+
+def _next_step(output: str) -> list[str]:
+    """The command on `use`'s ``next:`` line, as the app's argv: no ``aisquare``, no note."""
+    line = next(ln for ln in output.splitlines() if ln.strip().startswith("next:"))
+    argv = shlex.split(line.split("next:", 1)[1].split("   (", 1)[0])
+    assert argv[0] == "aisquare", line
+    return argv[1:]
+
+
+def test_the_next_step_for_the_projects_key_resolves_the_projects_key(
+    runner: CliRunner,
+    idp: IdentityProviderStub,
+    signed_in: iam.Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`doctor` opens no store, so a minted key is invisible to it; `status` resolves it."""
+    _trace_on(monkeypatch)
+    _project(tmp_path / "lib")
+    _project(tmp_path / "web")  # the checkout the commands run from
+    result = runner.invoke(app, ["explainability", "use", "acme/Frontend"])
+    assert result.exit_code == 0, result.output
+    step = _next_step(result.output)
+    assert step == ["explainability", "status", "--target", "local"]
+    followed = runner.invoke(app, ["--json", *step])
+    assert followed.exit_code == 0, followed.output
+    shown = json.loads(followed.stdout)
+    assert (shown["key_source"], shown["key_set"]) == ("project", True)
+
+    # For a project other than this checkout's, the check is about THAT project.
+    other = runner.invoke(app, ["explainability", "use", "--project", "lib", "acme/API"])
+    assert other.exit_code == 0, other.output
+    step = _next_step(other.output)
+    assert step == ["explainability", "status", "--target", "local", "--project", "lib"]
+    shown = _json(runner, *step)
+    assert shown["destination"]["studio"]["name"] == "API", "this checkout's project was checked"
+    assert (shown["key_source"], shown["key_set"]) == ("project", True)
+
+
+def test_with_no_key_the_next_step_attaches_one_to_the_destination(
+    runner: CliRunner,
+    idp: IdentityProviderStub,
+    signed_in: iam.Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Not `doctor`: its remedy is a machine key, which never stands in for the project's."""
+    _trace_on(monkeypatch)
+    idp.key_mint = "token_not_valid"
+    project = _project(tmp_path / "web")
+    result = runner.invoke(app, ["explainability", "use", "acme/Frontend"])
+    assert result.exit_code == 0, result.output
+    step = _next_step(result.output)
+    assert step == ["explainability", "key", "set", "--from-env", "VAR", "--target", "local"]
+    monkeypatch.setenv("VAR", "AIS_handmade_key")
+    assert runner.invoke(app, step).exit_code == 0
+    resolved = ops.resolve_target(load_config().explainability, None, project_id=project.id)
+    assert (resolved.name, resolved.key_source) == ("local", "project")
+    again = runner.invoke(app, ["explainability", "use", "acme/Frontend"])
+    assert _next_step(again.output) == ["explainability", "status", "--target", "local"]
+
+
+def test_the_next_step_for_a_machine_key_is_doctor_and_doctor_resolves_it(
+    runner: CliRunner,
+    idp: IdentityProviderStub,
+    signed_in: iam.Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A machine key is doctor's to put to the gateway: it resolves the same key `use` did."""
+    _trace_on(monkeypatch)
+    idp.key_mint = "token_not_valid"
+    monkeypatch.setenv("EXPLAINABILITY_LOCAL_API_KEY", "AIS_machine_local_key")
+    _project(tmp_path / "web")
+    result = runner.invoke(app, ["explainability", "use", "acme/Frontend"])
+    assert result.exit_code == 0, result.output
+    step = _next_step(result.output)
+    assert step == ["doctor", "--live", "--target", "local"]
+    # Offline: the rows --live adds dial the gateway. The config row is the one
+    # that failed when this line named doctor for a project's key.
+    rows = {check.name: check for check in ops.checks(target_name=step[-1])}
+    assert rows["explainability config"].status == "ok", rows["explainability config"].detail
+
+
 # --- the proxy comes from the same target as the key ---------------------------------------------
 
 
@@ -705,6 +814,38 @@ def test_a_hand_key_over_a_minted_one_is_the_operators(
     assert service.project_key_path(project.id).read_text() == "AIS_handmade_key"
 
 
+def test_a_hand_key_that_does_not_land_leaves_the_minted_one_live_and_minted(
+    runner: CliRunner,
+    idp: IdentityProviderStub,
+    signed_in: iam.Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The minted key is revoked once its replacement is recorded, never before (review of #172).
+
+    ``key set`` revoked it and dropped its uid, then wrote; when the binding
+    could not be recorded, the write put the file back as it was — the key just
+    revoked, no longer called minted. ``use`` then called that dead key "the
+    project's own key" and never minted again, and ``logout`` left it alone.
+    """
+    project = _project(tmp_path / "web")
+    _json(runner, "explainability", "use", "acme/Frontend")
+    minted = service.project_key_path(project.id).read_text()
+
+    def locked(*_args: object, **_kwargs: object) -> None:
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(SqliteStore, "set_project_explainability", locked)
+    monkeypatch.setenv("WEB_KEY", "AIS_handmade_key")
+    failed = runner.invoke(app, ["explainability", "key", "set", "--from-env", "WEB_KEY"])
+    assert failed.exit_code != 0
+    assert idp.revoked_keys == [], "a key revoked before its replacement was in place"
+    with store_session() as store:
+        row = store.project_destination(project.id)
+    assert row is not None and row.key_uid == "key-1", "the key in the file stopped being minted"
+    assert service.project_key_path(project.id).read_text() == minted
+
+
 def test_key_clear_retires_a_minted_key(
     runner: CliRunner, idp: IdentityProviderStub, signed_in: iam.Session, tmp_path: Path
 ) -> None:
@@ -716,6 +857,33 @@ def test_key_clear_retires_a_minted_key(
         row = store.project_destination(project.id)
     assert row is not None and row.key_uid is None
     assert "— no key yet" in runner.invoke(app, ["explainability", "status"]).output
+
+
+def test_a_key_clear_that_does_not_land_leaves_the_minted_key_live_and_minted(
+    runner: CliRunner,
+    idp: IdentityProviderStub,
+    signed_in: iam.Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``key clear`` revokes once the binding is gone: a failed clear keeps a working key.
+
+    Revoked first, a clear whose row would not delete left the binding on a
+    dead key with no uid — the state a failed ``key set`` left (review of #172).
+    """
+    project = _project(tmp_path / "web")
+    _json(runner, "explainability", "use", "acme/Frontend")
+
+    def locked(*_args: object, **_kwargs: object) -> bool:
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(SqliteStore, "clear_project_explainability", locked)
+    assert runner.invoke(app, ["explainability", "key", "clear"]).exit_code != 0
+    assert idp.revoked_keys == []
+    with store_session() as store:
+        row = store.project_destination(project.id)
+    assert row is not None and row.key_uid == "key-1"
+    assert service.project_key_path(project.id).read_text() == idp.minted[0]["api_key"]
 
 
 def test_the_cli_never_mints_over_a_hand_key_bound_to_another_target(
@@ -740,15 +908,21 @@ def test_the_cli_never_mints_over_a_hand_key_bound_to_another_target(
     assert binding is not None and binding.target == "stg"
 
 
-def test_the_ui_attach_resolves_the_project_and_leaves_a_minted_key_to_the_cli(
+def test_the_ui_attach_leaves_a_minted_key_to_the_cli(
     runner: CliRunner, idp: IdentityProviderStub, signed_in: iam.Session, tmp_path: Path
 ) -> None:
+    """The tab's one project-key writer never overwrites a key the CLI minted.
+
+    Revoking it is a network call and the tab's handlers run on the UI thread,
+    so the refusal names ``key set``, which revokes it. Which deployment the
+    form binds a key to is the form's question (tests/test_ui_project.py).
+    """
     from aisquare.cli.ui.views import explainability as view
 
     idp.key_mint = "token_not_valid"
     project = _project(tmp_path / "web")
     _json(runner, "explainability", "use", "acme/Frontend")
-    attached = view.attach_project_key("AIS_pasted_key")
+    attached = view.attach_project_key("AIS_pasted_key", project, "local")
     assert attached.severity == "information" and "for target local" in attached.message
     with store_session() as store:
         binding = store.project_explainability(project.id)
@@ -757,9 +931,32 @@ def test_the_ui_attach_resolves_the_project_and_leaves_a_minted_key_to_the_cli(
     idp.key_mint = "ok"
     runner.invoke(app, ["explainability", "key", "clear"])
     _json(runner, "explainability", "use", "acme/Frontend")
-    refused = view.attach_project_key("AIS_pasted_again")
+    assert view.minted_key_refusal(project) is not None
+    refused = view.attach_project_key("AIS_pasted_again", project, "local")
     assert refused.severity == "warning" and "minted by the CLI" in refused.message
     assert service.project_key_path(project.id).read_text() == idp.minted[0]["api_key"]
+
+
+def test_use_status_and_whoami_ask_about_this_checkout_not_the_pin(
+    runner: CliRunner, idp: IdentityProviderStub, signed_in: iam.Session, tmp_path: Path
+) -> None:
+    """Without ``--project`` every surface here names the project a launch from here joins.
+
+    ``use`` and ``status`` default to it through the key commands' resolver
+    (review of #170); ``whoami`` read the ``project switch`` pin, so with
+    another project pinned it reported that one's destination — none — right
+    after ``use`` had recorded this checkout's.
+    """
+    web = _project(tmp_path / "web")
+    lib = _project(tmp_path / "lib")
+    pin_project(lib.id)
+    _json(runner, "explainability", "use", "acme/Frontend", "--no-key")
+    with store_session() as store:
+        assert store.project_destination(web.id) is not None
+        assert store.project_destination(lib.id) is None, "the pin is not where launches go"
+    assert _json(runner, "explainability", "status")["destination"]["studio"]["name"] == "Frontend"
+    assert _json(runner, "whoami")["destination"]["studio"]["name"] == "Frontend"
+    assert "traces: acme / Frontend" in runner.invoke(app, ["whoami"]).output
 
 
 # --- revocation goes where the key was minted ---------------------------------------------------
@@ -818,6 +1015,87 @@ def test_logout_revokes_only_on_the_host_that_minted_and_survives_a_stuck_file(
     assert sorted(cleared) == sorted([here.id, elsewhere.id])
     assert "key-elsewhere" not in idp.revoked_keys, "a key uid sent to a host that never minted it"
     assert sorted(idp.revoked_keys) == ["key-here", "key-stuck"]
+
+
+def test_an_exported_target_does_not_make_use_mint_again(
+    runner: CliRunner,
+    idp: IdentityProviderStub,
+    signed_in: iam.Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Whether the project has this destination's key is asked of the destination's deployment."""
+    monkeypatch.setenv(ops.TARGET_ENV_VAR, "stg")
+    project = _project(tmp_path / "web")
+    first = _json(runner, "explainability", "use", "acme/Frontend")
+    again = _json(runner, "explainability", "use", "acme/Frontend")
+    assert again["key"] == {"source": "project", "minted": False, "note": "the project's own key"}
+    assert len(idp.minted) == 1 and idp.revoked_keys == [], "a second key minted over the first"
+    assert first["target"]["name"] == again["target"]["name"] == "local"
+    assert again["routing"] and all(b["bound"] for b in again["routing"])
+    with store_session() as store:
+        row = store.project_destination(project.id)
+    assert row is not None and row.key_uid == "key-1"
+
+
+def test_a_mint_over_a_minted_key_revokes_the_one_it_replaces(
+    runner: CliRunner, idp: IdentityProviderStub, signed_in: iam.Session, tmp_path: Path
+) -> None:
+    """Its uid is overwritten, so unrevoked it would be a live key nothing remembers."""
+    project = _project(tmp_path / "web")
+    _json(runner, "explainability", "use", "acme/Frontend")
+    service.project_key_path(project.id).unlink()  # the minted key's file is gone
+    again = _json(runner, "explainability", "use", "acme/Frontend")
+    assert again["key"]["minted"] is True and len(idp.minted) == 2
+    assert idp.revoked_keys == ["key-1"]
+    with store_session() as store:
+        row = store.project_destination(project.id)
+    assert row is not None and row.key_uid == "key-2"
+
+
+def test_a_purge_revokes_the_minted_key_it_leaves_nothing_to_find(
+    runner: CliRunner,
+    idp: IdentityProviderStub,
+    signed_in: iam.Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``forget --purge`` and ``prune --purge`` delete the row ``logout`` finds the key by.
+
+    The row, its ``key_uid`` and the key file went, the key stayed live on the
+    server, and nothing on this machine could revoke it any more (review of
+    #172). Revoked once the purge is done: one that fails keeps a working key.
+    A plain forget keeps the row, hidden, and so keeps it for ``logout``.
+    """
+    web = _project(tmp_path / "web")
+    gone = _project(tmp_path / "gone")
+    kept = _project(tmp_path / "kept")
+    for project in (web, gone, kept):
+        _json(runner, "explainability", "use", "acme/Frontend", "--project", project.id)
+    assert [m["uid"] for m in idp.minted] == ["key-1", "key-2", "key-3"]
+
+    def locked(*_args: object, **_kwargs: object) -> dict[str, int]:
+        raise sqlite3.OperationalError("database is locked")
+
+    purge = SqliteStore.purge_project
+    monkeypatch.setattr(SqliteStore, "purge_project", locked)
+    assert runner.invoke(app, ["project", "forget", str(web.root), "--purge"]).exit_code != 0
+    assert idp.revoked_keys == [], "revoked for a purge that did not happen"
+    monkeypatch.setattr(SqliteStore, "purge_project", purge)
+
+    forgotten = runner.invoke(app, ["project", "forget", str(web.root), "--purge"])
+    assert forgotten.exit_code == 0, forgotten.output
+    assert idp.revoked_keys == ["key-1"]
+
+    gone.root.rmdir()
+    pruned = runner.invoke(app, ["project", "prune", "--missing", "--purge", "--yes"])
+    assert pruned.exit_code == 0, pruned.output
+    assert idp.revoked_keys == ["key-1", "key-2"]
+
+    assert runner.invoke(app, ["project", "forget", str(kept.root)]).exit_code == 0
+    assert idp.revoked_keys == ["key-1", "key-2"], "a forget without --purge keeps the row"
+    assert _json(runner, "logout")["minted_keys_cleared"] == 1
+    assert idp.revoked_keys == ["key-1", "key-2", "key-3"]
 
 
 # --- the store and the directory ----------------------------------------------------------------

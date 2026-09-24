@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 import sys
 from pathlib import Path
 from typing import Annotated
@@ -22,7 +23,7 @@ from aisquare.core.console import stdout_console
 from aisquare.core.state import get_state
 from aisquare.core.store import store_session
 from aisquare.core.workspace import find_project_root, project_id_for
-from aisquare.models import ProjectInfo
+from aisquare.models import ProjectGroup, ProjectInfo
 from aisquare.services import project as project_service
 from aisquare.services import project_groups as groups_service
 
@@ -66,12 +67,68 @@ def list_(
             chosen = groups_service.resolve_group(store, group) if group else None
         except KeyError:
             fail(f"no group matches '{group}'", error="not_found", ref=str(group))
-    projects = arrangement.ordered_projects()
-    if chosen is not None:
-        projects = [p for p in projects if p.group_id == chosen.id]
+        listed = arrangement.ordered_projects()
+        captured = [] if all else store.captured_projects()
+    # Counted only when nothing is listed at all, where "nothing registered"
+    # would be wrong — not when --group or --pinned filtered the list empty.
+    hidden = 0 if listed else len(captured)
+    projects = _matching(listed, chosen, pinned=pinned)
+    filtered = None
+    if listed and not projects:
+        # The filter matched nothing in a list that has rows, and the empty table
+        # said "No projects registered yet. Run: aisquare init" (review of #171,
+        # round 1). It names the filter instead, and the step that fills it.
+        where = f" in group {chosen.name}" if chosen is not None else ""
+        unlisted = len(_matching(captured, chosen, pinned=pinned))
+        if unlisted:
+            # What it matches is captured, and the list hides it (#139): pinned or
+            # grouped from a shell, or from the sidebar while `a` shows it. "pin
+            # one" and "add one" named a step already taken, and taken again it
+            # changed nothing (review of #171, round 2).
+            noun = "directory" if unlisted == 1 else "directories"
+            flags = " --pinned" if pinned else ""
+            if chosen is not None:
+                flags += f" --group {shlex.quote(chosen.name)}"
+            filtered = (
+                f"No listed {'pinned ' if pinned else ''}projects{where} — {unlisted} captured "
+                f"{noun} hidden (a hooked session ran there): aisquare project list --all"
+                f"{flags}; add one: aisquare project onboard <path>"
+            )
+        elif pinned:
+            filtered = f"No pinned projects{where} — pin one: aisquare project pin <project>"
+        elif chosen is not None:
+            filtered = (
+                f"No projects{where} — add one: aisquare project group add "
+                f"{_positional(chosen.name)} <project>"
+            )
+    emit_projects(
+        projects,
+        active_id=project_service.info().id,
+        hidden=hidden,
+        group_names=group_names,
+        filtered=filtered,
+    )
+
+
+def _matching(
+    projects: list[ProjectInfo], group: ProjectGroup | None, *, pinned: bool
+) -> list[ProjectInfo]:
+    """The rows ``--group`` and ``--pinned`` keep, in the order given."""
+    if group is not None:
+        projects = [p for p in projects if p.group_id == group.id]
     if pinned:
         projects = [p for p in projects if p.pinned_at is not None]
-    emit_projects(projects, active_id=project_service.info().id, group_names=group_names)
+    return projects
+
+
+def _positional(value: str) -> str:
+    """``value`` as a shell word a command reads as an argument, never as an option.
+
+    ``shlex.quote`` keeps the shell from splitting a name, not Click from reading
+    ``-wip`` as options; ``--`` ends the options first (review of #171, round 2).
+    """
+    word = shlex.quote(value)
+    return f"-- {word}" if value.startswith("-") else word
 
 
 @app.command("switch")
@@ -125,6 +182,10 @@ _PURGE_HELP = (
 )
 
 
+_STALE_CAPTURE_DAYS = 30
+"""How long a captured directory sits untouched before ``prune --captured-only`` takes it."""
+
+
 @app.command("forget")
 def forget(
     ref: Annotated[str, typer.Argument(help="Project id prefix, name, codename or path.")],
@@ -165,9 +226,13 @@ def prune(
         ),
     ] = False,
     older_than: Annotated[
-        int,
-        typer.Option("--older-than", min=0, help="Days of inactivity for --captured-only."),
-    ] = 30,
+        int | None,
+        typer.Option(
+            "--older-than",
+            min=0,
+            help=f"Days of inactivity for --captured-only (default {_STALE_CAPTURE_DAYS}).",
+        ),
+    ] = None,
     yes: Annotated[
         bool, typer.Option("--yes", "-y", help="Drop without asking; required off a terminal.")
     ] = False,
@@ -181,12 +246,17 @@ def prune(
     run unless --yes; under --json without --yes it lists the candidates and
     changes nothing.
     """
+    if older_than is not None and not captured_only:
+        # Ignored silently, `prune --older-than 7` read as "what is older than a
+        # week" and swept every missing root and worktree instead.
+        fail("--older-than applies only with --captured-only", error="usage")
     if not missing and not worktrees and not captured_only:
         missing = worktrees = True
+    days = _STALE_CAPTURE_DAYS if older_than is None else older_than
     candidates = project_service.prune_candidates(
         missing=missing,
         worktrees=worktrees,
-        captured_older_than=older_than if captured_only else None,
+        captured_older_than=days if captured_only else None,
     )
     if yes:
         emit_prune(project_service.prune(candidates, purge=purge))

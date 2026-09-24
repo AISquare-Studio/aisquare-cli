@@ -139,6 +139,44 @@ whichever `target` names, and keys never cross between them.
 
 ---
 
+### The proxy sits beside the gateway
+
+`--proxy-url` is the deployment's **proxy**, not its gateway: same host, port
+**9443**. It is the one value in this runbook nobody can guess, and getting it
+wrong is silent — sessions launch, traffic goes somewhere else, and `doctor`
+used to call that green.
+
+Two ways not to get it wrong:
+
+- **In `asq`** — the Explainability tab's **Setup** form fills it in from the
+  gateway you type. Leave the proxy field blank. Three things about that form
+  worth knowing before the first press:
+  - The **deployment** field names the entry these settings belong to. It does
+    not move this machine to that deployment unless **make active** is ticked —
+    correcting prod's gateway from a machine on stg leaves the machine on stg,
+    and the toast says so.
+  - The **workspace key** goes to `~/.aisquare/explainability-key`, and that
+    file is read only for the default variable, `EXPLAINABILITY_API_KEY`. A
+    target that names its own **key variable** reads the shell, so the form
+    refuses a key typed beside a custom variable rather than writing it where
+    nothing will look. With **this project only** ticked, the key is the
+    project's own instead (see *A key per project* below), which every target
+    reads first, whatever variable it names.
+  - The **prefix** is a name: `nishil` becomes `nishil-{role}`. Braces are taken
+    off, and the toast quotes what was stored.
+- **On the command line** — pass it explicitly, as the examples above do.
+
+Either way, a gateway or proxy without a scheme (`stg.example`) is **refused**,
+not stored. It used to be accepted, after which the proxy lane read green over a
+gateway nothing could reach; the one writer both surfaces go through checks it
+now, so the CLI and the form give the same answer.
+
+Self-hosting with no proxy tier? Use your own, or the local sidecar at
+`http://127.0.0.1:9090`. The form suggests nothing for a loopback gateway,
+precisely so it cannot repoint you at a port with nothing on it — and nothing
+when a proxy is already configured for the target, its own or a deliberate
+top-level `proxy_url`.
+
 ## 5. Register your agent identities
 
 ```bash
@@ -242,6 +280,7 @@ proxy, including one on your own machine:
 
 ```bash
 aisquare explainability enable --proxy-url http://127.0.0.1:9090
+# (the local sidecar's own port — 9443 is the HOSTED convention and does not apply here)
 ```
 
 Reasons to: model traffic that must not leave the machine, or a self-hosted
@@ -279,13 +318,22 @@ proxied under it. A project can carry its own (#141):
 ```bash
 cd ~/work/api
 aisquare explainability key set --from-env API_WORKSPACE_KEY   # from a variable (or pipe it on stdin)
+aisquare explainability register                                # once, if that workspace has not seen this machine's agents
 aisquare explainability key show                                # the origin, never the value
 aisquare explainability key clear
 ```
 
 The key comes from a named variable (`--from-env`) or from stdin (pipe it in);
 it is never an argument, because argv is in every process list and shell
-history.
+history. A directory nothing has registered yet is registered by `key set`:
+attaching a key is a deliberate act, like `team on`.
+
+**Which project** is the one a launch from here joins: `$AISQUARE_TEAM_HUB`
+when it is set, else this checkout (a worktree resolves to its principal) —
+never the `project switch` pin, which launches ignore. Every surface without a
+`--project` asks the same question, so the key `status` and `key show` report
+is the key `launch`, `team spawn` and `explainability env` authenticate with.
+Name another project with `--project P`.
 
 The key lands in the project's data directory, mode 600
 (`~/.aisquare/projects/<id>/explainability-key`); the store records only the
@@ -294,10 +342,22 @@ lane uses, is **project key → the target's variable → the machine file**, an
 key attached for `stg` is never handed to a `prod` gateway — the same rule the
 machine file follows. `aisquare launch`, `fleet spawn` (through `launch` in the
 window) and `explainability env [--project P]` authenticate the proxy with the
-project's key; `status` and the UI's Explainability view show the origin for the
-active project, and the view has an *Attach key* field (the key is pasted,
-never echoed). The client lane — the insights this CLI buffers and `ship`
-drains — still ships under the machine key; per-project shipping is a follow-up.
+project's key. A key for ANOTHER workspace traces nothing until that workspace
+knows this machine's agent identities — every span is refused 409
+`agent_not_registered` — so run `explainability register` there once;
+`register [--project P]` registers under the same project's key. `status`
+shows the origin for that project, and each project page's Explainability tab
+shows the key its launches use — the project they join from the page's root,
+so the hub's under `$AISQUARE_TEAM_HUB` — and a *Register roster* button that
+registers under it. The **Setup** form's workspace key field attaches a key to
+that project when **this project only** is ticked (the key is pasted, never
+echoed), bound to the deployment the form names, or — when the field is blank —
+the one an exported `$AISQUARE_EXPLAINABILITY_TARGET` or the project's
+destination names (#142), else the active one, as `key set` resolves it; typed
+beside other settings that would go to a different deployment, it is refused
+until the field names one. The client lane — the insights this CLI buffers and `ship` drains — still
+ships under the machine key, and `doctor --live` checks the machine's
+workspace; per-project shipping is a follow-up.
 `init --explainability` keeps writing the machine key, so a single-workspace
 machine is unaffected.
 
@@ -311,7 +371,7 @@ pasted, no gateway URL typed (#142).
 aisquare login --api-url https://stg-api.aisquare.studio   # or the default, production
 aisquare explainability workspaces                          # what you can see, members first
 aisquare explainability studios --workspace acme
-aisquare explainability use acme/Frontend                   # for the active project (or --project P)
+aisquare explainability use acme/Frontend                   # for the project a launch here joins (or --project P)
 aisquare explainability status                              # "destination: acme / Frontend · stg · …"
 aisquare explainability use --clear
 ```
@@ -329,7 +389,12 @@ reported on its own line:
   never answers for another one; the exception is the machine whose top-level
   gateway already is that deployment's. Launches, `fleet spawn` and
   `explainability env` in the project take the proxy **and** the key from this
-  target, and `use` ends by naming it: `aisquare doctor --live --target <name>`.
+  target. `use` asks about this target whatever `AISQUARE_EXPLAINABILITY_TARGET`
+  says, and once tracing is on it ends with the check for what it set up:
+  `aisquare explainability status --target <name>` (plus `--project` when you
+  named one) for the project's own key, because `doctor` resolves only the
+  machine's; `aisquare doctor --live --target <name>` for a machine key; and
+  `key set` when there is no key yet.
 - **key** — ingest still needs a workspace key (neither the gateway nor the
   hosted proxy accepts a sign-in token), so the CLI obtains one on your behalf
   unless the project already has its own, scoped to `ingest:write`, named
@@ -341,15 +406,17 @@ reported on its own line:
   `aisquare explainability key set --from-env VAR` is the way in — it binds the
   key to the project's destination unless you pass `--target`. A key you
   attached by hand is used as is and never minted over; `key set` over a minted
-  key revokes the minted one, and so do `use --clear` and a move into another
-  workspace.
+  key revokes the minted one once the new key is recorded (a `key set` that
+  fails leaves the minted key working), and so do `use --clear`, a move into
+  another workspace, a new mint over it (when its file is gone), and
+  `project forget --purge` or `project prune --purge`.
 - **routing** — a span lands in the studio its agent identity is bound to in
   that workspace (unbound identities go to the workspace's *Unassigned* inbox),
   so `use` binds this machine's identities (`aisquare-planner`, `aisquare-coder`,
   …) to the chosen studio with the key. Binding needs a workspace OWNER/ADMIN
   key or the studio owner's; a refusal is reported per identity, and the
   destination is still recorded.
-- `whoami` gains a `traces:` line for the active project; `aisquare logout`
+- `whoami` gains a `traces:` line for the same project; `aisquare logout`
   forgets every key the CLI minted (revoking each on the server when it can) and
   leaves hand-attached keys alone.
 
@@ -382,11 +449,19 @@ the line says `credits unavailable` with the reason and nothing else changes.
 | `401 Invalid API key` | Key belongs to a different deployment, or was rotated |
 | `409` / `not a registered identity` | Step 5 |
 | `explainability proxy: unreachable` | Wrong `--proxy-url`, or a local proxy that is not running |
+| `proxy … but it ships to <url> while target … is <url>` | **Red.** The proxy is alive and posting to another deployment — your Runs are landing there. Point this CLI at the target's proxy, or restart a local proxy with `EXPLAINABILITY_GATEWAY_URL` set to the target's gateway |
+| `proxy … a local proxy ships wherever EXPLAINABILITY_GATEWAY_URL pointed when it was started` | **Amber.** A local sidecar took its destination from the environment it was started with, which need not be your target, and it is too old to say. Restart it with `EXPLAINABILITY_GATEWAY_URL` set to the target's gateway, or point this CLI at the deployment's own proxy — the line spells it out |
+| `proxy … does not report a gateway and is not on <gateway>'s host` | **Amber**, and possibly not a fault: a deployment's own proxy behind another hostname looks exactly like another deployment's from here. Confirm on the proxy host what it was started with; a proxy that reports its gateway from `/health` clears this on its own |
+| `proxy … no gateway is configured for target` | **Amber.** Tracing is on and there is nothing to compare the proxy against — set `--gateway-url`. If the proxy reports where it ships, the line names that gateway and the command that adopts it |
+| `proxy … the gateway configured for target … is unusable` / `explainability config: … gateway needs a scheme` | The stored gateway is not a URL (`stg.example`, no scheme). `enable` and the form refuse this now; a hand-edited config or `EXPLAINABILITY_GATEWAY_URL` can still carry one. Store a full `https://` URL |
 | Everything green, nothing on the dashboard | The spool is not being drained — step 10 |
 | `… is temporarily unavailable (server error), so auto mode cannot determine the safety of Bash` on every tool call, while the chat itself keeps answering | Auto mode's **classifier** request failing behind the proxy — see the next section |
 
 `aisquare explainability status --json` is the machine-readable view, and the one
-to script a check against.
+to script a check against. Its exit code is non-zero when tracing is on and the
+proxy lane is **red** — the proxy would not take a session, or it is alive and
+reports that it ships to another deployment; amber exits 0, and
+`probe_severity` says which.
 
 ### Auto mode refuses every tool call behind the proxy
 
@@ -420,17 +495,31 @@ the baseline cannot be compacted.
 auto-mode` line whenever a fleet role runs `auto` behind a configured proxy: it
 reads the first-turn size of your recent sessions from their transcripts and
 warns when that size is above ~100k tokens, or when a recent session was
-refused. `fleet spawn` puts the same warning on its receipt. A running session
-that is being refused is put in **attention** (🔔 on its row) by its Stop hook,
-with one `auto_mode_blocked` line on the board.
+refused three times or more (one or two can be a real transient 5xx). `fleet
+spawn` puts the same warning on its receipt. A running session that was
+launched through the proxy and has been refused three times is put in
+**attention** (🔔 on its row) by its Stop hook, with one `auto_mode_blocked`
+line on the board — whether tracing is still on or not, because a running
+agent keeps the proxy it started with. A session that reaches the three while
+`fleet restart` or `fleet switch` is taking it down gets neither — the bell
+would cost the replacement its claims, and the line would name a restart
+already under way — and the replacement that resumes its transcript is judged
+on the refusals it adds, not on the ones it inherits: still refused, it gets
+the bell and the line; restarted in a mode that needs no classifier, neither.
 
 **Until the proxy fix, pick one:**
 
 - a permission mode that needs no classifier for the fleet roles:
   `aisquare config set fleet.roles.coder.permission_mode acceptEdits` (per
   spawn: `aisquare fleet spawn coder --permission-mode acceptEdits`; a running
-  agent: set the mode, then `aisquare fleet restart <label>` — its session
-  resumes);
+  agent: `aisquare fleet restart <label> --permission-mode acceptEdits` — its
+  session resumes, and later restarts keep the mode. A restart replays the mode
+  the agent was launched with, so the role's setting alone reaches only the
+  agents spawned after it). `config set` only writes a key your config already
+  has, and a `config.toml` with its own `[fleet.roles]` has only the roles it
+  lists: for a role it leaves out, add a `[fleet.roles.<role>]` table to the
+  file with `permission_mode = "acceptEdits"` on the line below it. The doctor
+  line and the board line name whichever of the two your config takes;
 - a lighter Claude config dir for the account the fleet launches under — fewer
   MCP connectors; their tool schemas are the bulk of the baseline — and check
   the new size with `aisquare doctor`;

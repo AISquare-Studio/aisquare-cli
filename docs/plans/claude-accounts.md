@@ -44,6 +44,16 @@ account is a second directory and a launch that points the variable at it.
   variable is set, so a "default" launched that way re-onboards into an empty
   config (verified on this machine: `~/.claude.json` exists, `~/.claude/
   .claude.json` does not; every `~/.claude-c<n>/.claude.json` does).
+- **Under a managed slot, slot 1 is still the launching shell's.** An agent on
+  slot 2 runs with both variables naming slot 2, and so do its hooks, the
+  hand-over worker it detaches and any `fleet spawn` it runs. Read as they
+  stand, slot 1 would be slot 2: a hand-over read slot 2's usage as slot 1's
+  and relaunched the limited agent on slot 2 as `--account 1`. So a launch
+  onto a managed slot keeps the shell's own two variables beside the slot's
+  (`AISQUARE_PLAIN_CLAUDE_CONFIG_DIR`, `AISQUARE_PLAIN_CLAUDE_CODE_TMPDIR`),
+  and wherever `CLAUDE_CONFIG_DIR` names one of our slots, slot 1 is read
+  from those copies, or is `~/.claude` when the shell had none
+  (`core.plain_environment`).
 - **Both variables, always.** `CLAUDE_CODE_TMPDIR` goes with the config dir or
   two parallel sessions share one scratch directory (README, "Several
   accounts, one team").
@@ -304,9 +314,19 @@ for the long ones.
   tree before continuing. A `switched` event closes the loop.
 - The automatic path lives in the hook (`_hand_over_if_configured`): a limited
   FLEET agent, `on_limit = "switch"`, reset farther than the wait window →
-  `switch`, which starts and records the replacement before it kills the
-  window the hook is a child of. A refusal (no headroom) is a board note and
-  the agent stays parked with Claude Code's own wait intact.
+  `switch` — performed by a worker in its own session (`aisquare hook
+  hand-over`, started detached), because the hook is a child of the very pane
+  `switch` kills and, run inline, went down with it before the replacement was
+  spawned (review of #205). A refusal (no headroom) is a board note and the
+  agent stays parked with Claude Code's own wait intact. A moved agent keeps
+  its claims — the session is marked `switching` before the `/exit`, so its
+  `SessionEnd` parks them as a `/clear` does: for the same id when the agent
+  resumes, and for the fresh replacement's new id, which its row and the claims
+  are moved onto in one transaction right after the row is recorded
+  (`spawn(takes_over=…)`; the launcher waits for the row, not the move, so a
+  start hook that beats it makes the move itself when it can prove the pane) —
+  a resumed agent is told in one line to continue, and no `agent_exited` goes
+  out for a hand-over of either kind.
 - `_derive` trusts a `limited` row until its reset (+10 min) rather than the
   30-minute stale window, because a parked agent fires no hook; `⏳ limited`
   chips in the sidebar, project view and `fleet ls`; `ALIVE_STATES` includes it.

@@ -22,7 +22,7 @@ from aisquare.cli.app import app
 from aisquare.cli.ui.sidebar import DoctorSection
 from aisquare.cli.ui.views.accounts import credits_text
 from aisquare.core.store import store_session
-from aisquare.core.workspace import pin_project, project_id_for
+from aisquare.core.workspace import project_id_for
 from aisquare.models import ProjectInfo
 from aisquare.services import auth as auth_service
 from aisquare.services import credits as credits_service
@@ -63,9 +63,21 @@ def idp() -> Iterator[IdentityProviderStub]:
 
 @pytest.fixture
 def pointed(
-    runner: CliRunner, idp: IdentityProviderStub, isolated_home: Path, tmp_path: Path
+    runner: CliRunner,
+    idp: IdentityProviderStub,
+    isolated_home: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> ProjectInfo:
-    """Signed in, one project pointed at acme/Frontend (no key: the stub refuses the mint)."""
+    """Signed in, one project pointed at acme/Frontend (no key: the stub refuses the mint).
+
+    Every command runs from the project's checkout: without ``--project``,
+    ``use``, ``status`` and ``whoami`` ask about the project a launch here
+    joins, not the ``project switch`` pin, which launches ignore (review of
+    #170). With the pin alone, the CLI tests pointed the directory the suite
+    ran from and passed, while the view, asked about this project, found no
+    destination.
+    """
     idp.key_mint = "token_not_valid"
     assert runner.invoke(app, ["login", "--no-browser", "--api-url", idp.url]).exit_code == 0
     root = tmp_path / "web"
@@ -73,7 +85,7 @@ def pointed(
     info = ProjectInfo(id=project_id_for(root.resolve()), root=root.resolve(), linked_repos=[])
     with store_session() as store:
         store.onboard_project(info)
-    pin_project(info.id)
+    monkeypatch.chdir(root)
     assert runner.invoke(app, ["explainability", "use", "acme/Frontend"]).exit_code == 0
     return info
 
@@ -291,15 +303,15 @@ def test_the_explainability_views_row_says_why_it_has_no_reading(
     ``lands in`` row naming that destination. It says what is missing now."""
     from aisquare.cli.ui.views.explainability import status_report
 
-    rows = dict(status_report().rows)
+    rows = dict(status_report(pointed).rows)
     assert rows["credits"].startswith("acme [low] — run credits"), rows["credits"]
     assert runner.invoke(app, ["logout"]).exit_code == 0
-    rows = dict(status_report().rows)
+    rows = dict(status_report(pointed).rows)
     assert rows["lands in"].startswith("acme / Frontend"), rows["lands in"]
     assert rows["credits"] == "(sign in to read them — aisquare login)"
     elsewhere = iam.Session(api_url="https://api.aisquare.studio", token="aisq_x", source="file")
     monkeypatch.setattr(iam, "current_session", lambda api_url=None: elsewhere)
-    rows = dict(status_report().rows)
+    rows = dict(status_report(pointed).rows)
     assert rows["credits"] == (
         "(signed in to https://api.aisquare.studio, not this workspace's API — "
         f"aisquare login --api-url {idp.url} to read them)"
@@ -308,7 +320,7 @@ def test_the_explainability_views_row_says_why_it_has_no_reading(
     # its API is the environment's to change.
     from_env = dataclasses.replace(elsewhere, source="env")
     monkeypatch.setattr(iam, "current_session", lambda api_url=None: from_env)
-    rows = dict(status_report().rows)
+    rows = dict(status_report(pointed).rows)
     assert rows["credits"] == (
         "(AISQUARE_TOKEN is used with https://api.aisquare.studio, not this workspace's API — "
         f"set AISQUARE_API_URL={idp.url} to read them)"

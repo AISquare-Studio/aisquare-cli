@@ -38,6 +38,8 @@ from typing import Any, Protocol
 from aisquare.core import paths
 from aisquare.core.ids import new_prompt_id
 from aisquare.models import (
+    CLAIM_KEEPING_STATUSES,
+    CLOSED_STATUSES,
     ClaudeAccountRecord,
     ContextEntry,
     FleetAgent,
@@ -491,9 +493,17 @@ def _adopt_onboarded_projects(connection: sqlite3.Connection) -> None:
     ``init`` write. Everything else — the 23 of 27 registrations on the
     reporting machine that held nothing but captured prompts — stays hidden,
     reachable through ``project list --all``.
+
+    A FORGOTTEN row is never adopted, whatever it carries: ``forget`` clears
+    ``onboarded_at`` so that the next prompt there revives the row captured,
+    not listed (:meth:`SqliteStore.ensure_project`), and a row forgotten before
+    the column existed must land in that same state — a forgotten project
+    keeps its entries and its snapshot, so the evidence below would otherwise
+    re-list it on the next prompt.
     """
     connection.execute(
-        "UPDATE project SET onboarded_at = created_at WHERE onboarded_at IS NULL AND ("
+        "UPDATE project SET onboarded_at = created_at "
+        "WHERE onboarded_at IS NULL AND forgotten_at IS NULL AND ("
         "  codename IS NOT NULL"
         "  OR (linked_repos IS NOT NULL AND linked_repos NOT IN ('[]', ''))"
         "  OR id IN (SELECT project_id FROM entry WHERE project_id IS NOT NULL)"
@@ -504,7 +514,9 @@ def _adopt_onboarded_projects(connection: sqlite3.Connection) -> None:
     )
     from aisquare.core import snapshot as snapshot_core  # lazy: keeps store import-light
 
-    rows = connection.execute("SELECT id FROM project WHERE onboarded_at IS NULL").fetchall()
+    rows = connection.execute(
+        "SELECT id FROM project WHERE onboarded_at IS NULL AND forgotten_at IS NULL"
+    ).fetchall()
     with_snapshot = [row[0] for row in rows if snapshot_core.exists(str(row[0]))]
     for project_id in with_snapshot:
         connection.execute(
@@ -525,7 +537,8 @@ _FINISH: dict[int, Callable[[sqlite3.Connection], None]] = {
 # with no cascade and ``PRAGMA foreign_keys = ON``, so a project with any
 # context or prompt history cannot be deleted from under them. Every project
 # read filters ``forgotten_at IS NOT NULL`` out; ``ensure_project`` clears it, so
-# a registration comes back the moment something registers the root again.
+# a registration comes back the moment something registers the root again —
+# since v17 as a captured, unlisted row unless the registration is deliberate.
 # ``forget --purge`` deletes the dependents first and then the row, for real.
 #
 # v14, not v12 as first authored: main took v12 for the metric table and v13
@@ -714,6 +727,13 @@ _DESTINATION_COLUMNS = (
     "project_id, api_url, environment, workspace_id, workspace_uid, workspace_name, "
     "studio_id, studio_uid, studio_name, key_uid, set_at, set_by"
 )
+_LAYOUT_KEPT_BY_A_LIVE_ROW = (
+    "group_id = CASE WHEN project.forgotten_at IS NULL THEN project.group_id END, "
+    "position = CASE WHEN project.forgotten_at IS NULL THEN project.position END, "
+    "pinned_at = CASE WHEN project.forgotten_at IS NULL THEN project.pinned_at END"
+)
+"""A revival's SET for the arrangement (#140): a live row keeps its place, a tombstone
+comes back loose and unpinned (:meth:`SqliteStore.ensure_project` says why)."""
 
 _COLUMNS = "id, pool, project_id, text, tags, source, created_at, updated_at, deleted_at"
 _PROMPT_COLUMNS = "id, project_id, text, source, created_at"
@@ -811,7 +831,9 @@ class ContextStore(Protocol):
     def promote(self, entry_id: str) -> ContextEntry: ...
     def ensure_project(self, project: ProjectInfo) -> None: ...
     def onboard_project(self, project: ProjectInfo) -> ProjectInfo: ...
-    def list_projects(self, *, all: bool = False) -> list[ProjectInfo]: ...
+    def list_projects(
+        self, *, all: bool = False, include_forgotten: bool = False
+    ) -> list[ProjectInfo]: ...
     def captured_projects(self) -> list[ProjectInfo]: ...
     def get_project(self, project_id: str) -> ProjectInfo | None: ...
     def find_projects(self, term: str) -> list[ProjectInfo]: ...
@@ -840,9 +862,11 @@ class ContextStore(Protocol):
     def touch_session(
         self, session_id: str, *, cursor: int | None = None, state: str | None = None
     ) -> None: ...
+    def replace_session_state(self, session_id: str, expected: str, state: str) -> bool: ...
     def mark_attention(self, session_id: str) -> bool: ...
     def mark_limited(self, session_id: str, resets_at: datetime | None) -> None: ...
     def end_session(self, session_id: str, *, release_claims: bool = True) -> list[TeamTask]: ...
+    def release_claims(self, session_id: str) -> list[TeamTask]: ...
     def upsert_task(self, task: TeamTask) -> tuple[TeamTask, bool]: ...
     def get_task(self, ref: str) -> TeamTask | None: ...
     def team_tasks(
@@ -861,10 +885,11 @@ class ContextStore(Protocol):
         status: TaskStatus = "todo",
         prefer: str | None = None,
     ) -> TeamTask | None: ...
-    def bind_fleet_agent_session(self, agent_id: str, session_id: str) -> bool: ...
-    def reassign_claim(
-        self, task_id: str, from_session: str, to_session: str, lease_until: datetime
+    def task_statuses(self, project_id: str) -> dict[str, str]: ...
+    def adopt_fleet_agent_session(
+        self, agent_id: str, previous: str | None, session_id: str, lease_until: datetime
     ) -> bool: ...
+    def retire_fleet_assignments(self, task_id: str) -> int: ...
     def open_turn(self, metric: TurnMetric) -> TurnMetric: ...
     def close_turn(self, session_id: str, *, ended_at: datetime) -> TurnMetric | None: ...
     def turn_metrics(
@@ -943,10 +968,14 @@ class ContextStore(Protocol):
         self, project_id: str, label: str, *, live_only: bool = True
     ) -> FleetAgent | None: ...
     def end_fleet_agent(self, agent_id: str, *, exit_status: int | None = None) -> FleetAgent: ...
+    def end_fleet_agent_if_live(
+        self, agent_id: str, *, exit_status: int | None = None
+    ) -> FleetAgent | None: ...
     # The Claude account registry (v15, #145): the arrangement of the slots.
     def claude_accounts(self) -> list[ClaudeAccountRecord]: ...
     def upsert_claude_account(self, slot: int, config_dir: Path) -> ClaudeAccountRecord: ...
     def delete_claude_account(self, slot: int) -> bool: ...
+    def delete_claude_accounts(self, slots: Sequence[int]) -> int: ...
     def set_claude_account_default(self, slot: int | None) -> None: ...
     def set_claude_account_alias(self, slot: int, alias: str | None) -> None: ...
     def set_claude_account_disabled(self, slot: int, disabled: bool) -> None: ...
@@ -954,6 +983,7 @@ class ContextStore(Protocol):
     # Usage readings (v16, #146): the history behind "how fast is this window filling".
     def add_usage_sample(self, sample: UsageSample) -> None: ...
     def usage_samples(self, slot: int, *, since: datetime) -> list[UsageSample]: ...
+    def delete_usage_samples(self, slot: int) -> int: ...
     # Per-project settings (v15): one key, one value, per project.
     def project_setting(self, project_id: str, key: str) -> str | None: ...
     def set_project_setting(self, project_id: str, key: str, value: str) -> None: ...
@@ -1206,7 +1236,7 @@ def unmet_needs(task: TeamTask, statuses: Mapping[str, str]) -> list[str]:
     A need is satisfied once its task is ``done`` or ``dropped``; anything
     else (including an unknown id) keeps the dependent task waiting.
     """
-    return [need for need in task.needs if statuses.get(need) not in ("done", "dropped")]
+    return [need for need in task.needs if statuses.get(need) not in CLOSED_STATUSES]
 
 
 def _fts_match(query: str) -> str:
@@ -1370,20 +1400,40 @@ class SqliteStore:
         return promoted
 
     def ensure_project(self, project: ProjectInfo) -> None:
-        """CAPTURE the project: make sure a row exists, and change nothing about a known one.
+        """CAPTURE the project: make sure a live row exists, and never list it.
 
-        This is what a hook recording a prompt, the MCP server and a context
-        write call — automatic registration, so prompt history and injection
-        work in every directory (#139). It never sets ``onboarded_at`` and never
-        clears ``forgotten_at``: a forgotten project stays forgotten and a
-        captured one stays hidden until something DELIBERATE registers it
-        (:meth:`onboard_project`). Before #139 this was also the revival, which
-        is how ``project forget`` came undone on the next prompt.
+        This is what a hook recording a prompt and the MCP server's session
+        call — automatic registration, so prompt history and injection work in
+        every directory (#139). It never sets ``onboarded_at``, so a captured
+        directory stays off the list until something DELIBERATE registers it
+        (:meth:`onboard_project`).
+
+        It does clear ``forgotten_at``: the next prompt in a forgotten or
+        pruned directory brings the row back CAPTURED, which is what makes a
+        forget stick. A tombstone left in place would take every later prompt and
+        turn metric into a row no read can reach: ``log`` would say nothing had
+        been captured, and ``project list --all``, ``doctor``, ``prune
+        --captured-only`` and ``metrics show --project`` would never see the
+        directory again. Before #139 this revival also re-listed the project,
+        which is how ``project forget`` came undone on the next prompt.
+
+        The revival clears ``onboarded_at`` itself rather than trusting the
+        tombstone to carry none. ``forget`` clears it, but the first cut of the
+        v17 backfill had no ``forgotten_at`` guard and stamped forgotten rows
+        with history as onboarded, and stores already past v17 keep them. A
+        live row keeps its mark: the SET reads the row as it was before the
+        update. The same goes for its place in the arrangement (#140): a forget
+        clears the group, the position and the pin, but a tombstone written
+        before it did keeps all three, and revived as it was, the project came
+        back pinned and grouped at a number its scope had since given away
+        (review of #171, round 2).
         """
         self._conn.execute(
             "INSERT INTO project (id, root, name, linked_repos, created_at) "
             "VALUES (?, ?, ?, ?, ?) "
-            "ON CONFLICT (id) DO NOTHING",
+            "ON CONFLICT (id) DO UPDATE SET forgotten_at = NULL, onboarded_at = "
+            "CASE WHEN project.forgotten_at IS NULL THEN project.onboarded_at END, "
+            f"{_LAYOUT_KEPT_BY_A_LIVE_ROW}",
             (
                 project.id,
                 str(project.root),
@@ -1397,17 +1447,21 @@ class SqliteStore:
     def onboard_project(self, project: ProjectInfo) -> ProjectInfo:
         """Register the project ON PURPOSE: shown from now on, and revived if forgotten.
 
-        ``init``, ``project onboard`` / ``link``, the sidebar's ``+``, ``team on``
-        and a fleet spawn — the actions that mean "this is one of my projects".
+        ``init``, ``project onboard`` / ``link`` / ``switch``, the sidebar's
+        ``+``, ``team on``, a fleet spawn and a fact written by hand — the
+        actions that mean "this is one of my projects".
         ``onboarded_at`` is set once and kept; ``forgotten_at`` is cleared, so
         the row comes back with whatever history it still carries (see v14).
+        A revived row comes back loose and unpinned, as :meth:`ensure_project`
+        says; a live one keeps its place.
         """
         now = _now_iso()
         self._conn.execute(
             "INSERT INTO project (id, root, name, linked_repos, created_at, onboarded_at) "
             "VALUES (?, ?, ?, ?, ?, ?) "
             "ON CONFLICT (id) DO UPDATE SET forgotten_at = NULL, "
-            "onboarded_at = COALESCE(project.onboarded_at, excluded.onboarded_at)",
+            "onboarded_at = COALESCE(project.onboarded_at, excluded.onboarded_at), "
+            f"{_LAYOUT_KEPT_BY_A_LIVE_ROW}",
             (
                 project.id,
                 str(project.root),
@@ -1422,18 +1476,38 @@ class SqliteStore:
         assert stored is not None  # just written
         return stored
 
-    def list_projects(self, *, all: bool = False) -> list[ProjectInfo]:
-        """The projects added on purpose, by name — or, with ``all``, every captured one too.
+    def list_projects(
+        self, *, all: bool = False, include_forgotten: bool = False
+    ) -> list[ProjectInfo]:
+        """Onboarded projects by name; ``all`` adds captures, ``include_forgotten`` every row.
 
-        Forgotten rows are out either way. The sidebar, ``project list`` and
-        the active-pin fallback read the default; machine-wide sweeps (reap,
-        doctor's row checks, the baseline) pass ``all=True`` because a captured
-        directory can hold fleet rows and sessions like any other.
+        Two different questions. ``all`` is "every directory this machine has
+        seen", not just "my projects": the sidebar, ``project list`` and the
+        active-pin fallback read the default; machine-wide sweeps (reap,
+        doctor's row checks, the baseline, a shutdown's pause scan) pass
+        ``all=True`` because a captured directory can hold fleet rows, sessions
+        and a pause like any other. Forgotten rows stay out, which is the
+        promise :func:`forget_project` makes.
+
+        ``include_forgotten=True`` reads past that promise too, for the one
+        question a tombstone must not hide: a forgotten project can still hold
+        LIVE ``fleet_agent`` rows (``forget`` reads liveness and writes the
+        tombstone in separate statements, and a concurrent ``fleet spawn``
+        revives the row through :meth:`onboard_project`), and those agents'
+        panes are real processes. ``fleet shutdown`` asks this way so a
+        tombstone cannot leave a row live on a socket it just took down, with
+        nothing able to reconcile it. A forget clears ``onboarded_at``, so a
+        tombstone is never an onboarded row: this returns the captured rows as
+        well, and ``all`` adds nothing to it.
         """
-        shown = "" if all else " AND onboarded_at IS NOT NULL"
+        if include_forgotten:
+            clause = ""
+        elif all:
+            clause = " WHERE forgotten_at IS NULL"
+        else:
+            clause = " WHERE forgotten_at IS NULL AND onboarded_at IS NOT NULL"
         rows = self._conn.execute(
-            f"SELECT {_PROJECT_COLUMNS} FROM project WHERE forgotten_at IS NULL{shown} "
-            "ORDER BY name"
+            f"SELECT {_PROJECT_COLUMNS} FROM project{clause} ORDER BY name"
         ).fetchall()
         return [_row_to_project(row) for row in rows]
 
@@ -1469,9 +1543,17 @@ class SqliteStore:
         should not cost history anyway. The context entries, prompt history,
         board rows, ended fleet-agent rows and turn metrics remain in the store,
         unreachable through any project read until the root is registered again.
+
+        Its place in the arrangement does not stay (#140): the group, the
+        position and the pin are cleared, and a project registered again comes
+        back loose and unpinned, like a new one. Kept, the next prompt there
+        revived a row that was still pinned and grouped, at a number its scope
+        had renumbered away while it was forgotten — two rows on one slot,
+        ordered by name (review of #171, round 1).
         """
         cursor = self._conn.execute(
-            "UPDATE project SET forgotten_at = ?, onboarded_at = NULL "
+            "UPDATE project SET forgotten_at = ?, onboarded_at = NULL, "
+            "group_id = NULL, position = NULL, pinned_at = NULL "
             "WHERE id = ? AND forgotten_at IS NULL",
             (_now_iso(), project_id),
         )
@@ -1512,6 +1594,14 @@ class SqliteStore:
                 "team_session",
                 "fleet_agent",
                 "metric",
+                # v15's per-project settings (#145) DO carry the FK, and left
+                # here the whole purge rolled back on it (review of #205).
+                "project_setting",
+                # v19's key binding (#141) DOES carry the FK, and left here the
+                # whole purge rolled back on it — `prune --purge` halfway
+                # through its loop (review of #170). The key file itself goes
+                # with the project's data directory.
+                "project_explainability",
                 # FK to project (#142): left in place, the project delete below
                 # is refused and the whole purge rolls back.
                 "project_destination",
@@ -1754,6 +1844,25 @@ class SqliteStore:
         )
         self._conn.commit()
 
+    def replace_session_state(self, session_id: str, expected: str, state: str) -> bool:
+        """Set ``state`` on a session whose state is still ``expected`` — and nothing else.
+
+        A compare-and-set for a writer that takes a state BACK: a hand-over that
+        did not happen returning its mark (``team.HANDOVER_STATE``) to what the
+        session said before. :meth:`touch_session` is a heartbeat — it bumps
+        ``last_seen_at`` and clears ``ended_at`` — and taking a mark back is no
+        evidence of life: a session whose ``SessionEnd`` had already run came back
+        to the board as a live teammate (review of #163, round 2). Nor is it
+        newer than a state written since the mark, which it leaves alone. Returns
+        whether the row changed.
+        """
+        cursor = self._conn.execute(
+            "UPDATE team_session SET state = ? WHERE id = ? AND state = ?",
+            (state, session_id, expected),
+        )
+        self._conn.commit()
+        return cursor.rowcount == 1
+
     def mark_attention(self, session_id: str) -> bool:
         """Flip a session into the attention state, atomically.
 
@@ -1807,26 +1916,47 @@ class SqliteStore:
         The return value still lists the tasks that WOULD have been released,
         so the caller can report them either way.
         """
-        released = [
-            _row_to_task(row)
-            for row in self._conn.execute(
-                f"SELECT {_TASK_COLUMNS} FROM team_task WHERE claimed_by = ? AND status = 'doing'",
-                (session_id,),
-            ).fetchall()
-        ]
         now = _now_iso()
+        released = self._doing_claims(session_id)
         if release_claims:
-            self._conn.execute(
-                "UPDATE team_task SET status = 'todo', claimed_by = NULL, "
-                "claim_expires_at = NULL, updated_at = ? WHERE claimed_by = ? AND status = 'doing'",
-                (now, session_id),
-            )
+            self._release_doing_claims(session_id, now)
         self._conn.execute(
             "UPDATE team_session SET ended_at = ?, last_seen_at = ? WHERE id = ?",
             (now, now, session_id),
         )
         self._conn.commit()
         return released
+
+    def release_claims(self, session_id: str) -> list[TeamTask]:
+        """Return the session's ``doing`` claims to the pool — its presence row untouched.
+
+        The other half of :meth:`end_session`, on its own: for a session that
+        already ENDED with its claims kept (a fleet agent's ``/clear`` parks
+        them for the start hook that follows) whose fleet row then ended before
+        anything came back for them. Ending the session again would only move
+        its ``ended_at``; the claims are what is owed (review of #135, second
+        round, finding 5).
+        """
+        released = self._doing_claims(session_id)
+        self._release_doing_claims(session_id, _now_iso())
+        self._conn.commit()
+        return released
+
+    def _doing_claims(self, session_id: str) -> list[TeamTask]:
+        return [
+            _row_to_task(row)
+            for row in self._conn.execute(
+                f"SELECT {_TASK_COLUMNS} FROM team_task WHERE claimed_by = ? AND status = 'doing'",
+                (session_id,),
+            ).fetchall()
+        ]
+
+    def _release_doing_claims(self, session_id: str, now: str) -> None:
+        self._conn.execute(
+            "UPDATE team_task SET status = 'todo', claimed_by = NULL, "
+            "claim_expires_at = NULL, updated_at = ? WHERE claimed_by = ? AND status = 'doing'",
+            (now, session_id),
+        )
 
     def upsert_task(self, task: TeamTask) -> tuple[TeamTask, bool]:
         """Add a task; a duplicate ``(project_id, key)`` returns the existing one.
@@ -1917,34 +2047,6 @@ class SqliteStore:
         self._conn.commit()
         return cursor.rowcount == 1
 
-    def reassign_claim(
-        self, task_id: str, from_session: str, to_session: str, lease_until: datetime
-    ) -> bool:
-        """Move a live claim between two ids of the SAME worker; False if none moved.
-
-        A ``/clear`` mints a new session id for the agent that is already working
-        the task. Without this the claim keeps naming an id nobody has: the board
-        shows the work held by a ghost, and the agent's next start does not
-        recognise its own claim and is told to stand down from work in progress
-        (review of #116). Narrow by construction — only a task claimed by exactly
-        ``from_session`` moves, so it can never take a claim from a session that
-        is genuinely someone else.
-
-        Every status that KEEPS a claim, not just ``doing``: ``set_task_status``
-        clears ``claimed_by`` for ``done``/``dropped`` alone, so ``review`` and
-        ``blocked`` carry one too — and those were exactly the two the first cut
-        left naming a dead session (review of #116, round 3). The lease it writes
-        is read only for ``doing`` (``claim_task``, ``renew_leases``), so it is
-        inert on the others.
-        """
-        cursor = self._conn.execute(
-            "UPDATE team_task SET claimed_by = ?, claim_expires_at = ?, updated_at = ? "
-            "WHERE id = ? AND claimed_by = ?",
-            (to_session, lease_until.isoformat(), _now_iso(), task_id, from_session),
-        )
-        self._conn.commit()
-        return cursor.rowcount == 1
-
     def renew_leases(self, session_id: str, lease_until: datetime) -> None:
         """Extend the claim lease on everything this session is working on."""
         self._conn.execute(
@@ -1957,7 +2059,7 @@ class SqliteStore:
         task = self.get_task(task_id)
         if task is None:
             raise KeyError(task_id)
-        if status in ("done", "dropped"):
+        if status in CLOSED_STATUSES:
             # Terminal: clear the claim so the task never *looks* held —
             # a lingering claimed_by invites a bogus "release" back to todo.
             self._conn.execute(
@@ -2537,7 +2639,14 @@ class SqliteStore:
         position: int | EllipsisType | None = ...,
         pinned_at: datetime | EllipsisType | None = ...,
     ) -> ProjectInfo:
-        """Change where a project sits — group, position, pin; ``...`` leaves a field alone."""
+        """Change where a project sits — group, position, pin; ``...`` leaves a field alone.
+
+        A forgotten project has no place to change: it is a ``KeyError``, as an
+        unknown one is. A gesture from a stale frame — the sidebar between two
+        refreshes, a drag, the group picker left open — while a shell ran
+        ``project forget`` was written onto the tombstone, and the revival
+        brought the project back pinned or grouped (review of #171, round 2).
+        """
         sets: list[str] = []
         params: list[object] = []
         if group_id is not ...:
@@ -2551,13 +2660,15 @@ class SqliteStore:
             params.append(pinned_at.isoformat() if pinned_at is not None else None)
         if sets:
             cursor = self._conn.execute(
-                f"UPDATE project SET {', '.join(sets)} WHERE id = ?", (*params, project_id)
+                f"UPDATE project SET {', '.join(sets)} WHERE id = ? AND forgotten_at IS NULL",
+                (*params, project_id),
             )
             self._conn.commit()
             if cursor.rowcount != 1:
                 raise KeyError(project_id)
         updated = self._conn.execute(
-            f"SELECT {_PROJECT_COLUMNS} FROM project WHERE id = ?", (project_id,)
+            f"SELECT {_PROJECT_COLUMNS} FROM project WHERE id = ? AND forgotten_at IS NULL",
+            (project_id,),
         ).fetchone()
         if updated is None:
             raise KeyError(project_id)
@@ -2692,21 +2803,6 @@ class SqliteStore:
             )
         self._conn.commit()
 
-    def bind_fleet_agent_session(self, agent_id: str, session_id: str) -> bool:
-        """Join a LIVE fleet row to the session running in its pane; False if none did.
-
-        A targeted UPDATE, like ``end_fleet_agent``, rather than a read-modify-
-        write of the whole row: the hook that calls this runs in another process
-        from ``fleet stop`` / ``reap``, and writing a stale snapshot back
-        resurrected a stopped agent (review of the first version).
-        """
-        cursor = self._conn.execute(
-            "UPDATE fleet_agent SET session_id = ? WHERE id = ? AND ended_at IS NULL",
-            (session_id, agent_id),
-        )
-        self._conn.commit()
-        return cursor.rowcount == 1
-
     def get_fleet_agent(self, ref: str) -> FleetAgent | None:
         """A fleet agent by id or unambiguous id prefix (git-style)."""
         rows = self._conn.execute(
@@ -2742,6 +2838,78 @@ class SqliteStore:
         ).fetchone()
         return _row_to_fleet_agent(row) if row is not None else None
 
+    def adopt_fleet_agent_session(
+        self, agent_id: str, previous: str | None, session_id: str, lease_until: datetime
+    ) -> bool:
+        """Move a LIVE fleet row from ``previous`` to ``session_id``, claims and all.
+
+        ``False`` when nothing moved. One transaction for the two facts that must
+        agree: which session the row is, and who holds the tasks that session
+        claimed. A ``/clear`` mints a new session id for the process that is
+        still working them, so every claim the old id holds — the assigned task
+        and any pool task it took, in every status that keeps a claim
+        (:data:`CLAIM_KEEPING_STATUSES`) — is re-addressed to the new id, and
+        the ``doing`` ones take the new lease. Committed separately they could disagree:
+        a row bound to the new id while the work stayed with the old one, whose
+        lease then ran out under a working agent (review of #135).
+
+        ``previous`` is part of the WHERE (``IS``, so an unbound row matches
+        ``None``): the hook that calls this runs in another process from
+        ``fleet stop`` and from every other hook, so the row must still be the
+        one that was read — ended, or taken by somebody else in between, and
+        nothing moves. A targeted UPDATE, never a whole-row write, for the same
+        reason (a stale snapshot written back resurrected a stopped agent).
+        """
+        try:
+            cursor = self._conn.execute(
+                "UPDATE fleet_agent SET session_id = ? "
+                "WHERE id = ? AND ended_at IS NULL AND session_id IS ?",
+                (session_id, agent_id, previous),
+            )
+            if cursor.rowcount != 1:
+                self._conn.rollback()
+                return False
+            if previous is not None:
+                # Every claim the old id holds moves; the LEASE is stamped on the
+                # ``doing`` ones alone. Stamped on a review or blocked task too,
+                # it was a lease nothing renews (``renew_leases``) and nothing
+                # reclaims (``claim_task``): "lease until 14:07" on the board
+                # for a claim that had lapsed and could not be taken (review of
+                # #203). One named set for the statuses that keep a claim.
+                statuses = tuple(sorted(CLAIM_KEEPING_STATUSES))
+                self._conn.execute(
+                    "UPDATE team_task SET claimed_by = ?, updated_at = ?, "
+                    "claim_expires_at = CASE WHEN status = 'doing' THEN ? "
+                    "ELSE claim_expires_at END "
+                    f"WHERE claimed_by = ? AND status IN ({', '.join('?' * len(statuses))})",
+                    (session_id, _now_iso(), lease_until.isoformat(), previous, *statuses),
+                )
+        except Exception:
+            self._conn.rollback()
+            raise
+        self._conn.commit()
+        return True
+
+    def retire_fleet_assignments(self, task_id: str) -> int:
+        """Forget ``task_id`` on every live fleet row spawned for it; how many did.
+
+        An assignment is over when its task is closed. A row that kept naming a
+        done task re-briefed its agent on every later session start — "already
+        done; tell the manager" — and a nudge went out to the manager each time
+        for nothing; reopened and claimed by someone else, the same row ordered
+        a busy agent to stand down (review of #135). What the operator sees: the
+        agent header's ``task 01k…`` chip goes with it — the agent is no longer
+        on that task — while the label (``coder-<task>``) and the branch keep
+        the task's short id, so the row still says what it was spawned for
+        (review of #135, second round, finding 7).
+        """
+        cursor = self._conn.execute(
+            "UPDATE fleet_agent SET task_id = NULL WHERE task_id = ? AND ended_at IS NULL",
+            (task_id,),
+        )
+        self._conn.commit()
+        return cursor.rowcount
+
     def fleet_agent_by_label(
         self, project_id: str, label: str, *, live_only: bool = True
     ) -> FleetAgent | None:
@@ -2755,16 +2923,32 @@ class SqliteStore:
 
     def end_fleet_agent(self, agent_id: str, *, exit_status: int | None = None) -> FleetAgent:
         """Mark an agent ended (idempotent: an already-ended row keeps its first end)."""
-        self._conn.execute(
+        self.end_fleet_agent_if_live(agent_id, exit_status=exit_status)
+        agent = self.get_fleet_agent(agent_id)
+        if agent is None:
+            raise KeyError(agent_id)
+        return agent
+
+    def end_fleet_agent_if_live(
+        self, agent_id: str, *, exit_status: int | None = None
+    ) -> FleetAgent | None:
+        """End a LIVE agent's row and return it; ``None`` when it was already ended.
+
+        The UPDATE is a compare-and-set on ``ended_at IS NULL``, for a caller that
+        announces the end: every fleet read records a dead pane (#138), so two
+        readers routinely see one death, and only the one whose write ended the
+        row may post ``agent_exited``. A re-read before the write left a statement
+        for the other to land in (review of #138).
+        """
+        cursor = self._conn.execute(
             "UPDATE fleet_agent SET ended_at = ?, exit_status = ? "
             "WHERE id = ? AND ended_at IS NULL",
             (_now_iso(), exit_status, agent_id),
         )
         self._conn.commit()
-        agent = self.get_fleet_agent(agent_id)
-        if agent is None:
-            raise KeyError(agent_id)
-        return agent
+        if cursor.rowcount == 0:
+            return None
+        return self.get_fleet_agent(agent_id)
 
     # --- the Claude account registry (v15, #145) --------------------------------------------
     #
@@ -2810,11 +2994,25 @@ class SqliteStore:
         the state a removal must not leave behind (the next ``add`` reuses the
         number, and a stale default would silently adopt the newcomer).
         """
-        cursor = self._conn.execute("DELETE FROM claude_account WHERE slot = ?", (slot,))
-        self._conn.commit()
-        if cursor.rowcount == 1:
-            self.order_claude_accounts([])  # close the gap the row leaves in the order
-        return cursor.rowcount == 1
+        return self.delete_claude_accounts([slot]) == 1
+
+    def delete_claude_accounts(self, slots: Sequence[int]) -> int:
+        """Forget several slots' arrangements at once; how many rows there were.
+
+        The order is renumbered ONCE, after every delete, in the same
+        transaction: the reconcile prunes every vanished slot in one pass, and
+        deleted one at a time each row paid a full renumbering — k slots, k
+        passes over the table (review of #205, fourth round).
+        """
+        deleted = 0
+        for slot in slots:
+            cursor = self._conn.execute("DELETE FROM claude_account WHERE slot = ?", (slot,))
+            deleted += cursor.rowcount
+        if deleted:
+            self.order_claude_accounts([])  # close the gaps the rows leave; commits all of it
+        else:
+            self._conn.commit()
+        return deleted
 
     def set_claude_account_default(self, slot: int | None) -> None:
         """Make ``slot`` the one default (``None`` clears it). Unknown slot → ``KeyError``.
@@ -2862,7 +3060,9 @@ class SqliteStore:
         already resolved what exists.
         """
         current = [record.slot for record in self.claude_accounts()]
-        wanted = [slot for slot in slots if slot in current]
+        # De-duplicated, first mention wins: `order 2 2 3` wrote slot 2 twice and
+        # left position 1 unused, which is the gap the docstring rules out.
+        wanted = list(dict.fromkeys(slot for slot in slots if slot in current))
         rest = [slot for slot in current if slot not in wanted]
         for position, slot in enumerate([*wanted, *rest], start=1):
             self._conn.execute(
@@ -2899,6 +3099,13 @@ class SqliteStore:
             (slot, since.isoformat()),
         ).fetchall()
         return [_row_to_usage_sample(row) for row in rows]
+
+    def delete_usage_samples(self, slot: int) -> int:
+        """Drop every reading of ``slot``: a removed account's history must not rate the
+        next occupant's window (review of #205, third round). Returns the count."""
+        cursor = self._conn.execute("DELETE FROM claude_usage WHERE slot = ?", (slot,))
+        self._conn.commit()
+        return int(cursor.rowcount)
 
     # --- per-project settings (v15) ---------------------------------------------------------
 

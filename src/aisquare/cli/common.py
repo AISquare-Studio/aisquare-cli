@@ -6,7 +6,7 @@ import errno
 import json
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
-from datetime import UTC, datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import NoReturn
 
@@ -16,6 +16,7 @@ from rich.table import Table
 
 from aisquare.core import paths
 from aisquare.core import snapshot as snapshot_core
+from aisquare.core.claude_accounts import format_reset as _format_reset
 from aisquare.core.config import AppConfig
 from aisquare.core.console import stderr_console, stdout_console
 from aisquare.core.state import get_state
@@ -41,57 +42,33 @@ from aisquare.models import (
 _DEFAULT_EMPTY = 'No context entries yet. Add one with: aisquare remember "…"'
 
 
+def refuse_conflicting_scope(every: bool, project: str | None) -> None:
+    """``--all`` and ``--project`` name different scopes; both at once is refused.
+
+    The mechanism, not one command's guard: ``--all`` used to win silently in
+    ``fleet shutdown`` (meant as one project, took every fleet down) and still
+    did in ``metrics show``/``list`` after that was patched per command (rounds
+    4 and 6 of #203). One helper, one wording, one exit code — 2, a usage
+    error, which the root group renders as ``{"error": "usage", …}`` on stdout
+    under ``--json`` (round 7: a caller that asked for JSON gets JSON or nothing).
+    """
+    if every and project is not None:
+        raise typer.BadParameter(
+            "--all and --project conflict: --all is every project, --project one project — "
+            "drop one of them",
+            param_hint="--all",
+        )
+
+
 def local_time(value: datetime) -> datetime:
     """A stored (UTC) timestamp in the user's local timezone, for display."""
     return value.astimezone()
 
 
-def format_reset(when: datetime | None, *, now: datetime | None = None) -> str:
-    """When a rate-limit window lifts, as a distance AND a clock time: ``in 3h 10m (18:00)``.
-
-    The ONE formatter for both surfaces that show a reset — ``accounts usage``
-    / ``list --usage`` and the Accounts page — because two copies drifted
-    (#152): both printed a bare ``HH:MM``, which for the seven-day window can be
-    six days away and read as tonight.
-
-    The rules, each chosen so nobody has to do calendar arithmetic:
-
-    - under an hour: ``in 12m`` — the clock time adds nothing;
-    - later the same LOCAL day: ``in 3h 10m (18:00)``;
-    - another day: ``in 2d 4h (Tue 02:00)`` — the weekday is what tells a
-      weekly reset from tonight's, and it is never a bare ``HH:MM`` again;
-    - already past (the endpoint's reading is a little stale): ``now``.
-
-    ``now`` is the clock to measure against; production reads the wall clock,
-    tests pass one so the midnight boundary can be pinned. Returns ``""`` for
-    ``None`` so callers can append it unconditionally.
-    """
-    if when is None:
-        return ""
-    moment = now if now is not None else datetime.now(tz=UTC)
-    remaining = when - moment
-    if remaining <= timedelta(0):
-        return "now"
-    total_minutes = int(remaining.total_seconds() // 60)
-    days, rest = divmod(total_minutes, 24 * 60)
-    hours, minutes = divmod(rest, 60)
-    # The clock time is shown to the nearest MINUTE. Measured against the live
-    # endpoint (2026-09-13): the same window's ``resets_at`` came back as
-    # 08:59:59.86, 09:00:00.26 and 08:59:59.62 on three calls seconds apart —
-    # it jitters across the second boundary — so a truncated ``%H:%M`` flickered
-    # between 04:59 and 05:00 from one refresh to the next. Rounding says what
-    # a person means by the time of a reset, and the distance still moves.
-    local_when = (local_time(when) + timedelta(seconds=30)).replace(second=0, microsecond=0)
-    local_now = moment.astimezone(local_when.tzinfo)
-    if remaining < timedelta(hours=1):
-        return f"in {max(minutes, 1)}m"
-    if days == 0:
-        distance = f"{hours}h" if minutes == 0 else f"{hours}h {minutes:02d}m"
-    else:
-        distance = f"{days}d" if hours == 0 else f"{days}d {hours}h"
-    if local_when.date() == local_now.date():
-        return f"in {distance} ({local_when:%H:%M})"
-    return f"in {distance} ({local_when:%a %H:%M})"
+# The formatter itself lives in core (``core.claude_accounts.format_reset``) so the
+# services — the board's ``limited`` line, the agent detail, doctor — render a reset
+# the same way the two account surfaces do; re-exported here, where they import it.
+format_reset = _format_reset
 
 
 def resolve_pool(user: bool, project: bool) -> Pool | None:
@@ -238,7 +215,9 @@ def emit_projects(
     projects: list[ProjectInfo],
     *,
     active_id: str | None,
+    hidden: int = 0,
     group_names: Mapping[str, str] | None = None,
+    filtered: str | None = None,
 ) -> None:
     """Render the project list — a JSON array under ``--json``, a table otherwise.
 
@@ -246,7 +225,11 @@ def emit_projects(
     the root rather than stored on the model, and a script picking a project
     by name had nothing to pick on. It also carries ``group`` (the name),
     ``position`` and ``pinned`` (#140); the table shows a GROUP column and a
-    📌 marker only when something is grouped or pinned.
+    📌 marker only when something is grouped or pinned. ``hidden`` is how many
+    captured directories the list leaves out (#139); only an empty table
+    mentions them. ``filtered`` is what an empty table says when ``--group`` or
+    ``--pinned`` left nothing of a list that has rows: neither "nothing
+    registered" nor the captured count is true then.
     """
     names = group_names or {}
     if get_state().json_output:
@@ -262,6 +245,18 @@ def emit_projects(
                     for project in projects
                 ]
             )
+        )
+        return
+    if not projects and filtered:
+        stdout_console().print(filtered)
+        return
+    if not projects and hidden:
+        # "nothing registered, run init" was wrong for a machine whose hooked
+        # sessions captured directories that are simply not listed (#139).
+        noun = "directory" if hidden == 1 else "directories"
+        stdout_console().print(
+            f"No projects added yet — {hidden} captured {noun} hidden (a hooked session ran "
+            "there): aisquare project list --all; add one: aisquare project onboard <path>"
         )
         return
     if not projects:
@@ -656,9 +651,14 @@ def emit_status(report: StatusReport) -> None:
     console.print(f"aisquare: {'initialized' if report.initialized else 'not initialized'}")
     console.print(f"home:     {report.home}")
     console.print(f"project:  {project.root.name or project.id} ({project.id})")
+    hidden = (
+        f" (+{report.captured_count} captured, hidden: aisquare project list --all)"
+        if report.captured_count
+        else ""
+    )
     console.print(
         f"context:  {report.user_entries} user, {report.project_entries} in this project; "
-        f"{report.project_count} project(s) registered"
+        f"{report.project_count} project(s) registered{hidden}"
     )
     console.print(f"detected: {', '.join(report.agents_detected) or 'none'}")
     console.print(f"connected: {', '.join(report.agents_connected) or 'none'}")

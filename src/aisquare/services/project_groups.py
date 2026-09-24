@@ -11,9 +11,10 @@ One place computes the order every surface shows (:func:`arrange`), one place
 applies each change (:func:`move_project`, :func:`move_group`, :func:`pin`,
 :func:`create_group`, …), and every change returns an :class:`UndoEntry` —
 the rows' layout as it was — so the sidebar's ``u`` and a CLI mistake have the
-same way back (:func:`undo`). Positions are dense integers per scope
-(the top level, or one group), renumbered after every move, so a gap can never
-make two projects tie.
+same way back (:func:`undo`). Positions are integers per scope (the top level,
+or one group), renumbered densely after every move, so two projects never tie.
+A pin or a forget can leave a gap, which orders the same: every placement is by
+index, never by number.
 """
 
 from __future__ import annotations
@@ -136,8 +137,10 @@ class UndoEntry:
     """A change's way back: the layout of every row it touched, as it was.
 
     ``groups`` maps a group id to its row before the change, or ``None`` when
-    the group did not exist yet (undo deletes it); a group that was deleted is
-    re-created under its old id, so its members' rows can point at it again.
+    the group did not exist yet (undo deletes it). A group the change deleted
+    (``deleted_groups``) is re-created under its old id, so its members' rows
+    can point at it again; one it only remembered — its place, its fold — and
+    that is gone by the undo was deleted since, and stays deleted.
     """
 
     description: str
@@ -145,6 +148,7 @@ class UndoEntry:
         default_factory=dict
     )
     groups: dict[str, ProjectGroup | None] = field(default_factory=dict)
+    deleted_groups: set[str] = field(default_factory=set)
 
 
 def _remember(store: ContextStore, entry: UndoEntry, project_ids: list[str]) -> None:
@@ -171,6 +175,10 @@ def undo(store: ContextStore, entry: UndoEntry) -> str:
                 store.delete_project_group(group_id)
             continue
         if current is None:
+            if group_id not in entry.deleted_groups:
+                # Deleted from a shell between the gesture and its `u`, by nothing
+                # this entry did: re-created, it came back empty (review of #171).
+                continue
             store.create_project_group(before.name, group_id=group_id)
         store.update_project_group(
             group_id,
@@ -179,6 +187,8 @@ def undo(store: ContextStore, entry: UndoEntry) -> str:
             pinned_at=before.pinned_at,
             collapsed=before.collapsed,
         )
+    restored: set[str] = set()
+    scopes: set[str | None] = set()
     for project_id, (scope, position, pinned_at) in entry.projects.items():
         if scope is not None and store.get_project_group(scope) is None:
             # Its group was deleted since — from a shell, between the sidebar's
@@ -192,8 +202,37 @@ def undo(store: ContextStore, entry: UndoEntry) -> str:
                 project_id, group_id=scope, position=position, pinned_at=pinned_at
             )
         except KeyError:
-            continue  # the project was purged meanwhile (a forgotten row is still there)
+            # Forgotten or purged since the gesture. A forget takes the row out of
+            # the arrangement; written back onto the tombstone, its old group,
+            # number and pin came back with it when a prompt revived the row
+            # (review of #171, round 1).
+            continue
+        restored.add(project_id)
+        scopes.add(scope)
+    for scope in scopes:
+        _untie(store, scope, first=restored)
     return entry.description
+
+
+def _untie(store: ContextStore, group_id: str | None, *, first: set[str]) -> None:
+    """Renumber a scope an undo wrote into, when two of its rows now share a number.
+
+    An undo writes back the numbers its rows had. A change from elsewhere
+    between a gesture and its `u` — a move from a shell, a forget and a
+    revival — renumbers the scope meanwhile, and a restored row's old number can
+    be another row's by then: two rows on one slot, ordered by name (review of
+    #171, round 2). The rows ``first`` names — the restored ones — win the tie,
+    and the scope is numbered densely around them: back at the place they had,
+    as an unpin puts a project back at its own.
+    """
+    members = _scope_members(store, group_id)
+    numbers = [p.position for p in members if p.position is not None]
+    if len(numbers) == len(set(numbers)):
+        return
+    ordered = sorted(
+        members, key=lambda p: (p.position is None, p.position or 0, p.id not in first)
+    )
+    _renumber(store, ordered, group_id)
 
 
 # --- renumbering ------------------------------------------------------------------------------
@@ -227,7 +266,10 @@ def _renumber(store: ContextStore, ordered: list[ProjectInfo], group_id: str | N
     "joined" a group in memory and stayed loose in the store).
     """
     for index, project in enumerate(ordered):
-        store.update_project_layout(project.id, group_id=group_id, position=index)
+        try:
+            store.update_project_layout(project.id, group_id=group_id, position=index)
+        except KeyError:
+            continue  # forgotten since the scope was read: it has left the arrangement
 
 
 def _insert_at(
@@ -436,6 +478,7 @@ def delete_group(store: ContextStore, group_id: str) -> UndoEntry:
         raise KeyError(group_id)
     entry = UndoEntry(f"delete group {group.name}")
     _remember_group(store, entry, group_id)
+    entry.deleted_groups.add(group_id)
     members = _scope_members(store, group_id)
     pinned_members = [
         p

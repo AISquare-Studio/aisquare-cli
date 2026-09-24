@@ -59,10 +59,14 @@ def list_projects(*, all: bool = False) -> list[ProjectInfo]:
 def switch(name: str) -> ProjectInfo:
     """Pin the project matching ``name`` (a name or id prefix) as active.
 
+    Pinning is choosing it on purpose, so a captured directory is onboarded
+    too (#139): otherwise the ACTIVE project would be missing from ``project
+    list`` — no ``*`` row — and from the sidebar.
+
     Raises ``KeyError`` if nothing matches and ``ValueError`` if it is ambiguous.
     """
     with store_session() as store:
-        project = _one_match(store, name)
+        project = store.onboard_project(_one_match(store, name))
     pin_project(project.id)
     return project
 
@@ -110,10 +114,16 @@ class ProjectBusyError(Exception):
 
     def __init__(self, project: ProjectInfo, agents: list[FleetAgent]) -> None:
         labels = ", ".join(agent.label for agent in agents)
+        # `reap` is named for rows whose SERVER still answers — it refuses to end a
+        # row on a server it cannot reach, and an operator following that advice
+        # after a hand-run `tmux kill-server` reaped nothing, twice. The scoped
+        # `fleet shutdown` is the command that can, on their word.
+        scope = project.codename or display_name(project)
         super().__init__(
             f"{display_name(project)} has {len(agents)} live fleet agent(s): {labels} — "
-            "stop them first (aisquare fleet stop <label>), or run aisquare fleet reap "
-            "if they are already gone"
+            "stop them first (aisquare fleet stop <label>), or run aisquare fleet reap if "
+            f"they are already gone; if their tmux server is gone too, aisquare fleet "
+            f"shutdown --project {scope} records them"
         )
         self.project = project
         self.agents = agents
@@ -135,7 +145,7 @@ def forget(ref: str, *, purge: bool = False) -> ProjectForgetReport:
     context entries, prompt history, board rows and ended fleet-agent rows stay
     in the store, hidden — reachable again only by registering the root again.
     With ``purge`` they are deleted, and so is ``~/.aisquare/projects/<id>/``
-    (the snapshot and brain).
+    (the snapshot and brain), and a key the CLI minted for it is revoked.
 
     If the project was the ACTIVE one — pinned, or the one the working
     directory resolves to — the pin moves to the most recently touched
@@ -147,7 +157,7 @@ def forget(ref: str, *, purge: bool = False) -> ProjectForgetReport:
         if live:
             raise ProjectBusyError(project, live)
         was_active = active_project(store).id == project.id
-        removed = store.purge_project(project.id) if purge else {}
+        removed = _purge(store, project.id) if purge else {}
         if not purge:
             store.forget_project(project.id)
         active = _repin(store) if was_active else None
@@ -192,8 +202,8 @@ def prune_candidates(
             if (
                 cutoff is not None
                 and project.onboarded_at is None
-                and not store.entries("project", project_id=project.id)
                 and activity.get(project.id, "") < cutoff
+                and not store.entries("project", project_id=project.id)
             ):
                 found.append(PruneCandidate(project=project, reason="captured", live_agents=live))
                 continue
@@ -251,7 +261,7 @@ def prune(candidates: list[PruneCandidate], *, purge: bool) -> ProjectPruneRepor
                 kept.append(candidate.model_copy(update={"live_agents": live}))
                 continue
             if purge:
-                store.purge_project(project_id)
+                _purge(store, project_id)
             else:
                 store.forget_project(project_id)
             dropped.append(project_id)
@@ -269,6 +279,20 @@ def prune(candidates: list[PruneCandidate], *, purge: bool) -> ProjectPruneRepor
         active=active,
         active_changed=active_changed,
     )
+
+
+def _purge(store: ContextStore, project_id: str) -> dict[str, int]:
+    """Delete what the project owns in the store, and revoke a key the CLI minted for it.
+
+    The purge takes the destination row (#142) that names that key, and
+    ``logout`` finds a minted key by that row alone: once it is gone, nothing
+    on this machine could revoke the key any more (review of #172).
+    """
+    from aisquare.services import destinations  # lazy: the explainability modules, for a purge
+
+    with destinations.purging_minted_key(store, project_id):
+        removed = store.purge_project(project_id)
+    return removed
 
 
 def _repin(store: ContextStore) -> ProjectInfo | None:

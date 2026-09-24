@@ -140,7 +140,52 @@ set -g visual-activity off
 set -g allow-rename off
 set -g automatic-rename off
 set -g renumber-windows off
+# No prefix key (#147). `fleet attach` is a raw tmux client, and tmux's default
+# C-b is Claude Code's "background running tasks": every key goes to the agent,
+# and F12 detaches the client — the same key that hands focus back to the
+# sidebar in the UI. The UI's own path (`send-keys`) never met the prefix.
+set -g prefix None
+set -g prefix2 None
+bind-key -n F12 detach-client
+# A new client's desktop lands in the session's environment (tmux's default
+# list has DISPLAY and the SSH agent; these are the rest of what a re-login
+# changes), so windows made after `fleet attach` see the current display, bus
+# and colour facts. The UI's spawns carry them per window as well (#147,
+# services.fleet — a window inherits the SERVER's environment otherwise).
+set -ga update-environment WAYLAND_DISPLAY
+set -ga update-environment XDG_RUNTIME_DIR
+set -ga update-environment DBUS_SESSION_BUS_ADDRESS
+set -ga update-environment COLORTERM
+set -ga update-environment TERM_PROGRAM
 """
+
+#: What a re-login changes and a window inherits stale from the server it was
+#: spawned on (#147): the display (image paste, notifications, `xdg-open`), the
+#: user bus, the runtime dir, the SSH agent socket, and the two facts Claude Code
+#: reads about the terminal's colour and make. Set on each window at spawn
+#: (``new-window -e``) from the SPAWNER's environment; also the names the
+#: bundled conf adds to ``update-environment`` for ``fleet attach``.
+DESKTOP_ENV_VARS: tuple[str, ...] = (
+    "DISPLAY",
+    "WAYLAND_DISPLAY",
+    "XDG_RUNTIME_DIR",
+    "DBUS_SESSION_BUS_ADDRESS",
+    "SSH_AUTH_SOCK",
+    "COLORTERM",
+    "TERM_PROGRAM",
+)
+
+
+def desktop_environment(environ: Mapping[str, str] | None = None) -> dict[str, str]:
+    """The :data:`DESKTOP_ENV_VARS` this process has, to set on a window it spawns.
+
+    Only the variables that ARE set travel: an unset one here says nothing about
+    the server's copy (a headless spawn from a cron job must not blank the
+    display of an agent started from a desktop), and ``-e`` can only set.
+    """
+    source = os.environ if environ is None else environ
+    return {name: source[name] for name in DESKTOP_ENV_VARS if source.get(name, "").strip()}
+
 
 #: Separator for multi-field ``display-message`` output. Never appears in a pane
 #: id, a size or a flag; a command name or title containing it would be perverse.
@@ -162,6 +207,8 @@ _FACTS_FIELDS = (
     "pane_current_command",
     "mouse_any_flag",
     "mouse_sgr_flag",
+    "mouse_button_flag",
+    "mouse_all_flag",
     "pane_title",
 )
 _FACTS_FORMAT = _SEP.join(f"#{{{name}}}" for name in _FACTS_FIELDS)
@@ -293,6 +340,11 @@ class PaneFacts:
     ``?1003``) — it wants the wheel itself. Claude Code's fullscreen TUI does."""
     mouse_sgr: bool = False
     """…and asked for SGR encoding (``?1006``), the form every modern program uses."""
+    mouse_drag: bool = False
+    """…and asked for motion while a button is held (``?1002``, button-event
+    tracking) or for every motion (``?1003``). Without either, a program gets
+    presses and releases only, and a drag forwarded to it would be a report it
+    never asked for (#148)."""
 
 
 @dataclass(frozen=True)
@@ -371,6 +423,7 @@ def _facts(line: str) -> PaneFacts:
         title=values["pane_title"],
         mouse_on=values["mouse_any_flag"] == "1",
         mouse_sgr=values["mouse_sgr_flag"] == "1",
+        mouse_drag=values["mouse_button_flag"] == "1" or values["mouse_all_flag"] == "1",
     )
 
 
@@ -1094,6 +1147,20 @@ class TmuxServer:
             # paste's, never the tidy-up's.
             with contextlib.suppress(TmuxError):
                 self.run("delete-buffer", "-b", buffer_name)
+            raise
+
+    def show_buffer(self) -> str | None:
+        """The newest paste buffer's text, or ``None`` when the server holds none.
+
+        ``show-buffer`` without ``-b`` prints the most recently used buffer, as
+        the program wrote it. A server with no buffers answers ``no buffers`` and
+        exits 1 — an answer, not a failure; every other error is raised.
+        """
+        try:
+            return self.run("show-buffer")
+        except TmuxError as exc:
+            if "no buffer" in str(exc).lower():
+                return None
             raise
 
     def resize(self, pane_id: str, width: int, height: int) -> None:

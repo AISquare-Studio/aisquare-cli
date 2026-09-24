@@ -129,8 +129,11 @@ def doctor(
         # shows the first three not-ok rows (`DOCTOR_LINES == 3`, a stable sort
         # within the warn group), so a row inserted at position 12 evicted one
         # of `brain` / `snapshot` / a logged-out `gh` — the ones an operator can
-        # act on — from the only doctor surface visible without a click.
+        # act on — from the only doctor surface visible without a click. The
+        # fleet terminal row (#147) can warn too, about a running server's kept
+        # prefix, so it waits here with them rather than beside tmux.
         _check_browser_tools(cwd),
+        _check_fleet_terminal(),
         *_experiment_checks(),
         *explainability_ops.checks(live=live, target_name=target),
     ]
@@ -819,6 +822,142 @@ def _check_tmux(server: tmux_core.TmuxServer | None = None) -> DoctorCheck:
         # Failing open costs this line its verdict, not the operator anything
         # else: the fleet re-checks tmux on its first spawn and says so then.
         return _ok(name, f"not evaluated ({exc}) — the fleet checks again on its first spawn")
+
+
+#: How the outer terminal is recognised, from its environment: (variable, value
+#: prefix or ``None`` for "any"), the name, and whether it speaks the kitty
+#: keyboard protocol — which is what decides whether shift+enter and the other
+#: shifted chords reach an agent at all (docs/fleet.md, Keys). First match wins;
+#: ``TERM_PROGRAM`` is checked after the terminal-specific variables because a
+#: multiplexer or an IDE can leave an outer one behind.
+_TERMINAL_SIGNS: tuple[tuple[str, str | None, str, bool], ...] = (
+    ("KITTY_WINDOW_ID", None, "kitty", True),
+    ("GHOSTTY_RESOURCES_DIR", None, "ghostty", True),
+    ("WEZTERM_EXECUTABLE", None, "wezterm", True),
+    ("WT_SESSION", None, "Windows Terminal", False),
+    ("TERM_PROGRAM", "iTerm", "iTerm2", False),
+    ("TERM_PROGRAM", "WezTerm", "wezterm", True),
+    ("TERM_PROGRAM", "ghostty", "ghostty", True),
+    ("TERM_PROGRAM", "vscode", "the VS Code terminal", False),
+    ("TERM_PROGRAM", "Apple_Terminal", "Terminal.app", False),
+    ("VTE_VERSION", None, "a VTE terminal (GNOME Terminal, Tilix, …)", False),
+    ("TERM", "xterm-kitty", "kitty", True),
+    ("TERM", "foot", "foot", True),
+    ("TERM", "alacritty", "alacritty", True),
+)
+
+
+def outer_terminal(environ: Mapping[str, str] | None = None) -> tuple[str, bool | None]:
+    """``(name, speaks the kitty keyboard protocol)`` for the terminal this shell runs in.
+
+    ``None`` for the protocol when the terminal is not recognised — a guess in
+    either direction would send the operator chasing the wrong fix.
+    """
+    env = os.environ if environ is None else environ
+    for variable, prefix, name, kitty in _TERMINAL_SIGNS:
+        value = env.get(variable, "")
+        if value and (prefix is None or value.startswith(prefix)):
+            return name, kitty
+    term = env.get("TERM", "").strip()
+    return (f"unknown (TERM={term})" if term else "unknown"), None
+
+
+def _check_fleet_terminal(
+    server: tmux_core.TmuxServer | None = None, environ: Mapping[str, str] | None = None
+) -> DoctorCheck:
+    """What an agent pane's keys have to cross (#147): the outer terminal, tmux, the server.
+
+    Three facts an operator otherwise learns one broken chord at a time: whether
+    the terminal this shell runs in speaks the kitty keyboard protocol (without
+    it shift+enter arrives as enter and the UI never fakes it), whether the tmux
+    here carries extended keys (3.5+; below it shift+enter travels as ``C-j``,
+    the same newline to Claude Code), and — only when the private server is
+    already running, never started for this — whether that server still has a
+    prefix key (a server started with the pre-#147 conf keeps ``C-b``, Claude
+    Code's background-tasks chord, in ``fleet attach``) and which of the desktop
+    variables it holds stale (each new spawn carries this shell's, agents
+    already running keep the server's).
+
+    ``ok`` for everything but the stale prefix, which only a server restart
+    fixes and which eats a documented Claude Code key.
+    """
+    name = "fleet terminal"
+    env = os.environ if environ is None else environ
+    try:
+        terminal, kitty = outer_terminal(env)
+        if kitty is True:
+            outer = (
+                f"outer terminal {terminal} (kitty keyboard protocol: shift+enter reaches agents)"
+            )
+        elif kitty is False:
+            outer = (
+                f"outer terminal {terminal} (no kitty keyboard protocol: shift+enter arrives as "
+                "enter — `\\` then Enter, or ctrl+j, is the newline)"
+            )
+        else:
+            outer = f"outer terminal {terminal} (protocol unknown: try shift+enter in a pane)"
+        if env.get("TMUX"):
+            outer += "; this shell is itself inside tmux, which adds its own translation"
+        if server is None and _uncreated_home(name) is not None:
+            # No home yet: nothing may be created here (the conf path is under it),
+            # and there is no fleet server to ask about.
+            probe = tmux_core.TmuxServer()
+            if not probe.available():
+                return _ok(name, f"{outer}; tmux not installed (see the tmux check)")
+            return _ok(name, f"{outer}; {_extended_keys_note(probe.version())}; no fleet home yet")
+        srv = server or _fleet_server(fleet_service.settings().tmux_socket)
+        if not srv.available():
+            return _ok(name, f"{outer}; tmux not installed (see the tmux check)")
+        parts = [outer, _extended_keys_note(srv.version())]
+        if srv.server_absent():
+            parts.append("fleet server not running (nothing to compare)")
+            return _ok(name, "; ".join(parts))
+        prefix = srv.run("show-options", "-gv", "prefix").strip()
+        stale = _stale_server_environment(srv, env)
+        if stale:
+            parts.append(
+                f"stale on the running server: {', '.join(stale)} (each new spawn carries this "
+                "shell's values; agents already running keep the server's)"
+            )
+        if prefix and prefix != "None":
+            parts.append(f"the running server still has prefix {prefix}")
+            return _warn(
+                name,
+                "; ".join(parts),
+                f"The server started with an older config, so in `fleet attach` {prefix} is "
+                "tmux's and never reaches Claude Code (its background-tasks key). Restart the "
+                f"private server when no agent is running: tmux -L "
+                f"{fleet_service.settings().tmux_socket} kill-server",
+            )
+        parts.append(
+            "server prefix None (every key reaches the agent in fleet attach; F12 detaches)"
+        )
+        return _ok(name, "; ".join(parts))
+    except Exception as exc:  # diagnostics must never crash
+        return _ok(name, f"not evaluated ({exc})")
+
+
+def _extended_keys_note(version: tuple[int, int] | None) -> str:
+    if version is None:
+        return "tmux version not readable"
+    if version >= _RECOMMENDED_TMUX:
+        return f"tmux {version[0]}.{version[1]} carries extended keys"
+    return (
+        f"tmux {version[0]}.{version[1]} has no extended keys (3.5+): shift+enter travels as "
+        "ctrl+j, the other shifted chords are dropped"
+    )
+
+
+def _stale_server_environment(srv: tmux_core.TmuxServer, env: Mapping[str, str]) -> list[str]:
+    """The desktop variables whose value on the running server differs from this shell's."""
+    held: dict[str, str] = {}
+    for line in srv.run("show-environment", "-g").splitlines():
+        if line.startswith("-") or "=" not in line:
+            continue  # `-NAME` is an unset marker
+        key, _, value = line.partition("=")
+        held[key] = value
+    current = tmux_core.desktop_environment(env)
+    return [var for var, value in current.items() if held.get(var) != value]
 
 
 def _gh_config_dir() -> Path:

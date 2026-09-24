@@ -64,6 +64,8 @@ class FakePane:
     """The pane is in a tmux mode (copy mode): tmux owns it for the moment."""
     mouse_sgr: bool = False
     """…in SGR encoding (``?1006``); False is the X10 encoding older programs use."""
+    mouse_drag: bool = False
+    """…with motion while a button is held (``?1002``); False is presses and releases only."""
     wrapped: set[int] = field(default_factory=set)
     """Screen rows (0 = the top of the visible screen) that tmux soft-wrapped into
     the row below — the ``W`` flag ``capture-pane -F`` prints for them."""
@@ -80,6 +82,8 @@ class FakePane:
             "alternate_on": "1" if self.alternate_on else "0",
             "mouse_any_flag": "1" if self.mouse_on else "0",
             "mouse_sgr_flag": "1" if self.mouse_sgr else "0",
+            "mouse_button_flag": "1" if self.mouse_drag else "0",
+            "mouse_all_flag": "0",
             "history_size": str(len(self.history)),
             "pane_dead": "1" if self.dead else "0",
             "pane_dead_status": "" if self.dead_status is None else str(self.dead_status),
@@ -119,18 +123,22 @@ class FakeTmux:
         """How many ``resize-window`` calls fail like a killed window first. The
         attempt is still recorded: a test counts the retries."""
         self.record = record
+        """Every argv this fake was asked to run, when a caller wants them — the
+        shell tests' socket guard reads them after the test."""
+        self.buffer: str | None = None
+        """The newest tmux paste buffer — what ``show-buffer`` prints; ``None`` is
+        a server with no buffers (``no buffers``, exit 1)."""
         # A new fake server is a new machine: the pane caches `tmux -V` per
         # socket, and every fake here is socket "fake", so a test that sets
         # `version` must not read the last test's answer.
         terminal_module.forget_server_versions()
-        """Every argv this fake was asked to run, when a caller wants them — the
-        shell tests' socket guard reads them after the test."""
 
     def server(self, tmp_path: Path, socket: str = "fake") -> TmuxServer:
         # ``binary`` must resolve through ``shutil.which`` on a machine WITHOUT
         # tmux: an absolute executable path does, and is never run. ``socket``
         # names the server: two fakes standing for two SERVERS take two sockets,
-        # as two servers do (the widget caches ``tmux -V`` per socket).
+        # as two servers do (the widget caches ``tmux -V`` and keys its
+        # too-old notice by socket).
         return TmuxServer(socket, binary=sys.executable, conf=tmp_path / "fake.conf", runner=self)
 
     def sent(self) -> list[tuple[str, ...]]:
@@ -168,6 +176,11 @@ class FakeTmux:
         if name == "load-buffer":
             self.input.append((name, (stdin or b"").decode("utf-8")))
             return Completed(0, "", "")
+        if name == "show-buffer":
+            self.input.append((name,))
+            if self.buffer is None:
+                return Completed(1, "", "no buffers\n")
+            return Completed(0, self.buffer, "")
         pane_id = self._flag(group, "-t")
         pane = self.panes.get(pane_id)
         if pane is None or pane.gone:
@@ -255,39 +268,63 @@ def _at(widget: Widget, offset: tuple[int, int]) -> Offset:
 
 
 def mouse_event(
-    kind: type[events.MouseEvent], widget: Widget, offset: tuple[int, int], button: int
+    kind: type[events.MouseEvent],
+    widget: Widget,
+    offset: tuple[int, int],
+    button: int,
+    *,
+    shift: bool = False,
 ) -> events.MouseEvent:
     """One mouse event as the driver would post it, to hand to ``app.post_message``
-    yourself — for a burst posted with no turn of the loop between events."""
+    yourself — for a burst posted with no turn of the loop between events.
+
+    ``shift`` is reported by the terminal on every event of a shift+drag, which is
+    the one gesture that stays local under a program that owns the mouse (#148).
+    """
     x, y = _at(widget, offset)
     # The shape ``_xterm_parser.parse_mouse_code`` builds: no widget, screen
     # coordinates, and the button that is down (0 on a plain move).
-    return kind(None, x, y, 0, 0, button, False, False, False, screen_x=x, screen_y=y)
+    return kind(None, x, y, 0, 0, button, shift, False, False, screen_x=x, screen_y=y)
 
 
 async def press(
-    pilot: Pilot[Any], widget: Widget, offset: tuple[int, int], *, button: int = 1
+    pilot: Pilot[Any],
+    widget: Widget,
+    offset: tuple[int, int],
+    *,
+    button: int = 1,
+    shift: bool = False,
 ) -> None:
     """The pointer arrives at ``offset`` within ``widget`` and a button goes down there.
 
     A press is preceded by the motion that brought the pointer there, as the
     driver reports it (and as ``Pilot.mouse_down`` posts it).
     """
-    pilot.app.post_message(mouse_event(events.MouseMove, widget, offset, 0))
-    pilot.app.post_message(mouse_event(events.MouseDown, widget, offset, button))
+    pilot.app.post_message(mouse_event(events.MouseMove, widget, offset, 0, shift=shift))
+    pilot.app.post_message(mouse_event(events.MouseDown, widget, offset, button, shift=shift))
     await pilot.pause()
 
 
 async def move(
-    pilot: Pilot[Any], widget: Widget, offset: tuple[int, int], *, button: int = 0
+    pilot: Pilot[Any],
+    widget: Widget,
+    offset: tuple[int, int],
+    *,
+    button: int = 0,
+    shift: bool = False,
 ) -> None:
     """The pointer moves to ``offset`` within ``widget``, with ``button`` held (0: none)."""
-    pilot.app.post_message(mouse_event(events.MouseMove, widget, offset, button))
+    pilot.app.post_message(mouse_event(events.MouseMove, widget, offset, button, shift=shift))
     await pilot.pause()
 
 
 async def release(
-    pilot: Pilot[Any], widget: Widget, offset: tuple[int, int], *, button: int = 1
+    pilot: Pilot[Any],
+    widget: Widget,
+    offset: tuple[int, int],
+    *,
+    button: int = 1,
+    shift: bool = False,
 ) -> None:
     """The pointer arrives at ``offset`` within ``widget`` with ``button`` held, and it comes up.
 
@@ -295,8 +332,8 @@ async def release(
     MouseUp, so a release the pointer had not moved to would leave the
     selection where the last motion put it — a gesture no terminal delivers.
     """
-    pilot.app.post_message(mouse_event(events.MouseMove, widget, offset, button))
-    pilot.app.post_message(mouse_event(events.MouseUp, widget, offset, button))
+    pilot.app.post_message(mouse_event(events.MouseMove, widget, offset, button, shift=shift))
+    pilot.app.post_message(mouse_event(events.MouseUp, widget, offset, button, shift=shift))
     await pilot.pause()
 
 

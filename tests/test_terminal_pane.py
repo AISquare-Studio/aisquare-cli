@@ -25,6 +25,7 @@ import itertools
 import os
 import re
 import shutil
+import sys
 import time
 from collections.abc import Callable, Coroutine, Iterator
 from dataclasses import replace
@@ -63,6 +64,7 @@ from aisquare.cli.ui.terminal import (
     route_selection_gesture,
 )
 from aisquare.cli.ui.views.agent import AgentView, header_text
+from aisquare.core.keys import Drop
 from aisquare.core.tmux import BUNDLED_CONF, TmuxError, TmuxServer
 from aisquare.models import FleetAgent, FleetAgentStatus
 from tests.pane_harness import (
@@ -118,6 +120,7 @@ class Host(SelectionHost):
         self._with_footer = with_footer
         self.escapes = 0
         self.notices: list[str] = []
+        self.severities: list[str] = []
 
     def compose(self) -> ComposeResult:
         if self._with_input:
@@ -149,7 +152,12 @@ class Host(SelectionHost):
         timeout: float | None = None,
         markup: bool = True,
     ) -> None:
+        # Severity beside the text, for every test: an unmappable key must not
+        # read as an alarm (#151), the wheel's fullscreen notice must stay one,
+        # and a second host class that recorded it for two tests left every
+        # other notice test blind to a severity change (review of #161, round 2).
         self.notices.append(message)
+        self.severities.append(severity)
 
 
 class SwitcherHost(SelectionHost):
@@ -561,7 +569,7 @@ def test_keys_are_forwarded_in_tmux_vocabulary(fake: FakeTmux, tmp_path: Path) -
 def test_an_untranslatable_key_is_dropped_with_one_notice_per_key_name(
     fake: FakeTmux, tmp_path: Path
 ) -> None:
-    async def drive() -> list[str]:
+    async def drive() -> tuple[list[str], list[str]]:
         host = Host(fake.server(tmp_path), "%1")
         async with host.run_test(size=(40, 6)) as pilot:
             host.pane.focus()
@@ -570,11 +578,14 @@ def test_an_untranslatable_key_is_dropped_with_one_notice_per_key_name(
             await pilot.press("ctrl+comma")  # a second unknown key: its own notice
             await pilot.press("enter")  # a known key: no notice
             await pilot.pause()
-            return host.notices
+            return host.notices, host.severities
 
-    notices = run(drive())
+    notices, severities = run(drive())
     assert len(notices) == 2
-    assert notices[0].startswith("f13") and notices[1].startswith("ctrl+comma")
+    # The notice names the key and blames nothing: "no way to type f13 into a tmux pane" (#151).
+    assert notices[0] == "no way to type f13 into a tmux pane"
+    assert notices[1] == "no way to type ctrl+comma into a tmux pane"
+    assert severities == ["information", "information"]  # a fact about the key table, not an alarm
     assert fake.sent() == [("Enter",)]  # nothing was mistyped into the agent
 
 
@@ -804,7 +815,7 @@ def test_the_wheel_on_a_plain_alternate_screen_sends_nothing_and_says_why(
     pane = fake.panes["%1"]
     pane.alternate_on, pane.mouse_on = True, False
 
-    async def drive() -> tuple[int, list[tuple[str, ...]], list[str]]:
+    async def drive() -> tuple[int, list[tuple[str, ...]], list[str], list[str]]:
         host = Host(fake.server(tmp_path), "%1")
         async with host.run_test(size=(40, 6)) as pilot:
             widget = host.pane
@@ -812,11 +823,15 @@ def test_the_wheel_on_a_plain_alternate_screen_sends_nothing_and_says_why(
             _notch(widget, up=True)
             _notch(widget, up=True)
             await pilot.pause(0.1)
-            return widget.scrollback, fake.sent(), list(host.notices)
+            return widget.scrollback, fake.sent(), list(host.notices), host.severities
 
-    scrollback, sent, notices = run(drive())
+    scrollback, sent, notices, severities = run(drive())
     assert scrollback == 0 and sent == []
     assert len([n for n in notices if "fullscreen" in n]) == 1, notices
+    # A WARNING, and pinned here because it shares _warn_once with the key
+    # notice: #151 made that helper hard-code "information" and this notice
+    # changed severity with it, silently, since nothing looked (review).
+    assert severities == ["warning"], severities
 
 
 def test_a_scrolled_view_comes_back_with_the_wheel_whatever_the_program_wants(
@@ -3536,17 +3551,19 @@ def test_a_cursor_above_the_shown_window_is_neither_drawn_nor_dirtied(
 # --- the tmux-version key gate -----------------------------------------------------------------
 
 
-def _press_shift_enter(tmux: FakeTmux, tmp_path: Path) -> tuple[list[tuple[str, ...]], list[str]]:
+def _press_then_enter(
+    tmux: FakeTmux, tmp_path: Path, chord: str
+) -> tuple[list[tuple[str, ...]], list[str], list[str]]:
     """Press an extended-only chord (then a plain key) into a pane on ``tmux``."""
 
-    async def drive() -> tuple[list[tuple[str, ...]], list[str]]:
+    async def drive() -> tuple[list[tuple[str, ...]], list[str], list[str]]:
         host = Host(tmux.server(tmp_path), "%1")
         async with host.run_test(size=(40, 6)) as pilot:
             host.pane.focus()
             await pilot.pause()
-            await pilot.press("shift+enter", "enter")
+            await pilot.press(chord, "enter")
             await pilot.pause()
-            return tmux.sent(), list(host.notices)
+            return tmux.sent(), list(host.notices), list(host.severities)
 
     return run(drive())
 
@@ -3557,23 +3574,132 @@ def test_the_servers_tmux_version_gates_the_chords_it_would_type_out(
     """``_extended_keys`` is this widget's half of core.keys' anti-corruption rule.
 
     Below 3.5 tmux TYPES ``S-Enter`` into the running agent instead of sending
-    the key (measured on 3.3a/3.4), so the pane drops it there — and sends it on
-    every modern server, which is the only reason shift+enter works at all.
-    Nothing outside test_keys.py's pure units reached the gate: the fake always
-    answered 3.7c and no test pressed an extended-only chord, so the widget's
-    gate could have been stuck at either value undetected.
+    the key (measured on 3.3a/3.4), so the pane never sends it there: shift+enter
+    travels as ``C-j`` — Claude Code's newline on every tmux (#147) — a chord
+    with no older spelling is refused with a warning, and the chord itself goes
+    on every modern server. Nothing outside test_keys.py's pure units reached
+    the gate: the fake always answered 3.7c and no test pressed an
+    extended-only chord, so the widget's gate could have been stuck at either
+    value undetected.
     """
     fake.version = "tmux 3.4"
-    old_sent, old_notices = _press_shift_enter(fake, tmp_path)
+    old_sent, old_notices, old_severities = _press_then_enter(fake, tmp_path, "shift+enter")
+    refusing = FakeTmux()
+    refusing.version = "tmux 3.4"
+    refusing.panes["%1"] = FakePane(screen=["one row"])
+    refused_sent, refused_notices, refused_severities = _press_then_enter(
+        refusing, tmp_path, "ctrl+shift+enter"
+    )
     modern = FakeTmux()
     modern.panes["%1"] = FakePane(screen=["one row"])
-    modern_sent, modern_notices = _press_shift_enter(modern, tmp_path)
+    modern_sent, modern_notices, _ = _press_then_enter(modern, tmp_path, "shift+enter")
 
-    assert old_sent == [("Enter",)], "a chord tmux 3.4 would type out must not be sent"
-    assert len(old_notices) == 1 and old_notices[0].startswith("shift+enter")
+    assert old_sent == [("C-j",), ("Enter",)], "the newline by its older spelling, never S-Enter"
+    assert old_notices == [], "nothing was dropped, so nothing is said"
+    assert old_severities == []
+    assert refused_sent == [("Enter",)], "a chord tmux 3.4 would type out must not be sent"
+    # A keystroke LOST for a reason the reader can fix: a warning, naming the
+    # version they have and the one they need — not the "no way to type" line,
+    # which is false here (there is a way, on 3.5) and was information (review
+    # of #161, round 2). The version is the one on_key read for the gate,
+    # handed down (review of #161, round 5).
+    assert refused_notices == ["tmux 3.4 cannot carry ctrl+shift+enter — 3.5 or newer can"]
+    assert refused_severities == ["warning"]
     assert modern.version == "tmux 3.7c"  # the control's premise, spelled out
     assert modern_sent == [("S-Enter",), ("Enter",)]  # …and there the chord goes through
     assert modern_notices == []
+
+
+def test_the_too_old_notice_words_an_unknown_version_rather_than_asserting_it_away(
+    fake: FakeTmux, tmp_path: Path
+) -> None:
+    """``too_old`` is never produced with an unknown version — the gate fails
+    open — but ``_explain``'s type admits ``None``, and a branch that cannot be
+    reached through the widget was a dead string in one round and an assert
+    in the next (reviews of #161, rounds 3-5). So it is reached directly."""
+
+    async def drive() -> tuple[list[str], list[str]]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 6)) as pilot:
+            await pilot.pause()
+            host.pane._explain("ctrl+shift+enter", Drop("too_old"), None)
+            host.pane._explain("ctrl+shift+enter", Drop("too_old"), (3, 4))  # once per key name
+            await pilot.pause()
+            return host.notices, host.severities
+
+    notices, severities = run(drive())
+    assert notices == ["this tmux cannot carry ctrl+shift+enter — 3.5 or newer can"]
+    assert severities == ["warning"]
+
+
+def test_the_too_old_notice_follows_the_pane_to_its_next_server(
+    fake: FakeTmux, tmp_path: Path
+) -> None:
+    """The line names a server's version, and a pane outlives its server: a
+    notice deduped across servers prescribed an upgrade for the server the
+    pane had LEFT while the keystroke on the new one was lost without a word
+    (review of #161, round 6). The line is deduped per server — per socket,
+    as two servers always are — so the next one hears it (round 7)."""
+    fake.version = "tmux 3.3"
+    older = FakeTmux()
+    older.version = "tmux 3.4"
+    older.panes["%1"] = FakePane(screen=["another old server"])
+
+    async def drive() -> tuple[list[str], list[tuple[str, ...]], list[tuple[str, ...]]]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 6)) as pilot:
+            pane = host.pane
+            pane.focus()
+            await pilot.pause()
+            await pilot.press("ctrl+shift+enter", "ctrl+shift+enter")
+            await pilot.pause()
+            pane.server = older.server(tmp_path, socket="older")
+            pane.attach("%1")
+            await pilot.pause()
+            await pilot.press("ctrl+shift+enter", "ctrl+shift+enter")
+            await pilot.pause()
+            return list(host.notices), fake.sent(), older.sent()
+
+    notices, first_sent, second_sent = run(drive())
+    assert first_sent == [] and second_sent == []
+    assert notices == [
+        "tmux 3.3 cannot carry ctrl+shift+enter — 3.5 or newer can",
+        "tmux 3.4 cannot carry ctrl+shift+enter — 3.5 or newer can",
+    ]
+
+
+def test_a_new_pane_on_the_same_server_repeats_no_notice(fake: FakeTmux, tmp_path: Path) -> None:
+    """An attach is as often a restarted agent (``views/agent.py``,
+    ``views/project.py``) or a sign-in (``views/accounts.py``) as a new server:
+    a new pane on the SAME one, under a fresh ``TmuxServer`` for its socket.
+    Round 6 cleared every notice at each attach, so a restart brought back the
+    ``f13`` line — a fact about the key table, never about a server — and the
+    too-old line the reader had already had for that server: the re-toasting
+    #151 is about (review of #161, round 7)."""
+    fake.version = "tmux 3.4"
+    fake.panes["%2"] = FakePane(screen=["the restarted agent"])
+
+    async def drive() -> tuple[list[str], list[tuple[str, ...]]]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 6)) as pilot:
+            pane = host.pane
+            pane.focus()
+            await pilot.pause()
+            await pilot.press("ctrl+shift+enter", "f13")
+            await pilot.pause()
+            pane.server = fake.server(tmp_path)  # a fresh handle, as views/project.py makes
+            pane.attach("%2")
+            await pilot.pause()
+            await pilot.press("ctrl+shift+enter", "f13")
+            await pilot.pause()
+            return list(host.notices), fake.sent()
+
+    notices, sent = run(drive())
+    assert sent == []
+    assert notices == [
+        "tmux 3.4 cannot carry ctrl+shift+enter — 3.5 or newer can",
+        "no way to type f13 into a tmux pane",
+    ]
 
 
 def test_attach_re_reads_the_version_for_a_new_server(fake: FakeTmux, tmp_path: Path) -> None:
@@ -3607,7 +3733,7 @@ def test_attach_re_reads_the_version_for_a_new_server(fake: FakeTmux, tmp_path: 
 
     modern_sent, old_sent = run(drive())
     assert modern_sent == [("S-Enter",)]  # the 3.7c server got the chord…
-    assert old_sent == [], "…and the version was re-read for the server attached after it"
+    assert old_sent == [("C-j",)], "…and the 3.4 one its older spelling: the version was re-read"
 
 
 # --- placeholder and failure states -----------------------------------------------------------
@@ -3781,6 +3907,255 @@ def test_agent_view_refreshes_its_header_and_reattaches_on_a_new_pane(
     assert reset == 0  # a new pane starts live
     assert "coder-1" in waiting and "waiting" in waiting
     assert "working" in working and "waiting" not in working
+
+
+# --- mouse buttons (#148) ---------------------------------------------------------------------
+
+
+def _literals(fake: FakeTmux) -> str:
+    """Everything sent to the pane as literal text, in order — the SGR reports concatenated."""
+    return "".join(call[-1] for call in fake.sent() if call[:1] == ("-l",))
+
+
+def _hex(fake: FakeTmux) -> list[str]:
+    """Every byte sent with ``send-keys -H``, in order, across calls."""
+    out: list[str] = []
+    for call in fake.sent():
+        if call[:1] == ("-H",):
+            out.extend(call[1:])
+    return out
+
+
+def test_a_click_a_drag_and_a_release_reach_a_program_that_tracks_the_mouse(
+    fake: FakeTmux, tmp_path: Path
+) -> None:
+    """#148: only the wheel was forwarded, so a click never placed Claude Code's
+    cursor and its ``✕``, menu rows and collapsed tool results did nothing. tmux
+    was measured to pass the sequences byte for byte; the pane never sent them."""
+    pane = fake.panes["%1"]
+    pane.alternate_on = pane.mouse_on = pane.mouse_sgr = pane.mouse_drag = True
+
+    async def drive() -> tuple[str, bool, Selection | None, str, str]:
+        host = Host(fake.server(tmp_path), "%1", with_header=True)
+        async with host.run_test(size=(40, 7)) as pilot:
+            widget = host.pane
+            await wait_until(pilot, lambda: synced(widget))
+            allow = widget.allow_select
+            await pilot.mouse_down(widget, offset=(3, 2))
+            await pilot.hover(widget, offset=(5, 2))
+            await pilot.hover(widget, offset=(7, 3))
+            await pilot.mouse_up(widget, offset=(7, 3))
+            await pilot.pause(0.1)
+            forwarded = _literals(fake)
+            selection = widget.text_selection
+            # A plain click, with ctrl held: the modifier bit travels (ctrl+click opens a link).
+            await pilot.mouse_down(widget, offset=(0, 0), control=True)
+            await pilot.mouse_up(widget, offset=(0, 0), control=True)
+            await pilot.pause(0.1)
+            with_ctrl = _literals(fake)[len(forwarded) :]
+            # The right button, with alt: button 2, bit 8.
+            await pilot.mouse_down(widget, offset=(1, 1), button=3, meta=True)
+            await pilot.mouse_up(widget, offset=(1, 1), meta=True)
+            await pilot.pause(0.1)
+            right = _literals(fake)[len(forwarded) + len(with_ctrl) :]
+            return forwarded, allow, selection, with_ctrl, right
+
+    forwarded, allow, selection, with_ctrl, right = run(drive())
+    # 1-based pane cells; the drag carries the motion flag (+32); the release ends in `m`.
+    assert forwarded == "\x1b[<0;4;3M\x1b[<32;6;3M\x1b[<32;8;4M\x1b[<0;8;4m", repr(forwarded)
+    assert allow is False, "Textual's own drag-select stands down while the program owns the mouse"
+    assert selection is None, "…so the drag selected nothing here: the program did"
+    assert with_ctrl == "\x1b[<16;1;1M\x1b[<16;1;1m", repr(with_ctrl)
+    assert right == "\x1b[<10;2;2M\x1b[<10;2;2m", repr(right)
+
+
+def test_a_program_that_asked_for_presses_only_gets_no_drag_reports(
+    fake: FakeTmux, tmp_path: Path
+) -> None:
+    """``?1000`` without ``?1002``: motion reports would be ones it never asked for."""
+    pane = fake.panes["%1"]
+    pane.alternate_on = pane.mouse_on = pane.mouse_sgr = True
+    pane.mouse_drag = False
+
+    async def drive() -> str:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 6)) as pilot:
+            widget = host.pane
+            await wait_until(pilot, lambda: synced(widget))
+            await pilot.mouse_down(widget, offset=(3, 2))
+            await pilot.hover(widget, offset=(5, 2))
+            await pilot.mouse_up(widget, offset=(7, 2))
+            await pilot.pause(0.1)
+            return _literals(fake)
+
+    assert run(drive()) == "\x1b[<0;4;3M\x1b[<0;8;3m"
+
+
+def test_buttons_are_x10_bytes_for_a_program_that_did_not_ask_for_sgr(
+    fake: FakeTmux, tmp_path: Path
+) -> None:
+    pane = fake.panes["%1"]
+    pane.alternate_on = pane.mouse_on = True
+    pane.mouse_sgr = False
+
+    async def drive() -> list[tuple[str, ...]]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 6)) as pilot:
+            widget = host.pane
+            await wait_until(pilot, lambda: synced(widget))
+            await pilot.mouse_down(widget, offset=(2, 1), shift=True)  # shift+click, not a drag
+            await pilot.pause(0.1)
+            return [call for call in fake.input if call[0] == "send-keys"]
+
+    sent = run(drive())
+    assert sent == [], "shift begins the local selection, whatever the encoding"
+    pane.mouse_sgr = False
+    pane.mouse_drag = True
+
+    async def drive_plain() -> None:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 6)) as pilot:
+            widget = host.pane
+            await wait_until(pilot, lambda: synced(widget))
+            await pilot.mouse_down(widget, offset=(2, 1))
+            await pilot.hover(widget, offset=(3, 1))
+            await pilot.mouse_up(widget, offset=(3, 1))
+            await pilot.pause(0.1)
+
+    run(drive_plain())
+    # ESC [ M, then 32 + button / column / row: press 0 at (3,2); drag 32 at (4,2); release 3.
+    assert _hex(fake) == [
+        "1b", "5b", "4d", "20", "23", "22",
+        "1b", "5b", "4d", "40", "24", "22",
+        "1b", "5b", "4d", "23", "24", "22",
+    ], _hex(fake)  # fmt: skip
+    assert _literals(fake) == "", "nothing went as text: a string cannot carry these bytes"
+
+
+def test_nothing_is_forwarded_in_copy_mode_into_history_or_to_a_program_without_the_mouse(
+    fake: FakeTmux, tmp_path: Path
+) -> None:
+    """The wheel's guards, applied to buttons: a pane tmux owns for the moment, a
+    view scrolled into history, and a program that never asked, each keep the
+    gesture — and the last one keeps Textual's own drag-select, as before."""
+    pane = fake.panes["%1"]
+    pane.alternate_on = pane.mouse_on = pane.mouse_sgr = True
+    pane.in_mode = True
+
+    async def in_copy_mode() -> tuple[bool, list[tuple[str, ...]]]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 6)) as pilot:
+            widget = host.pane
+            await wait_until(pilot, lambda: synced(widget))
+            await pilot.mouse_down(widget, offset=(1, 1))
+            await pilot.mouse_up(widget, offset=(1, 1))
+            await pilot.pause(0.1)
+            return widget.allow_select, list(fake.sent())
+
+    allow, sent = run(in_copy_mode())
+    assert allow is True and sent == []
+    pane.in_mode = False
+    pane.alternate_on = pane.mouse_on = False  # a shell: Textual's own selection
+
+    async def plain_pane() -> tuple[bool, list[tuple[str, ...]], str | None]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 6)) as pilot:
+            widget = host.pane
+            await wait_until(pilot, lambda: synced(widget))
+            await drag(pilot, widget, (0, 1), (5, 1))
+            return widget.allow_select, list(fake.sent()), host.clipboard
+
+    allow, sent, clipboard = run(plain_pane())
+    assert allow is True and sent == [] and clipboard == "second"
+
+
+def test_shift_drag_selects_locally_and_copies_while_the_program_owns_the_mouse(
+    fake: FakeTmux, tmp_path: Path
+) -> None:
+    """The one gesture that works in every pane: shift+drag is this widget's own
+    selection even under Claude Code's fullscreen, copied on release through the
+    same end-of-gesture path as a plain drag anywhere else — one path, one toast."""
+    pane = fake.panes["%1"]
+    pane.alternate_on = pane.mouse_on = pane.mouse_sgr = True
+
+    async def drive() -> tuple[str, int, list[tuple[str, ...]], Selection | None]:
+        host = Host(fake.server(tmp_path), "%1", with_header=True)
+        async with host.run_test(size=(40, 7)) as pilot:
+            widget = host.pane
+            await wait_until(pilot, lambda: synced(widget))
+            # Through the app, not Pilot.mouse_*: the copy is routed from
+            # SelectionHost.on_event, which Pilot's own helpers step around.
+            await press(pilot, widget, (7, 1), shift=True)
+            await move(pilot, widget, (3, 1), button=1, shift=True)  # dragged BACKWARDS
+            await move(pilot, widget, (2, 1), button=1, shift=True)
+            await release(pilot, widget, (2, 1), shift=True)
+            await pilot.pause(0.1)
+            toasts = sum(1 for n in host.notices if n.startswith("copied"))
+            return host.clipboard, toasts, list(fake.sent()), widget.text_selection
+
+    copied, toasts, sent, selection = run(drive())
+    assert copied == "second row"[2:8], repr(copied)  # cells 2..7: the pointer's cell included
+    assert toasts == 1
+    assert sent == [], "nothing went to the program: shift is the local gesture"
+    assert selection == Selection(Offset(2, 1), Offset(8, 1))
+
+
+def test_a_double_click_is_two_presses_for_the_program_not_a_local_word(
+    fake: FakeTmux, tmp_path: Path
+) -> None:
+    pane = fake.panes["%1"]
+    pane.alternate_on = pane.mouse_on = pane.mouse_sgr = True
+
+    async def drive() -> tuple[str, str, Selection | None]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 6)) as pilot:
+            widget = host.pane
+            await wait_until(pilot, lambda: synced(widget))
+            await pilot.click(widget, offset=(1, 1), times=2)
+            await pilot.pause(0.1)
+            return _literals(fake), host.clipboard, widget.text_selection
+
+    forwarded, clipboard, selection = run(drive())
+    assert forwarded == "\x1b[<0;2;2M\x1b[<0;2;2m" * 2, repr(forwarded)
+    assert clipboard == "" and selection is None  # Claude Code's word selection, not ours
+
+
+def test_a_paste_buffer_the_program_wrote_on_release_is_mirrored_to_the_clipboard(
+    fake: FakeTmux, tmp_path: Path
+) -> None:
+    """Claude Code's copy-on-select writes tmux's paste buffer (its ``wl-copy`` may
+    have no display in the server's environment). A buffer that CHANGED between
+    the press and the release is the selection just made; one that did not is a
+    click that placed the cursor, and says nothing."""
+    pane = fake.panes["%1"]
+    pane.alternate_on = pane.mouse_on = pane.mouse_sgr = True
+    fake.buffer = "stale copy"
+
+    async def drive() -> tuple[str, list[str], str, list[str]]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 6)) as pilot:
+            widget = host.pane
+            await wait_until(pilot, lambda: synced(widget))
+            await pilot.mouse_down(widget, offset=(0, 0))
+            fake.buffer = "what Claude selected"  # the program's release handler ran
+            await pilot.mouse_up(widget, offset=(9, 0))
+            await pilot.pause(widget.BUFFER_MIRROR_DELAY + 0.1)
+            copied, toasts = host.clipboard, list(host.notices)
+            await pilot.mouse_down(widget, offset=(0, 1))  # a click: the buffer stands
+            await pilot.mouse_up(widget, offset=(0, 1))
+            await pilot.pause(widget.BUFFER_MIRROR_DELAY + 0.1)
+            await pilot.mouse_down(widget, offset=(0, 1), button=3)  # right: never read
+            fake.buffer = "changed under a right click"
+            await pilot.mouse_up(widget, offset=(0, 1))
+            await pilot.pause(widget.BUFFER_MIRROR_DELAY + 0.1)
+            return copied, toasts, host.clipboard, list(host.notices)
+
+    copied, toasts, after, toasts_after = run(drive())
+    assert copied == "what Claude selected"
+    assert toasts == ["copied 20 characters — the agent's own selection"], toasts
+    assert after == "what Claude selected" and toasts_after == toasts
+    reads = [call for call in fake.input if call[0] == "show-buffer"]
+    assert len(reads) == 4, "a read at each left press and its release; none for the right button"
 
 
 # --- against a real tmux ------------------------------------------------------------------------
@@ -4287,3 +4662,229 @@ def test_a_change_hidden_under_the_corner_marker_leaves_the_highlight_standing(
     assert standing, "the premise: the whole row is highlighted"
     assert after_hidden, "the text the user sees did not change: the marker covers the cells"
     assert after_visible is None, "a change under the highlight the user CAN see drops it"
+
+
+#: Keys a focused pane sees that carry no keystroke at all, written out here
+#: rather than derived from ``core.keys``' tables — a loop over the thing under
+#: test shrinks rather than fails when a name goes missing (review;
+#: CONTRIBUTING's "emptiness as both goal and symptom"). Four groups, each a bug
+#: that reached a user or a review: the fourteen modifier names, the locks WITH a
+#: modifier held (Textual keeps the prefix for those, so an exact match on
+#: ``event.key`` let them through), the whole keys a kitty-protocol terminal
+#: reports only because Textual asks for every key, and those same keys with a
+#: modifier held (a residue round 1 documented and round 2 lost).
+NOTHING_TO_TYPE = (
+    "left_shift",
+    "left_control",
+    "left_alt",
+    "left_super",
+    "left_hyper",
+    "left_meta",
+    "right_shift",
+    "right_control",
+    "right_alt",
+    "right_super",
+    "right_hyper",
+    "right_meta",
+    "iso_level3_shift",
+    "iso_level5_shift",
+    "caps_lock",
+    "num_lock",
+    "scroll_lock",
+    "shift+caps_lock",
+    "ctrl+num_lock",
+    "shift+scroll_lock",
+    "menu",
+    "print_screen",
+    "pause",
+    "raise_volume",
+    "lower_volume",
+    "mute_volume",
+    "media_play",
+    "media_pause",
+    "kp_begin",
+    "ctrl+pause",
+    "shift+menu",
+    "alt+media_play",
+)
+
+#: The Cmd chords macOS hands the pane — a DIFFERENT reason (``command``: a
+#: keystroke was pressed, at the OS) that is silent for a different argument,
+#: kept apart so the list's name says what its entries are (review of #161,
+#: round 4). The round-1 rule read them as deliberate aim and toasted one by one.
+COMMAND_CHORDS = ("super+k", "super+f5", "hyper+x")
+
+#: Keys the pane cannot type but the reader may have meant — one quiet line
+#: each, never silence, and never a raw byte in the line. ``tests/test_keys.py``
+#: pins the reason; this pins what the pane SAYS for it, which is how a C1
+#: control byte went into the toast verbatim unnoticed for a round (review of
+#: #161, round 5). The two control bytes are that regression's own key names —
+#: two of them, so the dedupe is shown to key on the RAW name while the notice
+#: shows the spelt one (round 6).
+NAMED_LOSSES = ("f13", "ctrl+comma", "grinning_face", "\x85", "\x9b")
+
+
+def test_a_key_with_nothing_to_type_is_ignored_in_silence(fake: FakeTmux, tmp_path: Path) -> None:
+    """#151: a kitty-protocol terminal reports keys that are not keystrokes.
+
+    Nothing can be forwarded — a modifier is half of a chord, and Menu or the
+    volume keys are nobody's message to an agent — so nothing is sent and
+    nothing is said. The old path raised one "tmux has no name for this key —
+    dropped" toast per key, three red toasts into an ordinary typing session.
+    The Cmd chords ride the same loop for a different reason that is silent on
+    a different argument (``tests/test_keys.py`` pins the reasons; this pins
+    the silence). The control beside them is a chord that USES a modifier and
+    still arrives.
+    """
+
+    async def drive() -> tuple[list[str], list[tuple[str, ...]]]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 6)) as pilot:
+            host.pane.focus()
+            await pilot.pause()
+            for key in (*NOTHING_TO_TYPE, *COMMAND_CHORDS):
+                await pilot.press(key)
+            await pilot.press("ctrl+a")  # the modifier USED: the chord still arrives
+            await pilot.pause()
+            return host.notices, fake.sent()
+
+    notices, sent = run(drive())
+    assert notices == []  # not one toast
+    assert sent == [("C-a",)]  # and not one stray send-keys
+
+
+def test_a_lost_keystroke_is_named_once_as_information_and_never_as_a_raw_byte(
+    fake: FakeTmux, tmp_path: Path
+) -> None:
+    """The pane-level pin for ``no_name``: one information notice per key name,
+    nothing sent, and the name spelt so the emulator cannot act on it — U+0085
+    as ``U+0085``, not as the byte that moves the cursor (review of #161,
+    round 5). Pressed twice each: once per key name is the whole of the
+    promise. The printable names go through the pilot — the app's own key
+    dispatch, the path the silent list's test measures — and only the raw
+    bytes, which the pilot cannot spell, are posted straight to the pane
+    (round 6)."""
+
+    async def drive() -> tuple[list[str], list[str], list[tuple[str, ...]]]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 6)) as pilot:
+            host.pane.focus()
+            await pilot.pause()
+            for name in (*NAMED_LOSSES, *NAMED_LOSSES):
+                if name.isprintable():
+                    await pilot.press(name)
+                else:
+                    host.pane.post_message(events.Key(name, name))
+            await pilot.pause()
+            return host.notices, host.severities, fake.sent()
+
+    notices, severities, sent = run(drive())
+    assert sent == []
+    assert notices == [
+        "no way to type f13 into a tmux pane",
+        "no way to type ctrl+comma into a tmux pane",
+        "no way to type grinning_face into a tmux pane",
+        "no way to type U+0085 into a tmux pane",
+        "no way to type U+009B into a tmux pane",  # its own line: deduped on the raw name
+    ]
+    assert severities == ["information"] * 5
+    assert all(char.isprintable() for notice in notices for char in notice)
+
+
+def test_a_numpad_operator_without_its_text_is_typed_not_swallowed(
+    fake: FakeTmux, tmp_path: Path
+) -> None:
+    """The counterexample to "bare and unnamed means nobody typed it": a terminal
+    that reports every key but not its text sends numpad ``+`` as ``add``, and
+    the round-1 rule filed it with ``menu`` — neither typed nor mentioned, less
+    than the toast it replaced (review of #161, round 2). It is a keystroke."""
+
+    async def drive() -> tuple[list[str], list[str], list[tuple[str, ...]]]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 6)) as pilot:
+            host.pane.focus()
+            await pilot.pause()
+            for name in ("add", "divide", "multiply", "decimal"):
+                host.pane.post_message(events.Key(name, None))
+            await pilot.pause()
+            return host.notices, host.severities, fake.sent()
+
+    notices, severities, sent = run(drive())
+    assert sent == [("-l", "--", "+"), ("-l", "--", "/"), ("-l", "--", "*")]
+    # The decimal key's text is the layout's to know — ``,`` on a German numpad
+    # arrives under the same physical key code — so without it nothing is
+    # guessed: one quiet line, the keystroke lost rather than mistyped (review
+    # of #161, round 3).
+    assert notices == ["no way to type decimal into a tmux pane"]
+    assert severities == ["information"]
+
+
+def test_a_truly_unmappable_key_is_still_named_once_but_as_information(
+    fake: FakeTmux, tmp_path: Path
+) -> None:
+    """The remaining notice does not blame tmux or say "dropped" in red (#151)."""
+
+    async def drive() -> tuple[list[str], list[str]]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 6)) as pilot:
+            host.pane.focus()
+            await pilot.pause()
+            await pilot.press("f13", "f13")
+            await pilot.pause()
+            return host.notices, host.severities
+
+    notices, severities = run(drive())
+    assert notices == ["no way to type f13 into a tmux pane"]
+    assert severities == ["information"]
+    assert fake.sent() == []
+
+
+@_needs_tmux
+def test_real_tmux_pane_delivers_a_forwarded_click_to_a_program_that_tracks_the_mouse(
+    real_server: TmuxServer, tmp_path: Path
+) -> None:
+    """The issue's own measurement, made a test: a program that turns on ``?1000``
+    + ``?1006`` in a real tmux pane receives the pane's press and release byte
+    for byte — tmux was never what blocked the mouse."""
+    script = tmp_path / "mouse_echo.py"
+    script.write_text(
+        "\n".join(
+            [
+                "import sys, tty",
+                "out = sys.stdout",
+                "out.write('\\x1b[?1049h\\x1b[?1000h\\x1b[?1006h'); out.flush()",
+                "tty.setraw(sys.stdin.fileno())",
+                "while True:",
+                "    data = sys.stdin.buffer.read1(64)",
+                "    if not data: break",
+                "    out.write(repr(data.decode('latin-1')) + '\\r\\n'); out.flush()",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    window = real_server.spawn_window(
+        "mouse",
+        name="probe",
+        cwd=tmp_path,
+        command=[sys.executable, str(script)],
+        width=80,
+        height=24,
+    )
+
+    async def drive() -> str:
+        host = Host(real_server, window.pane_id)
+        async with host.run_test(size=(80, 24)) as pilot:
+            pane = host.pane
+            await wait_until(
+                pilot, lambda: pane.facts is not None and pane.facts.mouse_on, timeout=5.0
+            )
+            await pilot.mouse_down(pane, offset=(4, 2))
+            await pilot.mouse_up(pane, offset=(4, 2))
+            await wait_until(
+                pilot, lambda: any("[<0;5;3m" in row for row in screen_text(pane)), timeout=3.0
+            )
+            return "\n".join(screen_text(pane))
+
+    shown = run(drive())
+    assert "[<0;5;3M" in shown and "[<0;5;3m" in shown, shown

@@ -185,6 +185,36 @@ def test_text_after_the_zone_costs_neither_the_window_nor_the_reset() -> None:
     assert fine is not None and fine.resets_at is not None  # 12:30am is still a clock time
 
 
+def test_a_reset_with_no_zone_named_is_resolved_in_the_local_rules_across_a_dst_change(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #205, fourth round: with no zone in the message — or one ``ZoneInfo`` cannot
+    find — the local zone was ``now.astimezone().tzinfo``, the offset in force NOW, and a
+    weekly reset on the far side of a DST change came out an hour early. Toronto, Friday
+    2026-10-30 (EDT); Monday 00:00 is after the 1 November change, so it is 05:00 UTC."""
+    import time
+
+    friday = datetime(2026, 10, 30, 16, 0, tzinfo=UTC)  # noon EDT (-04:00)
+    monday_midnight_est = datetime(2026, 11, 2, 5, 0, tzinfo=UTC)
+    with monkeypatch.context() as local:
+        local.setenv("TZ", "America/Toronto")
+        time.tzset()
+        try:
+            bare = core.parse_limit_notice(
+                "You've hit your weekly limit · resets Mon 12:00am", now=friday
+            )
+            unknown = core.parse_limit_notice(
+                "You've hit your weekly limit · resets Mon 12:00am (Mars/Olympus)", now=friday
+            )
+            named = core.parse_limit_notice(WEEKLY_LIMIT, now=friday)  # the control
+        finally:
+            local.undo()
+            time.tzset()
+    assert bare is not None and bare.resets_at == monday_midnight_est
+    assert unknown is not None and unknown.resets_at == monday_midnight_est
+    assert named is not None and named.resets_at == monday_midnight_est
+
+
 def test_a_429_that_is_not_a_usage_limit_and_an_unreadable_time_degrade_gracefully() -> None:
     assert core.parse_limit_notice(API_KEY_429, now=SUNDAY) is None  # not a plan limit
     assert core.parse_limit_notice(None, now=SUNDAY) is None
@@ -440,6 +470,46 @@ def test_a_re_fire_for_the_same_window_starts_no_second_worker(
         "sess-fleet", error="rate_limit", message=WEEKLY_LIMIT, details=None
     )
     assert mid is not None and mid.already_limited
+
+
+def test_another_api_error_mid_hand_over_keeps_the_mark_and_the_claims(
+    fake_home: Path, work: ProjectInfo, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #205, fourth round: the ``rate_limit`` branch kept ``fleet switch``'s mark
+    (third round), the other one wrote ``waiting`` over it — an ``overloaded`` landing
+    while the switch waits for the ``/exit``, and the SessionEnd that followed released
+    the claims the replacement was to inherit."""
+    monkeypatch.setattr(team_service, "_nudge_manager", lambda project_id, *, reason: None)
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
+    _session(work, "sess-fleet")
+    _fleet_row(work, "agt_overload", "coder-db", "sess-fleet")
+    task, _created = team_service.add_task("Keep it", role="coder", cwd=work.root)
+    assert team_service.claim_task(task.id, session_ref="sess-fleet").status == "doing"
+    with store_session() as store:
+        store.touch_session("sess-fleet", state=team_service.HANDOVER_STATE)
+    payload = json.dumps(
+        {
+            "session_id": "sess-fleet",
+            "cwd": str(work.root),
+            "error": "overloaded",
+            "last_assistant_message": "API Error: 529 Overloaded",
+        }
+    )
+
+    assert runner.invoke(app, ["hook", "stop-failure"], input=payload).exit_code == 0
+
+    assert _state("sess-fleet")[0] == team_service.HANDOVER_STATE
+    assert ("turn_failed", "overloaded: API Error: 529 Overloaded") in _events(work)
+    team_service.hook_session_end("sess-fleet", work.root, reason="prompt_input_exit")
+    with store_session() as store:
+        kept = store.get_task(task.id)
+    assert kept is not None and kept.status == "doing" and kept.claimed_by == "sess-fleet"
+    # The control: the same error on an unmarked row still ends the turn as `waiting`.
+    _session(work, "sess-plain")
+    plain = team_service.hook_stop_failure(
+        "sess-plain", error="overloaded", message="API Error: 529 Overloaded", details=None
+    )
+    assert plain is not None and _state("sess-plain")[0] == "waiting"
 
 
 def test_the_worker_refuses_a_hand_over_in_flight_or_one_that_just_happened(
@@ -987,6 +1057,79 @@ def test_the_pages_tick_opens_the_store_once_for_every_sample_and_trend(
         assert len(store.usage_samples(b.slot, since=NOW - timedelta(days=1))) == 1
 
 
+def test_a_recording_usage_round_opens_the_store_once_on_the_callers_thread(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``read_usage`` recorded from each pool thread — every headroom pick, ``accounts usage``,
+    ``list --usage`` and ``doctor --live``: up to four concurrent writers on ``context.db``,
+    on the launch path (review of #205, fourth round). The threads fetch; one session
+    records every answered reading, and an unanswered one leaves no row."""
+    import contextlib
+    import threading
+
+    a = _slot("work@example.com", "tok-work")
+    b = _slot("personal@example.com", "tok-personal")
+    c = _slot("third@example.com", "tok-third")
+    fetch = _Usage({"tok-work": _payload(40), "tok-personal": _payload(60), "tok-third": 401})
+    opens: list[str] = []
+    real_session = store_session
+
+    @contextlib.contextmanager
+    def counted_session() -> Any:
+        opens.append(threading.current_thread().name)
+        with real_session() as store:
+            yield store
+
+    monkeypatch.setattr("aisquare.services.claude_accounts.store_session", counted_session)
+    readings = service.read_usage([a, b, c], now=NOW, fetch=fetch)
+
+    assert opens == [threading.current_thread().name]
+    assert readings[a.slot].session_percent == 40 and readings[b.slot].session_percent == 60
+    assert not readings[c.slot].available
+    since = NOW - timedelta(days=1)
+    with store_session() as store:
+        assert len(store.usage_samples(a.slot, since=since)) == 1
+        assert len(store.usage_samples(b.slot, since=since)) == 1
+        assert store.usage_samples(c.slot, since=since) == []
+    opens.clear()
+    service.read_usage([a], now=NOW, fetch=fetch, record=False)
+    assert opens == []  # the page's path records in a session of its own
+
+
+def test_the_board_and_watch_name_an_aliased_slot_1_as_the_rest_does(
+    fake_home: Path, work: ProjectInfo
+) -> None:
+    """Review of #205, fourth round: ``account_label`` read the slot with ``managed_slot``,
+    which knows only the directories under ``accounts_root``, so slot 1 — the plain
+    claude's own directory — was ``.claude`` on the board and in ``watch`` while
+    ``fleet ls`` and the agent header said its alias."""
+    from aisquare.cli.watch import _session_lines
+
+    two = _slot("work@example.com", "tok-work")
+    service.set_alias("1", "personal")
+    plain_dir = str(core.default_config_dir())
+    now = datetime.now(tz=UTC)
+    sessions = [
+        TeamSession(
+            id=f"sess-{name}",
+            project_id=work.id,
+            role="coder",
+            started_at=now,
+            last_seen_at=now,
+            account=account,
+        )
+        for name, account in (("plain", plain_dir), ("work", str(two.config_dir)))
+    ]
+    labels = service.slot_labels()
+
+    assert team_service.account_label(plain_dir, labels) == "personal"
+    assert team_service.account_label(plain_dir) == "plain claude"  # the built-in name, unlabelled
+    rendered = _session_lines(sessions, labels).plain
+    assert "personal" in rendered and ".claude" not in rendered
+    block = team_service._render_board(work, sessions, [], [], me=None, labels=labels)
+    assert "[personal]" in block and "[.claude]" not in block
+
+
 def test_the_board_block_and_watch_name_the_account_as_the_rest_does(
     fake_home: Path, work: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1124,11 +1267,9 @@ def test_doctor_live_and_the_page_read_every_account_in_one_round(
     check = diagnostics._claude_account_headroom_check()
     assert check is not None and check.status.value == "ok" and rounds == [[2, 3]]
 
-    from aisquare.cli.ui.views import accounts as accounts_view
-
     rounds.clear()
     accounts = [a for a in service.list_accounts() if a.slot != 1]
-    fetched = accounts_view._read_usage(accounts)
+    fetched = service.read_usage_with_trends(accounts)  # what the page's usage worker runs
     assert rounds == [[2, 3]]
     assert fetched[2][0].session_percent == 10 and fetched[3][0].session_percent == 20
     assert fetched[2][1] is not None  # the reading was recorded, so a trend object exists

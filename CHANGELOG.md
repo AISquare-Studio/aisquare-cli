@@ -187,16 +187,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   stops the agent as `fleet stop` would and starts it again under the same
   label, task and worktree on the account with the most headroom, **resuming
   the same session** from its transcript (`claude --resume <path>`) when it is
-  on disk, else with a hand-off prompt built from the board (that stop
-  releases the old session's claims, and a release the store refused is named
-  in the switch's notes as `fleet stop` names it). With
+  on disk, else — or with `--fresh` — with a hand-off prompt built from the
+  board, the old session's claims moving onto the new session with its row. With
   `on_limit = switch` the fleet does that by itself when the limit lifts more
   than `wait_if_reset_within_minutes` (15) away — in a worker detached from
   the agent's own hook, so the window kill cannot take the hand-over down; a
   hand-over that finds no headroom leaves the agent parked with Claude Code's
-  own wait-and-continue intact. A resumed agent keeps its task claims (its
-  session parks them for the same id, as a `/clear` does), is told in one line
-  to continue, and no `agent_exited` goes out for it; every reset a surface
+  own wait-and-continue intact. A moved agent keeps its task claims (its
+  session parks them, as a `/clear` does, for the same id when it resumes and
+  for the new one when it starts fresh), a resumed one is told in one line to
+  continue, and no `agent_exited` goes out for either; every reset a surface
   shows — the feed, the agent header, doctor — comes from the one formatter. `doctor` lists parked agents (`claude-account-limits`) and, with
   `--live`, warns when every account is over the line
   (`claude-account-headroom`). Plan: `docs/plans/claude-accounts.md` §10.

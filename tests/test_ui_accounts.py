@@ -29,7 +29,7 @@ import pytest
 from textual.containers import Vertical
 from textual.pilot import Pilot
 from textual.widgets import Button, Static
-from textual.worker import WorkerError
+from textual.worker import Worker, WorkerError, WorkerState
 
 from aisquare.cli.ui.app import FleetApp
 from aisquare.cli.ui.sidebar import AccountsSection, AccountsTitle
@@ -1000,6 +1000,44 @@ def test_default_move_and_disable_buttons_write_through_the_service_and_refresh(
     assert ("move", "2", "down") in calls
     assert ("disable", "1", "True") in calls
     assert last.startswith("✗ the accounts registry cannot be written")  # the error, not a crash
+
+
+def test_an_arrange_notice_names_the_action_its_own_worker_finished(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The notice was a field on the page, so a second click overwrote it before the first
+    worker's report was handled — a thread worker ``exclusive`` cancels still finishes —
+    and the first one's success was announced as the second action (review of #205,
+    fourth round). The text now travels with the work, as the worker's result."""
+    release = threading.Event()
+
+    async def go(pilot: Pilot[None]) -> tuple[str, str]:
+        app = fleet_app(pilot)
+        view = await open_accounts(pilot)
+        workers: list[Worker[Any]] = []
+        real_run = view.run_worker
+
+        def spy(*args: Any, **kwargs: Any) -> Worker[Any]:
+            worker = real_run(*args, **kwargs)
+            workers.append(worker)
+            return worker
+
+        monkeypatch.setattr(view, "run_worker", spy)
+        view.arrange_accounts(lambda: None, done="✓ slot 2 moved down in the priority order")
+        await settle(app)
+        await pilot.pause()
+        first = notice(view)
+        # The second click, still running when the first worker's report is handled.
+        view.arrange_accounts(release.wait, done="✓ slot 1 disabled — never picked automatically")
+        view._arrange_finished(workers[0], WorkerState.SUCCESS)
+        late = notice(view)
+        release.set()
+        await settle(app)
+        return first, late
+
+    first, late = drive(go)
+    assert first == "✓ slot 2 moved down in the priority order"
+    assert late == first  # the first worker's own action, not the click that came after
 
 
 # --- the pace of the five-hour window (#146) ------------------------------------------------------

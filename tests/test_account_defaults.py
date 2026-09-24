@@ -32,7 +32,7 @@ from aisquare.core import claude_accounts as core
 from aisquare.core import paths
 from aisquare.core.config import load_config
 from aisquare.core.orchestrator import team_project
-from aisquare.core.store import store_session
+from aisquare.core.store import SqliteStore, store_session
 from aisquare.models import ProjectInfo
 from aisquare.services import claude_accounts as service
 from aisquare.services import diagnostics
@@ -119,6 +119,33 @@ def test_a_vanished_directory_drops_its_row_and_closes_the_gap(fake_home: Path) 
     assert service.machine_default() is None  # the default went with the directory
     with store_session() as store:
         assert [record.slot for record in store.claude_accounts()] == [1, 3]
+
+
+def test_pruning_several_vanished_slots_renumbers_the_order_once(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each delete renumbered the whole table, so pruning k slots was k passes of writes
+    inside one reconcile (review of #205, fourth round). One delete of all of them, one
+    renumbering, and the order still closes every gap."""
+    made = [core.create_account() for _ in range(4)]  # slots 2..5
+    service.list_accounts()  # the rows exist
+    for account in made[:3]:
+        shutil.rmtree(account.config_dir)
+    passes: list[int] = []
+    real = SqliteStore.order_claude_accounts
+
+    def counted(self: SqliteStore, slots: Any) -> None:
+        passes.append(1)
+        real(self, slots)
+
+    monkeypatch.setattr(SqliteStore, "order_claude_accounts", counted)
+
+    arranged = service.list_accounts()
+
+    assert _slots(arranged) == [1, 5] and _positions(arranged) == [1, 2]
+    assert len(passes) == 1
+    with store_session() as store:
+        assert [record.slot for record in store.claude_accounts()] == [1, 5]
 
 
 def test_set_default_marks_exactly_one_slot_and_clear_unmarks_it(fake_home: Path) -> None:
@@ -700,6 +727,60 @@ def test_doctor_warns_when_the_default_cannot_launch_and_is_silent_when_nothing_
     assert dangling.status.value == "warn"
     assert "role coder → 9" in dangling.detail
     assert f"project {work.root.name} → slot 3" in dangling.detail
+
+
+def test_doctor_checks_every_binding_against_one_registry_read(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``resolve(ref)`` per binding re-opened the store and rescanned the directories each
+    time — six bound roles, seven opens for one doctor line (review of #205, fourth round).
+    The list already in hand answers every binding."""
+    core.create_account()  # slot 2
+    service.set_alias("2", "work")
+    for role in ("coder", "tester", "reviewer"):
+        settings_service.bind_role(role, account="work")
+    settings_service.bind_role("runner", account="9")  # dangling, still found
+    reads: list[int] = []
+    real = service._read_registry
+
+    def counted(project: Any = None) -> Any:
+        reads.append(1)
+        return real(project)
+
+    monkeypatch.setattr(service, "_read_registry", counted)
+
+    checks = {check.name: check for check in diagnostics._claude_account_default_checks()}
+
+    assert len(reads) == 1
+    detail = checks["claude-account-bindings"].detail
+    assert "role runner → 9" in detail and "role coder" not in detail
+
+
+def test_project_default_reads_the_registry_in_one_store_open(
+    fake_home: Path, work: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two opens — the slot, then the list with a directory scan of its own — for what one
+    guarded read returns (review of #205, fourth round). ``accounts default`` asks on every
+    invocation."""
+    import contextlib
+
+    core.create_account()  # slot 2
+    service.set_default("2", project=work)
+    opens: list[int] = []
+    real_session = store_session
+
+    @contextlib.contextmanager
+    def counted_session() -> Any:
+        opens.append(1)
+        with real_session() as store:
+            yield store
+
+    monkeypatch.setattr("aisquare.services.claude_accounts.store_session", counted_session)
+
+    chosen = service.project_default(work)
+
+    assert chosen is not None and chosen.slot == 2
+    assert len(opens) == 1
 
 
 def test_doctor_reads_no_registry_and_creates_no_store_before_one_exists(

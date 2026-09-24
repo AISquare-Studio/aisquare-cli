@@ -488,9 +488,9 @@ def _resolve_reset(when: str, zone_name: str | None, now: datetime) -> datetime 
     if clock.group("ampm").lower() == "pm":
         hour += 12
     try:
-        zone: tzinfo = ZoneInfo(zone_name) if zone_name else (now.astimezone().tzinfo or UTC)
+        zone: tzinfo = ZoneInfo(zone_name) if zone_name else _local_zone(now)
     except (ZoneInfoNotFoundError, ValueError):
-        zone = now.astimezone().tzinfo or UTC
+        zone = _local_zone(now)
     local_now = now.astimezone(zone)
     candidate = local_now.replace(hour=hour, minute=minute, second=0, microsecond=0)
     day = clock.group("day")
@@ -505,6 +505,39 @@ def _resolve_reset(when: str, zone_name: str | None, now: datetime) -> datetime 
     elif candidate < local_now:
         candidate += timedelta(days=1)
     return candidate.astimezone(UTC)
+
+
+_LOCALTIME = Path("/etc/localtime")
+"""Where Linux and macOS keep the machine's zone: a TZif file, or a link to one."""
+
+
+def _local_zone(now: datetime) -> tzinfo:
+    """The local zone WITH its rules, so a moment days away gets the offset in force then.
+
+    ``now.astimezone().tzinfo`` is a fixed offset — the one in force NOW — and a
+    weekly reset read against it on the far side of a DST change came out an
+    hour off, and with it the board's ``⏳ limited`` line, ``format_reset`` and
+    the grace ``_derive`` gives a parked row (review of #205, fourth round). The
+    zone is ``TZ``'s when the process has one, since that is what the clock
+    itself honours, else ``/etc/localtime``'s. Only a zone neither can load —
+    a POSIX rule string in ``TZ``, a machine without the file (Windows) — falls
+    back to the offset in force now.
+    """
+    raw = os.environ.get("TZ")
+    key = raw.strip().removeprefix(":") if raw is not None else None
+    try:
+        if key is None:
+            if _LOCALTIME.is_file():
+                with _LOCALTIME.open("rb") as handle:
+                    return ZoneInfo.from_file(handle, key="localtime")
+        elif Path(key).is_absolute():  # `TZ=:/usr/share/zoneinfo/America/Toronto`
+            with Path(key).open("rb") as handle:
+                return ZoneInfo.from_file(handle, key=key)
+        elif key:  # an empty TZ is UTC, which the offset below already is
+            return ZoneInfo(key)
+    except (OSError, ValueError, ZoneInfoNotFoundError):
+        pass
+    return now.astimezone().tzinfo or UTC
 
 
 def format_reset(when: datetime | None, *, now: datetime | None = None) -> str:

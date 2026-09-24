@@ -271,21 +271,6 @@ def _host(url: str) -> str:
     return url.split("://", 1)[-1].rstrip("/")
 
 
-def _read_usage(
-    accounts: list[ClaudeAccount],
-) -> dict[int, tuple[ClaudeUsage, UsageTrend | None]]:
-    """Off the UI thread: each account's reading, RECORDED (#146), and the trend it implies.
-
-    ``read_usage_with_trends`` (concurrent, recording — review of #205, finding
-    11 and third round) rather than ``usage`` so the page's minute tick is what
-    builds the history the trend line reads, at the cost of one round trip and
-    one store open for every account rather than one each. It fails open — a
-    store that cannot be written costs the trends, and the readings still paint.
-    """
-    # Concurrent fetch, then ONE store open for every sample and trend (third round).
-    return accounts_service.read_usage_with_trends(accounts)
-
-
 # --- transient state -------------------------------------------------------------------------
 
 
@@ -423,7 +408,6 @@ class AccountsView(Vertical):
         self._usage_timer: Timer | None = None
         self._cancel_sign_in: threading.Event | None = None
         self._on_screen = False
-        self._arrange_done = ""
 
     # --- layout ------------------------------------------------------------------------
 
@@ -590,8 +574,13 @@ class AccountsView(Vertical):
         accounts = [status.account for status in self.overview.accounts if status.signed_in]
         if not accounts:
             return
+        # Each reading RECORDED (#146) with the trend it implies, so the minute
+        # tick is what builds the history the trend line reads: one concurrent
+        # round trip and one store open for every account (review of #205,
+        # finding 11 and third round). A store that cannot be written costs the
+        # trends; the readings still paint.
         self.run_worker(
-            lambda: _read_usage(accounts),
+            lambda: accounts_service.read_usage_with_trends(accounts),
             name=USAGE_WORKER,
             group=USAGE_WORKER,
             exclusive=True,
@@ -762,10 +751,19 @@ class AccountsView(Vertical):
         the UI — so it runs as a thread worker like *Remove* does. The row is
         NOT updated optimistically: the shell's next frame (``AccountsChanged``)
         is what the page shows, so what the operator sees is what was written.
+
+        ``done`` travels WITH the work, as the worker's result: kept on the page,
+        a second click overwrote it before the first worker reported — a thread
+        worker ``exclusive`` cancels still finishes — and the notice named the
+        wrong action (review of #205, fourth round).
         """
-        self._arrange_done = done
+
+        def work() -> str:
+            change()
+            return done
+
         self.run_worker(
-            change,
+            work,
             name=ARRANGE_WORKER,
             group=ARRANGE_WORKER,
             exclusive=True,
@@ -774,8 +772,8 @@ class AccountsView(Vertical):
         )
 
     def _arrange_finished(self, worker: Worker[Any], state: WorkerState) -> None:
-        if state is WorkerState.SUCCESS:
-            self._notice(self._arrange_done, "ok")
+        if state is WorkerState.SUCCESS and isinstance(worker.result, str):
+            self._notice(worker.result, "ok")
         elif state is WorkerState.ERROR:
             self._notice(f"✗ {worker.error}", "error")
         self.post_message(AccountsChanged())

@@ -109,11 +109,15 @@ def bind_role(
     return profile
 
 
-def role_account_bindings() -> dict[str, str]:
-    """Role → the account reference its binding names, for every role that names one."""
+def role_account_bindings(config: AppConfig | None = None) -> dict[str, str]:
+    """Role → the account reference its binding names, for every role that names one.
+
+    ``config`` is a caller's own read of the file, so a surface that needs other
+    sections too — the Settings tab — reads it once.
+    """
     return {
         role: profile.account
-        for role, profile in load_config().team.profiles.items()
+        for role, profile in (config or load_config()).team.profiles.items()
         if profile.account
     }
 

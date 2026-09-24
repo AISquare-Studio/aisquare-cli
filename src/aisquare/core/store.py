@@ -789,6 +789,7 @@ class ContextStore(Protocol):
     def claude_accounts(self) -> list[ClaudeAccountRecord]: ...
     def upsert_claude_account(self, slot: int, config_dir: Path) -> ClaudeAccountRecord: ...
     def delete_claude_account(self, slot: int) -> bool: ...
+    def delete_claude_accounts(self, slots: Sequence[int]) -> int: ...
     def set_claude_account_default(self, slot: int | None) -> None: ...
     def set_claude_account_alias(self, slot: int, alias: str | None) -> None: ...
     def set_claude_account_disabled(self, slot: int, disabled: bool) -> None: ...
@@ -2342,11 +2343,25 @@ class SqliteStore:
         the state a removal must not leave behind (the next ``add`` reuses the
         number, and a stale default would silently adopt the newcomer).
         """
-        cursor = self._conn.execute("DELETE FROM claude_account WHERE slot = ?", (slot,))
-        self._conn.commit()
-        if cursor.rowcount == 1:
-            self.order_claude_accounts([])  # close the gap the row leaves in the order
-        return cursor.rowcount == 1
+        return self.delete_claude_accounts([slot]) == 1
+
+    def delete_claude_accounts(self, slots: Sequence[int]) -> int:
+        """Forget several slots' arrangements at once; how many rows there were.
+
+        The order is renumbered ONCE, after every delete, in the same
+        transaction: the reconcile prunes every vanished slot in one pass, and
+        deleted one at a time each row paid a full renumbering — k slots, k
+        passes over the table (review of #205, fourth round).
+        """
+        deleted = 0
+        for slot in slots:
+            cursor = self._conn.execute("DELETE FROM claude_account WHERE slot = ?", (slot,))
+            deleted += cursor.rowcount
+        if deleted:
+            self.order_claude_accounts([])  # close the gaps the rows leave; commits all of it
+        else:
+            self._conn.commit()
+        return deleted
 
     def set_claude_account_default(self, slot: int | None) -> None:
         """Make ``slot`` the one default (``None`` clears it). Unknown slot → ``KeyError``.

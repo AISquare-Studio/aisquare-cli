@@ -267,8 +267,8 @@ class ClaudeUsage(BaseModel):
 class UsageSample(BaseModel):
     """One reading of an account's two windows, kept so a rate can be computed (#146).
 
-    Written by ``services.claude_accounts.sample_usage`` whenever usage is
-    fetched — the Accounts page's minute tick, ``accounts usage``, a headroom
+    Written by ``services.claude_accounts``' recording readers whenever usage
+    is fetched — the Accounts page's minute tick, ``accounts usage``, a headroom
     pick — and read back to say how fast the window is filling. Samples are
     pruned after a week; they are a derived convenience, never the record.
     """

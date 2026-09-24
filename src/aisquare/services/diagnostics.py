@@ -924,7 +924,9 @@ def _claude_account_default_checks() -> list[DoctorCheck]:
             dangling.append(f"project {names.get(project_id, project_id)} → slot {raw}")
     for role, ref in bindings.items():
         try:
-            claude_accounts_service.resolve(ref)
+            # Against the list in hand: `resolve` re-opened the store and rescanned
+            # the directories once per binding (review of #205, fourth round).
+            claude_accounts_service._resolve_in(accounts, ref)
         except claude_accounts_service.AccountsError:
             dangling.append(f"role {role} → {ref}")
     if dangling:

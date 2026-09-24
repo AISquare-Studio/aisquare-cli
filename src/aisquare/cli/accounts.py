@@ -243,7 +243,7 @@ def usage_(
     console = stdout_console()
     labels: list[Text] = []
     for status in statuses:
-        label = Text(core.label(status.account))
+        label = Text(status.label)  # `describe` put it there, as `_emit_overview` reads it
         if status.account.disabled:
             label.append(" (disabled)", style="dim")
         labels.append(label)

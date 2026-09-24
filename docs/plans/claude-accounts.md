@@ -308,10 +308,13 @@ for the long ones.
   hand-over`, started detached), because the hook is a child of the very pane
   `switch` kills and, run inline, went down with it before the replacement was
   spawned (review of #205). A refusal (no headroom) is a board note and the
-  agent stays parked with Claude Code's own wait intact. A resumed agent keeps
+  agent stays parked with Claude Code's own wait intact. A moved agent keeps
   its claims — the session is marked `switching` before the `/exit`, so its
-  `SessionEnd` parks them for the same id as a `/clear` does — and is told in
-  one line to continue; no `agent_exited` goes out for a hand-over.
+  `SessionEnd` parks them as a `/clear` does: for the same id when the agent
+  resumes, and for the fresh replacement's new id, which its row and the claims
+  are moved onto in one transaction before it starts (`spawn(takes_over=…)`) —
+  a resumed agent is told in one line to continue, and no `agent_exited` goes
+  out for a hand-over of either kind.
 - `_derive` trusts a `limited` row until its reset (+10 min) rather than the
   30-minute stale window, because a parked agent fires no hook; `⏳ limited`
   chips in the sidebar, project view and `fleet ls`; `ALIVE_STATES` includes it.

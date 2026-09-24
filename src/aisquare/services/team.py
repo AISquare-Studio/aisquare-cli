@@ -80,11 +80,13 @@ does not — and the ``SessionStart`` of the id that follows comes AFTER this en
 (measured on 2.1.272). See rule 2 in the fleet-row section below."""
 
 HANDOVER_STATE = "switching"
-"""The ``team_session.state`` ``fleet switch`` sets before it ``/exit``s an agent whose
-SAME session id is about to resume under another account (#146): its ``SessionEnd``
-then parks the claims for that id, as a ``/clear`` does, instead of releasing them
-(review of #205, finding 6). Transient — the resumed session's start hook writes
-``working`` over it — and unknown to ``fleet._derive``, which falls back to the pane."""
+"""The ``team_session.state`` ``fleet switch`` sets before it ``/exit``s an agent that is
+about to start again under another account (#146): its ``SessionEnd`` then parks the
+claims, as a ``/clear`` does, instead of releasing them (review of #205, finding 6) —
+for the SAME id when the replacement resumes the session, for the replacement's new
+id to take over when it starts fresh (fourth round). Transient — a resumed session's
+start hook writes ``working`` over it, a fresh start retires the old presence — and
+unknown to ``fleet._derive``, which falls back to the pane."""
 
 #: A numbered SEAT: a first-class role with a crew index glued on — ``coder1``,
 #: ``reviewer2``. ``cli/launch.py`` accepts these because crews run several agents
@@ -460,16 +462,26 @@ def account_label(account: str | None, labels: Mapping[int, str] | None = None) 
     """The short display form of an account.
 
     The slot's label from ``labels`` (``services.claude_accounts.slot_labels``:
-    the alias when one is set) when the caller has them, else ``account N`` for
-    a slot the CLI owns, the directory name otherwise. A managed slot's
+    the alias when one is set) when the caller has them, else the built-in
+    name — ``plain claude`` for slot 1, ``account N`` for a managed slot — and
+    the directory name for one the CLI does not own. A managed slot's
     directory is named by its number alone (``…/claude-accounts/2``), and a
-    bare ``[2]`` beside a session row would read as a count.
+    bare ``[2]`` beside a session row would read as a count. Slot 1 is the
+    plain claude's own directory, which ``managed_slot`` does not know, so the
+    slot is read with ``slot_of``: through ``managed_slot`` alone an aliased
+    slot 1 was ``.claude`` on the board and in ``watch`` while ``fleet ls``
+    and the agent header said its alias (review of #205, fourth round).
     """
     if not account:
         return None
-    slot = claude_accounts_core.managed_slot(account)
+    from aisquare.services import claude_accounts as accounts_service  # lazy: no import cycle
+
+    slot = accounts_service.slot_of(account)
     if slot is not None:
-        return (labels or {}).get(slot) or f"account {slot}"
+        named = (labels or {}).get(slot)
+        if named:
+            return named
+        return "plain claude" if slot == claude_accounts_core.DEFAULT_SLOT else f"account {slot}"
     return Path(account).name
 
 
@@ -1739,8 +1751,9 @@ def hook_stop_failure(
 
     Every other error (``overloaded``, ``authentication_failed``,
     ``billing_error``…) ends the turn like a Stop would — the row says
-    ``waiting`` — with a ``turn_failed`` feed line naming it, so the board does
-    not show a session as mid-turn for thirty minutes because its turn died.
+    ``waiting``, unless ``fleet switch`` has marked it :data:`HANDOVER_STATE` —
+    with a ``turn_failed`` feed line naming it, so the board does not show a
+    session as mid-turn for thirty minutes because its turn died.
     """
     if not orchestrator.team_enabled():
         return None
@@ -1751,7 +1764,13 @@ def hook_stop_failure(
         if session is None:
             return None
         if kind != "rate_limit":
-            store.touch_session(session.id, state="waiting")
+            # Not over a hand-over's mark either (the `rate_limit` branch below
+            # keeps it too): an `overloaded` landing while `fleet switch` waits
+            # for the `/exit` wrote `waiting` over it, and the SessionEnd that
+            # follows released the claims the replacement was to inherit
+            # (review of #205, fourth round). The feed line still goes out.
+            if session.state != HANDOVER_STATE:
+                store.touch_session(session.id, state="waiting")
             _emit(
                 store, session.project_id, "turn_failed", f"{kind}: {text}", session_id=session.id
             )
@@ -1839,8 +1858,9 @@ def hook_session_end(session_id: str, cwd: Path | None, *, reason: str | None = 
         if reason == CLEAR_REASON and _clearing_its_own_pane(store, session):
             store.end_session(session.id, release_claims=False)
         elif session.state == HANDOVER_STATE and _handing_over_a_fleet_row(store, session):
-            # A hand-over (``fleet switch``): the SAME id resumes on another
-            # account moments from now, so its claims wait for it exactly as a
+            # A hand-over (``fleet switch``): the agent starts again on another
+            # account moments from now — the SAME id resumed, or a fresh one
+            # that takes the claims over — so they wait for it exactly as a
             # /clear parks them. ``switch`` releases them itself should the
             # replacement never start (review of #205, finding 6).
             store.end_session(session.id, release_claims=False)
@@ -2351,8 +2371,8 @@ def _adopt(store: ContextStore, agent: FleetAgent, session_id: str) -> bool:
 
 
 def _handing_over_a_fleet_row(store: ContextStore, session: TeamSession) -> bool:
-    """Whether ``session`` is a live fleet row's — the premise of parking its claims for a
-    resume. Fail-open towards RELEASING, like :func:`_clearing_its_own_pane`."""
+    """Whether ``session`` is a live fleet row's — the premise of parking its claims for the
+    replacement. Fail-open towards RELEASING, like :func:`_clearing_its_own_pane`."""
     try:
         return _fleet_row_for(store, session.id, session.project_id) is not None
     except Exception:

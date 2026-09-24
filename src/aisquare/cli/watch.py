@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
@@ -148,7 +149,17 @@ _STATE_CHIP = {
 }
 
 
-def _session_lines(sessions: list[TeamSession]) -> Text:
+def _session_lines(sessions: list[TeamSession], labels: Mapping[int, str] | None = None) -> Text:
+    """The sessions block: who is here, in what state, on which account, how long ago.
+
+    The account is named by ``labels`` (``services.claude_accounts.slot_labels``
+    — the alias, as every other surface shows it; review of #205, third round).
+    A caller on an event loop passes its own map, read off that loop — the
+    board panel does, and a read here was a store open and a directory scan on
+    the UI thread at every tick (fourth round). Without one, as ``watch``'s
+    Rich loop calls it, they are read here: once per render, and only once
+    several accounts are in play.
+    """
     text = Text(no_wrap=True, overflow="ellipsis")
     live = [s for s in sessions if s.ended_at is None]
     if not live:
@@ -156,9 +167,8 @@ def _session_lines(sessions: list[TeamSession]) -> Text:
         return text
     now = datetime.now(tz=live[0].last_seen_at.tzinfo)
     accounts = len({s.account for s in live if s.account})
-    # The alias, as every other surface shows it (review of #205, third round);
-    # read once per render, and only once several accounts are in play.
-    labels = accounts_service.slot_labels() if accounts > 1 else {}
+    if labels is None:
+        labels = accounts_service.slot_labels() if accounts > 1 else {}
     for session in live:
         emoji = _ROLE_EMOJI.get(session.role, "🤖")
         style = _ROLE_STYLE.get(session.role, "white")

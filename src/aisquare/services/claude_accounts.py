@@ -218,13 +218,12 @@ def _arranged(store: ContextStore) -> list[ClaudeAccount]:
     for slot in sorted(on_disk):
         if slot not in rows:
             rows[slot] = store.upsert_claude_account(slot, on_disk[slot].config_dir)
-    if any(slot not in on_disk for slot in rows):
-        for slot in list(rows):
-            if slot not in on_disk:
-                store.delete_claude_account(slot)
-        # A delete renumbers the order (the store closes the gap), so the rows
-        # read before it are stale: re-read rather than hand back positions with
-        # a hole where the pruned slot was.
+    vanished = [slot for slot in rows if slot not in on_disk]
+    if vanished:
+        # One delete for all of them, so the order is renumbered once (the store
+        # closes the gaps), and the rows read before it are stale: re-read rather
+        # than hand back positions with a hole where a pruned slot was.
+        store.delete_claude_accounts(vanished)
         rows = {record.slot: record for record in store.claude_accounts()}
     arranged = [
         on_disk[record.slot].model_copy(
@@ -481,22 +480,19 @@ def choose(
         if picked is not None:
             return AccountChoice(picked, "headroom", notes)
     default = next((a for a in accounts if a.is_default), None)
-    if default is not None and default.slot not in skip:
+    if default is not None:
         if default.disabled:
             notes.append(f"{core.label(default)} (machine default) is disabled — skipped")
+        elif default.slot in skip:
+            # Said like the two rungs above: skipped in silence, a hand-over that
+            # found nothing was refused with no word that the last rung named the
+            # account being left (review of #205, fourth round).
+            notes.append(
+                f"{core.label(default)} (machine default) is the account being left — skipped"
+            )
         else:
             return AccountChoice(default, "machine default", notes)
     return AccountChoice(None, None, notes)
-
-
-def _project_default_slot(project: ProjectInfo) -> int | None:
-    """``project``'s default slot, or ``None`` — also when the store cannot be read."""
-    try:
-        with store_session() as store:
-            raw = store.project_setting(project.id, PROJECT_ACCOUNT_KEY)
-    except sqlite3.Error:
-        return None
-    return int(raw) if raw is not None and raw.isdigit() else None
 
 
 # --- arranging: the writers ---------------------------------------------------------------------
@@ -550,11 +546,17 @@ def _vanished(account: ClaudeAccount | None) -> str:
 
 
 def project_default(project: ProjectInfo) -> ClaudeAccount | None:
-    """The account ``project`` defaults to, or ``None`` when it has none (or it vanished)."""
-    slot = _project_default_slot(project)
+    """The account ``project`` defaults to, or ``None`` when it has none (or it vanished).
+
+    One guarded store open for the slot and the list it is looked up in
+    (:func:`_read_registry`, as ``choose`` reads them): it took two, the second
+    with a directory scan of its own (review of #205, fourth round). An
+    unreadable store reads as no default, as it always did.
+    """
+    accounts, _note, slot = _read_registry(project)
     if slot is None:
         return None
-    return next((a for a in list_accounts() if a.slot == slot), None)
+    return next((a for a in accounts if a.slot == slot), None)
 
 
 def machine_default() -> ClaudeAccount | None:
@@ -915,17 +917,24 @@ def read_usage(
     The one reader behind a headroom pick, ``accounts usage``, ``list --usage``
     and ``doctor --live`` (review of #205, finding 11): four accounts and a slow
     endpoint cost one ``USAGE_TIMEOUT_SECONDS``, not four. A reader that raises
-    costs its own slot a reading, never the others'. ``record=False`` fetches
-    without touching the store, for a caller that records in one session of
-    its own (:func:`read_usage_with_trends`).
+    costs its own slot a reading, never the others'.
+
+    The threads only fetch; every answered reading is then recorded in ONE
+    store session, after the round. Recorded by each thread, a headroom pick —
+    every launch under ``pick = "headroom"``, every hand-over — was up to four
+    concurrent writers on ``context.db``'s one write lock, on the launch path
+    (review of #205, fourth round; :func:`read_usage_with_trends` had the same
+    shape from the third). Best effort, as :func:`sample_usage` is: a store
+    that cannot be opened costs the history, never the readings.
+    ``record=False`` fetches without touching the store, for a caller that
+    records in a session of its own (:func:`read_usage_with_trends`).
     """
     if not accounts:
         return {}
-    reader = sample_usage if record else usage
     readings: dict[int, ClaudeUsage] = {}
     with ThreadPoolExecutor(max_workers=min(HEADROOM_WORKERS, len(accounts))) as pool:
         futures = {
-            pool.submit(reader, account, now=now, fetch=fetch): account.slot for account in accounts
+            pool.submit(usage, account, now=now, fetch=fetch): account.slot for account in accounts
         }
         for future, slot in futures.items():
             try:
@@ -934,6 +943,11 @@ def read_usage(
                 readings[slot] = ClaudeUsage(
                     available=False, reason=f"usage read failed ({type(exc).__name__})"
                 )
+    answered = [account for account in accounts if readings[account.slot].available]
+    if record and answered:
+        with contextlib.suppress(sqlite3.Error), store_session() as store:
+            for account in answered:
+                _record_sample(store, account, readings[account.slot], now)
     return readings
 
 

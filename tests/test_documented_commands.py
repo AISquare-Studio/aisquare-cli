@@ -872,7 +872,11 @@ CENSUS = {
     # Re-measured 2026-09-05 when `project forget` / `project prune` (#83) added a
     # fenced example to the memory section.
     "README.md": (58, 5),
-    "docs/connecting-your-agents-to-explainability.md": (11, 4),
+    # Re-measured 2026-09-13 when "Choose where traces land with your sign-in"
+    # (#142) added its fence: 20 commands, the same four classified mentions.
+    # Re-measured 2026-09-24 at 21 when #142 took in #141's review (its key
+    # section gained the `register` step; the parent had grown to 15 unrecorded).
+    "docs/connecting-your-agents-to-explainability.md": (21, 4),
     "docs/explainability-tracing-boundary.md": (2, 0),
     "docs/runbooks/explainability-prod-cutover.md": (18, 37),
     "docs/signing-in.md": (8, 0),
@@ -881,7 +885,13 @@ CENSUS = {
     # mention (the `aisquare-cli[tui]` pip requirement). Re-measured 2026-09-10 at
     # 33 when `fleet shutdown` added its reference section and replaced the
     # troubleshooting `tmux kill-server` block with two scoped invocations.
-    "docs/fleet.md": (33, 1),
+    # Re-measured 2026-09-13 when the groups / pins / order block (#140) took the
+    # document to 64 — the batch of fleet PRs before it (#138 to #144) had
+    # already left the record under half of reality, which is exactly the drift
+    # this floor exists to catch — and again 2026-09-24 at 69 when #140 took in
+    # what reached it since (`fleet shutdown`, `fleet restart --permission-mode`).
+    # Re-measure when it grows.
+    "docs/fleet.md": (69, 1),
     # Two commands in the smoke block; the export line is upper-case and is not a
     # mention this audit sees.
     "docs/ci-contract.md": (2, 0),

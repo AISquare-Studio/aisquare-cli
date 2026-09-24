@@ -399,6 +399,54 @@ def test_a_board_write_that_fails_still_closes_the_turn_and_hands_nothing_over(
     assert all(t.ended_at is not None for t in metrics_service.recent(session_id="sess-coder"))
 
 
+def test_claude_codes_routine_notices_leave_a_parked_or_handed_over_row_as_it_is(
+    fake_home: Path, work: ProjectInfo, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Where #153 meets the parking above: a notice is not a bell over ``limited``.
+
+    A limited agent sits idle until its reset, so Claude Code's idle notice
+    (~60 s into the pause) and the ``quota_auto_resume_*`` family arrive while
+    it is parked. When every ``Notification`` called ``mark_attention``, each
+    wrote ``attention`` over the row — the reset it named left the board and
+    the bell rang for an agent no one can help — and over a hand-over's mark,
+    whose ``SessionEnd`` then released the claims the replacement was to
+    inherit. Only a prompt that needs a human rings now.
+    """
+    monkeypatch.setattr(team_service, "_nudge_manager", lambda project_id, *, reason: None)
+    _session(work, "sess-coder")
+    team_service.hook_stop_failure(
+        "sess-coder", error="rate_limit", message=SESSION_LIMIT, details=None
+    )
+    parked = _state("sess-coder")
+    assert parked[0] == "limited" and parked[1] is not None  # control: it is parked
+
+    def notify(notification_type: str | None, message: str) -> None:
+        payload: dict[str, Any] = {
+            "session_id": "sess-coder",
+            "cwd": str(work.root),
+            "message": message,
+        }
+        if notification_type is not None:
+            payload["notification_type"] = notification_type
+        result = runner.invoke(app, ["hook", "notification"], input=json.dumps(payload))
+        assert result.exit_code == 0, result.output
+
+    notify("idle_prompt", "Claude is waiting for your input")
+    notify(None, "Claude is waiting for your input")  # an older Claude Code: the text
+    notify("quota_auto_resume_fired", "Usage limit reset — Claude is continuing your task")
+
+    assert _state("sess-coder") == parked  # the same reset, still on the board
+    assert [text for kind, text in _events(work) if kind == "notice"] == [
+        "Usage limit reset — Claude is continuing your task"
+    ]
+    assert not any(kind == "attention" for kind, _ in _events(work))
+
+    with store_session() as store:  # `fleet switch` has marked it and is waiting for the /exit
+        store.touch_session("sess-coder", state=team_service.HANDOVER_STATE)
+    notify("idle_prompt", "Claude is waiting for your input")
+    assert _state("sess-coder")[0] == team_service.HANDOVER_STATE
+
+
 # --------------------------------------------------------------------------- the hand-over decision
 
 

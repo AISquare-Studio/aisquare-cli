@@ -21,7 +21,7 @@ import os
 import re
 import shutil
 from collections.abc import Iterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -1206,3 +1206,168 @@ def test_the_fleet_terminal_row_comes_after_the_actionable_checks() -> None:
 )
 def test_outer_terminal_recognition(env: dict[str, str], name: str, kitty: bool | None) -> None:
     assert diagnostics.outer_terminal(env) == (name, kitty)
+
+
+# --- the dead-manager line (#138) --------------------------------------------------------
+
+
+def test_doctor_names_a_project_whose_manager_exited_while_its_agents_run(
+    home: Path, tmp_path: Path
+) -> None:
+    """The wake-ups coders send target that manager and land nowhere; one warning
+    names the project and the command that brings it back with its session."""
+    project = _seed(tmp_path / "repo")
+    manager = _agent(project.id, "manager", "%1", ended=True).model_copy(update={"role": "manager"})
+    _seed(tmp_path / "repo", manager, _agent(project.id, "coder-1", "%2"))
+
+    [check] = diagnostics._check_dead_managers()
+
+    assert check.name == "fleet-manager" and check.status is CheckStatus.warn
+    assert "the manager exited while agents are still running in: repo" in check.detail
+    assert "1 agent(s) still running" in check.detail
+    assert check.fix and "aisquare fleet restart manager --project <name>" in check.fix
+    assert "Restart on its row" in check.fix
+    assert "fleet-manager" in _by_name(diagnostics.doctor()), "it reaches the real doctor"
+
+
+def test_the_dead_manager_line_is_silent_for_every_other_shape(home: Path, tmp_path: Path) -> None:
+    """Negative controls: a live manager, a whole fleet that ended, a project that never
+    had a manager, and no fleet at all. Only "manager gone, agents left" is the shape."""
+    alive = _seed(tmp_path / "alive")
+    _seed(
+        tmp_path / "alive",
+        _agent(alive.id, "manager", "%1").model_copy(update={"role": "manager"}),
+        _agent(alive.id, "coder-1", "%2"),
+    )
+    finished = _seed(tmp_path / "finished")
+    _seed(
+        tmp_path / "finished",
+        _agent(finished.id, "manager", "%3", ended=True).model_copy(update={"role": "manager"}),
+        _agent(finished.id, "coder-1", "%4", ended=True),
+    )
+    headless_by_design = _seed(tmp_path / "solo")
+    _seed(tmp_path / "solo", _agent(headless_by_design.id, "coder-1", "%5"))
+    _seed(tmp_path / "empty")
+
+    assert diagnostics._check_dead_managers() == []
+
+
+def test_the_dead_manager_line_never_creates_the_home(isolated_home: Path) -> None:
+    assert not isolated_home.exists()
+    assert diagnostics._check_dead_managers() == []
+    assert not isolated_home.exists(), "doctor must not create the home it reports on"
+
+
+# --- the projects line (#139) -------------------------------------------------------------------
+
+
+def test_doctor_counts_the_captured_directories_it_hides(home: Path, tmp_path: Path) -> None:
+    from aisquare.models import ProjectInfo
+
+    assert diagnostics._check_captured_projects() == []  # nothing captured: silent
+    with store_session() as store:
+        store.onboard_project(ProjectInfo(id="prj_shown", root=tmp_path / "shown"))
+        store.ensure_project(ProjectInfo(id="prj_one", root=tmp_path / "one"))
+        store.ensure_project(ProjectInfo(id="prj_two", root=tmp_path / "two"))
+
+    [check] = diagnostics._check_captured_projects()
+
+    assert check.name == "projects" and check.status is CheckStatus.ok
+    assert check.detail.startswith("2 captured directories hidden")
+    assert "project list --all" in check.detail and "prune --captured-only" in check.detail
+    assert "projects" in _by_name(diagnostics.doctor()), "it reaches the real doctor"
+
+
+def test_the_projects_line_never_creates_the_home(isolated_home: Path) -> None:
+    assert not isolated_home.exists()
+    assert diagnostics._check_captured_projects() == []
+    assert not isolated_home.exists()
+
+
+# --- resumable exited agents (#144) -------------------------------------------------------------
+
+
+def test_doctor_counts_the_exited_agents_a_restart_would_resume(home: Path, tmp_path: Path) -> None:
+    from aisquare.models import TeamSession
+
+    project = _seed(tmp_path / "repo")
+    now = datetime.now(tz=UTC)
+    on_disk = tmp_path / "t1.jsonl"
+    on_disk.write_text("{}\n", encoding="utf-8")
+    resumable = _agent(project.id, "coder-1", "%1", ended=True).model_copy(
+        update={"session_id": "ses_resumable"}
+    )
+    no_transcript = _agent(project.id, "coder-2", "%2", ended=True).model_copy(
+        update={"session_id": "ses_bare"}
+    )
+    still_live = _agent(project.id, "coder-3", "%3").model_copy(update={"session_id": "ses_live"})
+    _seed(tmp_path / "repo", resumable, no_transcript, still_live)
+    transcripts = {"ses_resumable": str(on_disk), "ses_bare": None, "ses_live": str(on_disk)}
+    with store_session() as store:
+        for sid, path in transcripts.items():
+            session = TeamSession(
+                id=sid,
+                project_id=project.id,
+                role="coder",
+                started_at=now,
+                last_seen_at=now,
+                transcript_path=path,
+            )
+            store.upsert_session(session)
+
+    [check] = diagnostics._check_resumable_agents()
+
+    assert check.name == "fleet-resume" and check.status is CheckStatus.ok
+    assert check.detail.startswith("1 exited agent can be resumed")
+    assert "coder-1 (repo)" in check.detail
+    assert "coder-2" not in check.detail and "coder-3" not in check.detail
+    assert "fleet restart <label>" in check.detail
+    assert "fleet-resume" in _by_name(diagnostics.doctor()), "it reaches the real doctor"
+    on_disk.unlink()
+    assert diagnostics._check_resumable_agents() == [], "no transcript, nothing to resume"
+
+
+def test_the_resume_line_reads_only_the_newest_row_under_each_label(
+    home: Path, tmp_path: Path
+) -> None:
+    """Review of #169: a resumed restart keeps the session id, so the row it
+    replaced still has a transcript on disk. Counting every row listed a label that
+    was live again — whose `fleet restart <label>` stops the live agent — and
+    listed a label once per restart."""
+    from aisquare.models import TeamSession
+
+    project = _seed(tmp_path / "repo")
+    now = datetime.now(tz=UTC)
+    on_disk = tmp_path / "t.jsonl"
+    on_disk.write_text("{}\n", encoding="utf-8")
+
+    def row(label: str, pane: str, session_id: str, *, ended: bool, age: int) -> FleetAgent:
+        return _agent(project.id, label, pane, ended=ended).model_copy(
+            update={"session_id": session_id, "created_at": now - timedelta(minutes=age)}
+        )
+
+    _seed(
+        tmp_path / "repo",
+        row("coder-1", "%1", "ses_back", ended=True, age=10),
+        row("coder-1", "%2", "ses_back", ended=False, age=5),  # restarted, resumed, live
+        row("coder-2", "%3", "ses_twice", ended=True, age=10),
+        row("coder-2", "%4", "ses_twice", ended=True, age=5),  # restarted, exited again
+    )
+    with store_session() as store:
+        for sid in ("ses_back", "ses_twice"):
+            store.upsert_session(
+                TeamSession(
+                    id=sid,
+                    project_id=project.id,
+                    role="coder",
+                    started_at=now,
+                    last_seen_at=now,
+                    transcript_path=str(on_disk),
+                )
+            )
+
+    [check] = diagnostics._check_resumable_agents()
+
+    assert check.detail.startswith("1 exited agent can be resumed"), check.detail
+    assert "coder-2 (repo)" in check.detail and check.detail.count("coder-2") == 1
+    assert "coder-1" not in check.detail, "live again: nothing to resume"

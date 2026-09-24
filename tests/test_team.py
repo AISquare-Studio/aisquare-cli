@@ -18,6 +18,7 @@ from aisquare.core.ids import new_task_id
 from aisquare.core.orchestrator import team_project
 from aisquare.core.store import ContextStore, store_session
 from aisquare.models import TeamSession, TeamTask
+from aisquare.services import team as team_service
 
 PLANNER = "aaaa1111-0000-0000-0000-000000000000"
 CODER = "bbbb2222-0000-0000-0000-000000000000"
@@ -1570,3 +1571,143 @@ def test_the_quiet_board_teaches_launch_not_the_env_var_incantation(
 
     assert "aisquare launch" in board.output
     assert "AISQUARE_ROLE=" not in board.output
+
+
+# --- #153: the bell rings for a real prompt, not for the idle notice ---------------------------
+
+
+def _notify(
+    runner: CliRunner,
+    session_id: str,
+    work_dir: Path,
+    *,
+    message: str,
+    notification_type: str | None,
+) -> None:
+    payload: dict[str, Any] = {"cwd": str(work_dir), "session_id": session_id, "message": message}
+    if notification_type is not None:
+        payload["notification_type"] = notification_type
+    result = runner.invoke(app, ["hook", "notification"], input=json.dumps(payload))
+    assert result.exit_code == 0, result.output
+
+
+@pytest.mark.parametrize(
+    ("notification_type", "message", "expected"),
+    [
+        ("permission_prompt", "Claude needs your permission to use Bash", "attention"),
+        ("elicitation_dialog", "An MCP server is asking a question", "attention"),
+        ("elicitation_url_dialog", "Visit this URL to continue", "attention"),
+        ("agent_needs_input", "A teammate needs your input", "attention"),
+        ("idle_prompt", "Claude is waiting for your input", "quiet"),
+        ("elicitation_complete", "done", "quiet"),
+        ("auth_success", "Signed in", "notice"),
+        ("quota_auto_resume_fired", "Usage limit reset — Claude is continuing your task", "notice"),
+        ("agent_completed", "A teammate finished", "notice"),
+        ("some_future_type", "who knows", "notice"),  # unknown: a line, never a bell
+        (None, "Claude is waiting for your input", "quiet"),  # an older Claude Code: the text
+        (None, "Claude needs your permission to use Bash", "attention"),
+        (None, "Claude wants to use your browser", "attention"),
+        (None, "anything else an old version said", "attention"),  # pre-#153 behaviour kept
+    ],
+)
+def test_each_notification_type_is_classified_as_the_issue_asks(
+    notification_type: str | None, message: str, expected: str
+) -> None:
+    assert team_service.classify_notification(notification_type, message) == expected
+
+
+def test_an_idle_notice_leaves_a_waiting_session_waiting_and_a_prompt_rings_the_bell(
+    runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
+    _start(runner, CODER, work_dir)
+    monkeypatch.delenv("AISQUARE_ROLE")
+    _prompt(runner, CODER, work_dir)
+    runner.invoke(
+        app, ["hook", "stop"], input=json.dumps({"cwd": str(work_dir), "session_id": CODER})
+    )
+
+    def state() -> str:
+        with store_session() as store:
+            session = store.get_session(CODER)
+            assert session is not None
+            return session.state
+
+    assert state() == "waiting"
+    # 164 of 183 bells in the issue's census were this one line.
+    _notify(
+        runner,
+        CODER,
+        work_dir,
+        message="Claude is waiting for your input",
+        notification_type="idle_prompt",
+    )
+    assert state() == "waiting"
+    events = team_service.log_events(work_dir)
+    assert not any(e.kind in ("attention", "notice") for e in events)  # nothing on the feed either
+
+    _notify(
+        runner,
+        CODER,
+        work_dir,
+        message="Usage limit reset — Claude is continuing your task",
+        notification_type="quota_auto_resume_fired",
+    )
+    assert state() == "waiting"
+    assert [e.text for e in team_service.log_events(work_dir) if e.kind == "notice"] == [
+        "Usage limit reset — Claude is continuing your task"
+    ]
+
+    _notify(
+        runner,
+        CODER,
+        work_dir,
+        message="Claude needs your permission to use Bash",
+        notification_type="permission_prompt",
+    )
+    assert state() == "attention"
+    assert [e.text for e in team_service.log_events(work_dir) if e.kind == "attention"] == [
+        "Claude needs your permission to use Bash"
+    ]
+    # A second prompt while parked: the state holds, the feed does not repeat.
+    _notify(
+        runner,
+        CODER,
+        work_dir,
+        message="Claude needs your permission to use Read",
+        notification_type="permission_prompt",
+    )
+    assert len([e for e in team_service.log_events(work_dir) if e.kind == "attention"]) == 1
+
+    runner.invoke(
+        app, ["hook", "stop"], input=json.dumps({"cwd": str(work_dir), "session_id": CODER})
+    )
+    assert state() == "waiting"  # a Stop clears it, as before
+
+
+def test_notification_lines_stay_out_of_teammate_deltas(
+    runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A ``notice`` is for the human board, like the bell: a teammate's delta never
+    carries one, so it takes none of the ``_DELTA_LIMIT`` slots meant for real news."""
+    monkeypatch.setenv("AISQUARE_ROLE", "planner")
+    _start(runner, PLANNER, work_dir)
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
+    _start(runner, CODER, work_dir)
+    monkeypatch.delenv("AISQUARE_ROLE")
+    for _ in range(3):
+        _notify(
+            runner,
+            CODER,
+            work_dir,
+            message="A sub-agent finished",
+            notification_type="agent_completed",
+        )
+    notices = [e for e in team_service.log_events(work_dir) if e.kind == "notice"]
+    assert len(notices) == 3  # control: they are on the board
+
+    assert _prompt(runner, PLANNER, work_dir).stdout == ""  # nothing else is news
+    runner.invoke(app, ["note", "real work item", "--as", "bbbb2222"])
+    delta = _prompt(runner, PLANNER, work_dir).stdout
+    assert "real work item" in delta and "1 teammate update" in delta
+    assert "A sub-agent finished" not in delta

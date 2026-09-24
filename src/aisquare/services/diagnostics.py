@@ -38,8 +38,16 @@ from aisquare.models import (
     ShippingStatus,
     StatusReport,
 )
-from aisquare.services import ci_client, ci_descriptor, ci_override, explainability_ops
+from aisquare.services import (
+    auto_mode,
+    ci_client,
+    ci_descriptor,
+    ci_override,
+    explainability_ops,
+    iam,
+)
 from aisquare.services import claude_accounts as claude_accounts_service
+from aisquare.services import credits as credits_service
 from aisquare.services import distill as distill_service
 from aisquare.services import explainability as explainability_service
 from aisquare.services import fleet as fleet_service
@@ -62,6 +70,7 @@ def status() -> StatusReport:
             project_entries=len(store.entries("project", project_id=project.id)),
             active_project=project,
             project_count=len(store.list_projects()),
+            captured_count=len(store.captured_projects()),
             agents_detected=[agent.name for agent in agents if agent.detected],
             agents_connected=[agent.name for agent in agents if agent.connected],
             shipping=_shipping_status(),
@@ -128,6 +137,9 @@ def doctor(
         _check_harness(cwd),
         _check_self_invocation(cwd),
         _check_fleet(),
+        *_check_dead_managers(),
+        *_check_resumable_agents(),
+        *_check_captured_projects(),
         # After the actionable machine checks on purpose. The fleet UI's sidebar
         # shows the first three not-ok rows (`DOCTOR_LINES == 3`, a stable sort
         # within the warn group), so a row inserted at position 12 evicted one
@@ -139,9 +151,18 @@ def doctor(
         _check_fleet_terminal(),
         *_experiment_checks(),
         *explainability_ops.checks(live=live, target_name=target),
+        # Only when a fleet role runs `auto` behind a configured proxy (#150);
+        # offline — config, the store, the head of a few transcripts.
+        *_optional(auto_mode.doctor_check()),
         # Leaves the machine (one usage request per account), so --live only (#146).
         *_live_only(live, _claude_account_headroom_check),
+        # One balance request per destination workspace (#143), so --live only.
+        *_live_only(live, _workspace_credits_check),
     ]
+
+
+def _optional(check: DoctorCheck | None) -> list[DoctorCheck]:
+    return [check] if check is not None else []
 
 
 def _live_only(live: bool, check: Callable[[], DoctorCheck | None]) -> list[DoctorCheck]:
@@ -788,6 +809,121 @@ def _arranges_an_account() -> bool:
         return False
 
 
+def _check_resumable_agents() -> list[DoctorCheck]:
+    """How many exited agents a restart would CONTINUE rather than reset (#144).
+
+    A label whose newest fleet row has ended, with its session transcript still
+    on disk, resumes with ``fleet restart <label>`` (or the row's Restart); one
+    without starts fresh from a hand-off prompt. A label that is live again, or
+    was reused, is not an exited agent. Counted over the last day's rows,
+    machine-wide; silent when there are none. Gated on the store existing.
+    """
+    if _uncreated_home("fleet-resume") is not None:
+        return []
+    try:
+        cutoff = datetime.now(tz=UTC) - fleet_service.RECENTLY_ENDED
+        resumable: list[str] = []
+        with store_session() as store:
+            for project in store.list_projects(all=True):
+                name = project.codename or project.root.name or project.id
+                # The NEWEST row under each label only, the one `fleet restart
+                # <label>` acts on: a resumed restart keeps the session id, so the
+                # row it replaced still has its transcript on disk, and counting it
+                # listed a label that is live again — whose "restart" stops it.
+                newest: dict[str, FleetAgent] = {}
+                for agent in store.fleet_agents(project.id, live_only=False):
+                    newest[agent.label] = agent  # oldest first: the last one stands
+                for agent in newest.values():
+                    if agent.ended_at is None or agent.ended_at < cutoff or not agent.session_id:
+                        continue
+                    session = store.get_session(agent.session_id)
+                    if session is None or not session.transcript_path:
+                        continue
+                    if Path(session.transcript_path).is_file():
+                        resumable.append(f"{agent.label} ({name})")
+    except Exception:  # the database line reports a broken store
+        return []
+    if not resumable:
+        return []
+    shown = ", ".join(resumable[:6])
+    if len(resumable) > 6:
+        shown += f", +{len(resumable) - 6} more"
+    noun = "agent" if len(resumable) == 1 else "agents"
+    return [
+        _ok(
+            "fleet-resume",
+            f"{len(resumable)} exited {noun} can be resumed — the transcript is on disk, so "
+            f"Restart continues the session instead of starting over: {shown} "
+            "(aisquare fleet restart <label>)",
+        )
+    ]
+
+
+def _check_captured_projects() -> list[DoctorCheck]:
+    """How many directories are registered but hidden (#139) — and how to see or drop them.
+
+    Silent when there are none; gated on the store existing (doctor creates
+    nothing). ``ok``: a hidden capture is the design working, not a fault.
+    """
+    if _uncreated_home("projects") is not None:
+        return []
+    try:
+        with store_session() as store:
+            captured = len(store.captured_projects())
+    except Exception:  # the database line reports a broken store
+        return []
+    if not captured:
+        return []
+    noun = "directory" if captured == 1 else "directories"
+    return [
+        _ok(
+            "projects",
+            f"{captured} captured {noun} hidden from the sidebar and `project list` (a hooked "
+            "session ran there; nothing added it on purpose) — see them: aisquare project "
+            "list --all; drop the stale ones: aisquare project prune --captured-only",
+        )
+    ]
+
+
+def _check_dead_managers() -> list[DoctorCheck]:
+    """A project whose manager has exited while its fleet is still up (#138).
+
+    The wake-ups other agents send target that manager and land nowhere; the
+    sidebar showed 💤 and the way back was known to nobody. One line per
+    machine naming each such project and the command that brings the manager
+    back with its session. Gated on ``context.db`` existing: doctor creates
+    nothing. Silent when no fleet is in that state.
+    """
+    if not paths.db_path().exists():
+        return []
+    try:
+        with store_session() as store:
+            projects = store.list_projects(all=True)
+            headless = []
+            for project in projects:
+                live = store.fleet_agents(project.id, live_only=True)
+                if not live or any(agent.role == "manager" for agent in live):
+                    continue
+                last = store.fleet_agent_by_label(project.id, "manager", live_only=False)
+                if last is not None and last.ended_at is not None:
+                    headless.append(
+                        f"{project.codename or project.root.name or project.id} "
+                        f"({len(live)} agent(s) still running)"
+                    )
+    except Exception:  # the database line reports a broken store
+        return []
+    if not headless:
+        return []
+    return [
+        _warn(
+            "fleet-manager",
+            "the manager exited while agents are still running in: " + "; ".join(headless),
+            "Bring it back with its session: aisquare fleet restart manager --project <name> "
+            "(or Restart on its row in asq)",
+        )
+    ]
+
+
 def _claude_account_limit_checks() -> list[DoctorCheck]:
     """Agents parked on a usage limit (#146) — offline, from the board rows alone.
 
@@ -800,7 +936,7 @@ def _claude_account_limit_checks() -> list[DoctorCheck]:
         return []
     try:
         with store_session() as store:
-            projects = store.list_projects()
+            projects = store.list_projects(all=True)  # a session can sit in a captured dir
             names = {p.id: p.codename or p.root.name or p.id for p in projects}
             limited = [
                 (session, names[p.id])
@@ -891,6 +1027,66 @@ def _claude_account_headroom_check() -> DoctorCheck | None:
         "claude-account-headroom",
         f"five-hour windows ({settings.switch_at}% is the line): {summary}",
     )
+
+
+def _workspace_credits_check() -> DoctorCheck | None:
+    """``--live`` only: the credits of every workspace a project points at (#143).
+
+    Reads the destinations only when ``context.db`` exists (a doctor run must not
+    create the store) and asks only with a session for the destination's host.
+    Only a project a launch can join counts: a forgotten one keeps its
+    destination row for ``logout`` (the minted key it may name), but no fleet
+    is spawned into its workspace, so it is neither asked about nor warned on
+    (review of #173, round 1). Warns on the server's own band — ``low`` or
+    ``exhausted`` — and when a balance could not be read at all, because a
+    fleet spawned into an exhausted workspace traces nothing. ``None`` when
+    there is nothing to ask.
+    """
+    if not paths.db_path().exists():
+        return None
+    try:
+        session = iam.current_session()
+    except iam.IamError:
+        session = None
+    if session is None:
+        return None
+    try:
+        with store_session() as store:
+            visible = {p.id for p in store.list_projects(all=True)}  # captured ones launch too
+            destinations = [d for d in store.project_destinations() if d.project_id in visible]
+    except Exception:
+        return None
+    readings: list[credits_service.WorkspaceCredits] = []
+    seen: set[int] = set()
+    for destination in destinations:
+        if destination.workspace_id in seen:
+            continue
+        reading = credits_service.for_destination(session, destination, use_cache=False)
+        if reading is None:
+            continue
+        seen.add(destination.workspace_id)
+        readings.append(reading)
+    if not readings:
+        return None
+    summary = " · ".join(credits_service.describe(reading) for reading in readings)
+    short = [r for r in readings if r.available and r.state in ("low", "exhausted")]
+    unread = [r for r in readings if not r.available]
+    if short:
+        bands = ", ".join(sorted({r.state or "" for r in short}))
+        return _warn(
+            "workspace-credits",
+            f"{', '.join(r.workspace_name for r in short)}: the server says {bands} — {summary}",
+            "Top up the workspace in the dashboard before spawning a fleet into it; "
+            "an exhausted workspace traces nothing",
+        )
+    if unread:
+        names = ", ".join(r.workspace_name for r in unread)
+        return _warn(
+            "workspace-credits",
+            f"could not read the balance of {names} — {summary}",
+            "Sign in again (aisquare login) or check the API; the row reads once it answers",
+        )
+    return _ok("workspace-credits", summary)
 
 
 def _claude_account_default_checks() -> list[DoctorCheck]:
@@ -2085,7 +2281,7 @@ def _check_fleet(
             # that matters when nothing can run, and the tmux check has the verdict.
             return _ok(name, "not evaluated — tmux is not installed (see the tmux check)")
         with store_session() as store:
-            projects = store.list_projects()
+            projects = store.list_projects(all=True)  # rows live wherever they were spawned
             names = {p.id: p.codename or p.root.name or p.id for p in projects}
             live = [a for p in projects for a in store.fleet_agents(p.id, live_only=True)]
         gone: list[FleetAgent] = []

@@ -520,6 +520,31 @@ def test_the_reason_is_the_whole_delta_not_only_the_trigger(
     assert _session(MANAGER).cursor == _latest_seq(_session(MANAGER).project_id)
 
 
+def test_notification_lines_do_not_ride_along(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, work_dir: Path
+) -> None:
+    """A Claude Code notification's ``notice`` line (#153) is the human board's, like
+    the bell: the reason is the delta the next prompt would read, and neither carries
+    it — each would take a ``_DELTA_LIMIT`` slot from the decision it was woken for."""
+    _fleet(runner, monkeypatch, work_dir)
+    notice = {
+        "cwd": str(work_dir),
+        "session_id": CODER,
+        "message": "A sub-agent finished",
+        "notification_type": "agent_completed",
+    }
+    for _ in range(3):
+        runner.invoke(app, ["hook", "notification"], input=json.dumps(notice))
+    kinds = [event.kind for event in team_service.log_events(work_dir)]
+    assert kinds.count("notice") == 3  # control: they are on the board
+    task_id = _coder_reviews(work_dir)
+
+    reason = _decision(_stop(runner, MANAGER, work_dir))["reason"]
+
+    assert task_id in reason
+    assert "A sub-agent finished" not in reason
+
+
 def test_the_reason_is_bounded_and_the_rest_waits_its_turn(
     runner: CliRunner, monkeypatch: pytest.MonkeyPatch, work_dir: Path
 ) -> None:

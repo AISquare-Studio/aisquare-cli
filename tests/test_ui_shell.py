@@ -35,6 +35,7 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.content import Content
 from textual.geometry import Region
 from textual.pilot import Pilot
+from textual.widget import Widget
 from textual.widgets import Button, Checkbox, Input, Static, Switch
 from textual.widgets._toast import Toast
 from textual.worker import Worker, WorkerState
@@ -43,6 +44,7 @@ from aisquare.cli.ui import app as app_mod
 from aisquare.cli.ui.app import SIDEBAR_WIDTH_KEY, FleetApp, HelpScreen, Panes
 from aisquare.cli.ui.autosave import Autosave
 from aisquare.cli.ui.divider import WIDEST_ASK, Divider, cells
+from aisquare.cli.ui.groups import GroupPicker
 from aisquare.cli.ui.sidebar import (
     RESIZE_STEP,
     Activatable,
@@ -50,12 +52,15 @@ from aisquare.cli.ui.sidebar import (
     Disclosure,
     DoctorSection,
     DoctorTitle,
+    GroupHeader,
     ProjectCard,
     ProjectTitle,
+    SectionLabel,
     ordered_agents,
     short_path,
 )
 from aisquare.cli.ui.terminal import (
+    DUPLICATE_PRESS_WINDOW,
     EscapeToSidebar,
     SelectionHost,
     TerminalPane,
@@ -80,6 +85,7 @@ from aisquare.core.tmux import Completed
 from aisquare.models import CheckStatus, DoctorCheck, FleetAgent, FleetAgentStatus, ProjectInfo
 from aisquare.services import explainability as explainability_service
 from aisquare.services import fleet as fleet_service
+from aisquare.services import project_groups as groups_service
 from tests.pane_harness import FakePane, FakeTmux, asks_a_server, move, press, release, socket_of
 
 T = TypeVar("T")
@@ -102,7 +108,7 @@ def seed(tmp_path: Path, *specs: tuple[str, str, str | None]) -> list[ProjectInf
     with store_session() as store:
         for project_id, rel, codename in specs:
             project = ProjectInfo(id=project_id, root=tmp_path / rel)
-            store.ensure_project(project)
+            project = store.onboard_project(project)  # added on purpose: shown (#139)
             if codename:
                 project = store.set_codename(project_id, codename)
             projects.append(project)
@@ -351,9 +357,9 @@ def test_agent_rows_show_role_icon_state_chip_and_exit_status(
     manager, coder, tester, scout = rows
     assert manager.startswith("🧭") and manager.rstrip().endswith("⏸")
     assert coder.startswith("🔨") and coder.rstrip().endswith("▶")
-    assert tester.startswith("🧪") and tester.rstrip().endswith("💤(3)")
+    assert tester.startswith("🧪") and tester.rstrip().endswith("💤 exited(3)")  # #138: the word
     assert scout.startswith("🤖") and "🔔" in scout  # unknown role: the custom icon
-    assert "(3)" not in coder and "💤" not in coder  # exit status only on the exited row
+    assert "(3)" not in coder and "💤" not in coder and "exited" not in coder  # only on that row
     assert "🔔" not in manager and "▶" not in manager
     # The card's chips: three alive (the exited one is not), one needing the user.
     assert title.rstrip().endswith("3 · 🔔1")
@@ -1856,17 +1862,23 @@ def test_escape_hatch_focuses_the_sidebar(tmp_path: Path, script: Script) -> Non
 def test_help_opens_from_the_sidebar_and_closes(tmp_path: Path, script: Script) -> None:
     seed(tmp_path, ("prj_a", "alpha", None))
 
-    async def go(pilot: Pilot[None]) -> tuple[bool, bool, bool]:
+    async def go(pilot: Pilot[None]) -> tuple[bool, bool, bool, str]:
         app = fleet_app(pilot)
         closed_before = not isinstance(app.screen, HelpScreen)
         await pilot.press("question_mark")
         await pilot.pause()
         opened = isinstance(app.screen, HelpScreen)
+        keys = shown(app.screen.query_one("#helpbox Static", Static))
         await pilot.press("escape")
         await pilot.pause()
-        return closed_before, opened, isinstance(app.screen, HelpScreen)
+        return closed_before, opened, isinstance(app.screen, HelpScreen), keys
 
-    assert drive(go) == (True, True, False)
+    closed_before, opened, still_open, keys = drive(go)
+    assert (closed_before, opened, still_open) == (True, True, False)
+    # The sidebar's arranging keys (#140) are all show=False in the footer: here is
+    # the one place they are found (review of #171, round 1).
+    for key in ("shift+↑ ↓", "g p space", "shift+click", "drag title"):
+        assert key in keys, key
 
 
 def test_keyboard_cursor_walks_the_rows_and_enter_activates(tmp_path: Path, script: Script) -> None:
@@ -2334,6 +2346,37 @@ def test_r_refreshes_from_the_sidebar_but_is_forwarded_from_a_pane(
     assert from_sidebar.rstrip().endswith("▶")  # r re-read the fleet
     assert from_pane.rstrip().endswith("▶") and "🔔" not in from_pane  # …and did not, here
     assert keys == ["r"]
+
+
+def test_r_re_runs_the_doctor_and_a_only_re_reads_the_list(tmp_path: Path, script: Script) -> None:
+    """`r` is "refresh now" — the fleet AND the doctor. #139's `a` action was first
+    inserted between the two calls and took the doctor run with it, so `r` re-read
+    the store only and `a`, which changes nothing the doctor looks at, re-ran it."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+    calls: list[int] = []
+
+    def doctor() -> list[DoctorCheck]:
+        calls.append(1)
+        return []
+
+    async def go(pilot: Pilot[None]) -> tuple[int, int, int]:
+        app = fleet_app(pilot)
+        await settle(app)
+        app.sidebar.focus()
+        at_mount = len(calls)
+        await pilot.press("r")
+        await pilot.pause()
+        await settle(app)
+        after_r = len(calls)
+        await pilot.press("a")
+        await pilot.pause()
+        await settle(app)
+        return at_mount, after_r, len(calls)
+
+    at_mount, after_r, after_a = drive(go, doctor=doctor)
+    assert at_mount == 1
+    assert after_r == 2, "r re-runs the doctor"
+    assert after_a == 2, "a changes which cards are shown, not what the doctor finds"
 
 
 # --- theme -------------------------------------------------------------------------
@@ -3413,3 +3456,750 @@ def test_selecting_an_agent_focuses_its_pane_so_typing_reaches_the_agent_not_the
     typed = [argv for argv in no_real_tmux if "send-keys" in argv and argv[-1] == "q"]
     assert typed, f"q was forwarded to tmux: {no_real_tmux[-3:]}"
     assert not still_in_pane, "F12 is the deliberate way back to the sidebar"
+
+
+def test_restart_from_the_agent_view_selects_the_new_row_in_the_shell(
+    tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#138 end to end through the real app: the exited row's view offers Restart,
+    the service is called with the row's project and the pane's size, the frame is
+    re-read, and the NEW row is what the shell shows and highlights."""
+    seed(tmp_path, ("prj_a", "alpha", "amber-otter"))
+    exited = status("prj_a", "manager", "manager", "exited", exit_status=130)
+    script["prj_a"] = [exited]
+    started = status("prj_a", "manager", "manager", "waiting", minute=5)
+    started = started.model_copy(
+        update={"agent": started.agent.model_copy(update={"id": "agt_a_new"})}
+    )
+    calls: list[tuple[str, str, tuple[int, int] | None]] = []
+
+    def fake_restart(
+        project: ProjectInfo, label: str, *, size: tuple[int, int] | None = None, **kw: object
+    ) -> fleet_service.RestartReceipt:
+        calls.append((project.id, label, size))
+        script["prj_a"] = [started]  # what the next listing answers
+        return fleet_service.RestartReceipt(
+            replaced=exited.agent, started=started.agent, resumed=True, was_running=False,
+            tmux_session="asq-amber-otter",
+        )  # fmt: skip
+
+    monkeypatch.setattr(fleet_service, "restart", fake_restart)
+
+    async def go(pilot: Pilot[None]) -> tuple[str | None, str | None, list[str], list[str]]:
+        app = fleet_app(pilot)
+        await pilot.click(row_for(app, "agt_a_manager"))
+        await pilot.pause()
+        view = app.current_view()
+        assert isinstance(view, AgentView)
+        stop_shown = view.query_one("#agent-stop", Button).display
+        await pilot.click("#agent-restart")
+        await settle(app)
+        await pilot.pause()
+        await pilot.pause()
+        current = app.current_view()
+        # The pane's own "(pane gone)" toast is there too: read them all.
+        toasts = [toast.render().plain for toast in app.screen.query(Toast)]
+        rows = [shown(row) for row in card_for(app, "prj_a").query(AgentRow)]
+        assert stop_shown is True  # the 💤 row's Stop removes its dead window
+        return (current.id if current else None), app.sidebar.selected_key, toasts, rows
+
+    current, selected, toasts, rows = drive(go, notifications=True)
+    assert calls and calls[0][:2] == ("prj_a", "manager")
+    assert current == "agent-agt_a_new" and selected == "agent:agt_a_new"
+    assert any("✓ restarted manager — resumed its session" in toast for toast in toasts), toasts
+    assert len(rows) == 1 and rows[0].rstrip().endswith("⏸")  # the old 💤 exited row is gone
+
+
+def test_the_sidebar_hides_captured_directories_until_a_shows_them(
+    tmp_path: Path, script: Script
+) -> None:
+    """#139: every directory a hooked session ran in used to be a card. Now only the
+    projects added on purpose are; `a` shows the captured ones too, marked."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+    with store_session() as store:
+        store.ensure_project(ProjectInfo(id="prj_scratch", root=tmp_path / "scratch"))  # a hook
+
+    async def go(pilot: Pilot[None]) -> tuple[list[str], list[str], str, list[str], str]:
+        app = fleet_app(pilot)
+        before = [card.project.id for card in app.query(ProjectCard)]
+        app.sidebar.focus()
+        await pilot.press("a")
+        await pilot.pause()
+        with_captured = [card.project.id for card in app.query(ProjectCard)]
+        title = shown_text(app, "prj_scratch")
+        await pilot.press("a")
+        await pilot.pause()
+        after = [card.project.id for card in app.query(ProjectCard)]
+        await pilot.press("question_mark")
+        await pilot.pause()
+        return before, with_captured, title, after, shown(app.screen.query_one(Static))
+
+    def shown_text(app: FleetApp, project_id: str) -> str:
+        return shown(card_for(app, project_id).query_one(ProjectTitle))
+
+    before, with_captured, title, after, keys = drive(go)
+    assert before == ["prj_a"], "a captured directory is not a card"
+    assert with_captured == ["prj_a", "prj_scratch"]
+    assert "captured" in title
+    assert after == ["prj_a"], "a hides them again"
+    assert "captured directories" in keys, "the key is on the ? screen (it has no footer label)"
+
+
+def test_the_shell_reopens_what_was_open_when_its_row_is_still_there(
+    tmp_path: Path, script: Script
+) -> None:
+    """#144: the UI restored exactly one thing at mount, the theme. What was open —
+    a project, an agent, a page — is remembered in the store's ui_state and comes
+    back; an agent whose row is gone falls back to its project."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+    script["prj_a"] = [status("prj_a", "coder-auth", "coder", "working")]
+
+    async def open_agent(pilot: Pilot[None]) -> str | None:
+        app = fleet_app(pilot)
+        await pilot.click(row_for(app, "agt_a_coder-auth"))
+        await pilot.pause()
+        view = app.current_view()
+        return view.id if view else None
+
+    assert drive(open_agent) == "agent-agt_a_coder-auth"
+    with store_session() as store:
+        assert store.ui_state("fleet.selected") == "agent:prj_a/agt_a_coder-auth"
+
+    async def relaunch(pilot: Pilot[None]) -> tuple[str | None, str | None]:
+        app = fleet_app(pilot)
+        await pilot.pause()
+        await pilot.pause()
+        view = app.current_view()
+        return (view.id if view else None), app.sidebar.selected_key
+
+    assert drive(relaunch) == ("agent-agt_a_coder-auth", "agent:agt_a_coder-auth")
+
+    script["prj_a"] = []  # the agent's row is gone: its project is the fallback
+    assert drive(relaunch) == ("project-prj_a", "project:prj_a")
+
+    with store_session() as store:
+        store.set_ui_state("fleet.selected", "project:prj_gone")  # nothing to reopen
+    assert drive(relaunch) == ("welcome", None)
+    with store_session() as store:
+        assert store.ui_state("fleet.selected") is None, "a stale memory is dropped, not retried"
+
+
+def test_the_shell_remembers_the_captured_toggle_and_reopens_a_page(
+    tmp_path: Path, script: Script
+) -> None:
+    """Review of #169: what the shell remembers beyond a row came back untested —
+    the captured directories shown with `a`, the Accounts page, the Doctor."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+    with store_session() as store:
+        store.ensure_project(ProjectInfo(id="prj_scratch", root=tmp_path / "scratch"))  # a hook
+
+    async def press_a(pilot: Pilot[None]) -> None:
+        fleet_app(pilot).sidebar.focus()
+        await pilot.press("a")
+        await pilot.pause()
+
+    async def relaunch(pilot: Pilot[None]) -> tuple[list[str], str | None, str | None]:
+        app = fleet_app(pilot)
+        await pilot.pause()
+        await pilot.pause()
+        view = app.current_view()
+        cards = [card.project.id for card in app.query(ProjectCard)]
+        return cards, (view.id if view else None), app.sidebar.selected_key
+
+    drive(press_a)
+    with store_session() as store:
+        assert store.ui_state("fleet.show_captured") == "1"
+    assert drive(relaunch)[0] == ["prj_a", "prj_scratch"], "the toggle survives a relaunch"
+    drive(press_a)
+    with store_session() as store:
+        assert store.ui_state("fleet.show_captured") is None, "hiding them again is remembered"
+    assert drive(relaunch)[0] == ["prj_a"]
+
+    with store_session() as store:
+        store.set_ui_state("fleet.selected", "accounts")
+    assert drive(relaunch)[1:] == ("accounts", "accounts")
+    with store_session() as store:
+        store.set_ui_state("fleet.selected", "doctor:")
+    assert drive(relaunch)[1:] == ("doctor", "doctor")
+
+
+# --- groups, pins and manual order (#140) ---------------------------------------------------
+
+
+def _cards(app: FleetApp) -> list[str]:
+    """The visible cards and group headers in sidebar order."""
+    holder = app.sidebar.query_one("#projects")
+    out: list[str] = []
+    for child in holder.children:
+        if isinstance(child, ProjectCard) and child.display:
+            out.append(child.project.id)
+        elif isinstance(child, GroupHeader):
+            out.append(f"group:{child.group.name}")
+        elif isinstance(child, SectionLabel):
+            out.append("pinned")
+    return out
+
+
+def test_the_sidebar_shows_groups_pins_and_manual_order_and_the_keys_move_them(
+    tmp_path: Path, script: Script, isolated_home: Path
+) -> None:
+    """#140 by keyboard alone: shift+↓ moves, p pins, space folds, u undoes — every
+    gesture through the service, every change surviving a relaunch."""
+    seed(tmp_path, ("prj_a", "api", None), ("prj_b", "cli", None), ("prj_c", "docs", None))
+    script["prj_a"] = [status("prj_a", "manager", "manager", "working")]
+    with store_session() as store:
+        groups_service.create_group(store, "tools", ["prj_b", "prj_c"])
+
+    async def go(
+        pilot: Pilot[None],
+    ) -> tuple[list[str], list[str], list[str], list[str], str, list[str], list[str]]:
+        app = fleet_app(pilot)
+        initial = _cards(app)
+        app.sidebar.focus()
+        app.sidebar.select("project:prj_c")  # the cursor's anchor
+        await pilot.press("shift+up")
+        await pilot.pause()
+        moved = _cards(app)
+        await pilot.press("p")
+        await pilot.pause()
+        pinned = _cards(app)
+        await pilot.press("u")
+        await pilot.pause()
+        undone = _cards(app)
+        app.sidebar.select("group:" + store_group_id("tools"))
+        await pilot.press("space")
+        await pilot.pause()
+        folded = _cards(app)
+        header = app.sidebar.query_one(GroupHeader)
+        rollup = shown(header)
+        await pilot.press("space")
+        await pilot.pause()
+        return initial, moved, pinned, undone, rollup, folded, _cards(app)
+
+    def store_group_id(name: str) -> str:
+        with store_session() as store:
+            return groups_service.resolve_group(store, name).id
+
+    initial, moved, pinned, undone, rollup, folded, unfolded = drive(go)
+    # The group first, then the loose project; shift+↑ stepped docs above cli;
+    # p moved it into the Pinned section; u put it back where it was.
+    assert initial == ["group:tools", "prj_b", "prj_c", "prj_a"]
+    assert moved == ["group:tools", "prj_c", "prj_b", "prj_a"]
+    assert pinned == ["pinned", "prj_c", "group:tools", "prj_b", "prj_a"]
+    assert undone == ["group:tools", "prj_c", "prj_b", "prj_a"]
+    assert folded == ["group:tools", "prj_a"], "a folded group hides its members"
+    assert rollup.startswith("▸ 📁 tools"), rollup
+    assert unfolded == ["group:tools", "prj_c", "prj_b", "prj_a"]
+
+    async def relaunch(pilot: Pilot[None]) -> list[str]:
+        await pilot.pause()
+        return _cards(fleet_app(pilot))
+
+    assert drive(relaunch) == unfolded, "the arrangement is the store's, not the session's"
+
+
+def test_a_group_header_rolls_up_its_members_agents(tmp_path: Path, script: Script) -> None:
+    """Every member counts, the pinned one too: it is listed under Pinned, not under the
+    header, and it is still the group's — left out, the header hid its bell (review of #171)."""
+    seed(tmp_path, ("prj_a", "api", None), ("prj_b", "cli", None))
+    script["prj_a"] = [status("prj_a", "manager", "manager", "working")]
+    script["prj_b"] = [status("prj_b", "coder-1", "coder", "attention")]
+    with store_session() as store:
+        groups_service.create_group(store, "all", ["prj_a", "prj_b"])
+        groups_service.pin(store, "prj_b")
+
+    async def go(pilot: Pilot[None]) -> tuple[str, list[str]]:
+        app = fleet_app(pilot)
+        return shown(app.query_one(GroupHeader)), _cards(app)
+
+    header, cards = drive(go)
+    assert cards == ["pinned", "prj_b", "group:all", "prj_a"], "prj_b is listed once, pinned"
+    assert "📁 all" in header and header.rstrip().endswith("2 · 🔔1"), header
+
+
+async def _as_the_terminal_sends(
+    pilot: Pilot[None],
+    kind: type[events.MouseEvent],
+    widget: Widget,
+    offset: tuple[int, int] = (1, 0),
+    *,
+    shift: bool = False,
+    button: int = 1,
+) -> None:
+    """Post one mouse event (button 1 unless told) the way the terminal driver does: to the APP.
+
+    ``App.on_event`` is where a MouseUp over the pressed widget becomes a Click —
+    in the same call that queues the MouseUp, routed by the capture standing at
+    that moment. ``pilot.click`` skips it (it forwards a ready-made Click to the
+    screen, pausing between events), so a sidebar that held the mouse from the
+    press swallowed every real click on a title while the suite stayed green
+    (review of #171, round 1).
+    """
+    x, y = widget.region.offset + offset
+    app = pilot.app
+    app.post_message(kind(None, x, y, 0, 0, button, shift, False, False, screen_x=x, screen_y=y))
+    await pilot.pause()
+
+
+async def _click(pilot: Pilot[None], widget: Widget, *, shift: bool = False) -> None:
+    await _as_the_terminal_sends(pilot, events.MouseDown, widget, shift=shift)
+    await _as_the_terminal_sends(pilot, events.MouseUp, widget, shift=shift)
+    await pilot.pause()
+
+
+async def _drag_onto(
+    pilot: Pilot[None], source: Widget, target: Widget, offset: tuple[int, int] = (1, 0)
+) -> None:
+    """Press on ``source``, move onto ``target`` with the button held, release there."""
+    await _as_the_terminal_sends(pilot, events.MouseDown, source)
+    await _as_the_terminal_sends(pilot, events.MouseMove, target, offset)
+    await _as_the_terminal_sends(pilot, events.MouseUp, target, offset)
+    await pilot.pause()
+
+
+def test_dragging_a_card_onto_a_group_header_groups_it_and_the_picker_groups_a_selection(
+    tmp_path: Path, script: Script, isolated_home: Path
+) -> None:
+    seed(tmp_path, ("prj_a", "api", None), ("prj_b", "cli", None), ("prj_c", "docs", None))
+    with store_session() as store:
+        groups_service.create_group(store, "tools", ["prj_b"])
+
+    async def go(
+        pilot: Pilot[None],
+    ) -> tuple[list[str], list[str], str | None, list[str], str | None, list[str]]:
+        app = fleet_app(pilot)
+        before = _cards(app)
+        # Drag docs (a loose card) onto the group header.
+        title = card_for(app, "prj_c").query_one(ProjectTitle)
+        await _drag_onto(pilot, title, app.sidebar.query_one(GroupHeader), offset=(3, 0))
+        await pilot.pause()
+        dragged = _cards(app)
+        # A press and release without motion opens the project, as before.
+        await _click(pilot, card_for(app, "prj_a").query_one(ProjectTitle))
+        view = app.current_view()
+        opened = view.id if view is not None else None
+        # shift+click marks two cards — and opens neither: Textual runs the base
+        # class's on_click too, unless the mark prevents it.
+        await _click(pilot, card_for(app, "prj_a").query_one(ProjectTitle), shift=True)
+        await _click(pilot, card_for(app, "prj_c").query_one(ProjectTitle), shift=True)
+        marked = sorted(c.project.id for c in app.query(ProjectCard) if c.has_class("marked"))
+        view = app.current_view()
+        after_marks = view.id if view is not None else None
+        # shift+g groups them into a NEW group through the picker.
+        app.sidebar.focus()
+        await pilot.press("shift+g")
+        await pilot.pause()
+        assert isinstance(app.screen, GroupPicker), type(app.screen).__name__
+        await pilot.press("end")  # … the last option is Ungroup; New group… is just above it
+        await pilot.press("up")
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.press(*"web")
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+        return before, dragged, opened, marked, after_marks, _cards(app)
+
+    before, dragged, opened, marked, after_marks, grouped = drive(go)
+    assert before == ["group:tools", "prj_b", "prj_a", "prj_c"]
+    assert dragged == ["group:tools", "prj_b", "prj_c", "prj_a"], "dropped on the header: last"
+    assert opened == "project-prj_a", "a click on a drag handle is still a click"
+    assert marked == ["prj_a", "prj_c"]
+    assert after_marks == "project-prj_a", "a shift+click marks; it opens nothing"
+    assert grouped == ["group:tools", "prj_b", "group:web", "prj_a", "prj_c"]
+    with store_session() as store:
+        names = {g.name for g in store.project_groups()}
+    assert names == {"tools", "web"}
+
+
+def test_a_click_on_a_group_header_folds_it_and_a_drag_back_onto_itself_opens_nothing(
+    tmp_path: Path, script: Script, isolated_home: Path
+) -> None:
+    """The header is a drag handle AND the fold. A drag that returns to the title it began
+    on and is released there is a drag, not a click; the capture is let go either way."""
+    seed(tmp_path, ("prj_a", "api", None), ("prj_b", "cli", None))
+    with store_session() as store:
+        groups_service.create_group(store, "tools", ["prj_b"])
+
+    async def go(pilot: Pilot[None]) -> tuple[list[str], list[str], str | None, bool]:
+        app = fleet_app(pilot)
+        await _click(pilot, app.sidebar.query_one(GroupHeader))
+        folded = _cards(app)
+        await _click(pilot, app.sidebar.query_one(GroupHeader))
+        unfolded = _cards(app)
+        title = card_for(app, "prj_a").query_one(ProjectTitle)
+        await _as_the_terminal_sends(pilot, events.MouseDown, title)
+        await _as_the_terminal_sends(pilot, events.MouseMove, app.sidebar.query_one(GroupHeader))
+        await _as_the_terminal_sends(pilot, events.MouseMove, title)
+        await _as_the_terminal_sends(pilot, events.MouseUp, title)
+        await pilot.pause()
+        view = app.current_view()
+        return folded, unfolded, view.id if view is not None else None, app.mouse_captured is None
+
+    folded, unfolded, opened, released = drive(go)
+    assert folded == ["group:tools", "prj_a"]
+    assert unfolded == ["group:tools", "prj_b", "prj_a"]
+    assert opened == "welcome", "the release of a drag is not an open"
+    assert released
+
+
+def test_a_drag_released_where_nothing_is_a_place_moves_nothing(
+    tmp_path: Path, script: Script, isolated_home: Path
+) -> None:
+    """Only a card, a group header and the list's own empty space are places. Read as
+    "below the list", a drag abandoned over the main pane ungrouped its project and
+    moved it last; one onto a pinned card took a pinned member out of its group; a
+    group dropped on a card went to the end (review of #171, round 1)."""
+    seed(
+        tmp_path,
+        ("prj_a", "api", None),
+        ("prj_b", "cli", None),
+        ("prj_c", "docs", None),
+        ("prj_d", "web", None),
+    )
+    with store_session() as store:
+        groups_service.create_group(store, "tools", ["prj_b"])
+        groups_service.create_group(store, "site", ["prj_d"])
+        groups_service.pin(store, "prj_c")
+
+    async def go(pilot: Pilot[None]) -> tuple[list[list[str]], int, str | None]:
+        app = fleet_app(pilot)
+        seen = [_cards(app)]
+
+        def title(project_id: str) -> ProjectTitle:
+            return card_for(app, project_id).query_one(ProjectTitle)
+
+        def header(name: str) -> GroupHeader:
+            return next(h for h in app.sidebar.query(GroupHeader) if h.group.name == name)
+
+        await _drag_onto(pilot, title("prj_b"), app.content, offset=(10, 12))  # over the main pane
+        seen.append(_cards(app))
+        await _drag_onto(pilot, title("prj_b"), card_for(app, "prj_c"))  # onto a pinned card
+        seen.append(_cards(app))
+        await _drag_onto(pilot, header("tools"), card_for(app, "prj_a"))  # a group onto a card
+        seen.append(_cards(app))
+        abandoned = len(app._undo)
+        # The list's own empty space below the last row is still the end of the top level.
+        holder = app.sidebar.query_one("#projects", VerticalScroll)
+        await _drag_onto(pilot, title("prj_b"), holder, offset=(2, holder.region.height - 1))
+        seen.append(_cards(app))
+        with store_session() as store:
+            moved = store.get_project("prj_b")
+        return seen, abandoned, moved.group_id if moved is not None else "gone"
+
+    seen, abandoned, group_id = drive(go)
+    arranged = ["pinned", "prj_c", "group:tools", "prj_b", "group:site", "prj_d", "prj_a"]
+    assert seen[:4] == [arranged] * 4, seen
+    assert abandoned == 0, "an abandoned drag is no gesture to undo"
+    assert seen[4] == ["pinned", "prj_c", "group:tools", "group:site", "prj_d", "prj_a", "prj_b"]
+    assert group_id is None
+
+
+def test_a_pinned_row_is_not_dragged_as_it_is_not_stepped(
+    tmp_path: Path, script: Script, isolated_home: Path
+) -> None:
+    """A pinned row's place is the pin order, which is ``p``'s: shift+↓ on it is "nothing
+    to move", and a drag from it snaps back. Dragged, a pinned member dropped on the empty
+    space or on a loose card left its group while its card stayed under Pinned — nothing on
+    screen changed, and ``u`` had a step to undo (review of #171, round 1). A selection
+    drags only its unpinned cards; a click on a pinned title still opens it."""
+    seed(
+        tmp_path,
+        ("prj_a", "api", None),
+        ("prj_b", "cli", None),
+        ("prj_c", "docs", None),
+        ("prj_d", "web", None),
+    )
+    with store_session() as store:
+        tools, _ = groups_service.create_group(store, "tools", ["prj_b"])
+        site, _ = groups_service.create_group(store, "site", ["prj_c"])
+        groups_service.pin(store, "prj_b")  # a pinned member of tools
+        groups_service.pin_group(store, site.id)
+
+    async def go(
+        pilot: Pilot[None],
+    ) -> tuple[list[list[str]], bool, int, str | None, str | None]:
+        app = fleet_app(pilot)
+        seen = [_cards(app)]
+
+        def title(project_id: str) -> ProjectTitle:
+            return card_for(app, project_id).query_one(ProjectTitle)
+
+        def header(name: str) -> GroupHeader:
+            return next(h for h in app.sidebar.query(GroupHeader) if h.group.name == name)
+
+        holder = app.sidebar.query_one("#projects", VerticalScroll)
+        empty = (2, holder.region.height - 1)
+        await _drag_onto(pilot, title("prj_b"), holder, offset=empty)  # onto the empty space
+        seen.append(_cards(app))
+        # Onto a loose card, looked at on the way: nothing lifts off, nothing is a place.
+        api = card_for(app, "prj_a")
+        await _as_the_terminal_sends(pilot, events.MouseDown, title("prj_b"))
+        await _as_the_terminal_sends(pilot, events.MouseMove, api)
+        lifted = card_for(app, "prj_b").has_class("-dragging") or api.has_class("-drop-before")
+        await _as_the_terminal_sends(pilot, events.MouseUp, api)
+        seen.append(_cards(app))
+        await _drag_onto(pilot, header("site"), header("tools"), offset=(3, 0))  # a pinned group
+        seen.append(_cards(app))
+        depth = len(app._undo)
+        # A selection of a loose and a pinned card, dragged by the loose one: it moves alone.
+        await _click(pilot, title("prj_a"), shift=True)
+        await _click(pilot, title("prj_b"), shift=True)
+        await _drag_onto(pilot, title("prj_a"), holder, offset=empty)
+        seen.append(_cards(app))
+        await _click(pilot, title("prj_b"))
+        view = app.current_view()
+        with store_session() as store:
+            cli = store.get_project("prj_b")
+        group_id = cli.group_id if cli is not None else None
+        return seen, lifted, depth, group_id, view.id if view is not None else None
+
+    seen, lifted, depth, group_id, opened = drive(go)
+    arranged = ["pinned", "prj_b", "group:site", "prj_c", "group:tools", "prj_a", "prj_d"]
+    assert seen[:4] == [arranged] * 4, seen
+    assert not lifted, "a press on a pinned card is no drag"
+    assert depth == 0, "a drag from a pinned row is no gesture to undo"
+    assert seen[4] == ["pinned", "prj_b", "group:site", "prj_c", "group:tools", "prj_d", "prj_a"]
+    assert group_id == tools.id, "the pinned member is still the group's"
+    assert opened == "project-prj_b", "a click on a pinned title opens it"
+
+
+def test_a_drag_dims_the_card_it_moves_and_marks_only_a_place(
+    tmp_path: Path, script: Script, isolated_home: Path
+) -> None:
+    """The whole card dims while it moves, not its title line (which no rule styled). Its
+    own card is no place — a release there snaps back — so it gets no drop mark, and
+    neither does a group's own header under its drag; and a group header marked as the
+    place keeps its name on screen: the accent line on a one-row header took the row,
+    and the name went blank under the pointer."""
+    seed(tmp_path, ("prj_a", "api", None), ("prj_b", "cli", None), ("prj_c", "docs", None))
+    with store_session() as store:
+        groups_service.create_group(store, "tools", ["prj_b"])
+
+    async def go(pilot: Pilot[None]) -> tuple[list[bool], int, str, list[str]]:
+        app = fleet_app(pilot)
+        docs = card_for(app, "prj_c")
+        header = app.sidebar.query_one(GroupHeader)
+        await _as_the_terminal_sends(pilot, events.MouseDown, docs.query_one(ProjectTitle))
+        await _as_the_terminal_sends(pilot, events.MouseMove, docs, (1, 1))  # its own spawn row
+        marks = [docs.has_class("-dragging"), docs.has_class("-drop-before")]
+        await _as_the_terminal_sends(pilot, events.MouseMove, header, (3, 0))
+        await pilot.pause()
+        marks.append(header.has_class("-drop-before"))
+        rows = header.content_region.height
+        box = Region(0, 0, header.outer_size.width, header.outer_size.height)
+        name = "".join(strip.text for strip in header.render_lines(box))
+        await _as_the_terminal_sends(pilot, events.MouseUp, header, (3, 0))
+        await pilot.pause()
+        marks.append(docs.has_class("-dragging"))
+        # The group, off its header and back onto it.
+        await _as_the_terminal_sends(pilot, events.MouseDown, header, (3, 0))
+        await _as_the_terminal_sends(pilot, events.MouseMove, card_for(app, "prj_b"))
+        await _as_the_terminal_sends(pilot, events.MouseMove, header, (3, 0))
+        marks += [header.has_class("-dragging"), header.has_class("-drop-before")]
+        await _as_the_terminal_sends(pilot, events.MouseUp, header, (3, 0))
+        await pilot.pause()
+        return marks, rows, name, _cards(app)
+
+    marks, rows, name, cards = drive(go)
+    dimmed, own_mark, header_marked, still_dimmed, group_dimmed, own_header_mark = marks
+    assert dimmed, "the card it moves dims"
+    assert not own_mark, "a card is no place to drop itself"
+    assert header_marked and rows == 1, (header_marked, rows)
+    assert "📁 tools" in name, name
+    assert not still_dimmed
+    assert group_dimmed and not own_header_mark, "a header is no place to drop its group"
+    assert cards == ["group:tools", "prj_b", "prj_c", "prj_a"], "dropped on the header: last"
+
+
+def test_another_button_let_go_mid_drag_does_not_end_it(
+    tmp_path: Path, script: Script, isolated_home: Path
+) -> None:
+    """The drag is button 1's. A right button pressed and let go while it is held neither
+    drops the card there nor counts as a click on it; the left button's release does.
+    SelectionHost's one-gesture rule drops the right button's press and release at the
+    app, before the handle sees either, so this pins the whole path, not the handle's
+    own check."""
+    seed(tmp_path, ("prj_a", "api", None), ("prj_b", "cli", None), ("prj_c", "docs", None))
+    with store_session() as store:
+        groups_service.create_group(store, "tools", ["prj_b"])
+
+    async def go(pilot: Pilot[None]) -> tuple[list[str], list[str], str | None, list[str]]:
+        app = fleet_app(pilot)
+        before = _cards(app)
+        header = app.sidebar.query_one(GroupHeader)
+        await _as_the_terminal_sends(
+            pilot, events.MouseDown, card_for(app, "prj_c").query_one(ProjectTitle)
+        )
+        await _as_the_terminal_sends(pilot, events.MouseMove, header, (3, 0))
+        await _as_the_terminal_sends(pilot, events.MouseDown, header, (3, 0), button=3)
+        await _as_the_terminal_sends(pilot, events.MouseUp, header, (3, 0), button=3)
+        await pilot.pause()
+        midway = _cards(app)
+        view = app.current_view()
+        await _as_the_terminal_sends(pilot, events.MouseUp, header, (3, 0))
+        await pilot.pause()
+        return before, midway, view.id if view is not None else None, _cards(app)
+
+    before, midway, opened, after = drive(go)
+    assert midway == before == ["group:tools", "prj_b", "prj_a", "prj_c"], midway
+    assert opened == "welcome", "the right button's click is no open"
+    assert after == ["group:tools", "prj_b", "prj_c", "prj_a"], "the left release drops"
+
+
+def test_a_drag_whose_release_was_lost_ends_at_the_first_move_with_no_button_held(
+    tmp_path: Path, script: Script, isolated_home: Path
+) -> None:
+    """Let go outside the terminal, the release never arrives; the first move reported with
+    no button held says so. The drag ends there and snaps back — the release was nowhere a
+    place is — and the handle lets the mouse go. Left held and armed, the card stayed dimmed,
+    the card under the pointer kept its drop mark, and the next click anywhere went to the
+    dragged title: a click on api opened docs (review of #171, round 1)."""
+    seed(tmp_path, ("prj_a", "api", None), ("prj_b", "cli", None), ("prj_c", "docs", None))
+
+    async def go(
+        pilot: Pilot[None],
+    ) -> tuple[list[str], bool, list[bool], object, bool, int, list[str], str | None]:
+        app = fleet_app(pilot)
+        before = _cards(app)
+        docs = card_for(app, "prj_c")
+        api = card_for(app, "prj_a")
+        await _as_the_terminal_sends(pilot, events.MouseDown, docs.query_one(ProjectTitle))
+        await _as_the_terminal_sends(pilot, events.MouseMove, api)
+        running = docs.has_class("-dragging") and api.has_class("-drop-before")
+        await _as_the_terminal_sends(pilot, events.MouseMove, api, button=0)
+        await pilot.pause()
+        marks = [docs.has_class("-dragging"), api.has_class("-drop-before")]
+        captured = app.mouse_captured
+        closed = app.sidebar._drag is None
+        depth = len(app._undo)
+        after = _cards(app)
+        await _click(pilot, api.query_one(ProjectTitle))
+        view = app.current_view()
+        return before, running, marks, captured, closed, depth, after, view.id if view else None
+
+    before, running, marks, captured, closed, depth, after, opened = drive(go)
+    assert running, "the drag was over api's card when its release was lost"
+    assert marks == [False, False], "nothing dimmed, nothing marked"
+    assert captured is None and closed, "the handle let the mouse go and the drag is closed"
+    assert after == before and depth == 0, "a lost release drops nowhere"
+    assert opened == "project-prj_a", "the next click is the click it was"
+
+
+def test_a_drag_whose_release_was_lost_ends_at_the_next_press_where_no_motion_reports_it(
+    tmp_path: Path, script: Script, isolated_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A terminal that reports no motion without a button never sends the move that ends a
+    lost release. The next report is the next press: the same button, long past
+    DUPLICATE_PRESS_WINDOW, which SelectionHost takes as a new gesture. The handle still
+    held the mouse, so that press came to it and armed a drag again, and the Click of its
+    release came to it too: a click on api opened docs (review of #171, round 2). The press
+    ends the old drag instead — nothing dimmed or marked, nothing moved, nothing to undo,
+    the mouse let go — and the click is api's."""
+    seed(tmp_path, ("prj_a", "api", None), ("prj_b", "cli", None), ("prj_c", "docs", None))
+    now = {"t": 100.0}
+    monkeypatch.setattr("aisquare.cli.ui.terminal._monotonic", lambda: now["t"])
+
+    async def go(
+        pilot: Pilot[None],
+    ) -> tuple[list[str], bool, list[bool], object, bool, int, list[str], str | None]:
+        app = fleet_app(pilot)
+        before = _cards(app)
+        docs = card_for(app, "prj_c")
+        api = card_for(app, "prj_a")
+        await _as_the_terminal_sends(pilot, events.MouseDown, docs.query_one(ProjectTitle))
+        await _as_the_terminal_sends(pilot, events.MouseMove, api)
+        running = docs.has_class("-dragging") and api.has_class("-drop-before")
+        now["t"] += DUPLICATE_PRESS_WINDOW + 1.0  # let go outside; nothing reported it
+        await _click(pilot, api.query_one(ProjectTitle))
+        marks = [docs.has_class("-dragging"), api.has_class("-drop-before")]
+        captured = app.mouse_captured
+        closed = app.sidebar._drag is None
+        view = app.current_view()
+        return (
+            before,
+            running,
+            marks,
+            captured,
+            closed,
+            len(app._undo),
+            _cards(app),
+            view.id if view else None,
+        )
+
+    before, running, marks, captured, closed, depth, after, opened = drive(go)
+    assert running, "the drag was over api's card when its release was lost"
+    assert marks == [False, False], "nothing dimmed, nothing marked"
+    assert captured is None and closed, "the handle let the mouse go and the drag is closed"
+    assert after == before and depth == 0, "a lost release drops nowhere"
+    assert opened == "project-prj_a", "the click is the click it was"
+
+
+def test_a_step_with_nowhere_to_go_leaves_nothing_to_undo(
+    tmp_path: Path, script: Script, isolated_home: Path
+) -> None:
+    """shift+↑ on the first row, or on a pinned one, moves nothing; it must not take the
+    place of the last real gesture on the undo stack either."""
+    seed(tmp_path, ("prj_a", "api", None), ("prj_b", "cli", None), ("prj_c", "docs", None))
+    with store_session() as store:
+        groups_service.pin(store, "prj_c")
+
+    async def go(pilot: Pilot[None]) -> tuple[list[str], int, list[str]]:
+        app = fleet_app(pilot)
+        app.sidebar.focus()
+        app.sidebar.select("project:prj_b")
+        await pilot.press("shift+up")  # a real step: cli above api
+        await pilot.pause()
+        stepped = _cards(app)
+        await pilot.press("shift+up")  # already first
+        app.sidebar.select("project:prj_c")
+        await pilot.press("shift+down")  # pinned: no place in a scope
+        await pilot.pause()
+        depth = len(app._undo)
+        await pilot.press("u")
+        await pilot.pause()
+        return stepped, depth, _cards(app)
+
+    stepped, depth, undone = drive(go)
+    assert stepped == ["pinned", "prj_c", "prj_b", "prj_a"]
+    assert depth == 1
+    assert undone == ["pinned", "prj_c", "prj_a", "prj_b"], "u undid the real step"
+
+
+def test_a_handle_removed_mid_press_lets_the_mouse_go(
+    tmp_path: Path, script: Script, isolated_home: Path
+) -> None:
+    """The handle holds the mouse from the press; a refresh that removes it (the project
+    forgotten from a shell) must not leave the capture on a widget that is gone —
+    Textual would deliver every later mouse event nowhere. The drag it began closes
+    with it: left open, the card under the pointer kept its drop mark until the next
+    press on a handle (review of #171, round 1)."""
+    seed(tmp_path, ("prj_a", "api", None), ("prj_b", "cli", None))
+
+    async def go(pilot: Pilot[None]) -> tuple[bool, bool, object, bool, bool]:
+        app = fleet_app(pilot)
+        title = card_for(app, "prj_b").query_one(ProjectTitle)
+        api = card_for(app, "prj_a")
+        await _as_the_terminal_sends(pilot, events.MouseDown, title)
+        held = app.mouse_captured is title
+        await _as_the_terminal_sends(pilot, events.MouseMove, api)
+        marked = api.has_class("-drop-before")
+        with store_session() as store:
+            store.forget_project("prj_b")
+        app.refresh_data()
+        await pilot.pause()
+        await pilot.pause()
+        await _as_the_terminal_sends(pilot, events.MouseUp, api)
+        return (
+            held,
+            marked,
+            app.mouse_captured,
+            api.has_class("-drop-before"),
+            app.sidebar._drag is None,
+        )
+
+    held, marked, captured, still_marked, closed = drive(go)
+    assert held, "the press is held by the handle"
+    assert marked, "the drag was running over api's card"
+    assert captured is None
+    assert not still_marked and closed, "the drag went with its handle"

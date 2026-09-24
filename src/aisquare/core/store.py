@@ -27,10 +27,12 @@ import re
 import sqlite3
 import sys
 import time
+import uuid
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import EllipsisType
 from typing import Any, Protocol
 
 from aisquare.core import paths
@@ -41,13 +43,17 @@ from aisquare.models import (
     ClaudeAccountRecord,
     ContextEntry,
     FleetAgent,
+    LaunchSpec,
     Pool,
+    ProjectExplainability,
+    ProjectGroup,
     ProjectInfo,
     PromptRecord,
     TaskStatus,
     TeamEvent,
     TeamSession,
     TeamTask,
+    TraceDestination,
     TurnMetric,
     UsageSample,
 )
@@ -476,13 +482,63 @@ _PREPARE: dict[int, Callable[[sqlite3.Connection], None]] = {
     12: _converge_v11_fork,
 }
 
+
+def _adopt_onboarded_projects(connection: sqlite3.Connection) -> None:
+    """v16 → v17's backfill (#139): rows already used on purpose become onboarded.
+
+    Runs AFTER the column exists (a :data:`_FINISH` step, same transaction).
+    "On purpose" is read off what the row already carries: context entries, a
+    codename (it entered the fleet), linked repos, board activity, a fleet
+    agent — and a codebase snapshot on disk, which ``project onboard`` and
+    ``init`` write. Everything else — the 23 of 27 registrations on the
+    reporting machine that held nothing but captured prompts — stays hidden,
+    reachable through ``project list --all``.
+
+    A FORGOTTEN row is never adopted, whatever it carries: ``forget`` clears
+    ``onboarded_at`` so that the next prompt there revives the row captured,
+    not listed (:meth:`SqliteStore.ensure_project`), and a row forgotten before
+    the column existed must land in that same state — a forgotten project
+    keeps its entries and its snapshot, so the evidence below would otherwise
+    re-list it on the next prompt.
+    """
+    connection.execute(
+        "UPDATE project SET onboarded_at = created_at "
+        "WHERE onboarded_at IS NULL AND forgotten_at IS NULL AND ("
+        "  codename IS NOT NULL"
+        "  OR (linked_repos IS NOT NULL AND linked_repos NOT IN ('[]', ''))"
+        "  OR id IN (SELECT project_id FROM entry WHERE project_id IS NOT NULL)"
+        "  OR id IN (SELECT project_id FROM team_event)"
+        "  OR id IN (SELECT project_id FROM team_task)"
+        "  OR id IN (SELECT project_id FROM fleet_agent)"
+        ")"
+    )
+    from aisquare.core import snapshot as snapshot_core  # lazy: keeps store import-light
+
+    rows = connection.execute(
+        "SELECT id FROM project WHERE onboarded_at IS NULL AND forgotten_at IS NULL"
+    ).fetchall()
+    with_snapshot = [row[0] for row in rows if snapshot_core.exists(str(row[0]))]
+    for project_id in with_snapshot:
+        connection.execute(
+            "UPDATE project SET onboarded_at = created_at WHERE id = ? AND onboarded_at IS NULL",
+            (project_id,),
+        )
+
+
+#: Steps run AFTER a migration's statements, in its transaction — the mirror of
+#: :data:`_PREPARE` for work that needs the columns the migration just added.
+_FINISH: dict[int, Callable[[sqlite3.Connection], None]] = {
+    16: _adopt_onboarded_projects,
+}
+
 # v14: ``project forget`` — a tombstone on the registration, in the same spirit as
 # ``entry.deleted_at``. A hard delete is not available to a plain forget:
 # ``entry.project_id`` and ``prompt.project_id`` are FOREIGN KEYS to this row
 # with no cascade and ``PRAGMA foreign_keys = ON``, so a project with any
 # context or prompt history cannot be deleted from under them. Every project
 # read filters ``forgotten_at IS NOT NULL`` out; ``ensure_project`` clears it, so
-# a registration comes back the moment something registers the root again.
+# a registration comes back the moment something registers the root again —
+# since v17 as a captured, unlisted row unless the registration is deliberate.
 # ``forget --purge`` deletes the dependents first and then the row, for real.
 #
 # v14, not v12 as first authored: main took v12 for the metric table and v13
@@ -570,6 +626,75 @@ CREATE INDEX claude_usage_slot_time ON claude_usage (slot, fetched_at);
 ALTER TABLE team_session ADD COLUMN limit_resets_at TEXT;
 """
 
+# v17: captured is not shown (#139). Hooks register every directory a session
+# runs in — that must stay, prompt history and injection depend on it — but only
+# a project added ON PURPOSE (init, project onboard/link, the sidebar's +, team
+# on, a fleet spawn) carries ``onboarded_at``, and only those are listed. A
+# plain ALTER; the backfill is :func:`_adopt_onboarded_projects` (_FINISH).
+_SCHEMA_V17 = """
+ALTER TABLE project ADD COLUMN onboarded_at TEXT;
+"""
+# v18 (#144): the launch spec a restart replays, and a home for UI state that
+# used to live in scattered files — one key/value table, read at mount and
+# written on change, so what was open comes back after a restart.
+_SCHEMA_V18 = """
+ALTER TABLE fleet_agent ADD COLUMN launch_spec TEXT;
+CREATE TABLE ui_state (
+    key        TEXT PRIMARY KEY,
+    value      TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+"""
+# v19 (#141): a project's own explainability key — its deployment and where the
+# mode-600 file is. Never the value: this database is mode 644.
+_SCHEMA_V19 = """
+CREATE TABLE project_explainability (
+    project_id TEXT PRIMARY KEY REFERENCES project (id),
+    target     TEXT NOT NULL,
+    key_path   TEXT NOT NULL,
+    set_at     TEXT NOT NULL,
+    set_by     TEXT
+);
+"""
+# v20 (#140): project groups, pinning and manual order — a management layer over
+# projects. One group per project (like a browser tab), positions per scope,
+# pins on projects and groups. Nothing else references a group.
+_SCHEMA_V20 = """
+CREATE TABLE project_group (
+    id         TEXT PRIMARY KEY,
+    name       TEXT NOT NULL UNIQUE,
+    position   INTEGER NOT NULL DEFAULT 0,
+    pinned_at  TEXT,
+    collapsed  INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
+);
+ALTER TABLE project ADD COLUMN group_id TEXT REFERENCES project_group (id);
+ALTER TABLE project ADD COLUMN position INTEGER;
+ALTER TABLE project ADD COLUMN pinned_at TEXT;
+"""
+# v21 (#142): where a project's traces land — a workspace and a studio picked by a
+# signed-in user, from the API environment the session belongs to. Its own table
+# rather than new columns on ``project_explainability``: that row is the KEY
+# binding (#141) with a NOT NULL key path, and a destination exists before, or
+# without, any key — widening it would mean a rebuild migration and a nullable
+# path every reader of the binding would then have to reason about. Two rows
+# per project at most, each with one job; the resolver joins them by target.
+_SCHEMA_V21 = """
+CREATE TABLE project_destination (
+    project_id     TEXT PRIMARY KEY REFERENCES project (id),
+    api_url        TEXT NOT NULL,
+    environment    TEXT NOT NULL,
+    workspace_id   INTEGER NOT NULL,
+    workspace_uid  TEXT,
+    workspace_name TEXT NOT NULL,
+    studio_id      INTEGER,
+    studio_uid     TEXT,
+    studio_name    TEXT,
+    key_uid        TEXT,
+    set_at         TEXT NOT NULL,
+    set_by         TEXT
+);
+"""
 # Ordered migrations; index i upgrades the db from user_version i to i+1.
 _MIGRATIONS = (
     _SCHEMA_V1,
@@ -588,10 +713,27 @@ _MIGRATIONS = (
     _SCHEMA_V14,
     _SCHEMA_V15,
     _SCHEMA_V16,
+    _SCHEMA_V17,
+    _SCHEMA_V18,
+    _SCHEMA_V19,
+    _SCHEMA_V20,
+    _SCHEMA_V21,
 )
 SCHEMA_VERSION = len(_MIGRATIONS)
 
-_PROJECT_COLUMNS = "id, root, linked_repos, codename"
+_PROJECT_COLUMNS = "id, root, linked_repos, codename, onboarded_at, group_id, position, pinned_at"
+_GROUP_COLUMNS = "id, name, position, pinned_at, collapsed, created_at"
+_DESTINATION_COLUMNS = (
+    "project_id, api_url, environment, workspace_id, workspace_uid, workspace_name, "
+    "studio_id, studio_uid, studio_name, key_uid, set_at, set_by"
+)
+_LAYOUT_KEPT_BY_A_LIVE_ROW = (
+    "group_id = CASE WHEN project.forgotten_at IS NULL THEN project.group_id END, "
+    "position = CASE WHEN project.forgotten_at IS NULL THEN project.position END, "
+    "pinned_at = CASE WHEN project.forgotten_at IS NULL THEN project.pinned_at END"
+)
+"""A revival's SET for the arrangement (#140): a live row keeps its place, a tombstone
+comes back loose and unpinned (:meth:`SqliteStore.ensure_project` says why)."""
 
 _COLUMNS = "id, pool, project_id, text, tags, source, created_at, updated_at, deleted_at"
 _PROMPT_COLUMNS = "id, project_id, text, source, created_at"
@@ -658,7 +800,7 @@ _TASK_COLUMNS = (
 _EVENT_COLUMNS = "seq, id, project_id, session_id, kind, text, task_id, to_role, created_at"
 _FLEET_AGENT_COLUMNS = (
     "id, project_id, label, role, binary, tmux_socket, pane_id, session_id, cwd, worktree, "
-    "task_id, spawned_by, created_at, ended_at, exit_status, account_slot"
+    "task_id, spawned_by, created_at, ended_at, exit_status, account_slot, launch_spec"
 )
 _CLAUDE_ACCOUNT_COLUMNS = "slot, config_dir, alias, position, is_default, disabled, created_at"
 
@@ -688,7 +830,11 @@ class ContextStore(Protocol):
     def delete(self, entry_id: str) -> None: ...
     def promote(self, entry_id: str) -> ContextEntry: ...
     def ensure_project(self, project: ProjectInfo) -> None: ...
-    def list_projects(self, *, include_forgotten: bool = False) -> list[ProjectInfo]: ...
+    def onboard_project(self, project: ProjectInfo) -> ProjectInfo: ...
+    def list_projects(
+        self, *, all: bool = False, include_forgotten: bool = False
+    ) -> list[ProjectInfo]: ...
+    def captured_projects(self) -> list[ProjectInfo]: ...
     def get_project(self, project_id: str) -> ProjectInfo | None: ...
     def find_projects(self, term: str) -> list[ProjectInfo]: ...
     def add_linked_repo(self, project_id: str, repo: str) -> ProjectInfo: ...
@@ -716,6 +862,7 @@ class ContextStore(Protocol):
     def touch_session(
         self, session_id: str, *, cursor: int | None = None, state: str | None = None
     ) -> None: ...
+    def replace_session_state(self, session_id: str, expected: str, state: str) -> bool: ...
     def mark_attention(self, session_id: str) -> bool: ...
     def mark_limited(self, session_id: str, resets_at: datetime | None) -> None: ...
     def unmark_handover(self, session_id: str, state: str) -> None: ...
@@ -782,10 +929,49 @@ class ContextStore(Protocol):
     def get_fleet_agent(self, ref: str) -> FleetAgent | None: ...
     def fleet_agents(self, project_id: str, *, live_only: bool = False) -> list[FleetAgent]: ...
     def fleet_agent_for_session(self, project_id: str, session_id: str) -> FleetAgent | None: ...
+    def ui_state(self, key: str) -> str | None: ...
+    def set_ui_state(self, key: str, value: str | None) -> None: ...
+    def project_groups(self) -> list[ProjectGroup]: ...
+    def get_project_group(self, group_id: str) -> ProjectGroup | None: ...
+    def find_project_group(self, name: str) -> ProjectGroup | None: ...
+    def create_project_group(self, name: str, *, group_id: str | None = None) -> ProjectGroup: ...
+    def update_project_group(
+        self,
+        group_id: str,
+        *,
+        name: str | None = None,
+        position: int | None = None,
+        pinned_at: datetime | EllipsisType | None = ...,
+        collapsed: bool | None = None,
+    ) -> ProjectGroup: ...
+    def delete_project_group(self, group_id: str) -> list[str]: ...
+    def update_project_layout(
+        self,
+        project_id: str,
+        *,
+        group_id: str | EllipsisType | None = ...,
+        position: int | EllipsisType | None = ...,
+        pinned_at: datetime | EllipsisType | None = ...,
+    ) -> ProjectInfo: ...
+    def project_explainability(self, project_id: str) -> ProjectExplainability | None: ...
+    def project_explainability_all(self) -> list[ProjectExplainability]: ...
+    def set_project_explainability(
+        self, project_id: str, *, target: str, key_path: Path, set_by: str | None
+    ) -> ProjectExplainability: ...
+    def clear_project_explainability(self, project_id: str) -> bool: ...
+    # Where a project's traces land (v21, #142).
+    def project_destination(self, project_id: str) -> TraceDestination | None: ...
+    def project_destinations(self) -> list[TraceDestination]: ...
+    def set_project_destination(self, destination: TraceDestination) -> TraceDestination: ...
+    def set_project_destination_key(self, project_id: str, key_uid: str | None) -> None: ...
+    def clear_project_destination(self, project_id: str) -> bool: ...
     def fleet_agent_by_label(
         self, project_id: str, label: str, *, live_only: bool = True
     ) -> FleetAgent | None: ...
     def end_fleet_agent(self, agent_id: str, *, exit_status: int | None = None) -> FleetAgent: ...
+    def end_fleet_agent_if_live(
+        self, agent_id: str, *, exit_status: int | None = None
+    ) -> FleetAgent | None: ...
     # The Claude account registry (v15, #145): the arrangement of the slots.
     def claude_accounts(self) -> list[ClaudeAccountRecord]: ...
     def upsert_claude_account(self, slot: int, config_dir: Path) -> ClaudeAccountRecord: ...
@@ -827,11 +1013,27 @@ def _row_to_entry(row: sqlite3.Row) -> ContextEntry:
 
 
 def _row_to_project(row: sqlite3.Row) -> ProjectInfo:
+    onboarded = row["onboarded_at"]
     return ProjectInfo(
         id=row["id"],
         root=Path(row["root"]),
         linked_repos=json.loads(row["linked_repos"]),
         codename=row["codename"],
+        onboarded_at=datetime.fromisoformat(onboarded) if onboarded else None,
+        group_id=row["group_id"],
+        position=row["position"],
+        pinned_at=_maybe_dt(row["pinned_at"]),
+    )
+
+
+def _row_to_project_group(row: sqlite3.Row) -> ProjectGroup:
+    return ProjectGroup(
+        id=row["id"],
+        name=row["name"],
+        position=int(row["position"]),
+        pinned_at=_maybe_dt(row["pinned_at"]),
+        collapsed=bool(row["collapsed"]),
+        created_at=datetime.fromisoformat(row["created_at"]),
     )
 
 
@@ -853,7 +1055,45 @@ def _row_to_fleet_agent(row: sqlite3.Row) -> FleetAgent:
         ended_at=_maybe_dt(row["ended_at"]),
         exit_status=row["exit_status"],
         account_slot=row["account_slot"],
+        launch_spec=_launch_spec(row["launch_spec"]),
     )
+
+
+def _row_to_trace_destination(row: sqlite3.Row) -> TraceDestination:
+    return TraceDestination(
+        project_id=row["project_id"],
+        api_url=row["api_url"],
+        environment=row["environment"],
+        workspace_id=int(row["workspace_id"]),
+        workspace_uid=row["workspace_uid"],
+        workspace_name=row["workspace_name"],
+        studio_id=int(row["studio_id"]) if row["studio_id"] is not None else None,
+        studio_uid=row["studio_uid"],
+        studio_name=row["studio_name"],
+        key_uid=row["key_uid"],
+        set_at=datetime.fromisoformat(row["set_at"]),
+        set_by=row["set_by"],
+    )
+
+
+def _row_to_project_explainability(row: sqlite3.Row) -> ProjectExplainability:
+    return ProjectExplainability(
+        project_id=row["project_id"],
+        target=row["target"],
+        key_path=Path(row["key_path"]),
+        set_at=datetime.fromisoformat(row["set_at"]),
+        set_by=row["set_by"],
+    )
+
+
+def _launch_spec(raw: object) -> LaunchSpec | None:
+    """The recorded spec, or ``None`` for a row without one or with one that no longer parses."""
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        return LaunchSpec.model_validate_json(raw)
+    except ValueError:
+        return None
 
 
 def _row_to_claude_account(row: sqlite3.Row) -> ClaudeAccountRecord:
@@ -1161,17 +1401,40 @@ class SqliteStore:
         return promoted
 
     def ensure_project(self, project: ProjectInfo) -> None:
-        """Register the project, or revive a forgotten registration of the same root.
+        """CAPTURE the project: make sure a live row exists, and never list it.
 
-        Registering IS the revival: ``project forget`` hides a row rather than
-        deleting it (see v12), and the next thing that registers the root —
-        ``init``, a hook recording a prompt, ``context add --project`` — wants the
-        project visible again, with whatever history the row still carries.
+        This is what a hook recording a prompt and the MCP server's session
+        call — automatic registration, so prompt history and injection work in
+        every directory (#139). It never sets ``onboarded_at``, so a captured
+        directory stays off the list until something DELIBERATE registers it
+        (:meth:`onboard_project`).
+
+        It does clear ``forgotten_at``: the next prompt in a forgotten or
+        pruned directory brings the row back CAPTURED, which is what makes a
+        forget stick. A tombstone left in place would take every later prompt and
+        turn metric into a row no read can reach: ``log`` would say nothing had
+        been captured, and ``project list --all``, ``doctor``, ``prune
+        --captured-only`` and ``metrics show --project`` would never see the
+        directory again. Before #139 this revival also re-listed the project,
+        which is how ``project forget`` came undone on the next prompt.
+
+        The revival clears ``onboarded_at`` itself rather than trusting the
+        tombstone to carry none. ``forget`` clears it, but the first cut of the
+        v17 backfill had no ``forgotten_at`` guard and stamped forgotten rows
+        with history as onboarded, and stores already past v17 keep them. A
+        live row keeps its mark: the SET reads the row as it was before the
+        update. The same goes for its place in the arrangement (#140): a forget
+        clears the group, the position and the pin, but a tombstone written
+        before it did keeps all three, and revived as it was, the project came
+        back pinned and grouped at a number its scope had since given away
+        (review of #171, round 2).
         """
         self._conn.execute(
             "INSERT INTO project (id, root, name, linked_repos, created_at) "
             "VALUES (?, ?, ?, ?, ?) "
-            "ON CONFLICT (id) DO UPDATE SET forgotten_at = NULL",
+            "ON CONFLICT (id) DO UPDATE SET forgotten_at = NULL, onboarded_at = "
+            "CASE WHEN project.forgotten_at IS NULL THEN project.onboarded_at END, "
+            f"{_LAYOUT_KEPT_BY_A_LIVE_ROW}",
             (
                 project.id,
                 str(project.root),
@@ -1182,21 +1445,78 @@ class SqliteStore:
         )
         self._conn.commit()
 
-    def list_projects(self, *, include_forgotten: bool = False) -> list[ProjectInfo]:
-        """Every registration; ``include_forgotten`` also returns the tombstoned ones.
+    def onboard_project(self, project: ProjectInfo) -> ProjectInfo:
+        """Register the project ON PURPOSE: shown from now on, and revived if forgotten.
 
-        The default hides a forgotten registration, which is the promise
-        :func:`forget_project` makes. ``include_forgotten=True`` is for the one
+        ``init``, ``project onboard`` / ``link`` / ``switch``, the sidebar's
+        ``+``, ``team on``, a fleet spawn and a fact written by hand — the
+        actions that mean "this is one of my projects".
+        ``onboarded_at`` is set once and kept; ``forgotten_at`` is cleared, so
+        the row comes back with whatever history it still carries (see v14).
+        A revived row comes back loose and unpinned, as :meth:`ensure_project`
+        says; a live one keeps its place.
+        """
+        now = _now_iso()
+        self._conn.execute(
+            "INSERT INTO project (id, root, name, linked_repos, created_at, onboarded_at) "
+            "VALUES (?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT (id) DO UPDATE SET forgotten_at = NULL, "
+            "onboarded_at = COALESCE(project.onboarded_at, excluded.onboarded_at), "
+            f"{_LAYOUT_KEPT_BY_A_LIVE_ROW}",
+            (
+                project.id,
+                str(project.root),
+                project.root.name or str(project.root),
+                json.dumps(project.linked_repos),
+                now,
+                now,
+            ),
+        )
+        self._conn.commit()
+        stored = self.get_project(project.id)
+        assert stored is not None  # just written
+        return stored
+
+    def list_projects(
+        self, *, all: bool = False, include_forgotten: bool = False
+    ) -> list[ProjectInfo]:
+        """Onboarded projects by name; ``all`` adds captures, ``include_forgotten`` every row.
+
+        Two different questions. ``all`` is "every directory this machine has
+        seen", not just "my projects": the sidebar, ``project list`` and the
+        active-pin fallback read the default; machine-wide sweeps (reap,
+        doctor's row checks, the baseline, a shutdown's pause scan) pass
+        ``all=True`` because a captured directory can hold fleet rows, sessions
+        and a pause like any other. Forgotten rows stay out, which is the
+        promise :func:`forget_project` makes.
+
+        ``include_forgotten=True`` reads past that promise too, for the one
         question a tombstone must not hide: a forgotten project can still hold
         LIVE ``fleet_agent`` rows (``forget`` reads liveness and writes the
-        tombstone in separate statements, and ``ensure_project`` revives the row
-        on a concurrent ``fleet spawn``), and those agents' panes are real
-        processes. ``fleet shutdown`` asks this way so a tombstone cannot leave a
-        row live on a socket it just took down, with nothing able to reconcile it.
+        tombstone in separate statements, and a concurrent ``fleet spawn``
+        revives the row through :meth:`onboard_project`), and those agents'
+        panes are real processes. ``fleet shutdown`` asks this way so a
+        tombstone cannot leave a row live on a socket it just took down, with
+        nothing able to reconcile it. A forget clears ``onboarded_at``, so a
+        tombstone is never an onboarded row: this returns the captured rows as
+        well, and ``all`` adds nothing to it.
         """
-        clause = "" if include_forgotten else " WHERE forgotten_at IS NULL"
+        if include_forgotten:
+            clause = ""
+        elif all:
+            clause = " WHERE forgotten_at IS NULL"
+        else:
+            clause = " WHERE forgotten_at IS NULL AND onboarded_at IS NOT NULL"
         rows = self._conn.execute(
             f"SELECT {_PROJECT_COLUMNS} FROM project{clause} ORDER BY name"
+        ).fetchall()
+        return [_row_to_project(row) for row in rows]
+
+    def captured_projects(self) -> list[ProjectInfo]:
+        """The registrations a session made on its own that nothing has added on purpose."""
+        rows = self._conn.execute(
+            f"SELECT {_PROJECT_COLUMNS} FROM project "
+            "WHERE forgotten_at IS NULL AND onboarded_at IS NULL ORDER BY name"
         ).fetchall()
         return [_row_to_project(row) for row in rows]
 
@@ -1224,9 +1544,18 @@ class SqliteStore:
         should not cost history anyway. The context entries, prompt history,
         board rows, ended fleet-agent rows and turn metrics remain in the store,
         unreachable through any project read until the root is registered again.
+
+        Its place in the arrangement does not stay (#140): the group, the
+        position and the pin are cleared, and a project registered again comes
+        back loose and unpinned, like a new one. Kept, the next prompt there
+        revived a row that was still pinned and grouped, at a number its scope
+        had renumbered away while it was forgotten — two rows on one slot,
+        ordered by name (review of #171, round 1).
         """
         cursor = self._conn.execute(
-            "UPDATE project SET forgotten_at = ? WHERE id = ? AND forgotten_at IS NULL",
+            "UPDATE project SET forgotten_at = ?, onboarded_at = NULL, "
+            "group_id = NULL, position = NULL, pinned_at = NULL "
+            "WHERE id = ? AND forgotten_at IS NULL",
             (_now_iso(), project_id),
         )
         self._conn.commit()
@@ -1566,6 +1895,25 @@ class SqliteStore:
             (*params, session_id),
         )
         self._conn.commit()
+
+    def replace_session_state(self, session_id: str, expected: str, state: str) -> bool:
+        """Set ``state`` on a session whose state is still ``expected`` — and nothing else.
+
+        A compare-and-set for a writer that takes a state BACK: a hand-over that
+        did not happen returning its mark (``team.HANDOVER_STATE``) to what the
+        session said before. :meth:`touch_session` is a heartbeat — it bumps
+        ``last_seen_at`` and clears ``ended_at`` — and taking a mark back is no
+        evidence of life: a session whose ``SessionEnd`` had already run came back
+        to the board as a live teammate (review of #163, round 2). Nor is it
+        newer than a state written since the mark, which it leaves alone. Returns
+        whether the row changed.
+        """
+        cursor = self._conn.execute(
+            "UPDATE team_session SET state = ? WHERE id = ? AND state = ?",
+            (state, session_id, expected),
+        )
+        self._conn.commit()
+        return cursor.rowcount == 1
 
     def mark_attention(self, session_id: str) -> bool:
         """Flip a session into the attention state, atomically.
@@ -2228,12 +2576,12 @@ class SqliteStore:
         """
         self._conn.execute(
             f"INSERT INTO fleet_agent ({_FLEET_AGENT_COLUMNS}) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT (id) DO UPDATE SET "
             "pane_id = excluded.pane_id, session_id = excluded.session_id, "
             "cwd = excluded.cwd, worktree = excluded.worktree, task_id = excluded.task_id, "
             "ended_at = excluded.ended_at, exit_status = excluded.exit_status, "
-            "account_slot = excluded.account_slot",
+            "account_slot = excluded.account_slot, launch_spec = excluded.launch_spec",
             (
                 agent.id,
                 agent.project_id,
@@ -2251,12 +2599,291 @@ class SqliteStore:
                 agent.ended_at.isoformat() if agent.ended_at else None,
                 agent.exit_status,
                 agent.account_slot,
+                agent.launch_spec.model_dump_json() if agent.launch_spec is not None else None,
             ),
         )
         self._conn.commit()
         stored = self.get_fleet_agent(agent.id)
         assert stored is not None  # just written
         return stored
+
+    # --- project groups, pins and order (#140) ------------------------------------------
+
+    def project_groups(self) -> list[ProjectGroup]:
+        rows = self._conn.execute(
+            f"SELECT {_GROUP_COLUMNS} FROM project_group ORDER BY position, name"
+        ).fetchall()
+        return [_row_to_project_group(row) for row in rows]
+
+    def get_project_group(self, group_id: str) -> ProjectGroup | None:
+        row = self._conn.execute(
+            f"SELECT {_GROUP_COLUMNS} FROM project_group WHERE id = ?", (group_id,)
+        ).fetchone()
+        return _row_to_project_group(row) if row is not None else None
+
+    def find_project_group(self, name: str) -> ProjectGroup | None:
+        """By exact name, then case-insensitively — names are unique either way."""
+        row = self._conn.execute(
+            f"SELECT {_GROUP_COLUMNS} FROM project_group WHERE name = ? "
+            "OR lower(name) = lower(?) ORDER BY name = ? DESC LIMIT 1",
+            (name, name, name),
+        ).fetchone()
+        return _row_to_project_group(row) if row is not None else None
+
+    def create_project_group(self, name: str, *, group_id: str | None = None) -> ProjectGroup:
+        """A new group at the END of the top level; a duplicate name raises ``ValueError``.
+
+        ``group_id`` lets an undo re-create a deleted group under the id its
+        members' rows were restored with.
+        """
+        if self.find_project_group(name) is not None:
+            raise ValueError(f"a group named {name!r} already exists")
+        last = self._conn.execute("SELECT MAX(position) FROM project_group").fetchone()[0]
+        position = int(last) + 1 if last is not None else 0
+        new_id = group_id or f"grp_{uuid.uuid4().hex[:24]}"
+        try:
+            self._conn.execute(
+                f"INSERT INTO project_group ({_GROUP_COLUMNS}) VALUES (?, ?, ?, NULL, 0, ?)",
+                (new_id, name, position, _now_iso()),
+            )
+        except sqlite3.IntegrityError as exc:
+            raise ValueError(f"a group named {name!r} already exists") from exc
+        self._conn.commit()
+        created = self.get_project_group(new_id)
+        assert created is not None
+        return created
+
+    def update_project_group(
+        self,
+        group_id: str,
+        *,
+        name: str | None = None,
+        position: int | None = None,
+        pinned_at: datetime | EllipsisType | None = ...,
+        collapsed: bool | None = None,
+    ) -> ProjectGroup:
+        """Change the given fields; ``...`` for ``pinned_at`` means "leave it" (``None`` unpins)."""
+        sets: list[str] = []
+        params: list[object] = []
+        if name is not None:
+            taken = self.find_project_group(name)
+            if taken is not None and taken.id != group_id:
+                raise ValueError(f"a group named {name!r} already exists")
+            sets.append("name = ?")
+            params.append(name)
+        if position is not None:
+            sets.append("position = ?")
+            params.append(int(position))
+        if pinned_at is not ...:
+            sets.append("pinned_at = ?")
+            params.append(pinned_at.isoformat() if pinned_at is not None else None)
+        if collapsed is not None:
+            sets.append("collapsed = ?")
+            params.append(int(collapsed))
+        if sets:
+            try:
+                cursor = self._conn.execute(
+                    f"UPDATE project_group SET {', '.join(sets)} WHERE id = ?",
+                    (*params, group_id),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise ValueError(f"a group named {name!r} already exists") from exc
+            self._conn.commit()
+            if cursor.rowcount != 1:
+                raise KeyError(group_id)
+        updated = self.get_project_group(group_id)
+        if updated is None:
+            raise KeyError(group_id)
+        return updated
+
+    def delete_project_group(self, group_id: str) -> list[str]:
+        """Delete the group; its members are ungrouped (never deleted). Returns their ids."""
+        members = [
+            str(row["id"])
+            for row in self._conn.execute(
+                "SELECT id FROM project WHERE group_id = ?", (group_id,)
+            ).fetchall()
+        ]
+        self._conn.execute(
+            "UPDATE project SET group_id = NULL, position = NULL WHERE group_id = ?", (group_id,)
+        )
+        cursor = self._conn.execute("DELETE FROM project_group WHERE id = ?", (group_id,))
+        self._conn.commit()
+        if cursor.rowcount != 1:
+            raise KeyError(group_id)
+        return members
+
+    def update_project_layout(
+        self,
+        project_id: str,
+        *,
+        group_id: str | EllipsisType | None = ...,
+        position: int | EllipsisType | None = ...,
+        pinned_at: datetime | EllipsisType | None = ...,
+    ) -> ProjectInfo:
+        """Change where a project sits — group, position, pin; ``...`` leaves a field alone.
+
+        A forgotten project has no place to change: it is a ``KeyError``, as an
+        unknown one is. A gesture from a stale frame — the sidebar between two
+        refreshes, a drag, the group picker left open — while a shell ran
+        ``project forget`` was written onto the tombstone, and the revival
+        brought the project back pinned or grouped (review of #171, round 2).
+        """
+        sets: list[str] = []
+        params: list[object] = []
+        if group_id is not ...:
+            sets.append("group_id = ?")
+            params.append(group_id)
+        if position is not ...:
+            sets.append("position = ?")
+            params.append(int(position) if position is not None else None)
+        if pinned_at is not ...:
+            sets.append("pinned_at = ?")
+            params.append(pinned_at.isoformat() if pinned_at is not None else None)
+        if sets:
+            cursor = self._conn.execute(
+                f"UPDATE project SET {', '.join(sets)} WHERE id = ? AND forgotten_at IS NULL",
+                (*params, project_id),
+            )
+            self._conn.commit()
+            if cursor.rowcount != 1:
+                raise KeyError(project_id)
+        updated = self._conn.execute(
+            f"SELECT {_PROJECT_COLUMNS} FROM project WHERE id = ? AND forgotten_at IS NULL",
+            (project_id,),
+        ).fetchone()
+        if updated is None:
+            raise KeyError(project_id)
+        return _row_to_project(updated)
+
+    # --- a project's explainability key (#141) -----------------------------------------
+
+    def project_explainability(self, project_id: str) -> ProjectExplainability | None:
+        row = self._conn.execute(
+            "SELECT project_id, target, key_path, set_at, set_by FROM project_explainability "
+            "WHERE project_id = ?",
+            (project_id,),
+        ).fetchone()
+        return _row_to_project_explainability(row) if row is not None else None
+
+    def project_explainability_all(self) -> list[ProjectExplainability]:
+        rows = self._conn.execute(
+            "SELECT project_id, target, key_path, set_at, set_by FROM project_explainability "
+            "ORDER BY project_id"
+        ).fetchall()
+        return [_row_to_project_explainability(row) for row in rows]
+
+    def set_project_explainability(
+        self, project_id: str, *, target: str, key_path: Path, set_by: str | None
+    ) -> ProjectExplainability:
+        """Attach (or re-point) the project's key: one row per project, the newest wins."""
+        self._conn.execute(
+            "INSERT INTO project_explainability (project_id, target, key_path, set_at, set_by) "
+            "VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT (project_id) DO UPDATE SET target = excluded.target, "
+            "key_path = excluded.key_path, set_at = excluded.set_at, set_by = excluded.set_by",
+            (project_id, target, str(key_path), _now_iso(), set_by),
+        )
+        self._conn.commit()
+        stored = self.project_explainability(project_id)
+        assert stored is not None  # just written
+        return stored
+
+    def clear_project_explainability(self, project_id: str) -> bool:
+        """Detach the project's key; ``False`` when there was none."""
+        cursor = self._conn.execute(
+            "DELETE FROM project_explainability WHERE project_id = ?", (project_id,)
+        )
+        self._conn.commit()
+        return cursor.rowcount > 0
+
+    # --- where a project's traces land (#142) -------------------------------------------
+
+    def project_destination(self, project_id: str) -> TraceDestination | None:
+        row = self._conn.execute(
+            f"SELECT {_DESTINATION_COLUMNS} FROM project_destination WHERE project_id = ?",
+            (project_id,),
+        ).fetchone()
+        return _row_to_trace_destination(row) if row is not None else None
+
+    def project_destinations(self) -> list[TraceDestination]:
+        rows = self._conn.execute(
+            f"SELECT {_DESTINATION_COLUMNS} FROM project_destination ORDER BY project_id"
+        ).fetchall()
+        return [_row_to_trace_destination(row) for row in rows]
+
+    def set_project_destination(self, destination: TraceDestination) -> TraceDestination:
+        """Record (or re-point) where the project's traces land: one row per project.
+
+        ``set_at`` is stamped here, not trusted from the caller, so the row says
+        when the choice was made on THIS machine. A re-point keeps ``key_uid``
+        only when the caller carries it over — a destination in another
+        workspace is not served by a key minted for the old one.
+        """
+        self._conn.execute(
+            f"INSERT INTO project_destination ({_DESTINATION_COLUMNS}) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT (project_id) DO UPDATE SET api_url = excluded.api_url, "
+            "environment = excluded.environment, workspace_id = excluded.workspace_id, "
+            "workspace_uid = excluded.workspace_uid, workspace_name = excluded.workspace_name, "
+            "studio_id = excluded.studio_id, studio_uid = excluded.studio_uid, "
+            "studio_name = excluded.studio_name, key_uid = excluded.key_uid, "
+            "set_at = excluded.set_at, set_by = excluded.set_by",
+            (
+                destination.project_id,
+                destination.api_url,
+                destination.environment,
+                destination.workspace_id,
+                destination.workspace_uid,
+                destination.workspace_name,
+                destination.studio_id,
+                destination.studio_uid,
+                destination.studio_name,
+                destination.key_uid,
+                _now_iso(),
+                destination.set_by,
+            ),
+        )
+        self._conn.commit()
+        stored = self.project_destination(destination.project_id)
+        assert stored is not None  # just written
+        return stored
+
+    def set_project_destination_key(self, project_id: str, key_uid: str | None) -> None:
+        """Remember (or forget) the ingest key the CLI minted for this destination."""
+        self._conn.execute(
+            "UPDATE project_destination SET key_uid = ? WHERE project_id = ?",
+            (key_uid, project_id),
+        )
+        self._conn.commit()
+
+    def clear_project_destination(self, project_id: str) -> bool:
+        """Forget where the project's traces land; ``False`` when nothing was recorded."""
+        cursor = self._conn.execute(
+            "DELETE FROM project_destination WHERE project_id = ?", (project_id,)
+        )
+        self._conn.commit()
+        return cursor.rowcount > 0
+
+    # --- UI state (#144) ---------------------------------------------------------------
+
+    def ui_state(self, key: str) -> str | None:
+        """The remembered UI fact under ``key``, or ``None``."""
+        row = self._conn.execute("SELECT value FROM ui_state WHERE key = ?", (key,)).fetchone()
+        return str(row["value"]) if row is not None else None
+
+    def set_ui_state(self, key: str, value: str | None) -> None:
+        """Remember ``value`` under ``key``; ``None`` forgets it. Every change is the save."""
+        if value is None:
+            self._conn.execute("DELETE FROM ui_state WHERE key = ?", (key,))
+        else:
+            self._conn.execute(
+                "INSERT INTO ui_state (key, value, updated_at) VALUES (?, ?, ?) "
+                "ON CONFLICT (key) DO UPDATE SET value = excluded.value, "
+                "updated_at = excluded.updated_at",
+                (key, value, _now_iso()),
+            )
+        self._conn.commit()
 
     def get_fleet_agent(self, ref: str) -> FleetAgent | None:
         """A fleet agent by id or unambiguous id prefix (git-style)."""
@@ -2378,16 +3005,32 @@ class SqliteStore:
 
     def end_fleet_agent(self, agent_id: str, *, exit_status: int | None = None) -> FleetAgent:
         """Mark an agent ended (idempotent: an already-ended row keeps its first end)."""
-        self._conn.execute(
+        self.end_fleet_agent_if_live(agent_id, exit_status=exit_status)
+        agent = self.get_fleet_agent(agent_id)
+        if agent is None:
+            raise KeyError(agent_id)
+        return agent
+
+    def end_fleet_agent_if_live(
+        self, agent_id: str, *, exit_status: int | None = None
+    ) -> FleetAgent | None:
+        """End a LIVE agent's row and return it; ``None`` when it was already ended.
+
+        The UPDATE is a compare-and-set on ``ended_at IS NULL``, for a caller that
+        announces the end: every fleet read records a dead pane (#138), so two
+        readers routinely see one death, and only the one whose write ended the
+        row may post ``agent_exited``. A re-read before the write left a statement
+        for the other to land in (review of #138).
+        """
+        cursor = self._conn.execute(
             "UPDATE fleet_agent SET ended_at = ?, exit_status = ? "
             "WHERE id = ? AND ended_at IS NULL",
             (_now_iso(), exit_status, agent_id),
         )
         self._conn.commit()
-        agent = self.get_fleet_agent(agent_id)
-        if agent is None:
-            raise KeyError(agent_id)
-        return agent
+        if cursor.rowcount == 0:
+            return None
+        return self.get_fleet_agent(agent_id)
 
     # --- the Claude account registry (v15, #145) --------------------------------------------
     #
@@ -2806,6 +3449,9 @@ def _migrate(connection: sqlite3.Connection) -> None:
                 prepare(connection)
             for statement in _statements(_MIGRATIONS[version]):
                 connection.execute(statement)
+            finish = _FINISH.get(version)
+            if finish is not None:
+                finish(connection)
             connection.execute(f"PRAGMA user_version = {version + 1}")
             connection.execute("COMMIT")
         except sqlite3.Error:

@@ -47,6 +47,16 @@ from textual.worker import Worker, WorkerState
 
 from aisquare.cli.ui.autosave import Autosave
 from aisquare.cli.ui.divider import Divider, floor_of
+from aisquare.cli.ui.groups import (
+    DropGroup,
+    DropProject,
+    GroupPicker,
+    GroupProjects,
+    MoveRow,
+    ToggleCollapse,
+    TogglePin,
+    UndoLayout,
+)
 from aisquare.cli.ui.sidebar import (
     AccountsSelected,
     AddProject,
@@ -61,13 +71,13 @@ from aisquare.cli.ui.sidebar import (
 from aisquare.cli.ui.terminal import EscapeToSidebar, SelectionHost, TerminalPane
 from aisquare.cli.ui.theme import ThemePicker, restore_theme, theme_autosave
 from aisquare.cli.ui.views.accounts import AccountsChanged, AccountsView, read_session, summarise
-from aisquare.cli.ui.views.agent import AgentView
+from aisquare.cli.ui.views.agent import AgentRestarted, AgentView
 from aisquare.cli.ui.views.doctor import DoctorRefreshed, DoctorView
 from aisquare.cli.ui.views.onboard import OnboardFailed, OnboardView, ProjectOnboarded
 from aisquare.cli.ui.views.project import ProjectView
 from aisquare.cli.ui.views.welcome import WelcomeView
 from aisquare.core.console import stderr_console
-from aisquare.core.store import store_session
+from aisquare.core.store import ContextStore, store_session
 from aisquare.models import (
     AccountsOverview,
     CheckStatus,
@@ -76,7 +86,7 @@ from aisquare.models import (
     ProjectInfo,
 )
 from aisquare.services import claude_accounts as accounts_service
-from aisquare.services import diagnostics
+from aisquare.services import diagnostics, project_groups
 from aisquare.services import fleet as fleet_service
 
 DoctorRunner = Callable[[], list[DoctorCheck]]
@@ -110,6 +120,33 @@ def _doctor_report(result: object) -> _DoctorReport | None:
         if (scope is None or isinstance(scope, Path)) and isinstance(checks, list):
             return scope, list(checks)
     return None
+
+
+UNDO_DEPTH = 50
+"""How many layout gestures ``u`` can walk back in one session (#140)."""
+
+SELECTED_KEY = "fleet.selected"
+"""``ui_state`` key for what is open: ``project:<id>``, ``agent:<project>/<id>``,
+``accounts`` or ``doctor:<project or ''>`` (#144)."""
+SHOW_CAPTURED_KEY = "fleet.show_captured"
+
+
+def _ui_state(key: str) -> str | None:
+    """A remembered UI fact — ``None`` when there is none or the store cannot say."""
+    try:
+        with store_session() as store:
+            return store.ui_state(key)
+    except Exception:
+        return None
+
+
+def _remember_ui_state(key: str, value: str | None) -> None:
+    """Every change is the save; a store that will not take it costs the memory, never the UI."""
+    try:
+        with store_session() as store:
+            store.set_ui_state(key, value)
+    except Exception:
+        return
 
 
 @dataclass(frozen=True)
@@ -155,6 +192,12 @@ class HelpScreen(ModalScreen[None]):
         for key, what in (
             ("click", "select a project, an agent, Accounts, Doctor; + onboards a project"),
             ("↑ ↓ Enter", "move over the sidebar and open the row under the cursor"),
+            # Arranging the sidebar (#140): every one of these has a CLI twin.
+            ("shift+↑ ↓", "move the row under the cursor one place"),
+            ("g p space", "group · pin · fold the row under the cursor"),
+            ("u", "undo the last arrangement; a toast says what"),
+            ("shift+click", "mark cards — shift+g groups them, Esc clears"),
+            ("drag title", "move a card or a group header to a new place"),
             (self.escape_key.upper(), "hand focus from an agent's pane back to the sidebar"),
             ("wheel", "scroll an agent pane; shift/alt+PgUp/PgDn too, shift+Home/End"),
             ("drag", "select text in a pane (double-click: a word) — copied on release"),
@@ -162,10 +205,11 @@ class HelpScreen(ModalScreen[None]):
             ("> < =", "from the sidebar: widen, narrow, reset the divider"),
             ("t", "themes (applied live, autosaved)"),
             ("r", "refresh now"),
+            ("a", "show or hide the captured directories (never added)"),
             ("F1", "command palette"),
             ("q", "quit — from the sidebar; inside a pane every key goes to the agent"),
         ):
-            text.append(f"  {key:<10}", style="bold cyan")
+            text.append(f"  {key:<11}", style="bold cyan")
             text.append(f" {what}\n")
         text.append("\nEsc closes this", style="dim")
         with Vertical(id="helpbox"):
@@ -280,10 +324,19 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         Binding("ctrl+q", "quit", "quit", show=False),
         Binding("t", "pick_theme", "theme"),
         Binding("r", "refresh_now", "refresh"),
+        Binding("a", "toggle_captured", "captured", show=False),
         Binding("question_mark", "help", "help", key_display="?"),
     ]
     SIDEBAR_ACTIONS: ClassVar[frozenset[str]] = frozenset(
-        {"quit", "pick_theme", "refresh_now", "help", "command_palette", "change_theme"}
+        {
+            "quit",
+            "pick_theme",
+            "refresh_now",
+            "help",
+            "command_palette",
+            "change_theme",
+            "toggle_captured",
+        }
     )
     """Actions that are live only while focus is in the sidebar (§4.3)."""
 
@@ -316,6 +369,10 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         self.unsaved: list[str] = []
         """What the quit-time flush could not land (a preference each), for ``run_ui`` to say
         once the screen is gone."""
+        self.show_captured = False
+        """Whether the sidebar also lists the directories sessions merely ran in (#139)."""
+        self._undo: list[project_groups.UndoEntry] = []
+        """The layout gestures of this session, newest last; ``u`` reverts the last (#140)."""
 
     # --- layout -------------------------------------------------------------------
 
@@ -336,9 +393,48 @@ class FleetApp(SelectionHost, inherit_bindings=False):
     def on_mount(self) -> None:
         restore_theme(self)
         self._theme_restored = True
+        self.show_captured = _ui_state(SHOW_CAPTURED_KEY) == "1"
         self.refresh_data()
         self.set_interval(self.refresh_seconds, self.refresh_data)
         self.run_doctor()
+        self._restore_selection()
+
+    # --- what was open (#144) ---------------------------------------------------------
+
+    def _restore_selection(self) -> None:
+        """Reopen the view that was open when the UI last ran, if its row is still there.
+
+        Read from the store's ``ui_state`` (v18), never from a file the UI
+        keeps for itself: the theme stays in ``state.json`` because the board
+        shares it. A remembered agent whose row has left the frame falls back
+        to its project; a project that is gone falls back to the welcome view,
+        and the memory is dropped rather than retried every launch.
+        """
+        remembered = _ui_state(SELECTED_KEY)
+        if not remembered or self.snapshot is None:
+            return
+        kind, _, ident = remembered.partition(":")
+        if kind == "agent":
+            project_id, _, agent_id = ident.partition("/")
+            if self.snapshot.agent(project_id, agent_id) is not None:
+                self.post_message(AgentSelected(project_id, agent_id))
+                return
+            if self.snapshot.project(project_id) is not None:
+                self.post_message(ProjectSelected(project_id))
+                return
+        elif kind == "project" and self.snapshot.project(ident) is not None:
+            self.post_message(ProjectSelected(ident))
+            return
+        elif kind == "accounts":
+            self.post_message(AccountsSelected())
+            return
+        elif kind == "doctor":
+            self.post_message(DoctorSelected(ident or None))
+            return
+        _remember_ui_state(SELECTED_KEY, None)
+
+    def _remember_selection(self, value: str | None) -> None:
+        _remember_ui_state(SELECTED_KEY, value)
 
     @property
     def sidebar(self) -> Sidebar:
@@ -409,6 +505,22 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         self.refresh_data()
         self.run_doctor()
 
+    def action_toggle_captured(self) -> None:
+        """Show, or hide again, the captured directories the sidebar leaves out (#139).
+
+        Only the project list changes, so only the store is re-read: the doctor's
+        findings do not depend on which cards are shown, and ``r`` re-runs it.
+        """
+        self.show_captured = not self.show_captured
+        _remember_ui_state(SHOW_CAPTURED_KEY, "1" if self.show_captured else None)
+        self.refresh_data()
+        self.notify(
+            "showing captured directories too — `a` hides them again"
+            if self.show_captured
+            else "captured directories hidden — `a` shows them",
+            timeout=4,
+        )
+
     # --- data ---------------------------------------------------------------------------
 
     def refresh_data(self) -> None:
@@ -416,7 +528,8 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         sidebar = self.sidebar
         try:
             with store_session() as store:
-                projects = store.list_projects()
+                projects = store.list_projects(all=self.show_captured)
+                groups = store.project_groups()
         except Exception as exc:  # the store is briefly unavailable — keep what is shown
             self.store_error = f"{type(exc).__name__}: {exc}"
             if self.snapshot is None:
@@ -442,7 +555,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         self.store_error = None
         self.snapshot = FleetSnapshot(projects, agents, notices)
         sidebar.show_notice(None)
-        sidebar.show_projects(projects, agents, notices=notices)
+        sidebar.show_projects(projects, agents, notices=notices, groups=groups)
         self._feed_open_views(self.snapshot)
         self.refresh_accounts()
 
@@ -665,6 +778,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         await self._show(view_id, lambda: ProjectView(project, id=view_id))
         self.sidebar.select(f"project:{project.id}")
         self._set_doctor_scope(project.id)
+        self._remember_selection(f"project:{project.id}")
 
     async def on_agent_selected(self, event: AgentSelected) -> None:
         status = self.snapshot.agent(event.project_id, event.agent_id) if self.snapshot else None
@@ -675,6 +789,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         await self._show(view_id, lambda: AgentView(status, id=view_id))
         self.sidebar.select(f"agent:{status.agent.id}")
         self._set_doctor_scope(event.project_id)
+        self._remember_selection(f"agent:{event.project_id}/{status.agent.id}")
         self._focus_pane(view_id)
 
     def _focus_pane(self, view_id: str) -> None:
@@ -694,6 +809,147 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         if isinstance(pane, TerminalPane):
             self.call_after_refresh(pane.focus)
 
+    async def on_agent_restarted(self, event: AgentRestarted) -> None:
+        """A restart minted a new row (#138): show it where the old one was.
+
+        The view that posted this refreshed the frame first, so the row is
+        normally in the snapshot already; one more read covers a store that
+        was briefly busy. A row still missing is reported, not invented — the
+        next tick lists it.
+        """
+        started = event.agent
+        status = self.snapshot.agent(started.project_id, started.id) if self.snapshot else None
+        if status is None:
+            self.refresh_data()
+            status = self.snapshot.agent(started.project_id, started.id) if self.snapshot else None
+        if status is None:
+            self.notify(
+                f"{started.label} restarted — its row appears on the next refresh",
+                timeout=5,
+                markup=False,
+            )
+            return
+        view_id = f"agent-{status.agent.id}"
+        await self._show(view_id, lambda: AgentView(status, id=view_id))
+        self.sidebar.select(f"agent:{status.agent.id}")
+        self._set_doctor_scope(started.project_id)
+        self._remember_selection(f"agent:{started.project_id}/{status.agent.id}")
+
+    # --- groups, pins and order (#140) -------------------------------------------------
+
+    def _layout(self, what: Callable[[ContextStore], project_groups.UndoEntry], said: str) -> None:
+        """Apply one gesture through the service, remember its way back, repaint, say so."""
+        try:
+            with store_session() as store:
+                entry = what(store)
+        except KeyError as exc:
+            self.notify(f"nothing to do: {exc.args[0]!r} is gone", severity="warning", timeout=4)
+            return
+        except ValueError as exc:
+            self.notify(str(exc), severity="error", timeout=6, markup=False)
+            return
+        except Exception as exc:  # the store said no: the frame stands, the gesture is lost
+            self.notify(f"could not {said}: {exc}", severity="error", timeout=6, markup=False)
+            return
+        if entry.projects or entry.groups:
+            # A gesture that touched no row ("nothing to move": a step at an end,
+            # a pinned row) is no step back — `u` would undo nothing and say it did.
+            self._undo.append(entry)
+            del self._undo[:-UNDO_DEPTH]
+        self.refresh_data()
+
+    def on_move_row(self, event: MoveRow) -> None:
+        if event.kind == "group":
+            self._layout(lambda s: project_groups.step_group(s, event.ident, event.delta), "move")
+        else:
+            # One step is one row ON SCREEN: the captured rows count only while `a` shows them.
+            shown = self.show_captured
+            self._layout(
+                lambda s: project_groups.step(s, event.ident, event.delta, all=shown), "move"
+            )
+
+    def on_toggle_pin(self, event: TogglePin) -> None:
+        def flip(store: ContextStore) -> project_groups.UndoEntry:
+            if event.kind == "group":
+                group = store.get_project_group(event.ident)
+                if group is None:
+                    raise KeyError(event.ident)
+                return project_groups.pin_group(store, event.ident, group.pinned_at is None)
+            project = store.update_project_layout(event.ident)
+            return project_groups.pin(store, event.ident, project.pinned_at is None)
+
+        self._layout(flip, "pin")
+
+    def on_toggle_collapse(self, event: ToggleCollapse) -> None:
+        def fold(store: ContextStore) -> project_groups.UndoEntry:
+            group = store.get_project_group(event.group_id)
+            if group is None:
+                raise KeyError(event.group_id)
+            return project_groups.set_collapsed(store, event.group_id, not group.collapsed)
+
+        self._layout(fold, "fold")
+
+    def on_drop_project(self, event: DropProject) -> None:
+        ids = list(event.project_ids)
+
+        def drop(store: ContextStore) -> project_groups.UndoEntry:
+            entry = project_groups.UndoEntry(f"move {len(ids)} project(s)")
+            before = event.before
+            for project_id in ids:
+                part = project_groups.move_project(
+                    store, project_id, to=event.scope or project_groups.TOP, before=before
+                )
+                for pid, layout in part.projects.items():
+                    entry.projects.setdefault(pid, layout)
+            return entry
+
+        self._layout(drop, "move")
+        self.sidebar.action_clear_marks()
+
+    def on_drop_group(self, event: DropGroup) -> None:
+        self._layout(
+            lambda s: project_groups.move_group(s, event.group_id, before=event.before), "move"
+        )
+
+    def on_group_projects(self, event: GroupProjects) -> None:
+        """``g`` / ``shift+g``: the picker, then the move it chose."""
+        ids = list(event.project_ids)
+        try:
+            with store_session() as store:
+                groups = [g for g in store.project_groups()]
+        except Exception as exc:
+            self.notify(f"could not read the groups: {exc}", severity="error", markup=False)
+            return
+
+        def chosen(choice: str | None) -> None:
+            if choice is None:
+                return
+            if choice == "ungroup":
+                self._layout(lambda s: project_groups.remove_from_group(s, ids), "ungroup")
+            elif choice.startswith("new:"):
+                name = choice[4:]
+                self._layout(lambda s: project_groups.create_group(s, name, ids)[1], "group")
+            elif choice.startswith("group:"):
+                gid = choice[6:]
+                self._layout(lambda s: project_groups.add_to_group(s, gid, ids), "group")
+            self.sidebar.action_clear_marks()
+
+        self.push_screen(GroupPicker(groups, len(ids)), chosen)
+
+    def on_undo_layout(self, event: UndoLayout) -> None:
+        if not self._undo:
+            self.notify("nothing to undo", timeout=3)
+            return
+        entry = self._undo.pop()
+        try:
+            with store_session() as store:
+                done = project_groups.undo(store, entry)
+        except Exception as exc:
+            self.notify(f"could not undo: {exc}", severity="error", markup=False)
+            return
+        self.refresh_data()
+        self.notify(f"undid: {done}", timeout=4, markup=False)
+
     def on_spawn_agent(self, event: SpawnAgent) -> None:
         # The Spawn dialog is Phase 7 (§9); until it lands the CLI is the way.
         self.notify(
@@ -706,6 +962,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             "accounts", lambda: AccountsView(escape_key=self.escape_key, id="accounts")
         )
         self.sidebar.select("accounts")
+        self._remember_selection("accounts")
         if self.accounts_overview is not None:
             self.query_one("#accounts", AccountsView).show(self.accounts_overview)
 
@@ -717,6 +974,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         await self._show("doctor")
         self.sidebar.select("doctor")
         self.doctor_scope = event.project_id
+        self._remember_selection(f"doctor:{event.project_id or ''}")
         self.run_doctor()
 
     async def on_project_onboarded(self, event: ProjectOnboarded) -> None:

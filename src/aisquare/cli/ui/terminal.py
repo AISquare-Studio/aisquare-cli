@@ -99,7 +99,8 @@ A failed ``resize-window`` fails open the same way but is RETRIED, on a
 widening backoff (:attr:`TerminalPane.RESIZE_RETRY` doubling to
 :attr:`TerminalPane.RESIZE_RETRY_MAX`): its only other caller is a ``Resize``
 event, so one transient failure used to leave the tmux window at its spawn
-geometry (``spawn_window`` defaults to 200x50) for the life of the view while
+geometry (``spawn_window`` defaults to 120x40, ``core.tmux.DEFAULT_WINDOW_WIDTH``/
+``HEIGHT`` — #149) for the life of the view while
 captures kept succeeding — the widget then shows the bottom ``height`` rows of
 that screen with every row truncated to its width, so wrapped output is cut
 mid-line and the cursor sits off screen. What the retry costs is one tmux

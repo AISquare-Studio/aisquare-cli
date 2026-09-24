@@ -95,7 +95,7 @@ def initialize(
 
     project = current_project(path)
     with store_session() as store:
-        store.ensure_project(project)
+        store.onboard_project(project)  # init is the deliberate add (#139)
 
     notes: list[str] = []
     if discarded:

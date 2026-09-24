@@ -18,15 +18,16 @@ from collections.abc import Mapping
 from rich.text import Text
 from textual import on
 from textual.app import ComposeResult
-from textual.containers import Vertical
-from textual.widgets import Static
+from textual.containers import Horizontal, Vertical
+from textual.message import Message
+from textual.widgets import Button, Static
 from textual.worker import Worker, WorkerState
 
 from aisquare.cli import fleet as fleet_cli
 from aisquare.cli.ui.sidebar import ROLE_ICON, STATE_CHIP
 from aisquare.cli.ui.terminal import TerminalPane
 from aisquare.core.tmux import TmuxServer
-from aisquare.models import FleetAgentStatus
+from aisquare.models import FleetAgent, FleetAgentStatus
 from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import fleet as fleet_service
 from aisquare.services import team as team_service
@@ -85,11 +86,33 @@ def header_text(status: FleetAgentStatus, labels: Mapping[int, str] | None = Non
     return text
 
 
+STOP_WORKER = "agent-stop"
+RESTART_WORKER = "agent-restart"
+#: States in which there is a process to stop; anything else is a row to restart.
+_STOPPABLE: frozenset[str] = frozenset({"working", "waiting", "attention", "limited", "unknown"})
+#: Where **Stop** is offered: a process to stop, or an exited agent's dead window —
+#: `remain-on-exit` keeps it for the last screen, and Stop on the 💤 row removes it,
+#: which takes the row off the listing (``fleet stop`` on an ended row). Without it a
+#: 💤 row whose restart is refused (a coder whose task is done) could not be cleared.
+_SHOWS_STOP: frozenset[str] = _STOPPABLE | {"exited"}
+
+
 class AgentView(Vertical):
-    """One agent: who it is, then the live session."""
+    """One agent: who it is, the two actions that change it, then the live session.
+
+    **Stop** and **Restart** (#138) are the actions §4.2 promised and this view
+    never had: a manager ended with ctrl+c inside its window showed 💤 forever
+    with nothing to click, and ``fleet spawn manager`` refused until a hand-run
+    ``reap``. Both run the service off the UI thread; the shell's next frame is
+    what repaints, never an optimistic guess. A restart resumes the agent's own
+    session when its transcript is on disk, so the manager comes back knowing
+    its intake and its coders; the view then selects the new row.
+    """
 
     DEFAULT_CSS = """
-    AgentView #agent-header { height: 1; padding: 0 1; }
+    AgentView #agent-bar { height: 1; }
+    AgentView #agent-header { width: 1fr; height: 1; padding: 0 1; }
+    AgentView #agent-bar Button { min-width: 9; margin: 0 1 0 0; }
     AgentView #agent-pane { height: 1fr; }
     """
 
@@ -144,7 +167,10 @@ class AgentView(Vertical):
                 )
 
     def compose(self) -> ComposeResult:
-        yield Static(header_text(self.status, self._labels), id="agent-header")
+        with Horizontal(id="agent-bar"):
+            yield Static(header_text(self.status, self._labels), id="agent-header")
+            yield Button("Stop", id="agent-stop", compact=True)
+            yield Button("Restart", id="agent-restart", compact=True, variant="primary")
         yield TerminalPane(
             self.status.agent.pane_id,
             server=self.server,
@@ -153,6 +179,7 @@ class AgentView(Vertical):
         )
 
     def on_mount(self) -> None:
+        self._paint_actions()
         self._refresh_labels()
 
     @property
@@ -166,6 +193,123 @@ class AgentView(Vertical):
         if not self.is_mounted:
             return
         self.query_one("#agent-header", Static).update(header_text(status, self._labels))
+        self._paint_actions()
         self._refresh_labels()
         if status.agent.pane_id != previous.agent.pane_id:
             self.pane.attach(status.agent.pane_id)
+
+    def _paint_actions(self) -> None:
+        """Stop while there is a process or a dead window; Restart always (an exited row is
+        exactly its case).
+
+        Greyed while THIS view's own stop or restart runs, and only then: ``self.workers``
+        is the app's whole list, and a finished worker is still in it when its
+        ``StateChanged`` arrives — nothing else repaints the buttons afterwards (the shell
+        feeds a view only when its status changed), so a failed restart would otherwise
+        stay greyed with no way to retry it.
+        """
+        busy = any(
+            worker.node is self
+            and worker.name in (STOP_WORKER, RESTART_WORKER)
+            and not worker.is_finished
+            for worker in self.workers
+        )
+        stop = self.query_one("#agent-stop", Button)
+        stop.display = self.status.state in _SHOWS_STOP
+        stop.disabled = busy
+        stop.tooltip = (
+            "/exit, a grace period, then the window is killed (aisquare fleet stop)"
+            if self.status.state in _STOPPABLE
+            else "Remove the dead window tmux kept for the last screen; the row leaves the "
+            "listing (aisquare fleet stop)"
+        )
+        restart = self.query_one("#agent-restart", Button)
+        restart.disabled = busy
+        restart.label = "Restart" if self.status.state in _STOPPABLE else "Restart (resume)"
+        restart.tooltip = (
+            "Start it again under this label — same role, task, worktree and account; its "
+            "session is resumed from the transcript when that is on disk (aisquare fleet restart)"
+        )
+
+    @on(Button.Pressed, "#agent-stop")
+    def _stop(self, event: Button.Pressed) -> None:
+        event.stop()
+        agent = self.status.agent
+        # Pinned to THIS row (``agent_id``), never to whoever holds the label now: the
+        # view outlives its row, and a 💤 view's Stop by label stopped the replacement.
+        self.run_worker(
+            lambda: fleet_service.stop(
+                fleet_service.project_of(agent), agent.label, agent_id=agent.id
+            ),
+            name=STOP_WORKER,
+            group=STOP_WORKER,
+            exclusive=True,
+            thread=True,
+            exit_on_error=False,
+        )
+        self._paint_actions()
+
+    @on(Button.Pressed, "#agent-restart")
+    def _restart(self, event: Button.Pressed) -> None:
+        event.stop()
+        agent = self.status.agent
+        width, height = self.pane.content_size
+        size = (width, height) if width > 0 and height > 0 else None
+        self.run_worker(
+            lambda: fleet_service.restart(
+                fleet_service.project_of(agent), agent.label, size=size, agent_id=agent.id
+            ),
+            name=RESTART_WORKER,
+            group=RESTART_WORKER,
+            exclusive=True,
+            thread=True,
+            exit_on_error=False,
+        )
+        self._paint_actions()
+
+    def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
+        if event.worker.name not in (STOP_WORKER, RESTART_WORKER):
+            return
+        if event.state not in (WorkerState.SUCCESS, WorkerState.ERROR, WorkerState.CANCELLED):
+            return
+        label = self.status.agent.label
+        if event.state is WorkerState.ERROR:
+            verb = "stop" if event.worker.name == STOP_WORKER else "restart"
+            self.notify(
+                f"could not {verb} {label}: {event.worker.error}",
+                severity="error",
+                timeout=8,
+                markup=False,
+            )
+        elif event.worker.name == STOP_WORKER:
+            self.notify(f"✓ stopped {label}", timeout=5, markup=False)
+            receipt = event.worker.result
+            if isinstance(receipt, fleet_service.StopReceipt) and receipt.release_failed:
+                # `fleet stop` prints this and exits 1: a claim left with the ended
+                # session is not a clean stop, and the button must not read as one.
+                self.notify(
+                    f"claims: {receipt.release_failed}",
+                    severity="warning",
+                    timeout=8,
+                    markup=False,
+                )
+        else:
+            receipt = event.worker.result
+            if isinstance(receipt, fleet_service.RestartReceipt):
+                how = "resumed its session" if receipt.resumed else "started fresh"
+                self.notify(f"✓ restarted {label} — {how}", timeout=6, markup=False)
+                for note in receipt.notes:
+                    self.notify(note, severity="warning", timeout=8, markup=False)
+                self.post_message(AgentRestarted(receipt.started))
+        self._paint_actions()
+        refresh = getattr(self.app, "refresh_data", None)
+        if callable(refresh):
+            refresh()
+
+
+class AgentRestarted(Message):
+    """A restart produced a new row; the shell selects it once its frame lists it."""
+
+    def __init__(self, agent: FleetAgent) -> None:
+        super().__init__()
+        self.agent = agent

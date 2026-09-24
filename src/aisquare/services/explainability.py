@@ -450,6 +450,38 @@ def plan_session_identity(binary: str, args: Sequence[str]) -> SessionIdentity:
     return SessionIdentity(session_id, inject_args=(_SESSION_ID_FLAG, session_id))
 
 
+#: Only meaningful beside a session choice: next to a launch's own ``--resume``
+#: it forks a new id away from the one that launch resumes (#146).
+_FORK_SESSION_FLAG = "--fork-session"
+
+
+def without_session_choice(args: Sequence[str]) -> list[str]:
+    """``args`` less every flag that picks WHICH session a launch runs.
+
+    The flags :func:`plan_session_identity` reads — ``--session-id <id>``,
+    ``--resume``/``-r [<id>]``, ``--continue``/``-c`` — plus ``--fork-session``,
+    in both the ``--flag value`` and ``--flag=value`` shapes, read the way
+    :func:`_flag_value` reads them: a next token that starts with ``-`` is
+    another flag, not a value, and is kept. It lives beside the planner rather
+    than beside its caller (the fleet's launch spec, #144) so the two cannot
+    come to disagree about which flags those are.
+    """
+    valued = (_SESSION_ID_FLAG, *_RESUME_FLAGS)
+    bare = (*_CONTINUE_FLAGS, _FORK_SESSION_FLAG)
+    kept: list[str] = []
+    value_next = False
+    for arg in args:
+        if value_next:
+            value_next = False
+            if not arg.startswith("-"):
+                continue
+        if arg in valued:
+            value_next = True
+        elif arg not in bare and not any(arg.startswith(f"{flag}=") for flag in valued):
+            kept.append(arg)
+    return kept
+
+
 def record_join(
     *,
     session_id: str,
@@ -607,6 +639,19 @@ def _usable_base_url(value: str) -> bool:
     client refuses — passed this one and failed the other (review of #132).
     """
     return url_problem(value, what="base URL") is None
+
+
+def tracing_configured(settings: ExplainabilitySettings | None = None) -> bool:
+    """Whether a launch on this machine would be pointed at the proxy at all.
+
+    The two checks :func:`wire_session` makes before it ever probes: the
+    switch is on and ``proxy_url`` is an http(s) URL. Not whether the proxy
+    ANSWERS — that is the probe's business, and a doctor line or a spawn note
+    that only wants to know "is auto mode running behind a proxy here?" (#150)
+    must not dial anything to ask.
+    """
+    active = load_config().explainability if settings is None else settings
+    return bool(active.enabled) and _usable_base_url(active.proxy_url)
 
 
 def probe_proxy(proxy_url: str, timeout: float = _PROBE_TIMEOUT_SECONDS) -> ProxyProbe:
@@ -1238,6 +1283,34 @@ def configure_target(
     if enable:
         settings.enabled = True
     return name
+
+
+def project_key_path(project_id: str) -> Path:
+    """Where a project's own key lives (#141): its data directory, mode 600, never the store."""
+    return paths.project_data_dir(project_id) / "explainability-key"
+
+
+def store_project_api_key(project_id: str, key: str) -> Path:
+    """Write a project's key at mode 600 and return where it landed.
+
+    The directory is created mode 700 when it does not exist yet; an existing
+    one keeps its mode (it holds the codebase snapshot, which is not secret).
+    """
+    target = project_key_path(project_id)
+    if not target.parent.exists():
+        target.parent.mkdir(parents=True, mode=0o700)
+    target.write_text(key.strip(), encoding="utf-8")
+    target.chmod(0o600)
+    return target
+
+
+def clear_project_api_key(project_id: str) -> bool:
+    """Remove a project's key file; ``False`` when there was none."""
+    target = project_key_path(project_id)
+    if not target.exists():
+        return False
+    target.unlink()
+    return True
 
 
 def store_api_key(key: str) -> Path:

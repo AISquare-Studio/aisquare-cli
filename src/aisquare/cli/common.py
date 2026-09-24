@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import errno
 import json
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -211,21 +211,52 @@ def _project_name(project: ProjectInfo) -> str:
     return project.root.name or project.id
 
 
-def emit_projects(projects: list[ProjectInfo], *, active_id: str | None) -> None:
+def emit_projects(
+    projects: list[ProjectInfo],
+    *,
+    active_id: str | None,
+    hidden: int = 0,
+    group_names: Mapping[str, str] | None = None,
+    filtered: str | None = None,
+) -> None:
     """Render the project list — a JSON array under ``--json``, a table otherwise.
 
     The JSON carries the same ``name`` the table shows (#83): it is derived from
     the root rather than stored on the model, and a script picking a project
-    by name had nothing to pick on.
+    by name had nothing to pick on. It also carries ``group`` (the name),
+    ``position`` and ``pinned`` (#140); the table shows a GROUP column and a
+    📌 marker only when something is grouped or pinned. ``hidden`` is how many
+    captured directories the list leaves out (#139); only an empty table
+    mentions them. ``filtered`` is what an empty table says when ``--group`` or
+    ``--pinned`` left nothing of a list that has rows: neither "nothing
+    registered" nor the captured count is true then.
     """
+    names = group_names or {}
     if get_state().json_output:
         typer.echo(
             json.dumps(
                 [
-                    {**project.model_dump(mode="json"), "name": _project_name(project)}
+                    {
+                        **project.model_dump(mode="json"),
+                        "name": _project_name(project),
+                        "group": names.get(project.group_id or "", project.group_id),
+                        "pinned": project.pinned_at is not None,
+                    }
                     for project in projects
                 ]
             )
+        )
+        return
+    if not projects and filtered:
+        stdout_console().print(filtered)
+        return
+    if not projects and hidden:
+        # "nothing registered, run init" was wrong for a machine whose hooked
+        # sessions captured directories that are simply not listed (#139).
+        noun = "directory" if hidden == 1 else "directories"
+        stdout_console().print(
+            f"No projects added yet — {hidden} captured {noun} hidden (a hooked session ran "
+            "there): aisquare project list --all; add one: aisquare project onboard <path>"
         )
         return
     if not projects:
@@ -236,10 +267,31 @@ def emit_projects(projects: list[ProjectInfo], *, active_id: str | None) -> None
     table.add_column("NAME")
     table.add_column("ID", no_wrap=True)
     table.add_column("ROOT")
+    # The column exists only when a captured row is in the list (`--all`), so
+    # the everyday table is unchanged (#139).
+    captured = any(project.onboarded_at is None for project in projects)
+    if captured:
+        table.add_column("LISTED", no_wrap=True)
+    arranged = any(project.group_id or project.pinned_at for project in projects)
+    if arranged:
+        table.add_column("GROUP", no_wrap=True)
     for project in projects:
         marker = "*" if project.id == active_id else ""
-        table.add_row(marker, project.root.name or "—", project.id, str(project.root))
+        if project.pinned_at is not None:
+            marker = (marker + "📌").strip()
+        cells = [marker, project.root.name or "—", project.id, str(project.root)]
+        if captured:
+            cells.append("captured" if project.onboarded_at is None else "yes")
+        if arranged:
+            cells.append(names.get(project.group_id or "", project.group_id or "") or "")
+        table.add_row(*cells)
     stdout_console().print(table)
+    if captured:
+        stdout_console().print(
+            "captured = a hooked session ran there; add it on purpose to list it "
+            "(aisquare project onboard <path>), or drop the stale ones: "
+            "aisquare project prune --captured-only"
+        )
 
 
 def emit_project_action(message: str, project: ProjectInfo) -> None:
@@ -610,9 +662,14 @@ def emit_status(report: StatusReport) -> None:
     console.print(f"aisquare: {'initialized' if report.initialized else 'not initialized'}")
     console.print(f"home:     {report.home}")
     console.print(f"project:  {project.root.name or project.id} ({project.id})")
+    hidden = (
+        f" (+{report.captured_count} captured, hidden: aisquare project list --all)"
+        if report.captured_count
+        else ""
+    )
     console.print(
         f"context:  {report.user_entries} user, {report.project_entries} in this project; "
-        f"{report.project_count} project(s) registered"
+        f"{report.project_count} project(s) registered{hidden}"
     )
     console.print(f"detected: {', '.join(report.agents_detected) or 'none'}")
     console.print(f"connected: {', '.join(report.agents_connected) or 'none'}")

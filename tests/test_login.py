@@ -402,6 +402,7 @@ def test_logout_revokes_and_forgets_but_keeps_other_credentials(
         "signed_out": False,
         "server_revoked": False,
         "env_token_still_set": False,
+        "minted_keys_cleared": 0,  # the signed-in branch's shape (#142)
     }
 
 
@@ -416,6 +417,7 @@ def test_logout_offline_forgets_locally_and_says_so(runner: CliRunner) -> None:
         "signed_out": True,
         "server_revoked": False,
         "env_token_still_set": False,
+        "minted_keys_cleared": 0,  # #142: no project had a CLI-minted ingest key
     }
     assert "iam_token" not in _stored()
 
@@ -495,7 +497,9 @@ def test_login_with_token_clears_the_previous_sessions_optional_fields(
     assert reloaded.scope == ""
     whoami = runner.invoke(app, ["--json", "whoami"])
     assert whoami.exit_code == 0, whoami.output
-    assert json.loads(whoami.stdout) == payload
+    # whoami carries one field login does not: where the active project's traces
+    # land (#142) — none chosen here.
+    assert json.loads(whoami.stdout) == {**payload, "destination": None, "credits": None}
     assert _stored()["api_key"] == "keep-me"
     assert _stored()["serve_token"] == "keep-this-too"
 

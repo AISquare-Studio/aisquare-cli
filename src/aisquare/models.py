@@ -97,6 +97,19 @@ class ProjectInfo(BaseModel):
     codename: str | None = None
     """The fleet codename (``amber-otter``) — assigned the first time the project
     enters the fleet, never at ``init``; see ``core.codenames``."""
+    onboarded_at: datetime | None = None
+    """When the project was added ON PURPOSE (``init``, ``project onboard`` /
+    ``link``, the sidebar's ``+``, ``team on``, a fleet spawn) — #139. ``None``
+    is a directory a hooked session merely ran in: captured (prompt history and
+    injection keep working there) but not shown in the sidebar or ``project
+    list`` until something deliberate adds it."""
+    group_id: str | None = None
+    """The one :class:`ProjectGroup` this project sits in, like a browser tab (#140)."""
+    position: int | None = None
+    """Manual order inside its scope (its group, or the top level); ``None`` = never
+    arranged, which sorts after every arranged project, by name."""
+    pinned_at: datetime | None = None
+    """Set when the project is pinned: it renders in the Pinned section, in pin order."""
 
 
 class InjectionRecord(BaseModel):
@@ -150,6 +163,10 @@ class StatusReport(BaseModel):
     project_entries: int
     active_project: ProjectInfo
     project_count: int
+    """The projects ``project list`` shows — added on purpose (#139)."""
+    captured_count: int = 0
+    """The directories hooked sessions captured that nothing added on purpose:
+    registered but hidden, listed by ``project list --all`` (#139)."""
     agents_detected: list[str] = Field(default_factory=list)
     agents_connected: list[str] = Field(default_factory=list)
     shipping: ShippingStatus | None = None
@@ -706,9 +723,10 @@ class ProjectForgetReport(BaseModel):
     until ``project switch`` succeeds."""
 
 
-PruneReason = Literal["missing", "worktree"]
-"""Why ``project prune`` selected a registration: its root is gone from disk, or
-its root is a linked git worktree of another registered project."""
+PruneReason = Literal["missing", "worktree", "captured"]
+"""Why ``project prune`` selected a registration: its root is gone from disk, its
+root is a linked git worktree of another registered project, or it is a stale
+capture — a directory a session merely ran in, with no context entries (#139)."""
 
 
 class PruneCandidate(BaseModel):
@@ -754,6 +772,102 @@ pane's facts (exited with a status, or lost when the pane is gone); ``unknown``
 when neither source can answer."""
 
 
+class ProjectGroup(BaseModel):
+    """A named, collapsible container of projects — a management layer only (#140).
+
+    A group shares NOTHING: context entries, prompt history, snapshots, boards
+    and explainability settings stay per project, and no other table carries a
+    group id. Deleting a group ungroups its members and deletes no project.
+    """
+
+    id: str
+    name: str
+    position: int = 0
+    """Manual order among the top-level groups."""
+    pinned_at: datetime | None = None
+    collapsed: bool = False
+    created_at: datetime
+
+
+class ProjectExplainability(BaseModel):
+    """A project's own explainability key (#141): WHICH deployment it is for, and where it is.
+
+    The key VALUE never sits in the store — ``context.db`` is mode 644 on a
+    typical machine — only its path (a mode-600 file under the project's data
+    directory). ``target`` pins the deployment: a key attached for ``stg`` is
+    never handed to a ``prod`` gateway, the same rule the machine key file
+    follows (``tests/test_key_never_crosses_deployments.py``).
+    """
+
+    project_id: str
+    target: str
+    key_path: Path
+    set_at: datetime
+    set_by: str | None = None
+    """Who attached it — the signed-in email when there is one, else the OS user."""
+
+
+class TraceDestination(BaseModel):
+    """Where a project's traces land (#142): a workspace and a studio, chosen while signed in.
+
+    Recorded per project from the API the sign-in session belongs to, so the
+    CLI never handles a key to know WHERE traces go. ``environment`` is the
+    deployment the API host maps to (``prod``, ``stg``, ``dev`` — or the host
+    itself when the mapping does not know it) and doubles as the explainability
+    TARGET name: the gateway and proxy of that deployment apply to this project
+    without anyone typing a URL. ``key_uid`` is set only when the CLI minted an
+    ingest key for this destination — the derived credential ``logout`` clears;
+    a key attached by hand (#141) is the operator's and is left alone.
+    """
+
+    project_id: str
+    api_url: str
+    environment: str
+    workspace_id: int
+    workspace_uid: str | None = None
+    workspace_name: str
+    studio_id: int | None = None
+    studio_uid: str | None = None
+    studio_name: str | None = None
+    key_uid: str | None = None
+    set_at: datetime
+    set_by: str | None = None
+    """Who chose it — the signed-in email."""
+
+    @property
+    def label(self) -> str:
+        """``workspace / studio`` as every surface prints it."""
+        if self.studio_name:
+            return f"{self.workspace_name} / {self.studio_name}"
+        return self.workspace_name
+
+
+class LaunchSpec(BaseModel):
+    """What an agent was launched WITH, recorded at spawn and replayed by a restart (#144).
+
+    A restart that re-read today's config would silently change what "the same
+    agent" means: a role's permission mode edited between runs, a binary
+    rebound, an extra argument added. The spec is the resolved answer at spawn
+    time — binary, permission mode, the arguments after the role's own, the
+    account slot, the worktree choice — so ``fleet restart`` and ``fleet
+    switch`` start the agent the way it was started, and only the things a
+    restart is FOR (the account, on a switch; a fresh session, on ``--fresh``)
+    change. ``command`` is the whole window argv as spawned, for the record.
+    """
+
+    binary: str
+    permission_mode: str | None = None
+    """The ``--permission-mode`` passed; ``None`` or ``""`` means no flag was passed —
+    and a replay passes none, whatever the role's config says today."""
+    extra_args: list[str] = Field(default_factory=list)
+    """The role's ``extra_args`` followed by the caller's, as they went after the flags,
+    less the ones that chose a session (``--session-id``, ``--resume``, ``--continue``):
+    those are per launch, like a restart's own ``--resume``."""
+    account_slot: int | None = None
+    worktree: bool = False
+    command: list[str] = Field(default_factory=list)
+
+
 class FleetAgent(BaseModel):
     """One agent the fleet started: a tmux pane, the role it runs, and its board row.
 
@@ -781,6 +895,8 @@ class FleetAgent(BaseModel):
     account_slot: int | None = None
     """The Claude account slot the launch was resolved to (flag, binding or default);
     ``None`` when nothing chose one and the window ran on whatever its shell had."""
+    launch_spec: LaunchSpec | None = None
+    """How it was launched (#144); ``None`` on rows spawned before the spec existed."""
     created_at: datetime
     ended_at: datetime | None = None
     exit_status: int | None = None

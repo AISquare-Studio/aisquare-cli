@@ -32,7 +32,7 @@ from aisquare.core.injection import build_block
 from aisquare.core.store import store_session
 from aisquare.core.workspace import active_project
 from aisquare.models import ProjectInfo
-from aisquare.services import ci_augment
+from aisquare.services import auto_mode, ci_augment
 from aisquare.services import claude_accounts as claude_accounts_service
 from aisquare.services import explainability as explainability_service
 from aisquare.services import metrics as metrics_service
@@ -184,15 +184,24 @@ def turn_stopped(
         # after the row says waiting, and the turn is over all the same (review
         # of the #205 fold, round 1; see turn_failed).
         metrics_service.close_turn(session_id)
+    # Last, and it swallows its own errors too: auto-mode refusals in the
+    # transcript's tail put the row in attention with one board line (#150).
+    auto_mode.record_refusals(session_id)
     return decision
 
 
 def needs_attention(
-    cwd: Path | None, *, session_id: str | None = None, message: str | None = None
+    cwd: Path | None,
+    *,
+    session_id: str | None = None,
+    message: str | None = None,
+    notification_type: str | None = None,
 ) -> None:
-    """Mark the session as needing the user, and put it on the feed."""
+    """Route a Claude Code notification by its TYPE: a bell, a feed line, or nothing (#153)."""
     if session_id is not None:
-        team_service.hook_notification(session_id, cwd, message)
+        team_service.hook_notification(
+            session_id, cwd, message, notification_type=notification_type
+        )
 
 
 def turn_failed(

@@ -528,10 +528,14 @@ def set_default(ref: str | None, *, project: ProjectInfo | None = None) -> Claud
         with store_session() as store:
             _arranged(store)  # the row must exist before it can be the default
             if project is not None:
-                store.ensure_project(project)
                 if account is None:
+                    store.ensure_project(project)
                     store.clear_project_setting(project.id, PROJECT_ACCOUNT_KEY)
                 else:
+                    # Choosing the account a project launches under is choosing the
+                    # project (#139): it is listed from now on, as after a `context
+                    # add --project` there. Clearing that choice adds nothing.
+                    store.onboard_project(project)
                     store.set_project_setting(project.id, PROJECT_ACCOUNT_KEY, str(account.slot))
             else:
                 store.set_claude_account_default(account.slot if account else None)

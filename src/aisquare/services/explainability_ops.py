@@ -30,6 +30,7 @@ script over an in-process import, and check for the collision explicitly.
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
 import json
 import os
@@ -48,6 +49,7 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from aisquare.core import paths
 from aisquare.core.config import (
     ExplainabilitySettings,
     ExplainabilityTarget,
@@ -55,18 +57,28 @@ from aisquare.core.config import (
     save_config,
 )
 from aisquare.core.version import DISTRIBUTION
-from aisquare.models import CheckStatus, DoctorCheck, RedactionLevel
+from aisquare.models import (
+    CheckStatus,
+    DoctorCheck,
+    ProjectExplainability,
+    ProjectInfo,
+    RedactionLevel,
+    TraceDestination,
+)
 from aisquare.services.explainability import (
     EDITABLE_INSTALL_HINT,
     FALLBACK_ROLE,
     KEY_ENV_VAR,
     ProxyProbe,
+    clear_project_api_key,
     hosted_proxy_for,
     is_loopback,
     key_path,
     probe_proxy,
+    project_key_path,
     running_editable,
     split_url,
+    store_project_api_key,
     stored_api_key,
     trace_identity,
     url_problem,
@@ -137,7 +149,7 @@ class ResolvedTarget:
     gateway_source: str  # "config" | "env" | "unset" — shown, so surprises are visible
     api_key_env: str
     api_key: str | None
-    #: "env" | "file" | "unset" — WHERE the key won, not just which variable was
+    #: "project" | "env" | "file" | "unset" — WHERE the key won, not just which variable was
     #: named. The gateway has carried its source since the split-brain fix for
     #: the same reason, and the key needed it the moment `resolve_target` gained
     #: the key-file fallback: until then `api_key_env` WAS the provenance,
@@ -152,6 +164,10 @@ class ResolvedTarget:
     agent_name_template: str
     studio_id: str
     roles: tuple[str, ...]
+    project_id: str | None = None
+    """The project the key was resolved FOR (#141); ``None`` for a machine-level read."""
+    destination: TraceDestination | None = None
+    """Where the project's traces land (#142), when one was chosen and ``project_id`` was given."""
 
     @property
     def configured(self) -> bool:
@@ -178,6 +194,8 @@ class ResolvedTarget:
         populate next, and it is what every remediation line already tells them
         to export.
         """
+        if self.key_source == "project":
+            return f"the project's own key ({project_key_path(self.project_id or '?')})"
         if self.key_source == "file":
             return str(key_path())
         return f"${self.api_key_env}"
@@ -255,12 +273,20 @@ def resolve_target(
     name: str | None = None,
     *,
     env: Mapping[str, str] | None = None,
+    project_id: str | None = None,
 ) -> ResolvedTarget:
     """Fold the active target's overrides onto the top-level defaults.
 
     Precedence for the gateway URL is the target, then the SDK's environment
     variable, then the top-level ``gateway_url`` — and the winning source is
     reported either way.
+
+    THE KEY, with ``project_id`` (#141): the project's own key first — attached
+    with ``explainability key set`` and bound to ONE deployment, so it answers
+    only when that deployment is the one resolved here — then the target's
+    environment variable, then the machine key file under the same rule as
+    before. Without a project id the read is machine-level, as every caller
+    made it until now; ``doctor`` passes none and so opens no store.
 
     THE LAST FALLBACK IS THE SINGLE-DEPLOYMENT MACHINE, and it was missing.
     ``init --explainability`` writes ``settings.gateway_url`` and the key file
@@ -288,7 +314,19 @@ def resolve_target(
     ``tests/test_key_never_crosses_deployments.py``.
     """
     environ = os.environ if env is None else env
-    chosen = name or environ.get(TARGET_ENV_VAR) or settings.target
+    # THE DESTINATION NAMES THE TARGET (#142), between the explicit forms and
+    # the machine default: a project whose traces were pointed at a workspace
+    # on staging resolves the staging deployment, whatever the machine's
+    # default is — the same way its own key wins over the machine's. An
+    # explicit ``--target`` or the environment variable still wins, because
+    # both are someone saying so right now.
+    destination = _project_destination(project_id)
+    chosen = (
+        name
+        or environ.get(TARGET_ENV_VAR)
+        or (destination.environment if destination is not None else None)
+        or settings.target
+    )
     target = settings.targets.get(chosen, ExplainabilityTarget())
 
     gateway_url, source = target.gateway_url, "config"
@@ -299,7 +337,9 @@ def resolve_target(
     if not gateway_url:
         source = "unset"
 
-    api_key, key_source = environ.get(target.api_key_env) or None, "env"
+    api_key, key_source = _project_api_key(project_id, chosen), "project"
+    if api_key is None:
+        api_key, key_source = environ.get(target.api_key_env) or None, "env"
     if api_key is None and target.api_key_env == KEY_ENV_VAR:
         api_key, key_source = stored_api_key(), "file"
     if api_key is None:
@@ -318,7 +358,127 @@ def resolve_target(
         agent_name_template=target.agent_name_template or settings.agent_name_template,
         studio_id=target.studio_id,
         roles=tuple(roles),
+        project_id=project_id,
+        destination=destination,
     )
+
+
+def _project_api_key(project_id: str | None, target_name: str) -> str | None:
+    """The project's own key, when one is attached FOR ``target_name`` and its file reads.
+
+    Called from :func:`resolve_target` and nowhere else (the AST guard in
+    ``tests/test_one_key_resolver.py`` pins that). A binding for another
+    deployment is not a key for this one — the cross-deployment rule — and a
+    binding whose file is gone reads as no project key, so the next rung
+    answers; ``explainability key show`` is where that is reported.
+    """
+    if project_id is None:
+        return None
+    binding = project_key_binding(project_id)
+    if binding is None or binding.target != target_name:
+        return None
+    try:
+        value = binding.key_path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return value or None
+
+
+def _project_destination(project_id: str | None) -> TraceDestination | None:
+    """Where the project's traces land (#142); ``None`` without a project, a choice, or a store.
+
+    Same shape as :func:`project_key_binding`: a lazy store import (this module
+    is imported by the store's users) and a fail-open read, because a resolver
+    consulted on every launch must never make a broken home cost the launch.
+    And the same answer for a machine with no ``context.db``, given without
+    opening one: opening creates the file, and ``explainability env`` and
+    ``status`` resolve through here while they are reads that create nothing.
+    """
+    if project_id is None or not paths.db_path().exists():
+        return None
+    from aisquare.core.store import store_session  # lazy, as above
+
+    try:
+        with store_session() as store:
+            return store.project_destination(project_id)
+    except Exception:
+        return None
+
+
+def project_key_binding(project_id: str) -> ProjectExplainability | None:
+    """The project's key BINDING — its deployment and file path, never the value.
+
+    ``None`` when the project has none, or when the store cannot be read. A
+    machine with no ``context.db`` has no binding either, and is answered
+    without opening one: opening creates the file, and ``explainability env``
+    and ``status`` are reads that created nothing before #141 (review of #170).
+    """
+    from aisquare.core.store import (
+        store_session,  # lazy: this module is imported by the store's users
+    )
+
+    if not paths.db_path().exists():
+        return None
+    try:
+        with store_session() as store:
+            return store.project_explainability(project_id)
+    except Exception:
+        return None
+
+
+def key_owner() -> str | None:
+    """Who is attaching a key: the signed-in email when there is one, else the OS user.
+
+    ONE answer for ``key set`` and the UI's *Attach key*, so ``key show``
+    names the same person for the same act wherever it was done — the UI
+    recorded ``$USER`` alone while the CLI recorded the email (review of #170).
+    """
+    from aisquare.services import iam  # lazy: a sign-in read only this path needs
+
+    try:
+        session = iam.stored_session()
+        if session is not None and session.email:
+            return str(session.email)
+    except Exception:  # identity is decoration on the row
+        pass
+    return os.environ.get("USER") or None
+
+
+def attach_project_key(project: ProjectInfo, value: str, *, target: str) -> ProjectExplainability:
+    """Attach ``value`` as ``project``'s own key for ``target`` — ``key set`` and *Attach key*.
+
+    Attaching a key is a deliberate act, so the project is REGISTERED first
+    (``onboard_project``, as ``team on`` does): the binding is a FOREIGN KEY to
+    the project row, and a directory nothing had registered yet used to get
+    its mode-600 file written, fail the insert with an uncaught
+    ``IntegrityError``, and keep the key on disk with no binding (review of
+    #170). The file is written once the row can be recorded; if recording it
+    still fails, the file is put back as it was: a directory with no binding
+    keeps no credential that nothing names, and an earlier binding keeps the
+    key it named. Keeping the NEW file under the OLD row handed the old
+    binding's deployment the other deployment's key — a stg row answering
+    with the prod key (review of #170).
+    """
+    from aisquare.core.store import store_session  # lazy, as in project_key_binding
+
+    with store_session() as store:
+        store.onboard_project(project)
+        earlier = None
+        if store.project_explainability(project.id) is not None:
+            # A binding whose file is gone keeps no file: it stays as `key show` saw it.
+            with contextlib.suppress(OSError):
+                earlier = project_key_path(project.id).read_text(encoding="utf-8")
+        path = store_project_api_key(project.id, value)
+        try:
+            return store.set_project_explainability(
+                project.id, target=target, key_path=path, set_by=key_owner()
+            )
+        except Exception:
+            if earlier is None:
+                clear_project_api_key(project.id)
+            else:
+                store_project_api_key(project.id, earlier)
+            raise
 
 
 def effective_settings(
@@ -326,6 +486,7 @@ def effective_settings(
     name: str | None = None,
     *,
     env: Mapping[str, str] | None = None,
+    project_id: str | None = None,
 ) -> ExplainabilitySettings:
     """``settings`` with the active target's overrides folded into the top level.
 
@@ -334,8 +495,13 @@ def effective_settings(
     about targets. Without this fold, ``enable --target prod --proxy-url …``
     would write a value that every launch then ignored — config that looks
     applied and is not, which is worse than config that is missing.
+
+    ``project_id`` MUST be the one the key was resolved for. A project's
+    destination (#142) can name another target than the machine's, and the
+    wiring puts this fold's proxy beside that resolution's key: folded without
+    the project, a launch sent a production key to the staging proxy.
     """
-    target = resolve_target(settings, name, env=env)
+    target = resolve_target(settings, name, env=env, project_id=project_id)
     return settings.model_copy(
         update={
             "proxy_url": target.proxy_url,
@@ -478,8 +644,12 @@ def _request(
     api_key: str | None = None,
     body: Any = None,
     timeout: float = _HTTP_TIMEOUT,
+    method: str | None = None,
 ) -> HttpVerdict:
     """One HTTP call, with every failure turned into a verdict.
+
+    ``method`` defaults to what the body implies (POST with one, GET without);
+    the routing binding (#142) is a PUT and names it.
 
     ``X-API-KEY`` alone, deliberately: the gateway sits behind a layer that
     tries to verify any ``Authorization`` header as a JWT and fails the whole
@@ -520,7 +690,7 @@ def _request(
             detail=f"not a usable URL: {url!r} (it needs an http:// or https:// scheme)",
         )
     try:
-        request = Request(url, data=data, headers=headers)
+        request = Request(url, data=data, headers=headers, method=method)
         with urlopen(request, timeout=timeout) as response:
             raw = _read_body(response)
             return HttpVerdict(

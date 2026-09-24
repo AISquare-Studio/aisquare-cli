@@ -385,6 +385,13 @@ class WindowInfo:
     NOT "is printing now"; compare ``PaneFacts.history_size`` and the cursor
     between frames for that (see the module docstring). Kept because it is what
     tmux says and an attached client does clear it."""
+    resize_refused: str | None = None
+    """Set by :meth:`TmuxServer.spawn_window` alone: tmux's words when it refused
+    the resize that gives a window added to an existing session its geometry, so
+    the window runs at the session's size (#149). ``None`` when that resize
+    landed, when there was none to make, and on every window a listing reports.
+    The spawn fails open on it; this is how the refusal still reaches the
+    caller's receipt (review of #162, round 1)."""
 
 
 def _int(value: str, default: int = 0) -> int:
@@ -456,6 +463,24 @@ def _data_arg(value: str) -> str:
     if value.endswith(_ARGV_SEPARATOR):
         return value[:-1] + "\\" + _ARGV_SEPARATOR
     return value
+
+
+DEFAULT_WINDOW_WIDTH = 120
+DEFAULT_WINDOW_HEIGHT = 40
+"""The geometry a window is born with when nobody says (#149).
+
+It was 200x50, and the number that matters is 144: Claude Code's fullscreen
+renderer opens its diff panel BY ITSELF "once Claude starts editing files, if
+your terminal is at least 144 columns wide" (interactive-mode reference, "Diff
+panel"), and remembers "opened once → open on every edit" for the session and
+later ones. Every headless spawn — a manager starting coders, a `fleet spawn`
+with no UI open — therefore ran wide enough to grow a panel the UI could
+neither close (clicks are not forwarded, #148) nor reach with `/diff` while
+Claude was busy (typed input is queued). 120 keeps a headless window under that
+line and above 110, the width Claude Code needs to open the panel ON DEMAND
+(`/diff`), so nothing is lost; a window the UI shows adopts the pane's real
+size on first attach (``TerminalPane._sync_size``), as before.
+"""
 
 
 class TmuxServer:
@@ -782,8 +807,8 @@ class TmuxServer:
         cwd: Path,
         command: Sequence[str],
         env: Mapping[str, str] | None = None,
-        width: int = 200,
-        height: int = 50,
+        width: int = DEFAULT_WINDOW_WIDTH,
+        height: int = DEFAULT_WINDOW_HEIGHT,
     ) -> WindowInfo:
         """A new window named ``name`` running ``command`` — creating the session if needed.
 
@@ -801,10 +826,36 @@ class TmuxServer:
         would kill every agent), so ``name``, ``cwd``, ``env`` and every element
         of ``command`` go through :func:`_data_arg` and arrive verbatim.
 
-        ``width``/``height`` size a NEW session's first window; a window added
-        to an existing session takes the session's default size until
-        :meth:`resize`, which also pins that window to manual sizing (the global
-        ``window-size manual`` crashes tmux 3.4 — see :data:`BUNDLED_CONF`).
+        ``width``/``height`` size the window either way. A NEW session's first
+        window takes them on ``new-session -x -y``; a window added to an
+        EXISTING session is born at the session's size — 200x50 for every
+        session made before #149, or whatever its first window was — or, while
+        a ``fleet attach`` client is attached, at that client's size, and is
+        therefore resized right after ``new-window`` through :meth:`resize`,
+        which also pins it to manual sizing (the global ``window-size manual``
+        crashes tmux 3.4 — see :data:`BUNDLED_CONF`). Without that second
+        step a coder spawned into a running manager's session was wide enough
+        for Claude Code to open its diff panel on its own (#149).
+
+        The pin is kept on purpose. Under tmux's default ``window-size latest``
+        an unpinned window follows an attached terminal and keeps that width
+        after the terminal detaches, and a window born while one is attached
+        takes its size whatever the session's ``default-size`` says (both
+        measured on 3.7c, at 230 columns with ``default-size 120x40``) — so
+        neither leaving the window unpinned nor sizing the session instead
+        keeps a coder under 144 columns across a wide ``fleet attach`` (review
+        of #162, round 1). The cost: under ``fleet attach`` such a window keeps
+        its own size, panned in a smaller terminal and padded in a larger one.
+        The session's first window gets no resize, so it follows an attached
+        terminal until a pane has shown it.
+
+        The resize fails open: a window tmux refuses to resize is still
+        returned, at the session's size, with tmux's words in
+        :attr:`WindowInfo.resize_refused` so the caller can say why. A pane's
+        first attach corrects that size (``TerminalPane._sync_size``); a
+        headless window keeps it until a pane shows it — nothing sizes a
+        window nobody opens.
+
         Refuses a ``session`` no other method here could target afterwards and
         a ``cwd`` that is not a directory (tmux would use ``$HOME`` silently).
         """
@@ -817,7 +868,8 @@ class TmuxServer:
         ]
         args = [_data_arg(arg) for arg in command]
         fmt = f"#{{window_id}}{_SEP}#{{pane_id}}"
-        if self.has_session(session):
+        existing = self.has_session(session)
+        if existing:
             out = self.run(
                 "new-window", "-d", "-P", "-F", fmt, "-t", f"={session}:", "-n", _data_arg(name),
                 "-c", _data_arg(str(cwd)), *env_flags, "--", *args,
@@ -831,6 +883,20 @@ class TmuxServer:
             )  # fmt: skip
             self._forget_session_environment(session, env)
         window_id, _, pane_id = out.strip().partition(_SEP)
+        refused: str | None = None
+        if existing and pane_id:
+            # Born at the session's size, not the caller's (see the docstring);
+            # the resize is what makes the geometry argument mean the same
+            # thing on both branches. Fail-open: the window exists and is
+            # recorded whatever tmux says about its size — a refused resize
+            # costs geometry, never the agent. The geometry is the session's:
+            # a pane that shows the window resizes it (the UI's own sync, which
+            # retries); a headless window keeps it until a pane shows it, so the
+            # refusal is handed back rather than swallowed.
+            try:
+                self.resize(pane_id, width, height)
+            except TmuxError as exc:
+                refused = str(exc)
         return WindowInfo(
             session=session,
             window_id=window_id,
@@ -840,6 +906,7 @@ class TmuxServer:
             dead_status=None,
             current_command=command[0] if command else "",
             activity=False,
+            resize_refused=refused,
         )
 
     def _forget_session_environment(self, session: str, env: Mapping[str, str] | None) -> None:

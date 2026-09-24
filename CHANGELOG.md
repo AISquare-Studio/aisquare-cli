@@ -178,6 +178,92 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `state.json` beside the theme and restored at the next launch; an agent's
   pane forwards every width change to tmux, so the agent reflows. `?` lists the
   keys.
+- **Workspace credits beside where traces land** (#143). With a destination
+  chosen (#142), `explainability status` and `whoami` print a `credits:` line
+  for that workspace — run and build pools, today and this month, what is left
+  and when it resets, the server's `low`/`exhausted` band — and `status --json`
+  carries the numbers under `credits`. The Accounts page draws the same as bars
+  under the AISquare card on its minute tick; the Explainability view has a
+  `credits` row; `doctor --live` gains `workspace-credits`, warning before a
+  fleet is spawned into a low or exhausted workspace. One request per
+  workspace, cached a minute, never on a hook or session path; failures are a
+  reason on the row, nothing else.
+- **Pick where a project's traces land with your sign-in** (#142).
+  `aisquare explainability workspaces`, `studios [--workspace W]` and
+  `use <workspace>[/<studio>] [--project P] [--no-key] [--clear]` list what the
+  signed-in user can see and record the choice per project (schema v21,
+  `project_destination`). The deployment the session belongs to becomes the
+  project's explainability target with its gateway and hosted proxy filled in
+  (`stg-api` → `stg`, `api` → `prod`; nothing typed, nothing enabled behind
+  your back); the one resolver consults it between `--target` and the machine
+  default. The CLI obtains a workspace `ingest:write` key on your behalf and
+  stores it as `key set` would — the API still refuses a sign-in token there
+  (AISquare-Studio-BE#3493), so until then the line says so and `key set` is the
+  way in — and binds this machine's agent identities to the chosen studio, which
+  is what makes spans land there. `status` shows `destination:` (the UI's
+  Explainability view `lands in`) and takes `--project`: it is the check `use`
+  names once tracing is on, since `doctor` resolves only the machine's key;
+  `whoami` gains a `traces:` line; `logout` forgets every key the CLI minted and
+  leaves hand-attached keys alone. The key never crosses a deployment or a
+  workspace: a target `use` creates names its own key variable,
+  a machine key never stands in for the mint, launches take the proxy from the
+  same target as the key, `key set` binds to the destination's deployment, the
+  CLI never mints over a hand key, and a minted key that is replaced, cleared,
+  purged with its project or left behind by a move is revoked on the host that
+  minted it — a replaced one only once its replacement is recorded.
+- **Project groups, pinning and manual order in the sidebar** (#140). A
+  management layer only, like browser tab groups: a `project_group` table and
+  `group_id` / `position` / `pinned_at` on the project row (schema v20); a
+  group shares nothing and deleting one ungroups, never deletes. In the
+  sidebar: drag a card onto a group header, between cards, or below the list;
+  drag a group header to reorder groups; `shift+↑`/`shift+↓` move, `g` opens
+  the group picker (existing, new, ungroup), `p` pins, `space` folds, `u`
+  undoes the last gesture with a toast, `shift+click` marks several cards and
+  `shift+g` groups them. A 📌 Pinned section at the top; group headers roll up
+  their members' agents. CLI parity: `project group create|rename|delete|list|
+  add|remove|move`, `project pin|unpin`, `project move --to <group|top>
+  [--before|--after|--position]`, `project list --group|--pinned` (JSON
+  carries `group`, `position`, `pinned`), `project onboard --group`. One
+  arranger (`services.project_groups.arrange`) decides the order every
+  surface shows; every change returns its way back.
+- **A workspace key per project** (#141). The explainability key was one per
+  machine; pointing one project at another workspace meant another shell or
+  swapping the file for everyone. `aisquare explainability key set [--project
+  P] [--target T]` attaches a key to a project — read from stdin or
+  `--from-env VAR`, never from argv — stored at mode 600 in the project's data
+  directory, with only the deployment and the path in the store (schema v19);
+  `key show` prints the origin (never the value) and `key clear` detaches it.
+  Resolution stays in the one resolver: project key → the target's variable →
+  the machine file, and a key attached for one deployment is never handed to
+  another. "The project" is the one a launch from here joins
+  (`$AISQUARE_TEAM_HUB`, else this checkout — never the `project switch` pin)
+  everywhere: `launch`, `fleet spawn`, `explainability env [--project]` and
+  `register [--project]` use the project's key, `status` shows its origin,
+  and each project page's Explainability tab shows the key its launches use
+  (the hub's under a hub); its Setup form's one key field attaches the key to
+  that project, for the deployment the form names, when *this project only* is
+  ticked, and writes the machine key as before when it is not. The client lane
+  (`ship`) still uses the machine key.
+- **A restart is the same agent, and the UI comes back where it was** (#144).
+  `fleet_agent` rows record a `launch_spec` at spawn — the binary, the
+  permission mode actually passed (none included), the arguments after the
+  role's own less any that chose a session, the account slot, the worktree
+  choice and the whole window argv — and `fleet restart` / `fleet switch`
+  replay it instead of re-reading today's config, so a role edited between
+  runs cannot silently change what "the same agent" means; `fleet restart
+  --permission-mode` changes the replayed mode, and the replacement's spec
+  keeps it, which is the step the auto-mode notices of #150 now name for a
+  running agent, since the role's config reaches only later spawns (schema v18; rows
+  spawned before the spec fall back to the config as before; a recorded binary
+  no longer on the PATH is resolved again when that is the same kind of
+  program, and the receipt names it — otherwise the restart is refused before
+  a running agent is stopped). The session itself already resumes from
+  its transcript (#138). The
+  shell now remembers what was open — a project, an agent, the Accounts page,
+  the Doctor — and the captured-directories toggle, in the store's new
+  `ui_state` table, and reopens it at the next launch when the row is still
+  there; `doctor` gains `fleet-resume`, counting the exited agents whose
+  transcript is on disk and would therefore continue rather than start over.
 - **Usage-aware accounts: spawn where there is headroom, and hand an agent over
   when its limit hits** (#146). A new `[accounts]` section (Settings tab, or
   `aisquare config set accounts.<key>`): `pick = headroom` makes every launch
@@ -750,6 +836,28 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   fetches belong to other people.
 
 ### Changed
+- **Captured is not shown** (#139). Every directory a hooked session ran in was
+  auto-registered and listed — 27 projects on the reporting machine, 23 of
+  them nothing but captured prompts — and `project forget` came undone on the
+  next prompt, because registering was also the revival. The project row now
+  carries `onboarded_at` (schema v17): hooks and the MCP server's session only
+  *capture* (a row exists, prompt history and injection work, nothing is
+  shown), while `init`, `project onboard`, `project link`, `project switch`,
+  the sidebar's `+`, `team on` (and `serve` or a role `launch`, which turn it
+  on), a fleet spawn (a `restart` or `switch` too, codename or not) or `fleet
+  rename`, a project's account default (`accounts default <slot> --project`),
+  and a fact written by hand (`context add --project`, `context import`) add a
+  project **on purpose**. The sidebar
+  and `project list` show onboarded projects only; `a` in the sidebar and
+  `project list --all` show the captured ones too (marked); `project prune
+  --captured-only [--older-than DAYS]` drops captured directories with no
+  context entries and nothing touched in that many days; `forget` clears the
+  mark so the next prompt captures silently — the row comes back captured,
+  not listed; `doctor` gains a `projects` line with the hidden count, and an
+  empty `project list` and `status` say how many are hidden. The migration
+  adopts the rows already used on purpose (context entries, a codename,
+  linked repos, board activity, a fleet agent, a snapshot on disk; a
+  forgotten row never) and hides the rest.
 - **The snapshot token budget is a config knob, and the failure names its
   numbers (#82).** `aisquare project onboard` on a large repo printed only
   "codebase too large to pack within the token budget" against a hardcoded
@@ -974,6 +1082,98 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   no table for is a quiet line and never a keystroke lost without a trace, and
   a raw control byte a terminal reports as a key is spelt `U+0085` in that
   line rather than sent to your screen.
+- **Auto mode behind the explainability proxy is named, not mistaken for a
+  model outage** (#150). Fleet agents in `auto` permission mode traced through
+  the proxy were refused on every tool call — *"claude-opus-5[1m] is
+  temporarily unavailable (server error), so auto mode cannot determine the
+  safety of Bash"* — for hours, while the chat kept working and the API was
+  up: auto mode's separate, non-streaming **classifier** request fails behind
+  the proxy once the session is large, and a fleet agent's first request is
+  already ~140k tokens on a machine with several MCP connectors, so the
+  manager and its coders were refused from their first shell command. The fix
+  is the proxy's (AISquare-Explainability-SDK#1144); meanwhile: `aisquare
+  doctor` gains `explainability auto-mode` — present when a fleet role runs
+  `auto` behind a configured proxy, it reads the first-turn size of recent
+  sessions from their transcripts and warns above ~100k tokens or when a
+  recent session was refused three times or more; `fleet spawn` carries the
+  same warning on its receipt, and so do `fleet restart` and `fleet switch`,
+  naming the role's mode fix for later spawns and `fleet restart <label>
+  --permission-mode acceptEdits`, under the agent's own label, for the agent
+  itself — a restart replays the mode it was launched with (#144), so the
+  role's fix alone never reaches it; a session launched through
+  the proxy and refused three times is put in 🔔 attention by its Stop hook
+  with one `auto_mode_blocked` board line, or, when a restart or switch is
+  taking it down, leaves both to the replacement that resumes it, judged on
+  the refusals it adds; the mode fix they print is one the config
+  accepts (`config set` for a role the config lists, the TOML table for one
+  it leaves out); and the docs name the signature and the three ways round it
+  (a non-classifier mode per role, a lighter config dir, tracing off).
+- **An exited agent can be restarted from the UI, and a dead manager no
+  longer blocks its own replacement** (#138). A manager whose Claude Code was
+  ended with ctrl+c inside its window sat on the sidebar as 💤 forever: the
+  screen derived `exited` from the dead pane while its row stayed "live" until
+  a hand-run `fleet reap`, so `fleet spawn manager` refused with "already has
+  a manager", wake-ups targeted a dead pane, and the agent view had no
+  action. Now every listing (`fleet ls`, the UI's tick) records a dead pane
+  as ended the way `reap` does — exit status, the claims a crash left held
+  released, `agent_exited` on the board, the manager nudged — and `fleet
+  spawn` does the same before its checks, so a dead manager is replaceable at
+  once (a row a hand-over is stopping is left to it, for a few minutes at
+  most). The row stays on the live listing as **💤 exited** (the word, not
+  only the glyph) for a day while tmux still holds its window, and the agent
+  view gains **Stop** and **Restart**.
+  `aisquare fleet restart <label> [--fresh]` — and the button — starts the
+  agent again under its own label with the same role, task, worktree and
+  account, **resuming its session** from its transcript when that is on disk
+  (`claude --resume <transcript>`), else fresh with a hand-off prompt from the
+  board; a running agent is stopped first and handed over as `fleet switch`
+  hands one over (its claims wait for the replacement and no exit is
+  announced), a resumed one is typed one line telling it to carry on, one
+  whose role, task, account or binary would refuse the restart is refused
+  before it is stopped, one a hand-over is already moving is refused (and so
+  is a second `fleet switch` of it), and a refused restart
+  leaves the 💤 row and its last screen as they were. **Stop** on an exited row
+  removes the dead window, and so does spawning the same label again once the
+  replacement is up (it supersedes the old window — no two rows called
+  manager); the view's buttons act on the row it shows, never on a replacement
+  that took its label since. The Manager tab says *manager exited (130)* over
+  its Start button instead of "no manager yet". `doctor` warns when a
+  project's manager exited while its agents still run (`fleet-manager`).
+- **Fleet windows are born the width they will be shown, and a headless one
+  under the width at which Claude Code grows its diff panel on its own**
+  (#149). Every window started at 200x50 and only shrank to its pane when the
+  UI attached it; past 144 columns Claude Code's fullscreen renderer opens the
+  diff panel by itself as soon as a file is edited, remembers that for later
+  sessions, and inside the fleet nothing could close it — clicks are not
+  forwarded (#148) and a `/diff` typed while Claude works is queued. The
+  default is now 120x40 (`core.tmux.DEFAULT_WINDOW_WIDTH/HEIGHT`, under 144
+  and above the 110 `/diff` needs on demand), and a spawn from the UI's
+  *Start manager* is born at the size its pane will have — a pane that is
+  itself 144 columns or wider still shows the panel. A window added to a
+  running session keeps its size under `fleet attach` instead of following the
+  attached terminal, which would leave it that wide after the detach; the
+  session's first window follows it until the UI has shown it. `docs/fleet.md`
+  says how to close a panel that did open: `/diff` once the agent is idle.
+- **The sidebar bell rings for a real prompt, not for every notification**
+  (#153). Every Claude Code `Notification` flipped a session to 🔔 `attention`,
+  and 164 of the 183 bells on the reporting machine were the routine idle notice
+  ("Claude is waiting for your input") — nine bells in ten with nothing to
+  answer. The hook now reads `notification_type`: `permission_prompt`,
+  `elicitation_dialog`, `elicitation_url_dialog` and `agent_needs_input` ring
+  the bell; `idle_prompt` (and an elicitation closing) changes nothing — the
+  agent is `waiting`, which the board already says; `auth_success`, the
+  `quota_auto_resume_*` family, a sub-agent finishing and any type this build
+  does not know become a `notice` feed line, never a bell. A payload without
+  the field (an older Claude Code) is routed by its text, so the idle notice is
+  quiet there too and everything else keeps its old behaviour. A `notice`, like
+  the bell, is for the human board: it never reaches a teammate's prompt delta
+  or a manager's wake-up. In the fleet (the sidebar, the project view,
+  `fleet ls`) the bell also clears while the pane is producing output after
+  the notice — a permission that was granted, or an action the classifier
+  approved — not only on the next human prompt; a pane that goes quiet again
+  without a Stop (a prompt dismissed with Esc) reads 🔔 again. `aisquare watch`
+  and the team board show the session row itself, which keeps 🔔 until the turn
+  ends.
 - **A usage reset now says when, not just what o'clock** (#152). `aisquare
   accounts usage`, `accounts list --usage` and the Accounts page showed a reset
   as a bare `HH:MM`, which for the seven-day window can be six days away and

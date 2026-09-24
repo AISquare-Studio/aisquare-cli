@@ -569,6 +569,10 @@ aisquare accounts disable 3            # out of automatic selection; enable puts
 aisquare config set accounts.pick headroom     # spawns go where there is room (see above)
 aisquare config set accounts.on_limit switch   # …and an agent that hits its limit is moved
 aisquare fleet switch coder-auth       # move one now: resumes its session on the account with room
+aisquare fleet restart manager         # an exited (or stuck) agent, back under its label, session resumed
+                                       # …launched as it was first launched: the row records the
+                                       # binary, permission mode, arguments and account (#144)
+aisquare fleet restart coder-auth --permission-mode acceptEdits   # …another mode; later restarts keep it
 aisquare fleet switch coder-auth --to personal --fresh   # a named account; a new session + hand-off
 ```
 
@@ -607,6 +611,29 @@ that agent's own pane and the spawn does not fall back: pick another mode
 yourself, per spawn (`--permission-mode acceptEdits`) or for the role
 (`aisquare config set fleet.roles.coder.permission_mode acceptEdits`).
 `bypassPermissions` is available and is never a default.
+
+**`auto` behind the explainability proxy.** The classifier auto mode relies on
+makes a separate, non-streaming request the proxy currently cuts short once the
+session is large — and a fleet agent's very first request is already the whole
+system prompt, tool schemas and skills (~140k tokens on a machine with several
+MCP connectors), so every tool call is refused with *"… is temporarily
+unavailable (server error), so auto mode cannot determine the safety of Bash"*
+while the chat itself keeps working. `aisquare doctor` says so (`explainability
+auto-mode`), the spawn receipt repeats it, and a session launched through the
+proxy that has been refused three times is put in 🔔 attention with one
+`auto_mode_blocked` board line (one that a restart or a switch is taking down
+leaves both to its replacement, which is judged on the refusals it adds). Until
+the proxy fix
+([AISquare-Explainability-SDK#1144](https://github.com/AISquare-Studio/AISquare-Explainability-SDK/issues/1144)):
+a non-classifier mode for the roles (`acceptEdits`, as above — for a role your
+own `[fleet.roles]` leaves out, `config set` answers "unknown config key" and
+the step is a `[fleet.roles.<role>]` table in the file; the doctor line names
+the one your config takes) and, for an agent already running, `aisquare fleet
+restart <label> --permission-mode acceptEdits` — a restart replays the mode the
+agent was launched with (#144), so the role's setting reaches only the agents
+spawned after it; a lighter config dir; or tracing off. Details and
+the measurements:
+[`connecting-your-agents-to-explainability.md`](connecting-your-agents-to-explainability.md#auto-mode-refuses-every-tool-call-behind-the-proxy).
 
 **Every default is a default.** Everything this guide calls one — permission
 mode, worktree-per-role, the escape key, the agent cap, the tmux socket, the
@@ -722,6 +749,54 @@ badge beside the name. `fleet rename` changes it; `aisquare project switch
 amber-otter` and `--project amber-otter` both resolve it, and the "matches
 several projects" error lists codenames, because basenames are what collide.
 
+**Groups, pins and your own order.** The navigator is a flat list until you
+arrange it: **drag** a project card onto a group header to put it in that
+group, between cards to reorder it, or onto the empty space below the list to
+take it out of its group; drag a group header to reorder the groups. Released
+anywhere else — the main pane, a pinned card — a drag changes nothing. A pinned
+card or group does not drag at all: its place is the pin order, which `p` sets
+(the group picker still regroups a pinned project). Without a mouse: with the
+sidebar focused, `shift+↑` / `shift+↓` move the project (or group) under the
+cursor one step, `g` opens the group picker (an existing group, *New group…*,
+or *Ungroup*), `p` pins or unpins, `space` folds a group (or a card), and `u`
+undoes the last gesture — a toast says what was undone. `shift+click` marks
+several cards; `shift+g` then moves the whole set, and a drag its unpinned
+cards. Pinned projects and groups sit in a **📌 Pinned** section at the top, in
+pin order; a group header carries the roll-up of its members' agents, so a
+folded group still tells you something is running. A group shares **nothing**:
+context, prompts, snapshots, boards and explainability settings stay per
+project, and deleting a group never deletes a project. Forgetting a project
+takes it out of its group and off the pin: added again, it comes back loose, at
+the end. The same layer from a shell, with the same store state:
+
+```sh
+aisquare project group create frontend web docs     # a group, with its first members
+aisquare project group add frontend cli
+aisquare project group remove cli
+aisquare project group rename frontend ui
+aisquare project group move tools --before ui
+aisquare project group delete ui                    # members go back to the top level
+aisquare project pin api
+aisquare project unpin api
+aisquare project move docs --to top --position 0    # or --to <group> [--before P | --after P]
+aisquare project list --group ui                    # or --pinned; --json carries group, position, pinned
+aisquare project onboard ~/work/new --group tools   # created if new
+```
+
+**What is listed, and what is only captured.** Every directory a hooked Claude
+Code session runs in is *captured* — registered so that its prompt history and
+injected memory work — but the sidebar and `aisquare project list` show only
+the projects added **on purpose**: `aisquare init`, `project onboard`,
+`project link`, `project switch`, the sidebar's `+`, `team on`, a fleet spawn,
+or a fact written by hand with `context add --project` (#139). A captured
+directory stays out of the way until one of those happens; `a` in the sidebar
+shows the captured ones too (marked *captured*), `project list --all` lists
+them, and `project prune --captured-only [--older-than DAYS]` drops the stale
+ones — those with no context entries and nothing touched in 30 days by
+default. `project forget` now sticks: the next prompt in that directory
+captures it again, silently, instead of putting it back on the list. `doctor`
+says how many are hidden.
+
 **Registrations you no longer want** — a deleted checkout, a throwaway worktree —
 go with `aisquare project forget <name|path>`; `aisquare project prune` sweeps
 roots that are gone from disk and worktrees of a repository that is itself
@@ -797,6 +872,14 @@ config is bundled and regenerated (do not edit it): status line off,
 extended keys on so shift+enter and friends reach Claude Code, mouse off (the
 UI owns the mouse), monitor-activity on. One server for every project; one
 session per project; one window per agent.
+
+**What the UI remembers.** The view that was open — a project, an agent, the
+Accounts page, the Doctor — comes back at the next launch if its row is still
+there (an agent that has gone falls back to its project), and so does the
+captured-directories toggle; both live in the store's `ui_state` table (#144),
+the theme in `state.json` because the board shares it, the navigator width
+beside the theme. Nothing else is kept: the panes are tmux's and the rows are
+the store's.
 
 **The UI holds no state that matters.** What must keep running lives in tmux
 (the processes) and `~/.aisquare/context.db` (the `fleet_agent` rows, the
@@ -1067,6 +1150,54 @@ That is also how to stop everything the fleet ever started: it ends every agent
 at once (so prefer `fleet stop` per agent), and it reports what it ended.
 Running `tmux -L asq kill-server` by hand is what leaves the rows above wrong,
 and it takes any other session on that socket with it.
+
+**The manager shows 💤 exited and nothing brings it back.** You ended its
+Claude Code (ctrl+c until it quit, or `/exit`) inside its window; tmux keeps
+the dead window (`remain-on-exit`) so the last screen stays readable, and the
+row stays on the sidebar as **💤 exited** for a day while that window is
+there. Its row now records the exit the moment any listing sees the dead pane
+— no `reap` needed — so `aisquare fleet spawn manager` is not refused any more,
+and the row itself offers **Restart**: same label, role, task, worktree and
+account, and the SAME session resumed from its transcript when that file is
+on disk, so the manager comes back knowing its intake, its contracts and its
+coders (`--fresh` in the command, or a missing transcript, starts new with a
+hand-off prompt built from the board). From a shell: `aisquare fleet restart
+manager`. The project's Manager tab says *manager exited (130)* over its
+**Start manager** button instead of "no manager yet". **Stop** on an exited
+row removes the dead window and takes the row off the listing; so does
+starting the same label again (the replacement supersedes the old window once
+it is up, so the sidebar never shows two rows called manager); `doctor` names
+a project whose manager exited while agents are still running
+(`fleet-manager`). A restart that is refused — a coder whose task is done, an
+account no longer on this machine — leaves the 💤 row and its last screen as
+they were (**Stop** clears them), and a running agent whose role, task,
+account or binary would refuse the restart is refused before it is stopped. A
+running agent is handed over the way `fleet switch` hands one over: its task
+stays claimed for the replacement, and the board says `restarted`, not
+`agent_exited`, so the manager is not woken to staff that task again. A resumed
+agent is typed one line telling it to carry on, as `fleet switch` types it, so
+it does not sit at the idle prompt `claude --resume` opens at. An agent a
+hand-over is already moving (a `fleet switch`, by hand or on a usage limit, or
+another restart) is not restarted or switched again: that hand-over starts the
+replacement itself. The agent view's **Stop** and **Restart** act on the row it
+shows: once its label has passed to a replacement (the manager restarted that
+coder), they say so and leave the replacement alone.
+
+**A panel reading "No changes this session" sits beside an agent's conversation
+and will not go away.** That is Claude Code's own diff panel (fullscreen
+renderer, v2.1.260+): it opens by itself once Claude edits a file in a terminal
+at least 144 columns wide, and once opened it opens again on every edit, in
+this session and later ones. Fleet windows are born 120 columns wide for
+exactly this reason (`core.tmux.DEFAULT_WINDOW_WIDTH`) and a spawn from the UI
+uses the pane's real size, so a panel should only appear if the pane itself is
+that wide — or after `aisquare fleet attach` from a terminal that wide. Under an
+attach the session's first window (usually the manager's) follows the
+terminal's size unless the UI has shown it, and keeps that width after you
+detach; every other window keeps its own size, panned in a smaller terminal and
+padded in a larger one. To close one: wait until the agent is idle
+(`⏸ waiting`) and type `/diff` into the pane — typed while Claude is working it
+is queued as a message, which is why it seemed to do nothing. The `✕` in the
+panel's header needs a forwarded click, which the pane does not do yet (#148).
 
 **An agent is stuck on a permission prompt.** Its row shows **🔔 NEEDS YOU**
 and the terminal rings. Nothing nudges it and nothing answers for it: click the

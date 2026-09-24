@@ -39,6 +39,8 @@ from aisquare.core.tmux import (
     BUNDLED_CONF,
     CHECK_SOCKET_SUFFIX,
     CONF_NAME,
+    DEFAULT_WINDOW_HEIGHT,
+    DEFAULT_WINDOW_WIDTH,
     MIN_VERSION,
     PASTE_BUFFER,
     Capture,
@@ -510,9 +512,41 @@ def test_spawn_window_adds_a_window_when_the_session_exists(
         "-t", "=asq-amber-fox:", "-n", "reviewer", "-c", str(tmp_path),
         "--", "sh", "-c", "exit 3",
     ]  # fmt: skip
-    assert "-x" not in new_window, "an existing session's size is the session's"
+    assert "-x" not in new_window, "new-window takes no geometry: the session's applies…"
+    # …so the window is resized right after, to the requested (here: default) geometry —
+    # a coder spawned into a running manager's session was otherwise born at the
+    # session's 200x50 and grew Claude Code's diff panel on its own (#149).
+    assert fake.commands()[2] == ["resize-window", "-t", "%10", "-x", "120", "-y", "40"]
     assert (info.window_id, info.pane_id, info.current_command) == ("@5", "%10", "sh")
-    assert len(fake.commands()) == 2, "new-window -e is per window: nothing to take back"
+    assert info.resize_refused is None  # it landed: nothing for the receipt to say
+    # The resize is the only command after new-window: no set-environment -u follows.
+    assert len(fake.commands()) == 3, "new-window -e is per window: nothing to take back"
+
+
+def test_spawn_window_keeps_a_window_whose_resize_tmux_refuses(
+    fake_bin: Path, conf: Path, tmp_path: Path
+) -> None:
+    """The resize after ``new-window`` fails open: the window runs, so it is returned.
+
+    Raised instead, it would reach ``fleet.spawn`` as a failed spawn AFTER the
+    window exists — a running agent with no row to show, stop or find it by. A
+    refused size costs geometry only: the window keeps the session's size until
+    a pane shows it and the UI's own sync corrects it — for a headless window,
+    one nobody opens, possibly never. So the refusal comes back with the window,
+    in tmux's words, for the spawn's receipt (review of #162, round 1).
+    """
+    fake = FakeTmux(
+        OK,  # has-session
+        Completed(0, f"@6{_SEP}%11\n", ""),  # new-window -P
+        Completed(1, "", "width too large"),  # resize-window
+    )
+    info = _server(fake, fake_bin, conf).spawn_window(
+        "asq-amber-fox", name="coder-2", cwd=tmp_path, command=["claude"], width=97, height=31
+    )
+    # The caller's size, not the default, on the existing-session branch too.
+    assert fake.commands()[2] == ["resize-window", "-t", "%11", "-x", "97", "-y", "31"]
+    assert (info.window_id, info.pane_id, info.current_command) == ("@6", "%11", "claude")
+    assert info.resize_refused == "width too large"
 
 
 def test_spawn_window_without_env_passes_no_dash_e(
@@ -1623,3 +1657,29 @@ def test_desktop_environment_carries_only_the_variables_this_process_has() -> No
     }
     assert listed == set(DESKTOP_ENV_VARS) - {"DISPLAY", "SSH_AUTH_SOCK"}
     assert "set -g prefix None" in BUNDLED_CONF and "bind-key -n F12 detach-client" in BUNDLED_CONF
+
+
+def test_the_default_geometry_stays_under_claude_codes_diff_panel_line(
+    fake_bin: Path, conf: Path, tmp_path: Path
+) -> None:
+    """#149: a window nobody sized must not be wide enough to open the diff panel by itself.
+
+    Claude Code's fullscreen renderer opens it "once Claude starts editing files, if
+    your terminal is at least 144 columns wide" and remembers that; the panel opens
+    on demand from 110 columns. Both numbers are pinned where the default is
+    defined and where it is consumed (a new session's ``-x``/``-y``).
+    """
+    assert 110 <= DEFAULT_WINDOW_WIDTH < 144
+    assert DEFAULT_WINDOW_HEIGHT >= 24
+    fake = FakeTmux(
+        Completed(1, "", "can't find session: asq-quiet-lark"),  # has-session
+        Completed(0, f"@1{_SEP}%1\n", ""),  # new-session -P
+    )
+    _server(fake, fake_bin, conf).spawn_window(
+        "asq-quiet-lark", name="coder-1", cwd=tmp_path, command=["claude"]
+    )
+    new_session = fake.commands()[1]
+    x, y = new_session.index("-x"), new_session.index("-y")
+    assert new_session[x + 1] == str(DEFAULT_WINDOW_WIDTH) == "120"
+    assert new_session[y + 1] == str(DEFAULT_WINDOW_HEIGHT) == "40"
+    assert len(fake.commands()) == 2  # a new session's first window needs no second step

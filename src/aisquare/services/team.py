@@ -81,13 +81,16 @@ does not — and the ``SessionStart`` of the id that follows comes AFTER this en
 
 HANDOVER_STATE = "switching"
 """The ``team_session.state`` ``fleet switch`` sets before it ``/exit``s an agent that is
-about to start again under another account (#146): its ``SessionEnd`` then parks the
-claims, as a ``/clear`` does, instead of releasing them (review of #205, finding 6) —
-for the SAME id when the replacement resumes the session, for the replacement's new
-id to take over when it starts fresh (fourth round). Transient — a resumed session's
-start hook writes ``working`` over it, a fresh start retires the old presence — and
-unknown to ``fleet._derive``, which falls back to the pane. Besides that start and
-``switch`` taking it back, no state write replaces it: the store keeps it
+about to start again under another account (#146), and ``fleet restart`` before it
+``/exit``s a running one (#163): its ``SessionEnd`` then parks the claims, as a
+``/clear`` does, instead of releasing them (review of #205, finding 6) — for the SAME
+id when the replacement resumes the session, for the replacement's new id to take over
+when it starts fresh (fourth round). Transient — a resumed session's start hook writes
+``working`` over it, a fresh start retires the old presence — and unknown to
+``fleet._derive``, which falls back to the pane. The agent's own hooks between the
+``/exit`` and its end — the turn it finishes first, a notification, a failed turn —
+leave it where it is (review of #163, round 2). Besides that start and ``switch``
+taking it back, no state write replaces it: the store keeps it
 (``SqliteStore.touch_session``; review of the #205 fold, round 1). So ``switch``
 takes it back as soon as its ``stop`` returns or raises — the one reader, the old
 process's ``SessionEnd``, has run by then or never will (round 2)."""
@@ -132,6 +135,12 @@ MANAGER_WAKE_KINDS: frozenset[str] = frozenset(
         "switched",
     }
 )
+
+#: Event kinds written for the HUMAN board only: the 🔔 transition and a Claude
+#: Code notification's feed line (#153). They never reach a teammate's prompt
+#: delta or a manager's wake-up reason — no agent can answer another's permission
+#: prompt, and each one would take a ``_DELTA_LIMIT`` slot from the real news.
+HUMAN_BOARD_KINDS: frozenset[str] = frozenset({"attention", "notice"})
 
 #: The last sentence of every wake-up reason. Claude Code continues the turn with
 #: the reason as its instruction, so the instruction must license stopping — a
@@ -523,7 +532,8 @@ def activate(cwd: Path | None = None) -> ProjectInfo:
     _require_enabled()
     _DELIVERY.set(None)
     with store_session() as store:
-        project = _project(store, cwd)
+        # `team on` is deliberate (#139): one onboarding write, not _project's capture first.
+        project = store.onboard_project(orchestrator.team_project(cwd))
         event = None
         if not store.team_active(project.id):
             event = _emit(store, project.id, "activate", "agent orchestrator activated")
@@ -1527,8 +1537,8 @@ def hook_prompt_heartbeat(
             exclude_session=session.id,
             limit=_DELTA_LIMIT * 3 + 1,
         )
-        # Attention notices are for the human board, not teammate context.
-        events = [event for event in raw if event.kind != "attention"]
+        # Bells and notification lines are for the human board, not teammate context.
+        events = [event for event in raw if event.kind not in HUMAN_BOARD_KINDS]
         if not events or not orchestrator.delta_enabled():
             cursor = raw[-1].seq if raw else None
             store.touch_session(session.id, cursor=cursor, state="working")
@@ -1562,6 +1572,10 @@ def hook_stop(
     The wake-up is an extra on top of the contract, so it fails open on its own:
     the row is marked waiting first, then :class:`ManagerWakeupError` carries the
     cause to the CLI's cost line.
+
+    A session a hand-over has marked (:data:`HANDOVER_STATE`) keeps the mark and
+    is not kept going: ``/exit`` has been typed into it, and the turn ending is
+    only what that ``/exit`` waits behind.
     """
     if not orchestrator.team_enabled():
         return None
@@ -1570,6 +1584,15 @@ def hook_stop(
         if session is None:
             return None
         store.renew_leases(session.id, _now() + timedelta(minutes=orchestrator.lease_minutes()))
+        if session.state == HANDOVER_STATE:
+            # `fleet switch`, or `fleet restart` of a running agent, marked it and typed
+            # `/exit`, which an agent mid-turn runs once the turn is over. `waiting`
+            # written here (or a manager's wake-up writing `working`) replaced the mark,
+            # so the `SessionEnd` that followed released the claims the replacement was
+            # to inherit, and a listing ended the row under the hand-over (review of
+            # #163, round 2). A manager woken here would take its news down with it:
+            # the events stay past its cursor, for whatever comes back.
+            return None
         failure: Exception | None = None
         deferred: str | None = None
         if session.role == MANAGER_ROLE:
@@ -1624,13 +1647,13 @@ def _wake_candidates(store: ContextStore, me: TeamSession) -> list[TeamEvent]:
 
     One function so the wake-up and the deferral below can never disagree about
     the window they are judging — same source, same exclusions, same limit as
-    :func:`hook_prompt_heartbeat`. Attention notices are for the human board,
-    not teammate context.
+    :func:`hook_prompt_heartbeat`. Bells and notification lines
+    (:data:`HUMAN_BOARD_KINDS`) are for the human board, not teammate context.
     """
     raw = store.events_since(
         me.project_id, me.cursor, exclude_session=me.id, limit=_DELTA_LIMIT * 3 + 1
     )
-    return [event for event in raw if event.kind != "attention"]
+    return [event for event in raw if event.kind not in HUMAN_BOARD_KINDS]
 
 
 def _deferred_wake_reason(store: ContextStore, me: TeamSession) -> str | None:
@@ -1696,18 +1719,95 @@ def _manager_wakeup(
     )
 
 
-def hook_notification(session_id: str, cwd: Path | None, message: str | None) -> None:
-    """The session needs the user (permission request / idle notice).
+#: Claude Code ``notification_type`` values that mean A HUMAN IS NEEDED: a
+#: permission prompt, an MCP elicitation (a form or a URL to visit), a sub-agent
+#: asking its user. These ring the bell (``attention``); nothing else does.
+ATTENTION_NOTIFICATIONS: frozenset[str] = frozenset(
+    {
+        "permission_prompt",
+        "elicitation_dialog",
+        "elicitation_url_dialog",
+        "agent_needs_input",
+    }
+)
 
-    The feed event is emitted only on the transition INTO attention —
-    Claude re-notifies while parked, and a per-notice event floods the feed
-    with lines nobody can act on twice.
+#: Types that are ROUTINE and change nothing on the board: the idle notice
+#: ("Claude is waiting for your input", sent ~60 s into every pause — 164 of the
+#: 183 bells measured in #153) and the housekeeping of elicitations closing.
+QUIET_NOTIFICATIONS: frozenset[str] = frozenset(
+    {"idle_prompt", "elicitation_complete", "elicitation_response"}
+)
+
+#: The idle notice's text, which identifies it when Claude Code sent no type (a
+#: version before ``notification_type`` existed). It is the one text that matters:
+#: without it every old-style notification rang the bell, as before #153.
+_IDLE_MESSAGE = "waiting for your input"
+
+
+def classify_notification(notification_type: str | None, message: str | None) -> str:
+    """``attention`` · ``quiet`` · ``notice`` — what a Claude Code notification means for the board.
+
+    By ``notification_type`` first (#153): the documented values are sorted
+    above, and an UNKNOWN type is a ``notice`` — a feed line, never a bell,
+    because the cost of a false bell (every agent reading as stuck, the real
+    prompt lost in the noise) is the defect this exists to end, and the cost of
+    a missed bell on a brand-new type is one feed line the operator can read.
+    Without a type — older Claude Code — the message decides: the idle notice
+    is quiet, and everything else, a permission or browser request included,
+    keeps the pre-#153 behaviour (attention), so an old install loses nothing.
+    """
+    if notification_type:
+        if notification_type in ATTENTION_NOTIFICATIONS:
+            return "attention"
+        if notification_type in QUIET_NOTIFICATIONS:
+            return "quiet"
+        return "notice"
+    return "quiet" if _IDLE_MESSAGE in (message or "").lower() else "attention"
+
+
+def hook_notification(
+    session_id: str,
+    cwd: Path | None,
+    message: str | None,
+    *,
+    notification_type: str | None = None,
+) -> None:
+    """A Claude Code notification: ring the bell only for what needs a human (#153).
+
+    ``attention`` (a permission prompt, an elicitation, a sub-agent asking) flips
+    the row to ``attention``; the feed event is emitted only on the transition
+    INTO it — Claude re-notifies while parked, and a per-notice event floods the
+    feed with lines nobody can act on twice. ``quiet`` (the idle notice) changes
+    nothing at all: the agent has finished a turn and is ``waiting``, which the
+    board already says, and it was these — nine bells in ten — that made the
+    bell meaningless. ``notice`` (``auth_success``, the quota auto-resume
+    family, a sub-agent finishing, an unknown type) is a feed line for the
+    human board, no state change — and, like the bell, never part of an agent's
+    delta or a manager's wake-up (:data:`HUMAN_BOARD_KINDS`).
     """
     if not orchestrator.team_enabled():
+        return
+    kind = classify_notification(notification_type, message)
+    if kind == "quiet":
         return
     with store_session() as store:
         session = store.get_session(session_id)
         if session is None:
+            return
+        if kind == "notice":
+            _emit(
+                store,
+                session.project_id,
+                "notice",
+                message or notification_type or "notification",
+                session_id=session.id,
+            )
+            return
+        if session.state == HANDOVER_STATE:
+            # A prompt that came up in a pane a hand-over is closing: nobody is to
+            # answer it, and `attention` written over the mark had the `SessionEnd`
+            # that follows release the claims the replacement was to inherit (review
+            # of #163, round 2) — as `hook_stop` and `hook_stop_failure` keep it too.
             return
         if store.mark_attention(session.id):
             _emit(

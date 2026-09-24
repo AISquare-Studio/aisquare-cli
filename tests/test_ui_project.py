@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import threading
 import tomllib
 from collections.abc import Callable, Coroutine, Iterator, Sequence
 from datetime import UTC, datetime
@@ -39,7 +40,7 @@ from textual.geometry import Region
 from textual.notifications import Notification, SeverityLevel
 from textual.pilot import Pilot
 from textual.widget import Widget
-from textual.widgets import Button, DataTable, Input, OptionList, Select, Static
+from textual.widgets import Button, Checkbox, DataTable, Input, OptionList, Select, Static
 from textual.widgets._toast import Toast
 from typer.testing import CliRunner
 
@@ -53,7 +54,8 @@ from aisquare.cli.ui.views.project import ManagerTab, ProjectView
 from aisquare.cli.ui.views.settings import SettingsView
 from aisquare.core import paths
 from aisquare.core import tmux as tmux_core
-from aisquare.core.config import load_config
+from aisquare.core.config import ExplainabilityTarget, load_config, save_config
+from aisquare.core.store import store_session
 from aisquare.core.tmux import Capture, Completed, PaneFacts, TmuxServer
 from aisquare.models import (
     CheckStatus,
@@ -483,6 +485,40 @@ def test_refresh_status_pushes_the_managers_state(project: ProjectInfo) -> None:
     assert "NEEDS YOU" in header and "asq-ruby-fox" in header
     assert attached == "%11"  # the manager's pane, not the coder's
     assert button_back is True and pane_after is False  # no manager in the snapshot → button
+
+
+def test_the_manager_tab_says_the_manager_exited_and_how_to_bring_it_back(
+    project: ProjectInfo,
+) -> None:
+    """#138: an exited manager's row stays listed while its window stands (its last
+    screen is readable behind it); the tab must not call that "no manager yet"."""
+    now = datetime.now(tz=UTC)
+    gone = fake_agent(project, pane_id="%31").model_copy(
+        update={"ended_at": now, "exit_status": 130}
+    )
+    coder = fake_agent(project, pane_id="%32", label="coder-auth")
+
+    async def scenario(pilot: Pilot[None], host: Host) -> tuple[str, bool, bool, str]:
+        view = host.query_one(ProjectView)
+        view.refresh_status(
+            [
+                FleetAgentStatus(agent=gone, state="exited", detail="exit 130"),
+                FleetAgentStatus(agent=coder, state="working"),
+            ]
+        )
+        await pilot.pause()
+        header = str(host.query_one("#manager-header").render())
+        button = host.query_one("#start-manager", Button).display
+        pane = host.query_one("#manager-pane", TerminalPane).display
+        view.refresh_status([FleetAgentStatus(agent=coder, state="working")])  # no such row
+        await pilot.pause()
+        return header, button, pane, str(host.query_one("#manager-header").render())
+
+    header, button, pane, without = drive(project, scenario)
+    assert "manager exited (130)" in header and "Restart on its sidebar row" in header
+    assert "aisquare fleet restart manager" in header and "no manager yet" not in header
+    assert button is True and pane is False  # the way to a NEW session is right there
+    assert "has no manager yet" in without and "exited" not in without  # the control
 
 
 def test_refresh_routes_a_snapshot_and_a_bare_refresh_only_repaints(project: ProjectInfo) -> None:
@@ -1060,3 +1096,493 @@ def test_settings_saves_the_accounts_section_and_rejects_a_bad_line(project: Pro
     assert shown_pick == "headroom"  # the form opened on what the file holds
     assert any("between 1 and 100" in m and sev == "error" for m, sev in notices), notices
     assert load_config().accounts.switch_at == 70  # a refused form never reaches the writer
+
+
+@pytest.mark.parametrize("columns", [120, 200])
+def test_start_manager_spawns_at_the_panes_own_size(
+    project: ProjectInfo, monkeypatch: pytest.MonkeyPatch, columns: int
+) -> None:
+    """#149: the window is born the size of the pane about to show it, never the 200x50
+    that grew Claude Code's diff panel before the first resize could shrink it.
+
+    At 200 columns too: the width is passed through uncapped (the CHANGELOG says a
+    pane 144 or more columns wide still shows the panel), so a clamp anywhere from
+    120 to 143 would pass on the 120-column host alone (review of #162, round 2)."""
+    fleet: dict[str, FleetAgent | None] = {"manager": None}
+    sizes: list[object] = []
+
+    def spawn(target: ProjectInfo, role: str, **kwargs: object) -> fleet_service.SpawnReceipt:
+        sizes.append(kwargs.get("size"))
+        fleet["manager"] = fake_agent(target)
+        return fleet_service.SpawnReceipt(
+            agent=fake_agent(target), asked_label=None, tmux_session="asq-amber-otter"
+        )
+
+    monkeypatch.setattr(fleet_service, "spawn", spawn)
+    monkeypatch.setattr(fleet_service, "manager_of", lambda target: fleet["manager"])
+
+    async def scenario(pilot: Pilot[None], host: Host) -> tuple[int, int]:
+        await pilot.resize_terminal(columns, 50)
+        await pilot.pause()
+        await pilot.click("#start-manager")
+        await settle(pilot)
+        return host.query_one(ManagerTab).content_size
+
+    tab_width, tab_height = drive(project, scenario)
+    assert len(sizes) == 1
+    size = sizes[0]
+    assert isinstance(size, tuple) and len(size) == 2
+    width, height = size
+    # The pane is hidden until the manager exists, so the tab's own size stands in:
+    # the pane's width, and an estimate of the rows it will have under the header.
+    assert width == tab_width and 0 < height < tab_height
+    # A clamp under the 144-column line fails that equality only on a tab past the
+    # line, which is what the wide host is for. Matched against the tab, not the
+    # host, so chrome beside the tab is not this test's business (review of #162,
+    # round 1).
+    assert columns < 144 or tab_width >= 144
+    # Uncapped on purpose: the pane's first attach widens the window to the pane
+    # whatever it was born at, so a pane 144 or more columns wide shows Claude Code's
+    # panel either way (docs/fleet.md). What stays under that line is a window nobody
+    # sized — the headless default (test_tmux, test_fleet_service).
+
+
+def test_start_manager_reads_the_panes_size_on_the_ui_thread_and_spawns_off_it(
+    project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The geometry is read when the button is pressed, the spawn runs in the worker.
+
+    Textual's DOM is not thread-safe: reading a widget's ``content_size`` from the
+    worker thread can rebuild the compositor's map off the event loop. So the size
+    is taken on the UI thread and handed to the worker, and only the slow part —
+    ``fleet.spawn`` and its tmux calls — runs off it.
+    """
+    fleet: dict[str, FleetAgent | None] = {"manager": None}
+    on_ui_thread: dict[str, bool] = {}
+    measure = ManagerTab._pane_size
+
+    def pane_size(tab: ManagerTab) -> tuple[int, int] | None:
+        on_ui_thread["measure"] = threading.current_thread() is threading.main_thread()
+        return measure(tab)
+
+    def spawn(target: ProjectInfo, role: str, **kwargs: object) -> fleet_service.SpawnReceipt:
+        on_ui_thread["spawn"] = threading.current_thread() is threading.main_thread()
+        fleet["manager"] = fake_agent(target)
+        return fleet_service.SpawnReceipt(
+            agent=fake_agent(target), asked_label=None, tmux_session="asq-amber-otter"
+        )
+
+    monkeypatch.setattr(ManagerTab, "_pane_size", pane_size)
+    monkeypatch.setattr(fleet_service, "spawn", spawn)
+    monkeypatch.setattr(fleet_service, "manager_of", lambda target: fleet["manager"])
+
+    async def scenario(pilot: Pilot[None], host: Host) -> None:
+        await pilot.click("#start-manager")
+        await settle(pilot)
+
+    drive(project, scenario)
+    assert on_ui_thread == {"measure": True, "spawn": False}
+
+
+def _attach_in_setup(host: Host, key: str, **fields: str) -> None:
+    """Type ``key`` into the Setup form's one key field, tick *this project only*, save.
+
+    ``fields`` fills other Setup inputs by id (``target=``, ``gateway=``, ``key_env=``).
+    Pressed, not clicked: the form sits below the fold of a 50-row host.
+    """
+    for name, value in fields.items():
+        host.query_one(f"#explainability-{name.replace('_', '-')}", Input).value = value
+    host.query_one("#explainability-key", Input).value = key
+    host.query_one("#explainability-key-project", Checkbox).value = True
+    host.query_one("#explainability-save", Button).press()
+
+
+def test_the_explainability_tab_attaches_a_key_to_the_active_project_without_echoing_it(
+    project: ProjectInfo, quiet_explainability: dict[str, int]
+) -> None:
+    """#141: the shell-only gap — a key per project, from the UI. The value goes to a
+    mode-600 file and a binding row, not to the machine file; the toast names the
+    path, never the key."""
+
+    async def scenario(
+        pilot: Pilot[None], host: Host
+    ) -> tuple[str, list[tuple[str, str]], str, str]:
+        host.query_one(ProjectView).active = "tab-explainability"
+        await settle(pilot)
+        view = host.query_one(ExplainabilityView)
+        before = view.status_text
+        _attach_in_setup(host, "pk-ui-0123456789")
+        await settle(pilot)
+        field = host.query_one("#explainability-key", Input)
+        return before, list(host.notices), field.value, view.status_text
+
+    before, notices, field_after, status = drive(project, scenario)
+    assert "project:" in before and "no key of its own" in before
+    attached = [m for m, _ in notices if m.startswith("✓ key attached to")]
+    assert len(attached) == 1, notices
+    assert "pk-ui-0123456789" not in attached[0]
+    assert field_after == "", "the field is cleared"
+    path = explainability_service.project_key_path(project.id)
+    assert path.read_text(encoding="utf-8") == "pk-ui-0123456789"
+    assert (path.stat().st_mode & 0o777) == 0o600
+    with store_session() as store:
+        binding = store.project_explainability(project.id)
+    assert binding is not None and binding.key_path == path
+    assert explainability_service.stored_api_key() is None, "the machine file is not the project's"
+    assert "its own key for target" in status and "pk-ui" not in status
+
+
+def test_the_explainability_tab_has_one_key_field_and_the_box_says_whose_key(
+    project: ProjectInfo, quiet_explainability: dict[str, int]
+) -> None:
+    """#141's *Attach key* field and #131's Setup form met on this tab with a key
+    input each, writing to two places under two rules for the deployment. One field
+    now: unticked it is the machine key, as the Setup form always wrote it."""
+
+    async def scenario(pilot: Pilot[None], host: Host) -> tuple[list[str | None], bool]:
+        host.query_one(ProjectView).active = "tab-explainability"
+        await settle(pilot)
+        view = host.query_one(ExplainabilityView)
+        secret_fields = [field.id for field in view.query(Input) if field.password]
+        box = host.query_one("#explainability-key-project", Checkbox)
+        host.query_one("#explainability-key", Input).value = "AIS_machine_0123456789"
+        host.query_one("#explainability-save", Button).press()
+        await settle(pilot)
+        return secret_fields, box.disabled
+
+    secret_fields, disabled = drive(project, scenario)
+    assert secret_fields == ["explainability-key"]
+    assert disabled is False, "a page has a project to own a key"
+    assert explainability_service.stored_api_key() == "AIS_machine_0123456789"
+    with store_session() as store:
+        assert store.project_explainability(project.id) is None, "unticked: not the project's"
+
+
+def test_a_project_key_is_taken_beside_a_target_that_names_its_own_variable(
+    project: ProjectInfo, quiet_explainability: dict[str, int], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The Setup form refuses a MACHINE key beside a custom key variable: the file is
+    read only for the default one. A project's own key is the resolver's first rung,
+    read whatever variable the target names, so that refusal is not its to make."""
+    config = load_config()
+    config.explainability.targets = {
+        "stg": ExplainabilityTarget(gateway_url="https://stg.example", api_key_env="MY_KEY"),
+    }
+    save_config(config)
+    monkeypatch.delenv("MY_KEY", raising=False)
+
+    async def scenario(pilot: Pilot[None], host: Host) -> list[tuple[str, str]]:
+        host.query_one(ProjectView).active = "tab-explainability"
+        await settle(pilot)
+        _attach_in_setup(host, "pk-own-var-0123456789")
+        await settle(pilot)
+        return list(host.notices)
+
+    notices = drive(project, scenario)
+    assert not any("reads its key from $MY_KEY" in m for m, _ in notices), notices
+    resolved = ops.resolve_target(load_config().explainability, None, project_id=project.id)
+    assert (resolved.api_key, resolved.key_source) == ("pk-own-var-0123456789", "project")
+
+
+def test_a_project_key_for_a_deployment_nothing_answers_to_is_refused(
+    project: ProjectInfo, quiet_explainability: dict[str, int]
+) -> None:
+    """``key set --target prdo`` is refused before anything is written: a binding to a
+    name no target answers to traces nothing (review of #170). The form's deployment
+    field is the same question. Typed with a gateway, the target exists after the
+    save and the key is bound to it, not to the machine's active one."""
+
+    async def scenario(pilot: Pilot[None], host: Host) -> tuple[list[tuple[str, str]], str]:
+        host.query_one(ProjectView).active = "tab-explainability"
+        await settle(pilot)
+        _attach_in_setup(host, "pk-typo-0123456789", target="prdo")
+        await settle(pilot)
+        refused = list(host.notices)
+        kept = host.query_one("#explainability-key", Input).value
+        _attach_in_setup(host, "pk-prod-0123456789", target="prod", gateway="https://p.example")
+        await settle(pilot)
+        return refused, kept
+
+    refused, kept = drive(project, scenario)
+    assert any(m.startswith("no target 'prdo' on this machine") for m, _ in refused), refused
+    assert kept == "pk-typo-0123456789", "refused before a write began: the field keeps it"
+    assert "prdo" not in load_config().explainability.targets
+    with store_session() as store:
+        binding = store.project_explainability(project.id)
+    assert binding is not None and binding.target == "prod"
+    assert load_config().explainability.target != "prod", "naming a deployment is not moving to it"
+    path = explainability_service.project_key_path(project.id)
+    assert path.read_text(encoding="utf-8") == "pk-prod-0123456789"
+
+
+def test_a_project_key_lands_where_its_destination_does_and_never_over_a_minted_one(
+    project: ProjectInfo, quiet_explainability: dict[str, int]
+) -> None:
+    """#142 on the Setup form. With the deployment field blank, the key is bound to
+    the deployment the project's destination names — ``key set``'s default — not to
+    the machine's active one. And a key the CLI minted is the CLI's to replace
+    (``key set`` revokes it): refused before a write began, the field keeps what
+    was typed, and the minted key stays in its file."""
+    from aisquare.services import destinations, iam
+
+    config = load_config()
+    config.explainability.targets = {"prod": ExplainabilityTarget(gateway_url="https://p.example")}
+    save_config(config)
+    session = iam.Session(api_url="https://api.aisquare.studio", token="aisq_x", source="env")
+    with store_session() as store:
+        destinations.choose(
+            store,
+            project,
+            destinations.Workspace(id=42, uid="ws-uid-42", name="acme", role="ADMIN"),
+            destinations.Studio(id=301, uid="st-301", name="Frontend"),
+            session,
+        )
+        store.set_project_destination_key(project.id, "key-minted")
+    explainability_service.store_project_api_key(project.id, "AIS_minted_key")
+
+    async def scenario(pilot: Pilot[None], host: Host) -> tuple[list[tuple[str, str]], str, str]:
+        host.query_one(ProjectView).active = "tab-explainability"
+        await settle(pilot)
+        _attach_in_setup(host, "pk-over-minted-0123456789")
+        await settle(pilot)
+        refused = list(host.notices)
+        kept = host.query_one("#explainability-key", Input).value
+        on_disk = explainability_service.project_key_path(project.id).read_text(encoding="utf-8")
+        with store_session() as store:
+            # What `key set` leaves after revoking the minted key: no uid on the row.
+            store.set_project_destination_key(project.id, None)
+        _attach_in_setup(host, "pk-hand-0123456789")
+        await settle(pilot)
+        return refused, kept, on_disk
+
+    refused, kept, on_disk = drive(project, scenario)
+    assert any("minted by the CLI" in m and s == "warning" for m, s in refused), refused
+    assert kept == "pk-over-minted-0123456789", "refused before a write began: the field keeps it"
+    assert on_disk == "AIS_minted_key"
+    with store_session() as store:
+        binding = store.project_explainability(project.id)
+    assert binding is not None and binding.target == "prod", "the destination's deployment"
+    assert load_config().explainability.target == "stg", "the machine stays where it was"
+    path = explainability_service.project_key_path(project.id)
+    assert path.read_text(encoding="utf-8") == "pk-hand-0123456789"
+
+
+def test_one_save_never_splits_a_project_key_and_its_settings_across_deployments(
+    project: ProjectInfo, quiet_explainability: dict[str, int]
+) -> None:
+    """The deployment field blank, a gateway typed beside the project's key went to
+    the machine's target while the key went to the destination's: one press, two
+    deployments, and the project's launches never read that gateway (review of
+    #172). Refused before a write began; with the deployment typed, both land there."""
+    from aisquare.services import destinations, iam
+
+    config = load_config()
+    config.explainability.targets = {"prod": ExplainabilityTarget(gateway_url="https://p.example")}
+    save_config(config)
+    session = iam.Session(api_url="https://api.aisquare.studio", token="aisq_x", source="env")
+    with store_session() as store:
+        destinations.choose(
+            store,
+            project,
+            destinations.Workspace(id=42, uid="ws-uid-42", name="acme", role="ADMIN"),
+            destinations.Studio(id=301, uid="st-301", name="Frontend"),
+            session,
+        )
+
+    async def scenario(
+        pilot: Pilot[None], host: Host
+    ) -> tuple[list[tuple[str, str]], tuple[str, str], set[str], bool]:
+        host.query_one(ProjectView).active = "tab-explainability"
+        await settle(pilot)
+        _attach_in_setup(host, "pk-split-0123456789", gateway="https://new.example")
+        await settle(pilot)
+        refused = list(host.notices)
+        kept = (
+            host.query_one("#explainability-key", Input).value,
+            host.query_one("#explainability-gateway", Input).value,
+        )
+        gateways = {t.gateway_url for t in load_config().explainability.targets.values()}
+        bound = explainability_service.project_key_path(project.id).exists()
+        # The gateway field still holds what was typed: with the deployment, one save.
+        _attach_in_setup(host, "pk-split-0123456789", target="prod")
+        await settle(pilot)
+        return refused, kept, gateways, bound
+
+    refused, kept, gateways, bound = drive(project, scenario)
+    assert any(
+        "belongs to target 'prod'" in m and "saved for 'stg'" in m and s == "warning"
+        for m, s in refused
+    ), refused
+    assert kept == ("pk-split-0123456789", "https://new.example"), "the fields keep what was typed"
+    assert "https://new.example" not in gateways and not bound, "refused before any write"
+    saved = load_config().explainability
+    assert saved.targets["prod"].gateway_url == "https://new.example", "typed: both go to prod"
+    with store_session() as store:
+        binding = store.project_explainability(project.id)
+    assert binding is not None and binding.target == "prod"
+
+
+def test_a_store_that_cannot_say_whether_the_key_was_minted_refuses_the_attach(
+    project: ProjectInfo, quiet_explainability: dict[str, int], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The minted-key check (#142) runs on the UI thread before any write: a store
+    error there is a notice and nothing written — never a raise out of the handler,
+    which ends the app, and never a guess that could overwrite a minted key."""
+    import sqlite3
+
+    from aisquare.cli.ui.views import explainability as view_module
+
+    def locked() -> None:
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(view_module, "store_session", locked)
+
+    async def scenario(pilot: Pilot[None], host: Host) -> tuple[list[tuple[str, str]], str]:
+        host.query_one(ProjectView).active = "tab-explainability"
+        await settle(pilot)
+        _attach_in_setup(host, "pk-locked-0123456789")
+        await settle(pilot)
+        return list(host.notices), host.query_one("#explainability-key", Input).value
+
+    notices, kept = drive(project, scenario)
+    refused = [m for m, s in notices if s == "error" and "could not be read" in m]
+    assert refused and "database is locked" in refused[0], notices
+    assert kept == "pk-locked-0123456789", "refused before a write began: the field keeps it"
+    assert not explainability_service.project_key_path(project.id).exists()
+
+
+def _another_project_pinned(tmp_path: Path) -> ProjectInfo:
+    """A second registered project, pinned by ``project switch`` — the one the tab must ignore."""
+    from aisquare.core.workspace import pin_project, project_id_for
+
+    root = (tmp_path / "pinned-elsewhere").resolve()
+    root.mkdir()
+    other = ProjectInfo(id=project_id_for(root), root=root, linked_repos=[])
+    with store_session() as store:
+        store.onboard_project(other)
+    pin_project(other.id)
+    return other
+
+
+def test_the_explainability_tab_is_about_its_own_project_not_the_pinned_one(
+    project: ProjectInfo, quiet_explainability: dict[str, int], tmp_path: Path
+) -> None:
+    """The tab sits on ONE project's page, and that page's agents launch in that
+    project — so its key row and the key it attaches are that project's. They read
+    the ``project switch`` pin, and attached the key to whichever project was
+    pinned while the page named another (review of #170)."""
+    other = _another_project_pinned(tmp_path)
+
+    async def scenario(pilot: Pilot[None], host: Host) -> str:
+        host.query_one(ProjectView).active = "tab-explainability"
+        await settle(pilot)
+        _attach_in_setup(host, "pk-page-0123456789")
+        await settle(pilot)
+        return host.query_one(ExplainabilityView).status_text
+
+    status = drive(project, scenario)
+    with store_session() as store:
+        assert store.project_explainability(project.id) is not None
+        assert store.project_explainability(other.id) is None, "never the pinned project"
+    name = project.root.name or project.id
+    assert f"{name}: its own key for target stg (in use)" in status
+
+
+def test_the_explainability_tab_registers_the_roster_under_its_projects_key(
+    project: ProjectInfo, quiet_explainability: dict[str, int], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A project key for ANOTHER workspace traces nothing until that workspace knows
+    the agents; *Register roster* resolved at machine level only, and on a
+    machine with no key of its own refused "not set" right after *Attach key*
+    succeeded (review of #170)."""
+    config = load_config()
+    config.explainability.targets = {
+        "stg": ExplainabilityTarget(gateway_url="https://stg.example"),
+    }
+    save_config(config)
+    monkeypatch.delenv("EXPLAINABILITY_API_KEY", raising=False)
+    path = explainability_service.store_project_api_key(project.id, "pk-roster-0123456789")
+    with store_session() as store:
+        store.set_project_explainability(project.id, target="stg", key_path=path, set_by=None)
+    keys: list[str | None] = []
+
+    def register_roster(target: ops.ResolvedTarget, names: tuple[str, ...]) -> ops.HttpVerdict:
+        keys.append(target.api_key)
+        return ops.HttpVerdict(ok=True, status=200, detail="HTTP 200", payload={"agents": []})
+
+    monkeypatch.setattr(ops, "register_roster", register_roster)
+
+    async def scenario(pilot: Pilot[None], host: Host) -> list[tuple[str, str]]:
+        host.query_one(ProjectView).active = "tab-explainability"
+        await settle(pilot)
+        await pilot.click("#explainability-register")
+        await settle(pilot)
+        return host.notices
+
+    notices = drive(project, scenario)
+    assert keys == ["pk-roster-0123456789"]
+    assert any(m.startswith("✓ registered") for m, _ in notices), notices
+
+
+def test_under_a_hub_the_explainability_tab_is_about_the_hub_its_launches_join(
+    project: ProjectInfo,
+    quiet_explainability: dict[str, int],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``AISQUARE_TEAM_HUB`` puts a fleet window's ``launch`` on the hub's board, so its
+    agents authenticate with the hub's key — the one ``key set`` binds from any
+    repo under the hub. The tab showed, attached and registered under the PAGE's
+    key, which no launch from the page read (review of #170)."""
+    from aisquare.core.workspace import project_id_for
+
+    config = load_config()
+    config.explainability.targets = {
+        "stg": ExplainabilityTarget(gateway_url="https://stg.example"),
+    }
+    save_config(config)
+    monkeypatch.delenv("EXPLAINABILITY_API_KEY", raising=False)
+    hub = (tmp_path / "hub").resolve()
+    hub.mkdir()
+    monkeypatch.setenv("AISQUARE_TEAM_HUB", str(hub))
+    keys: list[str | None] = []
+
+    def register_roster(target: ops.ResolvedTarget, names: tuple[str, ...]) -> ops.HttpVerdict:
+        keys.append(target.api_key)
+        return ops.HttpVerdict(ok=True, status=200, detail="HTTP 200", payload={"agents": []})
+
+    monkeypatch.setattr(ops, "register_roster", register_roster)
+
+    async def scenario(pilot: Pilot[None], host: Host) -> str:
+        host.query_one(ProjectView).active = "tab-explainability"
+        await settle(pilot)
+        _attach_in_setup(host, "pk-hub-0123456789")
+        await settle(pilot)
+        await pilot.click("#explainability-register")
+        await settle(pilot)
+        return host.query_one(ExplainabilityView).status_text
+
+    status = drive(project, scenario)
+    with store_session() as store:
+        assert store.project_explainability(project_id_for(hub)) is not None
+        assert store.project_explainability(project.id) is None, "not the page under a hub"
+    assert "hub: its own key for target stg (in use)" in status
+    assert keys == ["pk-hub-0123456789"]
+
+
+def test_the_key_row_names_a_missing_file_instead_of_contradicting_itself(
+    project: ProjectInfo, quiet_explainability: dict[str, int]
+) -> None:
+    """Bound to the active target with its file gone, the row read "its own key for
+    target stg (not used for target stg)"; it says what ``key show`` says."""
+    from aisquare.cli.ui.views.explainability import status_report
+
+    path = explainability_service.store_project_api_key(project.id, "pk-gone-0123456789")
+    with store_session() as store:
+        store.set_project_explainability(project.id, target="stg", key_path=path, set_by=None)
+    path.unlink()
+
+    row = dict(status_report(project).rows)["project"]
+
+    assert "file MISSING" in row and str(path) in row
+    assert "not used for target stg" not in row

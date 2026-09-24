@@ -68,6 +68,7 @@ from aisquare.cli.ui.views.doctor import DoctorRefreshed, DoctorView
 from aisquare.cli.ui.views.explainability import ExplainabilityView
 from aisquare.cli.ui.views.onboard import OnboardFailed, ProjectOnboarded
 from aisquare.cli.ui.views.project import ManagerTab, ProjectView
+from aisquare.cli.watch import _load_saved_theme
 from aisquare.core import state_file
 from aisquare.core import tmux as tmux_core
 from aisquare.core.atomic import write_replacing
@@ -3146,6 +3147,28 @@ def test_the_fleet_ui_flushes_a_theme_picked_inside_the_debounce_at_quit(
 
     drive(go)
     assert _state(isolated_home)["board_theme"] == "nord"
+
+
+def test_the_fleet_ui_reads_the_saved_theme_once_at_start_up(
+    tmp_path: Path, script: Script, isolated_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of the #167 fold, F8: the theme's saver read `state.json` in `FleetApp.__init__`
+    for a start value nothing consults, and `restore_theme` read it again at mount."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+    _write_state(isolated_home, {"board_theme": "nord"})
+    reads: list[str | None] = []
+
+    def load() -> str | None:
+        reads.append(_load_saved_theme())
+        return reads[-1]
+
+    monkeypatch.setattr("aisquare.cli.ui.theme._load_saved_theme", load)
+
+    async def go(pilot: Pilot[None]) -> str:
+        return fleet_app(pilot).theme
+
+    assert drive(go) == "nord", "the saved theme is still restored"
+    assert reads == ["nord"]
 
 
 def test_the_ceiling_rule_reads_what_the_saver_was_last_asked_not_the_last_confirmed_write(

@@ -17,8 +17,8 @@ Only presentation lives here; all data comes from ``services.team``. The pure
 renderers (``feed_line``, ``_session_lines``, the detail texts, the transcript
 helpers) live here rather than beside the widgets because the fallback needs
 them without Textual, and ``_load_saved_theme`` and the theme's key are imported
-by the fleet UI, which reuses the theme persistence verbatim (the save itself is
-``cli.ui.autosave``'s, for both apps).
+by the fleet UI, which reuses the theme persistence verbatim (the saver itself is
+``cli.ui.theme.theme_autosave``'s, for both apps).
 """
 
 from __future__ import annotations
@@ -277,6 +277,7 @@ def _build_app_class(interval: float) -> Any:
 
     from aisquare.cli.ui.autosave import Autosave
     from aisquare.cli.ui.board import BoardPanel
+    from aisquare.cli.ui.theme import theme_autosave
 
     class ThemePicker(ModalScreen[None]):
         """A theme browser that STAYS OPEN: every highlight applies (and
@@ -344,7 +345,7 @@ def _build_app_class(interval: float) -> Any:
             saved = _load_saved_theme()
             if saved and saved in self.available_themes:
                 self.theme = saved
-            self._theme_autosave = Autosave(self, _THEME_KEY, what="the theme", initial=saved)
+            self._theme_autosave = theme_autosave(self)
             self._theme_restored = True
 
         def on_unmount(self) -> None:

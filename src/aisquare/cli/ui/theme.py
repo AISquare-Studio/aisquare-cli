@@ -92,5 +92,11 @@ def theme_autosave(app: App[Any]) -> Autosave:
     picker has already shown the theme applied, and silence would promise a
     memory the file has refused. Flush it at unmount: a pick inside the debounce
     before ``q`` is a preference the user expressed.
+
+    The fleet UI and ``board -w`` both build it here. It reads nothing: its
+    ``latest`` is consulted by nobody (whether the file already says so is
+    ``update_state``'s to decide, under its lock), and reading the file for it
+    was a second read at every start-up beside :func:`restore_theme`'s
+    (review of the #167 fold, F8).
     """
-    return Autosave(app, _THEME_KEY, what="the theme", initial=_load_saved_theme())
+    return Autosave(app, _THEME_KEY, what="the theme")

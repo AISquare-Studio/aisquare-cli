@@ -75,6 +75,13 @@ def load_all(*, strict: bool = False) -> dict[str, str]:
     its write REPLACES the file, so "could not be read" taken as "holds
     nothing" published only this call's keys over everything else (review of
     the #65 fold, F1). The in-place write it replaced raised on such a file.
+
+    A file that is not UTF-8 cannot be read either: ``read_text`` raises
+    ``UnicodeDecodeError``, a ``ValueError`` and not an ``OSError``, so one an
+    editor re-saved as UTF-16 crashed every reader of the default mode with a
+    traceback (review of the #65 fold, round 2, F4). It is ``{}`` by default
+    and raised when ``strict``: the keys are still in it, in an encoding this
+    reader does not speak, and a ``store`` must not replace them.
     """
     path = paths.credentials_path()
     if not path.exists():
@@ -95,7 +102,7 @@ def load_all(*, strict: bool = False) -> dict[str, str]:
         raw = paths.despite_windows_contention(lambda: path.read_text(encoding="utf-8"))
     except FileNotFoundError:
         return {}
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         if strict:
             raise
         return {}

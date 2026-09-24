@@ -252,6 +252,24 @@ def test_a_file_that_cannot_be_read_is_refused_not_replaced(isolated_home: Path)
     assert credentials.load_all() == {"api_key": _KEY, "serve_token": _TOKEN}
 
 
+def test_a_file_that_is_not_utf8_reads_as_nothing_and_is_not_replaced(
+    isolated_home: Path,
+) -> None:
+    """``read_text`` raises ``UnicodeDecodeError``, a ``ValueError``, where the readers catch
+    ``OSError``: a file an editor re-saved as UTF-16 crashed ``stored_session``,
+    ``serve_token`` and every other reader past "never raises by default" (review of the #65
+    fold, round 2, F4). It reads as nothing, like any file that cannot be read, and ``store``
+    refuses it rather than replacing the key still in it."""
+    paths.ensure_home()
+    creds = paths.credentials_path()
+    original = json.dumps({"api_key": _KEY}).encode("utf-16")
+    creds.write_bytes(original)
+    assert credentials.load_all() == {}
+    with pytest.raises(UnicodeDecodeError):
+        credentials.store(serve_token=_TOKEN)
+    assert creds.read_bytes() == original
+
+
 def test_the_secrets_go_into_a_file_already_restricted_to_this_account(
     isolated_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

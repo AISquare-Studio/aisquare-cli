@@ -1543,6 +1543,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   contention DIFFERENTLY — `os.replace` sets `winerror` 5/32, `Path.open`
   goes through the C runtime and sets `errno` 13 with `winerror` **None** —
   and matching only the obvious one covered just the writer.
+- **A read racing a credentials write can no longer corrupt the API key.**
+  `store` and `drop` rewrote `~/.aisquare/credentials` in place, which
+  truncates it first, and took no lock. A `load_all` in that window read an
+  empty file or half a JSON document, and the half document came back as a
+  pre-JSON bare key. The next `store` wrote it into `api_key`, and the serve
+  token and the IAM session went with it. Two writers at once also lost
+  whichever key the first one added. The file is now replaced by rename
+  (`core.atomic.write_replacing`, with the Windows contention retry) under a
+  lock on `credentials.lock`, a new file is created 0600 before its contents
+  are written, and only one non-blank line that could not start a JSON value
+  is migrated as a bare key.
 - **The explainability workspace key is restricted on Windows too.** The third
   secret file to have this bug and the first that landed after the fix for the
   other two: `store_api_key` used `chmod(0o600)`, which is the whole story on

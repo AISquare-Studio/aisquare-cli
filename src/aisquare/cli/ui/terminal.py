@@ -57,16 +57,18 @@ Input (§4.3). With the pane focused every key goes to tmux through
 ``core.keys.translate`` — literal text via ``send-keys -l``, everything else by
 tmux's key name — except the escape hatch (``F12`` by default), which posts
 :class:`EscapeToSidebar` and is never forwarded. A key tmux has no safe name
-for is dropped, and ``translate``'s reason decides what is said, once per key
-name and per pane: a chord the reader meant gets ONE quiet notice, a chord this
-tmux is too old to carry a warning that names the version, and a key with
-nothing to type — a modifier, a lock, a Cmd chord, a whole key a kitty-protocol
-terminal reports only because Textual asked for every key — nothing at all
-(#151). ``Paste`` goes through the paste buffer so the agent sees one bracketed
-paste. The wheel scrolls our own offset over the pane's history (clamped to
-``history_size``); any key returns to live. ``Resize`` is forwarded as
-``resize-window`` after a 100 ms debounce. Forwarded input re-arms the fast
-cadence, so an echo never waits for the idle tick.
+for is never sent under a guessed one: the text the terminal reported with it
+is typed instead, a Cmd chord aside, and with none nothing is sent. For what
+was not sent ``translate``'s reason decides what is said: a chord the reader
+meant gets ONE quiet notice per key name in the pane, a chord this tmux is too
+old to carry a warning that names the version, once per key name on each
+server, and a key with nothing to type — a modifier, a lock, a Cmd chord, a
+whole key a kitty-protocol terminal reports only because Textual asked for
+every key — nothing at all (#151). ``Paste`` goes through the paste buffer so
+the agent sees one bracketed paste. The wheel scrolls our own offset over the
+pane's history (clamped to ``history_size``); any key returns to live.
+``Resize`` is forwarded as ``resize-window`` after a 100 ms debounce. Forwarded
+input re-arms the fast cadence, so an echo never waits for the idle tick.
 
 Selection (§4.3). The pane owns its highlight; :class:`TerminalPane`'s docstring
 states the rules — who sees a gesture, when a highlight is dropped, and which
@@ -1621,15 +1623,19 @@ class TerminalPane(Widget, can_focus=True):
         Once per PANE, not per session: ``_warned`` is this widget's, and the
         app composes a ``TerminalPane`` per view — so that is the scope
         ``docs/fleet.md`` promises, and no wider (review). A line about a
-        SERVER passes that server's socket as ``server`` — a server is its
-        socket, and ``views/project.py`` builds a fresh ``TmuxServer`` for the
-        same one at every attach — and is said once per key name on EACH: the
-        too-old line names the version, so a pane moved to another server hears
-        it for that one (review of #161, round 6). Everything else is keyed by
-        the key alone, and an attach re-arms nothing: round 6 cleared the whole
-        set there, and a restarted agent or a sign-in — a new pane on the same
-        server — brought back the ``f13`` line, a fact about the key table, and
-        the fullscreen one, the very re-toasting #151 is about (round 7).
+        SERVER passes that server's socket as ``server`` — ``views/project.py``
+        builds a fresh ``TmuxServer`` for the same socket at every attach, so
+        the socket is what names a server here — and is said once per key name
+        on EACH: the too-old line names the version, so a pane moved to another
+        server hears it for that one (review of #161, round 6). A server
+        restarted on the same socket under another tmux counts as the same
+        one: the line is not said again, since its advice — 3.5 or newer —
+        still holds, though the version it named is stale (round 8). Everything
+        else is keyed by the key alone, and an attach re-arms nothing: round 6
+        cleared the whole set there, and a restarted agent or a sign-in — a new
+        pane on the same server — brought back the ``f13`` line, a fact about
+        the key table, and the fullscreen one, the very re-toasting #151 is
+        about (round 7).
         """
         if (server, key) in self._warned:
             return

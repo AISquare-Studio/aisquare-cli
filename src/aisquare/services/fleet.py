@@ -1044,22 +1044,6 @@ def spawn(
             notes.append(f"the manager is always labelled {MANAGER_LABEL!r} (asked: {label!r})")
         else:
             notes.append(f"label {label!r} is held by a live agent — using {picked!r}")
-    # The dead windows of the rows this agent SUPERSEDES — ended rows under the
-    # label it takes. `remain-on-exit` kept them so the last screen stayed
-    # readable and the listing kept their 💤 rows for it (#138); once a
-    # replacement has the name, an old window only makes the sidebar show two
-    # rows called manager. A window already gone, or a server that will not
-    # answer, costs nothing here.
-    for row in rows:
-        observed = views.get(row.tmux_socket)
-        if row.ended_at is None or row.label != picked or observed is None:
-            continue
-        pane = observed.get(row.pane_id)
-        # Only a DEAD pane: ids restart with the server, and a live pane under
-        # an ended row's id is another agent's (see `_with_lingering_windows`).
-        if pane is not None and pane.dead:
-            with suppress(TmuxError):
-                server_for(row.tmux_socket, config).kill_window(row.pane_id)
 
     use_worktree = role_config.worktree if worktree is None else worktree
     cwd = project.root
@@ -1184,9 +1168,36 @@ def spawn(
     stored = _record(
         agent, project, srv, wanted=label, notes=notes, cap=config.max_agents_per_project
     )
+    _supersede(rows, views, stored, config)
     if prompt:
         _type_prompt(srv, stored.pane_id, prompt, notes)
     return SpawnReceipt(agent=stored, asked_label=label, tmux_session=tmux_session, notes=notes)
+
+
+def _supersede(
+    rows: Sequence[FleetAgent],
+    views: Mapping[str, dict[str, _PaneView] | None],
+    started: FleetAgent,
+    config: FleetSettings,
+) -> None:
+    """Remove the dead windows of the ended rows ``started`` replaces — those under its label.
+
+    `remain-on-exit` kept them so the last screen stayed readable and the
+    listing kept their 💤 rows for it (#138); once a replacement has the name,
+    an old window only makes the sidebar show two rows called manager.
+
+    Only once the replacement is up AND recorded: a spawn refused on the way —
+    a finished task, a missing binary, an unknown account, tmux itself — must
+    leave the 💤 row and its last screen where they were (review of #138: a
+    refused restart used to take them with it). Which dead window is a row's
+    is :func:`_lingering_windows`' rule, the one the listing shows it by, and
+    the pane is asked again at the kill (:func:`_kill_dead`). A window already
+    gone, or a server that will not answer, costs nothing here.
+    """
+    own = (started.tmux_socket, started.pane_id)
+    for (socket, pane_id), row in _lingering_windows(rows, views).items():
+        if row.label == started.label and (socket, pane_id) != own:
+            _kill_dead(server_for(socket, config), pane_id)
 
 
 def _refuse_occupied_worktree(project: ProjectInfo, worktree_dir: str, label: str) -> None:
@@ -1465,49 +1476,82 @@ def _end_dead_rows(
     return ended
 
 
-def _with_lingering_windows(
+def _lingering_windows(
     agents: Sequence[FleetAgent], views: Mapping[str, dict[str, _PaneView] | None]
-) -> list[FleetAgent]:
-    """Every live row, plus each ended row whose window still stands.
+) -> dict[tuple[str, str], FleetAgent]:
+    """``(socket, pane id)`` → the ENDED row whose window each dead pane still is.
 
-    "Stands" means a DEAD pane under the row's id on the row's server. The id
-    alone is not the window: pane ids are unique only per server lifetime — the
-    fleet's server exits with its last window and the next one numbers from
+    "Its window" means a DEAD pane under the row's id on the row's server. The
+    id alone is not the window: pane ids are unique only per server lifetime —
+    the fleet's server exits with its last window and the next one numbers from
     ``%0`` again (measured live while building #138: three ended rows and the
     running manager all at ``%0``) — so a LIVE pane under an ended row's id is
-    another agent's. And one dead pane vouches for at most one row, the latest
-    to end: a lingering window keeps its server alive, so any older row's pane
-    under the same id went with an earlier server.
+    another agent's. And one dead pane is the window of at most ONE row: a live
+    row naming it when there is one (its death is only not recorded yet), else
+    the latest to end — a lingering window keeps its server alive, so any older
+    row's pane under the same id went with an earlier server.
+
+    The one rule for everything that acts on a lingering window — the listing
+    that shows the 💤 row, ``stop`` that removes the window, ``spawn`` that
+    supersedes it — so none of them takes another agent's last screen for a
+    row's (review of #138: a reused id let ``stop`` kill another agent's
+    window and report success).
     """
-    latest: dict[tuple[str, str], FleetAgent] = {}
+    owners: dict[tuple[str, str], FleetAgent] = {}
     for agent in agents:
-        if agent.ended_at is None:
-            continue
         observed = views.get(agent.tmux_socket)
         pane = observed.get(agent.pane_id) if observed else None
         if pane is None or not pane.dead:
             continue
         key = (agent.tmux_socket, agent.pane_id)
-        current = latest.get(key)
-        if current is None or current.ended_at is None or agent.ended_at > current.ended_at:
-            latest[key] = agent
-    shown = {agent.id for agent in latest.values()}
+        held = owners.get(key)
+        if held is None or (
+            held.ended_at is not None and (agent.ended_at is None or agent.ended_at > held.ended_at)
+        ):
+            owners[key] = agent
+    return {key: agent for key, agent in owners.items() if agent.ended_at is not None}
+
+
+def _with_lingering_windows(
+    agents: Sequence[FleetAgent], views: Mapping[str, dict[str, _PaneView] | None]
+) -> list[FleetAgent]:
+    """Every live row, plus each ended row whose window still stands (see
+    :func:`_lingering_windows`)."""
+    shown = {agent.id for agent in _lingering_windows(agents, views).values()}
     return [agent for agent in agents if agent.ended_at is None or agent.id in shown]
 
 
-def _kill_if_dead(agent: FleetAgent, config: FleetSettings | None = None) -> bool:
-    """Kill the row's window only if its pane is DEAD; ``False`` when it is gone or alive.
+def _kill_lingering_window(store: ContextStore, project: ProjectInfo, agent: FleetAgent) -> bool:
+    """Kill an ENDED row's window if it still stands; ``False`` when it does not.
 
-    A live pane under an ended row's id belongs to another agent (ids restart
-    with the server — see :func:`_with_lingering_windows`) and is never killed
-    from here. Never raises: a server that will not answer costs the tidy-up.
+    Whether it stands is decided as the listing decides it — the project's
+    rows observed together, :func:`_lingering_windows` — never by asking tmux
+    about the id alone: after the server restarted, a dead pane under that id
+    is another agent's last screen. Never raises: a server that will not
+    answer costs the tidy-up.
+    """
+    current = store.get_project(project.id) or project
+    rows = store.fleet_agents(project.id, live_only=False)
+    tmux_session = session_name(current.codename) if current.codename else None
+    views = _observe_sockets(rows, tmux_session)
+    owner = _lingering_windows(rows, views).get((agent.tmux_socket, agent.pane_id))
+    if owner is None or owner.id != agent.id:
+        return False
+    return _kill_dead(server_for(agent.tmux_socket), agent.pane_id)
+
+
+def _kill_dead(srv: TmuxServer, pane_id: str) -> bool:
+    """Kill the window of ``pane_id`` only if that pane is DEAD now; never raises.
+
+    Asked again at the kill because what decided it was an earlier look: a
+    window gone meanwhile — and with it perhaps the server, whose next pane may
+    carry the same id — is left alone, and a live pane is never killed from here.
     """
     try:
-        srv = server_for(agent.tmux_socket, config)
-        facts = srv.pane_facts(agent.pane_id)
+        facts = srv.pane_facts(pane_id)
         if facts is None or not facts.dead:
             return False
-        srv.kill_window(agent.pane_id)
+        srv.kill_window(pane_id)
     except TmuxError:
         return False
     return True
@@ -1616,8 +1660,8 @@ def stop(
             # (`remain-on-exit`), which is what the UI's 💤 row and its Stop
             # button stand for (#138): stopping it means killing that window.
             ended = store.fleet_agent_by_label(project.id, label, live_only=False)
-            if ended is None or not _kill_if_dead(ended):
-                raise  # no such row, its window is gone, or a live pane under a reused id
+            if ended is None or not _kill_lingering_window(store, project, ended):
+                raise  # no such row, or no window of its own left (gone, or a reused id)
             return ended
     srv = server_for(agent.tmux_socket)
     session = session_name(ensure_codename(project).codename or "")
@@ -1901,14 +1945,15 @@ def restart(
     """Start an agent again under its own label — the **Restart** of #138.
 
     Works on the row the label names whatever its state: an agent that exited
-    (the 💤 row, its dead window killed so the label is free), one that is
-    lost, or one still running, which is stopped first as ``fleet stop`` stops
-    it. The replacement keeps the role, the task, the worktree and the account
-    (``FleetAgent.account_slot``, #145) and — when its transcript is on disk
-    and ``fresh`` is not asked — RESUMES the same session (``claude --resume
-    <transcript>``), so a manager killed with ctrl+c comes back with its
-    intake, its contracts and the state of every coder it steered; without a
-    transcript it starts new with a hand-off prompt built from the board.
+    (the 💤 row — its dead window goes once the replacement is up, see
+    :func:`_supersede`), one that is lost, or one still running, which is
+    stopped first as ``fleet stop`` stops it. The replacement keeps the role,
+    the task, the worktree and the account (``FleetAgent.account_slot``, #145)
+    and — when its transcript is on disk and ``fresh`` is not asked — RESUMES
+    the same session (``claude --resume <transcript>``), so a manager killed
+    with ctrl+c comes back with its intake, its contracts and the state of
+    every coder it steered; without a transcript it starts new with a
+    hand-off prompt built from the board.
     For the manager that is "end the dead row, then spawn manager again" — the
     fix the issue asks for — with the session carried over when it can be.
     """
@@ -1920,7 +1965,13 @@ def restart(
                 "every row"
             )
         session = store.get_session(agent.session_id) if agent.session_id else None
-        task = store.get_task(agent.task_id) if agent.task_id else None
+        try:
+            # `spawn`'s refusal for the task (done, dropped, gone from the board),
+            # given BEFORE anything is stopped: a running agent stopped for a
+            # restart that is then refused is an agent lost for nothing.
+            task = _task_for(store, project, agent.task_id)
+        except FleetError as exc:
+            raise FleetError(f"cannot restart {label!r}: {exc}") from exc
         recent = [
             event
             for event in store.recent_events(project.id, limit=60)
@@ -1934,8 +1985,10 @@ def restart(
         # running. Either way the label is free afterwards.
         was_running = _pane_alive(agent)
         agent = stop(project, label)
-    else:
-        _kill_if_dead(agent)  # the dead window, when remain-on-exit kept it
+    # An exited agent's dead window is NOT removed here: `spawn` supersedes it
+    # once the replacement is up and recorded, so a restart that is refused on
+    # the way (a missing binary, an unknown account, tmux) leaves the 💤 row and
+    # its last screen as they were.
     account = str(agent.account_slot) if agent.account_slot is not None else None
     receipt, resumed, notes = _respawn(
         project,

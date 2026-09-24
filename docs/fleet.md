@@ -793,9 +793,13 @@ hand-off prompt built from the board). From a shell: `aisquare fleet restart
 manager`. The project's Manager tab says *manager exited (130)* over its
 **Start manager** button instead of "no manager yet". **Stop** on an exited
 row removes the dead window and takes the row off the listing; so does
-starting the same label again (the replacement supersedes the old window, so
-the sidebar never shows two rows called manager); `doctor` names a project
-whose manager exited while agents are still running (`fleet-manager`).
+starting the same label again (the replacement supersedes the old window once
+it is up, so the sidebar never shows two rows called manager); `doctor` names
+a project whose manager exited while agents are still running
+(`fleet-manager`). A restart that is refused — a coder whose task is done, an
+account no longer on this machine — leaves the 💤 row and its last screen as
+they were (**Stop** clears them), and a running agent whose task is done is
+refused before it is stopped.
 
 **A panel reading "No changes this session" sits beside an agent's conversation
 and will not go away.** That is Claude Code's own diff panel (fullscreen

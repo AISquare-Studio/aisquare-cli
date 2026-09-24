@@ -3543,3 +3543,91 @@ def test_a_reused_pane_id_never_makes_an_ended_row_present_nor_kills_a_live_wind
         "coder-third",
         "coder-old",
     ]
+
+
+# --- the review of #138 --------------------------------------------------------------------------
+
+
+def test_a_refused_restart_leaves_the_exited_row_its_window_and_a_running_agent_alone(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``restart`` killed the 💤 row's dead window — or stopped a running agent — BEFORE
+    ``spawn`` ran its refusals, so a refused restart took the row and its last screen
+    and put nothing in their place; the commonest 💤 row is a coder whose task is
+    done. The task is now checked before anything is touched, and the dead window
+    goes only once the replacement is up and recorded (``_supersede``)."""
+    task = _add_task(project, "Ship auth")
+    coder = _coder(project, task_id=task.id)
+    with store_session() as store:
+        store.set_task_status(task.id, "done")
+    tmux.die(coder.pane_id, 0)
+    [seen] = fleet_service.list_agents(project)
+    assert seen.state == "exited"
+
+    with pytest.raises(FleetError, match=f"cannot restart '{coder.label}': task .* is done"):
+        fleet_service.restart(project, coder.label)
+    assert tmux.killed == [] and len(tmux.spawned) == 1
+    listed = fleet_service.list_agents(project)
+    assert [(s.agent.id, s.state) for s in listed] == [(coder.id, "exited")]
+
+    # A running agent is refused the same way BEFORE it is stopped: nothing typed.
+    billing = _add_task(project, "Ship billing")
+    running = _coder(project, label="coder-billing", task_id=billing.id)
+    with store_session() as store:
+        store.set_task_status(billing.id, "dropped")
+    with pytest.raises(FleetError, match="is dropped"):
+        fleet_service.restart(project, running.label)
+    assert tmux.typed == [] and tmux.killed == []
+    with store_session() as store:
+        assert store.fleet_agent_by_label(project.id, running.label) is not None  # still live
+
+    # A refusal past every check — tmux will not start the window — keeps the 💤 row too.
+    plain = _coder(project, label="coder-plain")
+    tmux.die(plain.pane_id, 1)
+    fleet_service.list_agents(project)
+
+    def no_window(*args: Any, **kwargs: Any) -> WindowInfo:
+        raise TmuxError("server exited unexpectedly")
+
+    monkeypatch.setattr(tmux, "spawn_window", no_window)
+    with pytest.raises(FleetError, match="tmux could not start the window"):
+        fleet_service.restart(project, "coder-plain")
+    assert tmux.killed == [] and plain.pane_id in tmux.facts
+    states = {s.agent.label: s.state for s in fleet_service.list_agents(project)}
+    assert states["coder-plain"] == "exited" and states[coder.label] == "exited"
+
+
+def test_a_reused_pane_id_never_lets_stop_or_spawn_take_another_agents_last_screen(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """``stop`` on an ended row asked tmux about the id ALONE and killed any dead pane
+    under it, and spawn's supersede walked every row the label ever had. Once the
+    server restarted and a new agent died at the old id, both took the NEW agent's
+    last screen for the old row's — and ``stop`` reported success. Both now go by
+    the listing's rule (``_lingering_windows``): a dead pane is the window of a live
+    row naming it, else of the LATEST row to end under it."""
+    old = _coder(project, label="coder-old")
+    fleet_service.stop(project, "coder-old")
+    tmux._counter = 0  # the server restarted: numbering begins again
+    new = _coder(project, label="coder-new")
+    assert new.pane_id == old.pane_id  # the shape under test
+    tmux.die(new.pane_id, 1)
+
+    # Before any listing — coder-new's row is still live — and after it.
+    with pytest.raises(NoSuchAgent):
+        fleet_service.stop(project, "coder-old")
+    listed = fleet_service.list_agents(project)
+    assert [(s.agent.id, s.state) for s in listed] == [(new.id, "exited")]
+    with pytest.raises(NoSuchAgent):
+        fleet_service.stop(project, "coder-old")
+    assert tmux.killed == [old.pane_id]  # the first stop's, nothing since
+
+    replacement = fleet_service.spawn(project, "coder", label="coder-old", worktree=False)
+    assert replacement.agent.label == "coder-old"
+    assert new.pane_id in tmux.facts and tmux.killed == [old.pane_id]
+    states = {s.agent.label: s.state for s in fleet_service.list_agents(project)}
+    assert states == {"coder-new": "exited", "coder-old": "waiting"}
+
+    # Its OWN window is still its own to remove.
+    assert fleet_service.stop(project, "coder-new").id == new.id
+    assert tmux.killed == [old.pane_id, new.pane_id]

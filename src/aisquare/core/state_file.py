@@ -88,6 +88,13 @@ def read_state(*, strict: bool = False) -> dict[str, object]:
     rename takes an ``Access is denied`` for the rename's width, which raised
     from the strict pin read and read as "not set" everywhere else (review of
     the #65 fold, R1-B). The writer's half is in ``core.atomic``.
+
+    The retry costs the one read that was going to fail anyway. Windows
+    reports a busy file and a forbidden one with the same ``errno`` 13
+    (``paths._is_contention``), so a state.json that really cannot be read
+    spends about 0.9 s in retries before it reads as ``{}``, and ``Divider``
+    makes this read on the UI loop at mount. ``config`` and ``credentials``
+    make the same trade (review of the #65 fold, round 2, F7).
     """
     try:
         raw = paths.despite_windows_contention(paths.state_path().read_bytes)

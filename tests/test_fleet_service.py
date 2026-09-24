@@ -8942,7 +8942,7 @@ def test_a_restart_whose_recorded_binary_left_the_path_resolves_it_again_and_say
     re-resolved the binary and resumed."""
     # A wrapper named `claude` (`/opt/wrap/claude`, harness.is_default_agent), so
     # the agent has a session id to resume.
-    wrapper = tmp_path / "wrap" / "claude"
+    wrapper = tmp_path / "wrap" / claude_on_path.name  # `claude.cmd` on Windows: PATHEXT
     wrapper.parent.mkdir()
     wrapper.write_text(claude_on_path.read_text(encoding="utf-8"), encoding="utf-8")
     wrapper.chmod(0o755)
@@ -9028,11 +9028,18 @@ def test_the_launch_spec_drops_every_shape_of_a_session_choice() -> None:
 
 
 def _executable(path: Path) -> Path:
-    """A stand-in agent binary at ``path`` — a shell script, never the real thing."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("#!/bin/sh\nread line\nexit 0\n", encoding="utf-8")
-    path.chmod(0o755)
-    return path
+    """A stand-in agent binary at ``path`` — a script, never the real thing.
+
+    Written by ``fakebin.executable_fake``, so it is ``path.cmd`` on Windows and the
+    RETURNED path is the one that exists. Written as a bare ``#!/bin/sh`` file, it
+    was no program to PATHEXT: ``shutil.which`` found nothing, and every test here
+    failed in ``_launch_binary`` with "'claude2' is not on your PATH" on
+    windows-latest. A bare name on PATH (``AISQUARE_BIN_CODER=claude2``) still
+    finds it there, through PATHEXT; a full path must be this return value.
+    """
+    return fakebin.executable_fake(
+        path.parent, path.name, windows="set /p line=", posix="read line"
+    )
 
 
 @pytest.mark.parametrize("flag", ["--session-id", "--resume"])

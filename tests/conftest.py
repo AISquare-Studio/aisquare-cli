@@ -158,6 +158,13 @@ AMBIENT_ENV_VARS = (
     # elsewhere would be reported as uncleared and send the reader to the wrong
     # file.
     "CLAUDE_CONFIG_DIR",
+    # Its sibling: the two are what a Claude account IS for a launch
+    # (`core.claude_accounts.LAUNCH_VARS`). A launch on the default account
+    # restores the shell's own, and a sign-in window carries this process's
+    # (`services.claude_accounts.carry_environment`), so a developer with a
+    # second login exported would see its directory in both. The account tests
+    # cleared it locally; this makes it the suite's answer rather than theirs.
+    "CLAUDE_CODE_TMPDIR",
     "AISQUARE_TEAM",
     "AISQUARE_ROLE",
     # Read off the ambient env by `services/mcp_server.py` to attribute remote
@@ -212,7 +219,7 @@ AMBIENT_ENV_VARS = (
     "AISQUARE_EXPLAINABILITY_TARGET",
     "EXPLAINABILITY_GATEWAY_URL",
     "EXPLAINABILITY_API_KEY",
-    # The same file's inbox path: `_load_sdk` keeps an operator's instead of
+    # The same file's inbox path: `_init_sdk` keeps an operator's instead of
     # pinning one under the isolated home. Its AISQUARE_AGENT_NAME and
     # EXPLAINABILITY_AGENTS are not here because this package never reads them
     # — only the SDK does, and the checkout the suite grades cannot have the
@@ -255,6 +262,14 @@ AMBIENT_ENV_VARS = (
     "AISQUARE_RUN_TRACE_ID",
     # A sign-in token in the operator's shell would make every test run as them.
     "AISQUARE_TOKEN",
+    # What `core.browser.open_url` launches. Its `is_headless` also reads
+    # SSH_CONNECTION, SSH_TTY, CI, CODESPACES, DISPLAY and WAYLAND_DISPLAY, and
+    # those stay out on purpose: it answers "headless" whenever stdout is not a
+    # terminal, and under CliRunner or pytest's capture it never is, so no
+    # command a test runs can reach a browser whatever they say — the tests of
+    # the detection itself pass an environ. Clearing CI would cost something:
+    # pytest reads it while it explains a failing assert, and it is why CI's
+    # log shows the whole diff rather than a truncated one.
     "BROWSER",
     # The CI test bed's switches. An operator who has them exported would
     # otherwise run the suite's hooks against THEIR endpoint, with THEIR

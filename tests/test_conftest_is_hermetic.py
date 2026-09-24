@@ -74,6 +74,9 @@ DIRTY_SHELL = {
     "AISQUARE_PIN_SESSION_ID": "0",
     "AISQUARE_SERVE_PORT": "1",
     "EXPLAINABILITY_INBOX_PATH": "/somewhere/theirs.db",
+    # A second Claude login's scratch directory, exported the way the README's
+    # role bindings set it.
+    "CLAUDE_CODE_TMPDIR": "/home/someone/.cache/claude-account1",
     # A narrow terminal that has turned colour off. The width and NO_COLOR
     # alone fail 13 tests left set; conftest clears them with TERM.
     "COLUMNS": "40",
@@ -203,4 +206,24 @@ def test_conftest_clears_everything_the_wiring_stands_down_for() -> None:
         f"the wiring stands down on {missing} — 'not overriding your routing, "
         "launching untraced' — and conftest does not clear them, so every test "
         "that asserts a traced launch depends on the caller's shell"
+    )
+
+
+def test_conftest_clears_both_variables_an_account_is() -> None:
+    """Both of ``core.claude_accounts.LAUNCH_VARS``, not only the one detection reads.
+
+    A launch on the default account restores the SHELL's value of each, and a
+    sign-in window carries this process's, so either left set makes a test's
+    "plain claude of this shell" the developer's second login. Conftest cleared
+    ``CLAUDE_CONFIG_DIR`` for agent detection and not ``CLAUDE_CODE_TMPDIR``
+    beside it — the account tests cleared that one themselves, which is why
+    nothing failed (review of #203, round 1).
+    """
+    from aisquare.core import claude_accounts
+
+    missing = sorted(set(claude_accounts.LAUNCH_VARS) - set(AMBIENT_ENV_VARS))
+    assert not missing, (
+        f"a Claude account is {list(claude_accounts.LAUNCH_VARS)} for a launch, and "
+        f"conftest does not clear {missing}, so the default account a test launches "
+        "is whichever login the caller's shell pointed at"
     )

@@ -8365,12 +8365,13 @@ def test_a_hand_over_whose_row_a_listing_ended_after_its_exit_is_a_stop_that_wor
 ) -> None:
     """A listing leaves a hand-over's row alone only while its session carries the mark,
     and nothing marks a session that is not on the board yet (its ``SessionStart`` not
-    in, or the orchestrator off), nor keeps a mark a writer that does not know it
-    overwrites. A listing then records the death the hand-over's own ``/exit`` caused,
-    released and announced as any death is, and the hand-over's stop raised "no longer
-    live" after the kill: the agent gone and nothing started. It is a stop that worked,
-    as it always was for a plain one, and the replacement starts. What that listing
-    announced is not announced again should the replacement never start."""
+    in, or the orchestrator off), nor keeps a mark a start on the same id replaces (a
+    compaction's ``SessionStart`` inside the grace). A listing then records the death the
+    hand-over's own ``/exit`` caused, released and announced as any death is, and the
+    hand-over's stop raised "no longer live" after the kill: the agent gone and nothing
+    started. It is a stop that worked, as it always was for a plain one, and the
+    replacement starts. What that listing announced is not announced again should the
+    replacement never start."""
     if command == "switch":
         _two_slots_with_usage(monkeypatch, work=95, personal=10)
     mine = _task(project, "the task this coder is for")
@@ -8392,8 +8393,15 @@ def test_a_hand_over_whose_row_a_listing_ended_after_its_exit_is_a_stop_that_wor
         real_keys(pane_id, *keys)
         if pane_id == agent.pane_id and not listed:
             if unguarded == "mark-lost":
+                # Through the session's own start, the one writer besides the take-back
+                # that replaces the mark: every other state write keeps it since the
+                # #205 fold's round 1 (`SqliteStore.touch_session`), so the heartbeat
+                # this leg used to lose it with no longer does.
                 with store_session() as store:
-                    store.touch_session(first, state="working")
+                    session = store.get_session(first)
+                    assert session is not None
+                    store.upsert_session(session)
+                assert _session_state(first) == "working"
             listed.append(fleet_service.list_agents(project))  # the UI's tick
 
     monkeypatch.setattr(tmux, "send_keys", enter_then_a_listing)

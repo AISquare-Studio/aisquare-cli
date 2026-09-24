@@ -1073,12 +1073,20 @@ def choose_for_handover(
     which leaves the agent parked with Claude Code's own wait intact; a manual
     switch keeps the least-bad answer and, when no usage can be read at all,
     falls back to the ladder minus the account being left.
+
+    A registry that cannot be read picks nothing, manual or automatic, and says
+    why. Its fallback is the bare directories, where every slot reads as
+    enabled, so headroom moved an agent onto a slot the operator had disabled.
+    :func:`choose` does not pick from it by headroom or by a default either
+    (review of the #205 fold, round 1). ``--to`` still names an account.
     """
     skip = frozenset(exclude)  # read three times below: never an iterator
     if explicit is not None:
         return choose(explicit, role=role, project=project, exclude=skip, fetch=fetch)
     accounts, registry_note = _read_arranged()
-    notes: list[str] = [] if registry_note is None else [registry_note]
+    if registry_note is not None:
+        return AccountChoice(None, None, [registry_note])
+    notes: list[str] = []
     settings = accounts_settings()
     picked, more = headroom_choice(
         accounts,

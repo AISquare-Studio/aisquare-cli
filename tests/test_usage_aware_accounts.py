@@ -34,7 +34,7 @@ from typer.testing import CliRunner
 
 from aisquare.cli.app import app
 from aisquare.core import claude_accounts as core
-from aisquare.core import selfcli
+from aisquare.core import paths, selfcli
 from aisquare.core.config import AccountsSettings, AppConfig, load_config, save_config
 from aisquare.core.orchestrator import team_project
 from aisquare.core.store import store_session
@@ -897,6 +897,31 @@ def test_choose_for_handover_asks_headroom_before_the_binding_and_refuses_when_a
         ).account
         is None
     )
+
+
+def test_a_hand_over_picks_nothing_from_a_registry_it_cannot_read(
+    fake_home: Path, work: ProjectInfo
+) -> None:
+    """Review of the #205 fold, round 1: with ``context.db`` unreadable, headroom ran over the
+    bare directories, where a slot the operator disabled reads as enabled, and a hand-over
+    moved the agent onto it. ``choose`` already picked nothing there; nor does this now."""
+    _slot("work@example.com", "tok-work")
+    _slot("personal@example.com", "tok-personal")
+    service.set_disabled("3", True)
+    room = _Usage({"tok-work": _payload(95), "tok-personal": _payload(10)})
+    readable = service.choose_for_handover(role="coder", project=work, exclude=(2,), fetch=room)
+    assert readable.account is None  # the control: disabled is never the pick
+    paths.db_path().write_bytes(b"this is not a sqlite database, and the hand-over must say so")
+
+    for automatic in (False, True):
+        choice = service.choose_for_handover(
+            role="coder", project=work, exclude=(2,), automatic=automatic, fetch=room
+        )
+        assert choice.account is None and choice.source is None
+        assert any("accounts registry unreadable" in note for note in choice.notes)
+    # `--to` still names one: the flag rung does not check, as for a launch.
+    named = service.choose_for_handover("3", role="coder", project=work, exclude=(2,))
+    assert named.account is not None and named.account.slot == 3 and named.source == "flag"
 
 
 def test_one_launch_reads_the_registry_and_the_settings_once(

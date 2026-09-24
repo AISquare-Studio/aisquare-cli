@@ -1152,6 +1152,44 @@ def test_a_drag_over_nothing_but_blank_cells_copies_nothing_and_leaves_no_highli
     assert sent == [("C-c",)], "ctrl+c after it is the agent's interrupt"
 
 
+@pytest.mark.parametrize(
+    ("start", "end"),
+    [
+        ((5, 4), (6, 4)),  # one cell right, over rows nothing was printed on
+        ((6, 4), (5, 4)),  # one cell left
+        ((5, 4), (5, 5)),  # one row down
+        ((5, 4), (6, 5)),  # one cell each way
+    ],
+)
+def test_a_click_whose_pointer_drifts_one_cell_drops_its_empty_highlight_without_a_word(
+    fake: FakeTmux, tmp_path: Path, start: tuple[int, int], end: tuple[int, int]
+) -> None:
+    """Review of the #167 fold, F3. A press and a release one cell apart is not a
+    click to Textual's screen, so the move between them leaves a highlight, and
+    over blank cells 5e4e2b4's drop said "nothing to copy" for it: a toast for
+    focusing the pane, at the hand's ordinary drift. A gesture that came up
+    within a cell of its press asked for no copy and is told of none; the
+    highlight with nothing under it still goes. The negative half, a drag that
+    did travel over nothing, is
+    ``test_a_drag_over_nothing_but_blank_cells_copies_nothing_and_leaves_no_highlight``."""
+
+    async def drive() -> tuple[bool, str, list[str]]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 8)) as pilot:
+            pane = host.pane
+            await wait_until(pilot, lambda: synced(pane))
+            await press(pilot, pane, start)
+            await move(pilot, pane, end, button=1)
+            assert pane.text_selection is not None, "the premise: the drift left a highlight"
+            await release(pilot, pane, end)
+            await pilot.pause()
+            return pane.text_selection is not None, host.clipboard, list(host.notices)
+
+    standing, clipboard, notices = run(drive())
+    assert not standing, "nothing under it to copy, so no highlight stands"
+    assert clipboard == "" and notices == [], notices
+
+
 def test_the_scroll_marker_is_measured_in_cells_not_characters(
     fake: FakeTmux, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2671,7 +2709,7 @@ def test_every_button_sequence_up_to_five_events_keeps_the_gesture_invariant(
     monkeypatch.setattr(
         terminal_module,
         "route_selection_gesture",
-        lambda app, button: routed.append(("end", button)),
+        lambda app, button, moved=True: routed.append(("end", button)),
     )
     monkeypatch.setattr(terminal_module, "_monotonic", lambda: 100.0)
 

@@ -903,6 +903,8 @@ row displays. Blank cells past the end of a line, and blank rows at the end of a
 drag, are not text and are not copied; a drag over nothing but those — the empty
 rows under an agent's output — copies nothing, says "nothing to copy" and
 leaves no highlight behind, so the next ctrl+c is the agent's interrupt. A
+click whose pointer slips a cell before the button comes up leaves no highlight
+there either, and says nothing. A
 line tmux soft-wrapped is copied as one line, as tmux's own copy mode copies
 it — every frame carries tmux's own wrap marks (`capture-pane
 -F`, tmux 3.7 and later; an older tmux gets one line per row). Tabs are

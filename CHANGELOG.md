@@ -1020,7 +1020,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the agent's interrupt. A drag over nothing but blank cells — the empty rows
   under an agent's output — copies nothing, says "nothing to copy" and leaves
   no highlight behind, so a highlight that stands always has text for ctrl+c
-  to copy. cmd+c is
+  to copy; a click whose pointer slips a cell there says nothing. cmd+c is
   only ever the copy, and types nothing when there is no selection. The
   highlight does not outlive what it means: a key or a paste into the agent
   drops it, so does the agent printing something else under it, so a later

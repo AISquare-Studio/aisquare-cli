@@ -439,7 +439,7 @@ def route_gesture_start(app: App[Any]) -> None:
     _tell_panes(app, "selection gesture start", TerminalPane.selection_gesture_started)
 
 
-def route_selection_gesture(app: App[Any], button: int | None) -> None:
+def route_selection_gesture(app: App[Any], button: int | None, *, moved: bool = True) -> None:
     """The button came up: every pane on the active screen may copy what the
     gesture left highlighted in it (see :meth:`TerminalPane.selection_gesture_ended`).
 
@@ -458,12 +458,19 @@ def route_selection_gesture(app: App[Any], button: int | None) -> None:
     blank rows of another said "copied 11 characters" and then — the blank
     pane was where the drag ended, so it was told last — "nothing to copy",
     with the copy on the clipboard (review of the #167 fold, F1).
+
+    Nor is it said when the pointer came up within a cell of where it went
+    down (``moved`` false). Textual's screen clears the selections at a
+    release on the press's own cell, its click; one cell off, the move in
+    between leaves a highlight, and over blank rows a focus click whose hand
+    drifted was told "nothing to copy" (review of the #167 fold, F3). Such a
+    gesture asked for no copy: its blank highlight still goes, without a word.
     """
     ended: list[GestureEnd | None] = []
     _tell_panes(
         app, "selection gesture", lambda pane: ended.append(pane.selection_gesture_ended(button))
     )
-    if button == 1 and "blank" in ended and "copied" not in ended:
+    if button == 1 and moved and "blank" in ended and "copied" not in ended:
         app.notify(NOTHING_TO_COPY, markup=False)
 
 
@@ -596,6 +603,9 @@ class SelectionHost(App[None]):
         self._pressed_at = 0.0
         """When ``_pressed`` went down — a repeat of it inside :data:`DUPLICATE_PRESS_WINDOW`
         is the terminal reporting one press twice; later, its release was lost."""
+        self._pressed_offset: Offset | None = None
+        """Where on the screen ``_pressed`` went down: a release within a cell of it is a
+        click the hand drifted on, not a drag (:func:`route_selection_gesture`)."""
 
     def get_default_screen(self) -> Screen[None]:
         return PaneScreen(id="_default")
@@ -704,7 +714,9 @@ class SelectionHost(App[None]):
             self._stray = None
             self._pressed = event.button
             self._pressed_at = _monotonic()
+            self._pressed_offset = event.screen_offset
             route_gesture_start(self)
+        moved = True
         if released:
             assert isinstance(event, events.MouseUp)
             # While a gesture is down, the only release that is its own names
@@ -721,6 +733,9 @@ class SelectionHost(App[None]):
             if self._stray is not None and event.button == self._stray:
                 self._stray = None
                 return
+            if self._pressed_offset is not None:
+                drift = event.screen_offset - self._pressed_offset
+                moved = max(abs(drift.x), abs(drift.y)) > 1
         try:
             await super().on_event(event)
         finally:
@@ -732,7 +747,7 @@ class SelectionHost(App[None]):
             # path (review of #135, second round, finding 8).
             if released:
                 button, self._pressed = self._pressed, None
-                route_selection_gesture(self, button)
+                route_selection_gesture(self, button, moved=moved)
 
 
 class EscapeToSidebar(Message):

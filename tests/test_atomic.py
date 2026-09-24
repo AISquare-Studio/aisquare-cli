@@ -12,6 +12,9 @@ import pytest
 
 from aisquare.core.atomic import write_replacing
 
+#: The directory fsync after a rename, where the platform can open a directory to sync it.
+_DIRECTORY_SYNC = [] if sys.platform == "win32" else ["fsync"]
+
 
 def _leftovers(directory: Path) -> list[str]:
     return sorted(p.name for p in directory.iterdir() if p.is_file())
@@ -39,15 +42,16 @@ def test_a_read_only_temp_is_still_removed_when_the_replace_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """With `keep_mode` copying a read-only target's bits onto the temp, a failed replace left a
-    temp Windows would not delete; the cleanup makes it writable first."""
+    temp Windows would not delete; the cleanup makes it writable first. Read as the owner's
+    write bit, the one bit NTFS keeps: there ``st_mode`` is 0o444 or 0o666, never 0o600."""
     target = tmp_path / "config.toml"
     target.write_text("old\n")
     target.chmod(0o444)
-    unlinked: list[int] = []
+    unlinked: list[bool] = []
     real_unlink = os.unlink
 
     def spying_unlink(path: str | os.PathLike[str], *, dir_fd: int | None = None) -> None:
-        unlinked.append(stat.S_IMODE(os.stat(path).st_mode))
+        unlinked.append(bool(os.stat(path).st_mode & stat.S_IWUSR))
         real_unlink(path, dir_fd=dir_fd)
 
     def refuse(src: object, dst: object) -> None:
@@ -60,7 +64,7 @@ def test_a_read_only_temp_is_still_removed_when_the_replace_fails(
             write_replacing(target, "new\n", keep_mode=True)
     finally:
         target.chmod(0o644)
-    assert unlinked == [0o600], "made writable before the unlink"
+    assert unlinked == [True], "made writable before the unlink"
     assert _leftovers(tmp_path) == ["config.toml"]
 
 
@@ -86,6 +90,7 @@ def test_a_filesystem_that_refuses_chmod_still_gets_its_temp_removed(
     assert _leftovers(tmp_path) == ["state.json"]
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX file modes")
 def test_keep_mode_copies_the_targets_bits_and_off_takes_the_umask_default(
     tmp_path: Path,
 ) -> None:
@@ -189,7 +194,9 @@ def test_owner_only_restricts_the_empty_temp_whatever_the_targets_bits(
 def test_durable_syncs_the_file_then_the_directory_and_not_durable_syncs_nothing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A cache on the hook path pays no fsync; a preference file pays both."""
+    """A cache on the hook path pays no fsync; a preference file pays both. Windows cannot
+    open a directory to sync it (``os.open`` refuses one), so there the directory's flush
+    fails open, as ``_sync_directory`` promises, and only the file's is seen."""
     calls: list[str] = []
     real_fsync, real_replace = os.fsync, os.replace
 
@@ -204,7 +211,7 @@ def test_durable_syncs_the_file_then_the_directory_and_not_durable_syncs_nothing
     monkeypatch.setattr(os, "fsync", fsync_spy)
     monkeypatch.setattr(os, "replace", replace_spy)
     write_replacing(tmp_path / "durable.json", "{}\n")
-    assert calls == ["fsync", "replace", "fsync"]
+    assert calls == ["fsync", "replace", *_DIRECTORY_SYNC]
     calls.clear()
     write_replacing(tmp_path / "cache.json", "{}\n", durable=False)
     assert calls == ["replace"]

@@ -214,6 +214,7 @@ def test_the_replace_precondition_holds_wherever_the_config_lives(tmp_path: Path
     )
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX file modes")
 def test_a_config_the_operator_tightened_keeps_its_mode(tmp_path: Path) -> None:
     """`save_config` passes `keep_mode=True` on purpose: a `chmod 600 config.toml` stays 600
     across a rewrite, where the old recipe reset it to the umask default (review of #167)."""

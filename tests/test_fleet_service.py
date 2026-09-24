@@ -3668,6 +3668,14 @@ def test_shutdown_refuses_when_the_socket_cannot_be_asked(
     assert tmux.killed == [] and tmux.killed_sessions == []
 
 
+#: ``TmuxServer.socket_path`` raises ``TmuxUnavailable`` where there is no uid (Windows
+#: outside WSL): no tmux, so no socket for ``$TMUX`` to name and no guard to test.
+_needs_a_socket_path = pytest.mark.skipif(
+    not hasattr(os, "getuid"), reason="no uid, no tmux socket: the fleet needs a POSIX host"
+)
+
+
+@_needs_a_socket_path
 def test_shutdown_refuses_from_inside_the_fleets_own_server(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -4061,6 +4069,7 @@ def test_shutdown_leaves_a_late_row_live_when_its_socket_is_denied(
     assert fleet_service.is_paused(project) and report.paused_kept == [project.root.name]
 
 
+@_needs_a_socket_path
 def test_shutdown_inside_guard_keeps_commas_in_the_socket_path(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

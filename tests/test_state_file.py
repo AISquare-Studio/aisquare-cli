@@ -13,6 +13,7 @@ import errno
 import json
 import os
 import stat
+import sys
 import threading
 import time
 from pathlib import Path
@@ -361,7 +362,8 @@ def test_the_write_goes_through_a_symlink_and_keeps_the_targets_mode(
 
     assert _path(isolated_home).is_symlink(), "the link is still a link"
     assert json.loads(target.read_text()) == {"board_theme": "nord", "sidebar_width": 44}
-    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+    if sys.platform != "win32":  # NTFS keeps one bit of the mode: 0o666 or 0o444
+        assert stat.S_IMODE(target.stat().st_mode) == 0o600
     assert read_state() == {"board_theme": "nord", "sidebar_width": 44}
     assert sorted(p.name for p in dotfiles.iterdir()) == ["aisquare-state.json"], (
         "no temp and no lock left in the dotfiles repo"
@@ -390,7 +392,9 @@ def test_the_write_is_a_rename_of_this_processs_own_fsynced_temp_file(
     monkeypatch.setattr(os, "fsync", fsync_spy)
     monkeypatch.setattr(os, "replace", replace_spy)
     update_state("sidebar_width", 44)
-    assert calls == ["fsync", "replace", "fsync"], (
+    # Windows cannot open a directory to sync it, and that flush fails open there.
+    directory_sync = [] if sys.platform == "win32" else ["fsync"]
+    assert calls == ["fsync", "replace", *directory_sync], (
         "the temp reaches the disk before it is published, and the rename is made durable"
     )
     ((src, dst),) = renamed

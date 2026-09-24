@@ -441,10 +441,16 @@ def home_is_a_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path
 def test_home_blocker_names_the_file_in_the_way_and_nothing_else(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Four shapes, because the message names the path the operator has to move.
+    """Three shapes plus both controls, because the message names the path to move.
 
-    The dangling symlink is the one that is easy to miss: ``exists()`` follows the
-    link and says no, but ``mkdir`` still refuses with ``FileExistsError``.
+    The fourth shape, a dangling symlink, is the next test: it needs a privilege
+    an ordinary Windows account does not have, and it used to be guarded by a
+    ``pytest.skip`` in the MIDDLE of this body. That cost twice. The two
+    negative controls sat below the skip, so on such a machine a guard whose
+    name ends "and nothing else" quietly stopped checking the "nothing else"
+    half — and ``-ra`` reported the whole test as skipped, which reads as "not
+    run here" rather than "three quarters run here". Split, so the report says
+    which shapes ran. Same shape 98a4d92 split out of ``test_tmux.py``.
     """
     blocker = tmp_path / "in-the-way"
     blocker.write_text("", encoding="utf-8")
@@ -455,22 +461,33 @@ def test_home_blocker_names_the_file_in_the_way_and_nothing_else(
     monkeypatch.setenv(paths.HOME_ENV_VAR, str(blocker / "nested" / "home"))
     assert common.home_blocker() == blocker, "a file ABOVE the home blocks it too"
 
-    # The dangling-link shape needs a real symlink — a privilege the CI runner
-    # holds and an ordinary Windows account does not. Measured rather than
-    # assumed, and placed so the three shapes above have already been asserted:
-    # this is the only one that cannot be built here.
-    if not can_symlink():  # pragma: no cover - a privilege CI holds, a laptop does not
-        pytest.skip("this machine cannot create symlinks (needs privilege on Windows)")
-
-    dangling = tmp_path / "dangling"
-    dangling.symlink_to(tmp_path / "nowhere")
-    monkeypatch.setenv(paths.HOME_ENV_VAR, str(dangling))
-    assert common.home_blocker() == dangling
-
     # The negative controls: a directory that exists, and one that does not yet.
+    # Neither needs a symlink, so neither is gated on one any more.
     fine = tmp_path / "fine"
     fine.mkdir()
     monkeypatch.setenv(paths.HOME_ENV_VAR, str(fine))
     assert common.home_blocker() is None
     monkeypatch.setenv(paths.HOME_ENV_VAR, str(fine / "not-created-yet"))
     assert common.home_blocker() is None
+
+
+@pytest.mark.skipif(
+    not can_symlink(), reason="this machine cannot create symlinks (needs privilege on Windows)"
+)
+def test_home_blocker_names_a_dangling_symlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fourth shape, and the one that is easy to miss.
+
+    ``exists()`` follows the link and says no, but ``mkdir`` still refuses with
+    ``FileExistsError`` — so a home pointed at a dangling link is blocked by
+    something ``exists()`` swears is not there.
+
+    Its own test with its own condition, because building it needs a privilege
+    the CI runner holds and an ordinary Windows account does not.
+    ``can_symlink()`` measures that rather than inferring it from the platform.
+    """
+    dangling = tmp_path / "dangling"
+    dangling.symlink_to(tmp_path / "nowhere")
+    monkeypatch.setenv(paths.HOME_ENV_VAR, str(dangling))
+    assert common.home_blocker() == dangling

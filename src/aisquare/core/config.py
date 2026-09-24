@@ -11,7 +11,7 @@ import errno
 import os
 import tomllib
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import Any
 from uuid import uuid4
 
 import tomli_w
@@ -20,8 +20,6 @@ from pydantic import BaseModel, Field
 from aisquare.core import paths
 from aisquare.core.paths import despite_windows_contention
 from aisquare.models import Pool, RedactionLevel
-
-_T = TypeVar("_T")
 
 
 class CaptureSettings(BaseModel):

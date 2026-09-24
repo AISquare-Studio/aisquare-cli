@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from aisquare.core import store as store_module
 from aisquare.core.ids import new_entry_id
 from aisquare.core.store import (
     SCHEMA_VERSION,
@@ -209,15 +210,52 @@ def test_add_linked_repo_unknown_project_raises(store: ContextStore) -> None:
 
 
 def test_add_and_list_prompts(store: ContextStore) -> None:
-    # NO SLEEP. Both prompts are written inside one clock tick on purpose —
-    # which is the case that used to sort by coin flip, because the tie-break
-    # was an id whose tail is 128 random bits. `recent_prompts` breaks ties on
-    # `rowid` now, so "written second" is what "sorts first" means, and this
-    # asserts that rather than sleeping until the clock disambiguates it.
     store.add_prompt("first prompt", PROJECT.id)
     store.add_prompt("second prompt", PROJECT.id)
     prompts = store.recent_prompts(PROJECT.id)
     assert [p.text for p in prompts] == ["second prompt", "first prompt"]  # newest first
+
+
+def test_recent_prompts_break_a_tie_on_insertion_order_not_on_the_id(
+    store: ContextStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two prompts in one clock tick come back newest-first, every run.
+
+    The test above cannot pin this and used to claim it did. It said both rows
+    were written "inside one clock tick on purpose" — true on Windows 3.12,
+    where `time.time()` had ~15.6 ms resolution, and false on Linux, where
+    `datetime.now(tz=UTC)` is microsecond-resolution and 0 of 2000 back-to-back
+    pairs shared a `created_at`. So `created_at DESC` alone decided the order
+    on four of the five CI legs, and on the fifth the tie-break was the id's
+    128 random bits — a coin flip. Restoring `ORDER BY ..., id DESC` left it
+    green.
+
+    So the tie is MANUFACTURED rather than hoped for: one frozen clock, so both
+    rows genuinely collide, and ids whose lexical order is the REVERSE of
+    insertion, so `id DESC` gets it wrong every time and only `rowid DESC` can
+    get it right.
+    """
+    frozen = datetime(2026, 9, 24, 12, 0, 0, tzinfo=UTC)
+
+    class _Frozen(datetime):
+        # A subclass, not a stub: `store` uses `datetime` for more than `now`.
+        @classmethod
+        def now(cls, tz: object = None) -> datetime:  # type: ignore[override]
+            return frozen
+
+    ids = iter(["prm_zzz_written_first", "prm_aaa_written_second"])
+    monkeypatch.setattr(store_module, "datetime", _Frozen)
+    monkeypatch.setattr(store_module, "new_prompt_id", lambda: next(ids))
+
+    first = store.add_prompt("first prompt", PROJECT.id)
+    second = store.add_prompt("second prompt", PROJECT.id)
+
+    # The controls: the tie is real, and `id DESC` really would answer wrongly.
+    assert first.created_at == second.created_at, "the clock was not frozen; no tie to break"
+    assert second.id < first.id, "the ids do not disagree with insertion order; nothing is pinned"
+
+    prompts = store.recent_prompts(PROJECT.id)
+    assert [p.text for p in prompts] == ["second prompt", "first prompt"]
 
 
 def test_recent_prompts_are_scoped_to_project(store: ContextStore) -> None:

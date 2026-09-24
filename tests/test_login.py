@@ -571,6 +571,43 @@ def test_request_without_a_session(monkeypatch: pytest.MonkeyPatch) -> None:
     assert caught.value.code == "not_authenticated"
 
 
+def test_an_answer_http_client_cannot_read_is_unreachable_and_an_error_keeps_its_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``http.client`` raises its own exceptions, not ``OSError``s — ``LineTooLong`` for a
+    header past its limit, ``IncompleteRead`` for a body cut short — and they escaped
+    ``_http`` past every caller that tolerates an unreachable server by catching
+    ``IamError`` (review of the accounts stack's fold, round 1, F2). An error status
+    whose body is cut short is read inside the ``except HTTPError`` branch, where no
+    sibling clause catches anything: it keeps its status, with what arrived."""
+    import urllib.request
+    from email.message import Message
+    from http.client import IncompleteRead, LineTooLong
+    from urllib.error import HTTPError
+
+    def too_long(request: urllib.request.Request, timeout: float) -> object:
+        raise LineTooLong("header line")
+
+    monkeypatch.setattr(urllib.request, "urlopen", too_long)
+    with pytest.raises(iam.IamError) as caught:
+        iam._http("GET", "https://api.example.com/api/v1/ping/")
+    assert caught.value.code == "unreachable"
+
+    class CutShort:
+        def read(self, *args: object) -> bytes:
+            raise IncompleteRead(b'{"detail": "unava', expected=40)
+
+        def close(self) -> None:  # HTTPError closes its body when collected
+            return None
+
+    def unavailable(request: urllib.request.Request, timeout: float) -> object:
+        raise HTTPError(request.full_url, 503, "unavailable", Message(), CutShort())  # type: ignore[arg-type]
+
+    monkeypatch.setattr(urllib.request, "urlopen", unavailable)
+    result = iam._http("GET", "https://api.example.com/api/v1/ping/")
+    assert result.status == 503 and result.body == '{"detail": "unava'
+
+
 # ------------------------------------------------------ the token never leaves in the clear
 
 

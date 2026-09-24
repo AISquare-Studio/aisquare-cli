@@ -1019,6 +1019,49 @@ def test_logout_revokes_only_on_the_host_that_minted_and_survives_a_stuck_file(
     assert sorted(idp.revoked_keys) == ["key-here", "key-stuck"]
 
 
+def test_a_revoke_whose_answer_is_cut_short_keeps_no_minted_key_after_logout(
+    idp: IdentityProviderStub,
+    signed_in: iam.Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``_revoke`` tolerates an unreachable server as ``IamError``, and ``http.client``'s
+    own exceptions escaped ``iam._http`` past it: one truncated answer to a revoke ended
+    ``logout``'s loop over the minted keys, which goes on only past an ``OSError``, and
+    every key after it stayed on disk after the sign-out (review of the accounts stack's
+    fold, round 1, F2)."""
+    import urllib.request
+    from http.client import IncompleteRead
+
+    projects = [_project(tmp_path / name) for name in ("first", "second")]
+    workspace = dest.Workspace(id=42, uid="ws-uid-42", name="acme", role="ADMIN")
+    studio = dest.Studio(id=301, uid="st-301", name="Frontend")
+    with store_session() as store:
+        for project in projects:
+            dest.choose(store, project, workspace, studio, signed_in)
+            path = service.store_project_api_key(project.id, f"minted-{project.root.name}")
+            store.set_project_explainability(project.id, target="local", key_path=path, set_by=None)
+            store.set_project_destination_key(project.id, f"key-{project.root.name}")
+    real_urlopen = urllib.request.urlopen
+    cut: list[str] = []
+
+    def first_revoke_cut_short(request: urllib.request.Request, timeout: float) -> Any:
+        # Raised where `response.read()` raises it: inside `_http`'s one `try`.
+        if request.full_url.endswith("/revoke/") and not cut:
+            cut.append(request.full_url)
+            raise IncompleteRead(b'{"rev', expected=40)
+        return real_urlopen(request, timeout=timeout)
+
+    monkeypatch.setattr(urllib.request, "urlopen", first_revoke_cut_short)
+    with store_session() as store:
+        cleared = dest.revoke_minted_keys(store, signed_in)
+
+    assert len(cut) == 1
+    assert sorted(cleared) == sorted(project.id for project in projects)
+    assert not any(service.project_key_path(project.id).exists() for project in projects)
+    assert len(idp.revoked_keys) == 1, "the other key's revoke reached the server"
+
+
 def test_an_exported_target_does_not_make_use_mint_again(
     runner: CliRunner,
     idp: IdentityProviderStub,

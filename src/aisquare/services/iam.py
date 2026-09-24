@@ -218,7 +218,20 @@ def _http(
     The provider's own endpoints take form bodies (RFC 8628); the API behind the
     session takes JSON — ``json_body`` is for those (#142), and the two are
     exclusive by construction: a call names one shape.
+
+    A transport error is ``IamError("unreachable")`` whatever layer raised it.
+    ``http.client`` raises its own ``HTTPException`` subclasses, which are not
+    ``OSError``s: ``IncompleteRead`` for a body shorter than its Content-Length,
+    ``LineTooLong`` for a header past its limit. They escaped this function, and
+    every caller that tolerates an unreachable server catches ``IamError``
+    alone: one truncated answer to ``logout``'s revoke of a minted key ended
+    the loop over them, and the keys after it stayed on disk after the sign-out
+    (review of the accounts stack's fold, round 1, F2). An error STATUS whose
+    body is cut short keeps its status, with what arrived of the body — the
+    status is the answer, the body its detail — as the explainability root
+    post reads one (rc/fixes' ccf4ac8).
     """
+    from http.client import HTTPException, IncompleteRead
     from urllib.error import HTTPError, URLError
     from urllib.request import Request, urlopen
 
@@ -237,8 +250,15 @@ def _http(
         with urlopen(request, timeout=timeout) as response:
             return HttpResult(response.status, _parse(response.read()), dict(response.headers))
     except HTTPError as exc:
-        return HttpResult(exc.code, _parse(exc.read()), dict(exc.headers))
-    except (URLError, OSError, TimeoutError, ValueError) as exc:
+        # Read here, inside the handler, where the clause below cannot catch it.
+        try:
+            raw = exc.read()
+        except IncompleteRead as short:
+            raw = short.partial
+        except (HTTPException, OSError):
+            raw = b""
+        return HttpResult(exc.code, _parse(raw), dict(exc.headers))
+    except (URLError, OSError, TimeoutError, ValueError, HTTPException) as exc:
         raise IamError("unreachable", f"Could not reach {url}: {exc}.", detail=str(exc)) from exc
 
 

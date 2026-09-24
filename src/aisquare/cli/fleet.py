@@ -288,7 +288,8 @@ def restart(
     Same role, task, worktree and account; the session is resumed from its
     transcript when that file is on disk (`claude --resume <transcript>`), so a
     manager killed with ctrl+c comes back knowing its intake and its coders.
-    A running agent is stopped first as `fleet stop` stops it.
+    A running agent is stopped first and handed over as `fleet switch` hands
+    one over: its claims wait for the replacement and no exit is announced.
     """
     target = _project(project)
     try:

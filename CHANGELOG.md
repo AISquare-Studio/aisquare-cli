@@ -839,16 +839,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   as ended the way `reap` does — exit status, the claims a crash left held
   released, `agent_exited` on the board, the manager nudged — and `fleet
   spawn` does the same before its checks, so a dead manager is replaceable at
-  once (a row `fleet switch` is handing over is left to the switch). The row
-  stays on the live listing as **💤 exited** (the word, not only the glyph)
-  for a day while tmux still holds its window, and the agent view gains
-  **Stop** and **Restart**.
+  once (a row a hand-over is stopping is left to it, for a few minutes at
+  most). The row stays on the live listing as **💤 exited** (the word, not
+  only the glyph) for a day while tmux still holds its window, and the agent
+  view gains **Stop** and **Restart**.
   `aisquare fleet restart <label> [--fresh]` — and the button — starts the
   agent again under its own label with the same role, task, worktree and
   account, **resuming its session** from its transcript when that is on disk
   (`claude --resume <transcript>`), else fresh with a hand-off prompt from the
-  board; a running agent is stopped first (one whose task, account or binary
-  would refuse the restart is refused before that), and a refused restart
+  board; a running agent is stopped first and handed over as `fleet switch`
+  hands one over (its claims wait for the replacement and no exit is
+  announced), one whose task, account or binary would refuse the restart is
+  refused before it is stopped, and a refused restart
   leaves the 💤 row and its last screen as they were. **Stop** on an exited row
   removes the dead window, and so does spawning the same label again once the
   replacement is up (it supersedes the old window — no two rows called

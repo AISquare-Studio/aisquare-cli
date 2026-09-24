@@ -7679,14 +7679,16 @@ def test_a_restart_says_a_release_its_stop_could_not_make(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """``stop`` REPORTS a release the store refused on its receipt (the release train);
-    ``fleet stop`` prints it and exits 1. ``restart`` stops a running agent through the
-    same ``stop`` and dropped the receipt, so a claim left with the ended session — the
-    replacement's own task, which it then cannot take back until the lease lapses —
-    went unsaid."""
+    ``fleet stop`` prints it and exits 1. ``restart`` ends a LOST agent's row through
+    the same ``stop`` and dropped the receipt, so a claim left with the ended session —
+    the replacement's own task, which it then cannot take back until the lease lapses —
+    went unsaid. (A RUNNING agent's restart is a hand-over since round 1 of #163's
+    review, and releases nothing for the store to refuse.)"""
     mine = _task(project, "the task this coder is for")
     agent, first = _spawned(project, "coder", mine.id, tmux, monkeypatch)
     team_service.hook_session_start(first, project.root, "startup")
     team_service.claim_task(mine.id, session_ref=first)
+    tmux.vanish(agent.pane_id)  # lost: no hook ran, and the row is still live
 
     def refuse(*args: object, **kwargs: object) -> list[TeamTask]:
         raise sqlite3.OperationalError("database is locked (fake)")
@@ -7695,7 +7697,302 @@ def test_a_restart_says_a_release_its_stop_could_not_make(
 
     receipt = fleet_service.restart(project, agent.label)
 
-    assert receipt.was_running is True and receipt.started.ended_at is None
+    assert receipt.was_running is False and receipt.replaced.ended_at is not None
+    assert receipt.started.ended_at is None
     [said] = [note for note in receipt.notes if note.startswith("claims:")]
     assert "could not be released" in said and "locked" in said
     assert _task_now(mine.id).claimed_by == first
+
+
+# --- review of #163, round 1: a running agent's restart is a hand-over; a mark guards its row --
+
+
+def _recorded_nudges(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """``nudge_manager`` replaced by a recorder: the reasons it was called with."""
+    nudges: list[str] = []
+
+    def nudge(project_id: str, *, reason: str) -> bool:
+        nudges.append(reason)
+        return True
+
+    monkeypatch.setattr(fleet_service, "nudge_manager", nudge)
+    return nudges
+
+
+def test_restarting_a_running_agent_hands_its_claims_to_the_replacement_and_announces_no_exit(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``restart`` stopped a RUNNING agent as ``fleet stop`` stops it: its task went back
+    to the pool, ``agent_exited`` went out and the manager was nudged, all before
+    ``_respawn`` started the replacement on that same task. That is the second worker
+    #205's fourth round shut out of ``switch``, and the running leg is a hand-over the
+    same way now: the claims wait, move onto the replacement's session with its row,
+    and the one event is ``restarted``. A replacement that never starts gives them back
+    and announces the exit that was withheld (``_abandon_handover``)."""
+    mine = _task(project, "the task this coder is for")
+    agent, first = _spawned(project, "coder", mine.id, tmux, monkeypatch)
+    team_service.hook_session_start(first, project.root, "startup")
+    team_service.claim_task(mine.id, session_ref=first)
+    nudges = _recorded_nudges(monkeypatch)
+    real_spawn = fleet_service.spawn
+    holder_at_spawn: list[str | None] = []
+
+    def spawn_and_look(*args: Any, **kwargs: Any) -> fleet_service.SpawnReceipt:
+        holder_at_spawn.append(_task_now(mine.id).claimed_by)
+        return real_spawn(*args, **kwargs)
+
+    monkeypatch.setattr(fleet_service, "spawn", spawn_and_look)
+
+    receipt = fleet_service.restart(project, agent.label)
+
+    assert receipt.was_running is True and receipt.replaced.ended_at is not None
+    assert holder_at_spawn == [first]  # never in the pool while the replacement started
+    new = receipt.started.session_id
+    assert new is not None and new != first
+    held = _task_now(mine.id)
+    assert held.status == "doing" and held.claimed_by == new
+    assert nudges == []
+    assert _events(project, "agent_exited") == [] and _events(project, "task_released") == []
+    assert _events(project, "restarted") == [
+        f"{agent.label} restarted — started fresh with a hand-off prompt"
+    ]
+
+    # The replacement runs and holds the task. Restarted again, its spawn is refused
+    # after the stop: nothing is coming for the parked claims, so they go back.
+    _become(receipt.started, tmux, monkeypatch, pid=PANE_PID, role="coder")
+    team_service.hook_session_start(new, project.root, "startup")
+
+    def refused(*args: Any, **kwargs: Any) -> fleet_service.SpawnReceipt:
+        raise FleetError("tmux refused the window (fake)")
+
+    monkeypatch.setattr(fleet_service, "spawn", refused)
+    with pytest.raises(FleetError, match="refused the window"):
+        fleet_service.restart(project, agent.label)
+
+    freed = _task_now(mine.id)
+    assert freed.claimed_by is None and freed.status == "todo"
+    assert _events(project, "agent_exited") == [f"{agent.label} exited (0)"]
+    assert nudges == [f"{agent.label} exited"]
+
+
+def test_a_resumed_replacement_that_dies_before_its_first_hook_is_ended_like_any_dead_row(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A listing leaves a row a hand-over is stopping to that hand-over, and the rule
+    keyed on the SESSION's mark, which only the replacement's own ``SessionStart``
+    clears. A resumed replacement shares the id, so one whose ``claude --resume`` died
+    before its first hook (the failure ``switch`` itself names) was skipped by every
+    listing and every ``spawn`` for good: no ``agent_exited``, and ``fleet spawn
+    manager`` refused with "already has a manager", the #138 trap. The mark guards only
+    a row older than it now, and only for ``HANDOVER_GRACE``: the old row of a switch
+    killed on the way is ended like any dead row once that has passed."""
+    _two_slots_with_usage(monkeypatch, work=95, personal=10)
+    manager = fleet_service.spawn(project, "manager", account="2").agent
+    transcript = tmp_path / f"{manager.session_id}.jsonl"
+    transcript.write_text('{"type":"user"}\n', encoding="utf-8")
+    _with_transcript(manager, transcript)
+    moved = fleet_service.switch(project, "manager", reason="session limit")
+    assert moved.resumed is True and moved.started.session_id == manager.session_id
+    tmux.die(moved.started.pane_id, 1)  # `claude --resume` failed: no hook ever ran
+
+    [seen] = fleet_service.list_agents(project)
+
+    assert seen.agent.id == moved.started.id and seen.state == "exited"
+    assert seen.agent.ended_at is not None and seen.agent.exit_status == 1
+    assert _events(project, "agent_exited") == ["manager exited (1)"]
+    again = fleet_service.spawn(project, "manager")  # not "already has a manager"
+    assert again.agent.id != moved.started.id
+
+    # A switch killed between its `/exit` and its kill: the old row's pane is dead and
+    # its session marked. Inside the grace that is a hand-over in flight; after it, not.
+    coder = _coder(project)
+    _with_transcript(coder, None)
+    with store_session() as store:
+        store.touch_session(coder.session_id or "", state=team_service.HANDOVER_STATE)
+    tmux.die(coder.pane_id, 0)
+    [inside] = [s for s in fleet_service.list_agents(project) if s.agent.id == coder.id]
+    assert inside.agent.ended_at is None  # left to the switch that is ending it
+    later = datetime.now(tz=UTC) + fleet_service.HANDOVER_GRACE + timedelta(seconds=1)
+    monkeypatch.setattr(fleet_service, "_now", lambda: later)
+    [after] = [s for s in fleet_service.list_agents(project) if s.agent.id == coder.id]
+    assert after.state == "exited" and after.agent.ended_at is not None
+    assert f"{coder.label} exited (0)" in _events(project, "agent_exited")
+
+
+@pytest.mark.parametrize("gap", ["dead", "gone"])
+def test_a_reap_that_lands_inside_a_switch_leaves_the_hand_over_to_it(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    gap: str,
+) -> None:
+    """The listing's hand-over guard, for ``reap``. Run by hand between a switch's
+    ``/exit`` and its kill (the pane reads dead), or between the kill and the stop's
+    end (gone), it ended the moving row, released the parked claims and woke the
+    manager, and the switch then failed on its own row with the agent already down."""
+    _two_slots_with_usage(monkeypatch, work=95, personal=10)
+    task = _task(project, "keep it across the move")
+    agent = fleet_service.spawn(
+        project, "coder", worktree=False, account="2", task_id=task.id
+    ).agent
+    _coder(project, label="coder-other")  # keeps the session, and the server, up
+    old = agent.session_id or ""
+    _with_transcript(agent, None)
+    assert team_service.claim_task(task.id, session_ref=old).status == "doing"
+    nudges = _recorded_nudges(monkeypatch)
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
+    reaped: list[fleet_service.ReapReport] = []
+    if gap == "dead":
+        real_keys = tmux.send_keys
+
+        def exit_then_a_reap(pane_id: str, *keys: str) -> None:
+            real_keys(pane_id, *keys)
+            if pane_id == agent.pane_id and not reaped:
+                team_service.hook_session_end(old, project.root, reason="prompt_input_exit")
+                reaped.append(fleet_service.reap(project))
+
+        monkeypatch.setattr(tmux, "send_keys", exit_then_a_reap)
+    else:
+        real_kill = tmux.kill_window
+
+        def kill_then_a_reap(pane_id: str) -> None:
+            real_kill(pane_id)
+            if pane_id == agent.pane_id and not reaped:
+                reaped.append(fleet_service.reap(project))
+
+        monkeypatch.setattr(tmux, "kill_window", kill_then_a_reap)
+
+    receipt = fleet_service.switch(project, agent.label, reason="session limit")
+
+    [report] = reaped
+    assert report.ended == [] and report.lost == []
+    assert receipt.stopped.id == agent.id and receipt.started.ended_at is None
+    held = _task_now(task.id)
+    assert held.status == "doing" and held.claimed_by == receipt.started.session_id
+    with store_session() as store:
+        kinds = [e.kind for e in store.recent_events(project.id, limit=20)]
+    assert "agent_exited" not in kinds and "task_released" not in kinds
+    assert nudges == []
+
+
+def test_a_switch_whose_label_passed_to_another_agent_meanwhile_leaves_that_agent_alone(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``switch`` reads its row, asks the accounts service for a target (a headroom
+    lookup that reads every account's usage over the network), and then stopped the
+    agent by LABEL. An agent that exited and was started again under that label in
+    between was the one stopped: ``/exit`` typed into the newcomer, which was then
+    replaced by a resume of the OLD agent's session. The stop is pinned to the row
+    the switch read, as the agent view's Stop is."""
+    from aisquare.services import claude_accounts as accounts_service
+
+    _two_slots_with_usage(monkeypatch, work=95, personal=10)
+    agent = fleet_service.spawn(project, "coder", worktree=False, account="2").agent
+    _with_transcript(agent, None)
+    real_choose = accounts_service.choose_for_handover
+    newcomer: list[FleetAgent] = []
+
+    def choose_while_the_label_moves(*args: Any, **kwargs: Any) -> Any:
+        tmux.die(agent.pane_id, 0)
+        fleet_service.list_agents(project)  # the UI's tick records the exit
+        newcomer.append(_coder(project, label=agent.label))  # the manager starts it again
+        return real_choose(*args, **kwargs)
+
+    monkeypatch.setattr(accounts_service, "choose_for_handover", choose_while_the_label_moves)
+
+    with pytest.raises(NoSuchAgent, match="another agent now"):
+        fleet_service.switch(project, agent.label, reason="session limit")
+
+    [new] = newcomer
+    assert new.label == agent.label
+    assert [typed for typed in tmux.typed if typed[0] == new.pane_id] == []
+    assert new.pane_id not in tmux.killed and _row(new.id).ended_at is None
+    assert len(tmux.spawned) == 2  # the original and the newcomer: no replacement
+
+
+def test_a_listing_whose_write_lands_after_a_stop_read_its_row_is_not_announced_twice(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``_stop_row`` read its row and then ended it: the read-then-write that
+    ``end_fleet_agent_if_live`` was added to close for listings. A listing in another
+    process that had seen the dead pane and wrote between the two ended and announced
+    the death, and the stop announced it again: two ``agent_exited`` lines and two
+    nudges for one stop. The stop ends the row by the same compare-and-set now."""
+    coder = _coder(project)
+    nudges = _recorded_nudges(monkeypatch)
+    seen: list[Any] = []
+    real_keys = tmux.send_keys
+
+    def exit_then_a_look(pane_id: str, *keys: str) -> None:
+        real_keys(pane_id, *keys)
+        if pane_id == coder.pane_id and not seen:
+            # A listing in another process observes the dead pane…
+            seen.append(fleet_service._observe_sockets([coder], f"asq-{_codename(project)}"))
+
+    real_get = SqliteStore.get_fleet_agent
+    landed = False
+
+    def read_then_the_listing_writes(self: SqliteStore, agent_id: str) -> FleetAgent | None:
+        nonlocal landed
+        row = real_get(self, agent_id)
+        if agent_id == coder.id and coder.pane_id in tmux.killed and not landed:
+            landed = True  # …and its write lands right after the stop reads the row
+            fleet_service._end_dead_rows([coder], seen[0])
+        return row
+
+    monkeypatch.setattr(tmux, "send_keys", exit_then_a_look)
+    monkeypatch.setattr(SqliteStore, "get_fleet_agent", read_then_the_listing_writes)
+
+    receipt = fleet_service.stop(project, coder.label)
+
+    assert landed and receipt.agent.id == coder.id and receipt.agent.ended_at is not None
+    assert _events(project, "agent_exited") == [f"{coder.label} exited (0)"]  # once
+    assert nudges == [f"{coder.label} exited"]
+
+
+def test_a_stop_whose_death_a_listing_recorded_asks_again_for_the_release_it_could_not_make(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A listing that records the death a stop's ``/exit`` caused leaves the stop a stop
+    that worked, and the stop returned that row with nothing released, without asking.
+    A listing has no report to carry a release the store refused, so a claim the dead
+    session still held stayed with it until the lease lapsed, and nothing said so. The
+    stop asks again (a release is idempotent) and its receipt carries what that did."""
+    mine = _task(project, "the task this coder is for")
+    agent, first = _spawned(project, "coder", mine.id, tmux, monkeypatch)
+    team_service.hook_session_start(first, project.root, "startup")
+    team_service.claim_task(mine.id, session_ref=first)
+    real_release = team_service.release_agent_claims
+    refusals = 1
+
+    def refuse_once(*args: Any, **kwargs: Any) -> Any:
+        nonlocal refusals
+        if refusals:
+            refusals -= 1
+            raise sqlite3.OperationalError("database is locked (fake)")
+        return real_release(*args, **kwargs)
+
+    monkeypatch.setattr(team_service, "release_agent_claims", refuse_once)
+    real_keys = tmux.send_keys
+    listed: list[list[FleetAgentStatus]] = []
+
+    def enter_then_a_listing(pane_id: str, *keys: str) -> None:
+        real_keys(pane_id, *keys)
+        if pane_id == agent.pane_id and not listed:
+            listed.append(fleet_service.list_agents(project))  # the UI's tick
+
+    monkeypatch.setattr(tmux, "send_keys", enter_then_a_listing)
+
+    receipt = fleet_service.stop(project, agent.label)
+
+    [[recorded]] = listed
+    assert recorded.agent.ended_at is not None and refusals == 0  # its release was refused
+    assert [task.id for task in receipt.released] == [mine.id]
+    assert receipt.release_failed is None
+    assert _task_now(mine.id).claimed_by is None
+    assert _events(project, "agent_exited") == [f"{agent.label} exited (0)"]  # still once

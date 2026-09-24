@@ -974,7 +974,10 @@ a project whose manager exited while agents are still running
 (`fleet-manager`). A restart that is refused — a coder whose task is done, an
 account no longer on this machine — leaves the 💤 row and its last screen as
 they were (**Stop** clears them), and a running agent whose task, account or
-binary would refuse the restart is refused before it is stopped. The agent
+binary would refuse the restart is refused before it is stopped. A running
+agent is handed over the way `fleet switch` hands one over: its task stays
+claimed for the replacement, and the board says `restarted`, not
+`agent_exited`, so the manager is not woken to staff that task again. The agent
 view's **Stop** and **Restart** act on the row it shows: once its label has
 passed to a replacement (the manager restarted that coder), they say so and
 leave the replacement alone.

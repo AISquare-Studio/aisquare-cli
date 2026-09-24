@@ -36,13 +36,27 @@ NOW = datetime(2026, 9, 15, 14, 0, tzinfo=TORONTO)
 
 @pytest.fixture(autouse=True)
 def local_clock_is_toronto(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    """``local_time`` uses the process zone; pin it so the expected strings hold everywhere."""
-    monkeypatch.setenv("TZ", "America/Toronto")
+    """``local_time`` uses the process zone; pin it so the expected strings hold everywhere.
+
+    ``TZ`` is put back BEFORE the closing ``tzset``: ``monkeypatch`` undoes its own
+    changes only after this fixture has finished, so the ``tzset`` ran against Toronto
+    still and left it the process zone for the rest of the session, while ``os.environ``
+    said otherwise (review of the #205 fold, round 1). Skipped where ``time`` has no
+    ``tzset`` (Windows), as ``test_usage_aware_accounts.py`` does: the zone cannot be
+    switched there, and #65's windows-latest leg runs this file.
+    """
     import time
 
-    time.tzset()
-    yield
-    time.tzset()
+    if not hasattr(time, "tzset"):
+        pytest.skip("time.tzset is POSIX-only: the process zone cannot be switched for the test")
+    with monkeypatch.context() as local:
+        local.setenv("TZ", "America/Toronto")
+        time.tzset()
+        try:
+            yield
+        finally:
+            local.undo()
+            time.tzset()
 
 
 @pytest.mark.parametrize(

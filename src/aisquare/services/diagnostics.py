@@ -23,6 +23,7 @@ from aisquare.core import snapshot as snapshot_core
 from aisquare.core import tmux as tmux_core
 from aisquare.core.config import load_config
 from aisquare.core.injection import load_last
+from aisquare.core.keys import EXTENDED_MINIMUM
 from aisquare.core.store import damaged_store_recovery, store_session
 from aisquare.core.stubs import stub
 from aisquare.core.version import DISTRIBUTION, __version__
@@ -740,10 +741,12 @@ def _claude_accounts_checks() -> list[DoctorCheck]:
 _OS_RELEASE = Path("/etc/os-release")
 _APT_FAMILY = frozenset({"debian", "ubuntu", "linuxmint", "pop", "raspbian", "kali", "elementary"})
 _DNF_FAMILY = frozenset({"fedora", "rhel", "centos", "rocky", "almalinux", "amzn", "nobara", "ol"})
-_RECOMMENDED_TMUX = (3, 5)
-"""``S-Enter`` (and the other extended chords) reach an agent pane from 3.5 —
-measured: 3.3/3.4 type their names literally, so the key table drops them there —
-below it the fleet works without them."""
+_RECOMMENDED_TMUX = EXTENDED_MINIMUM
+"""The extended chords reach an agent pane from here — measured: 3.3/3.4 type
+their names literally, so the key table drops them there, and sends shift+enter
+as ``C-j`` (``core.keys.LEGACY_FALLBACK``) — below it the fleet works without
+them. The key table's own gate, not a copy of it: the doctor's advice and what
+the pane does cannot disagree."""
 
 
 def install_hint(
@@ -815,7 +818,9 @@ def _check_tmux(server: tmux_core.TmuxServer | None = None) -> DoctorCheck:
         if version < _RECOMMENDED_TMUX:
             wanted = f"{_RECOMMENDED_TMUX[0]}.{_RECOMMENDED_TMUX[1]}"
             return _ok(
-                name, f"tmux {found} — fleet available ({wanted}+ adds Shift+Enter in agent panes)"
+                name,
+                f"tmux {found} — fleet available ({wanted}+ carries the shifted chords to agent "
+                "panes; below it shift+enter travels as ctrl+j and the rest are dropped)",
             )
         return _ok(name, f"tmux {found} — fleet available")
     except Exception as exc:  # diagnostics must never crash
@@ -942,9 +947,10 @@ def _extended_keys_note(version: tuple[int, int] | None) -> str:
         return "tmux version not readable"
     if version >= _RECOMMENDED_TMUX:
         return f"tmux {version[0]}.{version[1]} carries extended keys"
+    wanted = f"{_RECOMMENDED_TMUX[0]}.{_RECOMMENDED_TMUX[1]}"
     return (
-        f"tmux {version[0]}.{version[1]} has no extended keys (3.5+): shift+enter travels as "
-        "ctrl+j, the other shifted chords are dropped"
+        f"tmux {version[0]}.{version[1]} has no extended keys ({wanted}+): shift+enter travels "
+        "as ctrl+j, the other shifted chords are dropped"
     )
 
 

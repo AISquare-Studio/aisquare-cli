@@ -421,8 +421,9 @@ def test_tmux_is_only_touched_below_its_own_floor(tmp_path: Path) -> None:
     """3.2 is the floor (core/tmux.py MIN_VERSION); 3.3a is fine, 3.0 is not.
 
     Deliberately NOT the 3.5 recommendation: below 3.5 the fleet works without
-    Shift+Enter, and reinstalling a working tmux to chase a nicety is the kind
-    of unasked-for change §3.9 exists to prevent.
+    the shifted chords (shift+enter travels as ctrl+J), and reinstalling a
+    working tmux to chase a nicety is the kind of unasked-for change §3.9
+    exists to prevent.
     """
     for version, expected in (("3.0a", "install"), ("3.2a", "current"), ("3.3a", "current")):
         stubs = stub_dir(tmp_path / version, "bin", "tmux", body=f'printf "tmux {version}\\n"')

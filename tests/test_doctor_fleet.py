@@ -264,11 +264,16 @@ def test_tmux_too_old_warns_with_the_minimum_and_an_install_hint() -> None:
 
 
 def test_tmux_below_the_recommended_version_is_ok_but_says_what_is_missing() -> None:
+    """What is missing below 3.5 is the shifted chords, not shift+enter: that one
+    travels as ctrl+j there (#147). The row said "3.5+ adds Shift+Enter", beside
+    the fleet terminal row saying the opposite (review of #203, round 1 of the
+    terminal-ux fold)."""
     older = diagnostics._check_tmux(FakeServer(version=(3, 3)))
     current = diagnostics._check_tmux(FakeServer(version=(3, 7)))
 
-    assert older.status is CheckStatus.ok and "Shift+Enter" in older.detail
-    assert current.status is CheckStatus.ok and "Shift+Enter" not in current.detail
+    assert older.status is CheckStatus.ok and "3.5+ carries the shifted chords" in older.detail
+    assert "shift+enter travels as ctrl+j" in older.detail, older.detail
+    assert current.status is CheckStatus.ok and "ctrl+j" not in current.detail
 
 
 def test_tmux_with_an_unreadable_version_fails_open_and_says_so() -> None:

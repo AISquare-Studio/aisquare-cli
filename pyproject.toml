@@ -31,6 +31,13 @@ dependencies = [
   # cli/watch.py and cli/ui/ lean on 8.2.x internals. Imported lazily, only by
   # the UI entry, so the hook path pays nothing for it.
   "textual>=8.2,<9",
+  # Windows ships no IANA time zone database, and `zoneinfo` falls back to this
+  # package for one. Without it `ZoneInfo("America/Toronto")` raises there, so a
+  # limit message's named zone was dropped for the offset in force NOW, and a
+  # weekly reset across a DST change came out an hour off: the bug round 4 of
+  # #205 fixed, back on one platform (core/claude_accounts._resolve_reset).
+  # Linux and macOS read /usr/share/zoneinfo and do not install it.
+  "tzdata; sys_platform == 'win32'",
 ]
 
 [project.optional-dependencies]

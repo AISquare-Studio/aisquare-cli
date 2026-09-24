@@ -1558,6 +1558,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   lock on `credentials.lock`, a new file is created 0600 before its contents
   are written, and only one non-blank line that could not start a JSON value
   is migrated as a bare key.
+- **A limit message's named zone is read on Windows too.** Windows has no IANA
+  time zone database, so `ZoneInfo("America/Toronto")` raised there and a
+  reset named in a zone fell back to the offset in force now: a weekly reset
+  across a DST change came out an hour off. `tzdata` is now a dependency on
+  Windows only, where `zoneinfo` looks for it; Linux and macOS keep reading
+  the system database.
 - **The explainability workspace key is restricted on Windows too.** The third
   secret file to have this bug and the first that landed after the fix for the
   other two: `store_api_key` used `chmod(0o600)`, which is the whole story on

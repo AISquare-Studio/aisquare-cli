@@ -41,7 +41,8 @@ def test_the_base_install_gains_no_dependencies() -> None:
 
     ``textual`` is in the set because the fleet UI made it core in 0.6.0, not
     because the experiment wants it: the CI transport is stdlib ``urllib`` so
-    that the hook path works in a base install."""
+    that the hook path works in a base install. ``tzdata`` is Windows' zone
+    database, and only Windows installs it (the test below)."""
     import re
     import tomllib
 
@@ -50,7 +51,29 @@ def test_the_base_install_gains_no_dependencies() -> None:
     # Split on every specifier character, so a future `foo<2` upper bound reads
     # as `foo` rather than failing with a confusing diff.
     required = {re.split(r"[<>=!~\[; ]", dep)[0].strip() for dep in data["project"]["dependencies"]}
-    assert required == {"typer", "rich", "pydantic", "tomli-w", "textual"}
+    assert required == {"typer", "rich", "pydantic", "tomli-w", "textual", "tzdata"}
+
+
+def test_windows_installs_a_time_zone_database_and_nothing_else_does() -> None:
+    """Windows has no IANA database for ``zoneinfo`` to read, so ``ZoneInfo("America/Toronto")``
+    raised there. ``core.claude_accounts._resolve_reset`` then read a limit message's named
+    zone as the offset in force now, and a weekly reset across a DST change came out an hour
+    off. The ``tzdata`` package is where ``zoneinfo`` looks next. The Windows leg found this
+    at collection: ``tests/test_reset_formatter.py`` builds that zone at import. Linux and
+    macOS have the system database, so the marker keeps the package off them."""
+    import tomllib
+
+    from packaging.requirements import Requirement
+
+    pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
+    deps = tomllib.loads(pyproject.read_text(encoding="utf-8"))["project"]["dependencies"]
+    tzdata = [Requirement(dep) for dep in deps if Requirement(dep).name == "tzdata"]
+    assert len(tzdata) == 1, "Windows has no zone database without the tzdata package"
+    marker = tzdata[0].marker
+    assert marker is not None, "tzdata is for Windows; the other platforms have their own"
+    assert marker.evaluate({"sys_platform": "win32"})
+    assert not marker.evaluate({"sys_platform": "linux"})
+    assert not marker.evaluate({"sys_platform": "darwin"})
 
 
 def test_the_experiment_extra_is_a_real_extra_in_the_built_metadata() -> None:

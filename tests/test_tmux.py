@@ -436,6 +436,28 @@ def test_spawn_window_adds_a_window_when_the_session_exists(
     assert (info.window_id, info.pane_id, info.current_command) == ("@5", "%10", "sh")
 
 
+def test_spawn_window_keeps_a_window_whose_resize_tmux_refuses(
+    fake_bin: Path, conf: Path, tmp_path: Path
+) -> None:
+    """The resize after ``new-window`` fails open: the window runs, so it is returned.
+
+    Raised instead, it would reach ``fleet.spawn`` as a failed spawn AFTER the
+    window exists — a running agent with no row to show, stop or find it by. A
+    refused size costs geometry only; the UI's own sync sizes the window again.
+    """
+    fake = FakeTmux(
+        OK,  # has-session
+        Completed(0, f"@6{_SEP}%11\n", ""),  # new-window -P
+        Completed(1, "", "width too large"),  # resize-window
+    )
+    info = _server(fake, fake_bin, conf).spawn_window(
+        "asq-amber-fox", name="coder-2", cwd=tmp_path, command=["claude"], width=97, height=31
+    )
+    # The caller's size, not the default, on the existing-session branch too.
+    assert fake.commands()[2] == ["resize-window", "-t", "%11", "-x", "97", "-y", "31"]
+    assert (info.window_id, info.pane_id, info.current_command) == ("@6", "%11", "claude")
+
+
 def test_spawn_window_without_env_passes_no_dash_e(
     fake_bin: Path, conf: Path, tmp_path: Path
 ) -> None:

@@ -174,3 +174,74 @@ def test_both_surfaces_render_one_sentence(runner: CliRunner) -> None:
     proxy = next(c for c in ops.checks() if "proxy" in c.name)
 
     assert proxy.detail in line, f"status={line!r} doctor={proxy.detail!r}"
+
+
+# --- the machine-readable verdict, and the exit code's second red state ---
+
+
+def test_json_carries_the_verdict_as_fields(runner: CliRunner) -> None:
+    """Review follow-up H. ``probe_severity``/``probe_fix`` shipped documented in
+    the cutover runbook and tested nowhere; ``jq -r`` answers a missing key with
+    ``null`` and exits 0, so a rename would break every scripted check silently."""
+    import json
+
+    _configured(enabled=True)
+    dead = json.loads(runner.invoke(app, ["--json", "explainability", "status"]).output)
+    assert dead["probe_severity"] == "fail"
+    assert isinstance(dead["probe_fix"], str) and dead["probe_fix"]
+
+    _cold()
+    cold = json.loads(
+        runner.invoke(app, ["--json", "explainability", "status"], catch_exceptions=False).output
+    )
+    assert cold["probe_severity"] == "ok"
+    assert cold["probe_fix"] is None
+
+
+def test_a_live_proxy_shipping_elsewhere_exits_one_too(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review follow-up J: the exit code's second red state, announced and pinned.
+
+    Sessions ARE traced here — onto a gateway nobody is watching. A cutover
+    script gating on this code is asking "are the traces arriving where I
+    think", and the answer is no in the same way as for an unreachable proxy.
+    """
+    import json
+
+    from aisquare.services.explainability import ProxyProbe
+
+    _configured(enabled=True)
+    monkeypatch.setattr(
+        ops,
+        "probe_proxy",
+        lambda _url: ProxyProbe(True, "proxy healthy", gateway="https://elsewhere.example"),
+    )
+
+    result = runner.invoke(app, ["--json", "explainability", "status"])
+
+    assert result.exit_code == 1
+    payload = json.loads(result.output)
+    assert payload["probe_severity"] == "fail"
+    assert "https://elsewhere.example" in payload["probe"]
+
+
+def test_an_unverifiable_destination_is_amber_and_exits_zero(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The boundary of the rule above: amber is not red. A loopback proxy that
+    reports no gateway against a remote gateway cannot be checked from here,
+    and a cutover script must not be failed over a question nobody can answer."""
+    import json
+
+    from aisquare.services.explainability import ProxyProbe
+
+    _configured(enabled=True)
+    monkeypatch.setattr(ops, "probe_proxy", lambda _url: ProxyProbe(True, "proxy healthy"))
+
+    result = runner.invoke(app, ["--json", "explainability", "status"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["probe_severity"] == "warn"
+    assert payload["probe_fix"]

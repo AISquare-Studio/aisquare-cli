@@ -22,6 +22,7 @@ from aisquare.models import ClientReason, ProjectInfo, TurnMetric
 from aisquare.services import hooks as hooks_service
 from aisquare.services import metrics as metrics_service
 from aisquare.services import team as team_service
+from tests.rendered import plain
 
 PROJECT = ProjectInfo(id="prj_metrics", root=Path("/tmp/metrics"), linked_repos=[])
 
@@ -369,6 +370,21 @@ def test_override_rows_are_counted_apart_and_kept_out_of_the_round_trip_figures(
     assert summary.by_delivery_source == {"descriptor": 2, "override": 2}
     assert summary.consulted == 4, "what happened is still counted"
     assert (summary.median_round_trip_ms, summary.p95_round_trip_ms) == (300, 320)
+
+
+@pytest.mark.parametrize("command", ["show", "list"])
+def test_metrics_refuses_all_together_with_project(
+    command: str, isolated_home: Path, runner: CliRunner
+) -> None:
+    """Round 6 of #203. ``--all`` won silently over ``--project`` here exactly as
+    it had in ``fleet shutdown``: ``metrics show --project alpha --all`` reported
+    every project on the machine with nothing saying the project flag was
+    dropped. One shared refusal now, wherever the pair exists."""
+    with store_session() as store:
+        store.ensure_project(PROJECT)
+    result = runner.invoke(app, ["metrics", command, "--project", "alpha", "--all"])
+    assert result.exit_code != 0
+    assert "--all and --project conflict" in plain(result.output)
 
 
 def test_metrics_show_says_when_override_rows_are_present(

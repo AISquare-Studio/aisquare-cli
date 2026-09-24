@@ -16,6 +16,7 @@ from typer.testing import CliRunner
 
 from aisquare.cli.app import app
 from aisquare.core.store import store_session
+from aisquare.services import team as team_service
 
 CODER = "bbbb2222-0000-0000-0000-000000000000"
 
@@ -133,6 +134,54 @@ def test_signal_receipts_verify_like_any_write(runner: CliRunner, work_dir: Path
     verified = runner.invoke(app, ["team", "verify", str(signal["seq"]), "--as", "bbbb2222"])
     assert verified.exit_code == 0, verified.output
     assert "gate: open" in _flat(verified.output)
+
+
+def test_signal_validation_runs_before_any_store_is_opened(
+    work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of the fold. The name/value check moved behind ``store_session()``
+    and the board resolution — and ``_board`` runs ``ensure_project``, which
+    revives a forgotten project's tombstone — so a signal that was going to be
+    refused registered the directory first. Refused before anything is opened."""
+
+    def never() -> None:
+        raise AssertionError("the store was opened for a signal that was going to be refused")
+
+    monkeypatch.setattr(team_service, "store_session", never)
+    with pytest.raises(ValueError, match="lowercase token"):
+        team_service.set_signal("Bad Name", "on", cwd=work_dir)
+    with pytest.raises(ValueError, match="single token"):
+        team_service.set_signal("ready", "not one token", cwd=work_dir)
+
+
+def test_a_store_held_signal_write_clears_the_previous_receipt(
+    runner: CliRunner, work_dir: Path
+) -> None:
+    """Round 5. ``set_signal_in`` publishes no receipt of its own — nobody to
+    hand it to — but it must not leave an EARLIER write's receipt standing, or a
+    reader after a ``fleet shutdown --all`` that cleared eight pauses reads the
+    receipt of a different write."""
+    _start(runner, work_dir)
+    team_service.set_signal("ready", "on", cwd=work_dir)
+    assert team_service._DELIVERY.get() is not None, "the premise: a receipt stands"
+    with store_session() as store:
+        project = store.list_projects()[0]
+        team_service.set_signal_in(store, project.id, "ready", "off")
+    assert team_service._DELIVERY.get() is None, "cleared, so nothing reads it as this write's"
+    assert team_service.read_signal("ready", cwd=work_dir).value == "off"  # type: ignore[union-attr]
+
+
+def test_a_refused_signal_leaves_no_stale_receipt(runner: CliRunner, work_dir: Path) -> None:
+    """Round 8 of #203. Validation moved above the receipt clear, so a refused
+    name or value returned with ``_DELIVERY`` still holding the last successful
+    write's receipt — readable by the next ``last_delivery()`` reader in a
+    long-lived process such as the MCP server."""
+    _start(runner, work_dir)
+    team_service.set_signal("ready", "on", cwd=work_dir)
+    assert team_service._DELIVERY.get() is not None, "the premise: a receipt stands"
+    with pytest.raises(ValueError, match="lowercase token"):
+        team_service.set_signal("Bad Name", "on", cwd=work_dir)
+    assert team_service._DELIVERY.get() is None, "a refused write leaves no receipt behind"
 
 
 def test_signal_validation_rejects_non_tokens(runner: CliRunner, work_dir: Path) -> None:

@@ -28,26 +28,29 @@ team service may one day call back into it for nudges.
 from __future__ import annotations
 
 import contextlib
+import os
 import re
 import shutil
 import sqlite3
 import subprocess
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import ModuleType
+from typing import Any
 
 from aisquare.core import claude_accounts as claude_accounts_core
-from aisquare.core import codenames, harness, selfcli
+from aisquare.core import codenames, harness, orchestrator, selfcli
 from aisquare.core.config import FleetRoleSettings, FleetSettings, load_config
 from aisquare.core.ids import new_agent_id
 from aisquare.core.store import AmbiguousIdError, ContextStore, store_session
 from aisquare.core.tmux import TmuxError, TmuxServer, TmuxUnavailable, WindowInfo
 from aisquare.core.workspace import active_project
 from aisquare.models import (
+    CLOSED_STATUSES,
     FleetAgent,
     FleetAgentState,
     FleetAgentStatus,
@@ -140,6 +143,18 @@ class NoSuchAgent(FleetError):
     """No live agent with that label in this project."""
 
 
+class FleetInterrupted(FleetError):
+    """The operator interrupted ``shutdown`` mid-loop; ``report`` says how far it got.
+
+    A ``FleetError`` so a caller that only knows the family still stops cleanly;
+    the CLI catches it first, prints the report, and exits 130.
+    """
+
+    def __init__(self, report: ShutdownReport) -> None:
+        super().__init__(report.interrupted or "shutdown interrupted")
+        self.report = report
+
+
 @dataclass(frozen=True)
 class ResumeSpec:
     """Start the window on an EXISTING Claude session rather than a fresh one (#146).
@@ -155,7 +170,7 @@ class ResumeSpec:
     transcript_path: Path
 
 
-@dataclass
+@dataclass(frozen=True)
 class SwitchReceipt:
     """What ``fleet switch`` did: the agent it stopped, the one it started, and how."""
 
@@ -170,7 +185,7 @@ class SwitchReceipt:
     notes: list[str] = field(default_factory=list)
 
 
-@dataclass
+@dataclass(frozen=True)
 class SpawnReceipt:
     """What ``fleet spawn`` did — including the label it ACTUALLY used."""
 
@@ -199,6 +214,147 @@ class ReapReport:
     ended: list[FleetAgent] = field(default_factory=list)
     lost: list[FleetAgent] = field(default_factory=list)
     worktrees_removed: list[Path] = field(default_factory=list)
+    claims_released: list[str] = field(default_factory=list)
+    """Task ids the ended and lost rows' board sessions still held, returned to
+    the pool — the same count ``shutdown`` reports, where ``reap`` used to
+    discard :func:`services.team.release_agent_claims`' answer in both branches
+    (review of #203, round 4)."""
+    release_failures: list[str] = field(default_factory=list)
+    """``<label>: <what happened>`` for each ended or lost row whose release did
+    not fully happen — refused by the store, or released and not announced to
+    the board. The row is ended and committed before the release runs, so a
+    raise here used to take the rest of the sweep down with it: the remaining
+    agents, every later project, the worktree pass and the manager nudges, and
+    a traceback instead of a report (round 5)."""
+
+
+@dataclass(frozen=True)
+class StopReceipt:
+    """What :func:`stop` did: the row it ended, and the claims that ended with it.
+
+    ``released`` is the answer ``shutdown`` needs to COUNT what a stop returned
+    to the pool. It used to reach that through a ``release_claims=False`` flag
+    on ``stop`` and a second release of its own — two paths that had to agree
+    the pane was dead, and a caller that forgot the flag double-released
+    (review of #203, round 4). One release, in ``stop``, reported here — and
+    none under ``handover`` (``switch``), whose claims wait for the
+    replacement, so its ``released`` is empty whatever the session held.
+    """
+
+    agent: FleetAgent
+    released: list[TeamTask]
+    release_failed: str | None = None
+    """Why the release did not happen, when it did not: the row IS ended and the
+    pane IS dead by then, so a store that refuses the courtesy (a lock, a
+    vanished session row) costs the release and is SAID here — never the stop,
+    which used to raise out of ``shutdown`` and report a dead, ended row as
+    LEFT LIVE, keep the project's pause and exit 1 (review of the fold)."""
+
+
+@dataclass(frozen=True)
+class ShutdownRow:
+    """One row ``shutdown`` did not simply stop, and WHY it reads that way.
+
+    The reason is set where the service KNOWS it, because the CLI cannot know
+    and must not guess. The first draft of this command printed "its server was
+    not running" over every recorded row — including rows that got there because
+    ``stop`` raised on a server that had answered and was reported killed on the
+    line above, and rows whose agent had exited cleanly on its own.
+    """
+
+    agent: FleetAgent
+    reason: str
+
+
+@dataclass
+class ShutdownReport:
+    """What ``shutdown`` did, row by row and session by session."""
+
+    stopped: list[FleetAgent] = field(default_factory=list)
+    """Agents ``stop`` ended on an answering server: graceful ``/exit`` unless
+    ``force``, exit status where tmux exposed one, ``agent_exited`` emitted. An
+    agent that had already exited on its OWN between the snapshot and its turn
+    joins them: same end state, and it keeps the exit status it recorded."""
+    recorded: list[ShutdownRow] = field(default_factory=list)
+    """Rows ended with no exit status on the operator's word, each with its reason:
+    their socket did not answer, or they appeared after their session was killed."""
+    failed: list[ShutdownRow] = field(default_factory=list)
+    """Rows LEFT LIVE, each with its reason: ``stop`` refused because the pane was
+    seen alive, the row could not be written, or the agent was no longer there to
+    stop. Nothing in this list was ended — that is the point of the list."""
+    sessions_killed: list[str] = field(default_factory=list)
+    """``<socket>:<session>`` for each of the fleet's OWN sessions this killed."""
+    sessions_absent: list[str] = field(default_factory=list)
+    """Sessions already gone when the kill phase looked — the ordinary shape after a
+    clean stop pass: killing a session's last window takes the session with it."""
+    sessions_failed: list[str] = field(default_factory=list)
+    """Sessions tmux refused to kill. Tried and did NOT happen — never reported as
+    killed, which is what the first draft did with ``servers_killed``. A session
+    still standing because the dead pane of a row that exited LATE could not be
+    removed from it is here too, with that as its reason (review of #121,
+    round 9): the outcome is the same one the operator has to act on."""
+    sessions_left_up: list[str] = field(default_factory=list)
+    """Sessions deliberately spared: they hold a row this left live, and killing the
+    session would kill an agent whose pane tmux had just confirmed alive. The same
+    rule spares a session that outlived the late dead pane removed from it."""
+    servers_absent: list[str] = field(default_factory=list)
+    """Sockets with no server to ask — the rows on them went to ``recorded``."""
+    claims_released: list[str] = field(default_factory=list)
+    """Task ids released from the ended rows' board sessions (``release_claims``)."""
+    release_failures: list[str] = field(default_factory=list)
+    """``<label>: <error>`` for each ended row whose claims could NOT be released —
+    a store that refused after the row was ended. The row is down and counted
+    where it belongs; its work stays claimed by a session that no longer exists
+    until the lease lapses, which the operator has to be told rather than have
+    swallowed (the release used to be a silent ``suppress(Exception)``)."""
+    paused_cleared: list[str] = field(default_factory=list)
+    """Projects whose ``fleet-paused`` signal this cleared, by display name."""
+    paused_kept: list[str] = field(default_factory=list)
+    """Projects whose ``fleet-paused`` signal was deliberately LEFT ON because the
+    shutdown did not confirm them down (a row left live, a session left up or
+    unkillable, a listing that failed). Clearing it there would remove the
+    manager's instruction not to spawn precisely while the operator is trying to
+    stop it (review of #121, round 2)."""
+    incomplete_projects: list[str] = field(default_factory=list)
+    """Project ids the shutdown could not confirm down — the set the pause rule
+    and any caller that wants "is it really down?" should read, rather than
+    re-deriving it from the other lists."""
+    interrupted: str | None = None
+    """Set when the operator interrupted the stop loop: which row it was on, and
+    that the rest of the fleet was left as it was. Rows before it are ended and
+    their claims released, committed row by row, so the report is owed even
+    then — it travels on :class:`FleetInterrupted` (round 5)."""
+    late_scan_failed: str | None = None
+    """Why the final re-read of live rows did not happen (a store that refused).
+    A scan that did not run cannot vouch for anything, so every project in the
+    run's snapshot is marked not confirmed down and keeps its pause; the CLI
+    reports PARTLY and exits 1 (review of #121, round 7)."""
+    pause_scan_failed: str | None = None
+    """Why the pause signals could not be reconciled (a store that refused the
+    visible-projects lookup AFTER agents were already stopped). Every pause is
+    then KEPT — a forgotten project's pause is not ours to touch, and this could
+    not tell one from a live project — and the CLI reports PARTLY and exits 1,
+    rather than discarding the whole report (review of #121, round 8). It also
+    carries the per-project failures — ``<project>: could not be read/cleared
+    (…)``, joined by ``; `` — for a lookup that SUCCEEDED and left one project's
+    own signal unread or unwritten (review of #121, round 9)."""
+
+
+@dataclass(frozen=True)
+class ShutdownPlan:
+    """What ``shutdown`` WOULD end — read-only, so the CLI can ask before doing it.
+
+    ``fleet shutdown`` ends running work, so it prints this and asks first, the
+    way ``project prune`` does for stale registrations. ``absent_sockets`` is
+    what separates the two dispositions: a row on one of them cannot be stopped,
+    only recorded lost.
+    """
+
+    projects: list[ProjectInfo] = field(default_factory=list)
+    agents: list[FleetAgent] = field(default_factory=list)
+    sessions: list[str] = field(default_factory=list)
+    """``<socket>:<session>`` for every fleet session the kill phase would target."""
+    absent_sockets: list[str] = field(default_factory=list)
 
 
 # --- settings ---------------------------------------------------------------------
@@ -840,11 +996,20 @@ def _derive(
             # and since tmux reports activity in whole seconds while the hook
             # stamped `last_seen_at` with microseconds, "after" means a LATER
             # second, which keeps the drawing of the prompt (the same second as
-            # the hook) from reading as its answer.
+            # the hook) from reading as its answer. And the answer holds only
+            # while the pane is STILL producing output (ACTIVITY_WINDOW): one
+            # burst after the notice is not a working agent. A prompt dismissed
+            # with Esc fires no Stop, and the idle notice after it is quiet; the
+            # redraw when the UI resizes the window on attach, or arrow keys
+            # moving through the dialog, print too. Without the bound each held
+            # an unanswered prompt at `working` for the row's whole
+            # `_STALE_AFTER`; a granted permission keeps the pane moving until
+            # its turn's Stop.
             answered = (
                 pane is not None
                 and pane.last_output is not None
                 and pane.last_output > session.last_seen_at
+                and now - pane.last_output <= ACTIVITY_WINDOW
             )
             if answered:
                 return "working", None
@@ -868,13 +1033,14 @@ after it, and a session that continues turns ``working`` on its next prompt)."""
 
 
 def _limit_detail(until: datetime | None, now: datetime) -> str:
-    """``limit resets 12:30`` / ``limit resets Mon 00:00`` / ``usage limit``."""
+    """``limit resets in 2h 10m (12:30)`` / ``limit resets in 2d (Mon 00:00)`` / ``usage limit``.
+
+    Through ``core.claude_accounts.format_reset``, the one formatter every
+    surface that shows a reset goes through (#152; review of #205, finding 9).
+    """
     if until is None:
         return "usage limit"
-    local = until.astimezone()
-    far = until - now > timedelta(hours=24)
-    stamp = local.strftime("%a %H:%M") if far else local.strftime("%H:%M")
-    return f"limit resets {stamp}"
+    return f"limit resets {claude_accounts_core.format_reset(until, now=now)}"
 
 
 def _status(
@@ -919,7 +1085,7 @@ def _task_for(store: ContextStore, project: ProjectInfo, task_id: str | None) ->
         raise FleetError(f"no task matches {task_id!r}")
     if task.project_id != project.id:
         raise FleetError(f"task {task_id!r} belongs to another project's board")
-    if task.status in ("done", "dropped"):
+    if task.status in CLOSED_STATUSES:
         # Harmless when the id only named a label; now it reaches the agent as
         # its assignment, and an agent spawned for finished work would be told
         # so on arrival and hold a slot for nothing.
@@ -957,6 +1123,7 @@ def spawn(
     account: str | None = None,
     resume: ResumeSpec | None = None,
     size: tuple[int, int] | None = None,
+    takes_over: str | None = None,
 ) -> SpawnReceipt:
     """Start an agent for ``project`` in the fleet's tmux server and record it.
 
@@ -974,9 +1141,38 @@ def spawn(
     ``extra_args`` and the caller's ``agent_args``. ``AISQUARE_FLEET_AGENT``
     carries the row id into the window; ``CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=0``
     keeps Claude's native teams out of the fleet unless configured otherwise (§7.6).
+    Every variable set here is THIS window's: none reaches the tmux session's
+    environment, so a later spawn sets its own account and opt-out rather than
+    inheriting the first spawn's, and a window the operator opens by hand keeps
+    whatever the server had (review of #203, round 4).
     ``account`` is resolved through the one account resolver (flag, role
     binding, project default, machine default — #145) and the chosen slot is
     both passed to ``launch`` as ``--account`` and recorded on the row.
+
+    The row is written AFTER the window starts (``_record``: the window's
+    ``pane_id`` is part of the row, and a label or cap race is settled against
+    the window that exists). What keeps the agent's first hook from arriving
+    before the row does is the launcher: ``aisquare launch``, inside the
+    window, waits for the row ``AISQUARE_FLEET_AGENT`` names before it execs
+    the agent (:func:`aisquare.cli.launch._await_fleet_row`), so a slow or
+    locked store, a relabel or the cap check can delay the agent's start, never
+    strip its briefing (review of #135, second round, cut item).
+
+    ``takes_over`` is a FRESH hand-over's (:func:`switch` with no transcript to
+    resume, or ``--fresh``; never with ``resume``): the id of the session the
+    agent ran as until now, whose claims wait for the replacement
+    (``team.HANDOVER_STATE``). The row is recorded on that id and then moved
+    onto the new session's minted id together with the claims, in one store
+    transaction — the move a ``/clear`` makes (:func:`_take_over`) — right
+    after the insert. The launcher waits for the row, not for that move, so
+    nothing ORDERS the move before the agent's first hook: in practice the hook
+    comes seconds later (the launcher is still starting ``claude``, whose hook
+    starts an interpreter of its own), and a start hook that does get there
+    first makes the move itself when it can prove the pane is its own (rule 1
+    of ``services.team``'s fleet-row section). One that cannot is briefed
+    without its ASSIGNED TO YOU block — ``_late_assignment`` does not re-brief
+    a bound row — and the hand-off prompt still names the task (review of
+    #205, fifth round: this used to promise the move came first).
 
     ``size`` is the ``(columns, rows)`` the window is born with. The UI passes
     the pane it is about to attach, so the agent never runs wider than it will
@@ -1110,7 +1306,7 @@ def spawn(
         flags += ["--account", str(choice.account.slot)]
     flags += ["--name", picked]
     command = selfcli.argv_for(["launch", role, *flags, *role_args, *extra])
-    env = {"AISQUARE_FLEET_AGENT": agent_id}
+    env = {orchestrator.FLEET_AGENT_ENV_VAR: agent_id}
     if config.disable_native_agent_teams:
         env["CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"] = "0"
     if choice.account is not None:
@@ -1124,6 +1320,10 @@ def spawn(
     tmux_session = session_name(codename)
     geometry = {"width": size[0], "height": size[1]} if size is not None else {}
     try:
+        # Every pair is this window's alone: `spawn_window` keeps them out of
+        # the session environment, so a later spawn — or a window opened by hand
+        # — starts from the server's environment and sets its own (review of
+        # #203, rounds 3 and 4; §7.6 for the opt-out).
         window = srv.spawn_window(
             tmux_session, name=picked, cwd=cwd, command=command, env=env, **geometry
         )
@@ -1138,7 +1338,10 @@ def spawn(
         binary=resolution.binary,
         tmux_socket=config.tmux_socket,
         pane_id=window.pane_id,
-        session_id=identity.session_id,
+        # A fresh hand-over's row starts on the session whose claims it inherits,
+        # the state `_take_over` moves it out of (and the agent's own start hook
+        # would, should that move not happen).
+        session_id=takes_over if takes_over is not None else identity.session_id,
         cwd=cwd,
         worktree=use_worktree,
         task_id=resolved_task_id,
@@ -1149,9 +1352,65 @@ def spawn(
     stored = _record(
         agent, project, srv, wanted=label, notes=notes, cap=config.max_agents_per_project
     )
+    if takes_over is not None and identity.session_id is not None:
+        stored = _take_over(stored, takes_over, identity.session_id, notes)
     if prompt:
         _type_prompt(srv, stored.pane_id, prompt, notes)
     return SpawnReceipt(agent=stored, asked_label=label, tmux_session=tmux_session, notes=notes)
+
+
+def _take_over(agent: FleetAgent, previous: str, session_id: str, notes: list[str]) -> FleetAgent:
+    """Move a fresh replacement's row, and the claims parked for it, onto its own session id.
+
+    The claims were ``previous``'s — the session the agent ran as before
+    :func:`switch` stopped it — and moving them is ``adopt_fleet_agent_session``,
+    the one transaction a ``/clear`` hands its claims over in (rule 2 of
+    ``services.team``'s fleet-row section): the row and the claims can never
+    disagree about who holds the work. The ``doing`` ones take a fresh lease.
+    ``previous``'s presence is retired FIRST, releasing nothing: its process
+    is dead (``stop`` verified the pane), and a kill fires no ``SessionEnd``,
+    so it would otherwise sit on the board as a session mid-switch. First, so
+    that a move the store refuses still leaves the state a ``/clear`` leaves
+    between its two hooks — an ended id whose claims wait for the start hook —
+    and not a live ``switching`` presence nothing retires before the prune
+    (review of #205, fifth round). A store that refuses the retirement itself
+    costs only the retirement: the move still runs, and a note says the old id
+    stays on the board until ``aisquare team prune`` retires it.
+
+    Fail-open, because the window is running and its row is recorded: a store
+    that refuses the move leaves the row on ``previous`` with the claims, and
+    the agent's own start hook moves them (the pane's process adopts its row);
+    the row ending releases them either way (``release_agent_claims`` reads the
+    row's session). The note says so.
+    """
+    lease = _now() + timedelta(minutes=orchestrator.lease_minutes())
+    try:
+        with store_session() as store:
+            parked = store.get_session(previous)
+            if parked is not None and parked.ended_at is None:
+                # The retirement is the board's courtesy and the move is the record.
+                # Each commits on its own, and a store that refuses the first must
+                # not cost the second (review of #205, sixth round). Said, though:
+                # the old id is otherwise a live session on the board with nothing
+                # to explain it (review of #205, seventh round).
+                try:
+                    store.end_session(previous, release_claims=False)
+                except sqlite3.Error as exc:
+                    notes.append(
+                        f"the previous session {_team().short_id(previous)} was not marked ended "
+                        f"({type(exc).__name__}: {exc}) — it shows on the board as a live "
+                        "session until `aisquare team prune` retires it"
+                    )
+            store.adopt_fleet_agent_session(agent.id, previous, session_id, lease)
+            current = store.get_fleet_agent(agent.id)
+    except Exception as exc:  # the row and the window stand; the start hook is the second door
+        notes.append(
+            "the previous session's claims were not moved to this one "
+            f"({type(exc).__name__}: {exc}) — the agent's start hook takes them over, "
+            "and they go back to the pool if its row ends first"
+        )
+        return agent
+    return current if current is not None else agent
 
 
 def _refuse_occupied_worktree(project: ProjectInfo, worktree_dir: str, label: str) -> None:
@@ -1451,20 +1710,73 @@ def _file_note(project: ProjectInfo, label: str, text: str, sender: str | None) 
 
 
 def stop(
-    project: ProjectInfo, label: str, *, force: bool = False, grace: float = 5.0
-) -> FleetAgent:
-    """``/exit`` the agent, wait ``grace`` seconds, then kill its window.
+    project: ProjectInfo,
+    label: str,
+    *,
+    force: bool = False,
+    grace: float = 5.0,
+    handover: bool = False,
+) -> StopReceipt:
+    """``/exit`` the agent named ``label``, wait ``grace`` seconds, then kill its window.
+
+    Resolves the LIVE row by label and hands it to :func:`_stop_row`; the
+    documentation of what a stop is — and of ``handover`` — lives there.
+    """
+    with store_session() as store:
+        agent = _live_agent(store, project, label)
+    return _stop_row(project, agent, force=force, grace=grace, handover=handover)
+
+
+def _stop_row(
+    project: ProjectInfo,
+    agent: FleetAgent,
+    *,
+    force: bool = False,
+    grace: float = 5.0,
+    handover: bool = False,
+) -> StopReceipt:
+    """``/exit`` the agent in ``agent``'s pane, wait ``grace`` seconds, then kill its window.
+
+    Takes the ROW, so a caller that already holds one — ``shutdown`` over its
+    snapshot — stops that row and no other: resolving by label again let a
+    label reused between the snapshot and this row's turn (the row exited, the
+    manager spawned a new ``coder-1``) stop the new agent under the old one's
+    turn, count it as stopped, and then record it lost as a late row too
+    (review of the fold).
+
+    ``handover`` is :func:`switch`'s: the agent is about to start again under
+    another account — resuming the same session, or a fresh one that takes the
+    claims over — so the ended row's claims are not released (the session was
+    marked ``team.HANDOVER_STATE`` first, and its own ``SessionEnd`` parks them
+    the way a ``/clear`` does), no ``agent_exited`` goes out and the manager is
+    not nudged — ``switch`` closes the loop with ``switched``, a wake kind.
+    Released and announced here, a looper took the moving agent's task in the
+    gap and the manager respawned an agent that was on its way back (review of
+    #205, finding 6; the fresh start, fourth round). Its receipt's ``released``
+    is therefore empty: the claims are PARKED for the replacement, not returned.
 
     The agent's own ``SessionEnd`` hook releases its claims when it exits
-    cleanly; ``force`` skips the ``/exit`` and goes straight to the kill.
+    cleanly; ``force`` skips the ``/exit`` and goes straight to the kill — and
+    therefore records no exit status, since one is only ever read from a pane
+    that already reads dead. Whatever the ended row's session STILL holds is
+    released here once the pane is confirmed dead or gone (a kill fires no hook,
+    and a ``/clear`` parks claims on the id it ended), and RETURNED with the
+    row (:class:`StopReceipt`), so a caller that reports releases —
+    ``shutdown`` — counts this one instead of making a second.
+
+    Ending the row emits ``agent_exited`` and nudges the manager, exactly as
+    ``reap`` does for a pane it found dead. It belongs HERE rather than in each
+    caller: the §7.3 event the manager's Stop hook wakes on must not depend on
+    which path ended the agent, and while it was reap's alone a stopped agent
+    left the board no record of its exit while a merely crashed one did.
 
     tmux failing to ANSWER is not evidence that the agent died, so it does not
     end the row (see :func:`_verify_gone`): a row ended for a process still
     running is an agent no live listing shows and no ``stop`` can address, and
-    the operator was told "stopped".
+    the operator was told "stopped". Neither is tmux REFUSING the kill: the
+    window kill goes through the same verdict, so this returns only for a pane
+    tmux confirmed dead or gone, and raises otherwise.
     """
-    with store_session() as store:
-        agent = _live_agent(store, project, label)
     srv = server_for(agent.tmux_socket)
     session = session_name(ensure_codename(project).codename or "")
     exit_status: int | None = None
@@ -1486,11 +1798,23 @@ def stop(
         with a status) under some other session name, and hard-killing it
         without the graceful ``/exit`` would drop its ``SessionEnd`` hook, its
         claims and its exit status.
+
+        Both reads are the STRICT twins, because ``None`` from here is what
+        :func:`_verify_gone` acts on: the lenient pair answers ``[]``/``None``
+        for every non-zero exit, so a socket that answered the shutdown probe
+        and then refused this user (``Permission denied``, exit 1 — the live
+        server of round 7) read as "the pane is really gone", the row was ended
+        and, under ``shutdown``, a running agent's claims went back to the
+        board. That is the door round 9 closed on ``kill_window`` while leaving
+        this one open (review of #121, round 9 verification). A wedged server
+        was already safe — ``_tmux`` raises on the timeout, through either twin
+        — so what changes here is the answered-but-refused case, which now
+        raises and lands in ``_verify_gone``'s "could not be asked" branch.
         """
-        for window in srv.list_windows(session):
+        for window in srv.windows_or_raise(session):
             if window.pane_id == agent.pane_id:
                 return window
-        facts = srv.pane_facts(agent.pane_id)
+        facts = srv.pane_facts_or_raise(agent.pane_id)
         if facts is None:
             return None
         return WindowInfo(
@@ -1533,12 +1857,1020 @@ def stop(
                 _sleep(_POLL_INTERVAL)
         if window is not None and window.dead:
             exit_status = window.dead_status
-        with suppress(TmuxError):  # already gone — which is what the kill wanted
-            srv.kill_window(agent.pane_id)
+        # NOT suppressed. A kill that FAILED is not a pane that died, and this was
+        # the one tmux failure in this call that did not go through
+        # :func:`_verify_gone`: a `kill-window` tmux refused (a wedged server's 30 s
+        # timeout, a lost race with a server reload) ended the row anyway and
+        # returned it as stopped — under `shutdown` that also released the running
+        # agent's claims to the next worker (review of #121, round 9). The comment
+        # it carried, "already gone — which is what the kill wanted", is still true
+        # for a pane that really is gone: `_verify_gone` looks again and says so.
+        srv.kill_window(agent.pane_id)
     except TmuxError as exc:
-        exit_status = _verify_gone(_window, label, exc)
+        confirmed = _verify_gone(_window, agent.label, exc)
+        # …but never at the cost of a status already READ: a pane seen dead with
+        # its status, whose window then vanished before the kill, is gone with a
+        # known exit code, and the second look can only answer None for it.
+        if exit_status is None:
+            exit_status = confirmed
     with store_session() as store:
-        return store.end_fleet_agent(agent.id, exit_status=exit_status)
+        # The row as it is NOW, in the one session that ends it: ended meanwhile
+        # — its own hook, a `reap`, another terminal — it went away on its own,
+        # with the status it recorded, and this stop is nobody's (`NoSuchAgent`,
+        # which `shutdown` reads as exactly that). Re-reading a window earlier,
+        # in a connection of its own, neither closed the gap nor paid for itself
+        # (round 5).
+        current = store.get_fleet_agent(agent.id)
+        if current is None or current.ended_at is not None:
+            raise NoSuchAgent(f"{agent.label} ({agent.id}) is no longer live")
+        ended = store.end_fleet_agent(agent.id, exit_status=exit_status)
+        # The process is dead or gone by here, so whatever its session still
+        # holds is nobody's: a clean ``/exit`` released through the agent's own
+        # hook already, a kill fired no hook, and a stop landing in a
+        # ``/clear``'s gap found the claims parked on the id that just ended
+        # (review of #135, second round, finding 5). ONE release, here, in the
+        # store session that ended the row; what it returned rides on the
+        # receipt for whoever counts it. A hand-over releases and announces
+        # nothing: the replacement inherits, and ``switch`` says ``switched``.
+        released: list[TeamTask] = []
+        release_failed: str | None = None
+        if not handover:
+            released, release_failed = _release_or_say(store, ended, why="agent stopped")
+            _emit_exit(store, ended)
+    # Outside the store session, as ``reap`` does: the nudge types into a pane
+    # and must not hold the write lock the woken manager's own hooks will want.
+    if not handover:
+        nudge_manager(ended.project_id, reason=f"{ended.label} exited")
+    return StopReceipt(ended, released, release_failed)
+
+
+def _manager_first(agents: list[FleetAgent]) -> list[FleetAgent]:
+    """The manager before its team — it is the one agent that spawns others.
+
+    Stops are sequential and each can cost the whole ``grace``, so a six-agent
+    shutdown spends half a minute in the loop; the manager staffing the project
+    through that window is what puts a fresh row on a socket that is coming
+    down. Taking it down first narrows the window (``_record_late_rows`` closes
+    it). ``sorted`` is stable, so the rest keep their spawn order.
+    """
+    return sorted(agents, key=lambda agent: agent.label != MANAGER_LABEL)
+
+
+def _shutdown_targets(project: ProjectInfo | None) -> list[tuple[ProjectInfo, list[FleetAgent]]]:
+    """Every project in scope with its live rows — FORGOTTEN registrations included.
+
+    ``list_projects()`` hides a tombstoned registration, and a forgotten project
+    can still hold live rows: ``project forget`` reads liveness and writes the
+    tombstone in separate statements, and a concurrent ``fleet spawn`` revives
+    the row (``ensure_project`` clears ``forgotten_at``) and records its agent.
+    Hidden here, that agent's pane would be taken down with its session while its
+    row stayed live — and nothing could ever reconcile it: ``reap`` correctly
+    refuses a socket it cannot reach, and a second ``shutdown`` would not see the
+    project either. That is precisely the permanently-wrong row this command
+    exists to eliminate, so the scan reads past the tombstone.
+    """
+    with store_session() as store:
+        if project is not None:
+            projects = [store.get_project(project.id) or project]
+        else:
+            projects = store.list_projects(include_forgotten=True)
+        return [(p, _manager_first(store.fleet_agents(p.id, live_only=True))) for p in projects]
+
+
+def _shutdown_sockets(
+    targets: Sequence[tuple[ProjectInfo, list[FleetAgent]]], config: FleetSettings
+) -> list[str]:
+    """Every socket in scope: the ones the rows were spawned on, plus today's.
+
+    Today's is included even with no rows on it, because a session can outlive
+    every row that was recorded in it (``rename`` fails open, and the escape
+    hatch lets anyone rename a session by hand).
+    """
+    sockets = {agent.tmux_socket for _, agents in targets for agent in agents}
+    sockets.add(config.tmux_socket)
+    return sorted(sockets)
+
+
+def _require_usable_tmux(config: FleetSettings) -> None:
+    """Refuse before ANY row is touched unless tmux itself is usable.
+
+    ``answers()`` is False for "no usable tmux" as well as for "no server"
+    (``TmuxServer.answers`` swallows :class:`TmuxUnavailable`), and the first is
+    never evidence a pane died: measured on a live server holding a live
+    session, ``answers()`` reads True with a normal ``PATH`` and False with tmux
+    off it. Without this guard a ``tmux`` that left ``PATH`` — or a
+    ``TMUX_TMPDIR`` set at spawn and unset here — made ``shutdown`` end every
+    live row as lost while every agent kept running, and the next ``reap`` then
+    handed those agents' worktrees to ``git worktree remove``.
+
+    ``_require_tmux`` maps only :class:`TmuxUnavailable`; ``tmux -V`` can also
+    time out (``_COMMAND_TIMEOUT``) and raise a bare :class:`TmuxError`, which
+    is not a :class:`FleetError` and would reach the operator as a traceback
+    with no ``--json`` output at all.
+    """
+    srv = server(config)
+    try:
+        _require_tmux(srv)
+    except TmuxError as exc:  # a timeout or an OSError from `tmux -V`
+        raise FleetUnavailable(
+            f"tmux could not be asked for its version ({exc}) — no row was touched; "
+            "try again once tmux answers"
+        ) from exc
+
+
+def _same_socket(left: Path, right: Path) -> bool:
+    """Whether two socket paths name one socket, symlinks resolved (macOS ``/tmp``)."""
+    if left == right:
+        return True
+    try:
+        return left.resolve() == right.resolve()
+    except OSError:
+        return False
+
+
+def _refuse_from_inside(sockets: Sequence[str], config: FleetSettings) -> None:
+    """Refuse when this very process runs INSIDE a server whose sessions are going.
+
+    ``fleet attach`` is the documented full-fidelity escape hatch and every
+    fleet window runs ``aisquare`` inside that same server, so an operator (or
+    the manager agent itself) typing ``aisquare fleet shutdown`` in a fleet pane
+    is ordinary use, not abuse. Killing that session SIGHUPs the pane running the
+    command: the store writes have already happened, none of the report prints,
+    and no exit code is observable — losing the one thing this command offers
+    over ``tmux kill-server``.
+
+    ``$TMUX`` is tmux's own ``<socket-path>,<pid>,<session-index>``;
+    :meth:`~aisquare.core.tmux.TmuxServer.socket_path` reproduces the path for a
+    server that is not running, and the two are compared with symlinks resolved
+    because ``/tmp`` is one on macOS.
+    """
+    # `<socket-path>,<pid>,<session-index>`: the LAST two fields are the numbers,
+    # and the path may itself contain commas (a socket name or TMUX_TMPDIR with
+    # one), which tmux preserves — a `split(",")[0]` truncated such a path and
+    # let this guard accept the pane it was about to kill (review of #121,
+    # round 7).
+    inside = os.environ.get("TMUX", "").rsplit(",", 2)[0]
+    if not inside:
+        return
+    here = Path(inside)
+    for socket in sockets:
+        path: Path | None = None
+        with suppress(TmuxUnavailable, OSError):
+            path = server_for(socket, config).socket_path()
+        if path is not None and _same_socket(path, here):
+            raise FleetError(
+                f"fleet shutdown is running INSIDE the fleet's own tmux server ({socket}) — "
+                "killing its sessions would kill this pane before it could report anything. "
+                "Nothing was touched: detach (your tmux prefix, then `d`) or open a terminal "
+                "outside the fleet and run it there"
+            )
+
+
+def _shutdown_probe(sockets: Sequence[str], config: FleetSettings) -> dict[str, bool]:
+    """Which sockets have a server listening — refusing rather than guessing.
+
+    Asked with :meth:`TmuxServer.reachable`, the probe that RAISES on a client
+    that cannot be run, rather than :func:`_server_answers` / ``answers()``,
+    which swallow that into the same ``False`` as "no server". Both kinds of
+    failure — a 30 s command timeout on a wedged server (a bare
+    :class:`TmuxError`) and an unavailable client (:class:`TmuxUnavailable`) —
+    become a :class:`FleetError` refusal with nothing touched. "The socket did
+    not answer" and "we could not ask" are different facts: the first ends rows
+    on the operator's word, the second refuses.
+    """
+    answering: dict[str, bool] = {}
+    for socket in sockets:
+        try:
+            # The STRICT probe (review of #121, round 6): `answers()` swallows an
+            # unavailable client into False, and a client that disappears or
+            # fails at execution between `_require_usable_tmux` and this call
+            # would have read as "no server" — every row on that socket ended
+            # as lost before a single stop was attempted, panes alive.
+            # `reachable()` raises `TmuxUnavailable` (a `TmuxError`) instead,
+            # which the handler below turns into a refusal with nothing touched.
+            answering[socket] = server_for(socket, config).reachable()
+        except TmuxError as exc:
+            raise FleetError(
+                f"tmux could not be asked whether a server is running on {socket!r} ({exc}) "
+                "— no row was touched, because a socket that cannot be ASKED is not a socket "
+                "with no server; try again once tmux answers"
+            ) from exc
+    return answering
+
+
+def _fleet_sessions(
+    srv: TmuxServer,
+    targets: Sequence[tuple[ProjectInfo, list[FleetAgent]]],
+    *,
+    socket: str,
+    default_socket: str,
+    every: bool,
+) -> list[tuple[str, str | None, bool]]:
+    """The fleet's own sessions on this server: ``(session, project id or None, expected)``.
+
+    A scoped shutdown targets exactly the sessions of the projects in scope. An
+    ``--all`` run also sweeps any other ``asq-`` session the socket holds, with
+    no project to attribute it to — that is the shape a ``rename`` which failed
+    open leaves behind (its docstring says so, and ``attach`` and ``reap`` both
+    know it exists), and it is the fleet's session either way.
+
+    Named per SOCKET, as ``(session, project id or None, expected)``: a
+    project's session is looked for on the sockets its rows live on — where it
+    is EXPECTED — and on today's socket regardless, because a leftover session
+    (dead ``remain-on-exit`` panes of rows long ended) can stand there with no
+    live row to point at it, and a scoped shutdown that never asked left it up
+    under "✓ fleet shut down" (review of the fold). A session asked for
+    just-in-case and found absent is not worth a line: asked of every socket
+    and reported, a project whose rows were all on the old socket gained
+    "``asq-a`` was already gone" for a socket it never lived on (review of
+    #203, round 4). The ``--all`` prefix sweep lists what exists, so its
+    entries are expected by construction.
+    """
+    sessions: list[tuple[str, str | None, bool]] = []
+    for project, agents in targets:
+        if not project.codename:
+            continue
+        lived_here = any(agent.tmux_socket == socket for agent in agents)
+        if lived_here or socket == default_socket:
+            sessions.append((session_name(project.codename), project.id, lived_here))
+    named = {name for name, _, _ in sessions}
+    if every:
+        listed = [name for name in srv.sessions_or_raise() if name.startswith(SESSION_PREFIX)]
+        sessions += [(name, None, True) for name in sorted(listed) if name not in named]
+    return sessions
+
+
+def _kill_fleet_sessions(
+    targets: Sequence[tuple[ProjectInfo, list[FleetAgent]]],
+    sockets: Sequence[str],
+    answering: Mapping[str, bool],
+    report: ShutdownReport,
+    config: FleetSettings,
+    *,
+    every: bool,
+) -> None:
+    """Kill the fleet's OWN sessions — never the server.
+
+    ``tmux kill-server`` is server-scoped, but the fleet's claim is only ever to
+    ``asq-<codename>`` sessions. Reproduced while reviewing the first draft: a
+    socket holding one hand-made session and no fleet rows at all reported
+    ``0 stopped, 0 recorded lost`` and destroyed that session unmentioned — and
+    ``[fleet] tmux_socket`` is a free-form string with no validator, so an
+    operator who points it at ``default`` loses their personal tmux server to a
+    command that reported destroying nothing. Killing sessions still takes the
+    server down when the fleet is all it held: ``BUNDLED_CONF`` does not set
+    ``exit-empty off``, so a server with no session exits on its own.
+
+    A session holding a row this LEFT LIVE is spared. Killing it would end an
+    agent whose pane ``_verify_gone`` had just confirmed alive, and leave its
+    live row on a dead pane — the state this whole command exists to end.
+    """
+    spared = {(row.agent.tmux_socket, row.agent.project_id) for row in report.failed}
+    # The spare rule follows the PANE, not only the project's current session
+    # name: a `rename` that failed open (or a hand rename) leaves an agent in an
+    # `asq-*` session that `_fleet_sessions` returns with no project, and under
+    # `--all` the prefix sweep killed it over a row this had just marked LEFT
+    # LIVE (review of #121, round 2). So a session is also spared when one of
+    # its panes is a row left live — asked of tmux only when there is such a
+    # row, so the ordinary path costs nothing extra.
+    # Keyed by (socket, pane id): pane ids are unique only within ONE tmux
+    # server (every server starts at %0), so a failed `%1` on the old socket
+    # must not spare an unrelated session holding `%1` on the current one
+    # (review of #121, round 3).
+    spared_panes = {(row.agent.tmux_socket, row.agent.pane_id) for row in report.failed}
+    for socket in sockets:
+        if not answering.get(socket):
+            continue
+        srv = server_for(socket, config)
+        try:
+            here = _fleet_sessions(
+                srv, targets, socket=socket, default_socket=config.tmux_socket, every=every
+            )
+        except TmuxError as exc:
+            # tmux stopped answering between the probe and here (it can leave
+            # PATH mid-run): nothing on this socket can be reported killed, and
+            # nothing may be CLAIMED killed either — INCLUDING by omission. An
+            # empty report over a surviving session read as "✓ fleet shut down"
+            # (review of #121, round 2), so the failure is recorded as a failed
+            # session kill and every project with a row on this socket is not
+            # confirmed down.
+            report.sessions_failed.append(f"{socket}:* (could not list sessions: {exc})")
+            for project, agents in targets:
+                if any(agent.tmux_socket == socket for agent in agents) or (
+                    project.codename and every
+                ):
+                    _not_down(report, project.id)
+            continue
+        for name, project_id, expected in here:
+            qualified = f"{socket}:{name}"
+            if project_id is not None and (socket, project_id) in spared:
+                report.sessions_left_up.append(qualified)
+                _not_down(report, project_id)
+                continue
+            _take_down_session(
+                srv, socket, name, project_id, spared_panes, report, expected=expected
+            )
+
+
+def _take_down_session(
+    srv: TmuxServer,
+    socket: str,
+    name: str,
+    project_id: str | None,
+    spared_panes: set[tuple[str, str]],
+    report: ShutdownReport,
+    *,
+    expected: bool,
+    absent_is_news: bool | None = None,
+    failure_note: str | None = None,
+) -> None:
+    """Take one of the fleet's sessions down, or say why it stands — the ONE sequence.
+
+    Presence first. A name asked for just-in-case (today's socket, no row of
+    this project on it; ``expected=False``) that cannot be asked is not a failed
+    kill and marks nothing not-confirmed-down: nothing was claimed to be there.
+    Round 4 silenced only the confirmed-absent answer while widening the probe to
+    every in-scope project, so a transient ``TmuxError`` on a socket the project
+    never lived on read as PARTLY shut down and exit 1 (round 5). A session that
+    IS there is spared when one of its panes is a row this run left live —
+    killing it would end an agent tmux had just confirmed alive — and otherwise
+    killed; a refused kill is a failed one, never a killed one.
+
+    Written once for the kill phase and for the late-exit reconciliation: the
+    two copies had already drifted, the spare rule living in one and not the
+    other (review of #121, round 9; round 6 of #203). The late path expects its
+    session (its pane was just removed, so a refusal to re-check IS a failed
+    kill) but an absent one is the ordinary shape there — the window took the
+    session with it — hence ``absent_is_news`` apart from ``expected``.
+    ``failure_note`` is the caller's word for a question tmux would not answer.
+    """
+    if absent_is_news is None:
+        absent_is_news = expected
+    qualified = f"{socket}:{name}"
+    try:
+        present = srv.has_session_or_raise(name)
+    except TmuxError as exc:
+        if not expected:
+            return
+        report.sessions_failed.append(
+            f"{qualified} ({failure_note or 'could not be asked'}: {exc})"
+        )
+        _not_down(report, project_id)
+        return
+    if not present:
+        if absent_is_news:
+            report.sessions_absent.append(qualified)
+        return
+    if any(spared_socket == socket for spared_socket, _ in spared_panes):
+        try:
+            hosted = {(socket, window.pane_id) for window in srv.windows_or_raise(name)}
+        except TmuxError as exc:
+            # Cannot tell whether a left-live pane lives here: not killed, and
+            # said so — never a kill on a guess. The session IS there, so this
+            # is a real failed kill whatever brought it here.
+            note = failure_note or "could not list its panes"
+            report.sessions_failed.append(f"{qualified} ({note}: {exc})")
+            _not_down(report, project_id)
+            return
+        if hosted & spared_panes:
+            if qualified not in report.sessions_left_up:
+                report.sessions_left_up.append(qualified)
+            _not_down(report, project_id)
+            return
+    try:
+        srv.kill_session(name)
+    except TmuxError:
+        # Tried and did not happen: a wedged server times out at 30 s, and tmux
+        # can leave PATH between the probe and the kill.
+        report.sessions_failed.append(qualified)
+        _not_down(report, project_id)
+    else:
+        if qualified not in report.sessions_killed:
+            report.sessions_killed.append(qualified)
+
+
+def _not_down(report: ShutdownReport, project_id: str | None) -> None:
+    """Record that ``project_id`` was NOT confirmed down (once, in order)."""
+    if project_id is not None and project_id not in report.incomplete_projects:
+        report.incomplete_projects.append(project_id)
+
+
+def _release_or_say(
+    store: ContextStore, agent: FleetAgent, *, why: str
+) -> tuple[list[TeamTask], str | None]:
+    """Release the ended ``agent``'s session's claims, or say why that did not happen.
+
+    The one shape behind ``stop`` and the shutdown helpers: the row is ended
+    and the pane dead by the time this runs, so a store that refuses the
+    release is the courtesy owed after the stop — reported as ``<Type>: <exc>``,
+    never raised (review of the fold, twice). The releases themselves are
+    committed before their board events, and a failed event is not a failed
+    release (``services.team._release_session``).
+    """
+    if agent.session_id is None:
+        return [], None
+    try:
+        outcome = _team().release_agent_claims(store, agent, why=why)
+    except Exception as exc:
+        return [], (
+            f"could not be released ({type(exc).__name__}: {exc}) — they stay with the ended "
+            "session until the lease lapses; `aisquare task release <id>` frees one now"
+        )
+    if outcome.unannounced:
+        # Released — the rows say so — but the board was not told, and the
+        # manager learns a task is free from that event (round 5).
+        return list(outcome.tasks), (
+            f"released, but the board was not told about {', '.join(outcome.unannounced)} "
+            f"({outcome.reason}) — the manager will not see them come free until it lists "
+            "the pool"
+        )
+    return list(outcome.tasks), None
+
+
+def _release_in(store: ContextStore, agent: FleetAgent, report: ShutdownReport) -> None:
+    """RELEASE the ended agent's board session's claims, through ``store``, and count them.
+
+    ``services.team`` names exactly this caller: a caller that "genuinely knows
+    the session is dead passes ``release_claims=True``". Without it a task the
+    agent held in ``doing`` stays claimed by a session that no longer exists —
+    ``prune_sessions`` defaults to ``release_claims=False`` and waits
+    ``_CLAIM_ORPHAN_AFTER`` (4 h) — so the next fleet's manager sees its work
+    held by the dead. Under ``--force`` there is no ``/exit`` and therefore no
+    ``SessionEnd`` hook to do it, and a recorded row's pane was never reached at
+    all. Through the store the caller already holds open for the row it just
+    ended, rather than a connection of its own per row (review of #203, round
+    4). A courtesy, never the shutdown: a store that will not answer here costs
+    the release, not the report — and is NAMED in it (``release_failures``),
+    where a ``suppress(Exception)`` used to leave the stuck claim unmentioned.
+    """
+    released, failed = _release_or_say(store, agent, why="fleet shutdown")
+    _count_release(report, agent, released, failed)
+
+
+def _count_release(
+    report: ShutdownReport | ReapReport,
+    agent: FleetAgent,
+    released: list[TeamTask],
+    failed: str | None,
+) -> None:
+    """One place that turns a release (or what went wrong with it) into a report's fields."""
+    report.claims_released.extend(task.id for task in released)
+    if failed:
+        report.release_failures.append(f"{agent.label}: {failed}")
+
+
+def _record_lost(agent: FleetAgent, reason: str, report: ShutdownReport) -> None:
+    """End one row with no exit status, on the operator's word, saying why."""
+    try:
+        with store_session() as store:
+            ended = store.end_fleet_agent(agent.id, exit_status=None)
+            _release_in(store, ended, report)
+    except Exception as exc:  # a vanished row (KeyError), a locked store
+        report.failed.append(ShutdownRow(agent, f"its row could not be ended ({exc})"))
+        _not_down(report, agent.project_id)
+        return
+    report.recorded.append(ShutdownRow(ended, reason))
+
+
+def _record_self_exit(agent: FleetAgent, dead_status: int | None, report: ShutdownReport) -> None:
+    """End a late row whose pane tmux still holds DEAD, keeping the status tmux kept.
+
+    A spawn that landed AFTER the kill phase brought a session of its own up and
+    then EXITED on its own before this reconciliation; ``remain-on-exit`` keeps
+    its pane with the real exit status. Ending it through :func:`_record_lost`
+    discarded that status (``exit_status=None``) and told the operator "its
+    session was killed under it" — a kill that never targeted this late session
+    (review of #121, round 8). So it is ended the way every other self-exit is
+    (``reap``, :func:`_row_that_went_away`): the observed status is recorded,
+    ``agent_exited`` is emitted, and the row joins ``stopped`` — whose contract
+    already covers "exited on its OWN … keeps the exit status it recorded".
+    """
+    try:
+        with store_session() as store:
+            ended = store.end_fleet_agent(agent.id, exit_status=dead_status)
+            _release_in(store, ended, report)
+            _emit_exit(store, ended)
+    except Exception as exc:  # a vanished row (KeyError), a locked store
+        report.failed.append(ShutdownRow(agent, f"its row could not be ended ({exc})"))
+        _not_down(report, agent.project_id)
+        return
+    report.stopped.append(ended)
+
+
+def _row_that_went_away(agent: FleetAgent, reason: str, report: ShutdownReport) -> None:
+    """``stop`` raised ``NoSuchAgent``: the row is no longer LIVE, so re-read it.
+
+    The agent exited on its own between the snapshot and its turn and its own
+    ``SessionEnd`` (or a ``reap``) ended the row — with its real exit status.
+    Calling that "left live" would be false in every part: the row IS ended,
+    nothing needs stopping, and one self-exit would make a clean shutdown exit 1.
+    Calling it "recorded lost" would throw away the status the row already has.
+    Only a row that is somehow still live falls through to ``failed``.
+    """
+    try:
+        with store_session() as store:
+            current = store.get_fleet_agent(agent.id)
+            if current is not None and current.ended_at is not None:
+                # Its own hook or a `reap` released already; this finds nothing
+                # more, and says so through the same count if it does.
+                _release_in(store, current, report)
+    except Exception:  # the store is the only witness; without it, claim nothing new
+        current = None
+    if current is not None and current.ended_at is not None:
+        report.stopped.append(current)
+        return
+    report.failed.append(ShutdownRow(agent, reason))
+    _not_down(report, agent.project_id)
+
+
+def _shutdown_row(
+    project: ProjectInfo,
+    agent: FleetAgent,
+    answering: Mapping[str, bool],
+    report: ShutdownReport,
+    *,
+    force: bool,
+    grace: float,
+) -> None:
+    """Stop one row where its server answers; record it lost where it does not.
+
+    ``stop``'s refusal is not swallowed. It refuses on exactly one verdict —
+    ``_verify_gone`` looked again and the pane is VERIFIABLY still alive — which
+    is a positive observation, not an absence of evidence, and ending the row on
+    it is what ``stop``'s own docstring exists to prevent: "a row ended for a
+    process still running is an agent no live listing shows and no ``stop`` can
+    address, and the operator was told 'stopped'". Its message becomes the row's
+    reason instead, and the row stays live. ``NoSuchProject`` and
+    ``FleetUnavailable`` are carried the same way rather than vanishing into a
+    bare ``pass``; ``NoSuchAgent`` — the agent exited on its own between the
+    snapshot and its turn — goes through :func:`_row_that_went_away`, which reads
+    what actually became of the row instead of guessing.
+    """
+    if not answering.get(agent.tmux_socket):
+        _record_lost(agent, f"no server answered on socket {agent.tmux_socket!r}", report)
+        return
+    try:
+        # The snapshot's row is the row stopped — THAT pane, whatever label a
+        # later spawn reused. Whether it ended meanwhile is judged inside the
+        # store session that ends it (`_stop_row` raises `NoSuchAgent` there),
+        # not in a connection of its own a window ahead of it (round 5).
+        receipt = _stop_row(project, agent, force=force, grace=grace)
+    except NoSuchAgent as exc:
+        _row_that_went_away(agent, str(exc), report)
+    except FleetError as exc:
+        report.failed.append(ShutdownRow(agent, str(exc)))
+        _not_down(report, agent.project_id)
+    except Exception as exc:  # a store write, a codename race — the kill phase still runs
+        report.failed.append(ShutdownRow(agent, f"{type(exc).__name__}: {exc}"))
+        _not_down(report, agent.project_id)
+    else:
+        # `stop` released what the ended session held and says what; counted
+        # here rather than released again (review of #203, round 4).
+        report.stopped.append(receipt.agent)
+        _count_release(report, receipt.agent, receipt.released, receipt.release_failed)
+
+
+def _retire_late_panes(
+    late: Sequence[tuple[ProjectInfo, FleetAgent]],
+    report: ShutdownReport,
+    config: FleetSettings,
+) -> None:
+    """Take down what a row that exited LATE left standing, or report what survives.
+
+    ``remain-on-exit`` keeps the pane of an agent that exited on its own, so its
+    window — and the session holding that window, and the server behind the
+    session — all outlive the row :func:`_record_self_exit` just ended. The kill
+    phase ran BEFORE that row existed, so nothing else ever takes them down:
+    measured on real tmux, status 42 was recorded correctly while the fleet's
+    session and its server stayed up under a report that read "✓ fleet shut down"
+    (review of #121, round 9).
+
+    So the pane is removed and its session reconciled — with the kill phase's own
+    spare rule, because a session can outlive the pane by holding a row this run
+    LEFT LIVE, and killing it there would end an agent tmux had just confirmed
+    alive. Anything tmux will not confirm gone is reported, never assumed.
+    """
+    if not late:
+        return
+    spared_panes = {(row.agent.tmux_socket, row.agent.pane_id) for row in report.failed}
+    sessions: list[tuple[str, str, str]] = []  # (socket, session, project id)
+    for project, agent in late:
+        srv = server_for(agent.tmux_socket, config)
+        name = session_name(project.codename) if project.codename else "*"
+        try:
+            srv.kill_window(agent.pane_id)
+        except TmuxError as exc:
+            report.sessions_failed.append(
+                f"{agent.tmux_socket}:{name} (the dead pane {agent.pane_id} of a row that "
+                f"exited late could not be removed: {exc})"
+            )
+            _not_down(report, agent.project_id)
+            continue
+        entry = (agent.tmux_socket, name, project.id)
+        if project.codename and entry not in sessions:
+            sessions.append(entry)
+    for socket, name, project_id in sessions:
+        # The one take-down sequence. The session IS expected — its pane was just
+        # removed, so a refusal to re-check is a failed kill — but an absent one is
+        # the ordinary shape here: the window took the session with it, as tmux does.
+        _take_down_session(
+            server_for(socket, config),
+            socket,
+            name,
+            project_id,
+            spared_panes,
+            report,
+            expected=True,
+            absent_is_news=False,
+            failure_note="could not be re-checked after a row exited late",
+        )
+
+
+def _record_late_rows(
+    project: ProjectInfo | None,
+    handled: Collection[str],
+    report: ShutdownReport,
+    config: FleetSettings,
+    *,
+    snapshot: Sequence[tuple[ProjectInfo, list[FleetAgent]]] = (),
+) -> None:
+    """Rows that appeared DURING the run, re-read on EVERY socket in scope.
+
+    The snapshot is taken before the first stop and each stop can cost the whole
+    grace, so the window is real: the manager (stopped first, to narrow it), a
+    second terminal or the UI can ``fleet spawn`` into it. Such a row is in no
+    snapshot, so without this pass it is neither stopped nor recorded, and its
+    pane goes down with its session — a live row on a dead pane reading
+    ``unknown (tmux unavailable)``, which is the bug this command was written to
+    remove.
+
+    Its pane is asked about before the row is ended: a spawn that landed AFTER
+    the kill phase brought a session of its own back up, and that agent is
+    running. Those stay live and are reported, never recorded. A pane tmux holds
+    DEAD is ended with its status AND removed (:func:`_retire_late_panes`) —
+    otherwise the window it kept would hold its session, and the session the
+    server, under a report claiming the fleet is down.
+    """
+    try:
+        targets = _shutdown_targets(project)
+    except Exception as exc:
+        # A store that died mid-run: the report is still owed to the caller —
+        # but a scan that did not run cannot vouch for anything. Silently
+        # returning left a late-spawned agent unreported and its project
+        # "down" with its pause cleared (review of #121, round 7): the failure
+        # is recorded and every snapshot project stays not confirmed down.
+        report.late_scan_failed = f"{type(exc).__name__}: {exc}"
+        for current, _ in snapshot:
+            _not_down(report, current.id)
+        return
+    # Reachability is re-read for every socket in scope, including the ones the
+    # initial probe found absent: another terminal can bring a replacement
+    # manager up on exactly that socket during the run, and skipping it left a
+    # live row unreported, the project "down" and its pause cleared (review of
+    # #121, round 3). `None` is "could not be asked", which is never "gone".
+    fresh: dict[str, bool | None] = {}
+    for socket in _shutdown_sockets(targets, config):
+        srv = server_for(socket, config)
+        try:
+            # `answers()` swallows an unavailable client into False — the same
+            # answer as "no server" — and a `binary()` pre-check (round 4) only
+            # covered a client `which` cannot find, not one that fails at
+            # EXECUTION (deleted between check and exec, a shim whose
+            # interpreter is gone). `reachable()` lets that `TmuxUnavailable`
+            # through, so tmux leaving PATH after the initial guard is "cannot
+            # ask", never "gone", and a late agent on that socket is not
+            # recorded lost on the strength of it (review of #121, rounds 4-5).
+            fresh[socket] = srv.reachable()
+        except TmuxError:  # TmuxUnavailable included
+            fresh[socket] = None
+    late_dead: list[tuple[ProjectInfo, FleetAgent]] = []
+    for current, agents in targets:
+        for agent in agents:
+            if agent.id in handled:
+                continue
+            reachable = fresh.get(agent.tmux_socket)
+            if reachable is None:
+                report.failed.append(
+                    ShutdownRow(
+                        agent,
+                        "it was spawned during the shutdown and tmux could not be asked whether "
+                        f"a server is up on socket {agent.tmux_socket!r} — its row is left live; "
+                        "run shutdown again once tmux answers",
+                    )
+                )
+                _not_down(report, agent.project_id)
+                continue
+            if reachable is False:
+                _record_lost(
+                    agent,
+                    f"it was spawned during the shutdown and no server answers on socket "
+                    f"{agent.tmux_socket!r} now",
+                    report,
+                )
+                continue
+            try:
+                facts = server_for(agent.tmux_socket, config).pane_facts_or_raise(agent.pane_id)
+            except TmuxError as exc:
+                # "Could not query" is not "dead" (review of #121, round 2): a
+                # timeout on the pane of an agent another terminal just spawned
+                # used to fall through to `_record_lost`, ending a running
+                # agent's row and releasing its claims. Left live, said so.
+                report.failed.append(
+                    ShutdownRow(
+                        agent,
+                        f"it was spawned during the shutdown and tmux could not be asked about "
+                        f"its pane ({exc}) — its row is left live; run shutdown again once tmux "
+                        "answers",
+                    )
+                )
+                _not_down(report, agent.project_id)
+                continue
+            if facts is not None and facts.pane_id == agent.pane_id and not facts.dead:
+                report.failed.append(
+                    ShutdownRow(
+                        agent,
+                        "it was spawned during the shutdown and its pane is still alive — "
+                        "stop it, or run shutdown again",
+                    )
+                )
+                _not_down(report, agent.project_id)
+                continue
+            if facts is not None and facts.dead:
+                # A late spawn that came up and then EXITED on its own before
+                # this pass: tmux (remain-on-exit) still holds its pane with the
+                # real status. Recording it lost discarded that status and
+                # claimed a kill that never targeted this late session (review
+                # of #121, round 8). `_record_lost` below is now reserved for a
+                # pane that is genuinely GONE (`facts is None`).
+                _record_self_exit(agent, facts.dead_status, report)
+                # …and the pane tmux is still HOLDING is not left standing under a
+                # report that says the fleet is down (round 9): see
+                # :func:`_retire_late_panes`, run once the left-live set is final.
+                late_dead.append((current, agent))
+                continue
+            _record_lost(
+                agent, "it was spawned during the shutdown; its session was killed under it", report
+            )
+    _retire_late_panes(late_dead, report, config)
+
+
+def _clear_pause(
+    targets: Sequence[tuple[ProjectInfo, list[FleetAgent]]], report: ShutdownReport
+) -> None:
+    """Clear each project's ``fleet-paused`` signal: the fleet it paused is gone.
+
+    Board state survives shutdown by design, which is what makes this signal a
+    trap rather than a nit. ``fleet pause`` then ``fleet shutdown`` used to leave
+    it set, and the next ``fleet spawn manager`` came up staffing nothing — the
+    manager's own instructions tell it to spawn nothing while the signal is set
+    (``core/harness.py``) — with no output from either command pointing at
+    ``fleet resume``. Only a signal that is actually ON is written, so a shutdown
+    does not put a ``fleet-paused`` row on every project's board — and only for a
+    project this run CONFIRMED down: one with a row left live, a session left up
+    or a listing that failed keeps its signal and is named in ``paused_kept``.
+    A signal this could not READ or WRITE is reported rather than passed over —
+    the pause outlives the shutdown either way, and the operator has to know.
+
+    ONE store connection for the whole pass. ``is_paused`` and ``resume`` each
+    open their own — connect, WAL switch, migrations — so an ``--all`` shutdown
+    paid two opens per project here on top of the rows'; the signals are read
+    and cleared through the store this holds, by project id
+    (:func:`services.team.read_signal_in`, :func:`services.team.set_signal_in`),
+    which also keeps the shutdown from contending with the hooks of the agents
+    it is still stopping (review of #203, round 4).
+    """
+    team = _team()
+    try:
+        with store_session() as store:
+            # `is_paused`/`resume` resolve the board through `ensure_project`,
+            # which CLEARS a registration's tombstone. `shutdown --all` reads
+            # past tombstones on purpose (a forgotten project can hold live
+            # rows), so touching the pause of one would silently undo `project
+            # forget` (review of #121, round 7). A forgotten project's pause is
+            # nobody's standing order: skipped, not read.
+            visible = {p.id for p in store.list_projects()}
+            failures = _reconcile_pauses(store, team, targets, visible, report)
+    except Exception as exc:
+        # The store `_record_late_rows` already found locked is still locked (or
+        # a fresh failure). The report is owed to the caller regardless, and this
+        # lookup used to raise straight through it — empty stdout under `--json`
+        # after agents were already stopped (review of #121, round 8). Without
+        # the project list a forgotten project (whose pause is not ours to touch)
+        # cannot be told from a live one, so every pause is KEPT, said so, and
+        # the partial report is returned.
+        report.pause_scan_failed = f"{type(exc).__name__}: {exc}"
+        return
+    if failures:
+        report.pause_scan_failed = "; ".join(failures)
+
+
+def _reconcile_pauses(
+    store: ContextStore,
+    team: Any,
+    targets: Sequence[tuple[ProjectInfo, list[FleetAgent]]],
+    visible: Collection[str],
+    report: ShutdownReport,
+) -> list[str]:
+    """The per-project half of :func:`_clear_pause`; returns what could not be done.
+
+    Per-project read/write failures are surfaced the way the lookup's is. A
+    blanket ``suppress(Exception)`` here left the signal ON with
+    ``paused_kept=[]``, ``pause_scan_failed=null`` and exit 0 — the next manager
+    still under orders to spawn nothing, and nothing in the report saying so
+    (review of #121, round 9). A disabled board is NOT one of these: it holds no
+    signals (nothing can be paused where no signal can exist), so an ordinary
+    run on a project with no board still reports clean.
+    """
+    failures: list[str] = []
+    for project, _ in targets:
+        if project.id not in visible:
+            continue
+        try:
+            paused = _pause_is_on(store, project)
+        except team.TeamDisabledError:
+            return failures  # no board, no signals: nothing is paused anywhere
+        except Exception as exc:
+            # The signal could not even be READ, so nothing is known about it:
+            # the failure is named and the project is not confirmed down, and
+            # neither `paused_kept` nor `paused_cleared` claims anything.
+            failures.append(f"{_name(project)}: could not be read ({type(exc).__name__}: {exc})")
+            _not_down(report, project.id)
+            continue
+        if not paused:
+            continue
+        if project.id in report.incomplete_projects:
+            # A surviving or unverified agent keeps its standing order: the
+            # manager's "spawn nothing while fleet-paused" is exactly the
+            # instruction wanted while the operator is trying to stop it
+            # (review of #121, round 2).
+            report.paused_kept.append(_name(project))
+            continue
+        try:
+            _clear_pause_signal(store, project)
+        except Exception as exc:
+            # The signal was just read ON and the clear did not happen: it IS
+            # kept, so it is named as kept as well as reported failed.
+            failures.append(f"{_name(project)}: could not be cleared ({type(exc).__name__}: {exc})")
+            report.paused_kept.append(_name(project))
+            _not_down(report, project.id)
+            continue
+        report.paused_cleared.append(_name(project))
+    return failures
+
+
+def shutdown_plan(project: ProjectInfo | None = None) -> ShutdownPlan:
+    """What :func:`shutdown` would end — read-only, and it refuses the same way.
+
+    The guards run here too, so the plan an operator is asked to confirm is one
+    that can actually be carried out: no usable tmux, a probe that cannot be
+    asked, or a call from inside the fleet's own server all refuse before
+    anything is printed. A session query that fails AFTER a good probe refuses
+    the same way: the operator confirms this list, so a list missing a session
+    the run would still kill is worse than no list at all.
+    """
+    config = settings()
+    _require_usable_tmux(config)
+    targets = _shutdown_targets(project)
+    sockets = _shutdown_sockets(targets, config)
+    _refuse_from_inside(sockets, config)
+    answering = _shutdown_probe(sockets, config)
+    sessions: list[str] = []
+    for socket in sockets:
+        if not answering[socket]:
+            continue
+        srv = server_for(socket, config)
+        try:
+            # The STRICT check, and no suppression around the enumeration. The
+            # lenient `has_session` reads EVERY non-zero exit as "not there", and
+            # `suppress(TmuxError)` dropped a whole socket's listing: with two
+            # sessions and one transient failure the operator confirmed a plan
+            # naming one session and the run then killed both, and a scope holding
+            # only the inaccessible session read "nothing to shut down" (review of
+            # #121, round 9). A plan that cannot be completed is refused, not
+            # silently shortened — nothing has been touched at this point.
+            for name, _, expected in _fleet_sessions(
+                srv,
+                targets,
+                socket=socket,
+                default_socket=config.tmux_socket,
+                every=project is None,
+            ):
+                try:
+                    present = srv.has_session_or_raise(name)
+                except TmuxError:
+                    if not expected:
+                        continue  # asked just in case; a plan is not refused over it (round 5)
+                    raise
+                if present:
+                    sessions.append(f"{socket}:{name}")
+        except TmuxError as exc:
+            raise FleetError(
+                f"could not list the fleet's sessions on socket {socket!r} ({exc}) — refusing "
+                "to show a plan that may be short of what a shutdown would kill; try again "
+                "once tmux answers"
+            ) from exc
+    return ShutdownPlan(
+        projects=[current for current, agents in targets if agents],
+        agents=[agent for _, agents in targets for agent in agents],
+        sessions=sessions,
+        absent_sockets=[socket for socket in sockets if not answering[socket]],
+    )
+
+
+def shutdown(
+    project: ProjectInfo | None = None, *, force: bool = False, grace: float = 5.0
+) -> ShutdownReport:
+    """Stop this project's live agents (every project's with ``project=None``).
+
+    The one place a row may be ended without tmux confirming its pane died. Every
+    other path — ``stop``, ``reap`` — refuses that: a server that cannot be reached
+    is not evidence of a dead pane, and ending a live agent's row hides it from
+    every listing and hands its worktree to ``_remove_merged_worktrees``. Here the
+    ambiguity is resolved by the operator, not by inference: they have ordered the
+    fleet DOWN. Measured 2026-09-10 without this command — the operator ran ``tmux
+    -L asq kill-server`` by hand (the only off switch they had), every manager
+    row kept saying ``unknown (tmux unavailable)``, ``reap`` reaped 0 (correctly:
+    it could not ask), and the UI showed dead managers for as long as they cared
+    to look.
+
+    Scope is ``reap``'s: this project by default, every project when ``project``
+    is ``None``. An operator with two projects running who means "take this
+    project's fleet down" must not lose the other project's agents, and the CLI
+    asks before either.
+
+    Order matters and is deliberate: agents on an answering server get the
+    ordinary ``stop`` (graceful ``/exit`` unless ``force``, ``agent_exited``
+    emitted, claims released) BEFORE their session is killed, so the graceful
+    path's ``SessionEnd`` hook still runs. Rows on a socket with no server —
+    killed outside the CLI, or one the config no longer names — are ended with no
+    exit status and counted apart, each with the reason, so the report never
+    reads "stopped" over a process nobody confirmed stopping.
+
+    **Exit status is recorded where tmux exposes one, which ``force`` usually
+    means it does not**: ``force`` skips the ``/exit`` and kills a live pane, and
+    a status is only ever read from a pane that already reads dead. A forced row
+    lands in ``stopped`` with ``exit_status`` ``None`` unless its agent had
+    already exited on its own.
+
+    What is killed is the fleet's own SESSIONS, never the server (see
+    :func:`_kill_fleet_sessions`). Board tasks and notes are kept, but the ended
+    rows' claims are released — a task held by a session that no longer exists is
+    not "untouched", it is stuck — and a ``fleet-paused`` signal is cleared for
+    every project this run confirmed down, because the fleet it paused is gone;
+    a project with a surviving or unverified agent keeps it.
+    """
+    config = settings()
+    report = ShutdownReport()
+    # Where the run is, for the one sentence an interrupt owes: every
+    # KeyboardInterrupt inside this function — before the first row, during a
+    # row's stop, in the kill phase, the late scan or the pause pass — raises
+    # `FleetInterrupted(report)` with the report of how far it got. A Ctrl-C in
+    # the slow half used to escape as click's `Aborted!` with nothing printed,
+    # after every row was ended and every claim released (rounds 5 to 7).
+    phase = "before anything was stopped"
+    try:
+        _require_usable_tmux(config)
+        targets = _shutdown_targets(project)
+        sockets = _shutdown_sockets(targets, config)
+        _refuse_from_inside(sockets, config)
+        answering = _shutdown_probe(sockets, config)
+        report.servers_absent.extend(socket for socket in sockets if not answering[socket])
+        handled: set[str] = set()
+
+        def finish() -> None:
+            nonlocal phase
+            phase = "during the kill phase"
+            _kill_fleet_sessions(targets, sockets, answering, report, config, every=project is None)
+            phase = "during the final scan for rows spawned during the shutdown"
+            _record_late_rows(project, handled, report, config, snapshot=targets)
+            phase = "while reconciling the fleet-paused signals"
+            _clear_pause(targets, report)
+
+        try:
+            for current, agents in targets:
+                for agent in agents:
+                    phase = f"while stopping {agent.label}"
+                    handled.add(agent.id)
+                    _shutdown_row(current, agent, answering, report, force=force, grace=grace)
+        except Exception:
+            # The kill phase runs even if a row could not be recorded: "shutdown
+            # means down" must hold when the store refuses, and a caller that got
+            # a traceback instead of a report was left with a half-recorded
+            # fleet, a live server, and nothing saying how far it got.
+            # `_shutdown_row` catches its own, so this is the belt for a fault in
+            # the loop itself — an `Exception` only, never the operator's
+            # interrupt, which the handler below keeps for them.
+            finish()
+            raise
+        finish()
+    except KeyboardInterrupt:
+        # The operator's interrupt is theirs to have — nothing further is killed
+        # — but rows before it are ended and their claims released, each
+        # committed as it went, so the report of how far it got travels with the
+        # interrupt instead of being thrown away with it.
+        report.interrupted = f"interrupted {phase}; the rest of the fleet was left as it was"
+        raise FleetInterrupted(report) from None
+    return report
 
 
 def _verify_gone(look: Callable[[], WindowInfo | None], label: str, cause: TmuxError) -> int | None:
@@ -1575,24 +2907,41 @@ def switch(
     fresh: bool = False,
     reason: str | None = None,
     spawned_by: str = "user",
+    automatic: bool = False,
 ) -> SwitchReceipt:
     """Move a running agent to another Claude account — the hand-over of #146.
 
-    The target is ``to`` (a slot, alias or email) or, without it, the account
-    with the most headroom among the enabled, signed-in ones that are NOT the
-    one the agent is on (``services.claude_accounts.choose`` with ``spread=True``
-    and the current slot excluded — so a machine with ``pick = "default"`` still
-    switches by headroom, because that is the whole point of switching).
+    The target is ``to`` (a slot, alias or email) or, without it, HEADROOM
+    FIRST among the enabled, signed-in accounts that are NOT the one the agent
+    is on (``services.claude_accounts.choose_for_handover``): the role binding
+    and the project default are launch-time choices and do not get to send a
+    limited agent somewhere just as full. ``automatic`` is the hook's
+    hand-over: it takes only an account under ``switch_at`` and otherwise
+    refuses — the least-bad answer, applied twice, moved an agent between two
+    exhausted accounts for the whole window (review of #205, second round). A
+    manual switch keeps the least-bad answer and falls back to the ladder
+    (minus the account being left) when no usage can be read.
 
     The agent is stopped the way ``fleet stop`` stops it (``/exit``, a grace,
-    then the kill — its ``SessionEnd`` hook releases its claims) and started
-    again under the same label, role, task and worktree on the target account.
-    When its transcript is on disk and ``fresh`` is not asked, the replacement
-    RESUMES it: ``claude --resume <transcript path>`` keeps the session id, so
-    the board row, its cursor and its notes carry on and the agent picks up its
-    own context; otherwise it starts fresh with a hand-off prompt built from
-    the board — the task, its detail, the session's last notes — and is told
-    to read the board and the working tree before continuing.
+    then the kill) and started again under the same label, role, task and
+    worktree on the target account. When its transcript is on disk and
+    ``fresh`` is not asked, the replacement RESUMES it: ``claude --resume
+    <transcript path>`` keeps the session id, so the board row, its cursor, its
+    notes AND ITS CLAIMS carry on — the session is marked ``HANDOVER_STATE``
+    before the ``/exit``, so its own ``SessionEnd`` parks the claims for the
+    same id instead of releasing them, and ``stop`` announces no exit — and the
+    resumed agent is told, in one typed line, to continue (``claude --resume``
+    opens the conversation at an idle prompt; review of #205, findings 5 and 6).
+    Otherwise it starts fresh with a hand-off prompt built from the board — the
+    task, its detail, the session's last notes — and is told to read the board
+    and the working tree before continuing. A fresh start is a hand-over too:
+    the session is marked the same way, no exit is announced, and the claims
+    move onto the new session's id with the row (``spawn(takes_over=…)``).
+
+    Run from the automatic path it is a DETACHED worker, not the limited
+    agent's hook: inline, the ``/exit`` queued behind the still-running hook
+    and the window kill took the hook — and this function — down before
+    ``spawn`` ran (finding 1; ``services.hooks._detach``).
 
     What is deliberately NOT promised: that Claude Code resumes a transcript
     written under one ``CLAUDE_CONFIG_DIR`` from another. The path form is
@@ -1604,34 +2953,47 @@ def switch(
         agent = _live_agent(store, project, label)
         session = store.get_session(agent.session_id) if agent.session_id else None
         task = store.get_task(agent.task_id) if agent.task_id else None
-        recent = [
-            event
-            for event in store.recent_events(project.id, limit=60)
-            if agent.session_id is not None and event.session_id == agent.session_id
-        ]
+        # The session's own newest entries (oldest first), not the project's last
+        # 60 filtered down: on a busy board those all belonged to other agents
+        # and the prompt lost its "last board entries" (review of #205, third round).
+        recent = (
+            store.filtered_events(project.id, session_id=agent.session_id, limit=_HANDOFF_NOTES)
+            if agent.session_id is not None
+            else []
+        )
     current = _account_slot_of(agent, session)
     notes: list[str] = []
-    # ONE resolver, as for every launch (tests/test_one_account_resolver.py):
-    # `--to` is the flag rung; without it the headroom rung decides, with the
-    # account the agent is leaving excluded — whatever `[accounts] pick` says,
-    # because moving to the account with room is what a switch is for.
+    # The accounts service decides, as for every launch
+    # (tests/test_one_account_resolver.py): `--to` is the flag rung; without it
+    # headroom decides first, with the account the agent is leaving excluded.
     try:
-        choice = claude_accounts_service.choose(
+        choice = claude_accounts_service.choose_for_handover(
             to,
             role=agent.role,
             project=project,
             exclude=() if current is None else (current,),
-            spread=True,
+            automatic=automatic,
         )
     except claude_accounts_service.NoSuchAccount as exc:
         raise FleetError(str(exc)) from exc
     notes.extend(choice.notes)
     if choice.account is None:
+        where = f" (it is on slot {current})" if current is not None else ""
+        if automatic:
+            raise FleetError(
+                f"no account under the line for {label!r}{where} — every other account is "
+                "over switch_at or unreadable; it stays parked until a reset, or "
+                "`aisquare fleet switch` moves it by hand ("
+                + "; ".join(note for note in choice.notes if note.startswith("headroom:"))
+                + ")"
+            )
+        # With the notes, like the automatic refusal above: what each rung skipped
+        # and why is the only account of how nothing was found (fourth round).
+        said = f" ({'; '.join(choice.notes)})" if choice.notes else ""
         raise FleetError(
-            f"no other account with headroom for {label!r}"
-            + (f" (it is on slot {current})" if current is not None else "")
-            + " — add or enable one (`aisquare accounts`), name one with --to, or wait for "
-            "the reset"
+            f"no other account with headroom for {label!r}{where}"
+            " — add or enable one (`aisquare accounts`), name one with --to, or wait for "
+            f"the reset{said}"
         )
     target = choice.account
     if current is not None and target.slot == current:
@@ -1648,25 +3010,48 @@ def switch(
         notes.append(
             "no transcript on disk to resume — the replacement starts fresh with a hand-off prompt"
         )
-    prompt = None if resume is not None else _handoff_prompt(agent, task, recent, reason)
-
-    stopped = stop(project, label)
-    receipt = spawn(
-        project,
-        agent.role,
-        label=label,
-        task_id=agent.task_id,
-        worktree=agent.worktree,
-        prompt=prompt,
-        spawned_by=spawned_by,
-        account=str(target.slot),
-        resume=resume,
-    )
+    if resume is not None:
+        prompt = _resume_prompt(agent, reason)
+    else:
+        prompt = _handoff_prompt(agent, task, recent, reason)
+    # A hand-over whether it resumes or not: the agent is coming back, so its
+    # claims wait for the replacement and no exit is announced. A fresh start
+    # used to stop the agent as `fleet stop` does — the task went back to the
+    # pool and `agent_exited` woke the manager while `spawn` was still starting
+    # the replacement, so a second worker took the same task (review of #205,
+    # fourth round). Resumed, the same id carries the claims on; started fresh,
+    # `spawn` moves them onto the new session's id (`takes_over`).
+    if session is not None:
+        _mark_handing_over(session)
+    try:
+        stopped = stop(project, label, handover=True).agent
+    except Exception:
+        if session is not None:
+            _unmark_handing_over(session)  # nothing ended: the session keeps its state
+        raise
+    try:
+        receipt = spawn(
+            project,
+            agent.role,
+            label=label,
+            task_id=agent.task_id,
+            worktree=agent.worktree,
+            prompt=prompt,
+            spawned_by=spawned_by,
+            account=str(target.slot),
+            resume=resume,
+            takes_over=session.id if resume is None and session is not None else None,
+        )
+    except Exception:
+        _abandon_handover(stopped)  # no replacement is coming for the parked claims
+        raise
     notes.extend(receipt.notes)
     from_name = f"slot {current}" if current is not None else "its shell's claude"
     how = "resumed its session" if resume is not None else "started fresh with a hand-off prompt"
     why = f" ({reason})" if reason else ""
-    with store_session() as store, contextlib.suppress(Exception):  # the courtesy, not the record
+    # The suppression is entered FIRST: a store that cannot be opened is the courtesy
+    # lost too, never a moved agent reported as not moved (review of #205, fourth round).
+    with contextlib.suppress(Exception), store_session() as store:  # the courtesy, not the record
         _team()._emit(
             store,
             project.id,
@@ -1698,6 +3083,41 @@ def _account_slot_of(agent: FleetAgent, session: TeamSession | None) -> int | No
     if session is None or not session.account:
         return None
     return claude_accounts_service.slot_of(session.account)
+
+
+def _mark_handing_over(session: TeamSession) -> None:
+    """The session's own ``SessionEnd`` parks its claims for the replacement (rule 2)."""
+    with store_session() as store:
+        store.touch_session(session.id, state=_team().HANDOVER_STATE)
+
+
+def _unmark_handing_over(session: TeamSession) -> None:
+    with contextlib.suppress(Exception), store_session() as store:
+        store.touch_session(session.id, state=session.state)
+
+
+def _abandon_handover(stopped: FleetAgent) -> None:
+    """The replacement never started: release what was parked and record the exit withheld."""
+    with contextlib.suppress(Exception), store_session() as store:
+        _team().release_agent_claims(store, stopped, why="hand-over failed")
+        _emit_exit(store, stopped)
+    nudge_manager(stopped.project_id, reason=f"{stopped.label} exited")
+
+
+def _resume_prompt(agent: FleetAgent, reason: str | None) -> str:
+    """The first message of a RESUMED replacement — one line, so it is typed even past the wait.
+
+    ``claude --resume`` opens the old conversation at an idle prompt and waits
+    for input; without a line the "moved" agent never continued (review of
+    #205, finding 5). One line on purpose: :func:`_type_prompt` types a
+    single-line prompt past its timeout and refuses a multi-line one.
+    """
+    why = reason or "a usage limit"
+    return (
+        f"You are {agent.label}, moved to another Claude account after {why} and resumed "
+        "mid-task: re-read `aisquare board` and `git status`, then continue exactly where "
+        "you left off without redoing work that is already committed."
+    )
 
 
 _HANDOFF_NOTES = 5
@@ -1776,7 +3196,18 @@ def reap(project: ProjectInfo | None = None, *, server_down: bool = False) -> Re
                             # Asked once per socket for the whole sweep, so a
                             # server coming up mid-sweep cannot split the answer.
                             if socket not in absent:
-                                absent[socket] = server_for(socket, config).server_absent()
+                                try:
+                                    absent[socket] = server_for(socket, config).server_absent()
+                                except TmuxError:
+                                    # Unreachable TODAY: `server_absent` promises
+                                    # False for every question it could not put
+                                    # (core/tmux, round 7 of #203). Kept as the
+                                    # belt for a future predicate that raises
+                                    # again — a question that could not be put is
+                                    # no evidence of absence, and this sweep must
+                                    # never end on one. Do not copy the pattern
+                                    # to a call site that has the promise.
+                                    absent[socket] = False
                             if absent[socket]:
                                 views[socket] = {}  # no server: no panes
                 for agent in live:
@@ -1785,9 +3216,19 @@ def reap(project: ProjectInfo | None = None, *, server_down: bool = False) -> Re
                         continue  # that socket could not be asked: nothing is marked
                     pane = observed.get(agent.pane_id)
                     if pane is None:
-                        report.lost.append(store.end_fleet_agent(agent.id, exit_status=None))
+                        lost = store.end_fleet_agent(agent.id, exit_status=None)
+                        released, failed = _release_or_say(store, lost, why="agent lost")
+                        _count_release(report, lost, released, failed)
+                        report.lost.append(lost)
                     elif pane.dead:
                         ended = store.end_fleet_agent(agent.id, exit_status=pane.dead_status)
+                        # A crash fires no ``SessionEnd``; a clean exit already
+                        # released, and finds nothing more to release here. The
+                        # release is the courtesy after the row is ended, as in
+                        # `stop`: refused, it is said, never raised out of the
+                        # sweep (round 5).
+                        released, failed = _release_or_say(store, ended, why="agent exited")
+                        _count_release(report, ended, released, failed)
                         report.ended.append(ended)
                         _emit_exit(store, ended)
             _remove_merged_worktrees(store, current, report)
@@ -1871,7 +3312,7 @@ def resume(project: ProjectInfo, *, session_ref: str | None = None) -> None:
 def _set_pause(project: ProjectInfo, value: str, session_ref: str | None) -> None:
     team = _team()
     try:
-        team.set_signal(PAUSE_SIGNAL, value, session_ref=session_ref, cwd=project.root)
+        team.set_signal(PAUSE_SIGNAL, value, session_ref=session_ref, project_id=project.id)
     except team.TeamDisabledError as exc:
         raise FleetError(f"cannot set the pause signal: {exc}") from exc
     except KeyError as exc:
@@ -1879,12 +3320,27 @@ def _set_pause(project: ProjectInfo, value: str, session_ref: str | None) -> Non
 
 
 def is_paused(project: ProjectInfo) -> bool:
-    team = _team()
-    try:
-        state = team.read_signal(PAUSE_SIGNAL, cwd=project.root)
-    except team.TeamDisabledError:
-        return False  # a disabled board holds no signals: nothing can be paused
+    if not orchestrator.team_enabled():
+        return False  # a disabled board holds no signals: nothing can be paused — and no store
+    with store_session() as store:
+        return _pause_is_on(store, project)
+
+
+def _pause_is_on(store: ContextStore, project: ProjectInfo) -> bool:
+    """Whether ``project``'s ``fleet-paused`` signal reads ON, through ``store``.
+
+    The read half of the pause, id-addressed and on a caller's connection, so
+    ``shutdown``'s pass over every project pays one open (review of #203,
+    round 4). Raises ``TeamDisabledError`` when there is no board to ask.
+    """
+    state = _team().read_signal_in(store, project.id, PAUSE_SIGNAL)
     return state is not None and state.value == "on"
+
+
+def _clear_pause_signal(store: ContextStore, project: ProjectInfo) -> None:
+    """Set ``project``'s ``fleet-paused`` signal OFF through ``store`` — the write
+    half of the pause for the same pass; ``resume`` is the command's own door."""
+    _team().set_signal_in(store, project.id, PAUSE_SIGNAL, "off")
 
 
 def nudge_manager(project_id: str, *, reason: str) -> bool:

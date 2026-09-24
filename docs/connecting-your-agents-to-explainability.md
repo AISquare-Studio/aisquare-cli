@@ -320,9 +320,12 @@ the baseline cannot be compacted.
 auto-mode` line whenever a fleet role runs `auto` behind a configured proxy: it
 reads the first-turn size of your recent sessions from their transcripts and
 warns when that size is above ~100k tokens, or when a recent session was
-refused. `fleet spawn` puts the same warning on its receipt. A running session
-that is being refused is put in **attention** (🔔 on its row) by its Stop hook,
-with one `auto_mode_blocked` line on the board.
+refused three times or more (one or two can be a real transient 5xx). `fleet
+spawn` puts the same warning on its receipt. A running session that was
+launched through the proxy and has been refused three times is put in
+**attention** (🔔 on its row) by its Stop hook, with one `auto_mode_blocked`
+line on the board — whether tracing is still on or not, because a running
+agent keeps the proxy it started with.
 
 **Until the proxy fix, pick one:**
 
@@ -330,7 +333,11 @@ with one `auto_mode_blocked` line on the board.
   `aisquare config set fleet.roles.coder.permission_mode acceptEdits` (per
   spawn: `aisquare fleet spawn coder --permission-mode acceptEdits`; a running
   agent: set the mode, then `aisquare fleet restart <label>` — its session
-  resumes);
+  resumes). `config set` only writes a key your config already has, and a
+  `config.toml` with its own `[fleet.roles]` has only the roles it lists: for a
+  role it leaves out, add a `[fleet.roles.<role>]` table to the file with
+  `permission_mode = "acceptEdits"` on the line below it. The doctor line and
+  the board line name whichever of the two your config takes;
 - a lighter Claude config dir for the account the fleet launches under — fewer
   MCP connectors; their tool schemas are the bulk of the baseline — and check
   the new size with `aisquare doctor`;

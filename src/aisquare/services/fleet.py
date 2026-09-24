@@ -3068,8 +3068,9 @@ def _mark_handing_over(session: TeamSession) -> None:
 
 
 def _unmark_handing_over(session: TeamSession) -> None:
+    # Not through `touch_session`: every state writer but this one keeps the mark.
     with contextlib.suppress(Exception), store_session() as store:
-        store.touch_session(session.id, state=session.state)
+        store.unmark_handover(session.id, session.state)
 
 
 def _abandon_handover(stopped: FleetAgent) -> None:

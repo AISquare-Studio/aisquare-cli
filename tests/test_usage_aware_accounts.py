@@ -518,6 +518,87 @@ def test_another_api_error_mid_hand_over_keeps_the_mark_and_the_claims(
     assert plain is not None and _state("sess-plain")[0] == "waiting"
 
 
+@pytest.mark.parametrize(
+    ("hook", "payload"),
+    [
+        ("stop", {"stop_hook_active": False}),
+        ("notification", {"message": "Claude needs your permission to use Bash"}),
+    ],
+)
+def test_a_turn_that_ends_or_asks_mid_hand_over_keeps_the_mark_and_the_claims(
+    fake_home: Path,
+    work: ProjectInfo,
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+    hook: str,
+    payload: dict[str, Any],
+) -> None:
+    """Review of the #205 fold, round 1: the fourth round kept ``fleet switch``'s mark over a
+    ``StopFailure`` only. A plain ``Stop`` — the turn of an agent switched mid-turn ending
+    within ``stop``'s grace — wrote ``waiting`` over it, a permission prompt in the same
+    window wrote ``attention``, and the ``SessionEnd`` that followed released the claims the
+    replacement was to inherit: the task back to ``todo``, ``task_released`` on the feed."""
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
+    _session(work, "sess-fleet")
+    _fleet_row(work, "agt_midturn", "coder-db", "sess-fleet")
+    task, _created = team_service.add_task("Keep it", role="coder", cwd=work.root)
+    assert team_service.claim_task(task.id, session_ref="sess-fleet").status == "doing"
+    with store_session() as store:
+        store.touch_session("sess-fleet", state=team_service.HANDOVER_STATE)
+    body = {"session_id": "sess-fleet", "cwd": str(work.root), **payload}
+
+    result = runner.invoke(app, ["hook", hook], input=json.dumps(body))
+
+    assert result.exit_code == 0, result.output
+    assert _state("sess-fleet")[0] == team_service.HANDOVER_STATE
+    assert not any(kind == "attention" for kind, _ in _events(work))  # no bell for an exit
+    team_service.hook_session_end("sess-fleet", work.root, reason="prompt_input_exit")
+    with store_session() as store:
+        kept = store.get_task(task.id)
+    assert kept is not None and kept.status == "doing" and kept.claimed_by == "sess-fleet"
+    assert not any(kind == "task_released" for kind, _ in _events(work))
+    # The control: the same hook on an unmarked row still moves it on.
+    _session(work, "sess-plain")
+    plain = {**body, "session_id": "sess-plain"}
+    assert runner.invoke(app, ["hook", hook], input=json.dumps(plain)).exit_code == 0
+    assert _state("sess-plain")[0] == ("waiting" if hook == "stop" else "attention")
+
+
+def test_only_the_sessions_own_start_or_the_switch_itself_replaces_a_hand_overs_mark(
+    fake_home: Path, work: ProjectInfo
+) -> None:
+    """The mark is kept in the STORE, by every state writer, so a hook added later cannot
+    forget it the way ``hook_stop`` and ``hook_notification`` did (review of the #205 fold,
+    round 1). The rest of each write still lands; only the state is kept."""
+    _session(work, "sess-fleet")
+    mark = team_service.HANDOVER_STATE
+    with store_session() as store:
+        store.touch_session("sess-fleet", state=mark)
+        store.touch_session("sess-fleet", state="waiting")  # a Stop
+        store.touch_session("sess-fleet", cursor=7, state="working")  # a prompt, a manager wake
+        assert store.mark_attention("sess-fleet") is False  # a permission prompt: no transition
+        store.mark_limited("sess-fleet", NOW)  # a StopFailure re-fire
+        kept = store.get_session("sess-fleet")
+    assert kept is not None and kept.state == mark
+    assert kept.cursor == 7  # the heartbeat itself landed
+
+    # `fleet switch` takes its own mark back when the stop it marked the session for failed…
+    with store_session() as store:
+        store.unmark_handover("sess-fleet", "limited")
+    assert _state("sess-fleet")[0] == "limited"
+    # …and only its mark: a row that has moved on since is not written back.
+    with store_session() as store:
+        store.touch_session("sess-fleet", state="working")
+        store.unmark_handover("sess-fleet", "limited")
+    assert _state("sess-fleet")[0] == "working"
+
+    # The resumed agent's own start replaces it, as it always did.
+    with store_session() as store:
+        store.touch_session("sess-fleet", state=mark)
+    _session(work, "sess-fleet")
+    assert _state("sess-fleet")[0] == "working"
+
+
 def test_the_worker_refuses_a_hand_over_in_flight_or_one_that_just_happened(
     fake_home: Path, work: ProjectInfo, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
 ) -> None:

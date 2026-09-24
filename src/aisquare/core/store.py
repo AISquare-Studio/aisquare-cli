@@ -718,6 +718,7 @@ class ContextStore(Protocol):
     ) -> None: ...
     def mark_attention(self, session_id: str) -> bool: ...
     def mark_limited(self, session_id: str, resets_at: datetime | None) -> None: ...
+    def unmark_handover(self, session_id: str, state: str) -> None: ...
     def end_session(self, session_id: str, *, release_claims: bool = True) -> list[TeamTask]: ...
     def release_claims(self, session_id: str) -> list[TeamTask]: ...
     def upsert_task(self, task: TeamTask) -> tuple[TeamTask, bool]: ...
@@ -1523,13 +1524,27 @@ class SqliteStore:
         A heartbeat is EVIDENCE; prune's retirement was an inference from
         silence. The evidence wins. Nothing resurrects on its own — only a
         signal from the session itself reaches this method.
+
+        ``state`` never replaces a hand-over's mark (``'switching'``,
+        ``services.team.HANDOVER_STATE``), and neither do :meth:`mark_attention`
+        and :meth:`mark_limited`. ``fleet switch`` sets it before it ``/exit``s
+        the agent, and the session's own ``SessionEnd`` reads it to park the
+        claims for the replacement instead of releasing them. Each hook that
+        wrote a state in between replaced it — the ``Stop`` of a turn ending
+        within ``stop``'s grace, a permission prompt's ``attention`` — and that
+        ``SessionEnd`` released the claims the replacement was to inherit (review
+        of the #205 fold, round 1). Kept here, so a state writer added later
+        cannot forget it the way those hooks did. Only the session's own start
+        (:meth:`upsert_session`, the resumed agent) and ``switch`` taking its
+        mark back (:meth:`unmark_handover`) replace it. The rest of the heartbeat
+        still lands.
         """
         sets, params = ["last_seen_at = ?", "ended_at = NULL"], [_now_iso()]
         if cursor is not None:
             sets.append("cursor = ?")
             params.append(str(cursor))
         if state is not None:
-            sets.append("state = ?")
+            sets.append("state = CASE WHEN state = 'switching' THEN state ELSE ? END")
             params.append(state)
         self._conn.execute(
             f"UPDATE team_session SET {', '.join(sets)} WHERE id = ?",
@@ -1549,10 +1564,13 @@ class SqliteStore:
         wrongly retired row repaired, and the first statement deliberately does
         not match it. A session waiting on a permission prompt is the most alive
         it ever is, and the one a human is most likely hunting for on the board.
+
+        Never over a hand-over's mark (:meth:`touch_session`): no transition, so
+        no bell either, for an agent ``fleet switch`` is exiting.
         """
         cursor = self._conn.execute(
             "UPDATE team_session SET state = 'attention', last_seen_at = ? "
-            "WHERE id = ? AND state <> 'attention'",
+            "WHERE id = ? AND state NOT IN ('attention', 'switching')",
             (_now_iso(), session_id),
         )
         self._conn.execute(
@@ -1570,11 +1588,26 @@ class SqliteStore:
         ``attention`` needs is done by the caller, which knows the previous state.
         Un-retires the row for the same reason ``mark_attention`` does — a
         limited agent is alive and is exactly the one an operator is looking for.
+        Never over a hand-over's mark (:meth:`touch_session`).
         """
         self._conn.execute(
-            "UPDATE team_session SET state = 'limited', limit_resets_at = ?, last_seen_at = ?, "
-            "ended_at = NULL WHERE id = ?",
+            "UPDATE team_session SET "
+            "state = CASE WHEN state = 'switching' THEN state ELSE 'limited' END, "
+            "limit_resets_at = ?, last_seen_at = ?, ended_at = NULL WHERE id = ?",
             (resets_at.isoformat() if resets_at is not None else None, _now_iso(), session_id),
+        )
+        self._conn.commit()
+
+    def unmark_handover(self, session_id: str, state: str) -> None:
+        """``fleet switch`` takes its hand-over mark back: the stop it was set for failed.
+
+        The one writer besides the session's own start that replaces the mark
+        (:meth:`touch_session` keeps it), and it replaces only the mark: a row
+        that has moved on since is not written back to ``state``.
+        """
+        self._conn.execute(
+            "UPDATE team_session SET state = ? WHERE id = ? AND state = 'switching'",
+            (state, session_id),
         )
         self._conn.commit()
 

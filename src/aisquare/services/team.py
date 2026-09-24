@@ -86,7 +86,9 @@ claims, as a ``/clear`` does, instead of releasing them (review of #205, finding
 for the SAME id when the replacement resumes the session, for the replacement's new
 id to take over when it starts fresh (fourth round). Transient — a resumed session's
 start hook writes ``working`` over it, a fresh start retires the old presence — and
-unknown to ``fleet._derive``, which falls back to the pane."""
+unknown to ``fleet._derive``, which falls back to the pane. Besides that start and
+``switch`` taking it back, no state write replaces it: the store keeps it
+(``SqliteStore.touch_session``; review of the #205 fold, round 1)."""
 
 #: A numbered SEAT: a first-class role with a crew index glued on — ``coder1``,
 #: ``reviewer2``. ``cli/launch.py`` accepts these because crews run several agents
@@ -1578,6 +1580,9 @@ def hook_stop(
             else:
                 if decision is not None:
                     return decision
+        # Over a hand-over's mark the store keeps the mark: this can be the turn
+        # of an agent `fleet switch` is exiting, whose SessionEnd must still park
+        # the claims (review of the #205 fold, round 1).
         store.touch_session(session.id, state="waiting")
     if deferred is not None:
         # After the row says waiting, never before: nudge_manager refuses every

@@ -72,8 +72,6 @@ def fake_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     (home / ".claude").mkdir(parents=True)
     monkeypatch.setattr(core, "_home", lambda: home)
     monkeypatch.setattr("aisquare.core.agents._home", lambda: home)
-    monkeypatch.delenv(core.CONFIG_DIR_VAR, raising=False)
-    monkeypatch.delenv(core.TMPDIR_VAR, raising=False)
     monkeypatch.setattr(core, "keychain_platform", lambda: False)
     # The clock the production code reads is the clock the fixtures write
     # credentials against: tokens here expire at NOW + 7 h, and a command that

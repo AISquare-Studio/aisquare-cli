@@ -680,13 +680,10 @@ def test_spawn_manager_builds_the_launch_command_and_records_the_row(
 
 
 def test_spawn_with_an_account_carries_the_callers_environment_into_the_window(
-    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
 ) -> None:
     """`launch --account 1` restores "this shell's" login — inside the window that shell is
     whoever started the server, so the CALLER's view travels with the window."""
-    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
-    monkeypatch.delenv("CLAUDE_CODE_TMPDIR", raising=False)
-
     fleet_service.spawn(project, "coder", account="1")
 
     spawned = tmux.spawned[-1]
@@ -5912,7 +5909,7 @@ def test_spawn_carries_this_shells_desktop_into_the_window(
 
 
 def test_spawn_resolves_the_default_account_and_records_the_slot_on_the_row(
-    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
 ) -> None:
     """#145: the window gets the RESOLVED `--account <slot>`, the caller's environment travels
     with it, and the row says which account the agent draws on."""
@@ -5920,8 +5917,6 @@ def test_spawn_resolves_the_default_account_and_records_the_slot_on_the_row(
     from aisquare.services import claude_accounts as accounts_service
     from aisquare.services import settings as settings_service
 
-    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
-    monkeypatch.delenv("CLAUDE_CODE_TMPDIR", raising=False)
     accounts_core.create_account()  # slot 2, under the isolated AISQUARE_HOME
 
     # The control: nothing arranged → no flag, no carried environment, no slot on the row.

@@ -219,7 +219,7 @@ class ManagerTab(Vertical):
         first attach corrects (``TerminalPane._sync_size``).
         """
         width, height = self.content_size
-        return (width, max(height - 3, 1)) if width > 0 and height > 3 else None
+        return (width, height - 3) if width > 0 and height > 3 else None
 
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
         if event.worker.name != SPAWN_WORKER:

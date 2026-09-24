@@ -1091,7 +1091,12 @@ def test_start_manager_spawns_at_the_panes_own_size(
     width, height = size
     # The pane is hidden until the manager exists, so the tab's own size stands in:
     # the pane's width, and an estimate of the rows it will have under the header.
-    assert width == tab_width == columns and 0 < height < tab_height
+    assert width == tab_width and 0 < height < tab_height
+    # A clamp under the 144-column line fails that equality only on a tab past the
+    # line, which is what the wide host is for. Matched against the tab, not the
+    # host, so chrome beside the tab is not this test's business (review of #162,
+    # round 1).
+    assert columns < 144 or tab_width >= 144
     # Uncapped on purpose: the pane's first attach widens the window to the pane
     # whatever it was born at, so a pane 144 or more columns wide shows Claude Code's
     # panel either way (docs/fleet.md). What stays under that line is a window nobody

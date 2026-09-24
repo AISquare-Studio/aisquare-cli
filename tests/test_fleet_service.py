@@ -3631,3 +3631,120 @@ def test_a_reused_pane_id_never_lets_stop_or_spawn_take_another_agents_last_scre
     # Its OWN window is still its own to remove.
     assert fleet_service.stop(project, "coder-new").id == new.id
     assert tmux.killed == [old.pane_id, new.pane_id]
+
+
+def test_restart_keeps_the_account_a_row_without_a_slot_ran_under(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A row with no ``account_slot`` (spawned before the column) restarted on the
+    resolver's pick, and then resumed a transcript written under another config dir
+    — the leg ``switch`` calls unverified. It reads the session's account, as
+    ``switch`` does (``_account_slot_of``)."""
+    from aisquare.core import claude_accounts as accounts_core
+
+    _two_slots_with_usage(monkeypatch, work=10, personal=90)  # the pick would be slot 2
+    agent = fleet_service.spawn(project, "manager", account="3").agent
+    assert agent.session_id is not None
+    transcript = tmp_path / "manager.jsonl"
+    transcript.write_text("{}\n", encoding="utf-8")
+    now = datetime.now(tz=UTC)
+    with store_session() as store:
+        store.upsert_fleet_agent(agent.model_copy(update={"account_slot": None}))
+        store.upsert_session(
+            TeamSession(
+                id=agent.session_id,
+                project_id=project.id,
+                role="manager",
+                started_at=now,
+                last_seen_at=now,
+                transcript_path=str(transcript),
+                account=str(accounts_core.accounts_root() / "3"),
+            )
+        )
+    tmux.die(agent.pane_id, 130)
+
+    receipt = fleet_service.restart(project, "manager")
+
+    assert receipt.resumed is True
+    assert _flag(_command(tmux), "--account") == "3" and receipt.started.account_slot == 3
+
+
+def test_a_death_two_readers_see_is_announced_once(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """Every read records a dead pane now — the UI's tick, the manager's ``fleet ls``, a
+    spawn — so two readers routinely hold the same live snapshot. The second to write
+    found ``end_fleet_agent`` a no-op and still posted ``agent_exited`` and nudged."""
+    coder = _coder(project)
+    tmux.die(coder.pane_id, 1)
+    views = fleet_service._observe_sockets([coder], f"asq-{_codename(project)}")
+
+    first = fleet_service._end_dead_rows([coder], views)
+    second = fleet_service._end_dead_rows([coder], views)  # the same, now stale, snapshot
+
+    assert [row.id for row in first] == [row.id for row in second] == [coder.id]
+    assert second[0].ended_at == first[0].ended_at and second[0].exit_status == 1
+    assert _events(project, "agent_exited") == ["coder-1 exited (1)"]
+
+
+def test_a_listing_still_lists_when_the_store_will_not_take_the_exit(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    runner: CliRunner,
+) -> None:
+    """The reconcile made ``list_agents`` — ``fleet ls``, ``fleet status``, the UI's tick —
+    write, and a store locked past its busy timeout raised ``OperationalError`` out of
+    a READ (a traceback instead of the list). The write is best effort: the row waits
+    for the next read and reads ``exited`` from its pane meanwhile."""
+    coder = _coder(project)
+    tmux.die(coder.pane_id, 3)
+
+    def locked(self: SqliteStore, agent_id: str, *, exit_status: int | None = None) -> FleetAgent:
+        raise sqlite3.OperationalError("database is locked")
+
+    with monkeypatch.context() as patched:
+        patched.setattr(SqliteStore, "end_fleet_agent", locked)
+        [status] = fleet_service.list_agents(project)
+        assert status.state == "exited" and status.detail == "exit 3"
+        result = runner.invoke(app, ["fleet", "ls", "--project", project.id])
+        assert result.exit_code == 0, result.output
+        assert "coder-1" in result.stdout
+    with store_session() as store:
+        row = store.get_fleet_agent(coder.id)
+    assert row is not None and row.ended_at is None  # left for the next read
+    assert _events(project, "agent_exited") == []
+
+    fleet_service.list_agents(project)  # the next read records it
+    assert _events(project, "agent_exited") == ["coder-1 exited (3)"]
+
+
+def test_a_fresh_switch_still_tells_the_replacement_it_moved_to_another_account(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The hand-off prompt became shared with ``restart`` and lost the one fact a fresh
+    switched agent cannot read off the board: that it now runs under another account."""
+    _two_slots_with_usage(monkeypatch, work=95, personal=10)
+    agent = fleet_service.spawn(project, "coder", worktree=False, account="2").agent
+    _with_transcript(agent, None)  # nothing to resume: a hand-off prompt
+    original_spawn = tmux.spawn_window
+
+    def ready_spawn(*args: Any, **kwargs: Any) -> WindowInfo:
+        window = original_spawn(*args, **kwargs)
+        tmux.set_command(window.pane_id, "claude")
+        return window
+
+    monkeypatch.setattr(tmux, "spawn_window", ready_spawn)
+
+    fleet_service.switch(project, agent.label, reason="5h limit")
+
+    [prompt] = [text for _pane, kind, text in tmux.typed if kind == "paste"]
+    assert prompt.startswith(
+        f"You are {agent.label}, taking over from a previous session of this agent "
+        "(it stopped on 5h limit under another Claude account)."
+    )

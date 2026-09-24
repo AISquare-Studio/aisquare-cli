@@ -1021,7 +1021,6 @@ def spawn(
     for ended in _end_dead_rows(live, views):
         live = [agent for agent in live if agent.id != ended.id]
         rows = [ended if agent.id == ended.id else agent for agent in rows]
-        nudge_manager(project.id, reason=f"{ended.label} exited")
     with store_session() as store:
         if role == "manager":
             existing = next((agent for agent in live if agent.role == "manager"), None)
@@ -1429,12 +1428,9 @@ def list_agents(project: ProjectInfo, *, live_only: bool = True) -> list[FleetAg
         agents = [a for a in agents if a.ended_at is None or a.ended_at >= cutoff]
     tmux_session = session_name(current.codename) if current.codename else None
     views = _observe_sockets(agents, tmux_session)
-    ended = _end_dead_rows(agents, views)
+    ended = {row.id: row for row in _end_dead_rows(agents, views)}
     if ended:
-        by_id = {row.id: row for row in ended}
-        agents = [by_id.get(agent.id, agent) for agent in agents]
-        for row in ended:
-            nudge_manager(row.project_id, reason=f"{row.label} exited")
+        agents = [ended.get(agent.id, agent) for agent in agents]
     if live_only:
         agents = _with_lingering_windows(agents, views)
     return [
@@ -1456,6 +1452,15 @@ def _end_dead_rows(
 
     Returns the ended rows (fresh from the store). Opens the store only when
     there is something to write, so the ordinary listing stays a read.
+
+    Only a row THIS call ends gets the ``agent_exited`` event and the manager's
+    nudge. Every read reconciles now — the UI's tick, the manager's own ``fleet
+    ls``, a spawn, a restart — so two readers routinely see the same death, and
+    the one that finds the row already ended (re-read one statement before the
+    write, not taken from its snapshot) stays quiet rather than wake the
+    manager twice. And it is best effort: a listing must not fail for this
+    write, so a store locked past its busy timeout leaves the row to the next
+    read — it reads ``exited`` from its pane meanwhile (:func:`_derive`).
     """
     dead = [
         (agent, pane)
@@ -1468,11 +1473,20 @@ def _end_dead_rows(
     if not dead:
         return []
     ended: list[FleetAgent] = []
-    with store_session() as store:
+    mine: list[FleetAgent] = []
+    # Locked past its busy timeout, or unopenable (StoreUnopenable is an sqlite3.Error):
+    # what was recorded stands, the rest waits for the next read.
+    with suppress(sqlite3.Error), store_session() as store:
         for agent, pane in dead:
-            row = store.end_fleet_agent(agent.id, exit_status=pane.dead_status)
-            _emit_exit(store, row)
-            ended.append(row)
+            row = store.get_fleet_agent(agent.id)
+            if row is not None and row.ended_at is None:
+                row = store.end_fleet_agent(agent.id, exit_status=pane.dead_status)
+                _emit_exit(store, row)
+                mine.append(row)
+            if row is not None:
+                ended.append(row)
+    for row in mine:
+        nudge_manager(row.project_id, reason=f"{row.label} exited")
     return ended
 
 
@@ -1845,7 +1859,9 @@ def switch(
         recent,
         account=str(target.slot),
         fresh=fresh,
-        reason=reason or "moved to another account",
+        # What a FRESH replacement is told it takes over from: the account move is
+        # the one thing it cannot read off the board.
+        reason=f"it stopped on {reason or 'a usage limit'} under another Claude account",
         spawned_by=spawned_by,
     )
     notes.extend(more)
@@ -1948,12 +1964,13 @@ def restart(
     (the 💤 row — its dead window goes once the replacement is up, see
     :func:`_supersede`), one that is lost, or one still running, which is
     stopped first as ``fleet stop`` stops it. The replacement keeps the role,
-    the task, the worktree and the account (``FleetAgent.account_slot``, #145)
-    and — when its transcript is on disk and ``fresh`` is not asked — RESUMES
-    the same session (``claude --resume <transcript>``), so a manager killed
-    with ctrl+c comes back with its intake, its contracts and the state of
-    every coder it steered; without a transcript it starts new with a
-    hand-off prompt built from the board.
+    the task, the worktree and the account (``FleetAgent.account_slot``, #145;
+    for a row older than that column, the one its session ran under, as
+    ``switch`` reads it) and — when its transcript is on disk and ``fresh`` is
+    not asked — RESUMES the same session (``claude --resume <transcript>``), so
+    a manager killed with ctrl+c comes back with its intake, its contracts and
+    the state of every coder it steered; without a transcript it starts new
+    with a hand-off prompt built from the board.
     For the manager that is "end the dead row, then spawn manager again" — the
     fix the issue asks for — with the session carried over when it can be.
     """
@@ -1989,7 +2006,8 @@ def restart(
     # once the replacement is up and recorded, so a restart that is refused on
     # the way (a missing binary, an unknown account, tmux) leaves the 💤 row and
     # its last screen as they were.
-    account = str(agent.account_slot) if agent.account_slot is not None else None
+    slot = _account_slot_of(agent, session)
+    account = str(slot) if slot is not None else None
     receipt, resumed, notes = _respawn(
         project,
         agent,

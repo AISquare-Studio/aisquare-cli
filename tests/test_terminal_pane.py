@@ -4158,6 +4158,99 @@ def test_a_paste_buffer_the_program_wrote_on_release_is_mirrored_to_the_clipboar
     assert len(reads) == 4, "a read at each left press and its release; none for the right button"
 
 
+def test_a_quick_second_press_leaves_a_standing_paste_buffer_where_it_is(
+    fake: FakeTmux, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #203, round 1 of the terminal-ux fold. Every pending mirror
+    read one before-press snapshot, and the first to run emptied it: a
+    double-click's second mirror compared the buffer with nothing and copied
+    an hour-old one to the clipboard, toast and all. A right press inside the
+    delay emptied it the same way. Each gesture's release now takes its own
+    press's snapshot, and a buffer that stood before either press stays put."""
+    # Long enough that the second press always lands inside the first mirror's
+    # delay, however slow the runner: the fix does not depend on it.
+    monkeypatch.setattr(TerminalPane, "BUFFER_MIRROR_DELAY", 0.5)
+    pane = fake.panes["%1"]
+    pane.alternate_on = pane.mouse_on = pane.mouse_sgr = True
+    fake.buffer = "an old copy from an hour ago"
+
+    async def drive() -> tuple[str, list[str], str, list[str]]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 6)) as pilot:
+            widget = host.pane
+            await wait_until(pilot, lambda: synced(widget))
+            await click(pilot, widget, (1, 1), times=2)
+            await pilot.pause(widget.BUFFER_MIRROR_DELAY + 0.2)
+            double, double_toasts = host.clipboard, list(host.notices)
+            await click(pilot, widget, (1, 1))
+            await click(pilot, widget, (1, 1), button=3)
+            await pilot.pause(widget.BUFFER_MIRROR_DELAY + 0.2)
+            return double, double_toasts, host.clipboard, list(host.notices)
+
+    double, double_toasts, right, right_toasts = run(drive())
+    assert (double, double_toasts) == ("", []), "a double-click copied the standing buffer"
+    assert (right, right_toasts) == ("", []), "a right click in the delay copied it"
+
+
+def test_a_double_click_the_program_copies_is_mirrored_once(
+    fake: FakeTmux, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other half of the same review: Claude Code selects a word on the
+    second click and writes the buffer from that release, which BOTH pending
+    mirrors then read, so the word went out twice with two toasts. A release
+    while a mirror is still pending folds into it: one read, after the last
+    release, against the buffer from before the first press."""
+    monkeypatch.setattr(TerminalPane, "BUFFER_MIRROR_DELAY", 0.5)
+    pane = fake.panes["%1"]
+    pane.alternate_on = pane.mouse_on = pane.mouse_sgr = True
+    fake.buffer = "an old copy from an hour ago"
+
+    async def drive() -> tuple[str, list[str]]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 6)) as pilot:
+            widget = host.pane
+            await wait_until(pilot, lambda: synced(widget))
+            await click(pilot, widget, (1, 1))
+            await click(pilot, widget, (1, 1))
+            fake.buffer = "word"  # the program's handler for the second release ran
+            await pilot.pause(widget.BUFFER_MIRROR_DELAY + 0.2)
+            return host.clipboard, list(host.notices)
+
+    clipboard, toasts = run(drive())
+    assert clipboard == "word"
+    assert toasts == ["copied 4 characters — the agent's own selection"], toasts
+
+
+def test_a_mirror_pending_across_an_attach_reads_the_server_its_press_went_to(
+    fake: FakeTmux, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The shell switches a pane to another agent by setting ``server`` and
+    attaching, and the attach emptied the snapshot: a mirror still pending then
+    read the NEW server's buffer against nothing and copied it. Carried with
+    its snapshot, the mirror reads the server the click went to."""
+    monkeypatch.setattr(TerminalPane, "BUFFER_MIRROR_DELAY", 0.5)
+    pane = fake.panes["%1"]
+    pane.alternate_on = pane.mouse_on = pane.mouse_sgr = True
+    fake.buffer = "a copy on the first server"
+    other = FakeTmux()
+    other.panes["%7"] = FakePane(screen=["another agent"])
+    other.buffer = "a stale copy on the second server"
+
+    async def drive() -> tuple[str, list[str]]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 6)) as pilot:
+            widget = host.pane
+            await wait_until(pilot, lambda: synced(widget))
+            await click(pilot, widget, (1, 1))
+            widget.server = other.server(tmp_path, socket="other")
+            widget.attach("%7")
+            await pilot.pause(widget.BUFFER_MIRROR_DELAY + 0.2)
+            return host.clipboard, list(host.notices)
+
+    assert run(drive()) == ("", [])
+    assert not [call for call in other.input if call[0] == "show-buffer"]
+
+
 def test_a_lost_release_ends_the_program_s_drag_where_it_got_to_and_frees_the_pointer(
     fake: FakeTmux, tmp_path: Path
 ) -> None:

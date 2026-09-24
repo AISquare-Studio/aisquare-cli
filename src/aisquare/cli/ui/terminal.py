@@ -115,6 +115,7 @@ import time
 import weakref
 from bisect import bisect_left
 from collections.abc import Callable
+from functools import partial
 from typing import Any, ClassVar, NamedTuple, assert_never
 
 from rich.cells import cell_len, set_cell_size, split_graphemes
@@ -856,7 +857,12 @@ class TerminalPane(Widget, can_focus=True):
         self._shift_drag: Offset | None = None
         """Where a shift+drag began, while this widget runs that selection itself."""
         self._buffer_before: str | None = None
-        """tmux's paste buffer as it stood at a forwarded left press (#148)."""
+        """tmux's paste buffer as it stood at a forwarded left press (#148), until
+        that press's release takes it to the mirror."""
+        self._mirror: tuple[object, TmuxServer | None, str | None] | None = None
+        """The paste-buffer mirror a left release armed and that has not run yet:
+        its token, the server the press went to, and the buffer it compares with
+        (:meth:`_arm_mirror`)."""
         self._last_drag: tuple[int, int, int] | None = None
         """The (code, column, row) of the last drag report sent, so a pointer that
         has not left its cell is not reported again — a terminal reports motion
@@ -2085,7 +2091,7 @@ class TerminalPane(Widget, can_focus=True):
         # motion per cell, and Textual moves the pointer before every release.
         self._last_drag = (code, x, y)
         # The buffer as it stands, so a release can tell a NEW copy from an old one.
-        self._buffer_before = self._read_buffer() if event.button == 1 else None
+        self._buffer_before = self._read_buffer(self.server) if event.button == 1 else None
         self._queue_mouse("press", code, x, y)
         self.capture_mouse()
 
@@ -2129,8 +2135,9 @@ class TerminalPane(Widget, can_focus=True):
         self.release_mouse()
         x, y = self._cell(event)
         self._queue_mouse("release", self._button_code(button, event), x, y)
+        before, self._buffer_before = self._buffer_before, None
         if button == 1:
-            self.set_timer(self.BUFFER_MIRROR_DELAY, self._mirror_buffer, name="buffer-mirror")
+            self._arm_mirror(before)
 
     def gesture_release_lost(self) -> None:
         """The app learned the gesture's release was lost: end what this widget runs itself.
@@ -2169,8 +2176,9 @@ class TerminalPane(Widget, can_focus=True):
         report, self._last_drag = self._last_drag, None
         if report is not None:
             self._queue_mouse("release", *report)
+        before, self._buffer_before = self._buffer_before, None
         if button == 1:
-            self.set_timer(self.BUFFER_MIRROR_DELAY, self._mirror_buffer, name="buffer-mirror")
+            self._arm_mirror(before)
 
     def _cell(self, event: events.MouseEvent) -> tuple[int, int]:
         """The widget cell under the pointer, clamped to the rows and columns shown.
@@ -2215,16 +2223,46 @@ class TerminalPane(Widget, can_focus=True):
             code += 16
         return code
 
-    def _read_buffer(self) -> str | None:
-        """tmux's newest paste buffer, or ``None`` when there is none or tmux cannot say."""
-        if self.server is None:
+    def _read_buffer(self, server: TmuxServer | None) -> str | None:
+        """``server``'s newest paste buffer, or ``None`` when there is none or tmux cannot say."""
+        if server is None:
             return None
         try:
-            return self.server.show_buffer()
+            return server.show_buffer()
         except TmuxError:
             return None
 
-    def _mirror_buffer(self) -> None:
+    def _arm_mirror(self, before: str | None) -> None:
+        """A forwarded left release: read the paste buffer after the program's copy has run.
+
+        ``before`` is the buffer as it stood at that release's own press. Each
+        release used to arm a timer that read ONE shared snapshot, which the
+        first to run emptied: the second mirror of a double-click — or the one
+        after a right press inside the delay, which set the snapshot to nothing
+        — compared the buffer with nothing and copied whatever tmux held, an
+        hour-old copy included, with a toast (review of #203, round 1 of the
+        terminal-ux fold). Now the snapshot travels with the pending mirror, and
+        so does the server the press went to: an attach inside the delay may
+        move this widget to another server (``ManagerTab`` sets ``server``, then
+        attaches), whose buffer says nothing about this snapshot.
+
+        A release while a mirror is still pending folds into it rather than
+        arming a second: one read, after the LAST release, against the buffer
+        from before the FIRST press. Two reads each saw what the program wrote
+        at the second release — the word of a double-click went out twice, with
+        two toasts — and the earlier one ran before that write could land. The
+        earlier timer still fires, and finds itself superseded.
+        """
+        server = self.server
+        if self._mirror is not None:
+            _, server, before = self._mirror
+        token = object()
+        self._mirror = (token, server, before)
+        self.set_timer(
+            self.BUFFER_MIRROR_DELAY, partial(self._mirror_buffer, token), name="buffer-mirror"
+        )
+
+    def _mirror_buffer(self, token: object) -> None:
         """After a forwarded left release: a paste buffer the program wrote is copied out.
 
         Claude Code's copy-on-select runs ``wl-copy``/``xclip`` in the PANE's
@@ -2233,10 +2271,16 @@ class TerminalPane(Widget, can_focus=True):
         selection is sure to land, so one that changed between the press and now
         goes to the outer terminal's clipboard (OSC 52), the way this widget's
         own copies do. Unchanged, or none: nothing was selected there — a click
-        that placed the cursor — and nothing is said.
+        that placed the cursor — and nothing is said. ``token`` names the arming
+        this timer was set for; when it no longer matches, a later release took
+        the mirror over and reads after its own release (:meth:`_arm_mirror`).
         """
-        before, self._buffer_before = self._buffer_before, None
-        after = self._read_buffer()
+        mirror = self._mirror
+        if mirror is None or mirror[0] is not token:
+            return
+        self._mirror = None
+        _, server, before = mirror
+        after = self._read_buffer(server)
         if not after or after == before:
             return
         self.app.copy_to_clipboard(after)

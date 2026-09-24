@@ -221,14 +221,18 @@ def _read_credits(session: iam.Session) -> list[WorkspaceCredits]:
     """Off the UI thread: every destination workspace of this session's host, one reading each.
 
     Distinct by workspace — two projects pointed at the same workspace share a
-    balance and a request. Fails open: a store that cannot be read shows no
-    credits line, and the rest of the page is untouched.
+    balance and a request. A forgotten project's destination row stays for
+    ``logout`` and is not read here: nothing launches into its workspace, so
+    it is not asked about or drawn (review of #173, round 1). Fails open: a
+    store that cannot be read shows no credits line, and the rest of the page
+    is untouched.
     """
     if not paths.db_path().exists():
         return []
     try:
         with store_session() as store:
-            destinations = store.project_destinations()
+            visible = {p.id for p in store.list_projects(all=True)}  # captured ones launch too
+            destinations = [d for d in store.project_destinations() if d.project_id in visible]
     except Exception:
         return []
     readings: list[WorkspaceCredits] = []

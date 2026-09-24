@@ -156,6 +156,39 @@ def test_doctor_live_warns_on_the_servers_band(
     assert "workspace-credits" not in {c.name for c in diagnostics.doctor(live=False)}
 
 
+def test_a_forgotten_projects_workspace_is_neither_asked_about_nor_warned_on(
+    idp: IdentityProviderStub, pointed: ProjectInfo
+) -> None:
+    """Review of #173, round 1: ``project forget`` tombstones the project and
+    leaves its ``project_destination`` row, which ``logout`` still needs for a
+    minted key. ``doctor --live`` and the Accounts page read every row, so a
+    workspace only a forgotten project pointed at was still asked about, drawn,
+    and warned on ("Top up the workspace … before spawning a fleet into it")."""
+    from aisquare.cli.ui.views.accounts import _read_credits
+    from aisquare.services import diagnostics
+
+    session = iam.current_session()
+    assert session is not None
+    asked = len(_balance_calls(idp))
+    with store_session() as store:
+        store.forget_project(pointed.id)
+        assert store.project_destination(pointed.id) is not None, "logout still reaches it"
+    assert "workspace-credits" not in {c.name for c in diagnostics.doctor(live=True)}
+    assert _read_credits(session) == []
+    assert len(_balance_calls(idp)) == asked, "nobody asks about a forgotten project's workspace"
+    # A CAPTURED directory pointed at the same workspace still counts: a launch there joins it.
+    root = pointed.root.parent / "api"
+    root.mkdir()
+    captured = ProjectInfo(id=project_id_for(root), root=root, linked_repos=[])
+    with store_session() as store:
+        store.ensure_project(captured)
+        destination = store.project_destination(pointed.id)
+        assert destination is not None
+        store.set_project_destination(destination.model_copy(update={"project_id": captured.id}))
+    assert {c.name for c in diagnostics.doctor(live=True)} >= {"workspace-credits"}
+    assert [r.workspace_name for r in _read_credits(session)] == ["acme"]
+
+
 def test_the_accounts_page_draws_the_destination_workspaces_bars(
     idp: IdentityProviderStub, pointed: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:

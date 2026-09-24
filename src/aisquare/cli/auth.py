@@ -396,7 +396,7 @@ def logout() -> None:
 
 
 def whoami() -> None:
-    """Show which account this machine is signed in as (offline)."""
+    """Show which account this machine is signed in as (from the file; credits ask the API)."""
     try:
         session = iam.current_session()
     except iam.IamError as exc:
@@ -404,6 +404,10 @@ def whoami() -> None:
     if session is None:
         fail("Not signed in. Run aisquare login.", error="not_authenticated")
     lands_in = _destination_here()
+    # The one request `whoami` makes (#143), and only with a destination for
+    # the project here: that workspace's balance, cached a minute and given at
+    # most `credits.TIMEOUT_SECONDS`. It said "(offline)" before the credits
+    # line, which is no longer so (review of #173, round 1).
     credits = credits_service.for_destination(session, lands_in)
     if get_state().json_output:
         typer.echo(

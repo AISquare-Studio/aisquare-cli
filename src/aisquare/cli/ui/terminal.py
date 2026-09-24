@@ -995,6 +995,14 @@ class TerminalPane(Widget, can_focus=True):
             self._mouse_timer = None
         self._forwarding = None
         self._shift_drag = None
+        if self.is_mounted:
+            # Both gestures held the pointer, and forgetting them kept it: the
+            # release that followed found nothing to end, and every click in
+            # the app went on landing here (review of #203, round 1 of the
+            # terminal-ux fold). The release the old program is owed is not
+            # sent — the queue that would carry it is dropped above, and an
+            # attach is most often that program's pane gone or restarted.
+            self.release_mouse()
         self._buffer_before = None
         self._last_drag = None
         # A new attach may be a new server — ``ManagerTab`` assigns ``server``

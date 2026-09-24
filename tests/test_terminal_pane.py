@@ -4453,6 +4453,41 @@ def test_a_lost_release_ends_a_shift_drag_where_it_got_to(fake: FakeTmux, tmp_pa
     assert captured is None
 
 
+def test_an_attach_mid_drag_gives_the_pointer_back(fake: FakeTmux, tmp_path: Path) -> None:
+    """Review of #203, round 1 of the terminal-ux fold. An attach — the agent
+    restarted, or went — forgot the forwarded press it was running but kept the
+    pointer that press had captured. The release that followed found nothing
+    to end and returned, so the pane held the pointer for good: under a pane
+    whose program no longer tracks the mouse, no click reached any other
+    widget in the app again."""
+    pane = fake.panes["%1"]
+    pane.alternate_on = pane.mouse_on = pane.mouse_sgr = pane.mouse_drag = True
+    fake.panes["%2"] = FakePane(screen=["a shell after the restart"])
+
+    async def drive() -> tuple[Widget | None, Widget | None, str]:
+        host = Host(fake.server(tmp_path), "%1", with_header=True)
+        async with host.run_test(size=(40, 7)) as pilot:
+            widget = host.pane
+            await wait_until(pilot, lambda: synced(widget))
+            await press(pilot, widget, (3, 2))
+            await move(pilot, widget, (5, 2), button=1)
+            widget.attach("%2")
+            await release(pilot, widget, (5, 2))
+            await pilot.pause()
+            captured = host.mouse_captured
+            forwarded = _literals(fake)
+            header = host.query_one("#other", Static)
+            await press(pilot, header, (1, 0))
+            during = host.mouse_captured
+            await release(pilot, header, (1, 0))
+            return captured, during, _literals(fake)[len(forwarded) :]
+
+    captured, during, after = run(drive())
+    assert captured is None, "the pane kept the pointer past the attach"
+    assert during is None, "the header's press went to the pane"
+    assert after == ""
+
+
 # --- against a real tmux ------------------------------------------------------------------------
 
 _needs_tmux = pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux is not installed")

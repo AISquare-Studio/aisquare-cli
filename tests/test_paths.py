@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import stat
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -63,10 +64,9 @@ def test_restrict_to_owner_names_three_principals_and_not_a_fourth(tmp_path: Pat
     anyone wants; it is the behaviour we have, and a suite that only ever
     manufactured the Users group would report the narrowing as success.
 
-    In practice the file is created by this process under this process's own
-    home, so a stray explicit ACE for a domain group or service account is not
-    a shape we produce. If that ever stops being true, this test is the one
-    that should start failing.
+    What changed is the ANSWER. The DACL is read back after the call, so the
+    surviving grant makes `restrict_to_owner` return False, and its callers
+    warn instead of promising an owner-only file (review of #65, R3).
     """
     from tests import winacl
 
@@ -79,7 +79,7 @@ def test_restrict_to_owner_names_three_principals_and_not_a_fourth(tmp_path: Pat
     assert winacl.USERS_TRUSTEE in before, "the named leak was not manufactured"
     assert winacl.OTHER_PRINCIPAL_TRUSTEE in before, "the unnamed grant was not manufactured"
 
-    assert paths.restrict_to_owner(secret) is True
+    assert paths.restrict_to_owner(secret) is False, "a surviving grant was reported as owner-only"
 
     after = winacl.dacl_trustees(secret)
     assert winacl.USERS_TRUSTEE not in after, ("a named principal survived", after)
@@ -109,3 +109,113 @@ def test_sddl_abbreviations_resolve_to_the_current_account() -> None:
     assert not winacl.denotes_user("BU", ordinary)
     assert winacl.user_trustees({"LA", "SY", "BA"}, admin) == {"LA"}
     assert winacl.user_trustees({ordinary, "SY"}, ordinary) == {ordinary}
+
+
+_ME = "S-1-5-21-111-222-333-1001"
+
+
+@pytest.mark.parametrize(
+    ("sddl", "sid", "owner_only"),
+    [
+        (f"D:PAI(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x12019f;;;{_ME})", _ME, True),
+        (f"D:P(A;;0x12019f;;;{_ME})(A;;FR;;;IU)", _ME, False),
+        (f"D:P(A;;0x12019f;;;{_ME})(A;;FR;;;S-1-5-21-111-222-333-1002)", _ME, False),
+        (f"D:P(D;;FA;;;BU)(A;;0x12019f;;;{_ME})", _ME, True),
+        ("D:P(A;;FA;;;SY)(A;;0x12019f;;;LA)", "S-1-5-21-111-222-333-500", True),
+        ("D:P(A;;FA;;;SY)(A;;0x12019f;;;LA)", _ME, False),
+        ("D:NO_ACCESS_CONTROL", _ME, False),
+        (f'D:P(A;;0x12019f;;;{_ME})(XA;;FR;;;WD;(@User.Dept=="x"))', _ME, False),
+    ],
+    ids=[
+        "owner-and-privileged",
+        "interactive",
+        "another-account",
+        "a-deny-narrows",
+        "owner-as-LA",
+        "LA-is-not-this-account",
+        "null-dacl",
+        "conditional-ace",
+    ],
+)
+def test_the_read_back_names_a_file_owner_only_only_when_it_is(
+    sddl: str, sid: str, owner_only: bool
+) -> None:
+    """The judgement ``restrict_to_owner`` passes on the DACL it left, on every platform: any
+    grant beyond this account, SYSTEM, Administrators and the owner placeholders is a file
+    other principals can read (review of #65, R3)."""
+    assert paths._grants_only_owner(sddl, sid) is owner_only
+
+
+@pytest.fixture
+def windows_tools(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[list[list[str]]]:
+    """``restrict_to_owner``'s Windows branch on any platform: ``whoami`` and ``icacls``
+    answered by a fake, the argv of every call recorded."""
+    import subprocess
+
+    ran: list[list[str]] = []
+
+    def fake_run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        ran.append(list(argv))
+        out = f'"host\\me","{_ME}"\r\n' if argv[0].endswith("whoami.exe") else ""
+        return subprocess.CompletedProcess(argv, 0, stdout=out, stderr="")
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setenv("SYSTEMROOT", str(tmp_path / "Windows"))
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    paths._whoami_sid.cache_clear()
+    yield ran
+    paths._whoami_sid.cache_clear()
+
+
+def test_the_tools_run_from_system32_and_whoami_is_asked_once(
+    windows_tools: list[list[str]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """By bare name, ``CreateProcess`` finds an ``icacls.exe`` or ``whoami.exe`` planted in the
+    current directory before System32's, and a fake ``whoami`` could hand the grant to
+    Everyone. The SID is asked once per process, not once per restriction (review of #65,
+    R8)."""
+    monkeypatch.setattr(paths, "_dacl_sddl", lambda _path: f"D:P(A;;0x12019f;;;{_ME})")
+    secret = tmp_path / "credentials"
+    assert paths.restrict_to_owner(secret) is True
+    assert paths.restrict_to_owner(secret) is True
+    system32 = tmp_path / "Windows" / "System32"
+    assert [argv[0] for argv in windows_tools] == [
+        str(system32 / "whoami.exe"),
+        str(system32 / "icacls.exe"),
+        str(system32 / "icacls.exe"),
+    ]
+    assert f"*{_ME}:(R,W)" in windows_tools[1]
+
+
+def test_a_grant_the_call_left_behind_is_reported(
+    windows_tools: list[list[str]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``icacls`` exits 0 having removed only the three principals it names. The DACL read
+    back still grants INTERACTIVE, so the file is not owner-only and the answer is False;
+    a DACL that cannot be read back is not vouched for either."""
+    secret = tmp_path / "credentials"
+    monkeypatch.setattr(paths, "_dacl_sddl", lambda _path: f"D:P(A;;0x12019f;;;{_ME})(A;;FR;;;IU)")
+    assert paths.restrict_to_owner(secret) is False
+    monkeypatch.setattr(paths, "_dacl_sddl", lambda _path: None)
+    assert paths.restrict_to_owner(secret) is False
+
+
+def test_a_whoami_that_failed_is_asked_again(
+    windows_tools: list[list[str]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only a SID is cached. A ``whoami`` that failed once, a timeout on a loaded machine,
+    must not leave every later restriction in the process reporting False."""
+    import subprocess
+
+    answers = iter([1, 0])
+
+    def flaky(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        windows_tools.append(list(argv))
+        code = next(answers)
+        return subprocess.CompletedProcess(argv, code, stdout=f'"host\\me","{_ME}"', stderr="")
+
+    monkeypatch.setattr(subprocess, "run", flaky)
+    assert paths._current_user_sid() is None
+    assert paths._current_user_sid() == _ME
+    assert paths._current_user_sid() == _ME
+    assert len(windows_tools) == 2

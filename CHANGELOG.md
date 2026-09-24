@@ -1522,14 +1522,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the group/other bits have no equivalent — so the API key and the bearer
   token guarding the HTTP server stayed readable by every other account on the
   machine, with no error to say so. The credentials file that holds both now
-  gets a DACL rebuilt from scratch — explicit entries reset, inheritance
-  stripped, then the owner granted — which matters because an explicit
-  `BUILTIN\Users` ACE survives the obvious `/inheritance:r` + `/grant:r`
-  pairing and would have left the file readable by everyone anyway. An
-  `Administrators` entry can remain, as root does for a 0600 file on POSIX.
-  The single credentials writer reports whether the restriction actually
-  landed, so `init` and `serve` say so explicitly when it did not, rather than
-  implying a protection that is not there. POSIX behaviour is unchanged.
+  goes through one `icacls` call, run from System32 by its full path: its
+  inherited entries are stripped, `Users`, `Everyone` and `Authenticated
+  Users` are removed by SID, and the owner is granted. The removal matters
+  because an explicit `BUILTIN\Users` ACE survives the obvious
+  `/inheritance:r` + `/grant:r` pairing and would have left the file readable
+  by everyone anyway. It is not a reset: an explicit grant to any other
+  principal is left in place. The DACL is read back afterwards, and such a
+  grant counts as NOT restricted. `SYSTEM` and `Administrators` entries can
+  remain, as root does for a 0600 file on POSIX. The single credentials
+  writer reports whether the restriction actually landed, so `init`, `serve`
+  and `login` say so explicitly when it did not, rather than implying a
+  protection that is not there. POSIX behaviour is unchanged.
 - **A config write no longer fails because someone was reading the file.**
   `os.replace` is atomic on POSIX and a concurrent reader keeps its own inode;
   on NTFS `MoveFileEx` refuses to replace a file that ANY other handle has

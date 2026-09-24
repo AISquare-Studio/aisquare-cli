@@ -17,6 +17,7 @@ Set ``AISQUARE_HOME`` to relocate the whole tree (tests rely on this).
 from __future__ import annotations
 
 import errno
+import functools
 import os
 import stat
 import sys
@@ -60,10 +61,13 @@ def restrict_to_owner(path: Path) -> bool:
     The trade is stated rather than hidden: ``/remove`` drops the three ACEs it
     names, where ``/reset`` dropped every explicit ACE. A file carrying an
     explicit grant to some OTHER principal — a domain group, a service account,
-    a second local user — keeps it. That is a narrower guarantee than before on
-    a file that is, in practice, created by this process in this process's own
-    home; ``tests/test_paths.py`` pins the limit so it is recorded in the suite
-    rather than only here.
+    a second local user — keeps it. So the DACL the call left is READ BACK, in
+    process, and any principal still granted anything other than this account,
+    SYSTEM, Administrators and the owner placeholders makes the answer False:
+    the file is not what the callers promise, and they say so (review of #65,
+    R3). The read changes nothing, so it cannot widen what the call narrowed.
+    ``tests/test_paths.py`` pins both halves: the fourth principal survives,
+    and it is reported.
 
     The trustee is a SID from ``whoami``, not ``getpass.getuser()``. CPython
     returns the first set of ``LOGNAME``, ``USER``, ``LNAME``, ``USERNAME``
@@ -96,7 +100,7 @@ def restrict_to_owner(path: Path) -> bool:
     if sid is None:
         return False
     argv = [
-        "icacls",
+        _system32("icacls.exe"),
         str(path),
         "/inheritance:r",
         # Users, Everyone, Authenticated Users — by SID, because the display
@@ -120,7 +124,22 @@ def restrict_to_owner(path: Path) -> bool:
         )
     except (OSError, subprocess.TimeoutExpired):
         return False
-    return result.returncode == 0
+    if result.returncode != 0:
+        return False
+    sddl = _dacl_sddl(path)
+    return sddl is not None and _grants_only_owner(sddl, sid)
+
+
+def _system32(program: str) -> str:
+    """``program`` in ``%SystemRoot%\\System32``, by its full path.
+
+    Run by bare name, ``CreateProcess`` looks in the application's directory
+    and the CURRENT directory before System32. An ``icacls.exe`` or
+    ``whoami.exe`` planted in a project would run instead, and a fake
+    ``whoami`` could turn the owner's grant into one for Everyone (review of
+    #65, R8).
+    """
+    return str(Path(os.environ.get("SYSTEMROOT", r"C:\Windows")) / "System32" / program)
 
 
 def _current_user_sid() -> str | None:
@@ -132,22 +151,146 @@ def _current_user_sid() -> str | None:
     import subprocess  # Windows-only; see restrict_to_owner
 
     try:
-        result = subprocess.run(
-            ["whoami", "/user", "/fo", "csv", "/nh"],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=15,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired):  # pragma: no cover - needs a broken PATH
+        return _whoami_sid()
+    except (OSError, subprocess.TimeoutExpired):
         return None
+
+
+@functools.cache
+def _whoami_sid() -> str:
+    """The SID ``whoami`` names for this account; raises when it names none.
+
+    Cached: the account cannot change under a running process, and every
+    restriction otherwise cost a second subprocess (review of #65, R8). A
+    failure RAISES rather than returning ``None``, because an exception is
+    never cached, so a ``whoami`` that timed out once is asked again next time.
+    """
+    import subprocess  # Windows-only; see restrict_to_owner
+
+    result = subprocess.run(
+        [_system32("whoami.exe"), "/user", "/fo", "csv", "/nh"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=15,
+        check=False,
+    )
     if result.returncode != 0:
-        return None
+        raise OSError(f"whoami exited {result.returncode}: {result.stderr.strip()}")
     # '"domain\\user","S-1-5-21-..."'
     sid = result.stdout.strip().split(",")[-1].strip().strip('"')
-    return sid or None
+    if not sid:
+        raise OSError(f"whoami named no SID: {result.stdout.strip()!r}")
+    return sid
+
+
+#: Trustees an owner-only file may still grant, as SDDL writes them (an
+#: abbreviation, or the SID on a host that spells it out): SYSTEM,
+#: Administrators, OWNER RIGHTS and CREATOR OWNER. An administrator can take
+#: ownership of any file regardless, the same deal 0600 offers against root.
+_PRIVILEGED_TRUSTEES = frozenset(
+    {"SY", "S-1-5-18", "BA", "S-1-5-32-544", "OW", "S-1-3-4", "CO", "S-1-3-0"}
+)
+
+#: SDDL abbreviates two ACCOUNT SIDs by their RID, so this account can come
+#: back as one of these instead of spelled out: the built-in Administrator (a
+#: GitHub runner's login) and Guest.
+_ACCOUNT_ABBREVIATIONS = {"LA": "-500", "LG": "-501"}
+
+#: ACE types that deny. Every other type in a DACL grants something.
+_DENYING_ACES = frozenset({"D", "OD", "XD"})
+
+
+def _grants_only_owner(sddl: str, sid: str) -> bool:
+    """Whether the DACL in ``sddl`` grants nobody but ``sid`` and the privileged trustees.
+
+    Each ACE is ``(type;flags;rights;object;inherited object;trustee)``. A
+    deny ACE narrows and is skipped. An ACE this cannot read (a conditional
+    one carries a nested expression) counts as a grant to someone else: a
+    restriction this cannot vouch for is not reported as one. A NULL DACL
+    grants everyone everything.
+    """
+    if "NO_ACCESS_CONTROL" in sddl:
+        return False
+    for ace in sddl.split("(")[1:]:
+        fields = ace.split(")", 1)[0].split(";")
+        if len(fields) != 6:
+            return False
+        kind, trustee = fields[0], fields[5]
+        if kind in _DENYING_ACES or trustee in _PRIVILEGED_TRUSTEES or trustee == sid:
+            continue
+        suffix = _ACCOUNT_ABBREVIATIONS.get(trustee)
+        if suffix is None or not sid.endswith(suffix):
+            return False
+    return True
+
+
+def _dacl_sddl(path: Path) -> str | None:
+    """``path``'s DACL as SDDL, read in process; ``None`` when it cannot be read.
+
+    Through ``advapi32`` rather than ``icacls``: ``icacls <path>`` prints
+    display names, which are localised and contain spaces, and a read that
+    costs no subprocess keeps the restriction at one.
+    """
+    if sys.platform != "win32":
+        return None
+    import ctypes
+    from ctypes import wintypes
+
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    get_security = advapi32.GetNamedSecurityInfoW
+    get_security.argtypes = [
+        wintypes.LPCWSTR,  # pObjectName
+        ctypes.c_int,  # ObjectType: SE_FILE_OBJECT
+        wintypes.DWORD,  # SecurityInfo
+        ctypes.POINTER(ctypes.c_void_p),  # ppsidOwner
+        ctypes.POINTER(ctypes.c_void_p),  # ppsidGroup
+        ctypes.POINTER(ctypes.c_void_p),  # ppDacl
+        ctypes.POINTER(ctypes.c_void_p),  # ppSacl
+        ctypes.POINTER(ctypes.c_void_p),  # ppSecurityDescriptor
+    ]
+    get_security.restype = wintypes.DWORD
+    to_sddl = advapi32.ConvertSecurityDescriptorToStringSecurityDescriptorW
+    to_sddl.argtypes = [
+        ctypes.c_void_p,  # SecurityDescriptor
+        wintypes.DWORD,  # RequestedStringSDRevision
+        wintypes.DWORD,  # SecurityInformation
+        ctypes.POINTER(wintypes.LPWSTR),  # StringSecurityDescriptor
+        ctypes.POINTER(wintypes.ULONG),  # StringSecurityDescriptorLen
+    ]
+    to_sddl.restype = wintypes.BOOL
+    local_free = kernel32.LocalFree
+    local_free.argtypes = [ctypes.c_void_p]
+    local_free.restype = ctypes.c_void_p
+
+    se_file_object, dacl_security_information, sddl_revision_1 = 1, 0x4, 1
+    descriptor = ctypes.c_void_p()
+    status = get_security(
+        str(path),
+        se_file_object,
+        dacl_security_information,
+        None,
+        None,
+        None,
+        None,
+        ctypes.byref(descriptor),
+    )
+    if status != 0:
+        return None
+    try:
+        text = wintypes.LPWSTR()
+        if not to_sddl(
+            descriptor, sddl_revision_1, dacl_security_information, ctypes.byref(text), None
+        ):
+            return None
+        try:
+            return text.value
+        finally:
+            local_free(ctypes.cast(text, ctypes.c_void_p))
+    finally:
+        local_free(descriptor)
 
 
 def aisquare_home() -> Path:

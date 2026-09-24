@@ -3463,7 +3463,8 @@ def test_restart_from_the_agent_view_selects_the_new_row_in_the_shell(
 ) -> None:
     """#138 end to end through the real app: the exited row's view offers Restart,
     the service is called with the row's project and the pane's size, the frame is
-    re-read, and the NEW row is what the shell shows and highlights."""
+    re-read, and the NEW row is what the shell shows and highlights — with its pane
+    holding the keyboard, as a selected agent's does (#147)."""
     seed(tmp_path, ("prj_a", "alpha", "amber-otter"))
     exited = status("prj_a", "manager", "manager", "exited", exit_status=130)
     script["prj_a"] = [exited]
@@ -3485,7 +3486,9 @@ def test_restart_from_the_agent_view_selects_the_new_row_in_the_shell(
 
     monkeypatch.setattr(fleet_service, "restart", fake_restart)
 
-    async def go(pilot: Pilot[None]) -> tuple[str | None, str | None, list[str], list[str]]:
+    async def go(
+        pilot: Pilot[None],
+    ) -> tuple[str | None, str | None, list[str], list[str], bool]:
         app = fleet_app(pilot)
         await pilot.click(row_for(app, "agt_a_manager"))
         await pilot.pause()
@@ -3500,12 +3503,20 @@ def test_restart_from_the_agent_view_selects_the_new_row_in_the_shell(
         # The pane's own "(pane gone)" toast is there too: read them all.
         toasts = [toast.render().plain for toast in app.screen.query(Toast)]
         rows = [shown(row) for row in card_for(app, "prj_a").query(AgentRow)]
+        typing_reaches = isinstance(current, AgentView) and app.focused is current.pane
         assert stop_shown is True  # the 💤 row's Stop removes its dead window
-        return (current.id if current else None), app.sidebar.selected_key, toasts, rows
+        return (
+            (current.id if current else None),
+            app.sidebar.selected_key,
+            toasts,
+            rows,
+            typing_reaches,
+        )
 
-    current, selected, toasts, rows = drive(go, notifications=True)
+    current, selected, toasts, rows, typing_reaches = drive(go, notifications=True)
     assert calls and calls[0][:2] == ("prj_a", "manager")
     assert current == "agent-agt_a_new" and selected == "agent:agt_a_new"
+    assert typing_reaches, "the new pane has the keyboard, not nobody (where q quits the UI)"
     assert any("✓ restarted manager — resumed its session" in toast for toast in toasts), toasts
     assert len(rows) == 1 and rows[0].rstrip().endswith("⏸")  # the old 💤 exited row is gone
 

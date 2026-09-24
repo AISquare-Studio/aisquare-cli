@@ -815,7 +815,10 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         The view that posted this refreshed the frame first, so the row is
         normally in the snapshot already; one more read covers a store that
         was briefly busy. A row still missing is reported, not invented — the
-        next tick lists it.
+        next tick lists it. The new pane takes the keyboard, as a selected
+        agent's does (#147): the Restart button that had it went with the view
+        it was on, and focus was left with nobody — where the app's keys are
+        live, so a ``q`` typed at the restarted agent quit the UI.
         """
         started = event.agent
         status = self.snapshot.agent(started.project_id, started.id) if self.snapshot else None
@@ -834,6 +837,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         self.sidebar.select(f"agent:{status.agent.id}")
         self._set_doctor_scope(started.project_id)
         self._remember_selection(f"agent:{started.project_id}/{status.agent.id}")
+        self._focus_pane(view_id)
 
     # --- groups, pins and order (#140) -------------------------------------------------
 

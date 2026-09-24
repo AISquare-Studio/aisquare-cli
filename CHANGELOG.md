@@ -16,7 +16,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   runs cannot silently change what "the same agent" means (schema v18; rows
   spawned before the spec fall back to the config as before; a recorded binary
   no longer on the PATH is resolved again when that is the same kind of
-  program, and the receipt names it). The session itself already resumes from
+  program, and the receipt names it — otherwise the restart is refused before
+  a running agent is stopped). The session itself already resumes from
   its transcript (#138). The
   shell now remembers what was open — a project, an agent, the Accounts page,
   the Doctor — and the captured-directories toggle, in the store's new

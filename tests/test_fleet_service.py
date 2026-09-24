@@ -3722,12 +3722,13 @@ def test_the_launch_spec_drops_every_shape_of_a_session_choice() -> None:
     # Claude Code's flags, not every program's: aider's `-c` is its config file.
     assert fleet_service._without_session_choice("aider", ["-c", "a.yml"]) == ["-c", "a.yml"]
     # Claude Code by another name, known by a session its arguments NAME (the
-    # planner joins the row to it) or by a transcript the launch resumes.
+    # planner joins the row to it), or by a board session its hook joined or a
+    # transcript the launch resumes (`claude_code`).
     other = fleet_service._without_session_choice
     assert other("claude2", ["--session-id", "x", "--verbose"]) == ["--verbose"]
     assert other("claude2", ["-r", "abc", "-c"]) == [], "named: every session flag goes"
     assert other("claude2", ["-c", "--verbose"]) == ["-c", "--verbose"], "named nothing"
-    assert other("claude2", ["-c", "--verbose"], resuming=True) == ["--verbose"]
+    assert other("claude2", ["-c", "--verbose"], claude_code=True) == ["--verbose"]
 
 
 def _executable(path: Path) -> Path:
@@ -3884,7 +3885,7 @@ def test_a_replay_does_not_fall_back_onto_another_kind_of_program(
     assert len(tmux.spawned) == started
 
 
-def test_a_removed_claude_code_by_another_name_comes_back_on_claude_only_to_resume(
+def test_a_removed_claude_code_by_another_name_comes_back_on_claude_only_when_known(
     tmux: FakeTmux,
     claude_on_path: Path,
     project: ProjectInfo,
@@ -3892,29 +3893,42 @@ def test_a_removed_claude_code_by_another_name_comes_back_on_claude_only_to_resu
     tmp_path: Path,
 ) -> None:
     """The fallback's other half: `claude2` is not Claude Code by name, but a
-    transcript to resume is one only Claude Code writes — so the round-1 case (a
-    removed `AISQUARE_BIN_CODER=claude2`) still resumes on `claude`. A `--fresh`
-    restart has no such evidence, and is refused with a way out."""
+    board session its hook joined is — only Claude Code's hooks write one — so
+    the round-1 case (a removed `AISQUARE_BIN_CODER=claude2`) still resumes on
+    `claude`, and (review of #169, round 3) a `--fresh` restart of it starts on
+    `claude` too. A `claude2` with nothing to show what it was is refused, with
+    a way out, however it is restarted."""
     claude2 = _executable(claude_on_path.with_name("claude2"))
     monkeypatch.setenv("AISQUARE_BIN_CODER", "claude2")
-    sid = "11111111-2222-3333-4444-555555555555"
-    agent = fleet_service.spawn(
-        project, "coder", worktree=False, agent_args=["--session-id", sid]
-    ).agent
+    unknown = fleet_service.spawn(project, "coder", worktree=False).agent
+    assert unknown.session_id is None, "no id is minted for a binary not named claude"
     transcript = tmp_path / "t.jsonl"
     transcript.write_text("{}\n", encoding="utf-8")
-    _with_transcript(agent, transcript)
-    tmux.die(agent.pane_id, 1)
+    joined: list[FleetAgent] = []
+    for sid in ("11111111-2222-3333-4444-555555555555", "66666666-7777-8888-9999-000000000000"):
+        agent = fleet_service.spawn(
+            project, "coder", worktree=False, agent_args=["--session-id", sid]
+        ).agent
+        _with_transcript(agent, transcript)
+        joined.append(agent)
+    for agent in (unknown, *joined):
+        tmux.die(agent.pane_id, 1)
     claude2.unlink()
     monkeypatch.delenv("AISQUARE_BIN_CODER")
+    started = len(tmux.spawned)
 
-    with pytest.raises(FleetError, match="`aisquare fleet spawn coder`"):
-        fleet_service.restart(project, agent.label, fresh=True)
-    receipt = fleet_service.restart(project, agent.label)
-
-    assert receipt.resumed is True and receipt.started.binary == "claude"
-    assert receipt.started.session_id == sid
-    assert any("'claude2', the binary it was launched with" in note for note in receipt.notes)
+    for fresh in (True, False):
+        with pytest.raises(FleetError, match="`aisquare fleet spawn coder`"):
+            fleet_service.restart(project, unknown.label, fresh=fresh)
+    assert len(tmux.spawned) == started
+    resumed = fleet_service.restart(project, joined[0].label)
+    assert resumed.resumed is True and resumed.started.binary == "claude"
+    assert resumed.started.session_id == joined[0].session_id
+    renewed = fleet_service.restart(project, joined[1].label, fresh=True)
+    assert renewed.resumed is False and renewed.started.binary == "claude"
+    assert "--resume" not in _command(tmux)
+    for receipt in (resumed, renewed):
+        assert any("'claude2', the binary it was launched with" in note for note in receipt.notes)
 
 
 def test_a_replay_whose_fallback_is_missing_too_names_a_way_out_a_restart_has(
@@ -3948,3 +3962,124 @@ def test_a_replay_whose_fallback_is_missing_too_names_a_way_out_a_restart_has(
     with pytest.raises(FleetError, match="the role still resolves to it") as refused:
         fleet_service.restart(project, agent.label)
     assert "--bin" not in str(refused.value)
+
+
+def test_a_replay_falls_back_only_onto_the_same_program(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Review of #169, round 3: "the same kind of program" had two classes,
+    Claude Code and everything else, so any two programs that are both not
+    Claude Code passed as one — aider's `-c a.yml` was replayed to codex, and
+    a joined `claude2`'s `--model opus` and a hand-off prompt went to aider.
+    Two programs that are not both Claude Code are the same only by name."""
+    aider = _executable(tmp_path / "abin" / "aider")
+    monkeypatch.setenv("AISQUARE_BIN_CODER", str(aider))
+    agent = fleet_service.spawn(project, "coder", worktree=False, agent_args=["-c", "a.yml"]).agent
+    tmux.die(agent.pane_id, 1)
+    aider.unlink()
+    monkeypatch.setenv("AISQUARE_BIN_CODER", str(_executable(tmp_path / "cbin" / "codex")))
+    started = len(tmux.spawned)
+
+    with pytest.raises(FleetError, match="not known to be the same kind of program"):
+        fleet_service.restart(project, agent.label)
+    assert len(tmux.spawned) == started, "nothing was started"
+
+    # The same program somewhere else is the same program, and gets its arguments.
+    moved = _executable(tmp_path / "elsewhere" / "aider")
+    monkeypatch.setenv("AISQUARE_BIN_CODER", str(moved))
+    receipt = fleet_service.restart(project, agent.label)
+    command = _command(tmux)
+    assert _flag(command, "--command") == str(moved) and command[-2:] == ["-c", "a.yml"]
+    assert any(f"{str(aider)!r}, the binary it was launched with" in n for n in receipt.notes)
+
+    # A `claude2` its hook joined is Claude Code, which aider is not — `--fresh` or resumed.
+    claude2 = _executable(claude_on_path.with_name("claude2"))
+    monkeypatch.setenv("AISQUARE_BIN_CODER", "claude2")
+    sid = "11111111-2222-3333-4444-555555555555"
+    other = fleet_service.spawn(
+        project, "coder", worktree=False, agent_args=["--session-id", sid, "--model", "opus"]
+    ).agent
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text("{}\n", encoding="utf-8")
+    _with_transcript(other, transcript)
+    tmux.die(other.pane_id, 1)
+    claude2.unlink()
+    monkeypatch.setenv("AISQUARE_BIN_CODER", str(moved))
+    started = len(tmux.spawned)
+
+    for fresh in (True, False):
+        with pytest.raises(FleetError, match="not known to be the same kind of program"):
+            fleet_service.restart(project, other.label, fresh=fresh)
+    assert len(tmux.spawned) == started
+
+
+def test_a_fresh_restart_of_claude_code_by_another_name_does_not_continue_its_session(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Review of #169, round 3: a `claude2` spawned with `-c` keeps it in its spec
+    (nothing yet shows it to be Claude Code's `--continue`), and its hook joins
+    the row to the session it continued. A `--fresh` restart replayed the `-c`,
+    so the replacement continued the old conversation and the hand-off prompt
+    was typed into it. The board session shows the binary to be Claude Code,
+    resumed or not, and the `-c` goes."""
+    _executable(claude_on_path.with_name("claude2"))
+    monkeypatch.setenv("AISQUARE_BIN_CODER", "claude2")
+    agent = fleet_service.spawn(
+        project, "coder", worktree=False, agent_args=["-c", "--verbose"]
+    ).agent
+    assert agent.launch_spec is not None and agent.launch_spec.extra_args == ["-c", "--verbose"]
+    joined = "66666666-7777-8888-9999-000000000000"
+    with store_session() as store:
+        assert store.bind_fleet_agent_session(agent.id, joined)
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text("{}\n", encoding="utf-8")
+    _with_transcript(agent.model_copy(update={"session_id": joined}), transcript)
+    tmux.die(agent.pane_id, 1)
+
+    receipt = fleet_service.restart(project, agent.label, fresh=True)
+
+    command = _command(tmux)
+    assert receipt.resumed is False and _flag(command, "--command") == "claude2"
+    assert "-c" not in command and "--continue" not in command and "--resume" not in command
+    assert "--verbose" in command
+    assert receipt.started.launch_spec is not None
+    assert receipt.started.launch_spec.extra_args == ["--verbose"]
+
+
+def test_a_replay_that_cannot_start_leaves_a_running_agent_running(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Review of #169, round 3: `restart` and `switch` stop a running agent and
+    only then spawn, so a replay the fallback refuses stopped the agent and
+    started nothing — and the refusal did not say it had been stopped. It is
+    refused before the stop now, and the agent keeps running."""
+    _two_slots_with_usage(monkeypatch, work=95, personal=10)
+    aider = _executable(tmp_path / "abin" / "aider")
+    monkeypatch.setenv("AISQUARE_BIN_CODER", str(aider))
+    agent = fleet_service.spawn(project, "coder", worktree=False, account="2").agent
+    aider.unlink()
+    monkeypatch.delenv("AISQUARE_BIN_CODER")
+    started = len(tmux.spawned)
+
+    with pytest.raises(FleetError, match="not known to be the same kind of program"):
+        fleet_service.restart(project, agent.label)
+    with pytest.raises(FleetError, match="not known to be the same kind of program"):
+        fleet_service.switch(project, agent.label)
+
+    assert tmux.typed == [] and tmux.killed == [], "no /exit typed, no window killed"
+    assert len(tmux.spawned) == started
+    with store_session() as store:
+        live = store.fleet_agent_by_label(project.id, agent.label, live_only=True)
+    assert live is not None and live.id == agent.id

@@ -966,6 +966,7 @@ def spawn(
     resume: ResumeSpec | None = None,
     size: tuple[int, int] | None = None,
     spec: LaunchSpec | None = None,
+    claude_code: bool = False,
 ) -> SpawnReceipt:
     """Start an agent for ``project`` in the fleet's tmux server and record it.
 
@@ -977,7 +978,10 @@ def spawn(
     binary that has left the PATH is resolved again as a spawn resolves it
     when that lands on the same kind of program (``_in_place_of_recorded``),
     and the receipt names it. Every spawn records the spec it ended up with on
-    the row.
+    the row. ``claude_code`` says the replayed agent is Claude Code whatever its
+    binary is called — its hook joined its row to a board session, which only
+    Claude Code does (a ``resume`` says so too) — so the spec's session flags
+    are not replayed and that fallback may land on ``claude``.
 
     Every ``None`` means "the role's default" (config, then built-in). Refuses
     past ``max_agents_per_project``, a second manager, a worktree in a non-git
@@ -1023,6 +1027,8 @@ def spawn(
         worktree = worktree if worktree is not None else spec.worktree
         if replayed_args:
             agent_args = list(spec.extra_args)
+    # A transcript to resume is one only Claude Code writes.
+    claude_code = claude_code or resume is not None
     srv = server(config)
     _require_tmux(srv)
     notes: list[str] = []
@@ -1034,7 +1040,9 @@ def spawn(
                 "install it, pass --bin, or change the role's binding"
             )
         # Replayed, and gone since: today's resolution, when it is the same kind of program.
-        resolution = _in_place_of_recorded(role, resolution.binary, resume=resume, notes=notes)
+        resolution = _in_place_of_recorded(
+            role, resolution.binary, claude_code=claude_code, notes=notes
+        )
     role_config = role_settings(role, config)
     with store_session() as store:
         project = ensure_codename(project, store)
@@ -1146,9 +1154,10 @@ def spawn(
     extra = list(agent_args)
     if replayed_args:
         # Filtered on the way OUT as well as on the way in: a spec written before
-        # session choices were left out of it still holds them, and a resume
-        # below is what shows the binary to be Claude Code whatever its name.
-        extra = _without_session_choice(resolution.binary, extra, resuming=resume is not None)
+        # session choices were left out of it still holds them, and a board
+        # session or a resume is what shows the binary to be Claude Code
+        # whatever its name.
+        extra = _without_session_choice(resolution.binary, extra, claude_code=claude_code)
     # What the spec records: the agent's own arguments, BEFORE this launch's
     # `--resume` is prepended — a resume is per launch, and a restart of the
     # restarted agent must not carry an old transcript path into the new one.
@@ -1248,7 +1257,7 @@ def spawn(
 
 
 def _in_place_of_recorded(
-    role: str, recorded: str, *, resume: ResumeSpec | None, notes: list[str]
+    role: str, recorded: str, *, claude_code: bool, notes: list[str]
 ) -> harness.BinaryResolution:
     """What a replay starts when ``recorded``, the binary its spec holds, has left the PATH.
 
@@ -1259,11 +1268,16 @@ def _in_place_of_recorded(
     program: the spec's arguments, and a resume's `--resume <transcript>`, were
     written for the recorded one, and handed to another they run "the WRONG
     AGENT under the right role name" (`harness.resolve_binary`) — aider's
-    `-c a.yml` is Claude Code's `--continue` and a prompt. Claude Code is known
-    by name (`harness.is_default_agent`), and the recorded binary also by the
-    transcript this launch resumes, which only Claude Code writes: a removed
-    `claude2` parallel install comes back on `claude` when it resumes, and a
-    `--fresh` restart of it, with nothing to show what it was, is refused.
+    `-c a.yml` is Claude Code's `--continue` and a prompt, and codex's config
+    override. Two programs that are both not Claude Code are not thereby the
+    same one — aider's arguments are not codex's — so the same kind is known
+    two ways only. By name: the same basename somewhere else (`/opt/old/aider`,
+    then `aider`). Or as Claude Code: the recorded binary by its name
+    (`harness.is_default_agent`) or by ``claude_code`` — its hook joined the row
+    to a board session, or this launch resumes a transcript, and only Claude
+    Code does either — and today's by its name. So a removed `claude2` parallel
+    install its hook joined comes back on `claude`, resumed or `--fresh`, and
+    one with nothing to show what it was is refused.
 
     Every refusal here names a way out that a restart has; `--bin` is not one.
     """
@@ -1274,8 +1288,9 @@ def _in_place_of_recorded(
             f"{gone}, and the role still resolves to it (chosen by: {today.source}) — "
             "install it, or change the role's binding"
         )
-    was_claude_code = harness.is_default_agent(recorded) or resume is not None
-    if harness.is_default_agent(today.binary) != was_claude_code:
+    same_name = Path(today.binary).name == Path(recorded).name
+    was_claude_code = claude_code or harness.is_default_agent(recorded)
+    if not same_name and not (was_claude_code and harness.is_default_agent(today.binary)):
         raise FleetError(
             f"{gone}, and the role resolves to {today.binary!r} today (chosen by: "
             f"{today.source}), not known to be the same kind of program: the recorded "
@@ -1292,7 +1307,7 @@ def _in_place_of_recorded(
 
 
 def _without_session_choice(
-    binary: str, args: Sequence[str], *, resuming: bool = False
+    binary: str, args: Sequence[str], *, claude_code: bool = False
 ) -> list[str]:
     """``args`` less the flags that pick WHICH session a launch runs — for the launch spec.
 
@@ -1307,15 +1322,17 @@ def _without_session_choice(
     another program's ``-c`` is its own — aider's config file, codex's config
     override — and is replayed as given. Known three ways. By name
     (``harness.is_default_agent``, the predicate the role's ``default_args``
-    and ``--session-id`` pinning share). By ``resuming``: a launch that resumes
-    a transcript, which only Claude Code writes. And by the arguments NAMING a
-    session (``--session-id <id>``, ``--resume <id>``): the identity planner
-    reads those whatever the binary is called and joins the row to that
-    session, so a restart resumes it with its own ``--resume`` — the
-    ``claude2`` parallel install (``AISQUARE_BIN_CODER=claude2``) spawned on a
-    session its caller chose.
+    and ``--session-id`` pinning share). By ``claude_code``: a row its hook
+    joined to a board session, or a launch that resumes a transcript — only
+    Claude Code does either, so a ``--fresh`` restart of a ``claude2`` spawned
+    with ``-c`` does not continue the old conversation under the hand-off
+    prompt. And by the arguments NAMING a session (``--session-id <id>``,
+    ``--resume <id>``): the identity planner reads those whatever the binary
+    is called and joins the row to that session, so a restart resumes it with
+    its own ``--resume`` — the ``claude2`` parallel install
+    (``AISQUARE_BIN_CODER=claude2``) spawned on a session its caller chose.
     """
-    if harness.is_default_agent(binary) or resuming:
+    if harness.is_default_agent(binary) or claude_code:
         return explainability_service.without_session_choice(args)
     # An id the planner READ from the arguments, not one it minted — it mints
     # only for Claude Code by name, answered above.
@@ -1888,7 +1905,9 @@ def switch(
     written under one ``CLAUDE_CONFIG_DIR`` from another. The path form is
     documented and the id is preserved, but this machine has one login, so the
     cross-account leg is unverified; a resume that fails leaves a pane whose
-    error is visible, and ``--fresh`` is the documented way around it.
+    error is visible, and ``--fresh`` is the documented way around it. A
+    replay that cannot start (:func:`_refuse_a_replay_that_cannot_start`) is
+    refused before the agent is stopped.
     """
     with store_session() as store:
         agent = _live_agent(store, project, label)
@@ -1928,6 +1947,7 @@ def switch(
         raise FleetError(
             f"{label!r} already runs on {claude_accounts_core.label(target)} (slot {target.slot})"
         )
+    _refuse_a_replay_that_cannot_start(agent, session)
     stopped = stop(project, label)
     receipt, resumed, more = _respawn(
         project,
@@ -2014,9 +2034,28 @@ def _respawn(
         resume=resume,
         size=size,
         spec=agent.launch_spec,
+        # Only Claude Code's hooks write a board session (`agents connect`
+        # installs them for Claude Code alone): a row joined to one is Claude
+        # Code whatever its binary is called, resumed or `--fresh`.
+        claude_code=session is not None,
     )
     notes.extend(receipt.notes)
     return receipt, resume is not None, notes
+
+
+def _refuse_a_replay_that_cannot_start(agent: FleetAgent, session: TeamSession | None) -> None:
+    """Raise now what replaying ``agent``'s launch spec would refuse — BEFORE it is stopped.
+
+    :func:`restart` and :func:`switch` stop a running agent and only then
+    spawn its replacement, so a replay that ``_in_place_of_recorded`` refuses
+    — the recorded binary gone from the PATH, and today's resolution missing
+    or not the same kind of program — left the agent stopped and nothing
+    started. Asked here first, with the evidence :func:`_respawn` hands
+    :func:`spawn`, a running agent is left running.
+    """
+    spec = agent.launch_spec
+    if spec is not None and shutil.which(spec.binary) is None:
+        _in_place_of_recorded(agent.role, spec.binary, claude_code=session is not None, notes=[])
 
 
 @dataclass
@@ -2053,6 +2092,8 @@ def restart(
     transcript it starts new with a hand-off prompt built from the board.
     For the manager that is "end the dead row, then spawn manager again" — the
     fix the issue asks for — with the session carried over when it can be.
+    A replay that cannot start (:func:`_refuse_a_replay_that_cannot_start`) is
+    refused before anything is stopped.
     """
     with store_session() as store:
         agent = store.fleet_agent_by_label(project.id, label, live_only=False)
@@ -2068,6 +2109,7 @@ def restart(
             for event in store.recent_events(project.id, limit=60)
             if agent.session_id is not None and event.session_id == agent.session_id
         ]
+    _refuse_a_replay_that_cannot_start(agent, session)
     was_running = False
     if agent.ended_at is None:
         # Measured BEFORE the stop: `stop` on a pane that already died (a row no

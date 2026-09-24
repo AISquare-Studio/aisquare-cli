@@ -394,7 +394,10 @@ def _tell_panes(app: App[Any], what: str, tell: Callable[[TerminalPane], object]
     the gesture changed copies, so the last one told is the one the clipboard
     keeps: in hash order that was whichever pane happened to hash last (review
     of #120, round 11); in this order it is the highlight made most recently,
-    the one the copy key takes first (:func:`copy_pane_selection`).
+    the one the copy key takes first (:func:`copy_pane_selection`). The order
+    is stamped inside the write that changed a highlight
+    (:meth:`PaneScreen.watch_selections`), so a release routed straight after a
+    drag's last move reads that move (review of the #167 fold, F2).
     """
     try:
         screen = app.screen
@@ -499,7 +502,39 @@ class PaneScreen(Screen[None]):
     of #135, finding 10). Now a standing pane highlight is copied by the pane,
     from anywhere; only when no pane has one does Textual's copy run, and it
     never copies nothing.
+
+    It also keeps the clock the panes are ordered by (:meth:`watch_selections`).
     """
+
+    def watch_selections(self, old: dict[Widget, Selection], new: dict[Widget, Selection]) -> None:
+        """Stamp every pane whose highlight this write changed, as the write happens.
+
+        :attr:`TerminalPane.selected_at` orders the panes for a release
+        (:func:`_tell_panes`) and for the copy key. The pane used to stamp it
+        in ``selection_updated``, which Textual calls from
+        ``Screen._watch_selections`` — a coroutine, queued on this screen's
+        loop. A drag writes the selections inside ``App.on_event``, and a burst
+        routed its release before the watcher had run for the last move: the
+        release read the ticks of the gesture before, and copied the pane the
+        drag began in (review of the #167 fold, F2). A plain watcher runs
+        inside the assignment, so every stamp is in place before the next
+        event is handled.
+
+        One write can change two panes — the move that carries a drag across
+        into the next one — and Textual's own order for them is its set's. The
+        pane under the pointer is stamped last: the drag's end is there, and
+        the highlight it is still making is the newest.
+        """
+        changed = [
+            widget
+            for widget in old.keys() | new.keys()
+            if isinstance(widget, TerminalPane)
+            and new.get(widget) not in (None, SELECT_ALL)
+            and new.get(widget) != old.get(widget)
+        ]
+        pointer = self.app.mouse_position
+        for pane in sorted(changed, key=lambda pane: pane.region.contains_point(pointer)):
+            pane.stamp_selection()
 
     def action_copy_text(self) -> None:
         if copy_pane_selection(self.app):
@@ -891,7 +926,8 @@ class TerminalPane(Widget, can_focus=True):
         self._painting = False
         """Inside :meth:`render_lines`: rows are being painted, not read for offsets."""
         self._selected_at = 0
-        """When this pane's selection last changed, on :data:`_SELECTION_CLOCK`."""
+        """When this pane's selection last changed, on :data:`_SELECTION_CLOCK` — stamped
+        inside the write by :meth:`PaneScreen.watch_selections`."""
         # A tmux pane's links are the agent's, not Textual's: no hover highlight,
         # and no repaint of the whole pane when the pointer crosses one.
         self.auto_links = False
@@ -1539,6 +1575,14 @@ class TerminalPane(Widget, can_focus=True):
         and for a release (:func:`_tell_panes`)."""
         return self._selected_at
 
+    def stamp_selection(self) -> None:
+        """This pane's highlight was just written: it is now the newest.
+
+        Called by :meth:`PaneScreen.watch_selections` inside the write itself,
+        never from this widget's own watcher, which runs later (see there).
+        """
+        self._selected_at = next(_SELECTION_CLOCK)
+
     def has_standing_selection(self) -> bool:
         """Whether a highlight the copy key could take stands in this pane."""
         return self._own_selection() is not None
@@ -1575,17 +1619,14 @@ class TerminalPane(Widget, can_focus=True):
             return
         if selection is None:
             self._selection_bg = None
-        elif selection != self._painted_span:
-            # WHEN this pane's highlight last changed, for the copy key's order
-            # (rule 5). Textual tells every owner in the old and new dicts, so
-            # an unchanged entry is not a change and keeps its place.
-            self._selected_at = next(_SELECTION_CLOCK)
         # Nothing about participation is recorded here: Textual tells the union
         # of the old and new selection owners, this watcher runs asynchronously
         # — after the release was routed, under load — and every flag set from
         # it was found armed for the wrong gesture (reviews of #120, rounds 7
         # and 10; review of #135, findings 6 and 13). A release compares values
-        # instead (``selection_gesture_ended``).
+        # instead (``selection_gesture_ended``). WHEN the highlight changed, for
+        # the order of rule 5, went the same way: it is stamped inside the
+        # write, by ``PaneScreen.watch_selections`` (review of the #167 fold, F2).
         self._repaint_selection(selection)
 
     def _repaint_selection(self, selection: Selection | None) -> None:

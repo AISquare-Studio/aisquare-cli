@@ -4683,6 +4683,53 @@ def test_a_drag_across_two_panes_leaves_the_clipboard_with_the_highlight_the_cop
     assert up == ("d row\nthird row", "d row\nthird row"), up
 
 
+def test_a_drag_across_two_panes_posted_as_one_burst_copies_the_pane_it_ended_in(
+    fake: FakeTmux, tmp_path: Path
+) -> None:
+    """Review of the #167 fold, F2. The release tells the panes by
+    :attr:`~TerminalPane.selected_at`, which the pane stamped in Textual's
+    selection watcher — async, queued on the screen. A drag posted as one burst
+    is routed before that watcher runs, so its release read the ticks of the
+    gesture before; and a single move into the second pane writes both panes in
+    one call, which Textual makes in set order. Here each drag has that single
+    move and the release follows in the same burst, in both directions on one
+    host: whatever order the stale ticks or the set hold, one direction copied
+    the pane the drag began in. The copy key, pressed after, takes the same one."""
+    fake.panes["%2"] = FakePane(screen=["BBB one", "BBB two", "BBB three"], cursor=(0, 0))
+
+    async def drive() -> list[tuple[str, str]]:
+        host = PairHost(fake.server(tmp_path))
+        async with host.run_test(size=(40, 8)) as pilot:
+            top = host.query_one("#first", TerminalPane)
+            bottom = host.query_one("#second", TerminalPane)
+            await wait_until(pilot, lambda: synced(top) and synced(bottom))
+            results: list[tuple[str, str]] = []
+            for pressed_in, start, released_in, end in (
+                (top, (1, 1), bottom, (4, 1)),
+                (bottom, (3, 1), top, (5, 1)),
+            ):
+                for event in (
+                    mouse_event(events.MouseMove, pressed_in, start, 0),
+                    mouse_event(events.MouseDown, pressed_in, start, 1),
+                    mouse_event(events.MouseMove, released_in, end, 1),
+                    mouse_event(events.MouseUp, released_in, end, 1),
+                ):
+                    host.post_message(event)
+                await pilot.pause()
+                on_release = host.clipboard
+                host.set_focus(None)
+                await pilot.press("ctrl+c")
+                await pilot.pause()
+                results.append((on_release, host.clipboard))
+                host.screen.clear_selection()
+                await pilot.pause()
+            return results
+
+    down, up = run(drive())
+    assert down == ("BBB one\nBBB ", "BBB one\nBBB "), down
+    assert up == ("d row\nthird row", "d row\nthird row"), up
+
+
 def test_a_failed_frame_drops_the_highlight_on_the_row_its_notice_replaces(
     fake: FakeTmux, tmp_path: Path
 ) -> None:

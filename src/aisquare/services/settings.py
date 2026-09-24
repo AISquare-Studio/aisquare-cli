@@ -94,22 +94,30 @@ def bind_role(
     profile.args.extend(args)
     if clear_account:
         profile.account = None
-        if not (profile.bin or profile.env or profile.args):
-            # Clearing the only thing bound leaves no binding: the table goes, as
-            # `--clear` would take it, rather than an empty `[team.profiles.<role>]`
-            # that `launch._declared_roles` would read as an operator-declared role.
-            config.team.profiles.pop(role, None)
-    elif account is not None:
+    if account is not None:
+        # After the clear, never instead of it: an if/elif that read the clear
+        # first discarded the account and reported success (review of #205,
+        # finding 13). Both CLIs refuse the pair; this order keeps the service
+        # honest for any caller that does not.
         profile.account = account
+    if clear_account and account is None and not (profile.bin or profile.env or profile.args):
+        # Clearing the only thing bound leaves no binding: the table goes, as
+        # `--clear` would take it, rather than an empty `[team.profiles.<role>]`
+        # that `launch._declared_roles` would read as an operator-declared role.
+        config.team.profiles.pop(role, None)
     save_config(config)
     return profile
 
 
-def role_account_bindings() -> dict[str, str]:
-    """Role → the account reference its binding names, for every role that names one."""
+def role_account_bindings(config: AppConfig | None = None) -> dict[str, str]:
+    """Role → the account reference its binding names, for every role that names one.
+
+    ``config`` is a caller's own read of the file, so a surface that needs other
+    sections too — the Settings tab — reads it once.
+    """
     return {
         role: profile.account
-        for role, profile in load_config().team.profiles.items()
+        for role, profile in (config or load_config()).team.profiles.items()
         if profile.account
     }
 

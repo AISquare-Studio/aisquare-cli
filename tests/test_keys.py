@@ -1,12 +1,15 @@
 """``core.keys``: every Textual key the pane forwards arrives in tmux's vocabulary.
 
-Two kinds of test. The table tests pin each row of docs/plans/fleet-tui.md §6
+Three kinds of test. The table tests pin each row of docs/plans/fleet-tui.md §6
 and the deliberate holes (a ``None`` for every key tmux would MISTYPE — it
-sends an unknown name as literal text). The real-tmux test (skipped without a
-``tmux`` on PATH) sends every name this module can emit into a raw-mode
-``cat -v`` pane and reads back what arrived: no name may come back spelled
-out, and ``Bogus`` must — the control that proves the read-back can see a
-mistyped name at all.
+sends an unknown name as literal text). The parser tests feed the BYTES a
+terminal sends into Textual's own ``XTermParser`` and translate what comes out,
+because the table's alt exception was once written against hand-built events
+the parser never produces and promised chords no terminal could reach (review
+of #135). The real-tmux test (skipped without a ``tmux`` on PATH) sends every
+name this module can emit into a raw-mode ``cat -v`` pane and reads back what
+arrived: no name may come back spelled out, and ``Bogus`` must — the control
+that proves the read-back can see a mistyped name at all.
 """
 
 from __future__ import annotations
@@ -18,14 +21,17 @@ import re
 import shutil
 import string
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
+from textual import _parser, events
+from textual._xterm_parser import XTermParser
 
 from aisquare.core.keys import (
     CHORDS,
     CTRL_PUNCTUATION,
+    ESC_INTRODUCERS,
     EXTENDED_MINIMUM,
     MAX_FUNCTION_KEY,
     NO_CTRL,
@@ -148,6 +154,144 @@ def test_keys_tmux_would_mistype_are_dropped(textual: str) -> None:
     assert translate(textual, None, printable=False) is None
 
 
+# --- what the parser really delivers ---------------------------------------------------
+
+Parse = Callable[[str], list[events.Key]]
+
+
+@pytest.fixture
+def parsed(monkeypatch: pytest.MonkeyPatch) -> Parse:
+    """The key events Textual 8.2.8's ``XTermParser`` emits for a byte sequence.
+
+    A lone ``ESC`` prefix is resolved by a timeout the parser reads off a clock;
+    the clock is faked and jumped past ``ESCAPE_DELAY`` after the feed, so an
+    ``ESC p`` resolves to its alt chord without the test waiting for it.
+    """
+    clock = [0.0]
+    monkeypatch.setattr(_parser, "get_time", lambda: clock[0])
+
+    def parse(sequence: str) -> list[events.Key]:
+        parser = XTermParser()
+        tokens = list(parser.feed(sequence))
+        clock[0] += 10.0
+        tokens += list(parser.tick())
+        return [token for token in tokens if isinstance(token, events.Key)]
+
+    return parse
+
+
+def arrived(sequence: str, parse: Parse, *, extended: bool = True) -> list[Translation | None]:
+    """What tmux is handed for each key the parser makes of ``sequence``."""
+    return [
+        translate(event.key, event.character, printable=event.is_printable, extended_keys=extended)
+        for event in parse(sequence)
+    ]
+
+
+def test_the_parser_fixture_resolves_a_lone_escape_and_a_plain_letter(parsed: Parse) -> None:
+    """The control on the fixture: if the clock did not fire, every alt test
+    below would be about an empty list."""
+    [esc] = parsed("\x1b")
+    assert (esc.key, esc.character) == ("escape", "\x1b")
+    [letter] = parsed("p")
+    assert (letter.key, letter.character, letter.is_printable) == ("p", "p", True)
+
+
+@pytest.mark.parametrize("letter", [c for c in string.ascii_lowercase if c not in "bf"])
+def test_a_legacy_alt_letter_reaches_the_agent_as_the_chord(parsed: Parse, letter: str) -> None:
+    """``ESC p`` — what xterm, VTE, Windows Terminal and tmux send for alt+p —
+    is ``Key("alt+p", "p")`` to the parser: printable, and the very event the
+    old "the text wins" rule typed as a bare letter."""
+    [event] = parsed("\x1b" + letter)
+    assert (event.key, event.character, event.is_printable) == (f"alt+{letter}", letter, True)
+    assert arrived("\x1b" + letter, parsed) == [key(f"M-{letter}")]
+
+
+def test_legacy_alt_b_and_alt_f_are_ctrl_arrows_to_the_parser(parsed: Parse) -> None:
+    """Textual's sequence table maps ``ESC b`` / ``ESC f`` to ctrl+left /
+    ctrl+right (iTerm's natural-editing keys) before this table sees them."""
+    assert arrived("\x1bb", parsed) == [key("C-Left")]
+    assert arrived("\x1bf", parsed) == [key("C-Right")]
+
+
+def test_a_legacy_alt_shift_letter_keeps_its_case_unless_it_is_an_introducer(
+    parsed: Parse,
+) -> None:
+    """``ESC A`` is alt+shift+a and travels as ``M-A``. ``ESC O`` and ``ESC P``
+    are the SS3 and DCS introducers — a Node readline reading ``ESC O`` then
+    ``A`` sees Up — so those chords are never spelled: the letter is typed."""
+    assert arrived("\x1bA", parsed) == [key("M-A")]
+    assert arrived("\x1bZ", parsed) == [key("M-Z")]
+    assert sorted(ESC_INTRODUCERS) == ["N", "O", "P"]
+    for letter in sorted(ESC_INTRODUCERS):
+        [event] = parsed("\x1b" + letter)
+        assert event.key == f"alt+shift+{letter.lower()}", "the premise: the parser sees a chord"
+        assert arrived("\x1b" + letter, parsed) == [literal(letter)], letter
+
+
+def test_legacy_alt_digits_and_alt_space_are_the_text_the_parser_makes_of_them(
+    parsed: Parse,
+) -> None:
+    """The half of the old exception no terminal could reach: ``ESC 1`` arrives
+    as ``¡`` and ``ESC SPACE`` as a plain space, with no alt token for this
+    table to act on. They travel as that text, as they always did — and the
+    docs may promise nothing more for a legacy terminal."""
+    for digit, glyph in zip("1234567890", "¡™£¢∞§¶•ªº", strict=True):
+        [event] = parsed("\x1b" + digit)
+        assert "alt" not in event.key and event.character == glyph, (digit, event.key)
+        assert arrived("\x1b" + digit, parsed) == [literal(glyph)]
+    [space] = parsed("\x1b ")
+    assert (space.key, space.character) == ("space", " ")
+    assert arrived("\x1b ", parsed) == [literal(" ")]
+    # ctrl+alt: the parser keeps the control character and loses the alt.
+    assert arrived("\x1b\x00", parsed) == [key("C-@")], "ctrl+alt+space is a NUL"
+    assert arrived("\x1b\x10", parsed) == [key("C-p")], "ctrl+alt+p is ctrl+p"
+
+
+def test_kitty_alt_chords_without_text_are_chords_digits_and_space_included(
+    parsed: Parse,
+) -> None:
+    """A kitty-protocol terminal that reports no text for an alt chord (alt held
+    on Linux) delivers ``Key("alt+1", None)``: no character, so the name table
+    answers — the only way ``M-1`` and ``M-Space`` are ever reached."""
+    assert arrived("\x1b[112;3u", parsed) == [key("M-p")]
+    assert arrived("\x1b[49;3u", parsed) == [key("M-1")]
+    assert arrived("\x1b[32;3u", parsed) == [key("M-Space")]
+    assert arrived("\x1b[32;7u", parsed) == [key("C-M-Space")]
+    assert arrived("\x1b[32;7u", parsed, extended=False) == [None], "below tmux 3.5: nothing"
+    assert arrived("\x1b[49;7u", parsed) == [None], "ctrl+alt+1: no name and nothing to type"
+    assert arrived("\x1b[97;4u", parsed) == [key("M-A")]
+    assert arrived("\x1b[111;4u", parsed) == [None], "alt+shift+o: an introducer, no text"
+
+
+def test_kitty_text_reports_drop_the_alt_token_before_this_table_sees_it(
+    parsed: Parse,
+) -> None:
+    """Where the terminal reports the text a key produced — macOS Option makes
+    alt+p a ``π`` — the parser drops the alt token and the text is typed: the
+    documented limit, pinned so the docs cannot promise past it."""
+    assert arrived("\x1b[112;3;112u", parsed) == [literal("p")]
+    assert arrived("\x1b[112;3;960u", parsed) == [literal("π")]
+    assert arrived("\x1b[49;3;49u", parsed) == [literal("1")]
+    assert arrived("\x1b[32;3;32u", parsed) == [literal(" ")]
+
+
+def test_a_kitty_meta_shift_letter_keeps_its_case(parsed: Parse) -> None:
+    """``CSI 97;34;65u`` parses as ``Key("meta+A", "A")`` — the uppercase base
+    and no shift token — and came out as a lowercase ``M-a`` (review of #135).
+    The introducers are the same exception here as on a legacy terminal."""
+    assert arrived("\x1b[97;34;65u", parsed) == [key("M-A")]
+    assert arrived("\x1b[112;34;80u", parsed) == [literal("P")]
+
+
+def test_super_and_shift_chords_through_the_parser(parsed: Parse) -> None:
+    assert arrived("\x1b[99;9;99u", parsed) == [None], "super+c: a command, dropped"
+    assert arrived("\x1b[97;2;65u", parsed) == [literal("A")], "shift+a: the text"
+
+
+# --- the table on its own ---------------------------------------------------------------
+
+
 def test_printable_input_is_literal_under_the_modifiers_tmux_can_carry() -> None:
     assert translate("a", "a", printable=True) == literal("a")
     assert translate("left_square_bracket", "[", printable=True) == literal("[")
@@ -170,15 +314,18 @@ def test_a_modifier_tmux_cannot_spell_drops_the_key_rather_than_typing_it() -> N
     assert translate("super+f5", None, printable=False) is None
 
 
-def test_alt_only_claims_the_ascii_letters_and_digits_that_were_measured() -> None:
-    """``str.isalnum`` is Unicode-aware, so an AltGr or accented layout — or
+def test_alt_only_claims_the_ascii_letters_that_were_measured() -> None:
+    """``str.isalpha`` is Unicode-aware, so an AltGr or accented layout — or
     Escape typed just before the character — put ``M-é`` and ``M-ф`` on the wire.
     Every name this module emits was measured against a real tmux and those
-    never were, so they stay the text they have always been (review)."""
+    never were, so they stay the text they have always been (review). A digit
+    with a printable character is text too: no parser delivers such an event
+    (the parser tests above), and the table invents no chord for one."""
     assert translate("alt+é", "é", printable=True) == literal("é")
     assert translate("alt+ф", "ф", printable=True) == literal("ф")
     assert translate("alt+٣", "٣", printable=True) == literal("٣")
     assert translate("alt+³", "³", printable=True) == literal("³")
+    assert translate("alt+1", "1", printable=True) == literal("1")
     assert translate("alt+p", "p", printable=True) == key("M-p")
 
 
@@ -189,11 +336,11 @@ def test_alt_chords_keep_their_modifier_even_when_the_character_is_reported() ->
     Code's alt+p (switch model) never fired. Reported 2026-09-02 / 2026-09-10."""
     assert translate("alt+p", "p", printable=True) == key("M-p")
     assert translate("meta+p", "p", printable=True) == key("M-p")
-    assert translate("alt+shift+p", "P", printable=True) == key("M-P")
+    assert translate("alt+shift+a", "A", printable=True) == key("M-A")
     assert translate("ctrl+alt+p", "p", printable=True) == key("C-M-p")
-    assert translate("alt+1", "1", printable=True) == key("M-1")
     # Without the character it always worked; it must keep working.
     assert translate("alt+p", None, printable=False) == key("M-p")
+    assert translate("alt+1", None, printable=False) == key("M-1")
 
 
 #: Names that are not names: an empty base, an empty modifier token, or both.
@@ -210,11 +357,12 @@ def test_a_malformed_key_name_types_its_character_and_names_nothing(key: str) ->
     assert translate(key, None, printable=False) is None
 
 
-#: Chords the table deliberately refuses a name for, with the character the
-#: terminal reported alongside them. A refusal is not a reason to swallow the
-#: keystroke: what travels is the text, which is what this module did before any
-#: chord exception existed. ``extended_keys=False`` is the tmux 3.2 floor, where
-#: the capability gate is the thing refusing.
+#: Chords the table deliberately refuses a name for, with a character reported
+#: alongside them. A refusal is not a reason to swallow the keystroke: what
+#: travels is the text, which is what this module did before any chord exception
+#: existed. ``extended_keys=False`` is the tmux 3.2 floor, where the capability
+#: gate is the thing refusing. Synthetic inputs — the parser tests above say
+#: which of these a terminal can actually send — pinning the RULE, not a promise.
 NO_SAFE_NAME = [
     ("ctrl+alt+1", "1", True),  # the shifted digit is layout-specific
     ("alt+shift+1", "1", True),
@@ -222,6 +370,8 @@ NO_SAFE_NAME = [
     ("alt+shift+space", " ", False),
     ("alt+shift+minus", "_", False),  # shifted punctuation, same gate
     ("alt+semicolon", ";", True),  # tmux's own argv separator
+    ("alt+shift+o", "O", True),  # ESC O is the SS3 introducer
+    ("meta+P", "P", True),  # ESC P is the DCS introducer
 ]
 
 
@@ -234,16 +384,15 @@ def test_a_chord_with_no_safe_name_still_types_its_character(
     assert translate(key, None, printable=False, extended_keys=extended) is None
 
 
-def test_alt_space_travels_as_the_chord_the_table_already_had_a_name_for() -> None:
-    """``SPECIAL``'s ``not (ctrl or alt)`` guard exists to emit ``M-Space`` when
-    alt is held, and could never fire: Textual reports ``Key("alt+space", " ")``,
-    a space is printable and is not alnum, so the printable rule returned it as
-    text. The same dead-branch shape this PR was written to fix for alt+letter,
-    on the one non-alnum key the table has a safe tmux name for (review)."""
-    assert translate("alt+space", " ", printable=True) == key("M-Space")
-    assert translate("meta+space", " ", printable=True) == key("M-Space")
-    # Without the character it always worked; it must keep working.
+def test_alt_space_is_a_chord_only_when_it_arrives_without_a_character() -> None:
+    """``SPECIAL``'s ``not (ctrl or alt)`` guard emits ``M-Space`` for an alt+space
+    event with no character — the shape a kitty-protocol terminal sends. A
+    legacy terminal's ``ESC SPACE`` never carries an alt token (the parser tests
+    above), so a printable ``alt+space`` is not an input that exists, and the
+    table does not invent a chord for it: the space is typed."""
     assert translate("alt+space", None, printable=False) == key("M-Space")
+    assert translate("meta+space", None, printable=False) == key("M-Space")
+    assert translate("alt+space", " ", printable=True) == literal(" ")
     # Alt is what makes it a chord: plain and ctrl+space stay the space they were.
     assert translate("space", " ", printable=True) == literal(" ")
     assert translate("ctrl+space", " ", printable=True) == literal(" ")

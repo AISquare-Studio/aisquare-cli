@@ -651,6 +651,38 @@ def test_a_config_that_does_not_parse_does_not_cost_the_notice(
     assert len(blocked) == 1 and blocked[0].startswith("coder-auth: auto mode is refusing")
 
 
+def test_a_refused_turn_that_ends_inside_a_hand_over_leaves_the_mark_and_the_claims(
+    isolated_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``fleet restart`` of a running agent — the way out the line names — and ``fleet
+    switch`` mark the session ``HANDOVER_STATE`` and type ``/exit``, which an agent
+    mid-turn runs once the turn is over. That turn's Stop can be the one at which the
+    refusals reach the threshold, and ``attention`` written over the mark had the
+    ``SessionEnd`` that follows release the claims the replacement was to inherit. The
+    line is said, once; the mark and the claims stay for the hand-over."""
+    paths.ensure_home()
+    _configure(tracing=True, modes={"coder": "auto"})
+    _launched(monkeypatch, traced=True)
+    project = _project(tmp_path / "repo")
+    team_service.activate(project.root)
+    _session(project, "sess-coder", _sized(tmp_path / "t" / "coder.jsonl", 137_000, refusals=5))
+    _fleet_agent(project, "sess-coder", label="coder-auth", role="coder")
+    task, _created = team_service.add_task("the task it holds", role="coder", cwd=project.root)
+    team_service.claim_task(task.id, session_ref="sess-coder")
+    with store_session() as store:  # what `restart` and `switch` write before the `/exit`
+        store.touch_session("sess-coder", state=team_service.HANDOVER_STATE)
+
+    assert hooks_service.turn_stopped(project.root, session_id="sess-coder") is None
+
+    assert _state("sess-coder") == team_service.HANDOVER_STATE
+    blocked = [text for kind, text in _events(project) if kind == auto_mode.EVENT_KIND]
+    assert len(blocked) == 1 and blocked[0].startswith("coder-auth: auto mode is refusing")
+    team_service.hook_session_end("sess-coder", project.root, reason="prompt_input_exit")
+    with store_session() as store:
+        held = store.get_task(task.id)
+    assert held is not None and held.status == "doing" and held.claimed_by == "sess-coder"
+
+
 def test_the_hook_never_raises_when_the_store_is_damaged(
     isolated_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

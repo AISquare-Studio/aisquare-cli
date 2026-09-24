@@ -139,6 +139,42 @@ whichever `target` names, and keys never cross between them.
 
 ---
 
+### The proxy sits beside the gateway
+
+`--proxy-url` is the deployment's **proxy**, not its gateway: same host, port
+**9443**. It is the one value in this runbook nobody can guess, and getting it
+wrong is silent — sessions launch, traffic goes somewhere else, and `doctor`
+used to call that green.
+
+Two ways not to get it wrong:
+
+- **In `asq`** — the Explainability tab's **Setup** form fills it in from the
+  gateway you type. Leave the proxy field blank. Three things about that form
+  worth knowing before the first press:
+  - The **deployment** field names the entry these settings belong to. It does
+    not move this machine to that deployment unless **make active** is ticked —
+    correcting prod's gateway from a machine on stg leaves the machine on stg,
+    and the toast says so.
+  - The **workspace key** goes to `~/.aisquare/explainability-key`, and that
+    file is read only for the default variable, `EXPLAINABILITY_API_KEY`. A
+    target that names its own **key variable** reads the shell, so the form
+    refuses a key typed beside a custom variable rather than writing it where
+    nothing will look.
+  - The **prefix** is a name: `nishil` becomes `nishil-{role}`. Braces are taken
+    off, and the toast quotes what was stored.
+- **On the command line** — pass it explicitly, as the examples above do.
+
+Either way, a gateway or proxy without a scheme (`stg.example`) is **refused**,
+not stored. It used to be accepted, after which the proxy lane read green over a
+gateway nothing could reach; the one writer both surfaces go through checks it
+now, so the CLI and the form give the same answer.
+
+Self-hosting with no proxy tier? Use your own, or the local sidecar at
+`http://127.0.0.1:9090`. The form suggests nothing for a loopback gateway,
+precisely so it cannot repoint you at a port with nothing on it — and nothing
+when a proxy is already configured for the target, its own or a deliberate
+top-level `proxy_url`.
+
 ## 5. Register your agent identities
 
 ```bash
@@ -242,6 +278,7 @@ proxy, including one on your own machine:
 
 ```bash
 aisquare explainability enable --proxy-url http://127.0.0.1:9090
+# (the local sidecar's own port — 9443 is the HOSTED convention and does not apply here)
 ```
 
 Reasons to: model traffic that must not leave the machine, or a self-hosted
@@ -282,11 +319,19 @@ whose Runs land somewhere else.
 | `401 Invalid API key` | Key belongs to a different deployment, or was rotated |
 | `409` / `not a registered identity` | Step 5 |
 | `explainability proxy: unreachable` | Wrong `--proxy-url`, or a local proxy that is not running |
+| `proxy … but it ships to <url> while target … is <url>` | **Red.** The proxy is alive and posting to another deployment — your Runs are landing there. Point this CLI at the target's proxy, or restart a local proxy with `EXPLAINABILITY_GATEWAY_URL` set to the target's gateway |
+| `proxy … a local proxy ships wherever EXPLAINABILITY_GATEWAY_URL pointed when it was started` | **Amber.** A local sidecar took its destination from the environment it was started with, which need not be your target, and it is too old to say. Restart it with `EXPLAINABILITY_GATEWAY_URL` set to the target's gateway, or point this CLI at the deployment's own proxy — the line spells it out |
+| `proxy … does not report a gateway and is not on <gateway>'s host` | **Amber**, and possibly not a fault: a deployment's own proxy behind another hostname looks exactly like another deployment's from here. Confirm on the proxy host what it was started with; a proxy that reports its gateway from `/health` clears this on its own |
+| `proxy … no gateway is configured for target` | **Amber.** Tracing is on and there is nothing to compare the proxy against — set `--gateway-url`. If the proxy reports where it ships, the line names that gateway and the command that adopts it |
+| `proxy … the gateway configured for target … is unusable` / `explainability config: … gateway needs a scheme` | The stored gateway is not a URL (`stg.example`, no scheme). `enable` and the form refuse this now; a hand-edited config or `EXPLAINABILITY_GATEWAY_URL` can still carry one. Store a full `https://` URL |
 | Everything green, nothing on the dashboard | The spool is not being drained — step 10 |
 | `… is temporarily unavailable (server error), so auto mode cannot determine the safety of Bash` on every tool call, while the chat itself keeps answering | Auto mode's **classifier** request failing behind the proxy — see the next section |
 
 `aisquare explainability status --json` is the machine-readable view, and the one
-to script a check against.
+to script a check against. Its exit code is non-zero when tracing is on and the
+proxy lane is **red** — the proxy would not take a session, or it is alive and
+reports that it ships to another deployment; amber exits 0, and
+`probe_severity` says which.
 
 ### Auto mode refuses every tool call behind the proxy
 

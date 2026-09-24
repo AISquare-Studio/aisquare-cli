@@ -353,8 +353,11 @@ def record_refusals(session_id: str) -> int:
     must change something) and ONE ``auto_mode_blocked`` line lands on the board
     naming the agent, the count and the way out. Never twice for a session: the
     refusals stay in the transcript, and a feed that repeats them every turn is
-    a feed nobody reads. Never raises — this runs inside the agent's hook, where
-    a failure may cost nothing but the notice.
+    a feed nobody reads. A session a hand-over has marked
+    (:data:`~aisquare.services.team.HANDOVER_STATE`) gets the line but keeps the
+    mark, which its ``SessionEnd`` needs to park the claims for the replacement.
+    Never raises — this runs inside the agent's hook, where a failure may cost
+    nothing but the notice.
 
     Only for a session LAUNCHED behind the proxy: untraced, the same sentence
     is a classifier call that failed at Anthropic, and a board line blaming the
@@ -394,7 +397,15 @@ def record_refusals(session_id: str) -> int:
 
                 step = _mode_step(agent.role, fleet_service.settings())
             store.set_meta(key, datetime.now(tz=UTC).isoformat())
-            store.mark_attention(session.id)
+            if session.state != team_service.HANDOVER_STATE:
+                # Never over a hand-over's mark: `fleet restart` of a running agent
+                # (the way out the line names) or `fleet switch` typed `/exit`, which
+                # waits for this turn to end, and `attention` written here had the
+                # `SessionEnd` that follows release the claims the replacement was to
+                # inherit — `hook_stop` and `hook_notification` leave the mark too.
+                # The line is still said, once: a resumed replacement keeps this
+                # session's id, and the refusals stay in its transcript's tail.
+                store.mark_attention(session.id)
             team_service._emit(
                 store,
                 session.project_id,

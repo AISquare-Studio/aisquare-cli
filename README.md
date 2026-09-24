@@ -700,7 +700,7 @@ removes exactly them):
 | `SessionStart` | inject orientation: snapshot pointers, context, team briefing |
 | `UserPromptSubmit` | capture the prompt; deliver the teammate delta; heartbeat |
 | `Stop` | mark the session waiting; renew its task leases |
-| `Notification` | flag **NEEDS YOU** on the board (permission prompts, idle) |
+| `Notification` | flag **NEEDS YOU** when a prompt needs a human (permission, elicitation); other notices are feed lines, the idle notice nothing |
 | `SessionEnd` | release claims, mark the session gone, final distill |
 
 Every hook is **fail-open**: any error is swallowed and the session
@@ -764,7 +764,8 @@ aisquare
 │                             [-- agent args]
 │                   ls [--all] · status · tell <label> <text> · stop <label> [--force]
 │                   restart <label> [--fresh] · switch <label> [--to A] [--fresh] [--reason R]
-│                   attach · reap [--all] [--server-down] · rename <codename> · pause · resume
+│                   shutdown [--all] [--yes] [--force] · attach · reap [--all] [--server-down]
+│                   rename <codename> · pause · resume
 │                   (all with [--project P]; spawn · tell · restart · switch · pause · resume
 │                   take [--as SESSION])
 ├── login [--no-browser] [--with-token] [--api-url URL] · logout · whoami

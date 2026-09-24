@@ -11,6 +11,7 @@ import shutil
 import string
 import sys
 from collections.abc import Callable, Container, Mapping, Sequence
+from datetime import UTC, datetime
 from importlib import metadata
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -42,6 +43,7 @@ from aisquare.services import claude_accounts as claude_accounts_service
 from aisquare.services import distill as distill_service
 from aisquare.services import explainability as explainability_service
 from aisquare.services import fleet as fleet_service
+from aisquare.services import settings as settings_service
 from aisquare.services import team as team_service
 from aisquare.services.ci_contract import DeliveryDescriptor
 
@@ -137,7 +139,16 @@ def doctor(
         _check_fleet_terminal(),
         *_experiment_checks(),
         *explainability_ops.checks(live=live, target_name=target),
+        # Leaves the machine (one usage request per account), so --live only (#146).
+        *_live_only(live, _claude_account_headroom_check),
     ]
+
+
+def _live_only(live: bool, check: Callable[[], DoctorCheck | None]) -> list[DoctorCheck]:
+    if not live:
+        return []
+    found = check()
+    return [found] if found is not None else []
 
 
 def _ok(name: str, detail: str) -> DoctorCheck:
@@ -716,13 +727,15 @@ def _claude_accounts_checks() -> list[DoctorCheck]:
     """
     managed = claude_accounts_core.managed_accounts()
     if not managed:
-        return []
+        # No added accounts, so no `claude-accounts` line — but a plain-claude
+        # session can still be parked on a usage limit (#146).
+        return _claude_account_limit_checks()
     statuses = [claude_accounts_service.describe(account) for account in managed]
     parts = [
         f"{status.account.slot} {status.identity.email if status.identity else 'not signed in'}"
         for status in statuses
     ]
-    detail = f"{len(statuses)} added beside the default: " + " · ".join(parts)
+    detail = f"{len(statuses)} added beside the plain claude: " + " · ".join(parts)
     unsigned = [status.account.slot for status in statuses if not status.signed_in]
     if unsigned:
         return [
@@ -731,9 +744,206 @@ def _claude_accounts_checks() -> list[DoctorCheck]:
                 detail,
                 "Sign in from asq → Accounts, or: "
                 + "; ".join(f"aisquare accounts run {slot}" for slot in unsigned),
+            ),
+            *_claude_account_default_checks(),
+            *_claude_account_limit_checks(),
+        ]
+    return [
+        _ok("claude-accounts", detail),
+        *_claude_account_default_checks(),
+        *_claude_account_limit_checks(),
+    ]
+
+
+def _claude_account_limit_checks() -> list[DoctorCheck]:
+    """Agents parked on a usage limit (#146) — offline, from the board rows alone.
+
+    Gated on ``context.db`` existing like the default check: a doctor run
+    creates nothing. One line for the whole machine, naming each limited agent
+    and when its limit lifts, with the one command that moves it. Nothing when
+    no session is limited, so an idle machine's doctor output is unchanged.
+    """
+    if not paths.db_path().exists():
+        return []
+    try:
+        with store_session() as store:
+            projects = store.list_projects()
+            names = {p.id: p.codename or p.root.name or p.id for p in projects}
+            limited = [
+                (session, names[p.id])
+                for p in projects
+                for session in store.team_sessions(p.id)
+                if session.ended_at is None and session.state == "limited"
+            ]
+            labels = {}
+            for session, _project_name in limited:
+                agent = store.fleet_agent_for_session(session.project_id, session.id)
+                labels[session.id] = agent.label if agent is not None else session.id[:8]
+    except Exception:  # the database line reports a broken store
+        return []
+    if not limited:
+        return []
+    now = datetime.now(tz=UTC)
+    parts = []
+    for session, project_name in limited:
+        when = (
+            f"resets {claude_accounts_core.format_reset(session.limit_resets_at, now=now)}"
+            if session.limit_resets_at is not None
+            else "reset time unknown"
+        )
+        parts.append(f"{labels[session.id]} ({project_name}, {when})")
+    return [
+        _warn(
+            "claude-account-limits",
+            f"{len(limited)} agent(s) parked on a Claude usage limit: " + " · ".join(parts),
+            "Move one to an account with headroom: aisquare fleet switch <label>; or wait — "
+            "Claude Code continues by itself at the reset",
+        )
+    ]
+
+
+def _claude_account_headroom_check() -> DoctorCheck | None:
+    """``--live`` only: every enabled, signed-in account's five-hour window, against ``switch_at``.
+
+    Leaves the machine (the usage endpoint, one request per account), which is
+    why it runs only on ``doctor --live``. Warns when EVERY account is over the
+    line — a fleet about to stall with nowhere to switch to — and reports the
+    numbers otherwise so the operator can see them without opening the page.
+    ``None`` when there is nothing to measure (no signed-in account) — and
+    ``None`` before ``context.db`` exists, like its two siblings: the arranged
+    list is read through the store, and a doctor run must not create the home
+    it is diagnosing (``tests/test_doctor_does_not_create_state.py``; review
+    of #205, second round).
+    """
+    if not paths.db_path().exists():
+        return None
+    accounts = [
+        account
+        for account in claude_accounts_service.list_accounts()
+        if not account.disabled and claude_accounts_core.signed_in(account)
+    ]
+    if not accounts:
+        return None
+    settings = claude_accounts_service.accounts_settings()
+    readings = claude_accounts_service.read_usage(accounts)
+    measured = [
+        (account, reading.session_percent)
+        for account in accounts
+        if (reading := readings[account.slot]).available and reading.session_percent is not None
+    ]
+    unreadable = [
+        f"{claude_accounts_core.label(account)}: {readings[account.slot].reason or 'no reading'}"
+        for account in accounts
+        if account.slot not in {a.slot for a, _ in measured}
+    ]
+    summary = " · ".join(
+        f"{claude_accounts_core.label(account)} {pct:.0f}%" for account, pct in measured
+    )
+    if unreadable:
+        summary = (summary + " · " if summary else "") + "unreadable: " + "; ".join(unreadable)
+    if measured and all(pct >= settings.switch_at for _, pct in measured):
+        return _warn(
+            "claude-account-headroom",
+            f"every account is at or over {settings.switch_at}% of its five-hour window: {summary}",
+            "Add or sign in another account (aisquare accounts add), or wait for a reset — "
+            "a fleet spawned now has nowhere to switch to",
+        )
+    if not measured:
+        return _warn(
+            "claude-account-headroom",
+            f"no account's usage could be read: {summary}",
+            "Open a session on the account to refresh its token, then: aisquare accounts usage",
+        )
+    return _ok(
+        "claude-account-headroom",
+        f"five-hour windows ({settings.switch_at}% is the line): {summary}",
+    )
+
+
+def _claude_account_default_checks() -> list[DoctorCheck]:
+    """The arrangement (#145): is the account a launch will pick one that can launch?
+
+    Reads the registry only when ``context.db`` already exists — a doctor run
+    must not create the store (``tests/test_doctor_does_not_create_state.py``)
+    — and says nothing at all when no default, project default or role binding
+    has ever been set, so a machine that never arranged its accounts keeps the
+    doctor output it had. What it warns about is the class #145 exists for: a
+    default that is not signed in or is disabled launches Claude Code's login
+    screen (or the next rung down) instead of the account the operator meant,
+    and a binding or project default naming a removed slot refuses every
+    launch of that role or project with `unknown_account`.
+    """
+    if not paths.db_path().exists():
+        return []
+    try:
+        accounts = claude_accounts_service.list_accounts()
+        bindings = settings_service.role_account_bindings()
+        with store_session() as store:
+            per_project = store.project_settings(claude_accounts_service.PROJECT_ACCOUNT_KEY)
+            names = {
+                project_id: (project.root.name or project.id)
+                for project_id in per_project
+                if (project := store.get_project(project_id)) is not None
+            }
+    except Exception as exc:  # the database line says WHY the store is broken; this says the cost
+        return [
+            _warn(
+                "claude-account-default",
+                f"the accounts registry could not be read ({exc}) — launches run without a "
+                "default account",
+                "aisquare doctor  (the database line above says what is wrong with context.db)",
             )
         ]
-    return [_ok("claude-accounts", detail)]
+    by_slot = {account.slot: account for account in accounts}
+    default = next((account for account in accounts if account.is_default), None)
+    if default is None and not per_project and not bindings:
+        return []
+    checks: list[DoctorCheck] = []
+    if default is not None:
+        label = f"slot {default.slot} ({claude_accounts_core.label(default)})"
+        if default.disabled:
+            checks.append(
+                _warn(
+                    "claude-account-default",
+                    f"the machine default is {label} and it is disabled — launches skip it",
+                    f"aisquare accounts enable {default.slot}, or pick another: "
+                    "aisquare accounts default <slot>",
+                )
+            )
+        elif not claude_accounts_core.signed_in(default):
+            checks.append(
+                _warn(
+                    "claude-account-default",
+                    f"the machine default is {label} but it is not signed in — a launch "
+                    "would open Claude Code's login instead of the account you meant",
+                    f"aisquare accounts run {default.slot} and sign in, or pick another: "
+                    "aisquare accounts default <slot>",
+                )
+            )
+        else:
+            checks.append(_ok("claude-account-default", f"machine default: {label}"))
+    dangling: list[str] = []
+    for project_id, raw in per_project.items():
+        if not raw.isdigit() or int(raw) not in by_slot:
+            dangling.append(f"project {names.get(project_id, project_id)} → slot {raw}")
+    for role, ref in bindings.items():
+        try:
+            # Against the list in hand: `resolve` re-opened the store and rescanned
+            # the directories once per binding (review of #205, fourth round).
+            claude_accounts_service._resolve_in(accounts, ref)
+        except claude_accounts_service.AccountsError:
+            dangling.append(f"role {role} → {ref}")
+    if dangling:
+        checks.append(
+            _warn(
+                "claude-account-bindings",
+                "these name an account this machine does not have, so their launches are "
+                "refused: " + "; ".join(dangling),
+                "aisquare accounts default --clear --project <project>, or "
+                "aisquare team bind <role> --clear-account",
+            )
+        )
+    return checks
 
 
 # --- system tools the fleet needs (docs/plans/fleet-tui.md §5 "Doctor", §8.2) ---------

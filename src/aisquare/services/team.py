@@ -19,6 +19,7 @@ import os
 import re
 import sqlite3
 import sys
+from collections.abc import Mapping
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -78,6 +79,15 @@ CLEAR_REASON = "clear"
 does not — and the ``SessionStart`` of the id that follows comes AFTER this end
 (measured on 2.1.272). See rule 2 in the fleet-row section below."""
 
+HANDOVER_STATE = "switching"
+"""The ``team_session.state`` ``fleet switch`` sets before it ``/exit``s an agent that is
+about to start again under another account (#146): its ``SessionEnd`` then parks the
+claims, as a ``/clear`` does, instead of releasing them (review of #205, finding 6) —
+for the SAME id when the replacement resumes the session, for the replacement's new
+id to take over when it starts fresh (fourth round). Transient — a resumed session's
+start hook writes ``working`` over it, a fresh start retires the old presence — and
+unknown to ``fleet._derive``, which falls back to the pane."""
+
 #: A numbered SEAT: a first-class role with a crew index glued on — ``coder1``,
 #: ``reviewer2``. ``cli/launch.py`` accepts these because crews run several agents
 #: in one role and need them apart on the board; the base is derived by stripping
@@ -112,6 +122,10 @@ MANAGER_WAKE_KINDS: frozenset[str] = frozenset(
         "result",
         "question",
         "agent_exited",
+        # #146: an agent parked on a usage limit needs a decision (switch it, or
+        # wait), and the hand-over that moved one is news the manager acts on.
+        "limited",
+        "switched",
     }
 )
 
@@ -427,19 +441,47 @@ def session_account(transcript_path: str | None) -> str | None:
     return os.environ.get("CLAUDE_CONFIG_DIR", "").strip() or None
 
 
-def account_label(account: str | None) -> str | None:
+def slot_labels_via(store: ContextStore) -> Mapping[int, str]:
+    """Slot → label through the caller's OWN store handle, for a board rendered inside a hook.
+
+    The alias everywhere (review of #205, finding 10 and third round) — but a
+    hook renders the board while it holds a session with pending writes, and a
+    second connection opened underneath would wait on that write until the
+    busy timeout, so the labels are read through the handle it already has.
+    Fails open to ``{}``: ``account N`` is the fallback everywhere.
+    """
+    from aisquare.services import claude_accounts as accounts_service  # lazy: no import cycle
+
+    try:
+        return accounts_service.slot_labels(store=store)
+    except Exception:
+        return {}
+
+
+def account_label(account: str | None, labels: Mapping[int, str] | None = None) -> str | None:
     """The short display form of an account.
 
-    ``account N`` for a slot the CLI owns, the directory name otherwise. A
-    managed slot's directory is named by its number alone
-    (``…/claude-accounts/2``), and a bare ``[2]`` beside a session row would
-    read as a count.
+    The slot's label from ``labels`` (``services.claude_accounts.slot_labels``:
+    the alias when one is set) when the caller has them, else the built-in
+    name — ``plain claude`` for slot 1, ``account N`` for a managed slot — and
+    the directory name for one the CLI does not own. A managed slot's
+    directory is named by its number alone (``…/claude-accounts/2``), and a
+    bare ``[2]`` beside a session row would read as a count. Slot 1 is the
+    plain claude's own directory, which ``managed_slot`` does not know, so the
+    slot is read with ``slot_of``: through ``managed_slot`` alone an aliased
+    slot 1 was ``.claude`` on the board and in ``watch`` while ``fleet ls``
+    and the agent header said its alias (review of #205, fourth round).
     """
     if not account:
         return None
-    slot = claude_accounts_core.managed_slot(account)
+    from aisquare.services import claude_accounts as accounts_service  # lazy: no import cycle
+
+    slot = accounts_service.slot_of(account)
     if slot is not None:
-        return f"account {slot}"
+        named = (labels or {}).get(slot)
+        if named:
+            return named
+        return "plain claude" if slot == claude_accounts_core.DEFAULT_SLOT else f"account {slot}"
     return Path(account).name
 
 
@@ -1407,6 +1449,7 @@ def hook_session_start(
             store.recent_events(project.id, limit=_BOARD_EVENTS),
             me=session,
             assigned=assigned,
+            labels=slot_labels_via(store),
         )
 
 
@@ -1460,6 +1503,7 @@ def hook_prompt_heartbeat(
                 store.recent_events(project.id, limit=_BOARD_EVENTS),
                 me=session,
                 assigned=assigned,
+                labels=slot_labels_via(store),
             )
         # Same check as session_start, on the path that actually runs every turn.
         # It must survive the empty-delta early return below: a collision warning
@@ -1668,6 +1712,124 @@ def hook_notification(session_id: str, cwd: Path | None, message: str | None) ->
             )
 
 
+@dataclass(frozen=True)
+class TurnFailure:
+    """What :func:`hook_stop_failure` recorded: the session, the error, and — for a
+    usage limit — what the message said about the reset."""
+
+    session: TeamSession
+    error: str
+    notice: claude_accounts_core.LimitNotice | None
+    already_limited: bool = False
+    """The row was ``limited`` before this hook fired: Claude Code re-fires
+    ``StopFailure`` for the same window, and a second firing must start no second
+    hand-over (review of #205, second round)."""
+
+    @property
+    def limited(self) -> bool:
+        return self.error == "rate_limit"
+
+
+def hook_stop_failure(
+    session_id: str,
+    *,
+    error: str | None,
+    message: str | None,
+    details: str | None,
+) -> TurnFailure | None:
+    """The turn ended on an API error — Claude Code's ``StopFailure`` (#146).
+
+    ``rate_limit`` is the one that matters: a subscription's allowance ran out
+    (``You've hit your session limit · resets 12:30am (America/Toronto)``, the
+    text the hook hands over as ``last_assistant_message``), or an API key was
+    throttled. Either way the agent can do nothing until something changes, so
+    the row is parked as ``limited`` with the reset time the message named
+    (``core.claude_accounts.parse_limit_notice``; ``None`` when it named none),
+    a ``limited`` event goes on the feed ON THE TRANSITION only — Claude Code
+    can fire the hook again for the same window — and a waiting manager is
+    nudged (§7.3 path 2), the event kind being a wake kind for its own Stop.
+
+    Every other error (``overloaded``, ``authentication_failed``,
+    ``billing_error``…) ends the turn like a Stop would — the row says
+    ``waiting``, unless ``fleet switch`` has marked it :data:`HANDOVER_STATE` —
+    with a ``turn_failed`` feed line naming it, so the board does not show a
+    session as mid-turn for thirty minutes because its turn died.
+    """
+    if not orchestrator.team_enabled():
+        return None
+    kind = (error or "unknown").strip() or "unknown"
+    text = (message or details or kind).strip()
+    with store_session() as store:
+        session = store.get_session(session_id)
+        if session is None:
+            return None
+        if kind != "rate_limit":
+            # Not over a hand-over's mark either (the `rate_limit` branch below
+            # keeps it too): an `overloaded` landing while `fleet switch` waits
+            # for the `/exit` wrote `waiting` over it, and the SessionEnd that
+            # follows released the claims the replacement was to inherit
+            # (review of #205, fourth round). The feed line still goes out.
+            if session.state != HANDOVER_STATE:
+                store.touch_session(session.id, state="waiting")
+            _emit(
+                store, session.project_id, "turn_failed", f"{kind}: {text}", session_id=session.id
+            )
+            refreshed = store.get_session(session.id) or session
+            return TurnFailure(refreshed, kind, None)
+        notice = claude_accounts_core.parse_limit_notice(message, now=_now())
+        # A row `fleet switch` has marked HANDOVER_STATE is already handled: a
+        # re-fire during the hand-over must neither start a second worker nor
+        # write `limited` over the mark — its SessionEnd would then release the
+        # claims the resume was to inherit (review of #205, third round).
+        already_limited = session.state in ("limited", HANDOVER_STATE)
+        if session.state != HANDOVER_STATE:
+            store.mark_limited(session.id, notice.resets_at if notice is not None else None)
+        agent = store.fleet_agent_for_session(session.project_id, session.id)
+        label = agent.label if agent is not None else (session.label or short_id(session.id))
+        if not already_limited:
+            _emit(
+                store,
+                session.project_id,
+                "limited",
+                _limited_text(label, text, notice, fleet=agent is not None),
+                session_id=session.id,
+            )
+        refreshed = store.get_session(session.id) or session
+    if not already_limited:
+        # After the row says limited, never before, and outside the `with`
+        # (it opens its own connection): path 2 types into a WAITING manager;
+        # a working one reads the event on its next delta or its own Stop.
+        _nudge_manager(session.project_id, reason=f"{label} hit its usage limit")
+    return TurnFailure(refreshed, kind, notice, already_limited=already_limited)
+
+
+def _limited_text(
+    label: str, message: str, notice: claude_accounts_core.LimitNotice | None, *, fleet: bool
+) -> str:
+    """The feed line: what stopped, when it lifts, and the one command that moves it."""
+    if notice is None:
+        head = f"{label} is rate limited: {message}"
+    else:
+        head = f"{label} hit its {notice.window} limit"
+        if notice.resets_at is not None:
+            # The one formatter (#152; review of #205, finding 9).
+            head += f" · resets {claude_accounts_core.format_reset(notice.resets_at, now=_now())}"
+    if fleet:
+        head += (
+            f" — `aisquare fleet switch {label}` moves it to the account with the most headroom"
+            " (or wait for the reset)"
+        )
+    return head
+
+
+def hook_note(project_id: str, text: str, *, session_id: str | None = None) -> None:
+    """A plain feed note from a hook — what a hand-over decided, and why (#146)."""
+    if not orchestrator.team_enabled():
+        return
+    with store_session() as store:
+        _emit(store, project_id, "note", text, session_id=session_id)
+
+
 def hook_session_end(session_id: str, cwd: Path | None, *, reason: str | None = None) -> None:
     """Mark the session ended and release its claims — unless a fleet agent is only clearing.
 
@@ -1694,6 +1856,13 @@ def hook_session_end(session_id: str, cwd: Path | None, *, reason: str | None = 
         # presence view. Released claims are real work signals and do go out;
         # a clear releases nothing, so it says nothing.
         if reason == CLEAR_REASON and _clearing_its_own_pane(store, session):
+            store.end_session(session.id, release_claims=False)
+        elif session.state == HANDOVER_STATE and _handing_over_a_fleet_row(store, session):
+            # A hand-over (``fleet switch``): the agent starts again on another
+            # account moments from now — the SAME id resumed, or a fresh one
+            # that takes the claims over — so they wait for it exactly as a
+            # /clear parks them. ``switch`` releases them itself should the
+            # replacement never start (review of #205, finding 6).
             store.end_session(session.id, release_claims=False)
         else:
             released = _release_session(store, session, why="session ended")
@@ -1935,7 +2104,11 @@ def render_board(
     events: list[TeamEvent],
 ) -> str:
     """The human/board view (``asq board``), without the protocol contract."""
-    return _render_board(project, sessions, tasks, events, me=None)
+    from aisquare.services import claude_accounts as accounts_service  # lazy: no import cycle
+
+    return _render_board(
+        project, sessions, tasks, events, me=None, labels=accounts_service.slot_labels()
+    )
 
 
 def _render_board(
@@ -1946,6 +2119,7 @@ def _render_board(
     *,
     me: TeamSession | None,
     assigned: Assignment | None = None,
+    labels: Mapping[int, str] | None = None,
 ) -> str:
     now = _now()
     lines = ["<aisquare-team>"]
@@ -1965,7 +2139,7 @@ def _render_board(
             parts = [f"  - {short_id(session.id)} {session.role}"]
             if me is not None and session.id == me.id:
                 parts.append("(you)")
-            label = account_label(session.account)
+            label = account_label(session.account, labels)
             # Only worth the noise once several accounts are actually in play.
             if label and accounts > 1:
                 parts.append(f"[{label}]")
@@ -2194,6 +2368,15 @@ def _adopt(store: ContextStore, agent: FleetAgent, session_id: str) -> bool:
         return False
     lease = _now() + timedelta(minutes=orchestrator.lease_minutes())
     return store.adopt_fleet_agent_session(agent.id, agent.session_id, session_id, lease)
+
+
+def _handing_over_a_fleet_row(store: ContextStore, session: TeamSession) -> bool:
+    """Whether ``session`` is a live fleet row's — the premise of parking its claims for the
+    replacement. Fail-open towards RELEASING, like :func:`_clearing_its_own_pane`."""
+    try:
+        return _fleet_row_for(store, session.id, session.project_id) is not None
+    except Exception:
+        return False
 
 
 def _clearing_its_own_pane(store: ContextStore, session: TeamSession) -> bool:

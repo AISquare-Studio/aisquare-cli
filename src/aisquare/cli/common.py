@@ -16,6 +16,7 @@ from rich.table import Table
 
 from aisquare.core import paths
 from aisquare.core import snapshot as snapshot_core
+from aisquare.core.claude_accounts import format_reset as _format_reset
 from aisquare.core.config import AppConfig
 from aisquare.core.console import stderr_console, stdout_console
 from aisquare.core.state import get_state
@@ -62,6 +63,12 @@ def refuse_conflicting_scope(every: bool, project: str | None) -> None:
 def local_time(value: datetime) -> datetime:
     """A stored (UTC) timestamp in the user's local timezone, for display."""
     return value.astimezone()
+
+
+# The formatter itself lives in core (``core.claude_accounts.format_reset``) so the
+# services — the board's ``limited`` line, the agent detail, doctor — render a reset
+# the same way the two account surfaces do; re-exported here, where they import it.
+format_reset = _format_reset
 
 
 def resolve_pool(user: bool, project: bool) -> Pool | None:

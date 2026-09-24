@@ -289,6 +289,21 @@ def _post_run_root(
     return RootReceipt(posted=verdict.ok, detail=verdict.detail)
 
 
+def _resumed_session_id(value: str) -> str:
+    """The id behind ``--resume``: the value itself, or the stem of a transcript path.
+
+    ``claude --resume`` takes a session id OR the absolute path of its
+    transcript, ``<config-dir>/projects/<cwd-slug>/<session-id>.jsonl`` — the
+    form a fleet hand-over passes. Read as an id, the path keyed the Run to a
+    filename while the hooks recorded the real uuid, and the board-to-Run join
+    broke for every switched agent (review of #205, finding 4).
+    """
+    name = os.path.basename(value)
+    if name.endswith(".jsonl") and len(name) > len(".jsonl"):
+        return name[: -len(".jsonl")]
+    return value
+
+
 def _flag_value(args: Sequence[str], flag: str) -> tuple[bool, str | None]:
     """``(flag is present, its value)`` for ``--flag value`` and ``--flag=value``.
 
@@ -420,7 +435,7 @@ def plan_session_identity(binary: str, args: Sequence[str]) -> SessionIdentity:
         present, value = _flag_value(args, flag)
         if present:
             if value is not None:
-                return SessionIdentity(value)
+                return SessionIdentity(_resumed_session_id(value))
             return SessionIdentity(None, note=f"{flag} picks the session at run time")
     for flag in _CONTINUE_FLAGS:
         if flag in args:

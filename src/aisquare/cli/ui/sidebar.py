@@ -60,6 +60,7 @@ STATE_CHIP: dict[str, tuple[str, str]] = {
     "working": ("▶", "green"),
     "waiting": ("⏸", "yellow"),
     "attention": ("🔔", "bold red"),
+    "limited": ("⏳", "magenta"),
     "exited": ("💤", "dim"),
     "lost": ("✗", "red"),
     "unknown": ("·", "dim"),
@@ -67,8 +68,9 @@ STATE_CHIP: dict[str, tuple[str, str]] = {
 CUSTOM_ROLE_ICON = "🤖"
 """The icon for a role the table above does not know (a `team bind` role, say)."""
 
-ALIVE_STATES: frozenset[str] = frozenset({"working", "waiting", "attention", "unknown"})
-"""States that count toward the card's "agents alive" chip."""
+ALIVE_STATES: frozenset[str] = frozenset({"working", "waiting", "attention", "limited", "unknown"})
+"""States that count toward the card's "agents alive" chip — a limited agent is
+alive and parked (#146), not gone."""
 
 DOCTOR_LINES = 3
 """How many ⚠/✗ lines the Doctor section shows under its counts (§4.1)."""

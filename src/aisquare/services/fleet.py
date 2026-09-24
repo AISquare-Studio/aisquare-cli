@@ -42,6 +42,7 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any
 
+from aisquare.core import claude_accounts as claude_accounts_core
 from aisquare.core import codenames, harness, orchestrator, selfcli
 from aisquare.core import tmux as tmux_core
 from aisquare.core.config import FleetRoleSettings, FleetSettings, load_config
@@ -55,6 +56,7 @@ from aisquare.models import (
     FleetAgentState,
     FleetAgentStatus,
     ProjectInfo,
+    TeamEvent,
     TeamSession,
     TeamTask,
 )
@@ -122,6 +124,7 @@ _BOARD_STATES: dict[str, FleetAgentState] = {
     "working": "working",
     "waiting": "waiting",
     "attention": "attention",
+    "limited": "limited",
 }
 
 
@@ -151,6 +154,36 @@ class FleetInterrupted(FleetError):
     def __init__(self, report: ShutdownReport) -> None:
         super().__init__(report.interrupted or "shutdown interrupted")
         self.report = report
+
+
+@dataclass(frozen=True)
+class ResumeSpec:
+    """Start the window on an EXISTING Claude session rather than a fresh one (#146).
+
+    ``claude --resume <absolute transcript path>`` (Claude Code ≥ 2.1.223 finds a
+    session by its ``.jsonl`` wherever it lives) keeps the original session id,
+    so the fleet row is joined to the same board session the agent already had:
+    its claims, its cursor and its notes carry on. ``session_id`` is that id,
+    recorded on the row up front rather than learned from the first hook.
+    """
+
+    session_id: str
+    transcript_path: Path
+
+
+@dataclass(frozen=True)
+class SwitchReceipt:
+    """What ``fleet switch`` did: the agent it stopped, the one it started, and how."""
+
+    stopped: FleetAgent
+    started: FleetAgent
+    from_slot: int | None
+    to_slot: int
+    resumed: bool
+    """True when the replacement resumed the old session's transcript; False when it
+    started fresh with a hand-off prompt built from the board."""
+    tmux_session: str
+    notes: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -204,7 +237,9 @@ class StopReceipt:
     to the pool. It used to reach that through a ``release_claims=False`` flag
     on ``stop`` and a second release of its own — two paths that had to agree
     the pane was dead, and a caller that forgot the flag double-released
-    (review of #203, round 4). One release, in ``stop``, reported here.
+    (review of #203, round 4). One release, in ``stop``, reported here — and
+    none under ``handover`` (``switch``), whose claims wait for the
+    replacement, so its ``released`` is empty whatever the session held.
     """
 
     agent: FleetAgent
@@ -944,7 +979,16 @@ def _derive(
     if session is not None and session.ended_at is None:
         fresh = now - session.last_seen_at <= _team()._STALE_AFTER
         board_state = _BOARD_STATES.get(session.state)
-        if fresh and board_state is not None:
+        if board_state == "limited":
+            # A parked agent fires no hook for as long as its limit lasts, which
+            # can be hours; the row is trusted until the reset it named has
+            # passed (plus a little), not for the ordinary stale window — after
+            # that, tmux's facts take over as for any quiet session (#146).
+            until = session.limit_resets_at
+            parked = until is not None and now <= until + _LIMIT_GRACE
+            if fresh or parked:
+                return "limited", _limit_detail(until, now)
+        elif fresh and board_state is not None:
             return board_state, None
     if not observed or pane is None:
         # tmux is WHY the state is unknown, and ``detail`` is "why the state is
@@ -954,6 +998,23 @@ def _derive(
         return "unknown", "tmux unavailable" if hooks is None else f"tmux unavailable; {hooks}"
     busy = pane.last_output is not None and now - pane.last_output <= ACTIVITY_WINDOW
     return ("working" if busy else "waiting"), hooks
+
+
+_LIMIT_GRACE = timedelta(minutes=10)
+"""How long past its named reset a ``limited`` row is still believed (the reset
+is a clock time from an error message; Claude Code's own continue lands shortly
+after it, and a session that continues turns ``working`` on its next prompt)."""
+
+
+def _limit_detail(until: datetime | None, now: datetime) -> str:
+    """``limit resets in 2h 10m (12:30)`` / ``limit resets in 2d (Mon 00:00)`` / ``usage limit``.
+
+    Through ``core.claude_accounts.format_reset``, the one formatter every
+    surface that shows a reset goes through (#152; review of #205, finding 9).
+    """
+    if until is None:
+        return "usage limit"
+    return f"limit resets {claude_accounts_core.format_reset(until, now=now)}"
 
 
 def _status(
@@ -1034,6 +1095,8 @@ def spawn(
     agent_args: Sequence[str] = (),
     spawned_by: str = "user",
     account: str | None = None,
+    resume: ResumeSpec | None = None,
+    takes_over: str | None = None,
 ) -> SpawnReceipt:
     """Start an agent for ``project`` in the fleet's tmux server and record it.
 
@@ -1055,6 +1118,9 @@ def spawn(
     environment, so a later spawn sets its own account and opt-out rather than
     inheriting the first spawn's, and a window the operator opens by hand keeps
     whatever the server had (review of #203, round 4).
+    ``account`` is resolved through the one account resolver (flag, role
+    binding, project default, machine default — #145) and the chosen slot is
+    both passed to ``launch`` as ``--account`` and recorded on the row.
 
     The row is written AFTER the window starts (``_record``: the window's
     ``pane_id`` is part of the row, and a label or cap race is settled against
@@ -1064,6 +1130,22 @@ def spawn(
     the agent (:func:`aisquare.cli.launch._await_fleet_row`), so a slow or
     locked store, a relabel or the cap check can delay the agent's start, never
     strip its briefing (review of #135, second round, cut item).
+
+    ``takes_over`` is a FRESH hand-over's (:func:`switch` with no transcript to
+    resume, or ``--fresh``; never with ``resume``): the id of the session the
+    agent ran as until now, whose claims wait for the replacement
+    (``team.HANDOVER_STATE``). The row is recorded on that id and then moved
+    onto the new session's minted id together with the claims, in one store
+    transaction — the move a ``/clear`` makes (:func:`_take_over`) — right
+    after the insert. The launcher waits for the row, not for that move, so
+    nothing ORDERS the move before the agent's first hook: in practice the hook
+    comes seconds later (the launcher is still starting ``claude``, whose hook
+    starts an interpreter of its own), and a start hook that does get there
+    first makes the move itself when it can prove the pane is its own (rule 1
+    of ``services.team``'s fleet-row section). One that cannot is briefed
+    without its ASSIGNED TO YOU block — ``_late_assignment`` does not re-brief
+    a bound row — and the hand-off prompt still names the task (review of
+    #205, fifth round: this used to promise the move came first).
     """
     config = settings()
     if not _role_ok(role):
@@ -1134,9 +1216,33 @@ def spawn(
         )
 
     mode = role_config.permission_mode if permission_mode is None else permission_mode
+    # WHICH ACCOUNT, decided here and carried into the window as an explicit
+    # `--account <slot>` (#145). The one resolver `launch` itself uses — flag,
+    # role binding, project default, machine default — runs HERE rather than
+    # only inside the window because the window's environment is the tmux
+    # server's, not the spawner's: a default of "slot 1" means THIS shell's
+    # claude, and only this process knows what that is (`carry_environment`
+    # below). It also lets the row record the slot before the agent has said a
+    # word, which a restart (#144) or a hand-over (#146) reads. An account the
+    # ladder names and the machine does not have refuses the spawn now, with
+    # the rung named, rather than starting a window that dies on its first line.
+    try:
+        choice = claude_accounts_service.choose(account, role=role, project=project)
+    except claude_accounts_service.NoSuchAccount as exc:
+        raise FleetError(str(exc)) from exc
+    notes.extend(f"accounts: {note}" for note in choice.notes)
     role_args = list(role_config.extra_args)
     extra = list(agent_args)
-    identity = explainability_service.plan_session_identity(resolution.binary, [*role_args, *extra])
+    if resume is not None:
+        # `--resume <transcript path>` keeps the ORIGINAL session id (#146), so
+        # the row is joined to it here rather than minted or learned later; the
+        # identity planner would otherwise read the path as the id.
+        extra = ["--resume", str(resume.transcript_path), *extra]
+        identity = explainability_service.SessionIdentity(resume.session_id)
+    else:
+        identity = explainability_service.plan_session_identity(
+            resolution.binary, [*role_args, *extra]
+        )
     if identity.session_id is None:
         notes.append(
             f"no board join for this agent ({identity.note}) — its state comes from tmux alone"
@@ -1160,11 +1266,11 @@ def spawn(
     if mode:
         flags += ["--permission-mode", mode]
     flags += list(identity.inject_args)
-    if account is not None:
-        # Carried to `launch`, which resolves the slot and sets the account's
-        # variables inside the window; a slot that does not exist fails there
-        # with `unknown_account`, exactly as a hand-typed launch would.
-        flags += ["--account", account]
+    if choice.account is not None:
+        # Carried to `launch` as the RESOLVED slot, so the window's own pass
+        # through the resolver lands on the same account whatever its
+        # environment says, and sets the account's variables there.
+        flags += ["--account", str(choice.account.slot)]
     flags += ["--name", picked]
     command = selfcli.argv_for(["launch", role, *flags, *role_args, *extra])
     env = {orchestrator.FLEET_AGENT_ENV_VAR: agent_id}
@@ -1177,7 +1283,7 @@ def spawn(
     # agent-forwarded key failed in silence. Set per window, the current values
     # win over the server's for this agent alone.
     env.update(tmux_core.desktop_environment())
-    if account is not None:
+    if choice.account is not None:
         # `launch --account 1` restores "this shell's" login, and inside the
         # window that shell would be whoever started the private server — so
         # the CALLER's aisquare home and account variables travel with the
@@ -1203,19 +1309,79 @@ def spawn(
         binary=resolution.binary,
         tmux_socket=config.tmux_socket,
         pane_id=window.pane_id,
-        session_id=identity.session_id,
+        # A fresh hand-over's row starts on the session whose claims it inherits,
+        # the state `_take_over` moves it out of (and the agent's own start hook
+        # would, should that move not happen).
+        session_id=takes_over if takes_over is not None else identity.session_id,
         cwd=cwd,
         worktree=use_worktree,
         task_id=resolved_task_id,
         spawned_by=spawned_by,
+        account_slot=choice.account.slot if choice.account is not None else None,
         created_at=_now(),
     )
     stored = _record(
         agent, project, srv, wanted=label, notes=notes, cap=config.max_agents_per_project
     )
+    if takes_over is not None and identity.session_id is not None:
+        stored = _take_over(stored, takes_over, identity.session_id, notes)
     if prompt:
         _type_prompt(srv, stored.pane_id, prompt, notes)
     return SpawnReceipt(agent=stored, asked_label=label, tmux_session=tmux_session, notes=notes)
+
+
+def _take_over(agent: FleetAgent, previous: str, session_id: str, notes: list[str]) -> FleetAgent:
+    """Move a fresh replacement's row, and the claims parked for it, onto its own session id.
+
+    The claims were ``previous``'s — the session the agent ran as before
+    :func:`switch` stopped it — and moving them is ``adopt_fleet_agent_session``,
+    the one transaction a ``/clear`` hands its claims over in (rule 2 of
+    ``services.team``'s fleet-row section): the row and the claims can never
+    disagree about who holds the work. The ``doing`` ones take a fresh lease.
+    ``previous``'s presence is retired FIRST, releasing nothing: its process
+    is dead (``stop`` verified the pane), and a kill fires no ``SessionEnd``,
+    so it would otherwise sit on the board as a session mid-switch. First, so
+    that a move the store refuses still leaves the state a ``/clear`` leaves
+    between its two hooks — an ended id whose claims wait for the start hook —
+    and not a live ``switching`` presence nothing retires before the prune
+    (review of #205, fifth round). A store that refuses the retirement itself
+    costs only the retirement: the move still runs, and a note says the old id
+    stays on the board until ``aisquare team prune`` retires it.
+
+    Fail-open, because the window is running and its row is recorded: a store
+    that refuses the move leaves the row on ``previous`` with the claims, and
+    the agent's own start hook moves them (the pane's process adopts its row);
+    the row ending releases them either way (``release_agent_claims`` reads the
+    row's session). The note says so.
+    """
+    lease = _now() + timedelta(minutes=orchestrator.lease_minutes())
+    try:
+        with store_session() as store:
+            parked = store.get_session(previous)
+            if parked is not None and parked.ended_at is None:
+                # The retirement is the board's courtesy and the move is the record.
+                # Each commits on its own, and a store that refuses the first must
+                # not cost the second (review of #205, sixth round). Said, though:
+                # the old id is otherwise a live session on the board with nothing
+                # to explain it (review of #205, seventh round).
+                try:
+                    store.end_session(previous, release_claims=False)
+                except sqlite3.Error as exc:
+                    notes.append(
+                        f"the previous session {_team().short_id(previous)} was not marked ended "
+                        f"({type(exc).__name__}: {exc}) — it shows on the board as a live "
+                        "session until `aisquare team prune` retires it"
+                    )
+            store.adopt_fleet_agent_session(agent.id, previous, session_id, lease)
+            current = store.get_fleet_agent(agent.id)
+    except Exception as exc:  # the row and the window stand; the start hook is the second door
+        notes.append(
+            "the previous session's claims were not moved to this one "
+            f"({type(exc).__name__}: {exc}) — the agent's start hook takes them over, "
+            "and they go back to the pool if its row ends first"
+        )
+        return agent
+    return current if current is not None else agent
 
 
 def _refuse_occupied_worktree(project: ProjectInfo, worktree_dir: str, label: str) -> None:
@@ -1520,19 +1686,25 @@ def stop(
     *,
     force: bool = False,
     grace: float = 5.0,
+    handover: bool = False,
 ) -> StopReceipt:
     """``/exit`` the agent named ``label``, wait ``grace`` seconds, then kill its window.
 
     Resolves the LIVE row by label and hands it to :func:`_stop_row`; the
-    documentation of what a stop is lives there.
+    documentation of what a stop is — and of ``handover`` — lives there.
     """
     with store_session() as store:
         agent = _live_agent(store, project, label)
-    return _stop_row(project, agent, force=force, grace=grace)
+    return _stop_row(project, agent, force=force, grace=grace, handover=handover)
 
 
 def _stop_row(
-    project: ProjectInfo, agent: FleetAgent, *, force: bool = False, grace: float = 5.0
+    project: ProjectInfo,
+    agent: FleetAgent,
+    *,
+    force: bool = False,
+    grace: float = 5.0,
+    handover: bool = False,
 ) -> StopReceipt:
     """``/exit`` the agent in ``agent``'s pane, wait ``grace`` seconds, then kill its window.
 
@@ -1542,6 +1714,17 @@ def _stop_row(
     manager spawned a new ``coder-1``) stop the new agent under the old one's
     turn, count it as stopped, and then record it lost as a late row too
     (review of the fold).
+
+    ``handover`` is :func:`switch`'s: the agent is about to start again under
+    another account — resuming the same session, or a fresh one that takes the
+    claims over — so the ended row's claims are not released (the session was
+    marked ``team.HANDOVER_STATE`` first, and its own ``SessionEnd`` parks them
+    the way a ``/clear`` does), no ``agent_exited`` goes out and the manager is
+    not nudged — ``switch`` closes the loop with ``switched``, a wake kind.
+    Released and announced here, a looper took the moving agent's task in the
+    gap and the manager respawned an agent that was on its way back (review of
+    #205, finding 6; the fresh start, fourth round). Its receipt's ``released``
+    is therefore empty: the claims are PARKED for the replacement, not returned.
 
     The agent's own ``SessionEnd`` hook releases its claims when it exits
     cleanly; ``force`` skips the ``/exit`` and goes straight to the kill — and
@@ -1678,12 +1861,17 @@ def _stop_row(
         # ``/clear``'s gap found the claims parked on the id that just ended
         # (review of #135, second round, finding 5). ONE release, here, in the
         # store session that ended the row; what it returned rides on the
-        # receipt for whoever counts it.
-        released, release_failed = _release_or_say(store, ended, why="agent stopped")
-        _emit_exit(store, ended)
+        # receipt for whoever counts it. A hand-over releases and announces
+        # nothing: the replacement inherits, and ``switch`` says ``switched``.
+        released: list[TeamTask] = []
+        release_failed: str | None = None
+        if not handover:
+            released, release_failed = _release_or_say(store, ended, why="agent stopped")
+            _emit_exit(store, ended)
     # Outside the store session, as ``reap`` does: the nudge types into a pane
     # and must not hold the write lock the woken manager's own hooks will want.
-    nudge_manager(ended.project_id, reason=f"{ended.label} exited")
+    if not handover:
+        nudge_manager(ended.project_id, reason=f"{ended.label} exited")
     return StopReceipt(ended, released, release_failed)
 
 
@@ -2680,6 +2868,265 @@ def _verify_gone(look: Callable[[], WindowInfo | None], label: str, cause: TmuxE
             "left live; try again, or `--force` once tmux is healthy"
         ) from cause
     return window.dead_status if window is not None else None
+
+
+def switch(
+    project: ProjectInfo,
+    label: str,
+    *,
+    to: str | None = None,
+    fresh: bool = False,
+    reason: str | None = None,
+    spawned_by: str = "user",
+    automatic: bool = False,
+) -> SwitchReceipt:
+    """Move a running agent to another Claude account — the hand-over of #146.
+
+    The target is ``to`` (a slot, alias or email) or, without it, HEADROOM
+    FIRST among the enabled, signed-in accounts that are NOT the one the agent
+    is on (``services.claude_accounts.choose_for_handover``): the role binding
+    and the project default are launch-time choices and do not get to send a
+    limited agent somewhere just as full. ``automatic`` is the hook's
+    hand-over: it takes only an account under ``switch_at`` and otherwise
+    refuses — the least-bad answer, applied twice, moved an agent between two
+    exhausted accounts for the whole window (review of #205, second round). A
+    manual switch keeps the least-bad answer and falls back to the ladder
+    (minus the account being left) when no usage can be read.
+
+    The agent is stopped the way ``fleet stop`` stops it (``/exit``, a grace,
+    then the kill) and started again under the same label, role, task and
+    worktree on the target account. When its transcript is on disk and
+    ``fresh`` is not asked, the replacement RESUMES it: ``claude --resume
+    <transcript path>`` keeps the session id, so the board row, its cursor, its
+    notes AND ITS CLAIMS carry on — the session is marked ``HANDOVER_STATE``
+    before the ``/exit``, so its own ``SessionEnd`` parks the claims for the
+    same id instead of releasing them, and ``stop`` announces no exit — and the
+    resumed agent is told, in one typed line, to continue (``claude --resume``
+    opens the conversation at an idle prompt; review of #205, findings 5 and 6).
+    Otherwise it starts fresh with a hand-off prompt built from the board — the
+    task, its detail, the session's last notes — and is told to read the board
+    and the working tree before continuing. A fresh start is a hand-over too:
+    the session is marked the same way, no exit is announced, and the claims
+    move onto the new session's id with the row (``spawn(takes_over=…)``).
+
+    Run from the automatic path it is a DETACHED worker, not the limited
+    agent's hook: inline, the ``/exit`` queued behind the still-running hook
+    and the window kill took the hook — and this function — down before
+    ``spawn`` ran (finding 1; ``services.hooks._detach``).
+
+    What is deliberately NOT promised: that Claude Code resumes a transcript
+    written under one ``CLAUDE_CONFIG_DIR`` from another. The path form is
+    documented and the id is preserved, but this machine has one login, so the
+    cross-account leg is unverified; a resume that fails leaves a pane whose
+    error is visible, and ``--fresh`` is the documented way around it.
+    """
+    with store_session() as store:
+        agent = _live_agent(store, project, label)
+        session = store.get_session(agent.session_id) if agent.session_id else None
+        task = store.get_task(agent.task_id) if agent.task_id else None
+        # The session's own newest entries (oldest first), not the project's last
+        # 60 filtered down: on a busy board those all belonged to other agents
+        # and the prompt lost its "last board entries" (review of #205, third round).
+        recent = (
+            store.filtered_events(project.id, session_id=agent.session_id, limit=_HANDOFF_NOTES)
+            if agent.session_id is not None
+            else []
+        )
+    current = _account_slot_of(agent, session)
+    notes: list[str] = []
+    # The accounts service decides, as for every launch
+    # (tests/test_one_account_resolver.py): `--to` is the flag rung; without it
+    # headroom decides first, with the account the agent is leaving excluded.
+    try:
+        choice = claude_accounts_service.choose_for_handover(
+            to,
+            role=agent.role,
+            project=project,
+            exclude=() if current is None else (current,),
+            automatic=automatic,
+        )
+    except claude_accounts_service.NoSuchAccount as exc:
+        raise FleetError(str(exc)) from exc
+    notes.extend(choice.notes)
+    if choice.account is None:
+        where = f" (it is on slot {current})" if current is not None else ""
+        if automatic:
+            raise FleetError(
+                f"no account under the line for {label!r}{where} — every other account is "
+                "over switch_at or unreadable; it stays parked until a reset, or "
+                "`aisquare fleet switch` moves it by hand ("
+                + "; ".join(note for note in choice.notes if note.startswith("headroom:"))
+                + ")"
+            )
+        # With the notes, like the automatic refusal above: what each rung skipped
+        # and why is the only account of how nothing was found (fourth round).
+        said = f" ({'; '.join(choice.notes)})" if choice.notes else ""
+        raise FleetError(
+            f"no other account with headroom for {label!r}{where}"
+            " — add or enable one (`aisquare accounts`), name one with --to, or wait for "
+            f"the reset{said}"
+        )
+    target = choice.account
+    if current is not None and target.slot == current:
+        raise FleetError(
+            f"{label!r} already runs on {claude_accounts_core.label(target)} (slot {target.slot})"
+        )
+    transcript = (
+        Path(session.transcript_path) if session is not None and session.transcript_path else None
+    )
+    resume: ResumeSpec | None = None
+    if not fresh and session is not None and transcript is not None and transcript.is_file():
+        resume = ResumeSpec(session.id, transcript)
+    elif not fresh:
+        notes.append(
+            "no transcript on disk to resume — the replacement starts fresh with a hand-off prompt"
+        )
+    if resume is not None:
+        prompt = _resume_prompt(agent, reason)
+    else:
+        prompt = _handoff_prompt(agent, task, recent, reason)
+    # A hand-over whether it resumes or not: the agent is coming back, so its
+    # claims wait for the replacement and no exit is announced. A fresh start
+    # used to stop the agent as `fleet stop` does — the task went back to the
+    # pool and `agent_exited` woke the manager while `spawn` was still starting
+    # the replacement, so a second worker took the same task (review of #205,
+    # fourth round). Resumed, the same id carries the claims on; started fresh,
+    # `spawn` moves them onto the new session's id (`takes_over`).
+    if session is not None:
+        _mark_handing_over(session)
+    try:
+        stopped = stop(project, label, handover=True).agent
+    except Exception:
+        if session is not None:
+            _unmark_handing_over(session)  # nothing ended: the session keeps its state
+        raise
+    try:
+        receipt = spawn(
+            project,
+            agent.role,
+            label=label,
+            task_id=agent.task_id,
+            worktree=agent.worktree,
+            prompt=prompt,
+            spawned_by=spawned_by,
+            account=str(target.slot),
+            resume=resume,
+            takes_over=session.id if resume is None and session is not None else None,
+        )
+    except Exception:
+        _abandon_handover(stopped)  # no replacement is coming for the parked claims
+        raise
+    notes.extend(receipt.notes)
+    from_name = f"slot {current}" if current is not None else "its shell's claude"
+    how = "resumed its session" if resume is not None else "started fresh with a hand-off prompt"
+    why = f" ({reason})" if reason else ""
+    # The suppression is entered FIRST: a store that cannot be opened is the courtesy
+    # lost too, never a moved agent reported as not moved (review of #205, fourth round).
+    with contextlib.suppress(Exception), store_session() as store:  # the courtesy, not the record
+        _team()._emit(
+            store,
+            project.id,
+            "switched",
+            f"{label} moved from {from_name} to {claude_accounts_core.label(target)} "
+            f"(slot {target.slot}){why} — {how}",
+            session_id=receipt.agent.session_id,
+        )
+    return SwitchReceipt(
+        stopped=stopped,
+        started=receipt.agent,
+        from_slot=current,
+        to_slot=target.slot,
+        resumed=resume is not None,
+        tmux_session=receipt.tmux_session,
+        notes=notes,
+    )
+
+
+def _account_slot_of(agent: FleetAgent, session: TeamSession | None) -> int | None:
+    """The slot an agent runs on: the row's (#145), else read off the session's config dir.
+
+    Reading where an agent already IS is not deciding where it goes — that is
+    ``choose``'s alone — which is why the config-dir lookup lives in the
+    accounts service rather than here.
+    """
+    if agent.account_slot is not None:
+        return agent.account_slot
+    if session is None or not session.account:
+        return None
+    return claude_accounts_service.slot_of(session.account)
+
+
+def _mark_handing_over(session: TeamSession) -> None:
+    """The session's own ``SessionEnd`` parks its claims for the replacement (rule 2)."""
+    with store_session() as store:
+        store.touch_session(session.id, state=_team().HANDOVER_STATE)
+
+
+def _unmark_handing_over(session: TeamSession) -> None:
+    with contextlib.suppress(Exception), store_session() as store:
+        store.touch_session(session.id, state=session.state)
+
+
+def _abandon_handover(stopped: FleetAgent) -> None:
+    """The replacement never started: release what was parked and record the exit withheld."""
+    with contextlib.suppress(Exception), store_session() as store:
+        _team().release_agent_claims(store, stopped, why="hand-over failed")
+        _emit_exit(store, stopped)
+    nudge_manager(stopped.project_id, reason=f"{stopped.label} exited")
+
+
+def _resume_prompt(agent: FleetAgent, reason: str | None) -> str:
+    """The first message of a RESUMED replacement — one line, so it is typed even past the wait.
+
+    ``claude --resume`` opens the old conversation at an idle prompt and waits
+    for input; without a line the "moved" agent never continued (review of
+    #205, finding 5). One line on purpose: :func:`_type_prompt` types a
+    single-line prompt past its timeout and refuses a multi-line one.
+    """
+    why = reason or "a usage limit"
+    return (
+        f"You are {agent.label}, moved to another Claude account after {why} and resumed "
+        "mid-task: re-read `aisquare board` and `git status`, then continue exactly where "
+        "you left off without redoing work that is already committed."
+    )
+
+
+_HANDOFF_NOTES = 5
+_HANDOFF_DETAIL = 600
+
+
+def _handoff_prompt(
+    agent: FleetAgent, task: TeamTask | None, recent: list[TeamEvent], reason: str | None
+) -> str:
+    """The first message of a FRESH replacement: who it is, what it inherits, where to look.
+
+    Built from the board rather than the model — the account that just ran out
+    is the one that cannot be asked for a summary (#146's own argument). Kept
+    short on purpose: the board and the working tree are the source of truth,
+    and the prompt points at them instead of retelling them.
+    """
+    lines = [
+        f"You are {agent.label}, taking over from a previous session of this agent that "
+        f"stopped on {reason or 'a usage limit'} under another Claude account.",
+    ]
+    if task is not None:
+        lines.append(f"Your task: {task.title} ({task.id}).")
+        if task.detail:
+            detail = task.detail.strip()
+            if len(detail) > _HANDOFF_DETAIL:
+                detail = detail[:_HANDOFF_DETAIL].rstrip() + " …"
+            lines.append(f"Contract: {detail}")
+    tail = recent[-_HANDOFF_NOTES:]
+    if tail:
+        lines.append("The previous session's last board entries:")
+        lines.extend(f"- {event.kind}: {event.text}" for event in tail)
+    lines.append(
+        "Start by reading `aisquare board`"
+        + (f" and `aisquare task show {task.id}`" if task is not None else "")
+        + ", then `git status` and `git log --oneline -5` in this directory; continue from "
+        "where the previous session left off and do not redo work that is already committed."
+    )
+    return "\n".join(lines)
 
 
 def reap(project: ProjectInfo | None = None, *, server_down: bool = False) -> ReapReport:

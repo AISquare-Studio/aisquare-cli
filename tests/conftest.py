@@ -165,6 +165,15 @@ AMBIENT_ENV_VARS = (
     # second login exported would see its directory in both. The account tests
     # cleared it locally; this makes it the suite's answer rather than theirs.
     "CLAUDE_CODE_TMPDIR",
+    # The copies of the shell's own two a launch onto a managed slot keeps
+    # (`core.claude_accounts.PLAIN_VARS`). `plain_environment` reads them
+    # whenever CLAUDE_CONFIG_DIR names a managed slot, which the account tests
+    # set up, so a suite run from a fleet pane on one of the developer's slots
+    # resolved slot 1 to THEIR directory: four tests went red, and the
+    # hand-over test read that directory's login (review of #205, seventh
+    # round).
+    "AISQUARE_PLAIN_CLAUDE_CONFIG_DIR",
+    "AISQUARE_PLAIN_CLAUDE_CODE_TMPDIR",
     "AISQUARE_TEAM",
     "AISQUARE_ROLE",
     # Read off the ambient env by `services/mcp_server.py` to attribute remote

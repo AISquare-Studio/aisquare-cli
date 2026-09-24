@@ -99,7 +99,8 @@ tmux can see and its row says so (`no hooks`).
 4. **Watch the agents appear**, indented under the project, each with a role
    icon (🧭 manager · 🔨 coder · 🧪 tester · 🌐 ui-tester · 👀 reviewer · 🛡 validator) and a
    state chip — **▶ working**, **⏸ waiting**, **🔔 NEEDS YOU** (with a terminal
-   bell), **💤 exited(N)**, **✗ lost**. **Click an agent** and you see its real
+   bell), **⏳ limited** (parked on a Claude usage limit, with the reset time),
+   **💤 exited(N)**, **✗ lost**. **Click an agent** and you see its real
    session; click into the pane and every key you type goes to it. `＋ spawn
    agent` on a project starts one of your own (Phase 4).
 5. Selecting an agent gives its pane the keyboard at once — type, and it reaches
@@ -254,8 +255,9 @@ its tmux session. `ls` shows live agents; `--all` (`-a`) includes the ones that
 have ended. `status` is the same data, always live only.
 
 State is **derived, never stored**: a fresh board session row wins (working ·
-waiting · attention); otherwise tmux's facts (a dead pane → exited with its
-code; activity → working; else waiting); no pane at all → lost; `· unknown`
+waiting · attention · limited — the last one trusted until the reset it names
+has passed, since a parked agent fires no hook); otherwise tmux's facts (a dead
+pane → exited with its code; activity → working; else waiting); no pane at all → lost; `· unknown`
 when neither source can answer. The detail beside the chip says why when that
 is not obvious — an exit code, `no hooks` for a binary without our lifecycle
 hooks, `pane gone`.
@@ -490,7 +492,55 @@ c1/c2/c3 shell aliases people write by hand, owned by the tool instead.
   open. It is not a documented API; when it does not answer, the row says why
   (`usage unavailable`, `token expired — open a session to refresh it`) and
   nothing else on the page is affected. On macOS the token lives in the
-  Keychain, which the CLI does not read, so the row says so.
+  Keychain, which the CLI does not read, so the row says so. A reset reads as a
+  distance and a clock time — `resets in 3h 10m (18:00)`, `resets in 2d 4h (Tue
+  02:00)` — the same string on the page and in `aisquare accounts usage`, so a
+  weekly window six days out never looks like tonight.
+- **Default**, **↑**/**↓** and **Disable** arrange the accounts. The row with
+  the ★ is the **machine default**: what a launch runs on when nothing more
+  specific says. The arrows set the **priority order** — the order the rows are
+  listed in, and the order a headroom-based pick will try them in. *Disable*
+  keeps a slot out of every automatic choice (its row says `disabled`) while
+  `--account <slot>` still reaches it by hand; *Enable* puts it back. An
+  **alias** (`aisquare accounts alias 2 work`) replaces `account 2` wherever
+  the slot is named — the row, the board, the launch line — and is accepted
+  everywhere a slot number is.
+- Which account an agent runs on is decided in one order, for `fleet spawn`,
+  `aisquare launch` and a manager spawning a coder alike: `--account` on the
+  command line, then the role's binding (the **account** select beside each
+  role on the Settings tab, or `aisquare team bind <role> --account`), then the
+  project's default (`aisquare accounts default <slot> --project .`), then the
+  machine default. With none of those set, the agent runs on whatever `claude`
+  the shell already has — exactly what it did before any of this existed. The
+  agent's header and `fleet ls` show the slot it was resolved to.
+- **Headroom.** With `[accounts] pick = "headroom"` (the Settings tab's
+  *launches pick*, or `aisquare config set accounts.pick headroom`) the machine
+  default gives way to the account with room: every enabled, signed-in account's
+  five-hour window is read once, and the first one in priority order under
+  `switch_at` (85 % by default) is taken — or, when all are over it, the one
+  with the most left. Usage is the same best-effort endpoint as the bars, so an
+  account that does not answer is skipped with a note and, when none answers,
+  the machine default decides as before. Each reading is kept: the row's bar
+  gains *≈ 40 min to the limit* once two readings of the same window exist.
+- **A usage limit.** When an agent's turn ends on one (Claude Code's
+  `StopFailure` hook, `You've hit your session limit · resets 12:30am`), its
+  row turns **⏳ limited** with the reset time, a `limited` line goes on the
+  board naming `aisquare fleet switch <label>`, and the manager is woken. Claude
+  Code's own wait-and-continue at the reset is left running. `fleet switch`
+  stops the agent as `fleet stop` would and starts it again under the same
+  label, task and worktree on the account with the most headroom (`--to` names
+  one), **resuming its session** from its transcript (`claude --resume
+  <path>`) when that file is on disk — the resumed agent keeps its task claims
+  and is told in one line to continue, and no exit is announced for it —
+  `--fresh` (or a transcript that is not on disk) starts new with a hand-off
+  prompt built from the board instead; that agent takes the claims over too,
+  on its new session, and no exit is announced for it either.
+  With `on_limit = "switch"` (*on a usage limit* on the Settings tab) the fleet
+  does this by itself when the limit lifts more than
+  `wait_if_reset_within_minutes` away, in a worker detached from the agent's
+  own hook; a hand-over that finds no headroom leaves the agent parked, its
+  own wait intact, and says so on the board. `doctor` lists parked agents; `doctor --live` warns when every account
+  is over the line.
 
 Nothing on this page writes into Claude Code's own files: the email and plan
 are read from what Claude Code recorded, and a token is never refreshed by the
@@ -508,11 +558,26 @@ aisquare accounts usage                # the windows, per signed-in account
 aisquare accounts remove 2             # the directory is kept as 2.removed-<stamp>
 aisquare launch coder --account 2      # a board role on account 2
 aisquare fleet spawn coder --account 2 # a fleet agent on account 2
+aisquare accounts default 2            # the machine default — what a launch runs on when nothing else says
+aisquare accounts default 3 --project . # this project's default (codename, name, id prefix, or . for here)
+aisquare accounts default 1 --role coder # coders run on the plain claude (= team bind coder --account 1)
+aisquare accounts default              # the three levels, as they stand
+aisquare accounts alias 2 work         # a name: --account work, [work] on the board
+aisquare accounts order work 3         # the priority order; the rest follow as they were
+aisquare accounts move 3 top           # up · down · top · bottom
+aisquare accounts disable 3            # out of automatic selection; enable puts it back
+aisquare config set accounts.pick headroom     # spawns go where there is room (see above)
+aisquare config set accounts.on_limit switch   # …and an agent that hits its limit is moved
+aisquare fleet switch coder-auth       # move one now: resumes its session on the account with room
+aisquare fleet switch coder-auth --to personal --fresh   # a named account; a new session + hand-off
 ```
 
 `add` and `run` hand the terminal to Claude Code, so they have no `--json`
 form and `add` refuses outside an interactive terminal. `aisquare doctor` gains a
-`claude-accounts` line naming any slot that still needs a sign-in. Accounts laid
+`claude-accounts` line naming any slot that still needs a sign-in, a
+`claude-account-default` line when the default is not signed in or is disabled,
+and a `claude-account-bindings` line when a role or project names an account the
+machine no longer has. Accounts laid
 out some other way — a wrapper, a proxy, a directory of your own — still bind
 to a role as a launch profile (`aisquare team bind coder1 --env …`, README
 "Several accounts, one team").

@@ -10,7 +10,7 @@ import json
 import sqlite3
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
 import typer
 
@@ -26,7 +26,7 @@ app = typer.Typer(
 
 
 #: What each boundary actually costs when it fails open. Named per hook rather
-#: than shared, because three of the five do not inject context at all and a
+#: than shared, because four of the six do not inject context at all and a
 #: line claiming they did would be a wrong sentence printed on every turn — the
 #: two that matter to a reader are the ones a TEAMMATE sees: a session that
 #: never leaves "running", and a turn that arrives with no delta.
@@ -40,6 +40,7 @@ _COST = {
     "session-end": "the board will keep showing this session as running",
     "stop": "the board will not show this session as waiting for input",
     "notification": "the board will not show this session as needing attention",
+    "stop-failure": "the board will not show this session as limited, and no hand-over will run",
     "manager-wakeup": "the manager will not be woken by this turn's board updates",
 }
 
@@ -200,6 +201,53 @@ def stop() -> None:
         return
     if decision is not None:
         typer.echo(json.dumps(decision.as_hook_output()))
+
+
+@app.command("stop-failure")
+def stop_failure() -> None:
+    """The turn ended on an API error instead of a Stop (no output).
+
+    Claude Code fires ``StopFailure`` with ``error`` (``rate_limit``,
+    ``overloaded``, ``authentication_failed``…), an optional ``error_details``
+    and ``last_assistant_message`` — for a usage limit, the rendered
+    ``You've hit your session limit · resets 12:30am (…)`` line. A
+    ``rate_limit`` parks the session as ``limited`` on the board with that reset
+    time and wakes the manager; any other error puts it back to ``waiting`` with
+    a feed line naming the error (#146). Output is ignored by Claude Code, so
+    nothing is printed on purpose.
+    """
+    try:
+        payload = _payload()
+        hooks_service.turn_failed(
+            session_id=_str(payload, "session_id"),
+            error=_str(payload, "error"),
+            message=_str(payload, "last_assistant_message"),
+            details=_str(payload, "error_details"),
+        )
+    except Exception as exc:  # never disrupt the agent
+        _cost_of_failing_open("stop-failure", exc)
+        return
+
+
+@app.command("hand-over", hidden=True)
+def hand_over(
+    session_id: Annotated[str, typer.Argument(help="The limited session's id.")],
+    reason: Annotated[
+        str | None, typer.Option("--reason", help="Why (recorded on the board).")
+    ] = None,
+) -> None:
+    """The detached half of an automatic hand-over (no output; started by ``stop-failure``).
+
+    Not a Claude Code hook: ``stop-failure`` starts this in a worker of its own
+    session, because the hook itself is a child of the pane ``fleet switch``
+    kills (#146; review of #205, finding 1). Silent like every hook; the
+    board carries a refusal (``not switched — …``).
+    """
+    try:
+        hooks_service.hand_over(session_id, reason=reason)
+    except Exception as exc:  # the board carries the refusal; nothing else to disrupt
+        _cost_of_failing_open("hand-over", exc, cost="the limited agent was not moved")
+        return
 
 
 @app.command("notification")

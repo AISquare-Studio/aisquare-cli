@@ -750,7 +750,9 @@ Two moments that already exist carry the wake-up.
    waiting and prints nothing. For `role == manager` it first asks the store for
    events since the session cursor authored by *others*, of kinds
    `task_review`, `task_done`, `task_blocked`, `task_reopened`, `result`,
-   `question`, and the new `agent_exited`. If there are any, it emits the
+   `question`, the new `agent_exited`, and — since #146 — `limited` (an agent
+   parked on a Claude usage limit) and `switched` (one the fleet moved to
+   another account). If there are any, it emits the
    Stop **block** decision with the rendered delta as the reason → Claude Code
    continues the turn with that context, and the cursor advances. If none →
    exit 0, waiting, exactly as today.

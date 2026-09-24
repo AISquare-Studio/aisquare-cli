@@ -10,7 +10,7 @@ import errno
 import os
 import tomllib
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import tomli_w
 from pydantic import BaseModel, Field
@@ -170,11 +170,22 @@ class RoleLaunchProfile(BaseModel):
     business knowing it, unusable by anyone laid out differently and liable to
     break for its author the day they reorganised. The operator states the
     spec; we carry it.
+
+    ``account`` is the ONE exception, and it is not that cut coming back: it
+    names a Claude account the CLI itself owns — a slot number, an alias or the
+    email it is signed in as (``aisquare accounts``) — never a path. It is
+    resolved at launch by the one account resolver
+    (``services.claude_accounts.choose``), after ``env``, so a binding that
+    carries both a hand-written ``CLAUDE_CONFIG_DIR`` and an ``account`` runs on
+    the account. Written by ``team bind <role> --account`` and the Settings tab;
+    ``None`` means the role expresses no preference and the project or machine
+    default applies (#145).
     """
 
     bin: str | None = None
     env: dict[str, str] = Field(default_factory=dict)
     args: list[str] = Field(default_factory=list)
+    account: str | None = None
 
 
 class TeamSettings(BaseModel):
@@ -287,6 +298,38 @@ class SnapshotSettings(BaseModel):
     ignore: list[str] = Field(default_factory=list)
 
 
+class AccountsSettings(BaseModel):
+    """How the fleet spends several Claude accounts (#146); every field is a changeable default.
+
+    ``pick`` is how a launch chooses an account when nothing names one (no
+    ``--account``, no role binding, no project default): ``default`` takes the
+    machine default (#145); ``headroom`` reads each enabled, signed-in account's
+    five-hour usage and takes, in priority order, the first one under
+    ``switch_at`` percent — or, when every account is over it, the one with the
+    most room left. Usage is the undocumented endpoint Claude Code's own
+    ``/usage`` reads (docs/plans/claude-accounts.md §5), so ``headroom`` is best
+    effort: an account whose usage cannot be read is skipped with a note, and
+    when none can be read the machine default decides as before.
+
+    ``on_limit`` is what the fleet does when an agent's turn ends on a usage
+    limit (Claude Code's ``StopFailure`` hook, error ``rate_limit``): ``wait``
+    marks the row ``limited`` and wakes the manager, and leaves Claude Code's own
+    wait-and-continue-at-reset in place; ``switch`` also hands the agent over —
+    ``aisquare fleet switch`` — to the account with the most headroom, unless
+    the limit resets within ``wait_if_reset_within_minutes`` (a reset ten minutes
+    away is cheaper than a cold start elsewhere). ``switch_at`` doubles as the
+    line the Accounts page colours red and ``doctor --live`` warns at.
+
+    Read from the config file alone, like ``[fleet]``: there is no
+    ``AISQUARE_ACCOUNTS_*`` variable, for the same reason that section gives.
+    """
+
+    pick: Literal["default", "headroom"] = "default"
+    switch_at: int = Field(default=85, ge=1, le=100)
+    on_limit: Literal["wait", "switch"] = "wait"
+    wait_if_reset_within_minutes: int = Field(default=15, ge=0)
+
+
 class AppConfig(BaseModel):
     """Root configuration object persisted at ``~/.aisquare/config.toml``."""
 
@@ -298,6 +341,7 @@ class AppConfig(BaseModel):
     explainability: ExplainabilitySettings = Field(default_factory=ExplainabilitySettings)
     team: TeamSettings = Field(default_factory=TeamSettings)
     fleet: FleetSettings = Field(default_factory=FleetSettings)
+    accounts: AccountsSettings = Field(default_factory=AccountsSettings)
     snapshot: SnapshotSettings = Field(default_factory=SnapshotSettings)
     experiment: ExperimentSettings = Field(default_factory=ExperimentSettings)
 

@@ -204,6 +204,41 @@ class ClaudeAccount(BaseModel):
     """The account's own ``CLAUDE_CODE_TMPDIR``; ``None`` for the default slot."""
     managed: bool = False
     """True when the CLI created ``config_dir`` (every slot but the default)."""
+    # --- what the REGISTRY says about the slot (``claude_account`` in the store) ---
+    #
+    # The directories stay the record of WHICH accounts exist and who is signed in
+    # (core.claude_accounts). These four fields are the operator's ARRANGEMENT of
+    # them — a name, an order, a choice — which no directory can carry, so they
+    # live in SQLite and are folded onto the account by
+    # ``services.claude_accounts.list_accounts``. A ``ClaudeAccount`` built by the
+    # core alone has the defaults below, which read as "no arrangement": that is
+    # deliberate, so nothing in the core has to open the store.
+    alias: str | None = None
+    """The operator's name for the slot (``work``, ``personal``), unique; ``None`` when unnamed."""
+    position: int | None = None
+    """Its rank in the priority order, 1 first; ``None`` before the registry has seen it."""
+    is_default: bool = False
+    """The machine default — what a launch runs under when nothing more specific says."""
+    disabled: bool = False
+    """Never chosen automatically (default, priority, headroom); still usable by name."""
+
+
+class ClaudeAccountRecord(BaseModel):
+    """One row of the ``claude_account`` registry: the arrangement of a slot, not the slot.
+
+    ``slot`` is the join to the directory; ``config_dir`` is recorded for the
+    launch record's benefit and never used to decide anything — the directory
+    is re-read from disk every time, so a row whose directory has gone is a
+    row to drop, not a directory to trust.
+    """
+
+    slot: int
+    config_dir: Path
+    alias: str | None = None
+    position: int
+    is_default: bool = False
+    disabled: bool = False
+    created_at: datetime
 
 
 class ClaudeIdentity(BaseModel):
@@ -227,6 +262,36 @@ class ClaudeUsage(BaseModel):
     """The rolling seven-day window, 0-100."""
     week_resets_at: datetime | None = None
     fetched_at: datetime | None = None
+
+
+class UsageSample(BaseModel):
+    """One reading of an account's two windows, kept so a rate can be computed (#146).
+
+    Written by ``services.claude_accounts``' recording readers whenever usage
+    is fetched — the Accounts page's minute tick, ``accounts usage``, a headroom
+    pick — and read back to say how fast the window is filling. Samples are
+    pruned after a week; they are a derived convenience, never the record.
+    """
+
+    slot: int
+    fetched_at: datetime
+    session_percent: float | None = None
+    session_resets_at: datetime | None = None
+    week_percent: float | None = None
+    week_resets_at: datetime | None = None
+
+
+class UsageTrend(BaseModel):
+    """Where an account's five-hour window is heading, from the samples of this window."""
+
+    percent: float
+    resets_at: datetime | None = None
+    per_hour: float | None = None
+    """Percentage points per hour over the sampled span; ``None`` when the span is too short."""
+    minutes_to_limit: float | None = None
+    """At the current rate, how long until 100 %; ``None`` when flat, falling or unknown."""
+    span_minutes: float = 0.0
+    """How long the samples behind the rate cover — the reader's measure of how much to trust it."""
 
 
 class ClaudeAccountStatus(BaseModel):
@@ -497,7 +562,11 @@ class TeamSession(BaseModel):
     cursor: int = 0
     """Highest team-event ``seq`` already shown to this session (delta position)."""
     state: str = "working"
-    """Live activity: working (mid-turn), waiting (wants input) or attention."""
+    """Live activity: working (mid-turn), waiting (wants input), attention, or limited
+    (its turn ended on a usage limit — #146)."""
+    limit_resets_at: datetime | None = None
+    """When the limit that stopped it lifts, as the error named it; meaningful while
+    ``state`` is ``limited``, and ``None`` when the message named no time."""
     transcript_path: str | None = None
     """The session's Claude Code transcript (JSONL), from hook payloads."""
     account: str | None = None
@@ -678,7 +747,7 @@ class AgentConnection(BaseModel):
     imported: int = 0
 
 
-FleetAgentState = Literal["working", "waiting", "attention", "exited", "lost", "unknown"]
+FleetAgentState = Literal["working", "waiting", "attention", "limited", "exited", "lost", "unknown"]
 """What a fleet agent is doing, DERIVED at read time and never stored: a fresh
 ``TeamSession`` row wins (working / waiting / attention); otherwise the tmux
 pane's facts (exited with a status, or lost when the pane is gone); ``unknown``
@@ -709,6 +778,9 @@ class FleetAgent(BaseModel):
     task_id: str | None = None
     spawned_by: str | None = None
     """``"user"``, or the id of the session (a manager) that asked for it."""
+    account_slot: int | None = None
+    """The Claude account slot the launch was resolved to (flag, binding or default);
+    ``None`` when nothing chose one and the window ran on whatever its shell had."""
     created_at: datetime
     ended_at: datetime | None = None
     exit_status: int | None = None

@@ -178,6 +178,67 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `state.json` beside the theme and restored at the next launch; an agent's
   pane forwards every width change to tmux, so the agent reflows. `?` lists the
   keys.
+- **Usage-aware accounts: spawn where there is headroom, and hand an agent over
+  when its limit hits** (#146). A new `[accounts]` section (Settings tab, or
+  `aisquare config set accounts.<key>`): `pick = headroom` makes every launch
+  that nothing names an account for read each enabled, signed-in account's
+  five-hour window and take, in priority order, the first under `switch_at`
+  (85 %) — or the one with the most room when all are over it; usage that
+  cannot be read is skipped with a note, and when none can, the machine
+  default decides as before. Every reading is kept (`claude_usage`, schema
+  v16), so `accounts usage`, `list --usage` and the Accounts page say
+  *≈ 40 min to the limit* at the current pace once two readings of the same
+  window exist. When an agent's turn ends on a usage limit — Claude Code's
+  `StopFailure` hook, now the sixth hook `agents connect` installs, with
+  `error: rate_limit` and `You've hit your session limit · resets 12:30am` — the
+  row shows **⏳ limited** with the reset time, a `limited` board line names
+  `aisquare fleet switch <label>`, and the manager is woken (`limited` and
+  `switched` join its wake kinds); other API errors end the turn as `waiting`
+  with a `turn_failed` line. `aisquare fleet switch <label> [--to A] [--fresh]`
+  stops the agent as `fleet stop` would and starts it again under the same
+  label, task and worktree on the account with the most headroom, **resuming
+  the same session** from its transcript (`claude --resume <path>`) when it is
+  on disk, else — or with `--fresh` — with a hand-off prompt built from the
+  board, the old session's claims moving onto the new session with its row. With
+  `on_limit = switch` the fleet does that by itself when the limit lifts more
+  than `wait_if_reset_within_minutes` (15) away — in a worker detached from
+  the agent's own hook, so the window kill cannot take the hand-over down; a
+  hand-over that finds no headroom leaves the agent parked with Claude Code's
+  own wait-and-continue intact. A moved agent keeps its task claims (its
+  session parks them, as a `/clear` does, for the same id when it resumes and
+  for the new one when it starts fresh), a resumed one is told in one line to
+  continue, and no `agent_exited` goes out for either; every reset a surface
+  shows — the feed, the agent header, doctor — comes from the one formatter. `doctor` lists parked agents (`claude-account-limits`) and, with
+  `--live`, warns when every account is over the line
+  (`claude-account-headroom`). Plan: `docs/plans/claude-accounts.md` §10.
+- **A Claude account can be chosen: a default, a priority order, aliases, and
+  disabling — in the CLI and on the Accounts page** (#145). Several accounts
+  could be added and seen and none picked: slot 1 was the default by constant,
+  the order was the slot number, and a role ran elsewhere only through a
+  `CLAUDE_CONFIG_DIR` buried in `team bind --env`. Now `aisquare accounts
+  default <slot|alias|email>` sets the **machine default**, `--project P` a
+  project's, `--role R` a role's (the same binding `aisquare team bind <role>
+  --account` writes); `accounts alias 2 work` names a slot so `--account work`
+  and the board's `[work]` can say it; `accounts order` and `accounts move`
+  set the **priority order** `accounts list` shows (and a headroom-based pick
+  will try first); `accounts disable` keeps a slot out of every automatic
+  choice while `--account` still reaches it. Every launch — `aisquare launch`,
+  `fleet spawn`, a manager spawning a coder — resolves its account in one
+  order through one resolver: the flag, the role's binding, the project's
+  default, the machine's default, and with none of those set the environment
+  is left exactly as it was, so a machine that never ran `accounts default`
+  notices nothing. A rung naming an account the machine no longer has refuses
+  the launch with the rung named rather than running on another login. The
+  arrangement lives in the store (`claude_account`, schema v15) and the
+  directories stay the record of which accounts exist; a removed slot's
+  default, alias and project defaults go with it, so the next `add` in that
+  number inherits nothing. On the Accounts page each row carries ★ *Default*,
+  ↑/↓ and *Disable*/*Enable*; the Settings tab binds an account per role; the
+  agent header and `fleet ls` show the slot an agent was resolved to. `doctor`
+  warns when the default is not signed in or disabled (`claude-account-default`)
+  and when a role or project names a missing account (`claude-account-bindings`).
+  Slot 1 is labelled `plain claude` (it was `default`, a word that now means
+  the chosen account). Plan: `docs/plans/claude-accounts.md` §9.
 - **Accounts, in `asq` and on the command line.** A new **Accounts** section in
   the fleet UI's sidebar opens a page with the AISquare sign-in on top and the
   Claude Code accounts under it. The AISquare card runs `aisquare login`'s
@@ -871,6 +932,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   no table for is a quiet line and never a keystroke lost without a trace, and
   a raw control byte a terminal reports as a key is spelt `U+0085` in that
   line rather than sent to your screen.
+- **A usage reset now says when, not just what o'clock** (#152). `aisquare
+  accounts usage`, `accounts list --usage` and the Accounts page showed a reset
+  as a bare `HH:MM`, which for the seven-day window can be six days away and
+  read as tonight, and around midnight could not tell a reset in ten minutes
+  from one a day out. Both surfaces now render the same string from one
+  formatter (`cli.common.format_reset`): `in 12m` within the hour, `in 3h 10m
+  (18:00)` later today, `in 2d 4h (Tue 02:00)` on another day — a weekly reset
+  is never a bare clock time again — and `now` when the reading is already
+  stale. `--json` is unchanged (ISO 8601 timestamps). A test walks both
+  modules' syntax trees so a third copy of the formatter cannot quietly return.
 - **Alt+letter chords reach the agent as chords.** Claude Code's alt+p (switch
   model) did nothing from a fleet pane — reported 2026-09-02 and again
   2026-09-10 — because Textual's parser reads `ESC p` as `Key("alt+p",

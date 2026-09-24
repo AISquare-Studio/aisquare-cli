@@ -31,26 +31,33 @@ long as the session lives.
 from __future__ import annotations
 
 import contextlib
+import time
+from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
 from typing import Any, ClassVar
 
 from rich.text import Text
-from textual import events
+from textual import events, on
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.coordinate import Coordinate
 from textual.message import Message
 from textual.widgets import DataTable, OptionList, Static
 from textual.widgets.option_list import Option, OptionDoesNotExist
+from textual.worker import Worker, WorkerState
 
 from aisquare.cli import watch
 from aisquare.cli.common import local_time
 from aisquare.core.store import unmet_needs
 from aisquare.models import CLOSED_STATUSES, ProjectInfo, TeamEvent, TeamSession, TeamTask
+from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import team as team_service
 
 OPEN_STATUSES = ("todo", "doing", "review", "blocked")
+LABELS_TTL = 30.0
+"""How long the sessions block keeps the slot labels before asking the registry again."""
+LABELS_WORKER = "board-account-labels"
 COLLAPSE_BELOW = 80
 """Panel width (columns) under which the board column hides and the feed takes all:
 the board column is 48 wide and a feed narrower than ~32 shows nothing readable.
@@ -171,6 +178,8 @@ class BoardPanel(Vertical):
         self._select_mode = False
         self._show_done = False
         self._sessions: dict[str, TeamSession] = {}
+        self._labels: Mapping[int, str] = {}
+        self._labels_asked_at: float | None = None
         self._all_tasks: list[TeamTask] = []
         self.autoscroll = True
         self.detail_text = ""
@@ -239,13 +248,52 @@ class BoardPanel(Vertical):
         self._sessions = {s.id: s for s in sessions}
         self._statuses = {t.id: t.status for t in tasks}
         self._all_tasks = tasks
-        self.query_one("#sessions", Static).update(watch._session_lines(sessions))
+        self._refresh_labels(sessions)
+        self.query_one("#sessions", Static).update(watch._session_lines(sessions, self._labels))
         self._ring_on_attention(sessions)
         # Events first: a task_done/dropped this tick flushes the attribution
         # cache BEFORE the archive rebuilds, so the closer is never one frame stale.
         self._append_events(events)
         self._refresh_tasks(tasks)
         self.post_message(self.Refreshed(project))
+
+    def _refresh_labels(self, sessions: list[TeamSession]) -> None:
+        """Ask the registry for the slot labels OFF the UI thread, at most every LABELS_TTL s.
+
+        ``watch._session_lines`` used to read them itself — a ``context.db``
+        open with a busy timeout of seconds, a scan of the account directories
+        and, on a registry not yet reconciled, its writes — on the event loop,
+        at every tick of every open board (review of #205, fourth round). The
+        block paints the last good map (the built-in names before the first
+        answer) and repaints when the worker answers, as the agent header does
+        (``views.agent``). Asked only once several accounts are in play, the
+        only time the block shows one.
+        """
+        if len({s.account for s in sessions if s.ended_at is None and s.account}) < 2:
+            return
+        now = time.monotonic()
+        if self._labels_asked_at is not None and now - self._labels_asked_at < LABELS_TTL:
+            return
+        self._labels_asked_at = now
+        self.run_worker(
+            accounts_service.slot_labels,
+            name=LABELS_WORKER,
+            group=LABELS_WORKER,
+            exclusive=True,
+            thread=True,
+            exit_on_error=False,
+        )
+
+    @on(Worker.StateChanged)
+    def _labels_answered(self, event: Worker.StateChanged) -> None:
+        if event.worker.group != LABELS_WORKER:
+            return
+        if event.state is WorkerState.SUCCESS and isinstance(event.worker.result, dict):
+            self._labels = event.worker.result
+            if self.is_mounted:
+                self.query_one("#sessions", Static).update(
+                    watch._session_lines(list(self._sessions.values()), self._labels)
+                )
 
     def _ring_on_attention(self, sessions: list[TeamSession]) -> None:
         """Terminal bell when a session newly flips to needing the user."""

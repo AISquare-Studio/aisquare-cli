@@ -25,6 +25,7 @@ from contextlib import contextmanager, suppress
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
 from typer.testing import CliRunner
@@ -5908,3 +5909,784 @@ def test_spawn_carries_this_shells_desktop_into_the_window(
     assert isinstance(env, dict)
     assert env["WAYLAND_DISPLAY"] == "wayland-1" and env["SSH_AUTH_SOCK"] == "/run/u/1/ssh"
     assert "AISQUARE_FLEET_AGENT" in env  # the fleet's own variables still travel
+
+
+def test_spawn_resolves_the_default_account_and_records_the_slot_on_the_row(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#145: the window gets the RESOLVED `--account <slot>`, the caller's environment travels
+    with it, and the row says which account the agent draws on."""
+    from aisquare.core import claude_accounts as accounts_core
+    from aisquare.services import claude_accounts as accounts_service
+    from aisquare.services import settings as settings_service
+
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_TMPDIR", raising=False)
+    accounts_core.create_account()  # slot 2, under the isolated AISQUARE_HOME
+
+    # The control: nothing arranged → no flag, no carried environment, no slot on the row.
+    plain = fleet_service.spawn(project, "coder")
+    assert _flag(_command(tmux), "--account") is None
+    assert plain.agent.account_slot is None
+    plain_env = tmux.spawned[-1]["env"]
+    assert isinstance(plain_env, dict) and "AISQUARE_HOME" not in plain_env
+
+    accounts_service.set_default("2")
+    chosen = fleet_service.spawn(project, "tester")
+    command, env = _command(tmux), tmux.spawned[-1]["env"]
+    assert isinstance(env, dict)
+    assert _flag(command, "--account") == "2"  # the slot, never the alias or the email
+    assert env["AISQUARE_HOME"] == str(Path(os.environ["AISQUARE_HOME"]).absolute())
+    assert chosen.agent.account_slot == 2
+    with store_session() as store:
+        stored = store.get_fleet_agent(chosen.agent.id)
+        assert stored is not None and stored.account_slot == 2
+
+    # A role binding outranks the machine default, and reaches the window the same way.
+    settings_service.bind_role("reviewer", account="1")
+    bound = fleet_service.spawn(project, "reviewer", worktree=False)
+    assert _flag(_command(tmux), "--account") == "1"
+    assert bound.agent.account_slot == 1
+
+    # A binding to an account this machine does not have refuses the spawn with the rung named,
+    # instead of starting a window that dies on its first line.
+    settings_service.bind_role("validator", account="9")
+    with pytest.raises(fleet_service.FleetError, match="role binding for 'validator'"):
+        fleet_service.spawn(project, "validator")
+
+
+# --- fleet switch (#146): a hand-over to another account --------------------------------------
+
+
+def _two_slots_with_usage(monkeypatch: pytest.MonkeyPatch, work: float, personal: float) -> None:
+    """Slots 2 and 3 signed in (under the isolated home) with a scripted usage endpoint."""
+    from tests.test_usage_aware_accounts import _payload, _slot, _Usage
+
+    # The real clock runs here (no redirected-home clock), so the tokens must outlive it.
+    _slot("work@example.com", "tok-work", expires_in=timedelta(days=3650))
+    _slot("personal@example.com", "tok-personal", expires_in=timedelta(days=3650))
+    from aisquare.services import claude_accounts as accounts_service
+
+    monkeypatch.setattr(
+        accounts_service,
+        "_http_get",
+        _Usage({"tok-work": _payload(work), "tok-personal": _payload(personal)}),
+    )
+
+
+def _with_transcript(agent: FleetAgent, transcript: Path | None) -> None:
+    """The board row the agent's hooks would have written, naming its transcript."""
+    assert agent.session_id is not None
+    now = datetime.now(tz=UTC)
+    with store_session() as store:
+        store.upsert_session(
+            TeamSession(
+                id=agent.session_id,
+                project_id=agent.project_id,
+                role=agent.role,
+                started_at=now,
+                last_seen_at=now,
+                transcript_path=str(transcript) if transcript is not None else None,
+            )
+        )
+
+
+def test_switch_moves_a_limited_agent_to_the_account_with_headroom_and_resumes_it(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _two_slots_with_usage(monkeypatch, work=95, personal=10)
+    agent = fleet_service.spawn(project, "coder", worktree=False, account="2").agent
+    transcript = tmp_path / f"{agent.session_id}.jsonl"
+    transcript.write_text('{"type":"user"}\n', encoding="utf-8")
+    _with_transcript(agent, transcript)
+    now = datetime.now(tz=UTC)
+    with store_session() as store:
+        store.mark_limited(agent.session_id or "", now + timedelta(hours=2))
+        task, _created = store.upsert_task(
+            TeamTask(
+                id="tsk_keep1",
+                project_id=project.id,
+                key="keep-it",
+                title="Keep it",
+                role="coder",
+                created_at=now,
+                updated_at=now,
+            )
+        )
+    assert team_service.claim_task(task.id, session_ref=agent.session_id or "").status == "doing"
+    [before] = fleet_service.list_agents(project)
+    assert before.state == "limited" and before.detail is not None
+    assert before.detail.startswith("limit resets in ")  # the one formatter: a distance
+
+    receipt = fleet_service.switch(project, agent.label, reason="session limit")
+
+    assert (receipt.from_slot, receipt.to_slot, receipt.resumed) == (2, 3, True)
+    command = _command(tmux)
+    assert _flag(command, "--account") == "3"  # the account with room, never the one it left
+    assert _flag(command, "--resume") == str(transcript)
+    assert "--session-id" not in command  # resuming keeps the id; none is minted
+    assert receipt.started.session_id == agent.session_id  # the same board session carries on
+    assert receipt.started.label == agent.label and receipt.started.account_slot == 3
+    assert receipt.started.pane_id != agent.pane_id
+    assert agent.pane_id in tmux.killed  # the old window is gone…
+    assert receipt.stopped.ended_at is not None  # …and its row ended
+    assert tmux.typed[:2] == [(agent.pane_id, "literal", "/exit"), (agent.pane_id, "key", "Enter")]
+    # The resumed conversation opens at an idle prompt: ONE line tells it to go on
+    # (review of #205, finding 5) — one line, so it is typed even past the wait.
+    new_pane = receipt.started.pane_id
+    pasted = [text for pane, kind, text in tmux.typed if pane == new_pane and kind == "paste"]
+    assert len(pasted) == 1 and "\n" not in pasted[0]
+    assert pasted[0].startswith(
+        f"You are {agent.label}, moved to another Claude account after session limit"
+    )
+    assert "continue exactly where you left off" in pasted[0]
+    assert (new_pane, "key", "Enter") in tmux.typed
+    live = fleet_service.list_agents(project)
+    assert [status.agent.id for status in live] == [receipt.started.id]
+    with store_session() as store:
+        kinds = [(e.kind, e.text) for e in store.recent_events(project.id, limit=10)]
+        kept = store.get_task(task.id)
+        marked = store.get_session(agent.session_id or "")
+    [switched] = [text for kind, text in kinds if kind == "switched"]
+    assert "moved from slot 2 to account 3 (slot 3) (session limit)" in switched
+    assert switched.endswith("— resumed its session")
+    assert any("headroom:" in note for note in receipt.notes)  # the pick is explained
+    # A hand-over is not an exit (finding 6): the claim stays with the session that resumes,
+    # nothing was released, no `agent_exited` woke the manager to respawn a coming-back agent.
+    assert kept is not None and kept.status == "doing" and kept.claimed_by == agent.session_id
+    assert not any(kind in {"agent_exited", "task_released"} for kind, _ in kinds)
+    assert marked is not None and marked.state == team_service.HANDOVER_STATE
+    # The old process's own SessionEnd lands during the grace: it parks the claims, as a
+    # /clear does, because the session is marked and a live row (the replacement) is bound…
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
+    team_service.hook_session_end(agent.session_id or "", project.root, reason="prompt_input_exit")
+    with store_session() as store:
+        parked = store.get_task(task.id)
+        ended = store.get_session(agent.session_id or "")
+    assert parked is not None and parked.claimed_by == agent.session_id
+    assert ended is not None and ended.ended_at is not None
+    # …and the resumed session's SessionStart, on the SAME id, finds them still its own.
+    team_service.hook_session_start(agent.session_id or "", project.root, "resume")
+    with store_session() as store:
+        revived = store.get_session(agent.session_id or "")
+        still = store.get_task(task.id)
+    assert revived is not None and revived.ended_at is None and revived.state == "working"
+    assert still is not None and still.status == "doing" and still.claimed_by == agent.session_id
+
+
+def test_the_receipts_are_immutable() -> None:
+    """``SpawnReceipt`` lost ``frozen=True`` when its neighbours were inserted (review of #205,
+    second round); every caller reads a receipt, none may rewrite one."""
+    import dataclasses
+
+    for receipt in (fleet_service.SpawnReceipt, fleet_service.SwitchReceipt):
+        params = getattr(receipt, "__dataclass_params__", None)
+        assert dataclasses.is_dataclass(receipt) and params is not None and params.frozen, receipt
+
+
+def _third_slot_with_usage(
+    monkeypatch: pytest.MonkeyPatch, *, work: float, personal: float, third: float
+) -> None:
+    """Slots 2, 3 and 4 signed in, with one scripted usage endpoint for all three."""
+    from tests.test_usage_aware_accounts import _payload, _slot, _Usage
+
+    _two_slots_with_usage(monkeypatch, work=work, personal=personal)
+    _slot("third@example.com", "tok-third", expires_in=timedelta(days=3650))
+    from aisquare.services import claude_accounts as accounts_service
+
+    monkeypatch.setattr(
+        accounts_service,
+        "_http_get",
+        _Usage(
+            {
+                "tok-work": _payload(work),
+                "tok-personal": _payload(personal),
+                "tok-third": _payload(third),
+            }
+        ),
+    )
+
+
+def test_a_switch_picks_by_headroom_before_the_binding_and_the_automatic_one_refuses_without_room(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #205, second round: the binding and project-default rungs sat above headroom
+    inside ``choose(spread=True)``, so a bound role moved to its bound account however full;
+    and with every account over the line the least-bad answer bounced an agent between two
+    exhausted accounts for the whole window."""
+    from aisquare.services import settings as settings_service
+
+    _third_slot_with_usage(monkeypatch, work=95, personal=99, third=10)
+    settings_service.bind_role("coder", account="3")  # bound to the 99 % account
+    agent = fleet_service.spawn(project, "coder", worktree=False, account="2").agent
+    _with_transcript(agent, None)
+
+    receipt = fleet_service.switch(project, agent.label)
+
+    assert receipt.to_slot == 4  # headroom, not the binding
+    assert any(
+        "headroom:" in note and "account 4 is first under 85%" in note for note in receipt.notes
+    )
+    assert "--to" not in _command(tmux) and _flag(_command(tmux), "--account") == "4"
+
+    # Every account over the line: by hand the least-bad one still moves it (as before)…
+    from aisquare.services import claude_accounts as accounts_service
+    from tests.test_usage_aware_accounts import _payload, _Usage
+
+    monkeypatch.setattr(  # the same three slots, the endpoint re-scripted
+        accounts_service,
+        "_http_get",
+        _Usage({"tok-work": _payload(95), "tok-personal": _payload(99), "tok-third": _payload(90)}),
+    )
+    manual = fleet_service.switch(project, agent.label, to=None)
+    assert manual.to_slot in {2, 3}  # it was on 4; the least-bad of the rest
+    assert any("every account is over 85%" in note for note in manual.notes)
+    # …but the automatic hand-over refuses, stops nothing, and says why.
+    killed_before = list(tmux.killed)
+    with pytest.raises(FleetError, match="no account under the line") as refused:
+        fleet_service.switch(project, agent.label, automatic=True, reason="session limit")
+    assert "every other account is over switch_at" in str(refused.value)
+    assert tmux.killed == killed_before
+    assert [status.agent.label for status in fleet_service.list_agents(project)] == [agent.label]
+
+
+def test_a_manual_switch_falls_back_to_the_ladder_when_no_usage_can_be_read(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from aisquare.services import claude_accounts as accounts_service
+    from tests.test_usage_aware_accounts import _Usage
+
+    _two_slots_with_usage(monkeypatch, work=95, personal=10)
+    accounts_service.set_default("3")
+    agent = fleet_service.spawn(project, "coder", worktree=False, account="2").agent
+    _with_transcript(agent, None)
+    monkeypatch.setattr(accounts_service, "_http_get", _Usage({}))  # every token rejected
+
+    receipt = fleet_service.switch(project, agent.label)
+
+    assert receipt.to_slot == 3  # the machine default, the account being left excluded
+    assert any("no account's usage could be read" in note for note in receipt.notes)
+    with pytest.raises(FleetError, match="no account under the line"):
+        fleet_service.switch(project, agent.label, automatic=True)
+
+
+def test_a_switch_that_finds_nothing_says_the_default_was_the_account_being_left(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``choose`` promises ``exclude`` is honoured on every rung WITH a note; the machine
+    default's rung skipped the account being left in silence, and the refusal of a manual
+    switch carried no notes at all — "no other account with headroom" and nothing on why
+    (review of #205, fourth round)."""
+    from aisquare.services import claude_accounts as accounts_service
+    from tests.test_usage_aware_accounts import _Usage
+
+    _two_slots_with_usage(monkeypatch, work=95, personal=10)
+    accounts_service.set_default("2")
+    agent = fleet_service.spawn(project, "coder", worktree=False, account="2").agent
+    _with_transcript(agent, None)
+    monkeypatch.setattr(accounts_service, "_http_get", _Usage({}))  # every token rejected
+
+    with pytest.raises(FleetError, match="no other account with headroom") as refused:
+        fleet_service.switch(project, agent.label)
+
+    said = str(refused.value)
+    assert "account 2 (machine default) is the account being left — skipped" in said
+    assert "no account's usage could be read" in said
+    assert agent.pane_id not in tmux.killed  # refused before anything was stopped
+
+
+@pytest.mark.parametrize("left_at", [95, 10], ids=["five-hour-window-full", "weekly-limit"])
+def test_an_automatic_hand_over_from_a_managed_slot_reads_and_launches_the_plain_claude(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    left_at: float,
+) -> None:
+    """Review of #205, sixth round. The automatic hand-over runs in the worker the limited
+    agent's hook detached, so it runs under the agent's own slot, with ``CLAUDE_CONFIG_DIR``
+    naming it, and slot 1 read from that variable WAS the slot. With the slot's five-hour
+    window full, slot 1 read the slot's 95 % and nothing was under the line. With that
+    window nearly empty (a weekly limit), slot 1 was picked, and the window got
+    ``--account 1`` with the slot's variables still set: the limited agent relaunched on
+    its limited account. Either way the slot's reading was recorded as slot 1's."""
+    from aisquare.core import claude_accounts as accounts_core
+    from aisquare.services import claude_accounts as accounts_service
+    from tests.test_claude_accounts import _sign_in
+    from tests.test_usage_aware_accounts import _payload, _slot, _Usage
+
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    monkeypatch.setattr(accounts_core, "_home", lambda: home)
+    monkeypatch.setattr(accounts_core, "keychain_platform", lambda: False)
+    plain = accounts_core.default_account()
+    _sign_in(plain, "plain@example.com", expires_in=timedelta(days=3650))
+    credentials = accounts_core.credentials_path(plain)
+    signed_in = json.loads(credentials.read_text())
+    signed_in["claudeAiOauth"]["accessToken"] = "tok-plain"
+    credentials.write_text(json.dumps(signed_in))
+    work = _slot("work@example.com", "tok-work", expires_in=timedelta(days=3650))
+    fetch = _Usage({"tok-plain": _payload(5), "tok-work": _payload(left_at)})
+    monkeypatch.setattr(accounts_service, "_http_get", fetch)
+    agent = fleet_service.spawn(project, "coder", worktree=False, account="2").agent
+    _with_transcript(agent, None)
+    # The worker's environment: what `launch --account 2` gave the agent, from a shell
+    # that set neither variable.
+    for var, value in accounts_core.apply_launch_env({}, work, shell={}).items():
+        monkeypatch.setenv(var, value)
+
+    receipt = fleet_service.switch(project, agent.label, automatic=True, reason="session limit")
+
+    assert (receipt.from_slot, receipt.to_slot) == (2, 1)
+    assert "tok-plain" in fetch.calls  # slot 1 read with its own credentials
+    command, env = _command(tmux), tmux.spawned[-1]["env"]
+    assert isinstance(env, dict)
+    assert _flag(command, "--account") == "1"
+    # The window starts the plain claude: the slot's two variables unset, not carried.
+    assert accounts_core.CONFIG_DIR_VAR not in env and accounts_core.TMPDIR_VAR not in env
+    unset = {command[at + 1] for at, part in enumerate(command) if part == "-u"}
+    assert {accounts_core.CONFIG_DIR_VAR, accounts_core.TMPDIR_VAR} <= unset
+    with store_session() as store:
+        [sample] = store.usage_samples(1, since=datetime.now(tz=UTC) - timedelta(hours=1))
+    assert sample.session_percent == 5  # the plain claude's reading, not the slot's
+
+
+@pytest.mark.parametrize("fresh", [False, True], ids=["resume", "fresh"])
+def test_a_hand_over_that_does_not_complete_leaves_nothing_parked(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fresh: bool,
+) -> None:
+    """The two ways a switch can die after it has marked the session (review of #205, finding 6):
+    a stop that raises leaves the session as it was; a spawn that raises releases the
+    parked claims and records the exit the hand-over withheld.
+
+    Resumed or fresh alike: since a fresh switch is a hand-over too, ``stop`` parks its
+    claims as well, and the release after a failed spawn is the only thing that returns
+    them. With the resume leg alone, that release could be limited to a resume and
+    nothing failed (review of #205, fifth round)."""
+    _two_slots_with_usage(monkeypatch, work=95, personal=10)
+    agent = fleet_service.spawn(project, "coder", worktree=False, account="2").agent
+    transcript = tmp_path / f"{agent.session_id}.jsonl"
+    transcript.write_text('{"type":"user"}\n', encoding="utf-8")
+    _with_transcript(agent, transcript)
+    now = datetime.now(tz=UTC)
+    with store_session() as store:
+        store.mark_limited(agent.session_id or "", now + timedelta(hours=2))
+        task, _created = store.upsert_task(
+            TeamTask(
+                id="tsk_keep2",
+                project_id=project.id,
+                key="keep-it-2",
+                title="Keep it",
+                role="coder",
+                created_at=now,
+                updated_at=now,
+            )
+        )
+    assert team_service.claim_task(task.id, session_ref=agent.session_id or "").status == "doing"
+
+    def stop_refuses(*args: Any, **kwargs: Any) -> fleet_service.StopReceipt:
+        raise FleetError("tmux would not answer")
+
+    real_stop = fleet_service.stop
+    monkeypatch.setattr(fleet_service, "stop", stop_refuses)
+    with pytest.raises(FleetError, match="would not answer"):
+        fleet_service.switch(project, agent.label, fresh=fresh, reason="session limit")
+    with store_session() as store:
+        session = store.get_session(agent.session_id or "")
+        held = store.get_task(task.id)
+    assert session is not None and session.state == "limited"  # as it was, not `switching`
+    assert held is not None and held.claimed_by == agent.session_id
+    monkeypatch.setattr(fleet_service, "stop", real_stop)
+
+    asked: list[dict[str, Any]] = []
+
+    def spawn_refuses(*args: Any, **kwargs: Any) -> fleet_service.SpawnReceipt:
+        asked.append(kwargs)
+        raise FleetError("tmux could not start the window: boom")
+
+    monkeypatch.setattr(fleet_service, "spawn", spawn_refuses)
+    with pytest.raises(FleetError, match="boom"):
+        fleet_service.switch(project, agent.label, fresh=fresh, reason="session limit")
+    [spawned] = asked  # the leg this is: a fresh replacement takes over, a resumed one resumes
+    if fresh:
+        assert spawned["resume"] is None and spawned["takes_over"] == agent.session_id
+    else:
+        assert spawned["resume"] is not None and spawned["takes_over"] is None
+    with store_session() as store:
+        released = store.get_task(task.id)
+        kinds = [(e.kind, e.text) for e in store.recent_events(project.id, limit=10)]
+        rows = store.fleet_agents(project.id)
+    assert released is not None and released.status == "todo" and released.claimed_by is None
+    assert any(kind == "task_released" and "hand-over failed" in text for kind, text in kinds)
+    assert any(kind == "agent_exited" for kind, _ in kinds)
+    assert all(row.ended_at is not None for row in rows)  # the old row ended; no replacement
+
+
+def test_switch_starts_fresh_with_a_hand_off_prompt_when_asked_or_when_there_is_no_transcript(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _two_slots_with_usage(monkeypatch, work=95, personal=10)
+    with store_session() as store:
+        task, _created = store.upsert_task(
+            TeamTask(
+                id="tsk_switch1",
+                project_id=project.id,
+                key="ship-auth",
+                title="Ship auth",
+                detail="objective: make login work · acceptance: tests green",
+                role="coder",
+                created_at=datetime.now(tz=UTC),
+                updated_at=datetime.now(tz=UTC),
+            )
+        )
+    agent = fleet_service.spawn(
+        project, "coder", worktree=False, account="2", task_id=task.id
+    ).agent
+    _with_transcript(agent, tmp_path / "missing.jsonl")  # named, not on disk
+    with store_session() as store:
+        team_service._emit(
+            store, project.id, "note", "halfway through the router", session_id=agent.session_id
+        )
+        # A busy board: seventy newer entries from other agents used to push the
+        # session's own out of the window the prompt was built from (third round).
+        for n in range(70):
+            team_service._emit(store, project.id, "note", f"chatter {n}", session_id="sess-other")
+    # The new pane must look ready, or a multi-line prompt is (correctly) not typed.
+    original_spawn = tmux.spawn_window
+
+    def ready_spawn(*args: Any, **kwargs: Any) -> WindowInfo:
+        window = original_spawn(*args, **kwargs)
+        tmux.set_command(window.pane_id, "claude")
+        return window
+
+    monkeypatch.setattr(tmux, "spawn_window", ready_spawn)
+
+    receipt = fleet_service.switch(project, agent.label, to="personal@example.com")
+
+    assert receipt.resumed is False and receipt.to_slot == 3
+    assert any("no transcript on disk" in note for note in receipt.notes)
+    command = _command(tmux)
+    assert "--resume" not in command and _flag(command, "--account") == "3"
+    assert _flag(command, "--task") is None  # the task travels on the row, as spawn records it
+    assert receipt.started.task_id == task.id
+    pasted = [text for pane, kind, text in tmux.typed if kind == "paste"]
+    assert len(pasted) == 1
+    prompt = pasted[0]
+    assert prompt.startswith(f"You are {agent.label}, taking over")
+    assert "Ship auth (tsk_switch1)" in prompt and "make login work" in prompt
+    assert "- note: halfway through the router" in prompt
+    assert f"aisquare task show {task.id}" in prompt and "git status" in prompt
+
+    # --fresh on an agent WITH a transcript still starts over, by choice.
+    transcript = tmp_path / "present.jsonl"
+    transcript.write_text("{}\n", encoding="utf-8")
+    _with_transcript(receipt.started, transcript)
+    again = fleet_service.switch(project, agent.label, to="2", fresh=True)
+    assert again.resumed is False and again.to_slot == 2
+    assert "--resume" not in _command(tmux)
+
+
+def test_a_hand_over_stop_releases_nothing_and_announces_nothing(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The merge of the release train into #205. ``stop`` returns a ``StopReceipt``
+    and REPORTS a release the store refused rather than raising it (review of the
+    fold), and it gained ``handover`` for ``switch``. A hand-over's receipt names no
+    release — the claims wait for the replacement — and no exit goes out for it."""
+    _two_slots_with_usage(monkeypatch, work=95, personal=10)
+    parked_task = _task(project, "parked across the hand-over")
+
+    parked = fleet_service.spawn(project, "coder", worktree=False, account="2").agent
+    _with_transcript(parked, None)
+    team_service.claim_task(parked_task.id, session_ref=parked.session_id or "")
+    receipt = fleet_service.stop(project, parked.label, handover=True)
+    assert receipt.agent.ended_at is not None
+    assert (receipt.released, receipt.release_failed) == ([], None)
+    assert _task_now(parked_task.id).claimed_by == parked.session_id  # parked, not returned
+    with store_session() as store:
+        kinds = [e.kind for e in store.recent_events(project.id, limit=10)]
+    assert "agent_exited" not in kinds and "task_released" not in kinds
+
+
+@pytest.mark.parametrize("exits", [True, False], ids=["exits-in-the-grace", "killed"])
+@pytest.mark.parametrize("fresh", [True, False], ids=["asked-fresh", "no-transcript"])
+def test_a_fresh_switch_hands_the_claims_to_the_replacement_and_announces_no_exit(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fresh: bool,
+    exits: bool,
+) -> None:
+    """Review of #205, fourth round. A switch with no transcript to resume — or with
+    ``--fresh`` — stopped the agent as ``fleet stop`` does: its task went back to the
+    pool and ``agent_exited`` woke the manager while ``spawn`` was still starting the
+    replacement, so the manager staffed the task a second time. A fresh start is a
+    hand-over too: the claims move onto the replacement's new session with its row,
+    nothing is released or announced, and the replacement is briefed on its task as
+    work already its own.
+
+    ``killed`` is an agent that never answers the ``/exit``: no ``SessionEnd`` fires, so
+    ``_take_over`` is the only thing that retires the old presence. With every leg
+    exiting in the grace, the old session's own hook ended it and a ``_take_over`` that
+    retired nothing passed (review of #205, fifth round)."""
+    _two_slots_with_usage(monkeypatch, work=95, personal=10)
+    task = _task(project, "keep it across the move")
+    agent = fleet_service.spawn(
+        project, "coder", worktree=False, account="2", task_id=task.id
+    ).agent
+    old = agent.session_id or ""
+    transcript = tmp_path / f"{old}.jsonl"
+    if fresh:
+        transcript.write_text('{"type":"user"}\n', encoding="utf-8")  # there, and not used
+    _with_transcript(agent, transcript)
+    assert team_service.claim_task(task.id, session_ref=old).status == "doing"
+    nudges: list[str] = []
+
+    def nudge(project_id: str, *, reason: str) -> bool:
+        nudges.append(reason)
+        return True
+
+    monkeypatch.setattr(fleet_service, "nudge_manager", nudge)
+    if exits:
+        # The old process's own SessionEnd lands during the grace, while its row is live.
+        monkeypatch.setenv("AISQUARE_ROLE", "coder")
+        real_kill = tmux.kill_window
+
+        def exit_then_kill(pane_id: str) -> None:
+            if pane_id == agent.pane_id:
+                team_service.hook_session_end(old, project.root, reason="prompt_input_exit")
+            real_kill(pane_id)
+
+        monkeypatch.setattr(tmux, "kill_window", exit_then_kill)
+
+    receipt = fleet_service.switch(project, agent.label, fresh=fresh, reason="session limit")
+
+    new = receipt.started.session_id
+    assert receipt.resumed is False and new is not None and new != old
+    assert "--resume" not in _command(tmux)
+    assert _flag(_command(tmux), "--session-id") == new  # the id the new process starts as
+    held = _task_now(task.id)
+    assert held.status == "doing" and held.claimed_by == new  # moved, never in the pool
+    assert held.claim_expires_at is not None and held.claim_expires_at > datetime.now(tz=UTC)
+    with store_session() as store:
+        kinds = [e.kind for e in store.recent_events(project.id, limit=20)]
+        retired = store.get_session(old)
+    assert "switched" in kinds
+    assert "agent_exited" not in kinds and "task_released" not in kinds
+    assert nudges == []  # nothing woke the manager to staff the task again
+    assert retired is not None and retired.ended_at is not None  # no ghost mid-switch
+    # The replacement's first SessionStart: the task is its own work in flight.
+    _become(receipt.started, tmux, monkeypatch, pid=PANE_PID, role="coder")
+    board = team_service.hook_session_start(new, project.root, "startup")
+    assert "You are the one working it" in _assignment_block(board)
+    assert _task_now(task.id).claimed_by == new
+
+
+def test_a_fresh_switch_whose_claims_cannot_be_moved_leaves_them_with_the_row(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``_take_over`` fails open: the window runs and its row is recorded, so a store
+    that refuses the move leaves the row on the old id WITH the claims — the state a
+    ``/clear`` leaves between its hooks — the switch says so, and the replacement's
+    own start hook makes the move (its pane's process adopts the row).
+
+    That state includes the ended presence. The old session was retired only AFTER the
+    move, so a refused move left it live as ``switching`` — a killed agent fires no
+    ``SessionEnd`` — until the prune (review of #205, fifth round)."""
+    _two_slots_with_usage(monkeypatch, work=95, personal=10)
+    task = _task(project, "moved by the start hook instead")
+    agent = fleet_service.spawn(
+        project, "coder", worktree=False, account="2", task_id=task.id
+    ).agent
+    old = agent.session_id or ""
+    _with_transcript(agent, None)
+    team_service.claim_task(task.id, session_ref=old)
+    original = SqliteStore.adopt_fleet_agent_session
+    refusing = True
+
+    def locked(self: SqliteStore, *args: Any, **kwargs: Any) -> bool:
+        if refusing:
+            raise sqlite3.OperationalError("database is locked (fake)")
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(SqliteStore, "adopt_fleet_agent_session", locked)
+
+    receipt = fleet_service.switch(project, agent.label, reason="session limit")
+
+    assert any("claims were not moved" in note and "locked" in note for note in receipt.notes)
+    assert receipt.started.session_id == old  # the row waits on the id holding the claims
+    assert _task_now(task.id).claimed_by == old  # parked, not released
+    with store_session() as store:
+        retired = store.get_session(old)
+        kinds = [e.kind for e in store.recent_events(project.id, limit=20)]
+    assert retired is not None and retired.ended_at is not None  # no ghost mid-switch
+    assert "agent_exited" not in kinds and "task_released" not in kinds
+    refusing = False
+    new = _flag(_command(tmux), "--session-id")
+    assert new is not None and new != old
+    _become(receipt.started, tmux, monkeypatch, pid=PANE_PID, role="coder")
+    board = team_service.hook_session_start(new, project.root, "startup")
+    assert "You are the one working it" in _assignment_block(board)
+    assert _task_now(task.id).claimed_by == new and _row(receipt.started.id).session_id == new
+
+
+def test_a_fresh_switch_whose_old_presence_cannot_be_retired_still_moves_the_claims(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #205, sixth round. Since the fifth, ``_take_over`` retires the old presence
+    BEFORE the move, each in a commit of its own, inside one ``try``: a store that refused
+    the retirement skipped the move too, and the claims waited on the old id for the start
+    hook. Before, only the retirement was lost; now it is again. The loss is said, too:
+    unexplained, the old id sat on the board as a live session until the prune (seventh
+    round)."""
+    _two_slots_with_usage(monkeypatch, work=95, personal=10)
+    task = _task(project, "moved though the presence stayed")
+    agent = fleet_service.spawn(
+        project, "coder", worktree=False, account="2", task_id=task.id
+    ).agent
+    old = agent.session_id or ""
+    _with_transcript(agent, None)
+    team_service.claim_task(task.id, session_ref=old)
+    original = SqliteStore.end_session
+
+    def locked(self: SqliteStore, session_id: str, **kwargs: Any) -> list[TeamTask]:
+        if session_id == old:
+            raise sqlite3.OperationalError("database is locked (fake)")
+        return original(self, session_id, **kwargs)
+
+    monkeypatch.setattr(SqliteStore, "end_session", locked)
+
+    receipt = fleet_service.switch(project, agent.label, reason="session limit")
+
+    new = receipt.started.session_id
+    assert new is not None and new != old
+    assert not any("claims were not moved" in note for note in receipt.notes)
+    assert _task_now(task.id).claimed_by == new and _row(receipt.started.id).session_id == new
+    marked = f"{team_service.short_id(old)} was not marked ended"  # as the board names it
+    assert any(marked in note for note in receipt.notes), receipt.notes
+
+
+def test_a_switch_whose_courtesy_event_cannot_be_written_still_reports_the_move(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``with store_session() as store, contextlib.suppress(Exception)`` enters the store
+    FIRST, so a store that could not be opened for the ``switched`` line raised out of a
+    switch that had already moved the agent — ``fleet switch`` printed an error and the
+    automatic path said "the limited agent was not moved" (review of #205, fourth round)."""
+    _two_slots_with_usage(monkeypatch, work=95, personal=10)
+    agent = fleet_service.spawn(project, "coder", worktree=False, account="2").agent
+    _with_transcript(agent, None)
+    real_spawn = fleet_service.spawn
+    real_session = store_session
+    wedged = False
+
+    def spawn_then_wedge(*args: Any, **kwargs: Any) -> fleet_service.SpawnReceipt:
+        nonlocal wedged
+        receipt = real_spawn(*args, **kwargs)
+        wedged = True  # every store open from here on refuses
+        return receipt
+
+    @contextmanager
+    def session() -> Iterator[ContextStore]:
+        if wedged:
+            raise sqlite3.OperationalError("database is locked (fake)")
+        with real_session() as store:
+            yield store
+
+    monkeypatch.setattr(fleet_service, "spawn", spawn_then_wedge)
+    monkeypatch.setattr(fleet_service, "store_session", session)
+
+    receipt = fleet_service.switch(project, agent.label, reason="session limit")
+
+    assert receipt.to_slot == 3 and receipt.started.ended_at is None
+    with real_session() as store:
+        kinds = [e.kind for e in store.recent_events(project.id, limit=10)]
+    assert "switched" not in kinds  # the courtesy is what was lost, and only that
+
+
+def test_switch_refuses_without_headroom_the_same_account_or_a_dead_label(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _two_slots_with_usage(monkeypatch, work=95, personal=99)
+    agent = fleet_service.spawn(project, "coder", worktree=False, account="2").agent
+    _with_transcript(agent, None)
+    from aisquare.services import claude_accounts as accounts_service
+
+    accounts_service.set_disabled("3", True)
+    with pytest.raises(FleetError, match="no other account with headroom"):
+        fleet_service.switch(project, agent.label)
+    assert len(tmux.killed) == 0  # nothing was stopped before a target was found
+    accounts_service.set_disabled("3", False)
+
+    with pytest.raises(FleetError, match="already runs on"):
+        fleet_service.switch(project, agent.label, to="2")
+    with pytest.raises(FleetError, match="no Claude account in slot 9"):
+        fleet_service.switch(project, agent.label, to="9")
+    with pytest.raises(NoSuchAgent):
+        fleet_service.switch(project, "nobody-here")
+    assert len(tmux.killed) == 0
+
+    # Every account over the line: the one with the most room still moves it (99 → 95? no —
+    # the agent is ON 95; the only other one is 99, and that is what it gets, with a note).
+    receipt = fleet_service.switch(project, agent.label)
+    assert receipt.to_slot == 3
+    assert any("every account is over 85%" in note for note in receipt.notes)
+
+
+def test_fleet_switch_command_reports_the_move_and_its_json(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    runner: CliRunner,
+) -> None:
+    _two_slots_with_usage(monkeypatch, work=95, personal=10)
+    agent = fleet_service.spawn(project, "coder", worktree=False, account="2").agent
+    _with_transcript(agent, None)
+
+    result = runner.invoke(
+        app, ["fleet", "switch", agent.label, "--project", project.id, "--reason", "limit"]
+    )
+    assert result.exit_code == 0, result.output
+    assert f"✓ {agent.label}: moved from slot 2 to slot 3 — started fresh" in result.stdout
+
+    second = runner.invoke(
+        app, ["--json", "fleet", "switch", agent.label, "--project", project.id, "--to", "2"]
+    )
+    assert second.exit_code == 0, second.output
+    payload = json.loads(second.stdout)
+    assert (payload["from_slot"], payload["to_slot"], payload["resumed"]) == (3, 2, False)
+    assert payload["started"]["label"] == agent.label and payload["started"]["account_slot"] == 2
+    assert payload["stopped"]["ended_at"] is not None
+
+    refused = runner.invoke(app, ["--json", "fleet", "switch", "ghost", "--project", project.id])
+    assert refused.exit_code == 1
+    assert json.loads(refused.stdout)["error"] in ("no_such_agent", "fleet")

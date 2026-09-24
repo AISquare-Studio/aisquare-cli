@@ -575,6 +575,62 @@ pane right there and closes by itself the moment it lands — and **Remove**.
 `aisquare doctor` gets a `claude-accounts` line naming any slot that still needs
 a sign-in.
 
+**Choosing one.** Several accounts are only useful if a launch knows which to
+run on, so an account can be the **default**, have a **name**, and sit in a
+**priority order** — arranged from the Accounts page (★ *Default*, ↑/↓,
+*Disable*) or from the command line:
+
+```sh
+aisquare accounts default 2               # the machine default: every launch runs on slot 2
+aisquare accounts default 3 --project .   # …except this project, which runs on slot 3
+aisquare accounts default 1 --role coder  # …and coders, who run on the plain claude
+aisquare accounts default                 # show the three levels as they stand
+aisquare accounts alias 2 work            # name it: --account work, [work] on the board
+aisquare accounts order work 3            # the priority order (what headroom-based picking will try first)
+aisquare accounts move 3 up               # one step at a time
+aisquare accounts disable 3               # never picked automatically; --account 3 still works
+aisquare team bind coder --account work   # the same role binding, from the team side
+```
+
+A launch — `aisquare launch`, `fleet spawn`, the manager spawning a coder —
+resolves the account in exactly one order: `--account` on the command line, then
+the role's binding, then the project's default, then the machine's default. With
+none of those set it runs on whatever `claude` the shell already has, exactly as
+before, so a machine that never ran `accounts default` notices nothing. One
+resolver answers for every surface, so the fleet UI and a hand-typed launch can
+never disagree about which login an agent gets; `accounts list` stars the
+default and lists the slots in priority order; `doctor` warns when the default is
+not signed in or is disabled, and when a binding names an account the machine no
+longer has.
+
+**Spending several accounts.** With more than one login the interesting
+questions are *where is there room* and *what happens when one runs out*. Both
+are `[accounts]` settings (on the Settings tab, or `aisquare config set`):
+
+```sh
+aisquare config set accounts.pick headroom   # spawns take, in priority order, the first account
+                                             # under switch_at % of its 5-hour window — or the one
+                                             # with the most room when all are over it
+aisquare config set accounts.switch_at 85    # the line (default 85 %)
+aisquare config set accounts.on_limit switch # when an agent hits its limit, move it (default: wait)
+aisquare fleet switch coder-auth             # move one by hand: same label, task and worktree,
+                                             # on the account with headroom, resuming its session
+aisquare fleet switch coder-auth --to work --fresh   # a named account, and a fresh session with a
+                                             # hand-off prompt built from the board
+```
+
+When an agent's turn ends on a usage limit — Claude Code's `StopFailure` hook,
+`You've hit your session limit · resets 12:30am` — its row shows **⏳ limited**
+with the reset time, the manager is woken with the one command that moves it,
+and Claude Code's own wait-and-continue at the reset is left in place. With
+`on_limit = switch` the fleet hands the agent over on its own: it stops the
+agent, starts it again on the account with the most headroom, and resumes the
+same session by its transcript (`claude --resume <path>`), unless the limit
+lifts within `wait_if_reset_within_minutes` (a reset ten minutes away is cheaper
+than a cold start). Every usage reading is kept, so `accounts usage` and the
+Accounts page can say *≈ 40 min to the limit* at the current pace, and
+`doctor --live` warns when every account is over the line.
+
 An account is two variables, `CLAUDE_CONFIG_DIR` and `CLAUDE_CODE_TMPDIR`, set
 for the launch and nothing else. Slot 1 sets neither: it is whatever `claude`
 already is in the shell you launch from. The CLI never writes into Claude
@@ -683,11 +739,15 @@ aisquare
 │                                                  [--config-dir DIR]
 ├── accounts        list [--usage] · add · run <slot> [… claude args] · usage [slot]
 │                   remove <slot>            — Claude Code accounts the CLI owns (docs/fleet.md)
+│                   default [<slot|alias|email>] [--project P] [--role R] [--clear]
+│                   alias <slot> <name> [--clear] · order <slot>… · move <slot> up|down|top|bottom
+│                   disable <slot> · enable <slot>   — the default, the order, the names
+│                   usage also shows the pace (≈ N min to the limit) — see [accounts] in config
 ├── team            on · status · focus <text> · role <name> · log [-n N] · distill [--all]
 │                   spawn <role> [--exec] [--probe/--no-probe] [--refresh]
 │                                 [--effort LEVEL] · harness
 │                   bind <role> [--bin CMD] [--env KEY=VALUE]… [--arg A]…
-│                               [--unset KEY] [--clear]
+│                               [--unset KEY] [--account A] [--clear-account] [--clear]
 ├── task            add · list · show · next [--role R] [--status S] [--claim]
 │                   claim · review [--note] · reopen --reason · done [--note]
 │                   block --reason · drop · release        (all with [--as SESSION])

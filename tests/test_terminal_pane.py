@@ -3915,6 +3915,55 @@ def test_header_text_carries_every_field_as_data() -> None:
     assert "task " not in bare and "exited" not in bare
 
 
+def test_agent_view_reads_the_account_labels_off_the_ui_thread_and_repaints(
+    fake: FakeTmux, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The header used to open the store on the event loop (a busy timeout of seconds, review
+    of #205, second round): the labels come from a thread worker, the header paints the
+    built-in name until it answers, and the registry is asked once per ``LABELS_TTL``."""
+    import threading
+
+    from aisquare.cli.ui.views import agent as agent_view
+
+    server = fake.server(tmp_path)
+    asked: list[str] = []
+    answered = threading.Event()
+
+    def slot_labels() -> dict[int, str]:
+        asked.append(threading.current_thread().name)
+        answered.set()
+        return {2: "work"}
+
+    monkeypatch.setattr("aisquare.services.claude_accounts.slot_labels", slot_labels)
+    status = _status()
+    on_slot_two = status.model_copy(
+        update={"agent": status.agent.model_copy(update={"account_slot": 2})}
+    )
+
+    class ViewHost(App[None]):
+        def compose(self) -> ComposeResult:
+            yield agent_view.AgentView(on_slot_two, server=server, escape_key="f12", id="view")
+
+    async def drive() -> tuple[str, str, int]:
+        host = ViewHost()
+        async with host.run_test(size=(60, 8)) as pilot:
+            view = host.query_one("#view", agent_view.AgentView)
+            header = host.query_one("#agent-header", Static)
+            first = str(header.content)
+            await wait_until(pilot, lambda: "work" in str(header.content))
+            for state in ("waiting", "working", "waiting"):
+                view.refresh_status(
+                    on_slot_two.model_copy(update={"state": state})
+                )  # within the TTL: no new read
+                await pilot.pause()
+            return first, str(header.content), len(asked)
+
+    first, painted, reads = asyncio.run(drive())
+    assert "account 2" in first or "work" in first  # the built-in name until the worker answers
+    assert "work" in painted and "account 2" not in painted
+    assert reads == 1 and asked[0] != "MainThread"  # once, off the event loop
+
+
 def test_agent_view_refreshes_its_header_and_reattaches_on_a_new_pane(
     fake: FakeTmux, tmp_path: Path
 ) -> None:

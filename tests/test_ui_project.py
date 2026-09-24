@@ -62,6 +62,7 @@ from aisquare.models import (
     FleetAgentStatus,
     ProjectInfo,
     TeamEvent,
+    TeamSession,
 )
 from aisquare.services import explainability as explainability_service
 from aisquare.services import explainability_ops as ops
@@ -560,6 +561,55 @@ def test_a_hidden_board_tab_stops_polling_and_catches_up_when_shown(
     assert after_show >= hidden + 2  # shown: on_show, then the ticks resume
 
 
+def test_the_board_names_its_accounts_from_a_worker_never_from_the_ui_thread(
+    project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #205, fourth round: the sessions block read the slot labels itself — a
+    ``context.db`` open with a busy timeout of seconds and a scan of the account
+    directories — on the event loop, at every tick of every open board. The panel reads
+    them in a thread worker, at most every ``LABELS_TTL``, and paints the map it has."""
+    import threading
+
+    from aisquare.core import claude_accounts as accounts_core
+    from aisquare.services import claude_accounts as accounts_service
+
+    two, three = accounts_core.create_account(), accounts_core.create_account()
+    now = datetime.now(tz=UTC)
+    sessions = [
+        TeamSession(
+            id=f"sess-on-{account.slot}",
+            project_id=project.id,
+            role="coder",
+            started_at=now,
+            last_seen_at=now,
+            account=str(account.config_dir),
+        )
+        for account in (two, three)
+    ]
+    monkeypatch.setattr(team_service, "board_data", lambda **kwargs: (project, sessions, [], []))
+    asked: list[str] = []
+
+    def slot_labels(store: Any = None) -> dict[int, str]:
+        asked.append(threading.current_thread().name)
+        return {two.slot: "work", three.slot: "home"}
+
+    monkeypatch.setattr(accounts_service, "slot_labels", slot_labels)
+
+    async def scenario(pilot: Pilot[None], host: Host) -> str:
+        panel = host.query_one("#board-panel", BoardPanel)
+        host.query_one(ProjectView).active = "tab-board"
+        await settle(pilot)
+        panel.refresh_data()  # two more ticks inside the TTL
+        panel.refresh_data()
+        await settle(pilot)
+        return shown(host.query_one("#sessions", Static))
+
+    painted = drive(project, scenario)
+    assert asked and threading.main_thread().name not in asked
+    assert len(asked) == 1  # ticks inside the TTL paint the map they have
+    assert "work" in painted and "home" in painted
+
+
 def _event(project: ProjectInfo, index: int) -> TeamEvent:
     return TeamEvent(
         seq=index + 1,
@@ -842,3 +892,162 @@ def test_explainability_ship_drains_through_the_service_and_register_refuses_unc
     assert ("shipped 3 records\nruns: run-1", "information") in notices
     assert rosters == []  # no gateway configured → refused before any request
     assert any("has no gateway URL" in m and s == "error" for m, s in notices), notices
+
+
+def test_settings_binds_an_account_per_role_and_a_cleared_one_leaves_no_empty_profile(
+    project: ProjectInfo,
+) -> None:
+    """The select beside each role is `team bind <role> --account` with a mouse (#145)."""
+    from aisquare.core import claude_accounts as accounts_core
+
+    accounts_core.create_account()  # slot 2, under the isolated AISQUARE_HOME
+
+    async def scenario(pilot: Pilot[None], host: Host) -> tuple[list[str], list[tuple[str, str]]]:
+        host.query_one(ProjectView).active = "tab-settings"
+        await settle(pilot)  # the slots arrive from a worker
+        select = host.query_one("#acct-coder", Select)
+        labels = [str(label) for label, _value in select._options]
+        select.value = "2"
+        host.query_one("#save-settings", Button).press()
+        await pilot.pause()
+        return labels, host.notices
+
+    labels, notices = drive(project, scenario)
+    assert any(m.startswith("✓ fleet settings saved") for m, _ in notices), notices
+    assert labels[0] == "(no account binding)"
+    assert any(label.startswith("2 · account 2") for label in labels), labels
+    assert load_config().team.profiles["coder"].account == "2"  # the binding's one home
+    assert _config_toml()["team"]["profiles"]["coder"]["account"] == "2"  # the bytes
+    assert "manager" not in load_config().team.profiles  # an untouched role gains no profile
+
+    async def clear(pilot: Pilot[None], host: Host) -> str | None:
+        host.query_one(ProjectView).active = "tab-settings"
+        await settle(pilot)
+        select = host.query_one("#acct-coder", Select)
+        shown_value = select.value
+        select.value = ""
+        host.query_one("#save-settings", Button).press()
+        await pilot.pause()
+        return str(shown_value)
+
+    shown_value = drive(project, clear)
+    assert shown_value == "2"  # the form opened on what the file held
+    assert "coder" not in load_config().team.profiles  # nothing else bound: the table goes
+
+
+def test_the_settings_form_reads_its_file_once_and_the_slots_off_the_ui_thread(
+    project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #205, fourth round: the constructor read ``config.toml`` three times —
+    ``[fleet]``, ``[accounts]``, the bindings — and listed the accounts, a store open, a
+    directory scan and maybe a reconcile write, on the event loop. One read of the file;
+    the slots come from a thread worker, and the select keeps what it showed meanwhile."""
+    import threading
+
+    from aisquare.cli.ui.views import settings as settings_view
+    from aisquare.core import claude_accounts as accounts_core
+    from aisquare.services import claude_accounts as accounts_service
+    from aisquare.services import settings as settings_service
+
+    accounts_core.create_account()  # slot 2
+    settings_service.bind_role("coder", account="2")
+    loads: list[str] = []
+    for module in (settings_view, fleet_service, accounts_service, settings_service):
+        real_load = module.load_config
+
+        def counted(real: Any = real_load, name: str = module.__name__) -> Any:
+            loads.append(name)
+            return real()
+
+        monkeypatch.setattr(module, "load_config", counted)
+    listed: list[str] = []
+    real_list = accounts_service.list_accounts
+
+    def list_accounts() -> Any:
+        listed.append(threading.current_thread().name)
+        return real_list()
+
+    monkeypatch.setattr(accounts_service, "list_accounts", list_accounts)
+
+    form = SettingsView(project)
+    assert len(loads) == 1 and listed == []  # the constructor reads the file once, lists nothing
+
+    async def scenario(pilot: Pilot[None], host: Host) -> tuple[list[str], str]:
+        host.query_one(ProjectView).active = "tab-settings"
+        await settle(pilot)
+        select = host.query_one("#acct-coder", Select)
+        return [str(label) for label, _value in select._options], str(select.value)
+
+    labels, value = drive(project, scenario)
+    assert listed and threading.main_thread().name not in listed
+    assert any(label.startswith("2 · account 2") for label in labels), labels
+    assert value == "2"  # the binding, shown before the slots arrived and after
+    assert form.accounts.pick == "default" and form.fleet.escape_key == "f12"
+
+
+def test_a_slot_removed_between_two_reads_falls_back_to_the_binding_on_the_form(
+    project: ProjectInfo,
+) -> None:
+    """The slots arrive from a worker, so a select can hold a slot an earlier answer offered
+    and the next one does not: set as its value, the select refuses it and the handler
+    raises. It falls back to what the file binds instead."""
+    import shutil
+
+    from aisquare.core import claude_accounts as accounts_core
+
+    accounts_core.create_account()  # slot 2
+    third = accounts_core.create_account()  # slot 3, removed below
+
+    async def scenario(pilot: Pilot[None], host: Host) -> tuple[str, list[str]]:
+        host.query_one(ProjectView).active = "tab-settings"
+        await settle(pilot)
+        select = host.query_one("#acct-coder", Select)
+        select.value = "3"
+        shutil.rmtree(third.config_dir)
+        host.query_one(SettingsView)._load_accounts()
+        await settle(pilot)
+        return str(select.value), [str(value) for _label, value in select._options]
+
+    value, offered = drive(project, scenario)
+    assert value == ""  # nothing bound: "no account binding"
+    assert "3" not in offered and "2" in offered
+
+
+def test_settings_saves_the_accounts_section_and_rejects_a_bad_line(project: ProjectInfo) -> None:
+    """`[accounts]` (#146) on the same form, through the same one writer."""
+
+    async def scenario(pilot: Pilot[None], host: Host) -> list[tuple[str, str]]:
+        host.query_one(ProjectView).active = "tab-settings"
+        await pilot.pause()
+        host.query_one("#accounts-pick", Select).value = "headroom"
+        host.query_one("#accounts-switch-at", Input).value = "70"
+        host.query_one("#accounts-on-limit", Select).value = "switch"
+        host.query_one("#accounts-wait-minutes", Input).value = "5"
+        host.query_one("#save-settings", Button).press()
+        await pilot.pause()
+        return host.notices
+
+    notices = drive(project, scenario)
+    assert any(m.startswith("✓ fleet settings saved") for m, _ in notices), notices
+    on_disk = _config_toml()["accounts"]
+    assert on_disk == {
+        "pick": "headroom",
+        "switch_at": 70,
+        "on_limit": "switch",
+        "wait_if_reset_within_minutes": 5,
+    }
+    assert load_config().accounts.pick == "headroom"
+
+    async def bad(pilot: Pilot[None], host: Host) -> tuple[str, list[tuple[str, str]]]:
+        host.query_one(ProjectView).active = "tab-settings"
+        await pilot.pause()
+        shown_pick = str(host.query_one("#accounts-pick", Select).value)
+        host.query_one("#accounts-switch-at", Input).value = "250"
+        host.query_one("#save-settings", Button).press()
+        await pilot.pause()
+        return shown_pick, host.notices
+
+    shown_pick, notices = drive(project, bad)
+    assert shown_pick == "headroom"  # the form opened on what the file holds
+    assert any("between 1 and 100" in m and sev == "error" for m, sev in notices), notices
+    assert load_config().accounts.switch_at == 70  # a refused form never reaches the writer

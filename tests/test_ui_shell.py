@@ -1889,3 +1889,42 @@ def test_the_shell_reopens_what_was_open_when_its_row_is_still_there(
     assert drive(relaunch) == ("welcome", None)
     with store_session() as store:
         assert store.ui_state("fleet.selected") is None, "a stale memory is dropped, not retried"
+
+
+def test_the_shell_remembers_the_captured_toggle_and_reopens_a_page(
+    tmp_path: Path, script: Script
+) -> None:
+    """Review of #169: what the shell remembers beyond a row came back untested —
+    the captured directories shown with `a`, the Accounts page, the Doctor."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+    with store_session() as store:
+        store.ensure_project(ProjectInfo(id="prj_scratch", root=tmp_path / "scratch"))  # a hook
+
+    async def press_a(pilot: Pilot[None]) -> None:
+        fleet_app(pilot).sidebar.focus()
+        await pilot.press("a")
+        await pilot.pause()
+
+    async def relaunch(pilot: Pilot[None]) -> tuple[list[str], str | None, str | None]:
+        app = fleet_app(pilot)
+        await pilot.pause()
+        await pilot.pause()
+        view = app.current_view()
+        cards = [card.project.id for card in app.query(ProjectCard)]
+        return cards, (view.id if view else None), app.sidebar.selected_key
+
+    drive(press_a)
+    with store_session() as store:
+        assert store.ui_state("fleet.show_captured") == "1"
+    assert drive(relaunch)[0] == ["prj_a", "prj_scratch"], "the toggle survives a relaunch"
+    drive(press_a)
+    with store_session() as store:
+        assert store.ui_state("fleet.show_captured") is None, "hiding them again is remembered"
+    assert drive(relaunch)[0] == ["prj_a"]
+
+    with store_session() as store:
+        store.set_ui_state("fleet.selected", "accounts")
+    assert drive(relaunch)[1:] == ("accounts", "accounts")
+    with store_session() as store:
+        store.set_ui_state("fleet.selected", "doctor:")
+    assert drive(relaunch)[1:] == ("doctor", "doctor")

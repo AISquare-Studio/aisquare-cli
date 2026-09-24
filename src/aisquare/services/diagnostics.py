@@ -118,7 +118,6 @@ def doctor(
         _check_claude_code(),
         *_claude_accounts_checks(),
         _check_tmux(),
-        _check_fleet_terminal(),
         _check_gh(),
         _check_snapshot(cwd),
         _check_brain(cwd),
@@ -129,8 +128,11 @@ def doctor(
         # shows the first three not-ok rows (`DOCTOR_LINES == 3`, a stable sort
         # within the warn group), so a row inserted at position 12 evicted one
         # of `brain` / `snapshot` / a logged-out `gh` — the ones an operator can
-        # act on — from the only doctor surface visible without a click.
+        # act on — from the only doctor surface visible without a click. The
+        # fleet terminal row (#147) can warn too, about a running server's kept
+        # prefix, so it waits here with them rather than beside tmux.
         _check_browser_tools(cwd),
+        _check_fleet_terminal(),
         *_experiment_checks(),
         *explainability_ops.checks(live=live, target_name=target),
     ]

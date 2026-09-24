@@ -462,13 +462,14 @@ def _handing_over(session: TeamSession, agent: FleetAgent | None) -> bool:
     """Whether a hand-over in flight holds ``session`` — its mark, read by the fleet's own
     rule (``fleet._handed_over``) when the session has a live row.
 
-    The raw mark is not enough: one that outlived its hand-over — ``restart`` or
-    ``switch`` interrupted between the mark and the ``/exit`` (``KeyboardInterrupt``
-    passes their ``except Exception``, so the take-back never runs) — would hold
-    back the bell and the line of an agent that is going nowhere. Older than
-    ``HANDOVER_GRACE``, a mark is the fleet's to disregard, and this hook's too
-    (review of #164, round 1). A marked session with no live row is one whose
-    stop has already ended it.
+    The raw mark is not enough: one that outlived its hand-over would hold back the
+    bell and the line of an agent that is going nowhere. ``restart`` and ``switch``
+    take it back in a ``finally`` around their stop, a Ctrl-C included, so what
+    leaves one behind is a take-back the store refused (said on their receipt) or
+    a process that died without unwinding — killed, or its terminal closed —
+    between the mark and the take-back. Older than ``HANDOVER_GRACE``, a mark is
+    the fleet's to disregard, and this hook's too (review of #164, round 1). A
+    marked session with no live row is one whose stop has already ended it.
     """
     if session.state != team_service.HANDOVER_STATE:
         return False

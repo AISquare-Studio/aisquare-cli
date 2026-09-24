@@ -233,3 +233,19 @@ def test_undo_puts_a_project_at_the_top_level_when_its_group_was_deleted_since(
     cli = store.get_project("prj_cli")
     assert cli is not None and cli.group_id is None
     assert set(_order(store)) == {"prj_api", "prj_cli", "prj_docs", "prj_web"}
+
+
+def test_undo_brings_back_only_a_group_its_own_change_deleted(store: ContextStore) -> None:
+    """A group the entry only remembered — its place among the groups, its fold — that was
+    deleted from a shell before the `u` stays deleted: re-created, it came back empty. The
+    entry of the deletion is the one that brings it back, members and all."""
+    tools, _ = groups.create_group(store, "tools", ["prj_cli"])
+    site, _ = groups.create_group(store, "site", ["prj_web"])
+    moved = groups.move_group(store, site.id, position=0)  # remembers tools's place too
+    folded = groups.set_collapsed(store, tools.id, True)
+    gone = groups.delete_group(store, tools.id)  # another surface, before the undo
+    assert groups.undo(store, folded) == "collapse tools"
+    assert groups.undo(store, moved) == "move group site"
+    assert [g.name for g in store.project_groups()] == ["site"], "tools stays deleted"
+    assert groups.undo(store, gone) == "delete group tools"
+    assert _shape(store)["groups"] == {"tools": ["prj_cli"], "site": ["prj_web"]}

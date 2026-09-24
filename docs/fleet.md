@@ -594,13 +594,15 @@ several projects" error lists codenames, because basenames are what collide.
 arrange it: **drag** a project card onto a group header to put it in that
 group, between cards to reorder it, or onto the empty space below the list to
 take it out of its group; drag a group header to reorder the groups. Released
-anywhere else — the main pane, a pinned card — a drag changes nothing. Without a
-mouse: with the sidebar focused, `shift+↑` / `shift+↓` move the project (or
-group) under the cursor one step, `g` opens the group picker (an existing
-group, *New group…*, or *Ungroup*), `p` pins or unpins, `space` folds a group
-(or a card), and `u` undoes the last gesture — a toast says what was undone.
-`shift+click` marks several cards; `shift+g` or a drag then moves the whole
-set. Pinned projects and groups sit in a **📌 Pinned** section at the top, in
+anywhere else — the main pane, a pinned card — a drag changes nothing. A pinned
+card or group does not drag at all: its place is the pin order, which `p` sets
+(the group picker still regroups a pinned project). Without a mouse: with the
+sidebar focused, `shift+↑` / `shift+↓` move the project (or group) under the
+cursor one step, `g` opens the group picker (an existing group, *New group…*,
+or *Ungroup*), `p` pins or unpins, `space` folds a group (or a card), and `u`
+undoes the last gesture — a toast says what was undone. `shift+click` marks
+several cards; `shift+g` then moves the whole set, and a drag its unpinned
+cards. Pinned projects and groups sit in a **📌 Pinned** section at the top, in
 pin order; a group header carries the roll-up of its members' agents, so a
 folded group still tells you something is running. A group shares **nothing**:
 context, prompts, snapshots, boards and explainability settings stay per

@@ -2003,8 +2003,9 @@ async def _as_the_terminal_sends(
     offset: tuple[int, int] = (1, 0),
     *,
     shift: bool = False,
+    button: int = 1,
 ) -> None:
-    """Post one button-1 mouse event the way the terminal driver does: to the APP.
+    """Post one mouse event (button 1 unless told) the way the terminal driver does: to the APP.
 
     ``App.on_event`` is where a MouseUp over the pressed widget becomes a Click —
     in the same call that queues the MouseUp, routed by the capture standing at
@@ -2015,7 +2016,7 @@ async def _as_the_terminal_sends(
     """
     x, y = widget.region.offset + offset
     app = pilot.app
-    app.post_message(kind(None, x, y, 0, 0, 1, shift, False, False, screen_x=x, screen_y=y))
+    app.post_message(kind(None, x, y, 0, 0, button, shift, False, False, screen_x=x, screen_y=y))
     await pilot.pause()
 
 
@@ -2173,6 +2174,155 @@ def test_a_drag_released_where_nothing_is_a_place_moves_nothing(
     assert group_id is None
 
 
+def test_a_pinned_row_is_not_dragged_as_it_is_not_stepped(
+    tmp_path: Path, script: Script, isolated_home: Path
+) -> None:
+    """A pinned row's place is the pin order, which is ``p``'s: shift+↓ on it is "nothing
+    to move", and a drag from it snaps back. Dragged, a pinned member dropped on the empty
+    space or on a loose card left its group while its card stayed under Pinned — nothing on
+    screen changed, and ``u`` had a step to undo (review of #171, round 1). A selection
+    drags only its unpinned cards; a click on a pinned title still opens it."""
+    seed(
+        tmp_path,
+        ("prj_a", "api", None),
+        ("prj_b", "cli", None),
+        ("prj_c", "docs", None),
+        ("prj_d", "web", None),
+    )
+    with store_session() as store:
+        tools, _ = groups_service.create_group(store, "tools", ["prj_b"])
+        site, _ = groups_service.create_group(store, "site", ["prj_c"])
+        groups_service.pin(store, "prj_b")  # a pinned member of tools
+        groups_service.pin_group(store, site.id)
+
+    async def go(
+        pilot: Pilot[None],
+    ) -> tuple[list[list[str]], bool, int, str | None, str | None]:
+        app = fleet_app(pilot)
+        seen = [_cards(app)]
+
+        def title(project_id: str) -> ProjectTitle:
+            return card_for(app, project_id).query_one(ProjectTitle)
+
+        def header(name: str) -> GroupHeader:
+            return next(h for h in app.sidebar.query(GroupHeader) if h.group.name == name)
+
+        holder = app.sidebar.query_one("#projects", VerticalScroll)
+        empty = (2, holder.region.height - 1)
+        await _drag(pilot, title("prj_b"), holder, offset=empty)  # onto the empty space
+        seen.append(_cards(app))
+        # Onto a loose card, looked at on the way: nothing lifts off, nothing is a place.
+        api = card_for(app, "prj_a")
+        await _as_the_terminal_sends(pilot, events.MouseDown, title("prj_b"))
+        await _as_the_terminal_sends(pilot, events.MouseMove, api)
+        lifted = card_for(app, "prj_b").has_class("-dragging") or api.has_class("-drop-before")
+        await _as_the_terminal_sends(pilot, events.MouseUp, api)
+        seen.append(_cards(app))
+        await _drag(pilot, header("site"), header("tools"), offset=(3, 0))  # a pinned group
+        seen.append(_cards(app))
+        depth = len(app._undo)
+        # A selection of a loose and a pinned card, dragged by the loose one: it moves alone.
+        await _click(pilot, title("prj_a"), shift=True)
+        await _click(pilot, title("prj_b"), shift=True)
+        await _drag(pilot, title("prj_a"), holder, offset=empty)
+        seen.append(_cards(app))
+        await _click(pilot, title("prj_b"))
+        view = app.current_view()
+        with store_session() as store:
+            cli = store.get_project("prj_b")
+        group_id = cli.group_id if cli is not None else None
+        return seen, lifted, depth, group_id, view.id if view is not None else None
+
+    seen, lifted, depth, group_id, opened = drive(go)
+    arranged = ["pinned", "prj_b", "group:site", "prj_c", "group:tools", "prj_a", "prj_d"]
+    assert seen[:4] == [arranged] * 4, seen
+    assert not lifted, "a press on a pinned card is no drag"
+    assert depth == 0, "a drag from a pinned row is no gesture to undo"
+    assert seen[4] == ["pinned", "prj_b", "group:site", "prj_c", "group:tools", "prj_d", "prj_a"]
+    assert group_id == tools.id, "the pinned member is still the group's"
+    assert opened == "project-prj_b", "a click on a pinned title opens it"
+
+
+def test_a_drag_dims_the_card_it_moves_and_marks_only_a_place(
+    tmp_path: Path, script: Script, isolated_home: Path
+) -> None:
+    """The whole card dims while it moves, not its title line (which no rule styled). Its
+    own card is no place — a release there snaps back — so it gets no drop mark, and
+    neither does a group's own header under its drag; and a group header marked as the
+    place keeps its name on screen: the accent line on a one-row header took the row,
+    and the name went blank under the pointer."""
+    seed(tmp_path, ("prj_a", "api", None), ("prj_b", "cli", None), ("prj_c", "docs", None))
+    with store_session() as store:
+        groups_service.create_group(store, "tools", ["prj_b"])
+
+    async def go(pilot: Pilot[None]) -> tuple[list[bool], int, str, list[str]]:
+        app = fleet_app(pilot)
+        docs = card_for(app, "prj_c")
+        header = app.sidebar.query_one(GroupHeader)
+        await _as_the_terminal_sends(pilot, events.MouseDown, docs.query_one(ProjectTitle))
+        await _as_the_terminal_sends(pilot, events.MouseMove, docs, (1, 1))  # its own spawn row
+        marks = [docs.has_class("-dragging"), docs.has_class("-drop-before")]
+        await _as_the_terminal_sends(pilot, events.MouseMove, header, (3, 0))
+        await pilot.pause()
+        marks.append(header.has_class("-drop-before"))
+        rows = header.content_region.height
+        box = Region(0, 0, header.outer_size.width, header.outer_size.height)
+        name = "".join(strip.text for strip in header.render_lines(box))
+        await _as_the_terminal_sends(pilot, events.MouseUp, header, (3, 0))
+        await pilot.pause()
+        marks.append(docs.has_class("-dragging"))
+        # The group, off its header and back onto it.
+        await _as_the_terminal_sends(pilot, events.MouseDown, header, (3, 0))
+        await _as_the_terminal_sends(pilot, events.MouseMove, card_for(app, "prj_b"))
+        await _as_the_terminal_sends(pilot, events.MouseMove, header, (3, 0))
+        marks += [header.has_class("-dragging"), header.has_class("-drop-before")]
+        await _as_the_terminal_sends(pilot, events.MouseUp, header, (3, 0))
+        await pilot.pause()
+        return marks, rows, name, _cards(app)
+
+    marks, rows, name, cards = drive(go)
+    dimmed, own_mark, header_marked, still_dimmed, group_dimmed, own_header_mark = marks
+    assert dimmed, "the card it moves dims"
+    assert not own_mark, "a card is no place to drop itself"
+    assert header_marked and rows == 1, (header_marked, rows)
+    assert "📁 tools" in name, name
+    assert not still_dimmed
+    assert group_dimmed and not own_header_mark, "a header is no place to drop its group"
+    assert cards == ["group:tools", "prj_b", "prj_c", "prj_a"], "dropped on the header: last"
+
+
+def test_another_button_let_go_mid_drag_does_not_end_it(
+    tmp_path: Path, script: Script, isolated_home: Path
+) -> None:
+    """The drag is button 1's. A right button pressed and let go while it is held neither
+    drops the card there nor counts as a click on it; the left button's release does."""
+    seed(tmp_path, ("prj_a", "api", None), ("prj_b", "cli", None), ("prj_c", "docs", None))
+    with store_session() as store:
+        groups_service.create_group(store, "tools", ["prj_b"])
+
+    async def go(pilot: Pilot[None]) -> tuple[list[str], list[str], str | None, list[str]]:
+        app = fleet_app(pilot)
+        before = _cards(app)
+        header = app.sidebar.query_one(GroupHeader)
+        await _as_the_terminal_sends(
+            pilot, events.MouseDown, card_for(app, "prj_c").query_one(ProjectTitle)
+        )
+        await _as_the_terminal_sends(pilot, events.MouseMove, header, (3, 0))
+        await _as_the_terminal_sends(pilot, events.MouseDown, header, (3, 0), button=3)
+        await _as_the_terminal_sends(pilot, events.MouseUp, header, (3, 0), button=3)
+        await pilot.pause()
+        midway = _cards(app)
+        view = app.current_view()
+        await _as_the_terminal_sends(pilot, events.MouseUp, header, (3, 0))
+        await pilot.pause()
+        return before, midway, view.id if view is not None else None, _cards(app)
+
+    before, midway, opened, after = drive(go)
+    assert midway == before == ["group:tools", "prj_b", "prj_a", "prj_c"], midway
+    assert opened == "welcome", "the right button's click is no open"
+    assert after == ["group:tools", "prj_b", "prj_c", "prj_a"], "the left release drops"
+
+
 def test_a_step_with_nowhere_to_go_leaves_nothing_to_undo(
     tmp_path: Path, script: Script, isolated_home: Path
 ) -> None:
@@ -2209,21 +2359,35 @@ def test_a_handle_removed_mid_press_lets_the_mouse_go(
 ) -> None:
     """The handle holds the mouse from the press; a refresh that removes it (the project
     forgotten from a shell) must not leave the capture on a widget that is gone —
-    Textual would deliver every later mouse event nowhere."""
+    Textual would deliver every later mouse event nowhere. The drag it began closes
+    with it: left open, the card under the pointer kept its drop mark until the next
+    press on a handle (review of #171, round 1)."""
     seed(tmp_path, ("prj_a", "api", None), ("prj_b", "cli", None))
 
-    async def go(pilot: Pilot[None]) -> tuple[bool, object]:
+    async def go(pilot: Pilot[None]) -> tuple[bool, bool, object, bool, bool]:
         app = fleet_app(pilot)
         title = card_for(app, "prj_b").query_one(ProjectTitle)
+        api = card_for(app, "prj_a")
         await _as_the_terminal_sends(pilot, events.MouseDown, title)
         held = app.mouse_captured is title
+        await _as_the_terminal_sends(pilot, events.MouseMove, api)
+        marked = api.has_class("-drop-before")
         with store_session() as store:
             store.forget_project("prj_b")
         app.refresh_data()
         await pilot.pause()
         await pilot.pause()
-        return held, app.mouse_captured
+        await _as_the_terminal_sends(pilot, events.MouseUp, api)
+        return (
+            held,
+            marked,
+            app.mouse_captured,
+            api.has_class("-drop-before"),
+            app.sidebar._drag is None,
+        )
 
-    held, captured = drive(go)
+    held, marked, captured, still_marked, closed = drive(go)
     assert held, "the press is held by the handle"
+    assert marked, "the drag was running over api's card"
     assert captured is None
+    assert not still_marked and closed, "the drag went with its handle"

@@ -327,9 +327,13 @@ class DragHandle(Activatable):
     _dragged = False
     """Whether the gesture that just ended here was a drag (so its Click is not a click)."""
 
-    def drag_state(self, sidebar: Sidebar) -> DragState:  # pragma: no cover - overridden
-        """What a press here would drag."""
+    def drag_state(self, sidebar: Sidebar) -> DragState | None:  # pragma: no cover - overridden
+        """What a press here would drag; ``None`` when nothing here moves (a pinned row)."""
         raise NotImplementedError
+
+    def dragged_row(self) -> Widget:
+        """The row a drag from here moves: it dims while it moves."""
+        return self
 
     def on_mouse_down(self, event: events.MouseDown) -> None:
         self._dragged = False
@@ -337,6 +341,8 @@ class DragHandle(Activatable):
         if sidebar is None or event.button != 1 or event.shift:
             return  # a shift+click is a mark, decided on the click
         state = self.drag_state(sidebar)
+        if state is None:
+            return  # nothing to drag: the press stays a click
         state.origin_y = event.screen_y
         sidebar.begin_drag(state, self)
 
@@ -347,8 +353,14 @@ class DragHandle(Activatable):
 
     def on_mouse_up(self, event: events.MouseUp) -> None:
         sidebar = self._sidebar()
-        if sidebar is not None:
-            self._dragged = sidebar.end_drag(self)
+        if sidebar is None:
+            return
+        if event.button != 1:
+            # Another button let go while button 1 holds a drag from here: the drag
+            # goes on, and the Click the app builds from this release is no click.
+            self._dragged = sidebar.dragging(self)
+            return
+        self._dragged = sidebar.end_drag(self)
 
     def on_click(self, event: events.Click) -> None:
         if self._dragged:
@@ -362,8 +374,13 @@ class DragHandle(Activatable):
     def on_unmount(self) -> None:
         # Removed mid-drag (its project forgotten, its group deleted from a
         # shell): Textual keeps a capture on a widget that is gone, and every
-        # later mouse event would be delivered nowhere.
+        # later mouse event would be delivered nowhere. The drag goes with it:
+        # its release now lands on another widget, which ends no drag, so the
+        # drop mark stayed on the card under the pointer.
         self.release_mouse()
+        sidebar = self._sidebar()
+        if sidebar is not None:
+            sidebar.cancel_drag(self)
 
 
 class ProjectTitle(DragHandle):
@@ -386,11 +403,28 @@ class ProjectTitle(DragHandle):
     def message(self) -> Message:
         return ProjectSelected(self.project_id)
 
-    def drag_state(self, sidebar: Sidebar) -> DragState:
+    def drag_state(self, sidebar: Sidebar) -> DragState | None:
+        """The card, or the selection it is in — never a pinned card.
+
+        A pinned card's place is the pin order, which is ``p``'s: ``step`` calls
+        it "nothing to move", and no card or empty space is a place for it.
+        Dragged, it left its group with its card still under Pinned — nothing on
+        screen changed, and ``u`` had a step to undo (review of #171, round 1).
+        """
+        pinned = sidebar.pinned_ids()
+        if self.project_id in pinned:
+            return None
         ids = sidebar.marked_ids()
         if self.project_id not in ids:
             ids = [self.project_id]
-        return DragState("project", self.project_id, ids)
+        return DragState("project", self.project_id, [pid for pid in ids if pid not in pinned])
+
+    def dragged_row(self) -> Widget:
+        # The whole card moves, not this line of it: only the card's dimming is styled.
+        for node in self.ancestors:
+            if isinstance(node, ProjectCard):
+                return node
+        return self
 
     def on_click(self, event: events.Click) -> None:
         sidebar = self._sidebar()
@@ -470,10 +504,12 @@ def group_header_text(entry: GroupEntry, agents: Mapping[str, list[FleetAgentSta
 class GroupHeader(DragHandle):
     """A group's line: Enter or a click folds and unfolds it; drag it to reorder groups (#140)."""
 
+    # Two rows while it is the drop target: the accent line takes one, and on a
+    # one-row header it took the only row — the name went blank under the pointer.
     DEFAULT_CSS = """
     GroupHeader { padding: 0 1; color: $text; background: $boost; }
     GroupHeader.-dragging { opacity: 60%; }
-    GroupHeader.-drop-before { border-top: solid $accent; }
+    GroupHeader.-drop-before { height: 2; border-top: solid $accent; }
     """
 
     def __init__(self, entry: GroupEntry, agents: Mapping[str, list[FleetAgentStatus]]) -> None:
@@ -488,7 +524,11 @@ class GroupHeader(DragHandle):
     def message(self) -> Message:
         return ToggleCollapse(self.group.id)
 
-    def drag_state(self, sidebar: Sidebar) -> DragState:
+    def drag_state(self, sidebar: Sidebar) -> DragState | None:
+        # A pinned group keeps its pin order, as a pinned card does (``step_group``
+        # has nothing to move either): dropped, it renumbered the unpinned groups.
+        if self.group.pinned_at is not None:
+            return None
         return DragState("group", self.group.id)
 
 
@@ -852,6 +892,11 @@ class Sidebar(Vertical):
     def marked_ids(self) -> list[str]:
         return list(self._marked)
 
+    def pinned_ids(self) -> set[str]:
+        """The projects the frame on screen lists under Pinned."""
+        pinned = self.arrangement.pinned if self.arrangement is not None else []
+        return {entry.id for entry in pinned if isinstance(entry, ProjectInfo)}
+
     def toggle_mark(self, project_id: str) -> None:
         """shift+click: add the card to (or drop it from) the multi-selection."""
         if project_id in self._marked:
@@ -937,6 +982,18 @@ class Sidebar(Vertical):
         self._drag, self._drag_source = state, source
         source.capture_mouse()
 
+    def dragging(self, source: DragHandle) -> bool:
+        """Is a press on ``source`` still held — its drag begun and not yet released?"""
+        return self._drag is not None and source is self._drag_source
+
+    def cancel_drag(self, source: DragHandle) -> None:
+        """``source`` went away mid-drag: close its drag and clear its marks; nothing moves."""
+        if not self.dragging(source):
+            return
+        self._drag, self._drag_source = None, None
+        source.dragged_row().remove_class("-dragging")
+        self._mark_drop(None)
+
     def drag_over(self, source: DragHandle, event: events.MouseMove) -> None:
         drag = self._drag
         if drag is None or source is not self._drag_source:
@@ -945,7 +1002,7 @@ class Sidebar(Vertical):
             if abs(event.screen_y - drag.origin_y) < 1:
                 return
             drag.started = True
-            source.add_class("-dragging")
+            source.dragged_row().add_class("-dragging")
         self._mark_drop(self._target_at(event.screen_x, event.screen_y))
 
     def end_drag(self, source: DragHandle) -> bool:
@@ -955,7 +1012,7 @@ class Sidebar(Vertical):
         if drag is None or source is not self._drag_source:
             return False
         self._drag, self._drag_source = None, None
-        source.remove_class("-dragging")
+        source.dragged_row().remove_class("-dragging")
         target = self._drop_target
         self._mark_drop(None)
         if not drag.started:
@@ -987,10 +1044,11 @@ class Sidebar(Vertical):
         it). The list's own empty space below the last row is the end: the top
         level for a project, the last group for a group. Nothing else is a place
         — the main pane, the header, Accounts and Doctor, the Pinned label, a
-        pinned card (pin order is ``p``'s), a card for a group — and a release
-        there changes nothing. Read as "below the list", a drag abandoned over
-        the main pane ungrouped its project and moved it last, and one onto a
-        pinned card took a pinned member out of its group (review of #171).
+        pinned card (pin order is ``p``'s), a card for a group, the rows being
+        dragged — and a release there changes nothing. Read as "below the list",
+        a drag abandoned over the main pane ungrouped its project and moved it
+        last, and one onto a pinned card took a pinned member out of its group
+        (review of #171).
         """
         drag = self._drag
         try:
@@ -1004,11 +1062,17 @@ class Sidebar(Vertical):
             return holder
         for node in (widget, *widget.ancestors):
             if isinstance(node, GroupHeader):
-                if drag.kind == "group" and node.group.pinned_at is not None:
+                if drag.kind == "group" and (
+                    node.group.pinned_at is not None or node.group.id == drag.ident
+                ):
                     return None
                 return node
             if isinstance(node, ProjectCard):
-                if drag.kind == "group" or node.project.pinned_at is not None:
+                if (
+                    drag.kind == "group"
+                    or node.project.pinned_at is not None
+                    or node.project.id in drag.project_ids
+                ):
                     return None
                 return node
         return None
@@ -1019,7 +1083,7 @@ class Sidebar(Vertical):
         if self._drop_target is not None:
             self._drop_target.remove_class("-drop-before")
         self._drop_target = target
-        if isinstance(target, ProjectCard | GroupHeader) and target is not self._drag_source:
+        if isinstance(target, ProjectCard | GroupHeader):
             target.add_class("-drop-before")
 
     def show_notice(self, text: str | None) -> None:

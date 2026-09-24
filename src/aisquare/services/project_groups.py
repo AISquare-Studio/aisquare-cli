@@ -136,8 +136,10 @@ class UndoEntry:
     """A change's way back: the layout of every row it touched, as it was.
 
     ``groups`` maps a group id to its row before the change, or ``None`` when
-    the group did not exist yet (undo deletes it); a group that was deleted is
-    re-created under its old id, so its members' rows can point at it again.
+    the group did not exist yet (undo deletes it). A group the change deleted
+    (``deleted_groups``) is re-created under its old id, so its members' rows
+    can point at it again; one it only remembered — its place, its fold — and
+    that is gone by the undo was deleted since, and stays deleted.
     """
 
     description: str
@@ -145,6 +147,7 @@ class UndoEntry:
         default_factory=dict
     )
     groups: dict[str, ProjectGroup | None] = field(default_factory=dict)
+    deleted_groups: set[str] = field(default_factory=set)
 
 
 def _remember(store: ContextStore, entry: UndoEntry, project_ids: list[str]) -> None:
@@ -171,6 +174,10 @@ def undo(store: ContextStore, entry: UndoEntry) -> str:
                 store.delete_project_group(group_id)
             continue
         if current is None:
+            if group_id not in entry.deleted_groups:
+                # Deleted from a shell between the gesture and its `u`, by nothing
+                # this entry did: re-created, it came back empty (review of #171).
+                continue
             store.create_project_group(before.name, group_id=group_id)
         store.update_project_group(
             group_id,
@@ -436,6 +443,7 @@ def delete_group(store: ContextStore, group_id: str) -> UndoEntry:
         raise KeyError(group_id)
     entry = UndoEntry(f"delete group {group.name}")
     _remember_group(store, entry, group_id)
+    entry.deleted_groups.add(group_id)
     members = _scope_members(store, group_id)
     pinned_members = [
         p

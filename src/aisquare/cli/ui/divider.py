@@ -62,6 +62,14 @@ def cells(scalar: Scalar | None) -> int | None:
     return None if scalar is None else scalar.cells
 
 
+def floor_of(widget: Widget) -> int:
+    """``widget``'s floor in columns: its ``min-width`` (``0`` means 0); unset, or a unit
+    that is not cells, means 1. One rule for the divider's bounds and the container's
+    ceiling (``app.Panes``), so the two cannot disagree about where the floor is."""
+    floor = cells(widget.styles.min_width)
+    return floor if floor is not None else 1
+
+
 class Divider(Widget):
     """One column between two neighbours; drag it to resize the one on its left.
 
@@ -123,16 +131,15 @@ class Divider(Widget):
     def bounds(self) -> tuple[int, int]:
         """The neighbour's floor and ceiling in columns.
 
-        The floor is its ``min-width`` (``0`` means 0; unset, or a unit that is
-        not cells, means 1). The ceiling is its ``max-width`` — the container's
-        (``app.Panes``) — and, until one is written, the terminal's width less
-        this column: a neighbour is never wider than the screen, whatever a
-        file says. The floor wins when the two cross.
+        The floor is its ``min-width`` (:func:`floor_of`). The ceiling is its
+        ``max-width`` — the container's (``app.Panes``) — and, until one is
+        written, the terminal's width less this column: a neighbour is never
+        wider than the screen, whatever a file says. The floor wins when the
+        two cross.
         """
-        styles = self.target.styles
-        floor = cells(styles.min_width)
-        lower = floor if floor is not None else 1
-        upper = cells(styles.max_width)
+        target = self.target
+        lower = floor_of(target)
+        upper = cells(target.styles.max_width)
         if upper is None:
             upper = self.app.size.width - 1
         return lower, max(lower, upper)

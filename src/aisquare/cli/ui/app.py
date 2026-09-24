@@ -46,7 +46,7 @@ from textual.widgets import ContentSwitcher, Footer, Static
 from textual.worker import Worker, WorkerState
 
 from aisquare.cli.ui.autosave import Autosave
-from aisquare.cli.ui.divider import Divider, cells
+from aisquare.cli.ui.divider import Divider, floor_of
 from aisquare.cli.ui.sidebar import (
     AccountsSelected,
     AddProject,
@@ -230,9 +230,7 @@ class Panes(Horizontal):
 
     def _fit(self, total: int) -> None:
         sidebar = self.sidebar
-        floor = cells(sidebar.styles.min_width)
-        # ``min-width: 0`` is a floor of 0; unset, or not in cells, is 1.
-        sidebar.styles.max_width = self.sidebar_ceiling(total, floor if floor is not None else 1)
+        sidebar.styles.max_width = self.sidebar_ceiling(total, floor_of(sidebar))
 
     def on_resize_sidebar(self, event: ResizeSidebar) -> None:
         """The sidebar's keyboard fallback: step or reset the partition."""

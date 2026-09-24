@@ -30,12 +30,15 @@ not turn into a poll.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
+from http.client import HTTPException
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from aisquare.core import paths
 from aisquare.models import TraceDestination
@@ -117,7 +120,7 @@ def _number(value: Any) -> float | None:
     """A quota number; ``-1`` is the API's "unlimited" and reads as ``None``."""
     try:
         number = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):  # an int past float's range, too
         return None
     if number < 0 or math.isnan(number):
         return None
@@ -204,6 +207,18 @@ def fetch(
         )
     except iam.IamError as exc:
         return WorkspaceCredits(workspace_id, workspace_name, available=False, reason=exc.message)
+    except HTTPException as exc:
+        # What `urllib` raises from `http.client` rather than wrapping, and
+        # `iam._http` does not catch: `IncompleteRead` for a body shorter than
+        # its Content-Length, `LineTooLong`, a bad status line. It used to
+        # escape to `status` and `whoami` as a traceback (review of #173,
+        # round 1; ccf4ac8 closed the same hole on the root post).
+        return WorkspaceCredits(
+            workspace_id,
+            workspace_name,
+            available=False,
+            reason=f"could not read the balance: {exc!r}",
+        )
     if result.status != 200:
         detail = None
         if isinstance(result.body, dict):
@@ -221,8 +236,21 @@ def fetch(
 
 
 def _cache_path(session: iam.Session, workspace_id: int) -> Path:
-    host = iam.resolve_api_url(session.api_url).split("://", 1)[-1].replace("/", "_")
-    return paths.cache_dir() / "credits" / f"{host}-{workspace_id}.json"
+    """``credits/<host>[-<port>]-<workspace>-<credential>.json``.
+
+    The host as ``iam._discovery_cache_path`` spells it — a port as ``-8123``,
+    never ``:8123``, which on Windows names an NTFS alternate data stream
+    rather than a file. And keyed by the credential that asked, as a short
+    hash, never the token: a reading is what the API told THAT sign-in, and a
+    second one within the minute (another user, an ``AISQUARE_TOKEN`` for
+    another account) must ask for itself rather than be handed the first
+    one's balance and ``cost_true`` (review of #173, round 1).
+    """
+    parsed = urlparse(session.api_url)
+    host = (parsed.hostname or "unknown").replace(":", "_")
+    port = f"-{parsed.port}" if parsed.port else ""
+    credential = hashlib.sha256(session.token.encode("utf-8")).hexdigest()[:16]
+    return paths.cache_dir() / "credits" / f"{host}{port}-{workspace_id}-{credential}.json"
 
 
 def _cached(session: iam.Session, workspace_id: int, now: datetime) -> WorkspaceCredits | None:
@@ -231,10 +259,14 @@ def _cached(session: iam.Session, workspace_id: int, now: datetime) -> Workspace
     Aged by the ``fetched_at`` the record carries, against the caller's clock —
     not by the file's mtime against the wall — so the two clocks the rest of
     this module uses are the only two in play (and a test can hold them still).
+
+    A record of any other shape than :func:`_remember` writes (an older or
+    newer CLI, a hand edit) is a miss, as ``iam.discover`` treats its own cache:
+    refetched, never trusted. Every figure goes through ``float`` here, so one
+    that would only fail when the row is drawn fails now instead.
     """
-    path = _cache_path(session, workspace_id)
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
+    try:  # the path under the guard too: a port urlparse cannot read is a ValueError
+        raw = json.loads(_cache_path(session, workspace_id).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
     fetched_at = _when(raw.get("fetched_at")) if isinstance(raw, dict) else None
@@ -242,31 +274,35 @@ def _cached(session: iam.Session, workspace_id: int, now: datetime) -> Workspace
         return None
     if (now - fetched_at).total_seconds() < 0:
         return None  # a reading from the future is a clock problem, not a cache hit
-    windows = {
-        key: Window(
-            used=w["used"],
-            limit=w["limit"],
-            remaining=w["remaining"],
-            resets_at=_when(w["resets_at"]),
+    try:
+        windows = {
+            str(key): Window(
+                used=float(w["used"]),
+                limit=None if w["limit"] is None else float(w["limit"]),
+                remaining=None if w["remaining"] is None else float(w["remaining"]),
+                resets_at=_when(w["resets_at"]),
+            )
+            for key, w in raw["windows"].items()
+        }
+        period, state, cost = raw.get("period"), raw.get("state"), raw.get("cost_true")
+        return WorkspaceCredits(
+            workspace_id=int(raw["workspace_id"]),
+            workspace_name=str(raw["workspace_name"]),
+            available=True,
+            period=period if isinstance(period, str) else None,
+            state=state if isinstance(state, str) else None,
+            windows=windows,
+            cost_true=cost if isinstance(cost, dict) else None,
+            fetched_at=fetched_at,
         )
-        for key, w in raw.get("windows", {}).items()
-    }
-    return WorkspaceCredits(
-        workspace_id=raw["workspace_id"],
-        workspace_name=raw["workspace_name"],
-        available=True,
-        period=raw.get("period"),
-        state=raw.get("state"),
-        windows=windows,
-        cost_true=raw.get("cost_true"),
-        fetched_at=_when(raw.get("fetched_at")),
-    )
+    except (KeyError, TypeError, AttributeError, ValueError, OverflowError):
+        return None  # a damaged cache is refetched, never trusted
 
 
 def _remember(session: iam.Session, credits: WorkspaceCredits) -> None:
     """Write the reading for the next minute; a cache that cannot be written costs nothing."""
-    path = _cache_path(session, credits.workspace_id)
     try:
+        path = _cache_path(session, credits.workspace_id)
         path.parent.mkdir(parents=True, exist_ok=True)
         record = asdict(credits)
         record["fetched_at"] = credits.fetched_at.isoformat() if credits.fetched_at else None

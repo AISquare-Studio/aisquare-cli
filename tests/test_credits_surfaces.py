@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterator
+from http.client import IncompleteRead
 from pathlib import Path
 from typing import Any
 
@@ -144,3 +145,30 @@ def test_the_accounts_page_draws_the_destination_workspaces_bars(
     assert line.startswith("acme  run today ▮▮▮▮▯ 76% · resets")
     assert "run month ▮▮▯▯▯ 40%" in line and "build today unlimited" in line
     assert line.rstrip().endswith("[low]")
+
+
+def test_a_truncated_answer_is_a_reason_on_the_row_not_a_traceback(
+    runner: CliRunner,
+    idp: IdentityProviderStub,
+    pointed: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #173, round 1: ``http.client`` raises what ``urllib`` does not
+    wrap — ``IncompleteRead`` for a body shorter than its Content-Length — and it
+    left ``status`` and ``whoami`` with exit 1 and a traceback. ``whoami`` made
+    no request at all before #143; a balance must never cost it the answer."""
+    real = iam._http
+
+    def http(method: str, url: str, **kwargs: Any) -> iam.HttpResult:
+        if url.endswith("/api/v2/credits/balance/"):
+            raise IncompleteRead(b'{"period": "2026-', 40)
+        return real(method, url, **kwargs)
+
+    monkeypatch.setattr(iam, "_http", http)
+    status = runner.invoke(app, ["explainability", "status"])
+    assert status.exit_code == 0, status.output
+    assert "credits:  acme: credits unavailable — could not read the balance" in status.output
+    assert "IncompleteRead(" in status.output
+    who = runner.invoke(app, ["whoami"])
+    assert who.exit_code == 0, who.output
+    assert "credits: acme: credits unavailable" in who.output

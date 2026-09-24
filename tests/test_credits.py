@@ -9,8 +9,11 @@ asked; a session for another host is not asked about this workspace at all.
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+
+import pytest
 
 from aisquare.core import paths
 from aisquare.models import TraceDestination
@@ -168,3 +171,91 @@ def test_failures_are_reasons_on_the_row(isolated_home: Path, monkeypatch: objec
     assert odd is not None and odd.reason == "unexpected balance shape"
     cached = list((paths.cache_dir() / "credits").glob("*.json"))
     assert not cached, "failures are not cached"
+
+
+def test_a_figure_past_a_floats_range_is_unreadable_not_an_error() -> None:
+    """``parse`` never raises: an integer ``float()`` cannot hold is ``OverflowError``,
+    not ``ValueError``, and read as no figure at all it costs one number, not the row."""
+    huge = {"pools": {"run_credits": {"daily": {"used": 10**400, "limit": 500}}}}
+    reading = credits.parse(huge, workspace_id=42, workspace_name="acme", now=NOW)
+    daily = reading.window("run", "daily")
+    assert reading.available and daily is not None
+    assert daily.used == 0.0 and daily.limit == 500
+
+
+def test_a_damaged_fresh_cache_is_refetched_never_trusted(
+    isolated_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #173, round 1: a cache file of another shape (an older or newer
+    CLI, a hand edit) raised ``KeyError``/``TypeError``/``AttributeError`` out of
+    ``for_destination`` — or read back a figure that raised later, when the row
+    was drawn. Each is a miss now, as ``iam.discover`` treats its own cache."""
+    calls: list[str] = []
+
+    def request(path: str, **kwargs: object) -> iam.HttpResult:
+        calls.append(path)
+        return iam.HttpResult(200, dict(BALANCE), {})
+
+    monkeypatch.setattr(iam, "request", request)
+    session, destination = _session(), _destination()
+    path = credits._cache_path(session, destination.workspace_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fresh = {"fetched_at": NOW.isoformat(), "workspace_id": 42, "workspace_name": "acme"}
+    window = {"used": 1, "limit": 500, "remaining": 499, "resets_at": None}
+    damaged: list[object] = [
+        {"fetched_at": NOW.isoformat(), "windows": {}},  # no workspace: KeyError
+        fresh | {"windows": ["run.daily"]},  # AttributeError
+        fresh | {"windows": {"run.daily": "full"}},  # TypeError
+        fresh | {"windows": {"run.daily": window | {"used": "lots"}}},  # drawn: TypeError
+        fresh | {"windows": {"run.daily": window | {"limit": {"n": 500}}}},
+        fresh | {"workspace_id": "forty-two", "windows": {}},
+    ]
+    for record in damaged:
+        path.write_text(json.dumps(record), encoding="utf-8")
+        reading = credits.for_destination(session, destination, now=NOW)
+        assert reading is not None and reading.available, record
+        run = reading.window("run", "daily")
+        assert run is not None and run.limit == 500 and run.used == 380, record
+        credits.describe(reading, now=NOW)  # and it draws
+    assert len(calls) == len(damaged), "every damaged record was a miss"
+    # The record the refetch wrote back is a hit again.
+    credits.for_destination(session, destination, now=NOW)
+    assert len(calls) == len(damaged)
+
+
+def test_the_cache_is_per_credential_and_a_plain_file_name(
+    isolated_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #173, round 1: the cache key was ``{host}-{workspace}``.
+
+    Keyed by no credential, a second sign-in within the minute — another user,
+    or an ``AISQUARE_TOKEN`` for another account — was handed the first one's
+    reading, ``cost_true`` included. And the host kept a port's colon
+    (``127.0.0.1:8123-42.json``), which on Windows names an NTFS alternate data
+    stream rather than a file; ``iam._discovery_cache_path`` spells it ``-8123``.
+    """
+    calls: list[str] = []
+
+    def request(path: str, **kwargs: object) -> iam.HttpResult:
+        calls.append(path)
+        return iam.HttpResult(200, dict(BALANCE), {})
+
+    monkeypatch.setattr(iam, "request", request)
+    local = "http://127.0.0.1:8123"
+    mine = _session(local)
+    theirs = iam.Session(api_url=local, token="aisq_someone_else", source="file", email="x@y.z")
+    destination = _destination(local)
+    assert credits.for_destination(mine, destination, now=NOW) is not None
+    written = credits._cache_path(mine, destination.workspace_id)
+    assert written.is_file() and ":" not in written.name
+    assert written.name.startswith("127.0.0.1-8123-42-")
+    assert "aisq_t" not in written.name, "the credential is hashed, never written out"
+    assert credits.for_destination(theirs, destination, now=NOW) is not None
+    assert len(calls) == 2, "another credential within the minute asks for itself"
+    credits.for_destination(mine, destination, now=NOW + timedelta(seconds=30))
+    credits.for_destination(theirs, destination, now=NOW + timedelta(seconds=30))
+    assert len(calls) == 2, "each is its own cache hit"
+    # A port `urlparse` cannot read names no cache file: it costs the cache, not the reading.
+    odd = "https://stg-api.aisquare.studio:badport"
+    reading = credits.for_destination(_session(odd), _destination(odd), now=NOW)
+    assert reading is not None and reading.available and len(calls) == 3

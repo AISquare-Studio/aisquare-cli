@@ -88,7 +88,9 @@ id to take over when it starts fresh (fourth round). Transient — a resumed ses
 start hook writes ``working`` over it, a fresh start retires the old presence — and
 unknown to ``fleet._derive``, which falls back to the pane. Besides that start and
 ``switch`` taking it back, no state write replaces it: the store keeps it
-(``SqliteStore.touch_session``; review of the #205 fold, round 1)."""
+(``SqliteStore.touch_session``; review of the #205 fold, round 1). So ``switch``
+takes it back as soon as its ``stop`` returns or raises — the one reader, the old
+process's ``SessionEnd``, has run by then or never will (round 2)."""
 
 #: A numbered SEAT: a first-class role with a crew index glued on — ``coder1``,
 #: ``reviewer2``. ``cli/launch.py`` accepts these because crews run several agents

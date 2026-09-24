@@ -1599,7 +1599,7 @@ class SqliteStore:
         self._conn.commit()
 
     def unmark_handover(self, session_id: str, state: str) -> None:
-        """``fleet switch`` takes its hand-over mark back: the stop it was set for failed.
+        """``fleet switch`` takes its hand-over mark back: the stop it was set for has ended.
 
         The one writer besides the session's own start that replaces the mark
         (:meth:`touch_session` keeps it), and it replaces only the mark: a row

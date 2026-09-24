@@ -2905,7 +2905,8 @@ def switch(
     <transcript path>`` keeps the session id, so the board row, its cursor, its
     notes AND ITS CLAIMS carry on — the session is marked ``HANDOVER_STATE``
     before the ``/exit``, so its own ``SessionEnd`` parks the claims for the
-    same id instead of releasing them, and ``stop`` announces no exit — and the
+    same id instead of releasing them (the mark is taken back as soon as
+    ``stop`` returns or raises), and ``stop`` announces no exit — and the
     resumed agent is told, in one typed line, to continue (``claude --resume``
     opens the conversation at an idle prompt; review of #205, findings 5 and 6).
     Otherwise it starts fresh with a hand-off prompt built from the board — the
@@ -3001,10 +3002,18 @@ def switch(
         _mark_handing_over(session)
     try:
         stopped = stop(project, label, handover=True).agent
-    except Exception:
+    finally:
+        # Taken back however `stop` ends. The mark has one reader, the old process's
+        # own SessionEnd, and by here that has run or never will: returned, the pane
+        # is confirmed dead or gone (a kill fires no hook); raised — a Ctrl-C in the
+        # grace included — the session keeps the state it had. Every state writer
+        # keeps the mark (`SqliteStore.touch_session`), so held any longer it
+        # outlived its reader: a Ctrl-C is no `Exception` and skipped the unmark, and
+        # a resumed replacement whose start hook failed open stayed `switching`
+        # through every later prompt — no `limited` recorded, no hand-over, no bell
+        # (review of the #205 fold, round 2).
         if session is not None:
-            _unmark_handing_over(session)  # nothing ended: the session keeps its state
-        raise
+            _unmark_handing_over(session)
     try:
         receipt = spawn(
             project,

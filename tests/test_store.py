@@ -887,6 +887,40 @@ def test_ensure_project_captures_and_only_onboard_project_shows() -> None:
         store.close()
 
 
+def test_a_capture_revives_a_tombstone_captured_even_one_that_kept_its_mark() -> None:
+    """The first cut of the v17 backfill (c716094) had no ``forgotten_at`` guard, so a
+    store migrated by it holds forgotten rows stamped onboarded. The revival kept the
+    mark, and the next prompt in such a directory put it back on the list — the bug
+    #139 is about — until a second forget cleared it. A live row keeps its mark."""
+    store = open_store()
+    try:
+        old = ProjectInfo(id="prj_old", root=Path("/w/old"))
+        live = ProjectInfo(id="prj_live", root=Path("/w/live"))
+        store.onboard_project(old)
+        store.onboard_project(live)
+        raw = sqlite3.connect(str(_db_path()))
+        try:  # the state the unguarded backfill left: forgotten AND onboarded
+            raw.execute(
+                "UPDATE project SET forgotten_at = ? WHERE id = ?",
+                ("2026-09-02T00:00:00+00:00", old.id),
+            )
+            raw.commit()
+        finally:
+            raw.close()
+        assert [p.id for p in store.list_projects()] == ["prj_live"]
+
+        store.ensure_project(old)  # the next prompt there
+        store.ensure_project(live)  # and one in a project that is listed
+
+        assert [p.id for p in store.list_projects()] == ["prj_live"], "forget sticks"
+        revived = store.get_project("prj_old")
+        assert revived is not None and revived.onboarded_at is None, "captured, not a tombstone"
+        kept = store.get_project("prj_live")
+        assert kept is not None and kept.onboarded_at is not None
+    finally:
+        store.close()
+
+
 def test_the_v17_migration_adopts_the_rows_already_used_on_purpose(
     isolated_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

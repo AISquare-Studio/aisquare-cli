@@ -1238,19 +1238,26 @@ class SqliteStore:
         (:meth:`onboard_project`).
 
         It does clear ``forgotten_at``: the next prompt in a forgotten or
-        pruned directory brings the row back CAPTURED — ``forget`` cleared its
-        ``onboarded_at``, so it is not listed, which is what makes a forget
-        stick. A tombstone left in place would take every later prompt and
+        pruned directory brings the row back CAPTURED, which is what makes a
+        forget stick. A tombstone left in place would take every later prompt and
         turn metric into a row no read can reach: ``log`` would say nothing had
         been captured, and ``project list --all``, ``doctor``, ``prune
         --captured-only`` and ``metrics show --project`` would never see the
         directory again. Before #139 this revival also re-listed the project,
         which is how ``project forget`` came undone on the next prompt.
+
+        The revival clears ``onboarded_at`` itself rather than trusting the
+        tombstone to carry none. ``forget`` clears it, but the first cut of the
+        v17 backfill had no ``forgotten_at`` guard and stamped forgotten rows
+        with history as onboarded, and stores already past v17 keep them. A
+        live row keeps its mark: the SET reads the row as it was before the
+        update.
         """
         self._conn.execute(
             "INSERT INTO project (id, root, name, linked_repos, created_at) "
             "VALUES (?, ?, ?, ?, ?) "
-            "ON CONFLICT (id) DO UPDATE SET forgotten_at = NULL",
+            "ON CONFLICT (id) DO UPDATE SET forgotten_at = NULL, onboarded_at = "
+            "CASE WHEN project.forgotten_at IS NULL THEN project.onboarded_at END",
             (
                 project.id,
                 str(project.root),

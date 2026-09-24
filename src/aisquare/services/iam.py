@@ -529,7 +529,16 @@ def unrestricted_warning() -> str:
 
 
 def clear_session() -> None:
-    credentials.drop(*CREDENTIAL_KEYS)
+    _, restricted = credentials.drop(*CREDENTIAL_KEYS)
+    if not restricted:
+        # Dropping the session rewrites the file that still holds the API key
+        # and the serve token, as a new file; one that could not be restricted
+        # is worth the same word on stderr that storing them got.
+        print(
+            f"warning: could not restrict {paths.credentials_path()} to your account — "
+            "other users on this machine may be able to read the credentials left in it.",
+            file=sys.stderr,
+        )
 
 
 def _parse_timestamp(value: str | None) -> datetime | None:

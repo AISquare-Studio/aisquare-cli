@@ -23,6 +23,11 @@ then came back as a legacy bare key, the next ``store`` wrote it into
 ``api_key``, and the serve token and IAM session went with it. Two writers
 racing each other also lost whichever key the first one added. Readers take no
 lock: a rename leaves them the whole old file or the whole new one.
+
+A rename publishes a NEW file, so what an in-place write got for free is done on
+purpose: the temp is restricted to this account before the secrets are written
+into it (``write_replacing(owner_only=True)``), and a file that exists but
+cannot be read is refused rather than replaced by what this call alone knows.
 """
 
 from __future__ import annotations
@@ -52,8 +57,8 @@ _HELD = frozenset({errno.EAGAIN, errno.EWOULDBLOCK, errno.EACCES})
 ``core.state_file``. Any other error from the primitive is raised at once."""
 
 
-def load_all() -> dict[str, str]:
-    """Everything stored, or ``{}``. Never raises — both callers are commands.
+def load_all(*, strict: bool = False) -> dict[str, str]:
+    """Everything stored, or ``{}``. Never raises by default — both callers are commands.
 
     A file that is not JSON is not assumed empty. If it holds a single
     non-blank line that does not open like JSON it is a pre-JSON API key and
@@ -62,6 +67,12 @@ def load_all() -> dict[str, str]:
     build, or a crash, can leave ``{"api_key": "...`` cut short, and read as a
     bare key it went into the next ``store``'s write, so the key was replaced
     by a JSON fragment.
+
+    ``strict`` re-raises the ``OSError`` of a file that exists but cannot be
+    read, as ``core.state_file.read_state`` does. ``store`` reads through it:
+    its write REPLACES the file, so "could not be read" taken as "holds
+    nothing" published only this call's keys over everything else (review of
+    the #65 fold, F1). The in-place write it replaced raised on such a file.
     """
     path = paths.credentials_path()
     if not path.exists():
@@ -80,7 +91,11 @@ def load_all() -> dict[str, str]:
         # genuinely cannot be read is nothing we can name — but contention is
         # now resolved before it gets there rather than swallowed by it.
         raw = paths.despite_windows_contention(lambda: path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
     except OSError:
+        if strict:
+            raise
         return {}
     try:
         loaded: Any = json.loads(raw)
@@ -122,22 +137,22 @@ def store(*, replace: Sequence[str] = (), **values: str) -> tuple[dict[str, str]
 
     The read, merge and write run under the writers' lock, so a concurrent
     ``store`` or ``drop`` cannot lose this one's keys or have its own lost.
-    Raises ``OSError`` when the file cannot be written, or ``TimeoutError``
-    when another writer holds the lock past :data:`LOCK_WAIT_S`; the file is
-    then left as it was.
+    Raises ``OSError`` when the file cannot be read or written, or
+    ``TimeoutError`` when another writer holds the lock past
+    :data:`LOCK_WAIT_S`; the file is then left as it was.
     """
     paths.ensure_home()
     path = paths.credentials_path()
     with _locked(path):
-        data = load_all()
+        data = load_all(strict=True)
         for key in replace:
             data.pop(key, None)
         data.update({k: v for k, v in values.items() if v})
         return data, _write(path, data)
 
 
-def drop(*keys: str) -> dict[str, str]:
-    """Remove ``keys`` from the file, keeping everything else. Returns what remains.
+def drop(*keys: str) -> tuple[dict[str, str], bool]:
+    """Remove ``keys`` from the file, keeping everything else.
 
     Signing out must not take the explainability key (or any future value)
     with it, and the file must stay valid JSON afterwards, so this is the same
@@ -147,43 +162,39 @@ def drop(*keys: str) -> dict[str, str]:
     Decided once without the lock, so a sign-out with nothing to drop creates
     no home and no lock file, then again under it, where the file is the
     truth: another writer may have landed in between.
+
+    Returns what remains and whether the file could be restricted to this
+    account, as ``store`` does; ``True`` when nothing was written. Dropping
+    one key REWRITES the file that still holds the others, as a new file, so
+    a restriction that failed leaves those secrets on the DACL the home hands
+    down: the caller has something to say about it (review of the #65 fold,
+    F2), where the in-place write this replaced kept the file's own.
     """
     data = load_all()
     if not any(key in data for key in keys):
-        return data
+        return data, True
     paths.ensure_home()
     path = paths.credentials_path()
     with _locked(path):
         data = load_all()
         remaining = {k: v for k, v in data.items() if k not in keys}
-        if remaining != data:
-            # Restricted like `store`'s write, not only chmodded: dropping one
-            # key REWRITES the file that still holds the others, so a sign-out
-            # on Windows would otherwise leave the remaining secrets on a
-            # default DACL. The unrestricted case is not reported here the way
-            # `store` reports it — `drop`'s callers are removing a value, not
-            # promising a guard on a new one — but the file must still end up
-            # owner-only.
-            _write(path, remaining)
-    return remaining
+        if remaining == data:
+            return remaining, True
+        return remaining, _write(path, remaining)
 
 
 def _write(path: Path, data: dict[str, str]) -> bool:
     """Replace the file with ``data`` by rename, owner-only; whether the restriction held.
 
     Written THROUGH a symlink, as the in-place ``write_text`` it replaces was:
-    a rename over the link would swap the user's pointer for a plain file. A
-    file that does not exist yet is created empty at ``0o600`` first, under the
-    lock, so ``write_replacing`` keeps that mode and its temp is never
-    readable more widely than the file it becomes. On NTFS the mode bits
-    protect nothing and the renamed file carries the DACL its temp inherited
-    from the home until ``restrict_to_owner`` narrows it.
+    a rename over the link would swap the user's pointer for a plain file.
+    ``owner_only`` creates the temp 0600 and restricts it to this account
+    before the body is in it, so the secrets are never in a file readable more
+    widely than the one they become: on POSIX by the bits, on NTFS by the DACL
+    the rename carries over.
     """
     target = Path(os.path.realpath(path))
-    with contextlib.suppress(FileExistsError):
-        os.close(os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
-    write_replacing(target, json.dumps(data, indent=2) + "\n", keep_mode=True)
-    return paths.restrict_to_owner(target)
+    return write_replacing(target, json.dumps(data, indent=2) + "\n", owner_only=True)
 
 
 @contextlib.contextmanager

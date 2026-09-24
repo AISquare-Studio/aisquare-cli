@@ -25,7 +25,7 @@ import pytest
 from aisquare.core import credentials, paths
 from aisquare.core.atomic import write_replacing
 from aisquare.core.locking import lock_exclusive, unlock
-from tests.fsperms import can_symlink
+from tests.fsperms import can_deny_reads, can_symlink
 
 _KEY = "-".join(["not", "a", "real", "key"])
 _TOKEN = "-".join(["not", "a", "real", "token"])
@@ -90,13 +90,13 @@ def test_two_writers_cannot_lose_each_others_key(
     inside, go = threading.Event(), threading.Event()
     paused = False
 
-    def pausing_write(target: Path, body: str, *, keep_mode: bool = True) -> None:
+    def pausing_write(target: Path, body: str, **options: bool) -> bool:
         nonlocal paused
         if not paused:  # the first writer, mid-critical-section, waits for the test's go
             paused = True
             inside.set()
             assert go.wait(5), "the test never let the first writer finish"
-        write_replacing(target, body, keep_mode=keep_mode)
+        return write_replacing(target, body, **options)
 
     monkeypatch.setattr(credentials, "write_replacing", pausing_write)
     first = threading.Thread(target=credentials.store, kwargs={"serve_token": _TOKEN})
@@ -135,7 +135,7 @@ def test_a_lock_held_too_long_is_a_timeout_that_names_the_lock(
 
 def test_dropping_what_is_not_there_creates_nothing(isolated_home: Path) -> None:
     """A sign-out on a machine that never signed in writes no home and no lock file."""
-    assert credentials.drop("iam_token") == {}
+    assert credentials.drop("iam_token") == ({}, True)
     assert not isolated_home.exists()
 
 
@@ -183,3 +183,70 @@ def test_a_new_file_is_owner_only_while_its_contents_are_written(
         os.umask(previous)
     assert synced == [0o600], [oct(mode) for mode in synced]
     assert stat.S_IMODE(paths.credentials_path().stat().st_mode) == 0o600
+
+
+@pytest.mark.skipif(
+    not can_deny_reads(), reason="chmod(0) denies nothing here (root, or NTFS where it is advice)"
+)
+def test_a_file_that_cannot_be_read_is_refused_not_replaced(isolated_home: Path) -> None:
+    """``store`` read under the lock through ``load_all``, which reads an unreadable file as
+    ``{}``. The in-place write then raised on the same file; the rename does not, so the store
+    returned cleanly and the API key and serve token were gone (review of the #65 fold, F1).
+    A root-owned 0600 file left by ``sudo`` with ``HOME`` kept is the realistic case."""
+    credentials.store(api_key=_KEY, serve_token=_TOKEN)
+    creds = paths.credentials_path()
+    creds.chmod(0)
+    try:
+        with pytest.raises(PermissionError):
+            credentials.store(iam_token="t")
+        assert credentials.load_all() == {}, "the lockless read still reads it as nothing"
+    finally:
+        creds.chmod(0o600)
+    assert credentials.load_all() == {"api_key": _KEY, "serve_token": _TOKEN}
+
+
+def test_the_secrets_go_into_a_file_already_restricted_to_this_account(
+    isolated_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Restricted after the rename, the file was published under the DACL its temp inherited
+    from the home, for an ``icacls`` call's width, and for good when the call failed; the
+    in-place write had kept the owner-only DACL (review of the #65 fold, F2). The spy records
+    what each restriction was applied to: the temp, while it was still empty, on every write."""
+    real = paths.restrict_to_owner
+    applied: list[tuple[str, int]] = []
+
+    def spy(path: Path) -> bool:
+        applied.append((path.name, path.stat().st_size))
+        return real(path)
+
+    monkeypatch.setattr(paths, "restrict_to_owner", spy)
+    credentials.store(api_key=_KEY)  # a new file
+    credentials.store(iam_token="t")  # over an existing one
+    credentials.drop("iam_token")
+    assert len(applied) == 3, applied
+    for name, size in applied:
+        assert name.startswith(".credentials.") and name.endswith(".tmp"), applied
+        assert size == 0, f"restricted with the secrets already in it: {applied}"
+    assert credentials.load_all() == {"api_key": _KEY}
+
+
+def test_a_restriction_that_failed_is_reported_by_both_writers(
+    isolated_home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``drop`` discarded the answer. Dropping the session rewrites the file that still holds
+    the API key, as a new file, so a sign-out whose restriction failed left it readable by
+    other accounts with nothing said. Both writers still write: the report is the guard."""
+    from aisquare.services import iam
+
+    credentials.store(api_key=_KEY, iam_token="t")
+    monkeypatch.setattr(paths, "restrict_to_owner", lambda path: False)
+    assert credentials.store(serve_token=_TOKEN) == (
+        {"api_key": _KEY, "iam_token": "t", "serve_token": _TOKEN},
+        False,
+    )
+    assert credentials.drop("serve_token") == ({"api_key": _KEY, "iam_token": "t"}, False)
+    assert credentials.drop("never_there") == ({"api_key": _KEY, "iam_token": "t"}, True)
+    iam.clear_session()
+    assert credentials.load_all() == {"api_key": _KEY}
+    err = capsys.readouterr().err
+    assert "warning: could not restrict" in err and "credentials left in it" in err, err

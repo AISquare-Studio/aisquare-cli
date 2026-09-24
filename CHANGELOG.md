@@ -1555,9 +1555,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   token and the IAM session went with it. Two writers at once also lost
   whichever key the first one added. The file is now replaced by rename
   (`core.atomic.write_replacing`, with the Windows contention retry) under a
-  lock on `credentials.lock`, a new file is created 0600 before its contents
-  are written, and only one non-blank line that could not start a JSON value
-  is migrated as a bare key.
+  lock on `credentials.lock`, and only one non-blank line that could not start
+  a JSON value is migrated as a bare key. A rename publishes a NEW file, so
+  two things the in-place write got for free are now done on purpose: the
+  temp is created 0600 and restricted to this account (the DACL, on Windows)
+  while it is still empty, so the secrets never sit under the permissions the
+  home hands down; and a file that exists but cannot be read (a root-owned
+  one left by `sudo`) is refused rather than replaced by the one key being
+  stored. An `aisquare logout` whose rewrite of the remaining keys could not
+  be restricted says so on stderr, as `login` does.
 - **A limit message's named zone is read on Windows too.** Windows has no IANA
   time zone database, so `ZoneInfo("America/Toronto")` raised there and a
   reset named in a zone fell back to the offset in force now: a weekly reset

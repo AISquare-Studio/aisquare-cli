@@ -148,6 +148,44 @@ def test_keep_mode_creates_the_temp_with_the_targets_bits_before_anything_is_wri
     assert _leftovers(tmp_path) == ["frozen.json", "secret.json", "shared.json"]
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX file modes")
+def test_owner_only_restricts_the_empty_temp_whatever_the_targets_bits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """For a file of secrets (review of the #65 fold, F2). The temp is 0600 from its creation
+    and restricted to this account before the body is in it, where restricting the target after
+    the rename published the secrets under the DACL the temp inherited. A target someone left
+    0644 lands 0600: ``keep_mode`` does not carry a wider mode onto secrets. A restriction that
+    fails is returned, and the write still lands."""
+    from aisquare.core import paths
+
+    at_restriction: list[tuple[str, int, int]] = []
+    answer = True
+
+    def spy(path: Path) -> bool:
+        info = path.stat()
+        at_restriction.append((path.name, info.st_size, stat.S_IMODE(info.st_mode)))
+        return answer
+
+    monkeypatch.setattr(paths, "restrict_to_owner", spy)
+    secret = tmp_path / "credentials"
+    secret.write_text("{}\n")
+    secret.chmod(0o644)
+    previous = os.umask(0o022)
+    try:
+        assert write_replacing(secret, '{"token": 1}\n', owner_only=True) is True
+        answer = False
+        assert write_replacing(secret, '{"token": 2}\n', owner_only=True) is False
+        assert write_replacing(tmp_path / "plain.json", "{}\n") is True  # nothing asked
+    finally:
+        os.umask(previous)
+    assert [(size, mode) for _, size, mode in at_restriction] == [(0, 0o600), (0, 0o600)]
+    assert all(name.startswith(".credentials.") for name, _, _ in at_restriction)
+    assert stat.S_IMODE(secret.stat().st_mode) == 0o600
+    assert secret.read_text() == '{"token": 2}\n'
+    assert _leftovers(tmp_path) == ["credentials", "plain.json"]
+
+
 def test_durable_syncs_the_file_then_the_directory_and_not_durable_syncs_nothing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

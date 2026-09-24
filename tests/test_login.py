@@ -579,7 +579,7 @@ def test_the_redaction_rules_know_our_token_shape() -> None:
 
 def test_drop_removes_only_the_named_keys(isolated_home: Path) -> None:
     credentials.store(api_key="k", iam_token="t", iam_api_url="u")
-    remaining = credentials.drop("iam_token", "iam_api_url", "never_there")
+    remaining, _ = credentials.drop("iam_token", "iam_api_url", "never_there")
     assert remaining == {"api_key": "k"}
     assert credentials.load_all() == {"api_key": "k"}
-    assert credentials.drop("api_key") == {}
+    assert credentials.drop("api_key") == ({}, True)

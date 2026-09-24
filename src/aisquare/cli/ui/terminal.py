@@ -102,6 +102,7 @@ from rich.text import Text
 from textual import events
 from textual.actions import SkipAction
 from textual.app import App
+from textual.dom import NoScreen
 from textual.geometry import Offset, Region
 from textual.message import Message
 from textual.screen import Screen
@@ -340,9 +341,19 @@ def _tell_panes(app: App[Any], what: str, tell: Callable[[TerminalPane], object]
         app.log.error(f"{what}: no screen to tell", error)
         return
     for pane in list(_MOUNTED_PANES):
+        # The filter answers apart from the pane's own handler: a pane detached
+        # from the DOM while still registered here raises ``NoScreen`` from
+        # ``pane.screen`` — it is not on the active screen, which is the
+        # filter's answer, and was logged as "failed for a pane" at every
+        # press and release in the app (review of #120, round 11). The line
+        # below means what it says: the pane's handler raised.
         try:
-            if not pane.is_mounted or pane.screen is not screen:
-                continue
+            on_screen = pane.is_mounted and pane.screen is screen
+        except NoScreen:
+            on_screen = False
+        if not on_screen:
+            continue
+        try:
             tell(pane)
         except Exception as error:
             app.log.error(f"{what} failed for a pane", error)
@@ -1453,13 +1464,20 @@ class TerminalPane(Widget, can_focus=True):
     def _with_selection(
         self, strip: Strip, span: tuple[int, int], row: DisplayedRow, width: int
     ) -> Strip:
-        """Paint ``span`` — CELL offsets from the compositor, ``-1`` to the end — as cells."""
+        """Paint ``span`` — CELL offsets from the compositor, ``-1`` to the end — as cells.
+
+        The row is skipped by the same test :func:`_extract` skips it by, so the
+        two count the same rows. ``start`` is not clamped (review of #120, round
+        11): at or past ``width`` — a selection left from a wider pane — the
+        test already skips the row; below 0 — which Textual never writes, its
+        compositor clamps offsets at 0 — ``Strip.crop`` starts at cell 0, as
+        :meth:`DisplayedRow.slice` copies from it. A clamp here changed nothing.
+        """
         start, end = span
-        cell_start = min(max(start, 0), width)
         cell_end = width if end == -1 else min(end, width)
-        if cell_start >= cell_end:
+        if start >= cell_end:
             return strip  # no cell of this row: nothing to widen, nothing to tint
-        cell_start, cell_end = row.snap(cell_start, cell_end)
+        cell_start, cell_end = row.snap(start, cell_end)
         tint = self._selection_tint()
         painted = strip.crop(cell_start, cell_end)
         segments = [self._tinted(segment, tint) for segment in painted]
@@ -1781,8 +1799,6 @@ class TerminalPane(Widget, can_focus=True):
         eighth and ninth versions). Both writers go through here, so the rule
         lives in one place.
         """
-        if not self.is_mounted:
-            return
         selections = {
             widget: span for widget, span in self.screen.selections.items() if widget is not self
         }

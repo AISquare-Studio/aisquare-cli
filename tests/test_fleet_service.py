@@ -3721,3 +3721,230 @@ def test_the_launch_spec_drops_every_shape_of_a_session_choice() -> None:
     assert drop(["--effort", "high"]) == ["--effort", "high"]
     # Claude Code's flags, not every program's: aider's `-c` is its config file.
     assert fleet_service._without_session_choice("aider", ["-c", "a.yml"]) == ["-c", "a.yml"]
+    # Claude Code by another name, known by a session its arguments NAME (the
+    # planner joins the row to it) or by a transcript the launch resumes.
+    other = fleet_service._without_session_choice
+    assert other("claude2", ["--session-id", "x", "--verbose"]) == ["--verbose"]
+    assert other("claude2", ["-r", "abc", "-c"]) == [], "named: every session flag goes"
+    assert other("claude2", ["-c", "--verbose"]) == ["-c", "--verbose"], "named nothing"
+    assert other("claude2", ["-c", "--verbose"], resuming=True) == ["--verbose"]
+
+
+def _executable(path: Path) -> Path:
+    """A stand-in agent binary at ``path`` — a shell script, never the real thing."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("#!/bin/sh\nread line\nexit 0\n", encoding="utf-8")
+    path.chmod(0o755)
+    return path
+
+
+@pytest.mark.parametrize("flag", ["--session-id", "--resume"])
+def test_a_session_the_caller_named_is_not_replayed_for_claude_code_by_another_name(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    flag: str,
+) -> None:
+    """Review of #169, round 2: session flags were left out of the spec only for a
+    binary NAMED `claude`. The identity planner reads `--session-id` and `--resume
+    <id>` whatever the binary is called, and a restart prepends its own
+    `--resume` to any of them — so a `claude2` parallel install spawned on a
+    session its caller chose replayed that choice beside the resume, and put
+    `--fresh` back on the old id."""
+    _executable(claude_on_path.with_name("claude2"))
+    monkeypatch.setenv("AISQUARE_BIN_CODER", "claude2")
+    sid = "11111111-2222-3333-4444-555555555555"
+    agent = fleet_service.spawn(
+        project, "coder", worktree=False, agent_args=[flag, sid, "--verbose"]
+    ).agent
+    assert agent.session_id == sid and _flag(_command(tmux), flag) == sid
+    assert agent.launch_spec is not None and agent.launch_spec.extra_args == ["--verbose"]
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text("{}\n", encoding="utf-8")
+    _with_transcript(agent, transcript)
+    tmux.die(agent.pane_id, 1)
+
+    resumed = fleet_service.restart(project, agent.label)
+
+    command = _command(tmux)
+    assert _flag(command, "--command") == "claude2"
+    assert command.count("--resume") == 1 and _flag(command, "--resume") == str(transcript)
+    assert "--session-id" not in command and "--verbose" in command
+    assert resumed.started.session_id == sid
+
+    tmux.die(resumed.started.pane_id, 1)
+    fresh = fleet_service.restart(project, agent.label, fresh=True)
+    command = _command(tmux)
+    assert "--session-id" not in command and "--resume" not in command
+    assert fresh.started.session_id is None, "not the old id: its hook joins it on arrival"
+
+
+def test_a_spec_that_holds_a_session_choice_does_not_replay_it(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Review of #169, round 2: session choices were filtered only when a spec was
+    RECORDED, so a spec written before that — stores at v18 hold them — still
+    replayed `--session-id` beside the restart's `--resume`, and one for a
+    `claude2` whose session its hook joined replayed its `--continue` there."""
+    sid = "11111111-2222-3333-4444-555555555555"
+    agent = fleet_service.spawn(
+        project, "coder", worktree=False, agent_args=["--session-id", sid, "--verbose"]
+    ).agent
+    assert agent.launch_spec is not None
+    legacy = agent.launch_spec.model_copy(
+        update={"extra_args": ["--session-id", sid, "--continue", "--verbose"]}
+    )
+    with store_session() as store:
+        store.upsert_fleet_agent(agent.model_copy(update={"launch_spec": legacy}))
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text("{}\n", encoding="utf-8")
+    _with_transcript(agent, transcript)
+    tmux.die(agent.pane_id, 1)
+
+    resumed = fleet_service.restart(project, agent.label)
+
+    command = _command(tmux)
+    assert command.count("--resume") == 1 and "--session-id" not in command
+    assert "--continue" not in command and "--verbose" in command
+    assert resumed.started.launch_spec is not None
+    assert resumed.started.launch_spec.extra_args == ["--verbose"]
+
+    # `claude2 -c`: the planner joins nothing, so the spec keeps `-c` (it could
+    # be aider's config file) — until the hook joins the row and a restart
+    # resumes the transcript, which shows the binary to be Claude Code.
+    _executable(claude_on_path.with_name("claude2"))
+    monkeypatch.setenv("AISQUARE_BIN_CODER", "claude2")
+    other = fleet_service.spawn(project, "coder", worktree=False, agent_args=["-c"]).agent
+    assert other.session_id is None
+    assert other.launch_spec is not None and other.launch_spec.extra_args == ["-c"]
+    joined = "66666666-7777-8888-9999-000000000000"
+    with store_session() as store:
+        assert store.bind_fleet_agent_session(other.id, joined)
+    _with_transcript(other.model_copy(update={"session_id": joined}), transcript)
+    tmux.die(other.pane_id, 1)
+
+    fleet_service.restart(project, other.label)
+
+    command = _command(tmux)
+    assert _flag(command, "--resume") == str(transcript)
+    assert "-c" not in command and "--continue" not in command
+
+
+def test_a_replay_does_not_fall_back_onto_another_kind_of_program(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Review of #169, round 2: the fallback for a recorded binary that left the
+    PATH took whatever the role resolves to today — and replayed the old
+    program's arguments to it: aider's `-c a.yml` became Claude Code's
+    `--continue` with the prompt `a.yml`, and a Claude session was `--resume`d
+    on aider. `resolve_binary`: "the WRONG AGENT under the right role name —
+    worse than not launching"."""
+    aider = _executable(tmp_path / "abin" / "aider")
+    monkeypatch.setenv("AISQUARE_BIN_CODER", str(aider))
+    agent = fleet_service.spawn(project, "coder", worktree=False, agent_args=["-c", "a.yml"]).agent
+    assert agent.launch_spec is not None and agent.launch_spec.extra_args == ["-c", "a.yml"]
+    tmux.die(agent.pane_id, 1)
+    aider.unlink()
+    monkeypatch.delenv("AISQUARE_BIN_CODER")
+    started = len(tmux.spawned)
+
+    with pytest.raises(FleetError) as refused:
+        fleet_service.restart(project, agent.label)
+
+    message = str(refused.value)
+    assert f"{str(aider)!r}, the binary it was launched with, is no longer on your PATH" in message
+    assert "'claude' today (chosen by: default)" in message
+    assert "`aisquare fleet spawn coder`" in message and "--bin" not in message
+    assert len(tmux.spawned) == started, "nothing was started"
+
+    # The other way round: a Claude Code session is not resumed on aider.
+    wrapper = _executable(tmp_path / "wrap" / "claude")
+    monkeypatch.setenv("AISQUARE_BIN_CODER", str(wrapper))
+    claude = fleet_service.spawn(project, "coder", worktree=False).agent
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text("{}\n", encoding="utf-8")
+    _with_transcript(claude, transcript)
+    tmux.die(claude.pane_id, 1)
+    wrapper.unlink()
+    monkeypatch.setenv("AISQUARE_BIN_CODER", str(_executable(tmp_path / "abin" / "aider")))
+    started = len(tmux.spawned)
+
+    with pytest.raises(FleetError, match="not known to be the same kind of program"):
+        fleet_service.restart(project, claude.label)
+    assert len(tmux.spawned) == started
+
+
+def test_a_removed_claude_code_by_another_name_comes_back_on_claude_only_to_resume(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The fallback's other half: `claude2` is not Claude Code by name, but a
+    transcript to resume is one only Claude Code writes — so the round-1 case (a
+    removed `AISQUARE_BIN_CODER=claude2`) still resumes on `claude`. A `--fresh`
+    restart has no such evidence, and is refused with a way out."""
+    claude2 = _executable(claude_on_path.with_name("claude2"))
+    monkeypatch.setenv("AISQUARE_BIN_CODER", "claude2")
+    sid = "11111111-2222-3333-4444-555555555555"
+    agent = fleet_service.spawn(
+        project, "coder", worktree=False, agent_args=["--session-id", sid]
+    ).agent
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text("{}\n", encoding="utf-8")
+    _with_transcript(agent, transcript)
+    tmux.die(agent.pane_id, 1)
+    claude2.unlink()
+    monkeypatch.delenv("AISQUARE_BIN_CODER")
+
+    with pytest.raises(FleetError, match="`aisquare fleet spawn coder`"):
+        fleet_service.restart(project, agent.label, fresh=True)
+    receipt = fleet_service.restart(project, agent.label)
+
+    assert receipt.resumed is True and receipt.started.binary == "claude"
+    assert receipt.started.session_id == sid
+    assert any("'claude2', the binary it was launched with" in note for note in receipt.notes)
+
+
+def test_a_replay_whose_fallback_is_missing_too_names_a_way_out_a_restart_has(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Review of #169, round 2: with the fallback missing as well, the refusal
+    still said "pass --bin" — which `fleet restart`, `fleet switch` and Restart
+    do not take — and lost the binary the agent was launched with."""
+    wrapper = _executable(tmp_path / "wrap" / "claude")
+    monkeypatch.setenv("AISQUARE_BIN_CODER", str(wrapper))
+    agent = fleet_service.spawn(project, "coder", worktree=False).agent
+    tmux.die(agent.pane_id, 1)
+    wrapper.unlink()
+    elsewhere = tmp_path / "elsewhere" / "claude"
+    monkeypatch.setenv("AISQUARE_BIN_CODER", str(elsewhere))
+
+    with pytest.raises(FleetError) as refused:
+        fleet_service.restart(project, agent.label)
+
+    message = str(refused.value)
+    assert f"{str(wrapper)!r}, the binary it was launched with, is no longer" in message
+    assert f"neither is {str(elsewhere)!r}" in message and "(chosen by: env)" in message
+    assert "--bin" not in message
+
+    # Still bound to the binary that is gone: said as such, not as two binaries.
+    monkeypatch.setenv("AISQUARE_BIN_CODER", str(wrapper))
+    with pytest.raises(FleetError, match="the role still resolves to it") as refused:
+        fleet_service.restart(project, agent.label)
+    assert "--bin" not in str(refused.value)

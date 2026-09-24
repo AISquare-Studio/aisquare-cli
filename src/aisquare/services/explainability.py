@@ -416,6 +416,38 @@ def plan_session_identity(binary: str, args: Sequence[str]) -> SessionIdentity:
     return SessionIdentity(session_id, inject_args=(_SESSION_ID_FLAG, session_id))
 
 
+#: Only meaningful beside a session choice: next to a launch's own ``--resume``
+#: it forks a new id away from the one that launch resumes (#146).
+_FORK_SESSION_FLAG = "--fork-session"
+
+
+def without_session_choice(args: Sequence[str]) -> list[str]:
+    """``args`` less every flag that picks WHICH session a launch runs.
+
+    The flags :func:`plan_session_identity` reads — ``--session-id <id>``,
+    ``--resume``/``-r [<id>]``, ``--continue``/``-c`` — plus ``--fork-session``,
+    in both the ``--flag value`` and ``--flag=value`` shapes, read the way
+    :func:`_flag_value` reads them: a next token that starts with ``-`` is
+    another flag, not a value, and is kept. It lives beside the planner rather
+    than beside its caller (the fleet's launch spec, #144) so the two cannot
+    come to disagree about which flags those are.
+    """
+    valued = (_SESSION_ID_FLAG, *_RESUME_FLAGS)
+    bare = (*_CONTINUE_FLAGS, _FORK_SESSION_FLAG)
+    kept: list[str] = []
+    value_next = False
+    for arg in args:
+        if value_next:
+            value_next = False
+            if not arg.startswith("-"):
+                continue
+        if arg in valued:
+            value_next = True
+        elif arg not in bare and not any(arg.startswith(f"{flag}=") for flag in valued):
+            kept.append(arg)
+    return kept
+
+
 def record_join(
     *,
     session_id: str,

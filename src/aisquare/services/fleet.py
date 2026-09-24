@@ -974,7 +974,8 @@ def spawn(
     not from today's config, so a role edited between runs cannot change what
     a restart means. An explicit ``binary`` / ``permission_mode`` / ``worktree``
     argument still wins over the spec, as it wins over the config; a recorded
-    binary that has left the PATH is resolved again as a spawn resolves it,
+    binary that has left the PATH is resolved again as a spawn resolves it
+    when that lands on the same kind of program (``_in_place_of_recorded``),
     and the receipt names it. Every spawn records the spec it ended up with on
     the row.
 
@@ -1009,6 +1010,7 @@ def spawn(
             "role, or one bound with `aisquare team bind`"
         )
     replayed_binary = spec is not None and binary is None
+    replayed_args = spec is not None and not agent_args
     if spec is not None:
         # The recorded launch stands in for the role's config, argument by argument.
         binary = binary if binary is not None else spec.binary
@@ -1019,28 +1021,20 @@ def spawn(
         if permission_mode is None:
             permission_mode = spec.permission_mode or ""
         worktree = worktree if worktree is not None else spec.worktree
-        if not agent_args:
+        if replayed_args:
             agent_args = list(spec.extra_args)
     srv = server(config)
     _require_tmux(srv)
     notes: list[str] = []
     resolution = harness.resolve_binary(role, override=binary)
-    if replayed_binary and shutil.which(resolution.binary) is None:
-        # The binary it was launched with has left the PATH. Refusing would strand
-        # the agent — `fleet restart` and `fleet switch` take no `--bin`, and
-        # `--fresh` replays the spec too — so it is resolved as a spawn resolves
-        # it today (per-role env, binding, default), and the receipt says so.
-        recorded = resolution.binary
-        resolution = harness.resolve_binary(role)
-        notes.append(
-            f"{recorded!r}, the binary it was launched with, is no longer on your PATH — "
-            f"starting {resolution.binary!r} (chosen by: {resolution.source}) instead"
-        )
     if shutil.which(resolution.binary) is None:
-        raise FleetError(
-            f"{resolution.binary!r} is not on your PATH (chosen by: {resolution.source}) — "
-            "install it, pass --bin, or change the role's binding"
-        )
+        if not replayed_binary:
+            raise FleetError(
+                f"{resolution.binary!r} is not on your PATH (chosen by: {resolution.source}) — "
+                "install it, pass --bin, or change the role's binding"
+            )
+        # Replayed, and gone since: today's resolution, when it is the same kind of program.
+        resolution = _in_place_of_recorded(role, resolution.binary, resume=resume, notes=notes)
     role_config = role_settings(role, config)
     with store_session() as store:
         project = ensure_codename(project, store)
@@ -1150,6 +1144,11 @@ def spawn(
     # adding today's would double them (or add ones the agent never had).
     role_args = [] if spec is not None else list(role_config.extra_args)
     extra = list(agent_args)
+    if replayed_args:
+        # Filtered on the way OUT as well as on the way in: a spec written before
+        # session choices were left out of it still holds them, and a resume
+        # below is what shows the binary to be Claude Code whatever its name.
+        extra = _without_session_choice(resolution.binary, extra, resuming=resume is not None)
     # What the spec records: the agent's own arguments, BEFORE this launch's
     # `--resume` is prepended — a resume is per launch, and a restart of the
     # restarted agent must not carry an old transcript path into the new one.
@@ -1248,44 +1247,82 @@ def spawn(
     return SpawnReceipt(agent=stored, asked_label=label, tmux_session=tmux_session, notes=notes)
 
 
-#: Only meaningful beside a session choice: next to a restart's own `--resume`
-#: it would fork a new id away from the one the row is joined to (#146).
-_FORK_SESSION_FLAG = "--fork-session"
+def _in_place_of_recorded(
+    role: str, recorded: str, *, resume: ResumeSpec | None, notes: list[str]
+) -> harness.BinaryResolution:
+    """What a replay starts when ``recorded``, the binary its spec holds, has left the PATH.
+
+    Refusing outright would strand the agent — `fleet restart`, `fleet switch`
+    and Restart take no `--bin`, and `--fresh` replays the spec too — so the
+    role is resolved as a spawn resolves it today (per-role env, binding,
+    default), and the receipt names both. But only onto the same KIND of
+    program: the spec's arguments, and a resume's `--resume <transcript>`, were
+    written for the recorded one, and handed to another they run "the WRONG
+    AGENT under the right role name" (`harness.resolve_binary`) — aider's
+    `-c a.yml` is Claude Code's `--continue` and a prompt. Claude Code is known
+    by name (`harness.is_default_agent`), and the recorded binary also by the
+    transcript this launch resumes, which only Claude Code writes: a removed
+    `claude2` parallel install comes back on `claude` when it resumes, and a
+    `--fresh` restart of it, with nothing to show what it was, is refused.
+
+    Every refusal here names a way out that a restart has; `--bin` is not one.
+    """
+    today = harness.resolve_binary(role)
+    gone = f"{recorded!r}, the binary it was launched with, is no longer on your PATH"
+    if today.binary == recorded:
+        raise FleetError(
+            f"{gone}, and the role still resolves to it (chosen by: {today.source}) — "
+            "install it, or change the role's binding"
+        )
+    was_claude_code = harness.is_default_agent(recorded) or resume is not None
+    if harness.is_default_agent(today.binary) != was_claude_code:
+        raise FleetError(
+            f"{gone}, and the role resolves to {today.binary!r} today (chosen by: "
+            f"{today.source}), not known to be the same kind of program: the recorded "
+            f"arguments are {recorded!r}'s — put {recorded!r} back on your PATH, or start "
+            f"a new agent under today's config with `aisquare fleet spawn {role}`"
+        )
+    if shutil.which(today.binary) is None:
+        raise FleetError(
+            f"{gone}, and neither is {today.binary!r}, which the role resolves to today "
+            f"(chosen by: {today.source}) — install one of them, or change the role's binding"
+        )
+    notes.append(f"{gone} — starting {today.binary!r} (chosen by: {today.source}) instead")
+    return today
 
 
-def _without_session_choice(binary: str, args: Sequence[str]) -> list[str]:
+def _without_session_choice(
+    binary: str, args: Sequence[str], *, resuming: bool = False
+) -> list[str]:
     """``args`` less the flags that pick WHICH session a launch runs — for the launch spec.
 
     ``--session-id <id>``, ``--resume``/``-r [<id>]``, ``--continue``/``-c`` and
-    ``--fork-session`` are per launch, like the restart's own ``--resume``
-    (#144). Replayed from the spec they sat beside it — Claude Code refuses
-    ``--session-id`` with ``--resume`` unless it forks — or, on ``--fresh``,
-    started the replacement on the old session id. Both the ``--flag value``
-    and ``--flag=value`` shapes go, read the way ``plan_session_identity`` reads
-    them (explainability owns the flag names): a next token that starts with
-    ``-`` is another flag, not a value, and is kept.
+    ``--fork-session`` (``explainability.without_session_choice``, beside the
+    planner that reads them) are per launch, like the restart's own
+    ``--resume`` (#144). Replayed from the spec they sat beside it — Claude
+    Code refuses ``--session-id`` with ``--resume`` unless it forks — or, on
+    ``--fresh``, started the replacement on the old session id.
 
-    These are Claude Code's flags, so only a binary they apply to loses them
-    (``harness.is_default_agent``, the predicate the role's ``default_args`` and
-    ``--session-id`` pinning share): another program's ``-c`` is its own —
-    aider's config file, codex's config override — and is replayed as given.
+    These are Claude Code's flags, so they go only where they are known to be:
+    another program's ``-c`` is its own — aider's config file, codex's config
+    override — and is replayed as given. Known three ways. By name
+    (``harness.is_default_agent``, the predicate the role's ``default_args``
+    and ``--session-id`` pinning share). By ``resuming``: a launch that resumes
+    a transcript, which only Claude Code writes. And by the arguments NAMING a
+    session (``--session-id <id>``, ``--resume <id>``): the identity planner
+    reads those whatever the binary is called and joins the row to that
+    session, so a restart resumes it with its own ``--resume`` — the
+    ``claude2`` parallel install (``AISQUARE_BIN_CODER=claude2``) spawned on a
+    session its caller chose.
     """
-    if not harness.is_default_agent(binary):
-        return list(args)
-    valued = (explainability_service._SESSION_ID_FLAG, *explainability_service._RESUME_FLAGS)
-    bare = (*explainability_service._CONTINUE_FLAGS, _FORK_SESSION_FLAG)
-    kept: list[str] = []
-    value_next = False
-    for arg in args:
-        if value_next:
-            value_next = False
-            if not arg.startswith("-"):
-                continue
-        if arg in valued:
-            value_next = True
-        elif arg not in bare and not any(arg.startswith(f"{flag}=") for flag in valued):
-            kept.append(arg)
-    return kept
+    if harness.is_default_agent(binary) or resuming:
+        return explainability_service.without_session_choice(args)
+    # An id the planner READ from the arguments, not one it minted — it mints
+    # only for Claude Code by name, answered above.
+    planned = explainability_service.plan_session_identity(binary, args)
+    if planned.session_id is not None and not planned.inject_args:
+        return explainability_service.without_session_choice(args)
+    return list(args)
 
 
 def _refuse_occupied_worktree(project: ProjectInfo, worktree_dir: str, label: str) -> None:

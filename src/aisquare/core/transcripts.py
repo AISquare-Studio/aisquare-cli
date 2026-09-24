@@ -96,7 +96,7 @@ def first_turn_tokens(path: Path) -> int | None:
     return None
 
 
-def refusal_count(path: Path, *, tail_bytes: int = _TAIL_BYTES) -> int:
+def refusal_count(path: Path, *, tail_bytes: int = _TAIL_BYTES, since: int = 0) -> int:
     """How many tool results in the transcript's TAIL are auto-mode refusals.
 
     Counts the ``tool_result`` blocks that ARE the refusal — what Claude Code
@@ -107,9 +107,15 @@ def refusal_count(path: Path, *, tail_bytes: int = _TAIL_BYTES) -> int:
     Read of this module or of the docs that name the signature, a grep, a test
     run — are none of them a refusal, and an agent working on this repository
     reads all three. ``0`` for a file that is missing or unreadable.
+
+    ``since`` is a byte offset — :func:`size` at an earlier moment — before
+    which nothing is counted, however far the tail reaches back: ``claude
+    --resume`` appends to the same file, so a replacement that resumes a
+    transcript would otherwise be counted the refusals of the launch it
+    replaced (#150).
     """
     count = 0
-    for entry in _tail_entries(path, tail_bytes):
+    for entry in _tail_entries(path, tail_bytes, since):
         message = entry.get("message")
         if not isinstance(message, dict):
             continue
@@ -120,6 +126,15 @@ def refusal_count(path: Path, *, tail_bytes: int = _TAIL_BYTES) -> int:
             if _is_refusal(block):
                 count += 1
     return count
+
+
+def size(path: Path) -> int:
+    """How long the transcript is now, in bytes — an offset :func:`refusal_count` can
+    start at later. ``0`` for a file that is missing or unreadable."""
+    try:
+        return path.stat().st_size
+    except OSError:
+        return 0
 
 
 def _is_refusal(block: Any) -> bool:
@@ -158,18 +173,21 @@ def _head_entries(path: Path) -> Iterator[dict[str, Any]]:
     yield from _entries(raw.split(b"\n"))
 
 
-def _tail_entries(path: Path, tail_bytes: int) -> Iterator[dict[str, Any]]:
+def _tail_entries(path: Path, tail_bytes: int, since: int = 0) -> Iterator[dict[str, Any]]:
     try:
         with path.open("rb") as handle:
             handle.seek(0, 2)
-            size = handle.tell()
-            handle.seek(max(size - tail_bytes, 0))
+            end = handle.tell()
+            start = max(end - tail_bytes, since, 0)
+            handle.seek(start)
             raw = handle.read()
     except OSError:
         return
     lines = raw.split(b"\n")
-    if len(raw) >= tail_bytes:
-        lines = lines[1:]  # the first line is almost surely a partial one
+    if start > since:
+        # The read began at an arbitrary byte, not at the start of the file or at
+        # an offset `size` gave: the first line is almost surely a partial one.
+        lines = lines[1:]
     yield from _entries(lines)
 
 

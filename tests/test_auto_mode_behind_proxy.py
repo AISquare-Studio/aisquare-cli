@@ -43,6 +43,7 @@ from aisquare.core.orchestrator import team_project
 from aisquare.core.store import store_session
 from aisquare.models import CheckStatus, FleetAgent, ProjectInfo, TeamSession
 from aisquare.services import auto_mode, diagnostics
+from aisquare.services import fleet as fleet_service
 from aisquare.services import hooks as hooks_service
 from aisquare.services import team as team_service
 from aisquare.services.explainability import PIPELINE_ID_ENV_VAR
@@ -85,6 +86,12 @@ def _transcript(path: Path, entries: list[Any]) -> Path:
     lines = [entry if isinstance(entry, str) else json.dumps(entry) for entry in entries]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return path
+
+
+def _append(path: Path, entries: list[Any]) -> None:
+    """More of the same session: ``claude --resume`` appends to the transcript it resumes."""
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write("".join(json.dumps(entry) + "\n" for entry in entries))
 
 
 def test_the_first_turn_size_sums_the_three_input_fields_of_the_first_assistant_entry(
@@ -174,6 +181,22 @@ def test_refusals_are_counted_in_tool_results_only_and_from_the_tail(tmp_path: P
     )
     assert transcripts.refusal_count(old, tail_bytes=4_000) == 0
     assert transcripts.refusal_count(old) == 1
+
+
+def test_refusals_are_counted_from_an_offset_the_transcript_had_earlier(tmp_path: Path) -> None:
+    """What a resumed replacement's Stop counts: only what it added to the file it resumed."""
+    path = _transcript(tmp_path / "coder.jsonl", [_refused() for _ in range(4)])
+    offset = transcripts.size(path)
+    assert offset == path.stat().st_size
+    assert transcripts.refusal_count(path, since=offset) == 0  # all four came before it
+    _append(path, [_plain_result(), _refused(), _refused()])
+    assert transcripts.refusal_count(path, since=offset) == 2
+    assert transcripts.refusal_count(path) == 6
+    # The tail still bounds it: a window that starts past the offset drops its partial line.
+    last = len(json.dumps(_refused())) + 1
+    assert transcripts.refusal_count(path, since=offset, tail_bytes=last + 10) == 1
+    assert transcripts.refusal_count(path, since=offset + 10_000) == 0  # nothing past the end
+    assert transcripts.size(tmp_path / "missing.jsonl") == 0
 
 
 def test_a_tool_output_that_quotes_the_refusal_is_not_one(tmp_path: Path) -> None:
@@ -432,7 +455,7 @@ def test_a_transient_refusal_or_two_is_not_a_refused_session(
     assert baseline.samples[0].refusals == 2 and baseline.refused_sessions == 0
     fine = auto_mode.doctor_check()
     assert fine is not None and fine.status is CheckStatus.ok
-    assert auto_mode.spawn_note("auto") is None
+    assert _note("auto") is None
 
     _session(project, "s-hit", _sized(tmp_path / "t" / "hit.jsonl", 80_000, refusals=3))
     assert auto_mode.measure_baseline().refused_sessions == 1
@@ -469,26 +492,62 @@ def test_a_transcript_doctor_may_not_stat_does_not_crash_doctor(
 # --- the spawn receipt ----------------------------------------------------------------------
 
 
+def _note(mode: str | None, *, role: str = "coder") -> str | None:
+    """The spawn note as ``fleet.spawn`` asks for it: the mode, the role, the loaded config."""
+    return auto_mode.spawn_note(mode, role=role, config=load_config().fleet)
+
+
 def test_the_spawn_note_needs_auto_mode_a_proxy_and_evidence(
     isolated_home: Path, tmp_path: Path
 ) -> None:
     paths.ensure_home()
     _configure(tracing=True)
     project = _project(tmp_path / "repo")
-    assert auto_mode.spawn_note("auto") is None  # nothing measured: doctor carries that case
+    assert _note("auto") is None  # nothing measured: doctor carries that case
     _session(project, "s-big", _sized(tmp_path / "t" / "big.jsonl", 141_000))
-    note = auto_mode.spawn_note("auto")
-    assert note is not None and "141k" in note and "--permission-mode acceptEdits" in note
-    assert auto_mode.spawn_note("acceptEdits") is None  # no classifier: no note
-    assert auto_mode.spawn_note("") is None
+    note = _note("auto")
+    assert note is not None and "141k" in note and "permission_mode" in note
+    assert _note("acceptEdits") is None  # no classifier: no note
+    assert _note("") is None
     _configure(tracing=False)
-    assert auto_mode.spawn_note("auto") is None  # no proxy: no note
+    assert _note("auto") is None  # no proxy: no note
     _configure(tracing=True)
     _session(project, "s-small", _sized(tmp_path / "t" / "small.jsonl", 80_000))  # the newest
-    assert auto_mode.spawn_note("auto") is None  # under the line, nothing refused
+    assert _note("auto") is None  # under the line, nothing refused
     _session(project, "s-hit", _sized(tmp_path / "t" / "hit.jsonl", 80_000, refusals=3))
-    hit = auto_mode.spawn_note("auto")
+    hit = _note("auto")
     assert hit is not None and "1 of the last 3 sessions were refused" in hit
+
+
+def test_the_spawn_note_names_a_step_a_restart_or_a_switch_receipt_can_follow(
+    isolated_home: Path, tmp_path: Path, runner: CliRunner
+) -> None:
+    """``fleet restart`` and ``fleet switch`` start their replacement through ``spawn``, so
+    the note rides on their receipts too, and neither takes ``--permission-mode`` — the
+    remedy it used to give was a usage error there. Nor does a mode passed to one spawn
+    outlive that agent's next restart or switch, which start it on the role's mode. The
+    note names the ROLE's step instead, in the form this config accepts, and the restart
+    that puts a running agent on it (review of #164, round 1)."""
+    paths.ensure_home()
+    _configure(tracing=True, modes={"coder": "auto"})
+    project = _project(tmp_path / "repo")
+    _session(project, "s-big", _sized(tmp_path / "t" / "big.jsonl", 141_000))
+
+    note = _note("auto", role="coder")
+
+    assert note is not None and "--permission-mode" not in note
+    command = "aisquare config set fleet.roles.coder.permission_mode acceptEdits"
+    assert (
+        f"set a non-classifier mode for coder ({command}) and `aisquare fleet restart` the agent"
+        in note
+    )
+    result = runner.invoke(app, command.split()[1:])
+    assert result.exit_code == 0, result.output
+    assert "coder" not in auto_mode.auto_roles()
+    # A role this config's [fleet.roles] leaves out: the table, as the doctor line names it.
+    manager = _note("auto", role="manager")
+    assert manager is not None and "config set fleet.roles.manager" not in manager
+    assert 'add a `[fleet.roles.manager]` table with `permission_mode = "acceptEdits"`' in manager
 
 
 # --- the Stop hook ----------------------------------------------------------------------------
@@ -580,6 +639,8 @@ def test_fewer_refusals_than_the_threshold_or_no_transcript_change_nothing(
 
 
 def _fleet_agent(project: ProjectInfo, session_id: str, *, label: str, role: str) -> None:
+    """A live fleet row for the session, spawned a minute ago — before any mark a test writes,
+    as ``fleet._handed_over`` requires of the row a hand-over is moving."""
     with store_session() as store:
         store.upsert_fleet_agent(
             FleetAgent(
@@ -589,7 +650,7 @@ def _fleet_agent(project: ProjectInfo, session_id: str, *, label: str, role: str
                 role=role,
                 pane_id="%4",
                 cwd=project.root,
-                created_at=datetime.now(tz=UTC),
+                created_at=datetime.now(tz=UTC) - timedelta(minutes=1),
                 session_id=session_id,
             )
         )
@@ -651,36 +712,131 @@ def test_a_config_that_does_not_parse_does_not_cost_the_notice(
     assert len(blocked) == 1 and blocked[0].startswith("coder-auth: auto mode is refusing")
 
 
-def test_a_refused_turn_that_ends_inside_a_hand_over_leaves_the_mark_and_the_claims(
+def _blocked(project: ProjectInfo) -> list[str]:
+    return [text for kind, text in _events(project) if kind == auto_mode.EVENT_KIND]
+
+
+def _refused_coder_holding_a_task(project: ProjectInfo, transcript: Path) -> str:
+    """``coder-auth``, refused five times, on the board and holding a task; the task's id."""
+    _session(project, "sess-coder", transcript)
+    _fleet_agent(project, "sess-coder", label="coder-auth", role="coder")
+    task, _created = team_service.add_task("the task it holds", role="coder", cwd=project.root)
+    team_service.claim_task(task.id, session_ref="sess-coder")
+    return task.id
+
+
+def _held_by_the_session_through_its_end(project: ProjectInfo, task_id: str) -> bool:
+    """The ``SessionEnd`` behind the ``/exit`` parks the claims only over the mark."""
+    team_service.hook_session_end("sess-coder", project.root, reason="prompt_input_exit")
+    with store_session() as store:
+        held = store.get_task(task_id)
+    return held is not None and held.status == "doing" and held.claimed_by == "sess-coder"
+
+
+def test_a_refused_turn_that_ends_inside_a_hand_over_leaves_the_notice_to_the_replacement(
     isolated_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """``fleet restart`` of a running agent — the way out the line names — and ``fleet
-    switch`` mark the session ``HANDOVER_STATE`` and type ``/exit``, which an agent
-    mid-turn runs once the turn is over. That turn's Stop can be the one at which the
-    refusals reach the threshold, and ``attention`` written over the mark had the
-    ``SessionEnd`` that follows release the claims the replacement was to inherit. The
-    line is said, once; the mark and the claims stay for the hand-over."""
+    """``fleet restart`` of a running agent and ``fleet switch`` mark the session
+    ``HANDOVER_STATE`` and type ``/exit``, which an agent mid-turn runs once the turn is
+    over. That turn's Stop can be the one at which the refusals reach the threshold.
+    ``attention`` written over the mark had the ``SessionEnd`` that follows release the
+    claims the replacement was to inherit, and a line said there named a restart already
+    under way while it used up the session's one notice: a replacement that resumes the
+    transcript keeps the id, so one still refused never rang (review of #164, round 1).
+    Nothing is said over the mark now; the replacement is judged on the refusals it adds.
+    """
     paths.ensure_home()
     _configure(tracing=True, modes={"coder": "auto"})
     _launched(monkeypatch, traced=True)
     project = _project(tmp_path / "repo")
     team_service.activate(project.root)
-    _session(project, "sess-coder", _sized(tmp_path / "t" / "coder.jsonl", 137_000, refusals=5))
-    _fleet_agent(project, "sess-coder", label="coder-auth", role="coder")
-    task, _created = team_service.add_task("the task it holds", role="coder", cwd=project.root)
-    team_service.claim_task(task.id, session_ref="sess-coder")
+    transcript = _sized(tmp_path / "t" / "coder.jsonl", 137_000, refusals=5)
+    task_id = _refused_coder_holding_a_task(project, transcript)
     with store_session() as store:  # what `restart` and `switch` write before the `/exit`
         store.touch_session("sess-coder", state=team_service.HANDOVER_STATE)
 
     assert hooks_service.turn_stopped(project.root, session_id="sess-coder") is None
 
     assert _state("sess-coder") == team_service.HANDOVER_STATE
-    blocked = [text for kind, text in _events(project) if kind == auto_mode.EVENT_KIND]
-    assert len(blocked) == 1 and blocked[0].startswith("coder-auth: auto mode is refusing")
-    team_service.hook_session_end("sess-coder", project.root, reason="prompt_input_exit")
+    assert _blocked(project) == []
+    assert _held_by_the_session_through_its_end(project, task_id)
+
+    # The replacement resumes the transcript under the same id, in a mode that needs no
+    # classifier: the five refusals it inherits are not its own, and it is not flagged.
+    _session(project, "sess-coder", transcript)  # its SessionStart
+    _append(transcript, [_plain_result(), _plain_result()])
+    assert hooks_service.turn_stopped(project.root, session_id="sess-coder") is None
+    assert _state("sess-coder") == "waiting" and _blocked(project) == []
+
+    # Still refused — a switch, or a restart that changed no mode: its own refusals ring.
+    _append(transcript, [_refused() for _ in range(3)])
+    assert hooks_service.turn_stopped(project.root, session_id="sess-coder") is None
+    assert _state("sess-coder") == "attention"
+    [line] = _blocked(project)
+    assert line.startswith("coder-auth: auto mode is refusing") and "(3 refusals" in line
+    assert "aisquare fleet restart coder-auth" in line
+    # Said once, as for any session.
+    assert hooks_service.turn_stopped(project.root, session_id="sess-coder") is None
+    assert len(_blocked(project)) == 1
+
+
+def test_a_mark_that_outlived_its_hand_over_does_not_hold_back_the_bell(
+    isolated_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A ``restart`` or ``switch`` interrupted between its mark and its ``/exit``
+    (``KeyboardInterrupt`` passes their ``except Exception``, so the take-back never runs)
+    leaves the agent running under the mark. The hook reads the mark by the fleet's own
+    rule, ``fleet._handed_over``: older than ``HANDOVER_GRACE`` it is no hand-over, and the
+    refused agent gets its bell and its line (review of #164, round 1)."""
+    paths.ensure_home()
+    _configure(tracing=True, modes={"coder": "auto"})
+    _launched(monkeypatch, traced=True)
+    project = _project(tmp_path / "repo")
+    team_service.activate(project.root)
+    _refused_coder_holding_a_task(
+        project, _sized(tmp_path / "t" / "coder.jsonl", 137_000, refusals=5)
+    )
     with store_session() as store:
-        held = store.get_task(task.id)
-    assert held is not None and held.status == "doing" and held.claimed_by == "sess-coder"
+        store.touch_session("sess-coder", state=team_service.HANDOVER_STATE)
+    later = datetime.now(tz=UTC) + fleet_service.HANDOVER_GRACE + timedelta(seconds=5)
+    monkeypatch.setattr(fleet_service, "_now", lambda: later)
+
+    assert hooks_service.turn_stopped(project.root, session_id="sess-coder") is None
+
+    assert _state("sess-coder") == "attention"
+    [line] = _blocked(project)
+    assert line.startswith("coder-auth: auto mode is refusing") and "(5 refusals" in line
+
+
+def test_a_mark_written_while_the_hook_reads_the_transcript_is_kept(
+    isolated_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The hook reads the session, then the transcript's tail, the meta and the config;
+    a ``fleet restart`` in another process can mark the session in between. The bell is a
+    compare-and-set on the state the hook read, so the mark is kept and the claims are
+    parked at the ``SessionEnd`` behind the ``/exit`` (review of #164, round 1)."""
+    paths.ensure_home()
+    _configure(tracing=True, modes={"coder": "auto"})
+    _launched(monkeypatch, traced=True)
+    project = _project(tmp_path / "repo")
+    team_service.activate(project.root)
+    task_id = _refused_coder_holding_a_task(
+        project, _sized(tmp_path / "t" / "coder.jsonl", 137_000, refusals=5)
+    )
+    real_count = transcripts.refusal_count
+
+    def count_while_a_restart_marks(path: Path, **kwargs: Any) -> int:
+        with store_session() as store:  # `_mark_handing_over`, from the restart's process
+            store.touch_session("sess-coder", state=team_service.HANDOVER_STATE)
+        return real_count(path, **kwargs)
+
+    monkeypatch.setattr(transcripts, "refusal_count", count_while_a_restart_marks)
+
+    assert hooks_service.turn_stopped(project.root, session_id="sess-coder") is None
+
+    assert _state("sess-coder") == team_service.HANDOVER_STATE
+    assert _blocked(project) == []
+    assert _held_by_the_session_through_its_end(project, task_id)
 
 
 def test_the_hook_never_raises_when_the_store_is_damaged(

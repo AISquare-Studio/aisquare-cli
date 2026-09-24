@@ -1316,7 +1316,7 @@ def spawn(
     # survives (#150). Said on the receipt when this machine's transcripts say
     # so; a warning, never a reason not to spawn.
     with contextlib.suppress(Exception):
-        if (warning := auto_mode.spawn_note(mode)) is not None:
+        if (warning := auto_mode.spawn_note(mode, role=role, config=config)) is not None:
             notes.append(warning)
     # WHICH ACCOUNT, decided here and carried into the window as an explicit
     # `--account <slot>` (#145). The one resolver `launch` itself uses — flag,

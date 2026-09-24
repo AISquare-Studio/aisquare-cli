@@ -843,9 +843,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `auto` behind a configured proxy, it reads the first-turn size of recent
   sessions from their transcripts and warns above ~100k tokens or when a
   recent session was refused three times or more; `fleet spawn` carries the
-  same warning on its receipt; a session launched through the proxy and
-  refused three times is put in 🔔 attention by its Stop hook with one
-  `auto_mode_blocked` board line; the mode fix they print is one the config
+  same warning on its receipt, naming the role's mode fix that a `fleet
+  restart` or `fleet switch` receipt can follow too; a session launched through
+  the proxy and refused three times is put in 🔔 attention by its Stop hook
+  with one `auto_mode_blocked` board line, or, when a restart or switch is
+  taking it down, leaves both to the replacement that resumes it, judged on
+  the refusals it adds; the mode fix they print is one the config
   accepts (`config set` for a role the config lists, the TOML table for one
   it leaves out); and the docs name the signature and the three ways round it
   (a non-classifier mode per role, a lighter config dir, tracing off).

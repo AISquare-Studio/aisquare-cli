@@ -49,8 +49,10 @@ from aisquare.core.tmux import (
     WindowInfo,
 )
 from aisquare.models import FleetAgent, FleetAgentStatus, ProjectInfo, TeamSession, TeamTask
+from aisquare.services import auto_mode
 from aisquare.services import fleet as fleet_service
 from aisquare.services import team as team_service
+from aisquare.services.explainability import PIPELINE_ID_ENV_VAR
 from aisquare.services.fleet import (
     ACTIVITY_WINDOW,
     NUDGE_TEXT,
@@ -8269,6 +8271,62 @@ def test_a_resumed_restart_is_told_in_one_line_to_carry_on(
     ]
     assert "\n" not in line and line.startswith(f"You are {agent.label}, restarted")
     assert "aisquare board" in line and "continue" in line
+
+
+def test_the_auto_mode_board_line_s_own_way_out_brings_the_agent_back_off_auto(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    runner: CliRunner,
+) -> None:
+    """The ``auto_mode_blocked`` line (#150) names its way out: a non-classifier mode for
+    the role, then ``aisquare fleet restart <label>``, whose session resumes. Followed
+    here as printed, from the project's directory: the replacement resumes the same
+    transcript and starts in the mode that was set. That holds because ``restart``
+    starts the replacement on the role's mode as the config reads NOW. A restart that
+    replayed the mode the agent was spawned with would resume it in ``auto``, refused as
+    before, and the line would send the operator round in a loop (review of #164,
+    round 1: a heads-up for the merge into #169, whose launch spec replays the mode)."""
+    agent, first = _spawned(project, "coder", None, tmux, monkeypatch)
+    assert _flag(_command(tmux), "--permission-mode") == "auto"  # the built-in default
+    refusal = {
+        "type": "user",
+        "message": {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "content": "claude-opus-5[1m] is temporarily unavailable (server error), so "
+                    "auto mode cannot determine the safety of Bash right now.",
+                    "is_error": True,
+                }
+            ],
+        },
+    }
+    transcript = tmp_path / f"{first}.jsonl"
+    transcript.write_text("".join(json.dumps(refusal) + "\n" for _ in range(3)), encoding="utf-8")
+    _with_transcript(agent, transcript)
+    monkeypatch.setenv(PIPELINE_ID_ENV_VAR, "run-150")  # the agent was launched traced
+    assert auto_mode.record_refusals(first) == 3
+    monkeypatch.delenv(PIPELINE_ID_ENV_VAR)
+    [line] = _events(project, auto_mode.EVENT_KIND)
+    way_out = re.search(
+        r"set a non-classifier mode \((aisquare config set [^)]+)\) and "
+        r"`(aisquare fleet restart [^`]+)`",
+        line,
+    )
+    assert way_out is not None, line
+    monkeypatch.chdir(project.root)
+
+    for step in way_out.groups():
+        result = runner.invoke(app, step.split()[1:])
+        assert result.exit_code == 0, (step, result.output)
+
+    command = _command(tmux)
+    assert _flag(command, "--resume") == str(transcript)
+    assert _flag(command, "--permission-mode") == "acceptEdits"
 
 
 def test_restarting_a_death_no_listing_recorded_announces_it_but_wakes_no_manager(

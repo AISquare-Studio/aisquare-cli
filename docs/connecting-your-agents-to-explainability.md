@@ -370,7 +370,12 @@ spawn` puts the same warning on its receipt. A running session that was
 launched through the proxy and has been refused three times is put in
 **attention** (🔔 on its row) by its Stop hook, with one `auto_mode_blocked`
 line on the board — whether tracing is still on or not, because a running
-agent keeps the proxy it started with.
+agent keeps the proxy it started with. A session that reaches the three while
+`fleet restart` or `fleet switch` is taking it down gets neither — the bell
+would cost the replacement its claims, and the line would name a restart
+already under way — and the replacement that resumes its transcript is judged
+on the refusals it adds, not on the ones it inherits: still refused, it gets
+the bell and the line; restarted in a mode that needs no classifier, neither.
 
 **Until the proxy fix, pick one:**
 

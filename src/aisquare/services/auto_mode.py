@@ -45,7 +45,7 @@ from pathlib import Path
 from aisquare.core import orchestrator, paths, transcripts
 from aisquare.core.config import FleetSettings
 from aisquare.core.store import store_session
-from aisquare.models import CheckStatus, DoctorCheck
+from aisquare.models import CheckStatus, DoctorCheck, FleetAgent, TeamSession
 from aisquare.services import explainability as explainability_service
 from aisquare.services import team as team_service
 
@@ -75,6 +75,11 @@ REFUSAL_THRESHOLD = 3
 CHECK_NAME = "explainability auto-mode"
 EVENT_KIND = "auto_mode_blocked"
 _META_PREFIX = "auto-mode-blocked:"
+
+#: What a session's :data:`_META_PREFIX` key holds when its line was NOT said
+#: because a hand-over was taking the session down: this prefix and the
+#: transcript's size then. The time the line was said is the other value.
+_COUNT_FROM = "count-from:"
 
 
 @dataclass(frozen=True)
@@ -309,7 +314,7 @@ def doctor_check() -> DoctorCheck | None:
     return DoctorCheck(name=CHECK_NAME, status=CheckStatus.ok, detail=detail)
 
 
-def spawn_note(mode: str | None) -> str | None:
+def spawn_note(mode: str | None, *, role: str, config: FleetSettings) -> str | None:
     """A receipt note for a spawn in ``auto`` mode that the evidence says will be refused.
 
     Silent unless the mode is ``auto``, tracing is configured, AND a recent
@@ -317,6 +322,13 @@ def spawn_note(mode: str | None) -> str | None:
     with no transcript yet gets no note — the doctor line carries that case —
     so a fresh install is not warned on every spawn about a size nobody has
     measured. Never raises: a warning is not a reason not to spawn.
+
+    The way out it names is the ROLE's (:func:`_mode_step` on ``config``), then
+    a restart. ``fleet restart`` and ``fleet switch`` start their replacement
+    through ``spawn`` too, so the note rides on their receipts, and neither
+    takes ``--permission-mode``; nor does a mode passed to one spawn outlive
+    that agent's next restart or switch, the automatic usage-limit hand-over
+    included, which start it on the role's mode (review of #164, round 1).
     """
     if mode != "auto":
         return None
@@ -340,8 +352,8 @@ def spawn_note(mode: str | None) -> str | None:
         )
     return (
         f"auto mode behind the explainability proxy: {why} — expect its tool calls to be refused "
-        f"({SDK_ISSUE}); pass --permission-mode acceptEdits, or see `aisquare doctor` "
-        f"({CHECK_NAME})"
+        f"({SDK_ISSUE}); set a non-classifier mode for {role} ({_mode_step(role, config)}) and "
+        f"`aisquare fleet restart` the agent, or see `aisquare doctor` ({CHECK_NAME})"
     )
 
 
@@ -353,11 +365,24 @@ def record_refusals(session_id: str) -> int:
     must change something) and ONE ``auto_mode_blocked`` line lands on the board
     naming the agent, the count and the way out. Never twice for a session: the
     refusals stay in the transcript, and a feed that repeats them every turn is
-    a feed nobody reads. A session a hand-over has marked
-    (:data:`~aisquare.services.team.HANDOVER_STATE`) gets the line but keeps the
-    mark, which its ``SessionEnd`` needs to park the claims for the replacement.
-    Never raises — this runs inside the agent's hook, where a failure may cost
-    nothing but the notice.
+    a feed nobody reads. Never raises — this runs inside the agent's hook, where
+    a failure may cost nothing but the notice.
+
+    The bell and the line go together or not at all. Not over a hand-over's
+    mark (:data:`~aisquare.services.team.HANDOVER_STATE`): ``fleet restart`` of
+    a running agent or ``fleet switch`` typed ``/exit``, which waits for this
+    turn to end, and ``attention`` written over the mark had the ``SessionEnd``
+    that follows release the claims the replacement was to inherit. The line
+    would also name a restart that is already under way. Nor over a state
+    written since this hook read the session — the write is a compare-and-set
+    on what it read, so a mark that lands meanwhile is kept (review of #164,
+    round 1). Then nothing is said, and the key records where the transcript
+    ends instead: a replacement that resumes it keeps this session's id, and is
+    judged on the refusals it adds past that point, not on the ones it
+    inherits — still refused, it gets the bell and the line; started in a mode
+    that needs no classifier, neither. A mark is read as the fleet reads it
+    (:func:`_handing_over`), so one that outlived its hand-over holds nothing
+    back.
 
     Only for a session LAUNCHED behind the proxy: untraced, the same sentence
     is a classifier call that failed at Anthropic, and a board line blaming the
@@ -383,13 +408,22 @@ def record_refusals(session_id: str) -> int:
             session = store.get_session(session_id)
             if session is None or not session.transcript_path:
                 return 0
-            count = transcripts.refusal_count(Path(session.transcript_path))
-            if count < REFUSAL_THRESHOLD:
-                return count
+            transcript = Path(session.transcript_path)
             key = _META_PREFIX + session.id
-            if store.get_meta(key) is not None:
+            recorded = store.get_meta(key)
+            since = _counted_from(recorded)
+            count = transcripts.refusal_count(transcript, since=since or 0)
+            if count < REFUSAL_THRESHOLD or (recorded is not None and since is None):
                 return count
             agent = store.fleet_agent_for_session(session.project_id, session.id)
+            if _handing_over(session, agent) or not store.replace_session_state(
+                session.id, session.state, "attention"
+            ):
+                # A hand-over is taking the session down, or its state moved since the
+                # read above: no bell over it and no line. The replacement that resumes
+                # this transcript is judged on what it adds past this point.
+                store.set_meta(key, f"{_COUNT_FROM}{transcripts.size(transcript)}")
+                return count
             label = agent.label if agent is not None else (session.label or session.id[:8])
             step = None
             if agent is not None:
@@ -397,15 +431,6 @@ def record_refusals(session_id: str) -> int:
 
                 step = _mode_step(agent.role, fleet_service.settings())
             store.set_meta(key, datetime.now(tz=UTC).isoformat())
-            if session.state != team_service.HANDOVER_STATE:
-                # Never over a hand-over's mark: `fleet restart` of a running agent
-                # (the way out the line names) or `fleet switch` typed `/exit`, which
-                # waits for this turn to end, and `attention` written here had the
-                # `SessionEnd` that follows release the claims the replacement was to
-                # inherit — `hook_stop` and `hook_notification` leave the mark too.
-                # The line is still said, once: a resumed replacement keeps this
-                # session's id, and the refusals stay in its transcript's tail.
-                store.mark_attention(session.id)
             team_service._emit(
                 store,
                 session.project_id,
@@ -416,6 +441,38 @@ def record_refusals(session_id: str) -> int:
             return count
     except Exception:
         return 0
+
+
+def _handing_over(session: TeamSession, agent: FleetAgent | None) -> bool:
+    """Whether a hand-over in flight holds ``session`` — its mark, read by the fleet's own
+    rule (``fleet._handed_over``) when the session has a live row.
+
+    The raw mark is not enough: one that outlived its hand-over — ``restart`` or
+    ``switch`` interrupted between the mark and the ``/exit`` (``KeyboardInterrupt``
+    passes their ``except Exception``, so the take-back never runs) — would hold
+    back the bell and the line of an agent that is going nowhere. Older than
+    ``HANDOVER_GRACE``, a mark is the fleet's to disregard, and this hook's too
+    (review of #164, round 1). A marked session with no live row is one whose
+    stop has already ended it.
+    """
+    if session.state != team_service.HANDOVER_STATE:
+        return False
+    if agent is None:
+        return True
+    from aisquare.services import fleet as fleet_service  # lazy: fleet imports this module
+
+    return fleet_service._handed_over(agent, session, fleet_service._now())
+
+
+def _counted_from(recorded: str | None) -> int | None:
+    """The transcript offset a hand-over left under a session's key, or ``None`` for any
+    other value — none, or the time the line was said."""
+    if recorded is None or not recorded.startswith(_COUNT_FROM):
+        return None
+    try:
+        return int(recorded.removeprefix(_COUNT_FROM))
+    except ValueError:
+        return None
 
 
 def _blocked_text(label: str, count: int, *, step: str | None) -> str:

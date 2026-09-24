@@ -141,75 +141,137 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
         )
 
 
+#: Every variable this package reads off the AMBIENT environment, cleared before
+#: each test so the suite grades this tree rather than the shell that started it.
+#: A module constant rather than an inline tuple because
+#: ``tests/test_conftest_is_hermetic.py`` compares it against the product's own
+#: lists — the four routing names below were missing for exactly as long as there
+#: was nothing to compare against.
+AMBIENT_ENV_VARS = (
+    # Agent detection honours CLAUDE_CONFIG_DIR, and a developer running the
+    # suite from inside a Claude session must never have tests write hooks into
+    # their real config directory. In the tuple rather than on its own
+    # `delenv` line so this really is the single answer to "what does the suite
+    # clear" — the guards below read only this name, so a variable cleared
+    # elsewhere would be reported as uncleared and send the reader to the wrong
+    # file.
+    "CLAUDE_CONFIG_DIR",
+    "AISQUARE_TEAM",
+    "AISQUARE_ROLE",
+    # Read off the ambient env by `services/mcp_server.py` to attribute remote
+    # calls — same family as the two above, and missed for the same reason.
+    "AISQUARE_SERVE_CLIENT",
+    "AISQUARE_SERVE_ROLE",
+    "AISQUARE_TEAM_HUB",
+    "AISQUARE_TEAM_DELTA",
+    "AISQUARE_TEAM_LEASE_MIN",
+    "AISQUARE_DB_BUSY_MS",
+    "AISQUARE_BRAIN",
+    "AISQUARE_BRAIN_EMBED",
+    "AISQUARE_BRAIN_EMBED_MODEL",
+    "AISQUARE_HARNESS_PROBE",
+    "AISQUARE_EFFORT",
+    "AISQUARE_EFFORT_PLANNER",
+    "AISQUARE_EFFORT_CODER",
+    "AISQUARE_EFFORT_RUNNER",
+    "AISQUARE_EFFORT_VALIDATOR",
+    "CLAUDE_EFFORT",
+    # A fleet agent's identity, and the process behind it. Both are ambient
+    # for a developer running the suite from inside a fleet pane or from
+    # inside Claude Code (which exports CLAUDE_PID to every subprocess) —
+    # left set, every session start would resolve THEIR row and THEIR pid.
+    "AISQUARE_FLEET_AGENT",
+    "CLAUDE_PID",
+    "AISQUARE_MODEL_PLANNER",
+    "AISQUARE_MODEL_CODER",
+    "AISQUARE_MODEL_RUNNER",
+    "AISQUARE_MODEL_VALIDATOR",
+    "ANTHROPIC_MODEL",
+    "CLAUDE_CODE_SUBAGENT_MODEL",
+    "ANTHROPIC_DEFAULT_FABLE_MODEL",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    # An operator's shell has these sourced from their explainability env
+    # file; leaving them set would resolve THEIR gateway and key inside the
+    # suite, so "this target is unconfigured" would pass or fail depending
+    # on whose terminal ran it.
+    "AISQUARE_EXPLAINABILITY_TARGET",
+    "EXPLAINABILITY_GATEWAY_URL",
+    "EXPLAINABILITY_API_KEY",
+    # The routing half, and the half that was missing. Two mechanisms read these
+    # and both do the right thing on finding them set, which is what made the
+    # omission invisible: `core.harness.interfering_env` REPORTS them, and
+    # `wire_session` STANDS DOWN — "already set — not overriding your routing,
+    # launching untraced". So a test asserting an unpinned model or a traced
+    # launch passed in CI and failed for anyone whose shell had them.
+    #
+    # EVERY Claude Code session exports ANTHROPIC_BASE_URL — that is, the
+    # machine of anyone who develops this with an agent. Measured here: the four
+    # tests named in tests/test_conftest_is_hermetic.py fail with these set and
+    # pass with them unset, on one tree, one commit, one machine.
+    "ANTHROPIC_BASE_URL",  # both mechanisms
+    "ANTHROPIC_CUSTOM_HEADERS",  # wire_session
+    "CLAUDE_CODE_USE_BEDROCK",  # interfering_env
+    "CLAUDE_CODE_USE_VERTEX",  # interfering_env
+    # The MARKER half of a tracing identity (core.spawn.MARKER_ENV_VARS).
+    # `core.insights.run_key` files every insight under AISQUARE_PIPELINE_ID
+    # when it is set, so a suite run from inside a traced session grades
+    # whoever launched it. This is the likeliest name of all to be set for the
+    # audience above: a traced `aisquare launch` / `team spawn` exports it into
+    # every child, and the fleet's tmux server hands its environment to every
+    # window it opens.
+    "AISQUARE_PIPELINE_ID",
+    "AISQUARE_TRACE_AGENT_NAME",
+    # The third. `MARKER_ENV_VARS` "went from two names to three once, and the
+    # copies that were prose rather than reads had to be chased down one at a
+    # time" — its own words. This tuple was one of those copies, and the guard
+    # below is what made it a read: it named this variable on merging main
+    # without anyone going looking.
+    "AISQUARE_RUN_TRACE_ID",
+    # A sign-in token in the operator's shell would make every test run as them.
+    "AISQUARE_TOKEN",
+    "BROWSER",
+    # The CI test bed's switches. An operator who has them exported would
+    # otherwise run the suite's hooks against THEIR endpoint, with THEIR
+    # token — measured once: four real POSTs to a listener during a green
+    # run. Off is the state every test starts from; tests opt in. The
+    # staging override is cleared with them: left set, it would turn every
+    # direct_api descriptor a test serves into one that delivers.
+    "AISQUARE_CI",
+    "AISQUARE_CI_URL",
+    "AISQUARE_CI_KEY",
+    "AISQUARE_CI_RUN",
+    "AISQUARE_CI_DELIVERY_OVERRIDE",
+    # Read off the ambient env, and none of them fails the suite TODAY — swept
+    # out of `src/` rather than waited for, because the docstring above claims
+    # completeness and two guards now read this tuple, so a claim that is only
+    # nearly true is worse than one that is checked.
+    "XDG_CONFIG_HOME",  # diagnostics: resolves the developer's real gh config dir
+    "GH_CONFIG_DIR",  # same
+    "GH_TOKEN",  # diagnostics: "gh is not authenticated" by whose shell
+    "GITHUB_TOKEN",  # same
+    "EDITOR",  # core.editor: a seam that escapes its patch launches the real one
+    "VISUAL",  # same
+    "TERM",  # rendering assertions vary by terminal
+    "TMUX_TMPDIR",  # core.tmux socket path
+)
+
+
 @pytest.fixture(autouse=True)
 def isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Point AISQUARE_HOME at a temp dir so tests never touch ``~/.aisquare``.
 
-    ``CLAUDE_CONFIG_DIR`` is cleared too: agent detection honours it, and a
-    developer running the suite from inside a Claude session must never have
-    tests write hooks into their real config directory.
+    Everything else it clears is :data:`AMBIENT_ENV_VARS`, which is the single
+    answer to "what does the suite clear" — including ``CLAUDE_CONFIG_DIR``,
+    which used to be cleared on a line of its own here.
     """
     home = tmp_path / "aisquare-home"
     monkeypatch.setenv(HOME_ENV_VAR, str(home))
-    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
-    # The orchestrator and brain knobs are read from the ambient env; clear them so
-    # the suite is hermetic (an embedding user's AISQUARE_BRAIN_EMBED=1 must not
-    # change what tests build/assert), each test opting in explicitly instead.
-    for knob in (
-        "AISQUARE_TEAM",
-        "AISQUARE_ROLE",
-        "AISQUARE_TEAM_HUB",
-        "AISQUARE_TEAM_DELTA",
-        "AISQUARE_TEAM_LEASE_MIN",
-        "AISQUARE_DB_BUSY_MS",
-        "AISQUARE_BRAIN",
-        "AISQUARE_BRAIN_EMBED",
-        "AISQUARE_BRAIN_EMBED_MODEL",
-        "AISQUARE_HARNESS_PROBE",
-        "AISQUARE_EFFORT",
-        "AISQUARE_EFFORT_PLANNER",
-        "AISQUARE_EFFORT_CODER",
-        "AISQUARE_EFFORT_RUNNER",
-        "AISQUARE_EFFORT_VALIDATOR",
-        "CLAUDE_EFFORT",
-        # A fleet agent's identity, and the process behind it. Both are ambient
-        # for a developer running the suite from inside a fleet pane or from
-        # inside Claude Code (which exports CLAUDE_PID to every subprocess) —
-        # left set, every session start would resolve THEIR row and THEIR pid.
-        "AISQUARE_FLEET_AGENT",
-        "CLAUDE_PID",
-        "AISQUARE_MODEL_PLANNER",
-        "AISQUARE_MODEL_CODER",
-        "AISQUARE_MODEL_RUNNER",
-        "AISQUARE_MODEL_VALIDATOR",
-        "ANTHROPIC_MODEL",
-        "CLAUDE_CODE_SUBAGENT_MODEL",
-        "ANTHROPIC_DEFAULT_FABLE_MODEL",
-        "ANTHROPIC_DEFAULT_OPUS_MODEL",
-        "ANTHROPIC_DEFAULT_SONNET_MODEL",
-        "ANTHROPIC_DEFAULT_HAIKU_MODEL",
-        # An operator's shell has these sourced from their explainability env
-        # file; leaving them set would resolve THEIR gateway and key inside the
-        # suite, so "this target is unconfigured" would pass or fail depending
-        # on whose terminal ran it.
-        "AISQUARE_EXPLAINABILITY_TARGET",
-        "EXPLAINABILITY_GATEWAY_URL",
-        "EXPLAINABILITY_API_KEY",
-        # A sign-in token in the operator's shell would make every test run as them.
-        "AISQUARE_TOKEN",
-        "BROWSER",
-        # The CI test bed's switches. An operator who has them exported would
-        # otherwise run the suite's hooks against THEIR endpoint, with THEIR
-        # token — measured once: four real POSTs to a listener during a green
-        # run. Off is the state every test starts from; tests opt in. The
-        # staging override is cleared with them: left set, it would turn every
-        # direct_api descriptor a test serves into one that delivers.
-        "AISQUARE_CI",
-        "AISQUARE_CI_URL",
-        "AISQUARE_CI_KEY",
-        "AISQUARE_CI_RUN",
-        "AISQUARE_CI_DELIVERY_OVERRIDE",
-    ):
+    # Read from the ambient env; cleared so the suite is hermetic (an embedding
+    # user's AISQUARE_BRAIN_EMBED=1 must not change what tests build/assert),
+    # each test opting in explicitly instead.
+    for knob in AMBIENT_ENV_VARS:
         monkeypatch.delenv(knob, raising=False)
     # The command sweeps invoke `login` with no arguments. Without this it would
     # resolve config.toml's default and contact the REAL API from inside the test

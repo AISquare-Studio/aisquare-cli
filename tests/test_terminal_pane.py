@@ -2492,10 +2492,10 @@ def test_every_button_sequence_up_to_five_events_keeps_the_gesture_invariant(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """EXHAUSTIVE, not one ordering per round (rounds 4 to 7 of #203 each fixed
-    the complement of the last): every sequence over {D1, D2, D3, U1, U2, U3} up
-    to five events — 9 330 of them, duplicates and lost releases included — is
-    driven through ``SelectionHost.on_event`` against a reference model of the
-    one rule, and both are compared event by event:
+    the complement of the last): every sequence over {D1, D2, D3, U1, U2, U3, M0}
+    up to five events — 19 607 of them, duplicates and lost releases included —
+    is driven through ``SelectionHost.on_event`` against a reference model of
+    the one rule, and both are compared event by event:
 
     * a press when nothing is down begins a gesture with that button: forwarded,
       every pane baselined; while one is down, ANY press is dropped (a second
@@ -2505,7 +2505,10 @@ def test_every_button_sequence_up_to_five_events_keeps_the_gesture_invariant(
       forwarded, routed once with that button; every other release while one is
       down is dropped;
     * with nothing down, the stray's own release is dropped once and any other
-      release is forwarded and routed with no button.
+      release is forwarded and routed with no button;
+    * a move with no button held (M0) is always forwarded; while a gesture is
+      down it is that gesture's lost release — routed once with its button —
+      and a stray is kept for its own release (review of the fold with #167).
 
     Measured at the two seams that matter — ``App.on_event`` (the screen) and
     the two route functions — on a bare host, with the clock frozen so a repeat
@@ -2514,7 +2517,7 @@ def test_every_button_sequence_up_to_five_events_keeps_the_gesture_invariant(
     routed: list[tuple[str, int | None]] = []
 
     async def screen(self: App[Any], event: events.Event) -> None:
-        if isinstance(event, (events.MouseDown, events.MouseUp)):
+        if isinstance(event, (events.MouseDown, events.MouseUp, events.MouseMove)):
             forwarded.append((type(event).__name__, event.button))
 
     monkeypatch.setattr(App, "on_event", screen)
@@ -2528,7 +2531,7 @@ def test_every_button_sequence_up_to_five_events_keeps_the_gesture_invariant(
     )
     monkeypatch.setattr(terminal_module, "_monotonic", lambda: 100.0)
 
-    alphabet = [("D", 1), ("D", 2), ("D", 3), ("U", 1), ("U", 2), ("U", 3)]
+    alphabet = [("D", 1), ("D", 2), ("D", 3), ("U", 1), ("U", 2), ("U", 3), ("M", 0)]
 
     def model(
         steps: list[tuple[str, int]],
@@ -2538,7 +2541,12 @@ def test_every_button_sequence_up_to_five_events_keeps_the_gesture_invariant(
         fwd: list[tuple[str, int]] = []
         rt: list[tuple[str, int | None]] = []
         for kind, b in steps:
-            if kind == "D":
+            if kind == "M":
+                if pressed is not None:
+                    rt.append(("end", pressed))
+                    pressed = None
+                fwd.append(("MouseMove", b))
+            elif kind == "D":
                 if pressed is not None:
                     if b != pressed:
                         stray = b
@@ -2559,8 +2567,9 @@ def test_every_button_sequence_up_to_five_events_keeps_the_gesture_invariant(
 
     async def drive(steps: list[tuple[str, int]]) -> None:
         host = SelectionHost()
+        kinds = {"D": events.MouseDown, "U": events.MouseUp, "M": events.MouseMove}
         for kind, b in steps:
-            await host.on_event(_mouse(events.MouseDown if kind == "D" else events.MouseUp, b))
+            await host.on_event(_mouse(kinds[kind], b))
         assert host._pressed is None or any(k == "D" for k, _ in steps)
 
     checked = 0
@@ -2573,7 +2582,7 @@ def test_every_button_sequence_up_to_five_events_keeps_the_gesture_invariant(
             assert forwarded == expected_fwd, f"{steps}: forwarded {forwarded} != {expected_fwd}"
             assert routed == expected_rt, f"{steps}: routed {routed} != {expected_rt}"
             checked += 1
-    assert checked == 6 + 36 + 216 + 1296 + 7776
+    assert checked == 7 + 49 + 343 + 2401 + 16807
 
 
 def test_a_duplicated_primary_press_does_not_restart_the_drag(
@@ -2639,6 +2648,54 @@ def test_a_lost_release_is_recovered_by_the_next_press_after_the_window(
     clipboard, notices = run(drive())
     assert clipboard == "third ", "the new gesture was accepted and copied"
     assert len(notices) == 1, notices
+
+
+def test_a_lost_release_ends_the_drag_at_the_first_move_with_no_button_held(
+    fake: FakeTmux, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of the fold with #167. The window above is the only recovery a
+    lost release had, so a drag let go outside the terminal and followed by
+    another drag within half a second lost the second one: its press was
+    dropped as a duplicate of the first, its moves extended the lost drag's
+    selection, and its release copied both rows. The pointer coming back in
+    with no button held is the first report that the release was lost — the
+    rule #167's sidebar divider ends its own drag by: the gesture ends there,
+    and copies where the drag got to, not where the bare pointer came back in.
+    The clock is frozen, so every repeat press is inside the window."""
+    monkeypatch.setattr(terminal_module, "_monotonic", lambda: 100.0)
+
+    async def drive() -> tuple[str, list[str], int | None]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 8)) as pilot:
+            pane = host.pane
+            await wait_until(pilot, lambda: synced(pane))
+            for event in (
+                mouse_event(events.MouseDown, pane, (0, 1), 1),
+                mouse_event(events.MouseMove, pane, (3, 1), 1),
+                # …the release is lost outside, and the pointer comes back in
+                mouse_event(events.MouseMove, pane, (7, 2), 0),
+            ):
+                host.post_message(event)
+            await pilot.pause()
+            await pilot.pause()
+            pressed_after_bare_move = host._pressed
+            for event in (
+                mouse_event(events.MouseDown, pane, (0, 2), 1),
+                mouse_event(events.MouseMove, pane, (5, 2), 1),
+                mouse_event(events.MouseUp, pane, (5, 2), 1),
+            ):
+                host.post_message(event)
+            await pilot.pause()
+            await pilot.pause()
+            return host.clipboard, list(host.notices), pressed_after_bare_move
+
+    clipboard, notices, pressed_after_bare_move = run(drive())
+    assert pressed_after_bare_move is None, "the bare move ended the lost gesture"
+    assert len(notices) == 2, f"both drags copied: {notices}"
+    assert notices[0].startswith("copied 4 characters"), (
+        f"the lost drag copied where it got to ('seco'), not to the bare pointer: {notices}"
+    )
+    assert clipboard == "third ", "the second drag was a gesture of its own"
 
 
 def test_the_servers_version_is_asked_once_across_attaches(tmp_path: Path) -> None:

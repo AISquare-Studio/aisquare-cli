@@ -1578,7 +1578,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   POSIX and nothing on NTFS, leaving the key readable by every other account
   on the machine. Now through `paths.restrict_to_owner` like the credentials
   file and the serve token, and it says so when the restriction cannot be
-  applied.
+  applied. Like the credentials file, it is written by rename into a temp
+  restricted while still empty, so a first key never sits under the
+  permissions the home hands down.
 - **The spawn-seam registry is no longer separator-dependent.** `core.spawn.SEAMS`
   is keyed by `<path>::<function>` with forward slashes; the guard built its
   keys with `str(Path)`, so on Windows every call site read as undecided AND

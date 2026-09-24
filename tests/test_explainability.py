@@ -637,6 +637,38 @@ def test_configure_target_judges_the_name_and_the_identity_as_it_stores_them() -
     assert set(config.explainability.targets) == {"stg", "prod west"}, "refused: nothing stored"
 
 
+def test_the_workspace_key_goes_into_a_file_already_restricted_to_this_account(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``store_api_key`` wrote the key in place and restricted the file afterwards, so a first
+    key sat under the umask mode (0644) or the DACL the home hands down until the restriction
+    ran, and for good when it failed (review of the #65 fold, round 2, F5). The spy records
+    what each restriction was applied to: a temp, still empty, for a new file and over an
+    existing one. A restriction that fails is still said out loud, and the key still lands."""
+    real = paths.restrict_to_owner
+    applied: list[tuple[str, int]] = []
+    holds = True
+
+    def spy(path: Path) -> bool:
+        applied.append((path.name, path.stat().st_size))
+        real(path)
+        return holds
+
+    monkeypatch.setattr(paths, "restrict_to_owner", spy)
+    target = explainability.store_api_key(" first-workspace-key\n")
+    explainability.store_api_key("second-workspace-key")
+    assert capsys.readouterr().err == ""
+    holds = False
+    explainability.store_api_key("third-workspace-key")
+    assert len(applied) == 3, applied
+    for name, size in applied:
+        assert name.startswith(".explainability-key.") and name.endswith(".tmp"), applied
+        assert size == 0, f"restricted with the key already in it: {applied}"
+    assert target.read_text(encoding="utf-8") == "third-workspace-key"
+    assert "warning: could not restrict" in capsys.readouterr().err
+    assert not list(target.parent.glob(".explainability-key.*")), "a temp was left behind"
+
+
 def test_probe_accepts_the_claude_code_proxy() -> None:
     server, url = _serve({"status": "ok", "service": "aisquare-proxy", "mode": "claude_code"})
     try:

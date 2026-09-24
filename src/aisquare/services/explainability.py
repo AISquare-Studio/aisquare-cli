@@ -75,6 +75,7 @@ from urllib.parse import SplitResult, urlsplit
 from urllib.request import urlopen
 
 from aisquare.core import harness, insights, outbox, paths, spawn
+from aisquare.core.atomic import write_replacing
 from aisquare.core.config import (
     AppConfig,
     ExplainabilitySettings,
@@ -1247,11 +1248,17 @@ def store_api_key(key: str) -> Path:
     have no equivalent — so this file joined the credentials file and the serve
     token in being readable by every other account on a Windows box, with
     nothing raised to say so. Same guard, same reporting, third secret.
+
+    Replaced by rename into a temp restricted while it is still empty, as the
+    credentials file is (``write_replacing(owner_only=True)``). Written in
+    place and restricted afterwards, a first key sat under the umask mode
+    (0644) or the DACL the home hands down until the restriction ran, and for
+    good when it failed (review of the #65 fold, round 2, F5). Written THROUGH
+    a symlink, as the in-place write was.
     """
     target = key_path()
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(key.strip(), encoding="utf-8")
-    if not paths.restrict_to_owner(target):
+    if not write_replacing(Path(os.path.realpath(target)), key.strip(), owner_only=True):
         print(
             f"warning: could not restrict {target} to your account — "
             "other users on this machine may be able to read the workspace key.",

@@ -109,14 +109,30 @@ def status_report() -> StatusReport:
 
 
 def _credits_row(target: ops.ResolvedTarget) -> str:
-    """The destination workspace's credits (#143) — cached a minute, off the UI thread."""
-    if target.destination is None:
+    """The destination workspace's credits (#143) — cached a minute, off the UI thread.
+
+    The row is always drawn, so when a destination IS chosen but there is
+    nothing to ask with, it says which is missing. ``describe(None)`` used to
+    answer "(no destination chosen)" there, directly under the ``lands in``
+    row naming that destination (review of #173, round 1). The CLI, whose
+    line is optional, leaves it out instead.
+    """
+    destination = target.destination
+    if destination is None:
         return "(no destination chosen)"
     try:
         session = iam.current_session()
     except iam.IamError:
         session = None
-    return credits_service.describe(credits_service.for_destination(session, target.destination))
+    if session is None:
+        return "(sign in to read them — aisquare login)"
+    reading = credits_service.for_destination(session, destination)
+    if reading is None:  # the session belongs to another API than the workspace's
+        return (
+            f"(signed in to {session.api_url}, not this workspace's API — "
+            f"aisquare login --api-url {destination.api_url} to read them)"
+        )
+    return credits_service.describe(reading)
 
 
 def _active() -> ProjectInfo | None:

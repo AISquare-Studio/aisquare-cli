@@ -258,6 +258,33 @@ def test_a_truncated_answer_is_a_reason_on_the_row_not_a_traceback(
     assert "credits: acme: credits unavailable" in who.output
 
 
+def test_the_explainability_views_row_says_why_it_has_no_reading(
+    runner: CliRunner,
+    idp: IdentityProviderStub,
+    pointed: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #173, round 1: with a destination chosen but nothing to ask
+    with, the row read ``(no destination chosen)`` — directly under the
+    ``lands in`` row naming that destination. It says what is missing now."""
+    from aisquare.cli.ui.views.explainability import status_report
+
+    rows = dict(status_report().rows)
+    assert rows["credits"].startswith("acme [low] — run credits"), rows["credits"]
+    assert runner.invoke(app, ["logout"]).exit_code == 0
+    rows = dict(status_report().rows)
+    assert rows["lands in"].startswith("acme / Frontend"), rows["lands in"]
+    assert rows["credits"] == "(sign in to read them — aisquare login)"
+    elsewhere = iam.Session(api_url="https://api.aisquare.studio", token="aisq_x", source="file")
+    monkeypatch.setattr(iam, "current_session", lambda api_url=None: elsewhere)
+    rows = dict(status_report().rows)
+    assert rows["credits"] == (
+        "(signed in to https://api.aisquare.studio, not this workspace's API — "
+        f"aisquare login --api-url {idp.url} to read them)"
+    ), rows["credits"]
+    assert len(_balance_calls(idp)) == 1, "neither case asks anyone"
+
+
 def test_a_sign_in_or_out_in_another_terminal_follows_on_the_next_frame(
     idp: IdentityProviderStub, pointed: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:

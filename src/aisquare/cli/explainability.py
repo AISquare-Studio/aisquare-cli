@@ -358,6 +358,31 @@ def _routing_lines(report: dest.RosterReport) -> list[str]:
     return [f"{b.agent} → {'bound' if b.ok else 'not bound: ' + b.detail}" for b in report.bound]
 
 
+def _next_check(target: ops.ResolvedTarget, project_ref: str | None) -> str:
+    """The step ``use`` names once tracing is on: one that resolves the key ``use`` set up.
+
+    ``doctor`` resolves the MACHINE's key and opens no store, so the project's
+    own key — minted or attached by hand — is invisible to it: it fails the
+    config row and tells the operator to export a machine key, the one thing
+    that never stands in for the project's. ``explainability status`` resolves
+    the project's key and probes the destination's proxy. With no key at all
+    the next step is attaching one, not a check. ``doctor --live`` stays for a
+    machine key, which it resolves too and is the one check that puts it to the
+    gateway. ``--target`` pins the destination's deployment whatever the shell
+    exports, and ``--project`` is repeated when ``use`` was given one.
+    """
+    name = shlex.quote(target.name)
+    project = f" --project {shlex.quote(project_ref)}" if project_ref is not None else ""
+    if target.key_source == "project":
+        return f"aisquare explainability status --target {name}{project}"
+    if target.key_source == "unset":
+        return (
+            f"aisquare explainability key set --from-env VAR --target {name}{project}"
+            "   (the project has no key for this destination yet)"
+        )
+    return f"aisquare doctor --live --target {name}"
+
+
 @app.command()
 def use(
     destination: Annotated[
@@ -434,7 +459,11 @@ def use(
     with store_session() as store:
         previous = store.project_destination(project.id)
         row = dest.choose(store, project, workspace, studio, session, previous=previous)
-        target = ops.resolve_target(config.explainability, None, project_id=project.id)
+        # By the destination's own deployment, never the shell's: whether the
+        # project already has THIS destination's key must not depend on an
+        # exported $AISQUARE_EXPLAINABILITY_TARGET, or every `use` under it
+        # mints again, and the roster is bound with the other deployment's key.
+        target = ops.resolve_target(config.explainability, target_name, project_id=project.id)
         key_note: str
         minted = None
         # Only the PROJECT's own key is taken as this destination's credential.
@@ -455,7 +484,9 @@ def use(
             try:
                 minted = dest.mint_key(store, project, row, session)
                 row = store.project_destination(project.id) or row
-                target = ops.resolve_target(config.explainability, None, project_id=project.id)
+                target = ops.resolve_target(
+                    config.explainability, target_name, project_id=project.id
+                )
                 key_note = f"minted on your behalf → {minted.path} (mode 600)"
             except iam.IamError as exc:
                 key_note = f"none — {exc.message}"
@@ -514,14 +545,13 @@ def use(
     if not config.explainability.enabled:
         typer.echo("  next:     aisquare explainability enable   (tracing is off on this machine)")
     else:
-        # With the target: doctor resolves the MACHINE's, and this project's
-        # traces go to the destination's deployment (#142).
-        typer.echo(f"  next:     aisquare doctor --live --target {shlex.quote(target.name)}")
+        typer.echo(f"  next:     {_next_check(target, project_ref)}")
 
 
 @app.command()
 def status(
     target_name: Annotated[str | None, _TARGET_OPTION] = None,
+    project_ref: Annotated[str | None, _PROJECT_OPTION] = None,
 ) -> None:
     """Show the tracing config and whether the proxy would accept a session.
 
@@ -535,12 +565,17 @@ def status(
     config = load_config()
     settings = config.explainability
     # The key is resolved FOR the active project (#141): a project with its own
-    # key shows that origin here; everything else the machine's.
-    try:
-        with store_session() as store:
-            project_id: str | None = active_project(store).id
-    except Exception:  # a project is decoration on this line, never its gate
-        project_id = None
+    # key shows that origin here; everything else the machine's. `--project`
+    # names another one — the check `use --project` sends the operator to.
+    project_id: str | None
+    if project_ref is not None:
+        project_id = _project_for(project_ref).id
+    else:
+        try:
+            with store_session() as store:
+                project_id = active_project(store).id
+        except Exception:  # a project is decoration on this line, never its gate
+            project_id = None
     target = ops.resolve_target(settings, target_name, project_id=project_id)
     # One description of the proxy lane for both surfaces. It also decides
     # whether to probe at all: a machine that never configured tracing has

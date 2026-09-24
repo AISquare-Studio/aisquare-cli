@@ -329,7 +329,12 @@ reported on its own line:
   never answers for another one; the exception is the machine whose top-level
   gateway already is that deployment's. Launches, `fleet spawn` and
   `explainability env` in the project take the proxy **and** the key from this
-  target, and `use` ends by naming it: `aisquare doctor --live --target <name>`.
+  target. `use` asks about this target whatever `AISQUARE_EXPLAINABILITY_TARGET`
+  says, and once tracing is on it ends with the check for what it set up:
+  `aisquare explainability status --target <name>` (plus `--project` when you
+  named one) for the project's own key, because `doctor` resolves only the
+  machine's; `aisquare doctor --live --target <name>` for a machine key; and
+  `key set` when there is no key yet.
 - **key** — ingest still needs a workspace key (neither the gateway nor the
   hosted proxy accepts a sign-in token), so the CLI obtains one on your behalf
   unless the project already has its own, scoped to `ingest:write`, named
@@ -341,8 +346,8 @@ reported on its own line:
   `aisquare explainability key set --from-env VAR` is the way in — it binds the
   key to the project's destination unless you pass `--target`. A key you
   attached by hand is used as is and never minted over; `key set` over a minted
-  key revokes the minted one, and so do `use --clear` and a move into another
-  workspace.
+  key revokes the minted one, and so do `use --clear`, a move into another
+  workspace, and a new mint over it (when its file is gone).
 - **routing** — a span lands in the studio its agent identity is bound to in
   that workspace (unbound identities go to the workspace's *Unassigned* inbox),
   so `use` binds this machine's identities (`aisquare-planner`, `aisquare-coder`,

@@ -601,6 +601,12 @@ def mint_key(
     overwrite that key and rebind it — the operator's credential destroyed by
     a command that promised to leave it alone. Refused before the request, so
     no key is created only to be thrown away.
+
+    A KEY THE CLI MINTED BEFORE IS REVOKED: the row's uid now names the new
+    one, so the old one would stay a live ``ingest:write`` key that nothing on
+    this machine remembers (``use`` mints over one when its file is gone).
+    Revoked only once the new key is stored, so a key is never revoked before
+    its replacement is in place.
     """
     binding = store.project_explainability(project.id)
     if binding is not None and not destination.key_uid and binding.key_path.is_file():
@@ -646,6 +652,7 @@ def mint_key(
         project.id, target=destination.environment, key_path=path, set_by=destination.set_by
     )
     store.set_project_destination_key(project.id, str(uid) if uid else "minted")
+    _revoke(destination, session)  # the uid it carried is the key just replaced
     return MintedKey(uid=str(uid or "minted"), name=str(body.get("name") or ""), path=str(path))
 
 

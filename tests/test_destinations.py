@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import ast
 import json
+import shlex
 import stat
 from collections.abc import Iterator
 from pathlib import Path
@@ -572,6 +573,100 @@ def test_key_set_after_a_refused_mint_binds_the_destinations_deployment(
     assert explicit["target"] == "stg"
 
 
+# --- the next step `use` names is a check that passes for what it set up ------------------------
+
+
+def _trace_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Tracing enabled, and the destination's proxy answering (nothing listens in a test)."""
+    config = load_config()
+    config.explainability.enabled = True
+    save_config(config)
+    monkeypatch.setattr(ops, "probe_proxy", lambda _url: service.ProxyProbe(True, "proxy healthy"))
+
+
+def _next_step(output: str) -> list[str]:
+    """The command on `use`'s ``next:`` line, as the app's argv: no ``aisquare``, no note."""
+    line = next(ln for ln in output.splitlines() if ln.strip().startswith("next:"))
+    argv = shlex.split(line.split("next:", 1)[1].split("   (", 1)[0])
+    assert argv[0] == "aisquare", line
+    return argv[1:]
+
+
+def test_the_next_step_for_the_projects_key_resolves_the_projects_key(
+    runner: CliRunner,
+    idp: IdentityProviderStub,
+    signed_in: iam.Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`doctor` opens no store, so a minted key is invisible to it; `status` resolves it."""
+    _trace_on(monkeypatch)
+    _project(tmp_path / "lib")
+    _project(tmp_path / "web")  # pinned last, so the active one
+    result = runner.invoke(app, ["explainability", "use", "acme/Frontend"])
+    assert result.exit_code == 0, result.output
+    step = _next_step(result.output)
+    assert step == ["explainability", "status", "--target", "local"]
+    followed = runner.invoke(app, ["--json", *step])
+    assert followed.exit_code == 0, followed.output
+    shown = json.loads(followed.stdout)
+    assert (shown["key_source"], shown["key_set"]) == ("project", True)
+
+    # For a project that is not the active one, the check is about THAT project.
+    other = runner.invoke(app, ["explainability", "use", "--project", "lib", "acme/API"])
+    assert other.exit_code == 0, other.output
+    step = _next_step(other.output)
+    assert step == ["explainability", "status", "--target", "local", "--project", "lib"]
+    shown = _json(runner, *step)
+    assert shown["destination"]["studio"]["name"] == "API", "the active project was checked"
+    assert (shown["key_source"], shown["key_set"]) == ("project", True)
+
+
+def test_with_no_key_the_next_step_attaches_one_to_the_destination(
+    runner: CliRunner,
+    idp: IdentityProviderStub,
+    signed_in: iam.Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Not `doctor`: its remedy is a machine key, which never stands in for the project's."""
+    _trace_on(monkeypatch)
+    idp.key_mint = "token_not_valid"
+    project = _project(tmp_path / "web")
+    result = runner.invoke(app, ["explainability", "use", "acme/Frontend"])
+    assert result.exit_code == 0, result.output
+    step = _next_step(result.output)
+    assert step == ["explainability", "key", "set", "--from-env", "VAR", "--target", "local"]
+    monkeypatch.setenv("VAR", "AIS_handmade_key")
+    assert runner.invoke(app, step).exit_code == 0
+    resolved = ops.resolve_target(load_config().explainability, None, project_id=project.id)
+    assert (resolved.name, resolved.key_source) == ("local", "project")
+    again = runner.invoke(app, ["explainability", "use", "acme/Frontend"])
+    assert _next_step(again.output) == ["explainability", "status", "--target", "local"]
+
+
+def test_the_next_step_for_a_machine_key_is_doctor_and_doctor_resolves_it(
+    runner: CliRunner,
+    idp: IdentityProviderStub,
+    signed_in: iam.Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A machine key is doctor's to put to the gateway: it resolves the same key `use` did."""
+    _trace_on(monkeypatch)
+    idp.key_mint = "token_not_valid"
+    monkeypatch.setenv("EXPLAINABILITY_LOCAL_API_KEY", "AIS_machine_local_key")
+    _project(tmp_path / "web")
+    result = runner.invoke(app, ["explainability", "use", "acme/Frontend"])
+    assert result.exit_code == 0, result.output
+    step = _next_step(result.output)
+    assert step == ["doctor", "--live", "--target", "local"]
+    # Offline: the rows --live adds dial the gateway. The config row is the one
+    # that failed when this line named doctor for a project's key.
+    rows = {check.name: check for check in ops.checks(target_name=step[-1])}
+    assert rows["explainability config"].status == "ok", rows["explainability config"].detail
+
+
 # --- the proxy comes from the same target as the key ---------------------------------------------
 
 
@@ -818,6 +913,42 @@ def test_logout_revokes_only_on_the_host_that_minted_and_survives_a_stuck_file(
     assert sorted(cleared) == sorted([here.id, elsewhere.id])
     assert "key-elsewhere" not in idp.revoked_keys, "a key uid sent to a host that never minted it"
     assert sorted(idp.revoked_keys) == ["key-here", "key-stuck"]
+
+
+def test_an_exported_target_does_not_make_use_mint_again(
+    runner: CliRunner,
+    idp: IdentityProviderStub,
+    signed_in: iam.Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Whether the project has this destination's key is asked of the destination's deployment."""
+    monkeypatch.setenv(ops.TARGET_ENV_VAR, "stg")
+    project = _project(tmp_path / "web")
+    first = _json(runner, "explainability", "use", "acme/Frontend")
+    again = _json(runner, "explainability", "use", "acme/Frontend")
+    assert again["key"] == {"source": "project", "minted": False, "note": "the project's own key"}
+    assert len(idp.minted) == 1 and idp.revoked_keys == [], "a second key minted over the first"
+    assert first["target"]["name"] == again["target"]["name"] == "local"
+    assert again["routing"] and all(b["bound"] for b in again["routing"])
+    with store_session() as store:
+        row = store.project_destination(project.id)
+    assert row is not None and row.key_uid == "key-1"
+
+
+def test_a_mint_over_a_minted_key_revokes_the_one_it_replaces(
+    runner: CliRunner, idp: IdentityProviderStub, signed_in: iam.Session, tmp_path: Path
+) -> None:
+    """Its uid is overwritten, so unrevoked it would be a live key nothing remembers."""
+    project = _project(tmp_path / "web")
+    _json(runner, "explainability", "use", "acme/Frontend")
+    service.project_key_path(project.id).unlink()  # the minted key's file is gone
+    again = _json(runner, "explainability", "use", "acme/Frontend")
+    assert again["key"]["minted"] is True and len(idp.minted) == 2
+    assert idp.revoked_keys == ["key-1"]
+    with store_session() as store:
+        row = store.project_destination(project.id)
+    assert row is not None and row.key_uid == "key-2"
 
 
 # --- the store and the directory ----------------------------------------------------------------

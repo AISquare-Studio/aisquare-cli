@@ -20,9 +20,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (AISquare-Studio-BE#3493), so until then the line says so and `key set` is the
   way in — and binds this machine's agent identities to the chosen studio, which
   is what makes spans land there. `status` shows `destination:` (the UI's
-  Explainability view `lands in`); `whoami` gains a `traces:` line; `logout` forgets every key the
-  CLI minted and leaves hand-attached keys alone. The key never crosses a
-  deployment or a workspace: a target `use` creates names its own key variable,
+  Explainability view `lands in`) and takes `--project`: it is the check `use`
+  names once tracing is on, since `doctor` resolves only the machine's key;
+  `whoami` gains a `traces:` line; `logout` forgets every key the CLI minted and
+  leaves hand-attached keys alone. The key never crosses a deployment or a
+  workspace: a target `use` creates names its own key variable,
   a machine key never stands in for the mint, launches take the proxy from the
   same target as the key, `key set` binds to the destination's deployment, the
   CLI never mints over a hand key, and a minted key that is replaced, cleared or

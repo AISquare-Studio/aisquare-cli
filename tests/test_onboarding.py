@@ -573,13 +573,12 @@ class Live:
         return selfcli.run(args, cwd=cwd, env=self.env, timeout=120.0)
 
 
-def _hermetic_env(**overrides: str) -> dict[str, str]:
+def _hermetic_env(tmp_path: Path, **overrides: str) -> dict[str, str]:
     """This process's environment (the suite's isolated ``AISQUARE_HOME`` included).
 
     ``CLAUDE_CONFIG_DIR`` is always one of ``overrides``: the developer's real
-    one must not be read. The PATH is cut back to a bare default so a machine
-    with Node does not pack the directory with its repomix, and the answer is
-    the same on both platforms.
+    one must not be read. The PATH is cut so a machine with Node does not pack
+    the directory with its repomix, and the answer is the same on every machine.
 
     This is ``conftest.no_repomix`` carried across a process boundary. That
     autouse fixture says the policy in one line — "disable the repomix
@@ -599,13 +598,23 @@ def _hermetic_env(**overrides: str) -> dict[str, str]:
     the lane from 18/18 to 17/18. Stripping the PATH is what the docstring
     always said happened, so it now happens.
 
-    System32 stays on the Windows PATH: ``paths.restrict_to_owner`` resolves
-    ``icacls`` and ``whoami`` by name, and dropping those would trade a Node
-    problem for a silently unrestricted credentials file.
+    On POSIX the PATH is one EMPTY directory under ``tmp_path``, not the bare
+    default ``os.defpath``. ``/usr/bin`` is where Debian's ``npm`` and Fedora's
+    ``nodejs-npm`` put ``npx``, so the default hid Node only from machines that
+    installed it somewhere else, like the CI runner's ``/usr/local/bin`` (review
+    of #65, R1). The child needs nothing by name: ``selfcli`` runs it by the
+    interpreter's own path, and without ``git`` a directory that is not a
+    repository resolves by its markers, which is what these plain directories do
+    anyway.
+
+    System32 stays on the Windows PATH. It is the OS's own directory, and no
+    Node installer writes to it.
     """
     env = {**os.environ, **overrides, "NO_COLOR": "1"}
     if os.name == "posix":
-        env["PATH"] = os.defpath
+        empty = tmp_path / "hermetic-path"
+        empty.mkdir(exist_ok=True)
+        env["PATH"] = str(empty)
     else:
         env["PATH"] = str(Path(os.environ.get("SYSTEMROOT", r"C:\Windows")) / "System32")
     return env
@@ -625,14 +634,21 @@ def test_the_hermetic_env_hides_node_from_the_child_on_every_platform(
 
     Both names, because ``snapshot._repomix_base`` tries ``repomix`` first and
     falls back to ``npx --yes repomix``, and hiding only one leaves the other.
+
+    The fake is also in the platform's DEFAULT search path, as a distro's Node is
+    in ``/usr/bin``: a cut back to ``os.defpath`` hid only a Node installed
+    somewhere else.
     """
-    fakebin.executable_fake(tmp_path, tool, posix="echo packed", windows="echo packed")
-    fakebin.prepend_to_path(tmp_path, monkeypatch)
+    installed = tmp_path / "installed"
+    fakebin.executable_fake(installed, tool, posix="echo packed", windows="echo packed")
+    fakebin.prepend_to_path(installed, monkeypatch)
+    monkeypatch.setattr(os, "defpath", f"{installed}{os.pathsep}{os.defpath}")
 
     # The control: without the cut, this machine CAN see it.
     assert shutil.which(tool) is not None, "the fake is not on PATH; the assertion below is vacuous"
+    assert shutil.which(tool, path=os.defpath) is not None, "the fake is not on the default path"
 
-    assert shutil.which(tool, path=_hermetic_env()["PATH"]) is None
+    assert shutil.which(tool, path=_hermetic_env(tmp_path)["PATH"]) is None
 
 
 def test_onboard_runs_the_real_cli_in_a_throwaway_home(tmp_path: Path) -> None:
@@ -649,7 +665,7 @@ def test_onboard_runs_the_real_cli_in_a_throwaway_home(tmp_path: Path) -> None:
     (proj / "README.md").write_text("hello\n", encoding="utf-8")
     claude_dir = tmp_path / "claude"
     claude_dir.mkdir()
-    run = Live(_hermetic_env(CLAUDE_CONFIG_DIR=str(claude_dir)))
+    run = Live(_hermetic_env(tmp_path, CLAUDE_CONFIG_DIR=str(claude_dir)))
 
     outcome = onboard(proj, run=run)
 
@@ -693,7 +709,9 @@ def test_onboard_reports_the_real_cli_failing_in_its_own_words(tmp_path: Path) -
     not_a_dir = tmp_path / "not-a-dir"
     not_a_dir.write_text("", encoding="utf-8")
     run = Live(
-        _hermetic_env(**{HOME_ENV_VAR: str(not_a_dir), "CLAUDE_CONFIG_DIR": str(tmp_path / "c")})
+        _hermetic_env(
+            tmp_path, **{HOME_ENV_VAR: str(not_a_dir), "CLAUDE_CONFIG_DIR": str(tmp_path / "c")}
+        )
     )
 
     outcome = onboard(proj, run=run)

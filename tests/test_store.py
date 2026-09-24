@@ -1062,3 +1062,88 @@ def test_ui_state_is_a_key_value_memory(store: ContextStore) -> None:
     assert store.ui_state("fleet.selected") == "agent:prj_test/agt_1"
     store.set_ui_state("fleet.selected", None)
     assert store.ui_state("fleet.selected") is None
+
+
+# #201's v15, as its ladder writes it: the two persona columns and nothing else.
+PERSONA_V15_DDL = """
+ALTER TABLE team_session ADD COLUMN persona TEXT;
+ALTER TABLE fleet_agent ADD COLUMN persona TEXT;
+"""
+
+
+def test_the_if_absent_twin_of_v15_names_every_table_and_index_v15_creates() -> None:
+    """``_SCHEMA_V15_IF_ABSENT`` is derived from ``_SCHEMA_V15``; this pins that the
+    derivation covers all of it, so a table added to v15 later is converged too."""
+    import re
+
+    from aisquare.core.store import _SCHEMA_V15, _SCHEMA_V15_IF_ABSENT
+
+    creates = re.findall(r"CREATE (?:UNIQUE )?(?:TABLE|INDEX) (\w+)", _SCHEMA_V15)
+    guarded = re.findall(
+        r"CREATE (?:UNIQUE )?(?:TABLE|INDEX) IF NOT EXISTS (\w+)", _SCHEMA_V15_IF_ABSENT
+    )
+    assert creates and guarded == creates
+    # the one column goes through _add_column_if_absent, never a bare ALTER
+    assert "ALTER TABLE" not in _SCHEMA_V15_IF_ABSENT
+
+
+@pytest.mark.parametrize(
+    ("label", "cohort"),
+    [
+        ("main's v14, passing through this branch's v15", "V14"),
+        ("the hackathon branch's persona v15 (#201)", "PERSONA15"),
+        ("this branch's own v15, stamped before v16 existed", "ACCOUNTS15"),
+    ],
+)
+def test_every_shape_of_user_version_15_converges_on_one_schema(label: str, cohort: str) -> None:
+    """The v15 fork (#201 persona against #203 accounts): whichever route a store
+    took to 15, it reaches the current version with the account registry, the
+    account slot AND the persona columns present.
+
+    As with the v11 cohorts, the end state is asserted by WRITING to the halves a
+    cohort could silently lack: a persona-15 store opened by this ladder without
+    the converge step stamps 21 with no ``claude_account`` and no
+    ``fleet_agent.account_slot``, and nothing raises until the first fleet read.
+    """
+    from pathlib import Path
+
+    if cohort == "V14":
+        db = _at_version(14)
+    elif cohort == "PERSONA15":
+        db = _at_version(14, after=PERSONA_V15_DDL, stamp=15)
+    else:
+        db = _at_version(15)
+
+    store = open_store()  # migrates on open; a wedge raises out of here
+    try:
+        account = store.upsert_claude_account(1, Path("/tmp/claude-accounts/1"))
+        assert account.slot == 1, label
+    finally:
+        store.close()
+
+    raw = sqlite3.connect(str(db))
+    try:
+        assert raw.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION, label
+        tables = {r[0] for r in raw.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+        assert {"claude_account", "project_setting", "claude_usage"} <= tables, label
+        fleet = {r[1] for r in raw.execute("PRAGMA table_info(fleet_agent)")}
+        session = {r[1] for r in raw.execute("PRAGMA table_info(team_session)")}
+        assert {"account_slot", "launch_spec", "persona"} <= fleet, label
+        assert {"limit_resets_at", "persona"} <= session, label
+        # and both halves take a row, whichever way in
+        raw.execute(
+            "INSERT INTO project (id, name, root, linked_repos, created_at, codename) "
+            "VALUES ('prj_f', 'f', '/tmp/f', '[]', '2026-01-01T00:00:00+00:00', 'kestrel')"
+        )
+        raw.execute(
+            "INSERT INTO fleet_agent (id, project_id, label, role, pane_id, cwd, created_at, "
+            "account_slot, persona) VALUES ('agt_1', 'prj_f', 'a', 'dev', '%1', '/tmp/f', "
+            "'2026-01-01T00:00:00+00:00', 1, 'skeptic')"
+        )
+        raw.commit()
+        (slot, persona) = raw.execute(
+            "SELECT account_slot, persona FROM fleet_agent WHERE id = 'agt_1'"
+        ).fetchone()
+        assert (slot, persona) == (1, "skeptic"), label
+    finally:
+        raw.close()

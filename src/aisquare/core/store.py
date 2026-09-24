@@ -474,12 +474,47 @@ def _converge_v11_fork(connection: sqlite3.Connection) -> None:
     )
 
 
+def _converge_v15_fork(connection: sqlite3.Connection) -> None:
+    """Before v16's statements: bring every ``user_version 15`` to ONE shape.
+
+    Two branches each claimed v15 while the other was open, the third fork of
+    this ladder after v11 and v13/v14. This branch's v15 is the account registry
+    (``claude_account``, ``project_setting``, ``fleet_agent.account_slot``); the
+    hackathon branch's v15 (#201) is ``team_session.persona`` and
+    ``fleet_agent.persona``. A store that took the persona v15 is stamped 15 with
+    no account table, and a renumber can never reach it: v15 is already stamped,
+    so this ladder would run v16 onward over it and stamp 21 with
+    ``claude_account`` missing and ``fleet_agent.account_slot`` missing, every
+    fleet read raising ``no such column`` while ``doctor`` still reads ok
+    (measured on a copy of a hackathon-build store, 2026-09-24). Numbering the
+    persona step above 21 instead fails the other way: ``duplicate column name``
+    on the stores that already carry it.
+
+    So both v15s are made idempotent and applied here, whichever route a store
+    took to 15: the account DDL as ``IF NOT EXISTS``, the three columns through
+    :func:`_add_column_if_absent`. Every statement is a no-op on a database that
+    already has it, and every cohort, this branch's v15, the persona v15 and a
+    fresh store passing through, lands in the same shape before v16 runs. The
+    persona columns therefore come from HERE, and the persona branch drops its
+    own v15 script when it lands rather than renumbering it.
+
+    Statements run one at a time on the migration's own connection, never through
+    ``executescript``, for the reason :func:`_migrate` gives.
+    """
+    for statement in _statements(_SCHEMA_V15_IF_ABSENT):
+        connection.execute(statement)
+    _add_column_if_absent(connection, "fleet_agent", "account_slot", "INTEGER")
+    _add_column_if_absent(connection, "team_session", "persona", "TEXT")
+    _add_column_if_absent(connection, "fleet_agent", "persona", "TEXT")
+
+
 # Python that must run before a migration's statements, inside its transaction,
 # keyed by the version being upgraded FROM. Kept apart from _MIGRATIONS so the
 # scripts stay plain SQL that executescript and _statements build identically.
 _PREPARE: dict[int, Callable[[sqlite3.Connection], None]] = {
     11: _retire_v1_metric_table,
     12: _converge_v11_fork,
+    15: _converge_v15_fork,
 }
 
 
@@ -599,6 +634,16 @@ CREATE TABLE project_setting (
 );
 ALTER TABLE fleet_agent ADD COLUMN account_slot INTEGER;
 """
+
+# The same DDL as ``IF NOT EXISTS``, for :func:`_converge_v15_fork`: derived rather
+# than copied so a table added to v15 is converged too, and pinned by a test. The
+# one ALTER is left out because SQLite has no conditional form of it; the column
+# goes through :func:`_add_column_if_absent` instead.
+_SCHEMA_V15_IF_ABSENT = (
+    _SCHEMA_V15.replace("CREATE TABLE ", "CREATE TABLE IF NOT EXISTS ")
+    .replace("CREATE UNIQUE INDEX ", "CREATE UNIQUE INDEX IF NOT EXISTS ")
+    .replace("ALTER TABLE fleet_agent ADD COLUMN account_slot INTEGER;\n", "")
+)
 
 # v16: usage-aware accounts (#146).
 #

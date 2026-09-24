@@ -44,6 +44,16 @@ account is a second directory and a launch that points the variable at it.
   variable is set, so a "default" launched that way re-onboards into an empty
   config (verified on this machine: `~/.claude.json` exists, `~/.claude/
   .claude.json` does not; every `~/.claude-c<n>/.claude.json` does).
+- **Under a managed slot, slot 1 is still the launching shell's.** An agent on
+  slot 2 runs with both variables naming slot 2, and so do its hooks, the
+  hand-over worker it detaches and any `fleet spawn` it runs. Read as they
+  stand, slot 1 would be slot 2: a hand-over read slot 2's usage as slot 1's
+  and relaunched the limited agent on slot 2 as `--account 1`. So a launch
+  onto a managed slot keeps the shell's own two variables beside the slot's
+  (`AISQUARE_PLAIN_CLAUDE_CONFIG_DIR`, `AISQUARE_PLAIN_CLAUDE_CODE_TMPDIR`),
+  and wherever `CLAUDE_CONFIG_DIR` names one of our slots, slot 1 is read
+  from those copies, or is `~/.claude` when the shell had none
+  (`core.plain_environment`).
 - **Both variables, always.** `CLAUDE_CODE_TMPDIR` goes with the config dir or
   two parallel sessions share one scratch directory (README, "Several
   accounts, one team").

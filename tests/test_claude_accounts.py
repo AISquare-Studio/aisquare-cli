@@ -215,6 +215,64 @@ def test_apply_launch_env_sets_a_managed_slot_and_restores_the_shell_for_the_def
     assert core.TMPDIR_VAR not in own  # blank in the shell counts as unset, as the README warns
 
 
+def test_under_a_managed_slot_slot_1_is_the_plain_claude_not_the_slot(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #205, sixth round. A process under one of our slots (an agent's hooks,
+    the hand-over worker it detaches, a manager's ``fleet spawn``) has both variables
+    naming the slot. Read as they stood, slot 1 WAS the slot: its login and usage came
+    from the slot's files, and ``launch --account 1`` there kept the slot's variables."""
+    second = core.create_account()
+    under = core.apply_launch_env({"PATH": "/bin"}, second, shell={"PATH": "/bin"})
+    assert not set(core.PLAIN_VARS.values()) & set(under)  # the shell had none to keep
+    for var in core.LAUNCH_VARS:
+        monkeypatch.setenv(var, under[var])
+
+    assert core.plain_environment() == {}
+    plain = core.default_account()
+    assert plain.config_dir == fake_home / ".claude"
+    assert core.claude_json_path(plain) == fake_home / ".claude.json"
+    back = core.apply_launch_env(dict(under), plain)
+    assert core.CONFIG_DIR_VAR not in back and core.TMPDIR_VAR not in back
+    command, carried = service.carry_environment(["x"])
+    assert core.CONFIG_DIR_VAR not in carried and core.TMPDIR_VAR not in carried
+    assert command[1:5] == ["-u", core.CONFIG_DIR_VAR, "-u", core.TMPDIR_VAR]
+
+
+def test_under_a_managed_slot_slot_1_is_the_launching_shells_own_claude(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same, from a shell that points the plain claude at a directory of its own. The
+    launch onto the slot keeps the shell's two variables beside the slot's, and everything
+    started under the slot finds them, a launch onto another slot included (review of
+    #205, sixth round). Without the copies, slot 1 there could only be ``~/.claude``."""
+    second = core.create_account()
+    third = core.create_account()
+    mine = fake_home / ".claude-c1"
+    shell = {core.CONFIG_DIR_VAR: str(mine), core.TMPDIR_VAR: str(fake_home / "c1-tmp")}
+    under = core.apply_launch_env(dict(shell), second, shell=shell)
+    assert under[core.CONFIG_DIR_VAR] == str(second.config_dir)
+    assert {var: under[kept] for var, kept in core.PLAIN_VARS.items()} == shell
+    for var, value in under.items():
+        monkeypatch.setenv(var, value)
+
+    assert core.plain_environment() == shell
+    plain = core.default_account()
+    assert plain.config_dir == mine
+    assert core.claude_json_path(plain) == mine / ".claude.json"
+    assert service.slot_of(mine) == 1 and service.slot_of(fake_home / ".claude") is None
+    onward = core.apply_launch_env(dict(under), third)  # handed on, never the slot left
+    assert {var: onward[kept] for var, kept in core.PLAIN_VARS.items()} == shell
+    back = core.apply_launch_env(dict(under), plain)
+    assert {var: back[var] for var in core.LAUNCH_VARS} == shell
+    assert not set(core.PLAIN_VARS.values()) & set(back)  # restored in place: no stale copy
+    _, carried = service.carry_environment(["x"])
+    assert {var: carried[var] for var in core.LAUNCH_VARS} == shell
+    # The control: the copies count only where the variable names one of our slots.
+    monkeypatch.setenv(core.CONFIG_DIR_VAR, str(fake_home / ".claude-c3"))
+    assert core.default_account().config_dir == fake_home / ".claude-c3"
+
+
 def test_remove_renames_the_directory_beside_itself_and_frees_the_number(
     fake_home: Path,
 ) -> None:

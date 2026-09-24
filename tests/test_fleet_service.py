@@ -6165,6 +6165,63 @@ def test_a_switch_that_finds_nothing_says_the_default_was_the_account_being_left
     assert agent.pane_id not in tmux.killed  # refused before anything was stopped
 
 
+@pytest.mark.parametrize("left_at", [95, 10], ids=["five-hour-window-full", "weekly-limit"])
+def test_an_automatic_hand_over_from_a_managed_slot_reads_and_launches_the_plain_claude(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    left_at: float,
+) -> None:
+    """Review of #205, sixth round. The automatic hand-over runs in the worker the limited
+    agent's hook detached, so it runs under the agent's own slot, with ``CLAUDE_CONFIG_DIR``
+    naming it, and slot 1 read from that variable WAS the slot. With the slot's five-hour
+    window full, slot 1 read the slot's 95 % and nothing was under the line. With that
+    window nearly empty (a weekly limit), slot 1 was picked, and the window got
+    ``--account 1`` with the slot's variables still set: the limited agent relaunched on
+    its limited account. Either way the slot's reading was recorded as slot 1's."""
+    from aisquare.core import claude_accounts as accounts_core
+    from aisquare.services import claude_accounts as accounts_service
+    from tests.test_claude_accounts import _sign_in
+    from tests.test_usage_aware_accounts import _payload, _slot, _Usage
+
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    monkeypatch.setattr(accounts_core, "_home", lambda: home)
+    monkeypatch.setattr(accounts_core, "keychain_platform", lambda: False)
+    plain = accounts_core.default_account()
+    _sign_in(plain, "plain@example.com", expires_in=timedelta(days=3650))
+    credentials = accounts_core.credentials_path(plain)
+    signed_in = json.loads(credentials.read_text())
+    signed_in["claudeAiOauth"]["accessToken"] = "tok-plain"
+    credentials.write_text(json.dumps(signed_in))
+    work = _slot("work@example.com", "tok-work", expires_in=timedelta(days=3650))
+    fetch = _Usage({"tok-plain": _payload(5), "tok-work": _payload(left_at)})
+    monkeypatch.setattr(accounts_service, "_http_get", fetch)
+    agent = fleet_service.spawn(project, "coder", worktree=False, account="2").agent
+    _with_transcript(agent, None)
+    # The worker's environment: what `launch --account 2` gave the agent, from a shell
+    # that set neither variable.
+    for var, value in accounts_core.apply_launch_env({}, work, shell={}).items():
+        monkeypatch.setenv(var, value)
+
+    receipt = fleet_service.switch(project, agent.label, automatic=True, reason="session limit")
+
+    assert (receipt.from_slot, receipt.to_slot) == (2, 1)
+    assert "tok-plain" in fetch.calls  # slot 1 read with its own credentials
+    command, env = _command(tmux), tmux.spawned[-1]["env"]
+    assert isinstance(env, dict)
+    assert _flag(command, "--account") == "1"
+    # The window starts the plain claude: the slot's two variables unset, not carried.
+    assert accounts_core.CONFIG_DIR_VAR not in env and accounts_core.TMPDIR_VAR not in env
+    unset = {command[at + 1] for at, part in enumerate(command) if part == "-u"}
+    assert {accounts_core.CONFIG_DIR_VAR, accounts_core.TMPDIR_VAR} <= unset
+    with store_session() as store:
+        [sample] = store.usage_samples(1, since=datetime.now(tz=UTC) - timedelta(hours=1))
+    assert sample.session_percent == 5  # the plain claude's reading, not the slot's
+
+
 @pytest.mark.parametrize("fresh", [False, True], ids=["resume", "fresh"])
 def test_a_hand_over_that_does_not_complete_leaves_nothing_parked(
     tmux: FakeTmux,
@@ -6458,6 +6515,41 @@ def test_a_fresh_switch_whose_claims_cannot_be_moved_leaves_them_with_the_row(
     _become(receipt.started, tmux, monkeypatch, pid=PANE_PID, role="coder")
     board = team_service.hook_session_start(new, project.root, "startup")
     assert "You are the one working it" in _assignment_block(board)
+    assert _task_now(task.id).claimed_by == new and _row(receipt.started.id).session_id == new
+
+
+def test_a_fresh_switch_whose_old_presence_cannot_be_retired_still_moves_the_claims(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #205, sixth round. Since the fifth, ``_take_over`` retires the old presence
+    BEFORE the move, each in a commit of its own, inside one ``try``: a store that refused
+    the retirement skipped the move too, and the claims waited on the old id for the start
+    hook. Before, only the retirement was lost; now it is again."""
+    _two_slots_with_usage(monkeypatch, work=95, personal=10)
+    task = _task(project, "moved though the presence stayed")
+    agent = fleet_service.spawn(
+        project, "coder", worktree=False, account="2", task_id=task.id
+    ).agent
+    old = agent.session_id or ""
+    _with_transcript(agent, None)
+    team_service.claim_task(task.id, session_ref=old)
+    original = SqliteStore.end_session
+
+    def locked(self: SqliteStore, session_id: str, **kwargs: Any) -> list[TeamTask]:
+        if session_id == old:
+            raise sqlite3.OperationalError("database is locked (fake)")
+        return original(self, session_id, **kwargs)
+
+    monkeypatch.setattr(SqliteStore, "end_session", locked)
+
+    receipt = fleet_service.switch(project, agent.label, reason="session limit")
+
+    new = receipt.started.session_id
+    assert new is not None and new != old
+    assert not any("claims were not moved" in note for note in receipt.notes)
     assert _task_now(task.id).claimed_by == new and _row(receipt.started.id).session_id == new
 
 

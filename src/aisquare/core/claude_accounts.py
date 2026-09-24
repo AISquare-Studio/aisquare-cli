@@ -24,6 +24,13 @@ no-op: Claude Code keeps the default install's ``.claude.json`` at
 variable is set — so a "default" launched that way re-onboards into an empty
 config and diverges from the one the user has.
 
+**Under one of our slots, slot 1 is still the launching shell's.** An agent
+launched on slot 2 runs with both variables naming slot 2, and so does every
+hook it fires, the hand-over worker it detaches and any ``fleet spawn`` it
+runs. There the variables are the slot's, not the plain claude's: a launch
+onto a managed slot keeps the launching shell's own two beside them
+(:data:`PLAIN_VARS`), and :func:`plain_environment` reads slot 1 from those.
+
 **Both variables, always.** ``CLAUDE_CODE_TMPDIR`` goes with ``CLAUDE_CONFIG_DIR``
 because the config dir alone leaves the account on the shared scratch
 directory, where two parallel sessions collide (README, "Several accounts, one
@@ -106,8 +113,12 @@ def tmp_root() -> Path:
 
 
 def default_config_dir() -> Path:
-    """What a plain ``claude`` from this environment uses: the variable, else ``~/.claude``."""
-    env = os.environ.get(CONFIG_DIR_VAR, "").strip()
+    """What a plain ``claude`` from this environment uses: the variable, else ``~/.claude``.
+
+    The variable as :func:`plain_environment` reads it, so a process running
+    under one of our slots answers the launching shell's directory, not the slot's.
+    """
+    env = plain_environment().get(CONFIG_DIR_VAR, "").strip()
     if env:
         return Path(env).expanduser()
     return home_config_dir()
@@ -285,7 +296,7 @@ def claude_json_path(account: ClaudeAccount) -> Path:
     slot, and a default that the environment redirects — and at ``~/.claude.json``
     for the plain default, which is where Claude Code keeps it.
     """
-    if account.managed or os.environ.get(CONFIG_DIR_VAR, "").strip():
+    if account.managed or CONFIG_DIR_VAR in plain_environment():
         return account.config_dir / ".claude.json"
     return _home() / ".claude.json"
 
@@ -610,6 +621,38 @@ def format_reset(when: datetime | None, *, now: datetime | None = None) -> str:
 LAUNCH_VARS = (CONFIG_DIR_VAR, TMPDIR_VAR)
 """The two variables an account IS, for a launch."""
 
+PLAIN_VARS = {
+    CONFIG_DIR_VAR: "AISQUARE_PLAIN_CLAUDE_CONFIG_DIR",
+    TMPDIR_VAR: "AISQUARE_PLAIN_CLAUDE_CODE_TMPDIR",
+}
+"""Where a launch onto a managed slot keeps the launching shell's own two variables.
+
+The launch overwrites both with the slot's, and nothing started under the slot
+could otherwise tell which directory the plain claude is. A variable the shell
+did not have gets no copy.
+"""
+
+
+def plain_environment(environ: Mapping[str, str] | None = None) -> dict[str, str]:
+    """The plain claude's two variables as ``environ`` (default: this process's) has them.
+
+    Each one ``environ`` sets to a non-blank value, as a plain ``claude`` started
+    from it would read them, except in an environment that runs under one of
+    OUR slots: ``CLAUDE_CONFIG_DIR`` names the slot there, and both variables
+    are the slot's. The plain claude's are then the :data:`PLAIN_VARS` copies
+    the launch kept, or none when the launching shell had none (``~/.claude``).
+    Read as they stood, every hook of an agent on slot 2 took slot 2 for slot 1.
+    The automatic hand-over then read slot 2's usage under slot 1's name and
+    relaunched the limited agent on slot 2 as ``--account 1`` (review of #205,
+    sixth round).
+    """
+    source = os.environ if environ is None else environ
+    own = {var: source[var] for var in LAUNCH_VARS if source.get(var, "").strip()}
+    config_dir = own.get(CONFIG_DIR_VAR)
+    if config_dir is None or managed_slot(Path(config_dir.strip()).expanduser()) is None:
+        return own
+    return {var: source[kept] for var, kept in PLAIN_VARS.items() if source.get(kept, "").strip()}
+
 
 def launch_env(account: ClaudeAccount) -> dict[str, str]:
     """The two variables that make a launch run under ``account`` — none for the default.
@@ -632,22 +675,28 @@ def apply_launch_env(
 ) -> dict[str, str]:
     """Make ``env`` launch under ``account``, in place, and return it.
 
-    A managed slot sets both variables. The default slot RESTORES the shell's
-    own: each variable becomes what the launching shell had, and one the shell
-    did not have is removed — so ``--account 1`` means "the plain claude of
-    this shell" even when the role's binding had pointed the launch at another
-    directory. Without the restore a launch announced as the default ran on
-    whatever the binding said, which is the one thing the flag exists to
-    override. ``shell`` defaults to this process's environment.
+    A managed slot sets both variables, and keeps the shell's own beside them
+    under :data:`PLAIN_VARS`. The default slot RESTORES the shell's own: each
+    variable becomes what the launching shell had, and one the shell did not
+    have is removed — so ``--account 1`` means "the plain claude of this shell"
+    even when the role's binding had pointed the launch at another directory.
+    Without the restore a launch announced as the default ran on whatever the
+    binding said, which is the one thing the flag exists to override. "The
+    shell's own" is :func:`plain_environment`'s reading, so a shell that itself
+    runs under one of our slots restores the plain claude, never that slot.
+    ``shell`` defaults to this process's environment.
     """
+    plain = plain_environment(shell)
+    wanted: dict[str, str | None]
     if account.managed:
         env.update(launch_env(account))
-        return env
-    source = os.environ if shell is None else shell
-    for var in LAUNCH_VARS:
-        value = source.get(var, "")
-        if value.strip():
-            env[var] = value
-        else:
+        wanted = {kept: plain.get(var) for var, kept in PLAIN_VARS.items()}
+    else:
+        wanted = {var: plain.get(var) for var in LAUNCH_VARS}
+        wanted.update(dict.fromkeys(PLAIN_VARS.values()))  # restored in place: no copy to go stale
+    for var, value in wanted.items():
+        if value is None:
             env.pop(var, None)
+        else:
+            env[var] = value
     return env

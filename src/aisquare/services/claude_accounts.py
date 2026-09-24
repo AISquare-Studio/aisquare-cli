@@ -349,22 +349,17 @@ def slot_of(config_dir: str | Path) -> int | None:
     directory a session runs under from its transcript path, and this turns it
     back into the slot a hand-over (#146) is leaving.
 
-    The plain claude's directory is read off this process's environment, except
-    in a process that runs under one of OUR slots. Every hook of an agent on a
-    managed slot does (``launch_env`` set ``CLAUDE_CONFIG_DIR`` to the slot's
-    directory), and there the variable names that slot, never the plain claude:
-    an aliased slot 1 was ``.claude`` on the board those hooks render (review of
-    #205, fifth round). The plain claude is then ``~/.claude``, the directory it
-    uses with the variable unset.
+    The plain claude's directory is ``core.default_config_dir``, which knows a
+    process that runs under one of OUR slots. Every hook of an agent on a
+    managed slot does, with ``CLAUDE_CONFIG_DIR`` naming that slot, and read
+    straight the variable made an aliased slot 1 ``.claude`` on the board
+    those hooks render (review of #205, fifth round).
     """
     managed = core.managed_slot(config_dir)
     if managed is not None:
         return managed
-    plain = core.default_config_dir()
-    if core.managed_slot(plain) is not None:
-        plain = core.home_config_dir()
     try:
-        if Path(config_dir).resolve() == plain.resolve():
+        if Path(config_dir).resolve() == core.default_config_dir().resolve():
             return core.DEFAULT_SLOT
     except OSError:
         return None
@@ -1153,13 +1148,22 @@ def carry_environment(
     - a variable this process does NOT have is unset for the child through
       ``env -u``, because ``-e`` can only set and the server's retained value
       must not leak in as ours. A blank value counts as unset, as it does for
-      ``core.claude_accounts.default_config_dir``.
+      ``core.claude_accounts.default_config_dir``;
+    - the two account variables are the plain claude's as this process knows
+      them (``core.plain_environment``). A process under one of our slots (a
+      hand-over worker, a manager on slot 2 spawning) has them naming that
+      slot, and carried as they stood, ``launch --account 1`` in the window
+      kept them and ran on the slot (review of #205, sixth round).
     """
     source = os.environ if environ is None else environ
+    view = {
+        paths.HOME_ENV_VAR: source.get(paths.HOME_ENV_VAR, ""),
+        **core.plain_environment(source),
+    }
     base = Path.cwd() if cwd is None else cwd
     to_set: dict[str, str] = {}
     for var in CARRIED_VARS:
-        value = source.get(var, "").strip()
+        value = view.get(var, "").strip()
         if value:
             to_set[var] = str((base / Path(value).expanduser()).absolute())
     to_unset = [var for var in CARRIED_VARS if var not in to_set]

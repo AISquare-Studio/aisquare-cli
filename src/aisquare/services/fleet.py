@@ -1349,7 +1349,11 @@ def _take_over(agent: FleetAgent, previous: str, session_id: str, notes: list[st
         with store_session() as store:
             parked = store.get_session(previous)
             if parked is not None and parked.ended_at is None:
-                store.end_session(previous, release_claims=False)
+                # The retirement is the board's courtesy and the move is the record.
+                # Each commits on its own, and a store that refuses the first must
+                # not cost the second (review of #205, sixth round).
+                with contextlib.suppress(sqlite3.Error):
+                    store.end_session(previous, release_claims=False)
             store.adopt_fleet_agent_session(agent.id, previous, session_id, lease)
             current = store.get_fleet_agent(agent.id)
     except Exception as exc:  # the row and the window stand; the start hook is the second door

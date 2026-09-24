@@ -146,6 +146,18 @@ jobs:
             # file branch is what needs a populated home to be real.
             # Set for anyone running the suite from inside a Claude session.
             echo "CLAUDE_CONFIG_DIR=$RUNNER_TEMP/claude-config"
+            # The rest of what a launch onto a Claude account exports: the
+            # scratch directory that goes with the config dir
+            # (core.claude_accounts.LAUNCH_VARS), and the copies of the shell's
+            # own two a launch onto a managed slot keeps (PLAIN_VARS) — what a
+            # developer running the suite from a fleet pane on one of their
+            # slots has. The account tests point CLAUDE_CONFIG_DIR at a managed
+            # slot themselves, and with the copies left set they resolved slot 1
+            # to the developer's directory (review of #205, seventh round).
+            # Consistent with the line above: the shell's own are those.
+            echo "CLAUDE_CODE_TMPDIR=$RUNNER_TEMP/claude-tmp"
+            echo "AISQUARE_PLAIN_CLAUDE_CONFIG_DIR=$RUNNER_TEMP/claude-config"
+            echo "AISQUARE_PLAIN_CLAUDE_CODE_TMPDIR=$RUNNER_TEMP/claude-tmp"
           } >> "$GITHUB_ENV"
 
       - name: Configure an aisquare home, the way a developer's machine is
@@ -153,7 +165,7 @@ jobs:
           # Deliberately NOT the default location: the point is a POPULATED home
           # that the suite must ignore, and a runner's real ~ stays empty so a
           # leak is unambiguous rather than accidental.
-          mkdir -p "$AISQUARE_HOME" "$CLAUDE_CONFIG_DIR"
+          mkdir -p "$AISQUARE_HOME" "$CLAUDE_CONFIG_DIR" "$CLAUDE_CODE_TMPDIR"
           cd "$(mktemp -d)"        # so `init` does not pack the checkout
           aisquare init --yes
           # No --proxy-url: the DEFAULT is 9090, and the default is what the

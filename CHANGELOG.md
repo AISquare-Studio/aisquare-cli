@@ -540,15 +540,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   agent again under its own label with the same role, task, worktree and
   account, **resuming its session** from its transcript when that is on disk
   (`claude --resume <transcript>`), else fresh with a hand-off prompt from the
-  board; a running agent is stopped first (one whose task is done is refused
-  before that), and a refused restart leaves the 💤 row and its last screen as
-  they were. **Stop** on an exited row removes the dead window, and so does
-  spawning the same label again once the replacement is up (it supersedes the
-  old window — no two rows called manager); the view's buttons act on the row
-  it shows, never on a replacement that took its label since. The Manager tab
-  says *manager exited (130)* over its Start button instead of "no manager
-  yet". `doctor` warns when a project's manager exited while its agents still
-  run (`fleet-manager`).
+  board; a running agent is stopped first (one whose task, account or binary
+  would refuse the restart is refused before that), and a refused restart
+  leaves the 💤 row and its last screen as they were. **Stop** on an exited row
+  removes the dead window, and so does spawning the same label again once the
+  replacement is up (it supersedes the old window — no two rows called
+  manager); the view's buttons act on the row it shows, never on a replacement
+  that took its label since. The Manager tab says *manager exited (130)* over
+  its Start button instead of "no manager yet". `doctor` warns when a
+  project's manager exited while its agents still run (`fleet-manager`).
 - **Fleet windows are born the width they will be shown, and never wide
   enough to grow Claude Code's diff panel on their own** (#149). Every window
   started at 200x50 and only shrank to its pane when the UI attached it; past

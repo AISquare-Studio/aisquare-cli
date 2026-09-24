@@ -3793,6 +3793,87 @@ def test_a_pinned_row_is_never_mistaken_for_the_agent_that_took_its_label(
     assert (new.pane_id, "literal", "/exit") in tmux.typed
 
 
+def test_a_refused_restart_of_a_death_no_listing_has_recorded_keeps_the_window(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A row still live whose pane had died — ``fleet restart`` run right after the death,
+    with no listing between — went through ``stop``, which killed the dead window before
+    ``spawn`` ran its refusals: a refused restart left neither the 💤 row nor its last
+    screen. The death is recorded as a listing records it (announced once) and the
+    window is left for ``_supersede``, once the replacement is up."""
+    plain = _coder(project, label="coder-plain")
+    tmux.die(plain.pane_id, 1)
+
+    def no_window(*args: Any, **kwargs: Any) -> WindowInfo:
+        raise TmuxError("server exited unexpectedly")
+
+    with monkeypatch.context() as patched:
+        patched.setattr(tmux, "spawn_window", no_window)
+        with pytest.raises(FleetError, match="tmux could not start the window"):
+            fleet_service.restart(project, "coder-plain")
+    assert tmux.killed == [] and plain.pane_id in tmux.facts
+    [status] = fleet_service.list_agents(project)
+    assert (status.agent.id, status.state, status.agent.exit_status) == (plain.id, "exited", 1)
+    assert _events(project, "agent_exited") == ["coder-plain exited (1)"]
+
+    receipt = fleet_service.restart(project, "coder-plain")
+    assert receipt.replaced.id == plain.id and receipt.was_running is False
+    assert tmux.killed == [plain.pane_id]  # once the replacement was up
+    assert [s.agent.id for s in fleet_service.list_agents(project)] == [receipt.started.id]
+
+
+def test_a_running_agent_is_not_stopped_for_a_restart_its_account_or_binary_would_refuse(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """``restart`` checked the task before stopping a running agent, and nothing else:
+    an account no longer on this machine — reachable for a slotless row through its
+    session's config dir, whose slot number outlives the slot — or a binary gone from
+    PATH were refused inside ``spawn``, AFTER the stop, leaving no agent at all. Both
+    are asked first now, as ``switch`` resolves its account before its stop."""
+    from aisquare.core import claude_accounts as accounts_core
+
+    agent = _coder(project)
+    now = datetime.now(tz=UTC)
+    with store_session() as store:
+        store.upsert_fleet_agent(agent.model_copy(update={"account_slot": None}))
+        store.upsert_session(
+            TeamSession(
+                id=agent.session_id or "",
+                project_id=project.id,
+                role="coder",
+                started_at=now,
+                last_seen_at=now,
+                account=str(accounts_core.accounts_root() / "4"),  # a slot since removed
+            )
+        )
+
+    with pytest.raises(FleetError, match="cannot restart 'coder-1': no Claude account in slot 4"):
+        fleet_service.restart(project, agent.label)
+    assert tmux.typed == [] and tmux.killed == []
+    with store_session() as store:
+        store.upsert_session(
+            TeamSession(
+                id=agent.session_id or "",
+                project_id=project.id,
+                role="coder",
+                started_at=now,
+                last_seen_at=now,
+            )
+        )
+    monkeypatch.setenv("PATH", str(tmp_path / "nowhere"))
+    with pytest.raises(FleetError, match="cannot restart 'coder-1': 'claude' is not on your PATH"):
+        fleet_service.restart(project, agent.label)
+    assert tmux.typed == [] and tmux.killed == []
+    with store_session() as store:
+        row = store.fleet_agent_by_label(project.id, agent.label)
+    assert row is not None and row.id == agent.id  # still live, still running
+    assert not tmux.facts[agent.pane_id].dead
+
+
 def test_one_death_two_writers_record_at_once_is_announced_once(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:

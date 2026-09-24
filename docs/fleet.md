@@ -798,10 +798,11 @@ it is up, so the sidebar never shows two rows called manager); `doctor` names
 a project whose manager exited while agents are still running
 (`fleet-manager`). A restart that is refused — a coder whose task is done, an
 account no longer on this machine — leaves the 💤 row and its last screen as
-they were (**Stop** clears them), and a running agent whose task is done is
-refused before it is stopped. The agent view's **Stop** and **Restart** act on
-the row it shows: once its label has passed to a replacement (the manager
-restarted that coder), they say so and leave the replacement alone.
+they were (**Stop** clears them), and a running agent whose task, account or
+binary would refuse the restart is refused before it is stopped. The agent
+view's **Stop** and **Restart** act on the row it shows: once its label has
+passed to a replacement (the manager restarted that coder), they say so and
+leave the replacement alone.
 
 **A panel reading "No changes this session" sits beside an agent's conversation
 and will not go away.** That is Claude Code's own diff panel (fullscreen

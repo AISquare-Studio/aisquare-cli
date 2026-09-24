@@ -1011,12 +1011,7 @@ def spawn(
         )
     srv = server(config)
     _require_tmux(srv)
-    resolution = harness.resolve_binary(role, override=binary)
-    if shutil.which(resolution.binary) is None:
-        raise FleetError(
-            f"{resolution.binary!r} is not on your PATH (chosen by: {resolution.source}) — "
-            "install it, pass --bin, or change the role's binding"
-        )
+    resolution = _binary_for(role, override=binary)
     role_config = role_settings(role, config)
     notes: list[str] = []
     with store_session() as store:
@@ -1184,6 +1179,17 @@ def spawn(
     if prompt:
         _type_prompt(srv, stored.pane_id, prompt, notes)
     return SpawnReceipt(agent=stored, asked_label=label, tmux_session=tmux_session, notes=notes)
+
+
+def _binary_for(role: str, *, override: str | None = None) -> harness.BinaryResolution:
+    """The executable ``role`` launches with — refused when it is not on ``PATH``."""
+    resolution = harness.resolve_binary(role, override=override)
+    if shutil.which(resolution.binary) is None:
+        raise FleetError(
+            f"{resolution.binary!r} is not on your PATH (chosen by: {resolution.source}) — "
+            "install it, pass --bin, or change the role's binding"
+        )
+    return resolution
 
 
 def _supersede(
@@ -2015,10 +2021,15 @@ def restart(
     For the manager that is "end the dead row, then spawn manager again" — the
     fix the issue asks for — with the session carried over when it can be.
 
+    Every refusal that does not depend on the stop — the task, the binary, the
+    account — is given BEFORE anything is stopped or recorded: a running agent
+    stopped for a restart that is then refused is an agent lost for nothing, and
+    a refused restart leaves the 💤 row and its last screen as they were.
     ``agent_id`` pins the row, as for :func:`stop`: the agent view's Restart
     means the row it shows, never a replacement that took the label since.
     """
     with store_session() as store:
+        current = store.get_project(project.id) or project
         agent = store.fleet_agent_by_label(project.id, label, live_only=False)
         if agent is None:
             raise NoSuchAgent(
@@ -2029,9 +2040,7 @@ def restart(
             raise _replaced(label, agent, agent_id)
         session = store.get_session(agent.session_id) if agent.session_id else None
         try:
-            # `spawn`'s refusal for the task (done, dropped, gone from the board),
-            # given BEFORE anything is stopped: a running agent stopped for a
-            # restart that is then refused is an agent lost for nothing.
+            # `spawn`'s refusal for the task (done, dropped, gone from the board).
             task = _task_for(store, project, agent.task_id)
         except FleetError as exc:
             raise FleetError(f"cannot restart {label!r}: {exc}") from exc
@@ -2040,21 +2049,42 @@ def restart(
             for event in store.recent_events(project.id, limit=60)
             if agent.session_id is not None and event.session_id == agent.session_id
         ]
+    # `spawn`'s refusals for the binary and the account, asked here for the same
+    # reason. The account is resolved as `switch` resolves its target — the row's
+    # slot, else the one its session ran under, whose number outlives a removed
+    # slot — and the replacement is started on what was resolved here.
+    slot = _account_slot_of(agent, session)
+    try:
+        _binary_for(agent.role)
+        choice = claude_accounts_service.choose(
+            str(slot) if slot is not None else None, role=agent.role, project=project
+        )
+    except (FleetError, claude_accounts_service.NoSuchAccount) as exc:
+        raise FleetError(f"cannot restart {label!r}: {exc}") from exc
+    account = str(choice.account.slot) if choice.account is not None else None
+    # The ladder's notes travel with the slot it chose; with none chosen, `spawn`
+    # asks the same ladder and gives them itself.
+    notes = [f"accounts: {note}" for note in choice.notes] if account is not None else []
     was_running = False
     if agent.ended_at is None:
-        # Measured BEFORE the stop: `stop` on a pane that already died (a row no
-        # listing has seen since) only records the status, and the operator
-        # should not read "stopped and restarted" for an agent that was not
-        # running. Either way the label is free afterwards.
+        # Measured BEFORE anything is done, so the operator does not read
+        # "stopped and restarted" for an agent that was not running.
         was_running = _pane_alive(agent)
-        agent = stop(project, label, agent_id=agent.id)
+        if was_running:
+            agent = stop(project, label, agent_id=agent.id)
+        else:
+            # A dead pane no listing has recorded yet is recorded as a listing
+            # records it, and its window LEFT like any 💤 row's (below). Only a
+            # pane that is gone — or a tmux that will not say — goes through
+            # `stop`, which ends a vanished pane's row and refuses on a silent tmux.
+            tmux_session = session_name(current.codename) if current.codename else None
+            ended = _end_dead_rows([agent], _observe_sockets([agent], tmux_session))
+            agent = ended[0] if ended else stop(project, label, agent_id=agent.id)
     # An exited agent's dead window is NOT removed here: `spawn` supersedes it
     # once the replacement is up and recorded, so a restart that is refused on
-    # the way (a missing binary, an unknown account, tmux) leaves the 💤 row and
-    # its last screen as they were.
-    slot = _account_slot_of(agent, session)
-    account = str(slot) if slot is not None else None
-    receipt, resumed, notes = _respawn(
+    # the way (tmux, a parallel spawn) leaves the 💤 row and its last screen as
+    # they were.
+    receipt, resumed, more = _respawn(
         project,
         agent,
         session,
@@ -2066,6 +2096,7 @@ def restart(
         spawned_by=spawned_by,
         size=size,
     )
+    notes.extend(more)
     how = "resumed its session" if resumed else "started fresh with a hand-off prompt"
     with store_session() as store, contextlib.suppress(Exception):  # the courtesy, not the record
         _team()._emit(

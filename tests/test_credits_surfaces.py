@@ -351,10 +351,12 @@ def test_a_reading_in_flight_at_sign_out_is_never_painted(
         try:
             assert await asyncio.to_thread(asked.wait, 5), "the page asked for the credits"
             await pilot.click("#aisquare-sign-out")
-            for _ in range(20):
-                await pilot.pause()
-                if view.session is None:
-                    break
+            # The sign-out worker is a thread: wait on the clock, not a count of
+            # pauses a loaded runner might not finish it in.
+            deadline = asyncio.get_running_loop().time() + 5
+            while view.session is not None and asyncio.get_running_loop().time() < deadline:
+                await pilot.pause(0.05)
+            assert view.session is None, "the sign-out finished while the reading was held"
         finally:
             release.set()
         await settle(app_)

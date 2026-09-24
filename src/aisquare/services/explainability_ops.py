@@ -30,6 +30,7 @@ script over an in-process import, and check for the collision explicitly.
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
 import json
 import os
@@ -412,22 +413,31 @@ def attach_project_key(project: ProjectInfo, value: str, *, target: str) -> Proj
     its mode-600 file written, fail the insert with an uncaught
     ``IntegrityError``, and keep the key on disk with no binding (review of
     #170). The file is written once the row can be recorded; if recording it
-    still fails, the file goes again unless an earlier binding points at it, so
-    a refusal leaves no credential behind that nothing names.
+    still fails, the file is put back as it was: a directory with no binding
+    keeps no credential that nothing names, and an earlier binding keeps the
+    key it named. Keeping the NEW file under the OLD row handed the old
+    binding's deployment the other deployment's key — a stg row answering
+    with the prod key (review of #170).
     """
     from aisquare.core.store import store_session  # lazy, as in project_key_binding
 
     with store_session() as store:
         store.onboard_project(project)
-        had_binding = store.project_explainability(project.id) is not None
+        earlier = None
+        if store.project_explainability(project.id) is not None:
+            # A binding whose file is gone keeps no file: it stays as `key show` saw it.
+            with contextlib.suppress(OSError):
+                earlier = project_key_path(project.id).read_text(encoding="utf-8")
         path = store_project_api_key(project.id, value)
         try:
             return store.set_project_explainability(
                 project.id, target=target, key_path=path, set_by=key_owner()
             )
         except Exception:
-            if not had_binding:
+            if earlier is None:
                 clear_project_api_key(project.id)
+            else:
+                store_project_api_key(project.id, earlier)
             raise
 
 

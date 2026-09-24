@@ -341,6 +341,35 @@ def test_a_binding_that_cannot_be_recorded_leaves_no_key_on_disk(
     assert not service.project_key_path(project.id).exists()
 
 
+def test_a_re_attach_that_cannot_be_recorded_leaves_the_earlier_bindings_key_in_place(
+    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The file is written before the row, and a refused re-attach used to keep the NEW
+    file under the OLD row — stg's binding answering with prod's key, the
+    cross-deployment rule broken by a failure (review of #170)."""
+    config = _settings()
+    project = _project(tmp_path / "api")
+    ops.attach_project_key(project, "stg-key-aaaa", target="stg")
+
+    def refuse(self: SqliteStore, *_args: object, **_kwargs: object) -> None:
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(SqliteStore, "set_project_explainability", refuse)
+    with pytest.raises(sqlite3.OperationalError):
+        ops.attach_project_key(project, "prod-key-bbbb", target="prod")
+
+    stg = ops.resolve_target(config.explainability, "stg", project_id=project.id)
+    assert (stg.api_key, stg.key_source) == ("stg-key-aaaa", "project")
+    path = service.project_key_path(project.id)
+    assert (path.stat().st_mode & 0o777) == 0o600
+    # An earlier binding whose file was already gone gets it gone again, not
+    # the refused key: the row is left exactly as `key show` reported it.
+    path.unlink()
+    with pytest.raises(sqlite3.OperationalError):
+        ops.attach_project_key(project, "prod-key-bbbb", target="prod")
+    assert not path.exists()
+
+
 def test_key_set_refuses_a_target_this_machine_does_not_have(
     home: Path, tmp_path: Path, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
 ) -> None:

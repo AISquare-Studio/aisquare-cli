@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import threading
 from collections.abc import Iterator
@@ -18,6 +19,7 @@ from typer.testing import CliRunner
 
 from aisquare.cli import auth as auth_cli
 from aisquare.cli.app import app
+from aisquare.cli.ui.sidebar import DoctorSection
 from aisquare.cli.ui.views.accounts import credits_text
 from aisquare.core.store import store_session
 from aisquare.core.workspace import pin_project, project_id_for
@@ -385,3 +387,65 @@ def test_a_reading_in_flight_at_sign_out_is_never_painted(
         return shown(view.query_one("#aisquare-credits", Static))
 
     assert drive(go) == ""
+
+
+def test_another_sign_in_while_the_page_is_hidden_never_shows_the_last_ones_bars(
+    idp: IdentityProviderStub, pointed: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #173, round 2: a switch from one session to ANOTHER (not to
+    none) while the page was hidden left the first one's bars on the line —
+    shown again under the second one's card until its own reading landed — and
+    a reading for the first still in flight was painted when it came back."""
+    session = iam.current_session()
+    assert session is not None
+    other = dataclasses.replace(session, token="aisq_someone_else", email="b@example.com")
+    idp.issued.append(other.token)  # a sign-in the API honours, like the first
+    current: dict[str, iam.Session | None] = {"session": session}
+    monkeypatch.setattr(iam, "current_session", lambda api_url=None: current["session"])
+    hold, asked, release = threading.Event(), threading.Event(), threading.Event()
+    real = credits_service.for_destination
+
+    def held(*args: Any, **kwargs: Any) -> credits_service.WorkspaceCredits | None:
+        if hold.is_set():
+            asked.set()
+            release.wait(5)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(credits_service, "for_destination", held)
+
+    async def go(pilot: Pilot[None]) -> tuple[str, str, str, str]:
+        app_ = fleet_app(pilot)
+        view = await open_accounts(pilot)
+        await settle(app_)
+        await pilot.pause()
+        line = view.query_one("#aisquare-credits", Static)
+        before = shown(line)
+        hold.set()
+        view.refresh_readings()  # the minute tick: a reading for the first session goes out
+        try:
+            assert await asyncio.to_thread(asked.wait, 5), "the tick asked for the credits"
+            await pilot.click(app_.query_one(DoctorSection))
+            await pilot.pause()
+            assert app_.current_view() is not view
+            current["session"] = other  # `aisquare login` as someone else, in another terminal
+            idp.credits = json.loads(json.dumps(BALANCE)) | {"state": "exhausted"}
+            app_.refresh_accounts()
+            await pilot.pause()
+            hidden = shown(line)
+        finally:
+            hold.clear()
+            release.set()
+        await settle(app_)
+        await asyncio.sleep(0.2)  # the first session's answer has had time to land
+        await pilot.pause()
+        landed = shown(line)
+        await open_accounts(pilot)
+        await settle(app_)
+        await pilot.pause()
+        return before, hidden, landed, shown(line)
+
+    before, hidden, landed, again = drive(go)
+    assert before.startswith("acme [low]"), before
+    assert hidden == "", "the first session's bars are not the second one's"
+    assert landed == "", "the first session's reading, in flight at the switch, is dropped"
+    assert again.startswith("acme [exhausted]"), again

@@ -496,6 +496,8 @@ class AccountsView(Vertical):
         self.sign_in_cwd = sign_in_cwd
         self.overview: AccountsOverview | None = None
         self.session: iam.Session | None = None
+        self._credits_for: iam.Session | None = None
+        """The session the credits line was drawn (or emptied) for."""
         self.usage: dict[int, ClaudeUsage] = {}
         self.trends: dict[int, UsageTrend | None] = {}
         self.login: _ClaudeLogin | None = None
@@ -702,20 +704,23 @@ class AccountsView(Vertical):
         """The destination workspaces' credits (#143), off the UI thread, for this session.
 
         Called on the minute tick and whenever the session changes (a sign-in
-        or sign-out here, or a frame that read a different one). With no
-        session the line empties at once and a reading still in flight for the
-        previous one is cancelled, never painted: the signed-out page must not
-        keep the last session's bars.
+        or sign-out here, or a frame that read a different one). A session
+        other than the one the line was drawn for — none, or another sign-in —
+        empties the line at once and cancels a reading still in flight for the
+        previous one, on screen or not: the page keeps its line while hidden,
+        and showing it again must not put the last session's bars under this
+        session's card (review of #173, round 2). The new session's are read
+        when the page is on screen.
         """
         session = self.session
-        if session is None:
+        if session != self._credits_for:
             self.workers.cancel_group(self, CREDITS_WORKER)
             self.query_one("#aisquare-credits", Static).update("")
-            return
-        if not self._on_screen:
+            self._credits_for = session
+        if session is None or not self._on_screen:
             return
         self.run_worker(
-            lambda: _read_credits(session),
+            lambda: (session, _read_credits(session)),
             name=CREDITS_WORKER,
             group=CREDITS_WORKER,
             exclusive=True,
@@ -723,9 +728,9 @@ class AccountsView(Vertical):
             exit_on_error=False,
         )
 
-    def _show_credits(self, readings: list[WorkspaceCredits]) -> None:
-        if self.session is None:
-            return  # signed out while it was in flight; the line stays empty
+    def _show_credits(self, session: iam.Session, readings: list[WorkspaceCredits]) -> None:
+        if session != self.session:
+            return  # read for a session that has since gone or changed; not this card's
         self.query_one("#aisquare-credits", Static).update(credits_text(readings))
 
     def _show_usage(self, fetched: dict[int, tuple[ClaudeUsage, UsageTrend | None]]) -> None:
@@ -1061,8 +1066,8 @@ class AccountsView(Vertical):
             if state is WorkerState.SUCCESS and isinstance(worker.result, dict):
                 self._show_usage(worker.result)
         elif worker.name == CREDITS_WORKER:
-            if state is WorkerState.SUCCESS and isinstance(worker.result, list):
-                self._show_credits(worker.result)
+            if state is WorkerState.SUCCESS and isinstance(worker.result, tuple):
+                self._show_credits(*worker.result)
         elif worker.name == SIGN_IN_WORKER:
             self._sign_in_finished(worker, state)
         elif worker.name == SIGN_OUT_WORKER:

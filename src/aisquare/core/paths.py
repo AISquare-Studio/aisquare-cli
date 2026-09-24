@@ -455,10 +455,12 @@ def ensure_home() -> Path:
 # --- Windows file contention ---------------------------------------------------
 #
 # Here rather than in `core.config` because it is a FILESYSTEM fact, not a
-# config one, and three modules want it: `config.save_config`/`load_config`,
-# `credentials.load_all`, and `services.explainability.store_api_key`. All
-# three already import this module, and `paths` imports nothing from
-# `aisquare`, so it is the one place none of them has to reach sideways for.
+# config one, and three modules want it: `config.load_config` and
+# `save_config`'s read of the existing file, `credentials.load_all`, and
+# `atomic.write_replacing`'s rename, which every replace-by-rename writer
+# shares. All three already import this module, and `paths` imports nothing
+# from `aisquare`, so it is the one place none of them has to reach sideways
+# for. `tests/test_windows_contention.py` holds each call site to it.
 
 
 #: Windows error codes meaning "someone else has this file open right now":
@@ -504,7 +506,7 @@ def despite_windows_contention(action: Callable[[], _T]) -> _T:
     succeeds, and a reader that already has the file open keeps its own inode,
     so neither side can observe the other.
 
-    NTFS shares no such guarantee, and BOTH sides of this module hit it:
+    NTFS shares no such guarantee, and both sides of a config write hit it:
 
     * ``MoveFileEx`` refuses to replace a file that any other handle has open —
       including one opened purely for reading — so a second session merely

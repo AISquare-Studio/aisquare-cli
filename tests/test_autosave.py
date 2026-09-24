@@ -331,7 +331,13 @@ def test_flush_all_joins_every_saver_against_one_deadline(
 ) -> None:
     """Flushed one after the other, two slow savers froze the quit twice over. Called on the
     loop, as `on_unmount` does, with the debounce timers out of the way: only `flush_all` may
-    wake the drains, or the timers would start both and hide a sequential flush."""
+    wake the drains, or the timers would start both and hide a sequential flush.
+
+    Read as the writer's peak concurrency, not the wall clock. Each write also lands for real
+    after its sleep, and the two landings take turns on the state lock by design, so the
+    clock counts two fsynced renames as well as the sleeps: a joined flush on the Windows leg
+    of a #203 PR run read 1.09 s against a 0.7 s bound. Taken in turn, the two sleeps never
+    overlap."""
     writer = _Writer(delay=lambda value: 0.4)
     monkeypatch.setattr(autosave_mod, "update_state", writer)
     monkeypatch.setattr(Autosave, "DEBOUNCE", 5.0)
@@ -343,13 +349,10 @@ def test_flush_all_joins_every_saver_against_one_deadline(
             theme = Autosave(pilot.app, "board_theme", what="the theme")
             width.remember(34)
             theme.remember("nord")
-            started = time.monotonic()
-            unsaved = Autosave.flush_all(pilot.app)
-            elapsed = time.monotonic() - started
-            assert unsaved == []
-            assert elapsed < 0.7, f"two 0.4 s writes joined together, not in turn: {elapsed:.2f}s"
+            assert Autosave.flush_all(pilot.app) == []
 
     asyncio.run(go())
+    assert writer.peak == 2, "two 0.4 s writes taken in turn, not joined together"
     assert sorted(map(str, writer.calls)) == ["34", "nord"]
     assert read_state() == {"sidebar_width": 34, "board_theme": "nord"}
 

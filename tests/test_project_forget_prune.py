@@ -28,8 +28,8 @@ from typer.testing import CliRunner
 from aisquare.cli.app import app
 from aisquare.core import paths
 from aisquare.core.ids import new_agent_id, new_event_id, new_task_id
-from aisquare.core.state_file import StateUnwritableError
-from aisquare.core.store import store_session
+from aisquare.core.state_file import StateUnwritableError, read_state
+from aisquare.core.store import SqliteStore, store_session
 from aisquare.core.workspace import pinned_project_id, project_id_for, worktree_principal
 from aisquare.models import FleetAgent, ProjectInfo, TeamEvent, TeamSession, TeamTask
 from tests.test_worktree import _git
@@ -646,6 +646,45 @@ def test_forget_the_last_project_on_a_corrupt_state_file_is_complete(
     assert "follows your working directory" in result.stdout and "⚠" not in result.stdout
     assert paths.state_path().read_text() == body
     assert "No projects registered yet" in runner.invoke(app, ["project", "list"]).stdout
+
+
+def test_forget_purge_of_the_last_project_reports_a_state_file_it_can_no_longer_read(
+    runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of the #167 fold, F6. With no project left, `_repin` unpins, and the unpin asks
+    `pinned_project_id` first — a strict read, whose `PermissionError` is not the
+    `StateUnwritableError` `_repin` catches. A `state.json` that became unreadable after
+    `forget` had resolved the active project escaped the committed purge as a traceback, and
+    the data directory was never removed. The refusal names the file, as a write's does."""
+    alpha = _register(runner, monkeypatch, work_dir / "alpha")  # the cwd's: active, unpinned
+    data_dir = paths.project_data_dir(alpha)
+    (data_dir / "snapshot").mkdir(parents=True)
+    real_purge = SqliteStore.purge_project
+    unreadable = False
+
+    def purge(self: SqliteStore, project_id: str) -> dict[str, int]:
+        nonlocal unreadable
+        removed = real_purge(self, project_id)
+        unreadable = True  # from here on, as if the file's mode had just changed
+        return removed
+
+    def read(*, strict: bool = False) -> dict[str, object]:
+        if unreadable and strict:
+            raise PermissionError(13, "Permission denied", str(paths.state_path()))
+        return read_state(strict=strict)
+
+    monkeypatch.setattr(SqliteStore, "purge_project", purge)
+    monkeypatch.setattr("aisquare.core.workspace.read_state", read)
+
+    result = runner.invoke(app, ["--json", "project", "forget", "alpha", "--purge"])
+
+    assert result.exit_code == 0, result.output
+    report = _json(result.stdout)
+    assert report["purged"] is True and report["data_dir_removed"] is True
+    assert not data_dir.exists()
+    assert report["active_changed"] is True and report["active"] is None
+    assert "state.json could not be read" in report["pin_error"], report["pin_error"]
+    assert "Permission denied" in report["pin_error"]
 
 
 def test_prune_reports_a_pin_it_could_not_move_instead_of_a_traceback(

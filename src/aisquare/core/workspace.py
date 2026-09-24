@@ -12,8 +12,9 @@ import hashlib
 import subprocess
 from pathlib import Path
 
+from aisquare.core import paths
 from aisquare.core.ids import PROJECT_PREFIX
-from aisquare.core.state_file import read_state, update_state
+from aisquare.core.state_file import StateUnwritableError, read_state, update_state
 from aisquare.core.store import ContextStore
 from aisquare.models import ProjectInfo
 
@@ -153,10 +154,21 @@ def pin_project(project_id: str | None) -> None:
     write. Otherwise ``core.state_file.StateUnwritableError`` says why the file
     could not be updated — it is not a JSON object and is left as it is, because
     the other keys in it (the board's theme, the fleet UI's navigator width) are
-    the user's; its lock could not be taken; it could not be written.
+    the user's; its lock could not be taken; it could not be read or written.
+
+    That includes the unpin's own look at the file first: its strict read
+    raises the ``OSError`` of a file that cannot be read, and a caller that
+    catches the refusal — ``project forget``'s repin, after a purge that has
+    already committed — let that one escape as a traceback, leaving the data
+    directory behind (review of the #167 fold, F6).
     """
-    if project_id is None and pinned_project_id() is None:
-        return
+    if project_id is None:
+        try:
+            pinned = pinned_project_id()
+        except OSError as exc:
+            raise StateUnwritableError(f"{paths.state_path()} could not be read: {exc}") from exc
+        if pinned is None:
+            return
     update_state(_PIN_KEY, project_id)
 
 

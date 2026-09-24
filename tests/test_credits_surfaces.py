@@ -350,13 +350,14 @@ def test_the_explainability_views_row_says_why_it_has_no_reading(
         f"aisquare login --api-url {idp.url} to read them)"
     ), rows["credits"]
     # Round 2: an AISQUARE_TOKEN session cannot `aisquare login` (env_token_set);
-    # its API is the environment's to change.
+    # its API is the environment's to change. The review of that round: and its
+    # token, which the other server issued — the URL alone reads a 401.
     from_env = dataclasses.replace(elsewhere, source="env")
     monkeypatch.setattr(iam, "current_session", lambda api_url=None: from_env)
     rows = dict(status_report(pointed).rows)
     assert rows["credits"] == (
         "(AISQUARE_TOKEN is used with https://api.aisquare.studio, not this workspace's API — "
-        f"set AISQUARE_API_URL={idp.url} to read them)"
+        f"set AISQUARE_API_URL={idp.url} and a token that API issued to read them)"
     ), rows["credits"]
     assert len(_balance_calls(idp)) == 1, "none of these cases asks anyone"
 

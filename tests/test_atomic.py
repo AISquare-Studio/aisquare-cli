@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from aisquare.core.atomic import write_replacing
+from aisquare.core.atomic import replacement, write_replacing
 
 #: The directory fsync after a rename, where the platform can open a directory to sync it.
 _DIRECTORY_SYNC = [] if sys.platform == "win32" else ["fsync"]
@@ -216,6 +216,29 @@ def test_durable_syncs_the_file_then_the_directory_and_not_durable_syncs_nothing
     write_replacing(tmp_path / "cache.json", "{}\n", durable=False)
     assert calls == ["replace"]
     assert _leftovers(tmp_path) == ["cache.json", "durable.json"]
+
+
+def test_a_replacement_left_unpublished_removes_its_temp_and_publishes_once(
+    tmp_path: Path,
+) -> None:
+    """``replacement`` is ``write_replacing`` in two steps, for a caller that decides the body
+    under a lock (``core.credentials``, review of the #65 fold, round 2, F1). The temp waits
+    beside the target between them. A caller that finds nothing to write leaves without a
+    publish, and the temp goes too. A second publish is refused: the temp has become the
+    target, and a second one would be a new file that no restriction was applied to."""
+    target = tmp_path / "credentials"
+    target.write_text("old\n")
+    with replacement(target, owner_only=True) as pending:
+        waiting = _leftovers(tmp_path)
+    assert len(waiting) == 2 and waiting[0].startswith(".credentials."), waiting
+    assert not pending.published
+    assert _leftovers(tmp_path) == ["credentials"] and target.read_text() == "old\n"
+    with replacement(target, owner_only=True) as pending:
+        pending.publish("new\n")
+        with pytest.raises(RuntimeError, match="already replaced"):
+            pending.publish("newer\n")
+    assert pending.published and target.read_text() == "new\n"
+    assert _leftovers(tmp_path) == ["credentials"]
 
 
 def _umask() -> int:

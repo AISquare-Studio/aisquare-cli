@@ -30,6 +30,7 @@ from __future__ import annotations
 import contextlib
 import os
 import stat
+from collections.abc import Iterator
 from pathlib import Path
 from uuid import uuid4
 
@@ -70,39 +71,102 @@ def write_replacing(
     where the in-place write it replaced had kept the file's owner-only DACL
     (review of the #65 fold, F2). Returns whether that restriction held, so the
     caller can say so; ``True`` when none was asked for.
+
+    The same write in two steps, for a caller that decides the body under a
+    lock, is :func:`replacement`.
+    """
+    with replacement(
+        target, keep_mode=keep_mode, durable=durable, owner_only=owner_only
+    ) as pending:
+        pending.publish(body)
+    return pending.restricted
+
+
+class Replacement:
+    """A temp beside ``target``, created (and restricted, if asked) but not yet written.
+
+    Made by :func:`replacement`. ``restricted`` is whether ``owner_only``'s
+    restriction held, ``True`` when none was asked for; ``published``, whether
+    :meth:`publish` has renamed the temp over the target.
+    """
+
+    def __init__(self, target: Path, temporary: Path, kept: int | None, durable: bool) -> None:
+        self.target = target
+        self.restricted = True
+        self.published = False
+        self._temporary = temporary
+        self._kept = kept
+        self._durable = durable
+
+    def publish(self, body: str) -> None:
+        """Write ``body`` into the temp and rename it over the target, once.
+
+        A second call is refused: the temp has become the target, and the file
+        it would write is a new one that no restriction was applied to.
+        """
+        if self.published:
+            raise RuntimeError(f"{self.target} was already replaced by this temp")
+        with self._temporary.open("w", encoding="utf-8") as handle:
+            handle.write(body)
+            if self._durable:
+                handle.flush()
+                os.fsync(handle.fileno())
+        if self._kept is not None:
+            # Exactly the target's: the umask may have narrowed them.
+            os.chmod(self._temporary, self._kept)
+        paths.despite_windows_contention(lambda: os.replace(self._temporary, self.target))
+        self.published = True
+        if self._durable:
+            _sync_directory(self.target.parent)
+
+
+@contextlib.contextmanager
+def replacement(
+    target: Path,
+    *,
+    keep_mode: bool = True,
+    durable: bool = True,
+    owner_only: bool = False,
+) -> Iterator[Replacement]:
+    """:func:`write_replacing` in two steps: the temp on entry, the body at ``publish``.
+
+    For a caller that decides the body under a lock, as ``core.credentials``'
+    writers do. With ``owner_only`` the restriction runs on entry, and on
+    Windows that is an ``icacls`` subprocess (and, on a process's first, a
+    ``whoami``) with a 15 second timeout each, while a writer waiting for that
+    lock gives up after two: a slow start of either tool (an antivirus scan, a
+    loaded runner) failed a concurrent ``login`` or ``serve`` with a
+    ``TimeoutError``. The temp's name is this process's own and unique, and it
+    is empty, so no lock has to cover its restriction; entered before the lock
+    is taken, only the write, the fsync and the rename are left inside it
+    (review of the #65 fold, round 2, F1). The options mean what they mean for
+    :func:`write_replacing`.
+
+    Leaving without a ``publish`` (nothing to write after all, a refusal, an
+    exception, ``KeyboardInterrupt`` included) removes the temp.
     """
     temporary = target.with_name(f".{target.name}.{os.getpid()}.{uuid4().hex[:8]}.tmp")
     kept: int | None = None
-    restricted = True
     if owner_only:
         kept = stat.S_IRUSR | stat.S_IWUSR
     elif keep_mode:
         with contextlib.suppress(FileNotFoundError):
             kept = target.stat().st_mode & 0o777
+    pending = Replacement(target, temporary, kept, durable)
     try:
         # Created empty with those bits, plus its owner's write until the body is
         # in (a read-only target's temp is written too), then opened by path.
         mode = 0o666 if kept is None else kept | stat.S_IWUSR
         os.close(os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode))
         if owner_only:
-            restricted = paths.restrict_to_owner(temporary)  # empty: nothing to expose yet
-        with temporary.open("w", encoding="utf-8") as handle:
-            handle.write(body)
-            if durable:
-                handle.flush()
-                os.fsync(handle.fileno())
-        if kept is not None:
-            os.chmod(temporary, kept)  # exactly the target's: the umask may have narrowed them
-        paths.despite_windows_contention(lambda: os.replace(temporary, target))
-    except BaseException:
-        with contextlib.suppress(OSError):
-            os.chmod(temporary, 0o600)  # Windows will not delete a read-only file
-        with contextlib.suppress(OSError):  # its own block: a filesystem that refuses chmod
-            temporary.unlink()  # (vfat, some CIFS) must not keep the temp too
-        raise
-    if durable:
-        _sync_directory(target.parent)
-    return restricted
+            pending.restricted = paths.restrict_to_owner(temporary)  # empty: nothing to expose yet
+        yield pending
+    finally:
+        if not pending.published:
+            with contextlib.suppress(OSError):
+                os.chmod(temporary, 0o600)  # Windows will not delete a read-only file
+            with contextlib.suppress(OSError):  # its own block: a filesystem that refuses chmod
+                temporary.unlink()  # (vfat, some CIFS) must not keep the temp too
 
 
 def _sync_directory(directory: Path) -> None:

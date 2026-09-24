@@ -23,7 +23,7 @@ from pathlib import Path
 import pytest
 
 from aisquare.core import credentials, paths
-from aisquare.core.atomic import write_replacing
+from aisquare.core.atomic import Replacement
 from aisquare.core.locking import lock_exclusive, unlock
 from tests.fsperms import can_deny_reads, can_symlink
 
@@ -89,16 +89,17 @@ def test_two_writers_cannot_lose_each_others_key(
     credentials.store(api_key=_KEY)
     inside, go = threading.Event(), threading.Event()
     paused = False
+    real_publish = Replacement.publish
 
-    def pausing_write(target: Path, body: str, **options: bool) -> bool:
+    def pausing_publish(pending: Replacement, body: str) -> None:
         nonlocal paused
         if not paused:  # the first writer, mid-critical-section, waits for the test's go
             paused = True
             inside.set()
             assert go.wait(5), "the test never let the first writer finish"
-        return write_replacing(target, body, **options)
+        real_publish(pending, body)
 
-    monkeypatch.setattr(credentials, "write_replacing", pausing_write)
+    monkeypatch.setattr(Replacement, "publish", pausing_publish)
     first = threading.Thread(target=credentials.store, kwargs={"serve_token": _TOKEN})
     first.start()
     assert inside.wait(5), "the first writer never reached its write"
@@ -117,7 +118,8 @@ def test_a_lock_held_too_long_is_a_timeout_that_names_the_lock(
     isolated_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A stalled writer costs the next one a bounded wait, and the refusal names the lock
-    file, not the credentials, as what was in the way. The file is left as it was."""
+    file, not the credentials, as what was in the way. The file is left as it was, and so is
+    the directory: the temp made before the wait goes with the refusal."""
     monkeypatch.setattr(credentials, "LOCK_WAIT_S", 0.2)
     credentials.store(api_key=_KEY)  # creates the lock file
     fd = os.open(isolated_home / "credentials.lock", os.O_RDWR)
@@ -129,45 +131,53 @@ def test_a_lock_held_too_long_is_a_timeout_that_names_the_lock(
         unlock(fd)
         os.close(fd)
     assert credentials.load_all() == {"api_key": _KEY}
+    files = sorted(p.name for p in isolated_home.iterdir() if p.is_file())
+    assert files == ["credentials", "credentials.lock"], files
     credentials.store(serve_token=_TOKEN)  # released: back in business
     assert credentials.load_all() == {"api_key": _KEY, "serve_token": _TOKEN}
 
 
 @pytest.mark.parametrize("write", ["store", "drop"])
-def test_whoami_is_asked_before_the_writers_lock_is_taken(
+def test_the_restriction_runs_before_the_writers_lock_is_taken(
     isolated_home: Path, monkeypatch: pytest.MonkeyPatch, write: str
 ) -> None:
-    """On Windows a process's first restriction runs ``whoami`` as well as ``icacls``, each
-    allowed 15 seconds, and a writer waiting for the lock gives up after two. Asked inside
-    the lock, a slow ``CreateProcess`` failed a concurrent ``login`` or ``serve`` with a
-    ``TimeoutError`` (review of the #65 fold, F3). The fake answers no SID, as a failing
-    ``whoami`` does, so no ``icacls`` runs here, and the restriction asks again inside the
-    lock, as it should for an answer that was never cached. The first question is the one
-    that must come before the lock: it records whether the lock was free when asked."""
+    """On Windows the restriction is an ``icacls`` subprocess, and a process's first one runs
+    ``whoami`` too, each allowed 15 seconds, while a writer waiting for the lock gives up after
+    two. Run inside the lock, a slow ``CreateProcess`` failed a concurrent ``login`` or
+    ``serve`` with a ``TimeoutError`` (review of the #65 fold, F3). Asking ``whoami`` early
+    still left ``icacls`` inside, and ``whoami`` too after a failed first answer, which is not
+    cached (round 2, F1). The restriction targets the empty temp, which is this call's alone,
+    so the whole of it comes first. The probe records whether the lock was free when it ran,
+    then restricts for real."""
     credentials.store(api_key=_KEY, iam_token="t")
     lock_path = isolated_home / "credentials.lock"
-    free_when_asked: list[bool] = []
+    real = paths.restrict_to_owner
+    free_when_restricting: list[bool] = []
 
-    def whoami() -> str | None:
+    def probe(path: Path) -> bool:
         fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
         try:
             lock_exclusive(fd)
         except OSError:
-            free_when_asked.append(False)
+            free_when_restricting.append(False)
         else:
             unlock(fd)
-            free_when_asked.append(True)
+            free_when_restricting.append(True)
         finally:
             os.close(fd)
-        return None
+        return real(path)
 
-    monkeypatch.setattr(sys, "platform", "win32")
-    monkeypatch.setattr(paths, "_current_user_sid", whoami)
+    monkeypatch.setattr(paths, "restrict_to_owner", probe)
     if write == "store":
         credentials.store(serve_token=_TOKEN)
     else:
         credentials.drop("iam_token")
-    assert free_when_asked and free_when_asked[0], free_when_asked
+    assert free_when_restricting == [True], free_when_restricting
+    assert credentials.load_all() == (
+        {"api_key": _KEY, "iam_token": "t", "serve_token": _TOKEN}
+        if write == "store"
+        else {"api_key": _KEY}
+    )
 
 
 def test_dropping_what_is_not_there_creates_nothing(isolated_home: Path) -> None:

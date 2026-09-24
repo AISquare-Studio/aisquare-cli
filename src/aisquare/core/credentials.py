@@ -15,8 +15,8 @@ bare key is MIGRATED into ``api_key`` rather than discarded: every machine that
 ran ``init --api-key`` before this change has one, and "unparseable therefore
 empty" is the exact reading that lost data.
 
-The writers replace the file by rename (``core.atomic.write_replacing``), under
-an exclusive lock on ``credentials.lock`` beside it. Both used to rewrite it in
+The writers replace the file by rename (``core.atomic.replacement``), under an
+exclusive lock on ``credentials.lock`` beside it. Both used to rewrite it in
 place with ``write_text``, which truncates first, and took no lock. A
 ``load_all`` in that window read ``""`` or half a document. The half document
 then came back as a legacy bare key, the next ``store`` wrote it into
@@ -26,8 +26,10 @@ lock: a rename leaves them the whole old file or the whole new one.
 
 A rename publishes a NEW file, so what an in-place write got for free is done on
 purpose: the temp is restricted to this account before the secrets are written
-into it (``write_replacing(owner_only=True)``), and a file that exists but
-cannot be read is refused rather than replaced by what this call alone knows.
+into it (``replacement(owner_only=True)``), and a file that exists but cannot be
+read is refused rather than replaced by what this call alone knows. The temp is
+made and restricted before the lock is taken: on Windows that is a subprocess or
+two, and only the write and the rename need the lock.
 """
 
 from __future__ import annotations
@@ -42,7 +44,7 @@ from pathlib import Path
 from typing import Any
 
 from aisquare.core import paths
-from aisquare.core.atomic import write_replacing
+from aisquare.core.atomic import Replacement, replacement
 from aisquare.core.locking import lock_exclusive, unlock
 
 #: Where a legacy bare-string file is migrated to.
@@ -142,14 +144,13 @@ def store(*, replace: Sequence[str] = (), **values: str) -> tuple[dict[str, str]
     :data:`LOCK_WAIT_S`; the file is then left as it was.
     """
     paths.ensure_home()
-    paths.warm_owner_restriction()  # whoami outside the lock, so only icacls runs inside it
     path = paths.credentials_path()
-    with _locked(path):
+    with _replacement(path) as pending, _locked(path):
         data = load_all(strict=True)
         for key in replace:
             data.pop(key, None)
         data.update({k: v for k, v in values.items() if v})
-        return data, _write(path, data)
+        return data, _write(pending, data)
 
 
 def drop(*keys: str) -> tuple[dict[str, str], bool]:
@@ -175,18 +176,17 @@ def drop(*keys: str) -> tuple[dict[str, str], bool]:
     if not any(key in data for key in keys):
         return data, True
     paths.ensure_home()
-    paths.warm_owner_restriction()  # as in `store`
     path = paths.credentials_path()
-    with _locked(path):
+    with _replacement(path) as pending, _locked(path):
         data = load_all()
         remaining = {k: v for k, v in data.items() if k not in keys}
         if remaining == data:
             return remaining, True
-        return remaining, _write(path, remaining)
+        return remaining, _write(pending, remaining)
 
 
-def _write(path: Path, data: dict[str, str]) -> bool:
-    """Replace the file with ``data`` by rename, owner-only; whether the restriction held.
+def _replacement(path: Path) -> contextlib.AbstractContextManager[Replacement]:
+    """The file's replacement, its temp made and restricted BEFORE the writers' lock is taken.
 
     Written THROUGH a symlink, as the in-place ``write_text`` it replaces was:
     a rename over the link would swap the user's pointer for a plain file.
@@ -194,9 +194,22 @@ def _write(path: Path, data: dict[str, str]) -> bool:
     before the body is in it, so the secrets are never in a file readable more
     widely than the one they become: on POSIX by the bits, on NTFS by the DACL
     the rename carries over.
+
+    Entered before :func:`_locked`, because on Windows the restriction is an
+    ``icacls`` subprocess (and, the first time in a process, a ``whoami``)
+    allowed 15 seconds each, and a writer waiting for the lock gives up after
+    :data:`LOCK_WAIT_S`. A slow start of either tool held the lock past that
+    and failed a concurrent ``login`` or ``serve`` with a ``TimeoutError``
+    (review of the #65 fold, round 2, F1). The temp is this call's alone, so
+    nothing needs the lock until the write.
     """
-    target = Path(os.path.realpath(path))
-    return write_replacing(target, json.dumps(data, indent=2) + "\n", owner_only=True)
+    return replacement(Path(os.path.realpath(path)), owner_only=True)
+
+
+def _write(pending: Replacement, data: dict[str, str]) -> bool:
+    """Publish ``data`` as the file, under the lock; whether its restriction held."""
+    pending.publish(json.dumps(data, indent=2) + "\n")
+    return pending.restricted
 
 
 @contextlib.contextmanager

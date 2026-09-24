@@ -763,10 +763,11 @@ def _claude_accounts_checks() -> list[DoctorCheck]:
 def _check_resumable_agents() -> list[DoctorCheck]:
     """How many exited agents a restart would CONTINUE rather than reset (#144).
 
-    An ended fleet row whose session transcript is still on disk resumes with
-    ``fleet restart <label>`` (or the row's Restart); one without starts fresh
-    from a hand-off prompt. Counted over the last day's rows, machine-wide;
-    silent when there are none. Gated on the store existing.
+    A label whose newest fleet row has ended, with its session transcript still
+    on disk, resumes with ``fleet restart <label>`` (or the row's Restart); one
+    without starts fresh from a hand-off prompt. A label that is live again, or
+    was reused, is not an exited agent. Counted over the last day's rows,
+    machine-wide; silent when there are none. Gated on the store existing.
     """
     if _uncreated_home("fleet-resume") is not None:
         return []
@@ -776,7 +777,14 @@ def _check_resumable_agents() -> list[DoctorCheck]:
         with store_session() as store:
             for project in store.list_projects(all=True):
                 name = project.codename or project.root.name or project.id
+                # The NEWEST row under each label only, the one `fleet restart
+                # <label>` acts on: a resumed restart keeps the session id, so the
+                # row it replaced still has its transcript on disk, and counting it
+                # listed a label that is live again — whose "restart" stops it.
+                newest: dict[str, FleetAgent] = {}
                 for agent in store.fleet_agents(project.id, live_only=False):
+                    newest[agent.label] = agent  # oldest first: the last one stands
+                for agent in newest.values():
                     if agent.ended_at is None or agent.ended_at < cutoff or not agent.session_id:
                         continue
                     session = store.get_session(agent.session_id)

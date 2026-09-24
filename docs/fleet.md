@@ -798,8 +798,12 @@ without the trailing cell, and the highlight stops there too, so what you see
 is what you get. What is copied is always what is shown under the highlight at
 the moment you copy: cut to the columns the pane actually shows, and including
 the `[↑k/history]` marker and the `(exited 0)` notice where those are what the
-row displays. A line tmux soft-wrapped is copied as one line, as tmux's own
-copy mode copies it — every frame carries tmux's own wrap marks (`capture-pane
+row displays. Blank cells past the end of a line, and blank rows at the end of a
+drag, are not text and are not copied; a drag over nothing but those — the empty
+rows under an agent's output — copies nothing, says "nothing to copy" and
+leaves no highlight behind, so the next ctrl+c is the agent's interrupt. A
+line tmux soft-wrapped is copied as one line, as tmux's own copy mode copies
+it — every frame carries tmux's own wrap marks (`capture-pane
 -F`, tmux 3.7 and later; an older tmux gets one line per row). Tabs are
 copied as the spaces they occupy on screen, and an emoji or a wide glyph is
 always highlighted and copied whole. Under an agent that is still printing that

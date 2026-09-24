@@ -948,7 +948,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   so does a release with nothing to do with a pane — a drag on the footer, a
   scrollbar, a button. ctrl+c copies again while a selection stands — from the
   pane or from the sidebar, through one path — and clears it; otherwise it is
-  the agent's interrupt, including when the selection covers nothing. cmd+c is
+  the agent's interrupt. A drag over nothing but blank cells — the empty rows
+  under an agent's output — copies nothing, says "nothing to copy" and leaves
+  no highlight behind, so a highlight that stands always has text for ctrl+c
+  to copy. cmd+c is
   only ever the copy, and types nothing when there is no selection. The
   highlight does not outlive what it means: a key or a paste into the agent
   drops it, so does the agent printing something else under it, so a later

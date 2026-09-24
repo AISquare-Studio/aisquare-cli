@@ -633,7 +633,10 @@ class TerminalPane(Widget, can_focus=True):
        DISPLAYED, notice and corner marker included, whether a frame or a
        failed capture put it there; so do hiding the pane, unmounting it and
        attaching another pane (finding 2; second round, findings 4, 6 and 12).
-    4. *The pane is never selected whole.* ``Selection(None, None)`` is what
+       A gesture that leaves a highlight with no text under it drops it at the
+       release, so a highlight that stands always has something for ctrl+c to
+       copy (review of #120, round 11).
+    4.*The pane is never selected whole.* ``Selection(None, None)`` is what
        Textual writes for a multi-click on a neighbour (the container's
        select-all) and for a drag that starts and ends beyond both of the pane's
        edges; the pane refuses it in every reader and clears its entry, so a
@@ -1864,9 +1867,23 @@ class TerminalPane(Widget, can_focus=True):
         on a double click is already in the baseline (rule 2). An UNKNOWN
         button is not a copy: reading "no press was seen" as "left" is the
         assumption that let a right-button drag copy (round 8).
+
+        A changed selection with no text under it — rows nothing was printed
+        on, the blank past a line's end — is dropped here, whatever the button
+        (rule 3). Left standing, it was tinted full width, the release copied
+        nothing and said nothing, and the ctrl+c the highlight invited went to
+        the agent as its interrupt (review of #120, round 11). A left drag was
+        a request to copy, so it is told why none happened.
         """
         selection = self._own_selection()
-        if selection is None or selection == self._baseline or button != 1:
+        if selection is None or selection == self._baseline:
+            return
+        if self.selected_text() is None:
+            self._clear_own_selection()
+            if button == 1:
+                self.notify("nothing to copy — no text under the highlight", markup=False)
+            return
+        if button != 1:
             return
         if self._copy_selection():
             self._baseline = selection

@@ -1061,31 +1061,66 @@ def test_a_run_of_spaces_the_user_selected_is_copied(fake: FakeTmux, tmp_path: P
     assert sent == [], "ctrl+c was the copy, not the interrupt, while it stood"
 
 
-def test_a_drag_over_rows_with_nothing_printed_is_not_a_copy(
-    fake: FakeTmux, tmp_path: Path
+@pytest.mark.parametrize(
+    ("start", "end", "button"),
+    [
+        ((1, 4), (10, 6), 1),  # three rows nothing printed on — round 11's own
+        ((12, 1), (20, 1), 1),  # the blank past the end of "second row"
+        ((1, 4), (10, 6), 3),  # the same rows, right button: not a copy either way
+    ],
+)
+def test_a_drag_over_nothing_but_blank_cells_copies_nothing_and_leaves_no_highlight(
+    fake: FakeTmux, tmp_path: Path, start: tuple[int, int], end: tuple[int, int], button: int
 ) -> None:
-    """Several blank rows, not one. One row extracts as ``""`` and the guard
-    holds for free; two extract as ``"\n"``, which is truthy — so the copy
-    reported success over empty space and ctrl+c stopped reaching the agent
-    (review of the ninth version). The interrupt is the property, not just the
-    clipboard."""
+    """Review of #120, round 11: a drag over rows nothing was printed on was
+    tinted full width, copied nothing and said nothing — and the ctrl+c the
+    highlight invited went to the agent as its interrupt. The highlight now goes
+    at the release and a left drag is told "nothing to copy", so whatever
+    stands is something ctrl+c copies.
 
-    async def drive() -> tuple[bool, str, int, list[tuple[str, ...]]]:
+    The paint is read off the rendered strips, against an unselected baseline:
+    ``test_what_is_copied_is_exactly_what_is_painted`` compares the TEXT under
+    the tint, which is ``""`` on both sides here, and cannot see this. Several
+    blank rows, not one: two extract as ``"\\n"`` before the trailing newlines
+    go, and the copy once reported success over empty space and swallowed
+    ctrl+c (review of the ninth version) — the interrupt is still asserted."""
+
+    async def drive() -> tuple[list[int], list[int], bool, str, list[str], list[tuple[str, ...]]]:
         host = Host(fake.server(tmp_path), "%1")
         async with host.run_test(size=(40, 8)) as pilot:
             pane = host.pane
             await wait_until(pilot, lambda: synced(pane))
-            await drag(pilot, pane, (2, 4), (6, 6))  # three rows nothing printed on
-            highlighted = pane.text_selection is not None
+            width = pane.content_size.width
+            base = [[style_at(strip, x).bgcolor for x in range(width)] for strip in rows(pane)]
+
+            def tinted() -> list[int]:
+                return [
+                    y
+                    for y, strip in enumerate(rows(pane))
+                    if any(style_at(strip, x).bgcolor != base[y][x] for x in range(width))
+                ]
+
+            await press(pilot, pane, start, button=button)
+            await move(pilot, pane, end, button=button)
+            during = tinted()
+            await release(pilot, pane, end, button=button)
+            await pilot.pause()
+            after = tinted()
+            standing = pane.text_selection is not None
             pane.focus()
             await pilot.press("ctrl+c")
             await pilot.pause()
-            return highlighted, host.clipboard, len(host.notices), list(fake.sent())
+            return during, after, standing, host.clipboard, list(host.notices), list(fake.sent())
 
-    highlighted, clipboard, toasts, sent = run(drive())
-    assert highlighted, "the premise: a highlight stands over the blank rows"
-    assert clipboard == "" and toasts == 0, "rows with nothing printed are not a copy"
-    assert sent == [("C-c",)], "and ctrl+c is still the agent's interrupt"
+    during, after, standing, clipboard, notices, sent = run(drive())
+    assert during == list(range(start[1], end[1] + 1)), "the premise: the drag tints them"
+    assert after == [] and not standing, "nothing under it to copy, so no highlight stands"
+    assert clipboard == "", "nothing was copied"
+    if button == 1:
+        assert len(notices) == 1 and notices[0].startswith("nothing to copy"), notices
+    else:
+        assert notices == [], "a right-button drag asked for no copy, and is told of none"
+    assert sent == [("C-c",)], "ctrl+c after it is the agent's interrupt"
 
 
 def test_the_scroll_marker_is_measured_in_cells_not_characters(
@@ -1207,15 +1242,20 @@ def test_a_drag_below_the_output_neither_crashes_nor_selects_everything(
 ) -> None:
     """Reproduced in review: ``Selection.extract`` re-splits with ``splitlines``,
     drops the trailing empty row, and a drag in the blank area under three rows
-    of output raised IndexError out of the mouse handler — the whole UI down."""
+    of output raised IndexError out of the mouse handler — the whole UI down.
+    The selection is read before the release, which drops a highlight with
+    nothing under it (review of #120, round 11)."""
 
     async def drive() -> tuple[str | None, str, Selection | None]:
         host = Host(fake.server(tmp_path), "%1")
         async with host.run_test(size=(40, 6)) as pilot:
             pane = host.pane
             await wait_until(pilot, lambda: synced(pane))
-            await drag(pilot, pane, (0, 5), (4, 5))
-            return pane.selected_text(), host.clipboard, pane.text_selection
+            await press(pilot, pane, (0, 5))
+            await move(pilot, pane, (4, 5), button=1)
+            selected, selection = pane.selected_text(), pane.text_selection
+            await release(pilot, pane, (4, 5))
+            return selected, host.clipboard, selection
 
     selected, clipboard, selection = run(drive())
     assert selected is None and clipboard == ""

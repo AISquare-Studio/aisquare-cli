@@ -47,7 +47,14 @@ from aisquare.core import codenames, harness, orchestrator, selfcli
 from aisquare.core.config import FleetRoleSettings, FleetSettings, load_config
 from aisquare.core.ids import new_agent_id
 from aisquare.core.store import AmbiguousIdError, ContextStore, store_session
-from aisquare.core.tmux import TmuxError, TmuxServer, TmuxUnavailable, WindowInfo
+from aisquare.core.tmux import (
+    DEFAULT_WINDOW_HEIGHT,
+    DEFAULT_WINDOW_WIDTH,
+    TmuxError,
+    TmuxServer,
+    TmuxUnavailable,
+    WindowInfo,
+)
 from aisquare.core.workspace import active_project
 from aisquare.models import (
     CLOSED_STATUSES,
@@ -1178,7 +1185,9 @@ def spawn(
     the pane it is about to attach, so the agent never runs wider than it will
     be shown; a headless spawn (a manager starting coders, `fleet spawn` with
     no UI open) takes ``core.tmux``'s default, which is kept under the 144
-    columns at which Claude Code opens its diff panel on its own (#149).
+    columns at which Claude Code opens its diff panel on its own (#149). A
+    window tmux would not resize to that size still runs, at its session's
+    size, and a note says so (``WindowInfo.resize_refused``).
     """
     config = settings()
     if not _role_ok(role):
@@ -1318,17 +1327,31 @@ def spawn(
         command, carried = claude_accounts_service.carry_environment(command)
         env.update(carried)
     tmux_session = session_name(codename)
-    geometry = {"width": size[0], "height": size[1]} if size is not None else {}
+    width, height = size if size is not None else (DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT)
     try:
         # Every pair is this window's alone: `spawn_window` keeps them out of
         # the session environment, so a later spawn — or a window opened by hand
         # — starts from the server's environment and sets its own (review of
         # #203, rounds 3 and 4; §7.6 for the opt-out).
         window = srv.spawn_window(
-            tmux_session, name=picked, cwd=cwd, command=command, env=env, **geometry
+            tmux_session,
+            name=picked,
+            cwd=cwd,
+            command=command,
+            env=env,
+            width=width,
+            height=height,
         )
     except TmuxError as exc:
         raise FleetError(f"tmux could not start the window: {exc}") from exc
+    if window.resize_refused is not None:
+        # The agent runs either way; what it costs is #149 itself, so it is said
+        # rather than left for the diff panel to explain (review of #162, round 1).
+        notes.append(
+            f"tmux would not size the window {width}x{height} ({window.resize_refused}) — "
+            "it runs at its session's size until a pane shows it, and at 144 columns or "
+            "wider Claude Code opens its diff panel on its own"
+        )
 
     agent = FleetAgent(
         id=agent_id,

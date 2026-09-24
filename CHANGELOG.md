@@ -839,8 +839,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   default is now 120x40 (`core.tmux.DEFAULT_WINDOW_WIDTH/HEIGHT`, under 144
   and above the 110 `/diff` needs on demand), and a spawn from the UI's
   *Start manager* is born at the size its pane will have — a pane that is
-  itself 144 columns or wider still shows the panel. `docs/fleet.md` says how
-  to close a panel that did open: `/diff` once the agent is idle.
+  itself 144 columns or wider still shows the panel. A window added to a
+  running session keeps its size under `fleet attach` instead of following the
+  attached terminal, which would leave it that wide after the detach; the
+  session's first window follows it until the UI has shown it. `docs/fleet.md`
+  says how to close a panel that did open: `/diff` once the agent is idle.
 - **The sidebar bell rings for a real prompt, not for every notification**
   (#153). Every Claude Code `Notification` flipped a session to 🔔 `attention`,
   and 164 of the 183 bells on the reporting machine were the routine idle notice

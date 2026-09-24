@@ -144,6 +144,10 @@ class FakeTmux(TmuxServer):
         """The pid tmux started in each pane — what ``pane_pid`` answers. Unset
         means tmux cannot say, which the identity check reads as "cannot tell"."""
         self.spawned: list[dict[str, object]] = []
+        self.refuse_resize: str | None = None
+        """What tmux says when it refuses the resize ``spawn_window`` makes after
+        ``new-window`` — the real one returns the window anyway, carrying these
+        words in ``WindowInfo.resize_refused`` (#149; review of #162, round 1)."""
         self.typed: list[tuple[str, str, str]] = []
         """``(pane_id, kind, text)`` with kind ``literal`` / ``paste`` / ``key``."""
         self.killed: list[str] = []
@@ -293,6 +297,7 @@ class FakeTmux(TmuxServer):
             dead_status=None,
             current_command=PYTHON_LAUNCHER,
             activity=False,
+            resize_refused=self.refuse_resize,
         )
         self.sessions.setdefault(session, []).append(window)
         self.facts[pane_id] = _facts(pane_id)
@@ -6732,3 +6737,29 @@ def test_spawn_passes_the_callers_size_and_otherwise_the_default_under_the_diff_
     # 110 it needs to open the panel on demand — so `/diff` still works.
     assert 110 <= width < 144
     assert height >= 24
+
+
+def test_a_window_tmux_would_not_size_still_runs_and_the_receipt_says_why(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """A refused resize after ``new-window`` costs geometry, never the agent — and is said.
+
+    Headless, nothing corrects it: the coder runs at its session's size, which for
+    a manager started from a wide pane is past 144 columns, the #149 failure. A
+    receipt with nothing in ``notes`` left the diff panel as the only clue (review
+    of #162, round 1).
+    """
+    fleet_service.spawn(project, "manager", worktree=False)
+    tmux.refuse_resize = "no server running on /tmp/tmux-1000/asq"
+    receipt = fleet_service.spawn(project, "coder", worktree=False)
+
+    [recorded] = [a for a in fleet_service.list_agents(project) if a.agent.role == "coder"]
+    assert recorded.agent.pane_id == receipt.agent.pane_id  # the row stands
+    size = f"{tmux_core.DEFAULT_WINDOW_WIDTH}x{tmux_core.DEFAULT_WINDOW_HEIGHT}"
+    [note] = [n for n in receipt.notes if "would not size" in n]
+    assert size in note and "no server running on /tmp/tmux-1000/asq" in note
+    assert "144 columns" in note
+
+    tmux.refuse_resize = None
+    quiet = fleet_service.spawn(project, "tester", worktree=False)
+    assert not [n for n in quiet.notes if "would not size" in n]

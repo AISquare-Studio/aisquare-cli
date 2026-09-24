@@ -482,6 +482,7 @@ def test_spawn_window_adds_a_window_when_the_session_exists(
     # session's 200x50 and grew Claude Code's diff panel on its own (#149).
     assert fake.commands()[2] == ["resize-window", "-t", "%10", "-x", "120", "-y", "40"]
     assert (info.window_id, info.pane_id, info.current_command) == ("@5", "%10", "sh")
+    assert info.resize_refused is None  # it landed: nothing for the receipt to say
     # The resize is the only command after new-window: no set-environment -u follows.
     assert len(fake.commands()) == 3, "new-window -e is per window: nothing to take back"
 
@@ -495,7 +496,8 @@ def test_spawn_window_keeps_a_window_whose_resize_tmux_refuses(
     window exists — a running agent with no row to show, stop or find it by. A
     refused size costs geometry only: the window keeps the session's size until
     a pane shows it and the UI's own sync corrects it — for a headless window,
-    one nobody opens, possibly never.
+    one nobody opens, possibly never. So the refusal comes back with the window,
+    in tmux's words, for the spawn's receipt (review of #162, round 1).
     """
     fake = FakeTmux(
         OK,  # has-session
@@ -508,6 +510,7 @@ def test_spawn_window_keeps_a_window_whose_resize_tmux_refuses(
     # The caller's size, not the default, on the existing-session branch too.
     assert fake.commands()[2] == ["resize-window", "-t", "%11", "-x", "97", "-y", "31"]
     assert (info.window_id, info.pane_id, info.current_command) == ("@6", "%11", "claude")
+    assert info.resize_refused == "width too large"
 
 
 def test_spawn_window_without_env_passes_no_dash_e(

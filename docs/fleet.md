@@ -960,10 +960,14 @@ at least 144 columns wide, and once opened it opens again on every edit, in
 this session and later ones. Fleet windows are born 120 columns wide for
 exactly this reason (`core.tmux.DEFAULT_WINDOW_WIDTH`) and a spawn from the UI
 uses the pane's real size, so a panel should only appear if the pane itself is
-that wide. To close one: wait until the agent is idle (`⏸ waiting`) and type
-`/diff` into the pane — typed while Claude is working it is queued as a
-message, which is why it seemed to do nothing. The `✕` in the panel's header
-needs a forwarded click, which the pane does not do yet (#148).
+that wide — or after `aisquare fleet attach` from a terminal that wide. Under an
+attach the session's first window (usually the manager's) follows the
+terminal's size unless the UI has shown it, and keeps that width after you
+detach; every other window keeps its own size, panned in a smaller terminal and
+padded in a larger one. To close one: wait until the agent is idle
+(`⏸ waiting`) and type `/diff` into the pane — typed while Claude is working it
+is queued as a message, which is why it seemed to do nothing. The `✕` in the
+panel's header needs a forwarded click, which the pane does not do yet (#148).
 
 **An agent is stuck on a permission prompt.** Its row shows **🔔 NEEDS YOU**
 and the terminal rings. Nothing nudges it and nothing answers for it: click the

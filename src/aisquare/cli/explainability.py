@@ -37,7 +37,7 @@ from aisquare.core.config import ExplainabilityTarget, load_config, save_config
 from aisquare.core.state import get_state
 from aisquare.core.store import store_session
 from aisquare.core.workspace import active_project
-from aisquare.models import ProjectInfo
+from aisquare.models import ProjectInfo, TraceDestination
 from aisquare.services import destinations as dest
 from aisquare.services import explainability_ops as ops
 from aisquare.services import iam
@@ -131,7 +131,10 @@ def key_set(
     """
     project = _project_for(project_ref)
     settings = load_config().explainability
-    target = ops.resolve_target(settings, target_name).name
+    # With the project (#142): its destination names the deployment when
+    # `--target` does not, so the key lands where the project's traces are
+    # resolved — the fallback `use` points at when the API will not mint one.
+    target = ops.resolve_target(settings, target_name, project_id=project.id).name
     if from_env is not None:
         value = os.environ.get(from_env, "").strip()
         if not value:
@@ -146,8 +149,11 @@ def key_set(
         value = sys.stdin.read().strip()
         if not value:
             fail("nothing on stdin — the key was empty", error="no_key")
-    path = store_project_api_key(project.id, value)
     with store_session() as store:
+        # The same file holds a key the CLI minted (#142): this one replaces it,
+        # so the minted key is revoked and stops being called minted.
+        dest.retire_minted_key(store, project.id, session=_signed_in_quietly())
+        path = store_project_api_key(project.id, value)
         binding = store.set_project_explainability(
             project.id, target=target, key_path=path, set_by=_who()
         )
@@ -198,6 +204,7 @@ def key_clear(project_ref: Annotated[str | None, _PROJECT_OPTION] = None) -> Non
     """Detach the project's key and delete its file; the machine key applies again."""
     project = _project_for(project_ref)
     with store_session() as store:
+        dest.retire_minted_key(store, project.id, session=_signed_in_quietly())  # (#142)
         had_row = store.clear_project_explainability(project.id)
     had_file = clear_project_api_key(project.id)
     if get_state().json_output:
@@ -224,6 +231,14 @@ def _session_or_fail() -> iam.Session:
     if session is None:
         fail("Not signed in. Run aisquare login.", error="not_authenticated")
     return session
+
+
+def _signed_in_quietly() -> iam.Session | None:
+    """The sign-in when there is one, for a best-effort revoke that must never cost the command."""
+    try:
+        return iam.current_session()
+    except iam.IamError:
+        return None
 
 
 def _workspace_rows(found: list[dest.Workspace]) -> list[dict[str, object]]:
@@ -334,6 +349,11 @@ def studios(
         typer.echo(f"{s.name:<{width}}  id {s.id}" + (f"  ({marks})" if marks else ""))
 
 
+def _moved(previous: TraceDestination, row: TraceDestination) -> bool:
+    """Whether ``use`` re-pointed the project into another workspace (ids are per API)."""
+    return (previous.workspace_id, previous.api_url) != (row.workspace_id, row.api_url)
+
+
 def _routing_lines(report: dest.RosterReport) -> list[str]:
     return [f"{b.agent} → {'bound' if b.ok else 'not bound: ' + b.detail}" for b in report.bound]
 
@@ -371,13 +391,15 @@ def use(
     silently start sending.
 
     Idempotent: re-running with the same destination changes nothing; a
-    different workspace drops the key the CLI minted for the old one.
+    different workspace revokes and drops the key the CLI minted for the old
+    one. Only the project's own key skips the mint — a machine key was issued
+    for whichever workspace set the machine up, so it only answers meanwhile.
     """
     project = _project_for(project_ref)
     pname = project.root.name or project.id
     if clear:
         with store_session() as store:
-            previous = dest.forget(store, project)
+            previous = dest.forget(store, project, session=_signed_in_quietly())
         if get_state().json_output:
             typer.echo(json.dumps({"project": project.id, "cleared": dest.as_json(previous)}))
         elif previous is None:
@@ -394,7 +416,9 @@ def use(
     session = _session_or_fail()
     workspace_ref, _, studio_ref = destination.partition("/")
     try:
-        workspace = dest.pick_workspace(workspace_ref, dest.list_workspaces(session))
+        workspace = dest.pick_workspace(
+            workspace_ref, dest.list_workspaces(session), members_only=True
+        )
         studios_seen = dest.list_studios(session, workspace)
         studio = dest.pick_studio(studio_ref or None, studios_seen, workspace)
     except iam.IamError as exc:
@@ -413,12 +437,18 @@ def use(
         target = ops.resolve_target(config.explainability, None, project_id=project.id)
         key_note: str
         minted = None
-        if target.api_key is not None:
-            key_note = {
-                "project": "the project's own key",
-                "env": f"${target.api_key_env} from this shell",
-                "file": "the machine key file",
-            }.get(target.key_source, target.key_origin)
+        # Only the PROJECT's own key is taken as this destination's credential.
+        # A machine key — the target's variable, or the file — was issued for
+        # whichever workspace set the machine up, so it never stands in for a
+        # mint; it only answers meanwhile, and the line says it is unchecked.
+        if target.key_source == "project":
+            key_note = "the project's own key"
+            if previous is not None and not row.key_uid and _moved(previous, row):
+                key_note += (
+                    f" — attached by hand while it pointed at {previous.label}; if it is not "
+                    f"{row.workspace_name}'s, attach that workspace's: aisquare explainability "
+                    "key set"
+                )
         elif no_key:
             key_note = "none — skipped (--no-key)"
         else:
@@ -431,6 +461,15 @@ def use(
                 key_note = f"none — {exc.message}"
             except dest.DestinationError as exc:
                 key_note = f"none — {exc.message}"
+        machine = {
+            "env": f"${target.api_key_env} from this shell",
+            "file": "the machine key file",
+        }.get(target.key_source)
+        if machine is not None:
+            key_note += (
+                f"; meanwhile {machine} answers — a machine key, not checked to be "
+                f"{row.workspace_name}'s"
+            )
     routing = dest.bind_roster(row, target) if target.api_key else dest.RosterReport()
 
     if get_state().json_output:
@@ -475,7 +514,9 @@ def use(
     if not config.explainability.enabled:
         typer.echo("  next:     aisquare explainability enable   (tracing is off on this machine)")
     else:
-        typer.echo("  next:     aisquare doctor --live")
+        # With the target: doctor resolves the MACHINE's, and this project's
+        # traces go to the destination's deployment (#142).
+        typer.echo(f"  next:     aisquare doctor --live --target {shlex.quote(target.name)}")
 
 
 @app.command()
@@ -990,7 +1031,10 @@ def env(
     # key, root, fail-open. See the docstring for what a post costs and why
     # only a line that starts the agent next may pay it.
     wiring = wire_session(
-        ops.effective_settings(settings, target_name),
+        # The same project as the key: its destination may name another target
+        # than the machine's, and a proxy from one with a key from the other
+        # hands that key to the wrong deployment (#142).
+        ops.effective_settings(settings, target_name, project_id=project.id),
         role,
         session_id=session_id,
         base_env=dict(os.environ),

@@ -415,6 +415,7 @@ def effective_settings(
     name: str | None = None,
     *,
     env: Mapping[str, str] | None = None,
+    project_id: str | None = None,
 ) -> ExplainabilitySettings:
     """``settings`` with the active target's overrides folded into the top level.
 
@@ -423,8 +424,13 @@ def effective_settings(
     about targets. Without this fold, ``enable --target prod --proxy-url …``
     would write a value that every launch then ignored — config that looks
     applied and is not, which is worse than config that is missing.
+
+    ``project_id`` MUST be the one the key was resolved for. A project's
+    destination (#142) can name another target than the machine's, and the
+    wiring puts this fold's proxy beside that resolution's key: folded without
+    the project, a launch sent a production key to the staging proxy.
     """
-    target = resolve_target(settings, name, env=env)
+    target = resolve_target(settings, name, env=env, project_id=project_id)
     return settings.model_copy(
         update={
             "proxy_url": target.proxy_url,

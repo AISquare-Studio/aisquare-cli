@@ -1512,6 +1512,9 @@ class SqliteStore:
                 "team_session",
                 "fleet_agent",
                 "metric",
+                # FK to project (#142): left in place, the project delete below
+                # is refused and the whole purge rolls back.
+                "project_destination",
             ):
                 cursor = self._conn.execute(
                     f"DELETE FROM {table} WHERE project_id = ?", (project_id,)

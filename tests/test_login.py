@@ -378,6 +378,7 @@ def test_logout_revokes_and_forgets_but_keeps_other_credentials(
         "signed_out": False,
         "server_revoked": False,
         "env_token_still_set": False,
+        "minted_keys_cleared": 0,  # the signed-in branch's shape (#142)
     }
 
 

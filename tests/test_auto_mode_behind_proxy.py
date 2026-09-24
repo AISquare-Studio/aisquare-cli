@@ -44,6 +44,8 @@ REFUSAL = (
     "determine the safety of Bash right now. Wait a moment and then try this action again."
 )
 
+REPO = Path(__file__).resolve().parents[1]
+
 
 # --- transcripts on disk --------------------------------------------------------------------
 
@@ -63,11 +65,11 @@ def _refused() -> dict[str, Any]:
     }
 
 
-def _plain_result(text: str = "ok") -> dict[str, Any]:
-    return {
-        "type": "user",
-        "message": {"role": "user", "content": [{"type": "tool_result", "content": text}]},
-    }
+def _plain_result(text: str = "ok", *, is_error: bool = False) -> dict[str, Any]:
+    block: dict[str, Any] = {"type": "tool_result", "content": text}
+    if is_error:
+        block["is_error"] = True
+    return {"type": "user", "message": {"role": "user", "content": [block]}}
 
 
 def _transcript(path: Path, entries: list[Any]) -> Path:
@@ -111,6 +113,28 @@ def test_the_first_turn_size_sums_the_three_input_fields_of_the_first_assistant_
     assert transcripts.first_turn_tokens(odd) == 0
 
 
+def test_a_synthetic_api_error_entry_is_not_the_first_turn(tmp_path: Path) -> None:
+    """Claude Code's own entry for a failed request carries zero usage: not a baseline of 0."""
+    zeros = {"input_tokens": 0, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0}
+    real = {
+        "input_tokens": 2,
+        "cache_creation_input_tokens": 6_959,
+        "cache_read_input_tokens": 130_041,
+    }
+    both = {**_assistant(zeros, model="<synthetic>"), "isApiErrorMessage": True}
+    flag_only = {**_assistant(zeros), "isApiErrorMessage": True}
+    for name, synthetic in (
+        ("both", both),
+        ("model", _assistant(zeros, model="<synthetic>")),
+        ("flag", flag_only),
+    ):
+        path = _transcript(tmp_path / f"{name}.jsonl", [synthetic, _assistant(real)])
+        assert transcripts.first_turn_tokens(path) == 137_002, name
+    # Only the synthetic entry so far: nothing measured yet, not "0k and fine".
+    alone = _transcript(tmp_path / "alone.jsonl", [both])
+    assert transcripts.first_turn_tokens(alone) is None
+
+
 def test_refusals_are_counted_in_tool_results_only_and_from_the_tail(tmp_path: Path) -> None:
     path = _transcript(
         tmp_path / "manager.jsonl",
@@ -124,7 +148,11 @@ def test_refusals_are_counted_in_tool_results_only_and_from_the_tail(tmp_path: P
                 "type": "user",
                 "message": {
                     "content": [
-                        {"type": "tool_result", "content": [{"type": "text", "text": REFUSAL}]}
+                        {
+                            "type": "tool_result",
+                            "content": [{"type": "text", "text": REFUSAL}],
+                            "is_error": True,
+                        }
                     ]
                 },
             },
@@ -138,6 +166,34 @@ def test_refusals_are_counted_in_tool_results_only_and_from_the_tail(tmp_path: P
     )
     assert transcripts.refusal_count(old, tail_bytes=4_000) == 0
     assert transcripts.refusal_count(old) == 1
+
+
+def test_a_tool_output_that_quotes_the_refusal_is_not_one(tmp_path: Path) -> None:
+    """An agent working on this repository reads the files that name the signature.
+
+    A successful Read of this module or of the docs, a grep that exits non-zero
+    over them, and a failing test run that prints the sentence all CONTAIN the
+    marker; none of them is Claude Code refusing a tool call.
+    """
+    sources = [
+        Path(transcripts.__file__),
+        REPO / "docs" / "fleet.md",
+        REPO / "docs" / "connecting-your-agents-to-explainability.md",
+    ]
+    reads = [source.read_text(encoding="utf-8") for source in sources]
+    assert all(transcripts.REFUSAL_MARKER in text for text in reads), "the premise"
+    grep_hit = f"docs/fleet.md:1:{REFUSAL}"
+    quoted = [
+        *[_plain_result(text) for text in reads],  # successful Reads
+        _plain_result(grep_hit),  # a grep that matched: exit 0
+        _plain_result("Exit code 1\n" + grep_hit, is_error=True),  # grep … && false
+        _plain_result("FAILED tests/x.py\n" + REFUSAL + "\n" + "E" * 2_000, is_error=True),
+        _plain_result(REFUSAL + "\n" + "x" * 2_000, is_error=True),  # long: an output
+    ]
+    assert transcripts.refusal_count(_transcript(tmp_path / "coder.jsonl", quoted)) == 0
+    # The same session with the refusals themselves: they are still counted.
+    refused = _transcript(tmp_path / "refused.jsonl", [*quoted, *[_refused()] * 3])
+    assert transcripts.refusal_count(refused) == 3
 
 
 # --- the baseline over the store ------------------------------------------------------------

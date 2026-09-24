@@ -1562,8 +1562,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   while it is still empty, so the secrets never sit under the permissions the
   home hands down; and a file that exists but cannot be read (a root-owned
   one left by `sudo`) is refused rather than replaced by the one key being
-  stored. An `aisquare logout` whose rewrite of the remaining keys could not
-  be restricted says so on stderr, as `login` does.
+  stored; a sign-out that cannot read it fails and says so, rather than
+  reporting a session gone that is still on disk. An `aisquare logout` whose
+  rewrite of the remaining keys could not be restricted says so on stderr, as
+  `login` does.
 - **A limit message's named zone is read on Windows too.** Windows has no IANA
   time zone database, so `ZoneInfo("America/Toronto")` raised there and a
   reset named in a zone fell back to the offset in force now: a weekly reset

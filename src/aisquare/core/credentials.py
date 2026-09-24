@@ -172,6 +172,13 @@ def drop(*keys: str) -> tuple[dict[str, str], bool]:
     no home and no lock file, then again under it, where the file is the
     truth: another writer may have landed in between.
 
+    Both reads are strict, as ``store``'s is. A file that could not be read is
+    not a file without these keys: read as ``{}``, a read that failed (under
+    the lock, after one without it had succeeded: the Windows contention
+    retry running out, an ``EIO``) was "nothing to drop", nothing was written,
+    and the sign-out reported the session gone while it was still on disk
+    (review of the #65 fold, round 2, F2). Raises what ``store`` raises.
+
     Returns what remains and whether the file could be restricted to this
     account, as ``store`` does; ``True`` when nothing was written. Dropping
     one key REWRITES the file that still holds the others, as a new file, so
@@ -179,13 +186,13 @@ def drop(*keys: str) -> tuple[dict[str, str], bool]:
     down: the caller has something to say about it (review of the #65 fold,
     F2), where the in-place write this replaced kept the file's own.
     """
-    data = load_all()
+    data = load_all(strict=True)
     if not any(key in data for key in keys):
         return data, True
     paths.ensure_home()
     path = paths.credentials_path()
     with _replacement(path) as pending, _locked(path):
-        data = load_all()
+        data = load_all(strict=True)
         remaining = {k: v for k, v in data.items() if k not in keys}
         if remaining == data:
             return remaining, True

@@ -13,12 +13,16 @@ synthetic parts, as in ``test_credentials_single_format.py``.
 
 from __future__ import annotations
 
+import contextlib
+import errno
 import json
 import os
 import stat
 import sys
 import threading
+from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -268,6 +272,41 @@ def test_a_file_that_is_not_utf8_reads_as_nothing_and_is_not_replaced(
     with pytest.raises(UnicodeDecodeError):
         credentials.store(serve_token=_TOKEN)
     assert creds.read_bytes() == original
+
+
+@pytest.mark.parametrize("failing", ["before the lock", "under the lock"])
+def test_a_drop_that_cannot_read_the_file_fails_rather_than_dropping_nothing(
+    isolated_home: Path, monkeypatch: pytest.MonkeyPatch, failing: str
+) -> None:
+    """``drop`` read without ``strict``, so a read that failed was ``{}``: nothing to drop,
+    ``({}, True)``, nothing written, and ``aisquare logout`` and the fleet UI both said
+    "Signed out" with the session still on disk (review of the #65 fold, round 2, F2). The
+    read under the lock can fail after the one before it succeeded: the Windows contention
+    retry running out, or an ``EIO``. Either read now raises, as ``store``'s does, so the
+    caller reports a sign-out that failed."""
+    credentials.store(api_key=_KEY, iam_token="t")
+    creds = paths.credentials_path()
+    real_read_text, real_locked = Path.read_text, credentials._locked
+    unreadable = failing == "before the lock"
+
+    def read_text(path: Path, *args: Any, **kwargs: Any) -> str:
+        if unreadable and path == creds:
+            raise OSError(errno.EIO, "Input/output error")
+        return real_read_text(path, *args, **kwargs)
+
+    @contextlib.contextmanager
+    def locked(path: Path) -> Iterator[None]:
+        nonlocal unreadable
+        with real_locked(path):
+            unreadable = True
+            yield
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+    monkeypatch.setattr(credentials, "_locked", locked)
+    with pytest.raises(OSError, match="Input/output error"):
+        credentials.drop("iam_token")
+    unreadable = False
+    assert credentials.load_all() == {"api_key": _KEY, "iam_token": "t"}
 
 
 def test_the_secrets_go_into_a_file_already_restricted_to_this_account(

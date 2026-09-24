@@ -79,3 +79,23 @@ def test_the_experiment_extra_is_a_real_extra_in_the_built_metadata() -> None:
             "its metadata is another build's; reinstall with `make install` to check it here"
         )
     assert "experiment" in (metadata("aisquare-cli").get_all("Provides-Extra") or [])
+
+
+def test_the_rich_floor_provides_split_graphemes() -> None:
+    """Round 8 of #203 — the first finding about the shipped artifact rather than
+    the logic. ``cli/ui/terminal.py`` imports ``split_graphemes`` from
+    ``rich.cells``, which exists from rich 14.3.0 (verified against the published
+    wheels: 14.2.0 lacks it, 14.3.0 has it); the package declared ``rich>=13.7``
+    and textual only asks for ``>=14.2``, so a clean resolve could install a rich
+    on which importing the UI package raises ``ImportError`` and ``asq`` dies.
+    The floor is pinned here so it cannot drift below the symbol again."""
+    import tomllib
+
+    pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
+    deps = tomllib.loads(pyproject.read_text(encoding="utf-8"))["project"]["dependencies"]
+    rich = next(d for d in deps if d.startswith("rich"))
+    floor = tuple(int(part) for part in rich.split(">=", 1)[1].split(",")[0].strip().split("."))
+    assert floor >= (14, 3), f"rich floor {rich!r} is below 14.3, where split_graphemes appears"
+    from rich.cells import split_graphemes  # the symbol the floor exists for
+
+    assert callable(split_graphemes)

@@ -14,10 +14,14 @@ so repos that never opted in never see team output.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
+import sqlite3
+import sys
+from collections.abc import Mapping
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import NamedTuple
@@ -27,8 +31,24 @@ from aisquare.core import claude_accounts as claude_accounts_core
 from aisquare.core.config import FleetSettings, load_config
 from aisquare.core.ids import new_event_id, new_task_id
 from aisquare.core.store import AmbiguousIdError, ContextStore, store_session, unmet_needs
-from aisquare.models import FleetAgent, ProjectInfo, TaskStatus, TeamEvent, TeamSession, TeamTask
+from aisquare.core.tmux import TmuxError
+from aisquare.models import (
+    CLOSED_STATUSES,
+    FleetAgent,
+    ProjectInfo,
+    TaskStatus,
+    TeamEvent,
+    TeamSession,
+    TeamTask,
+)
 from aisquare.services import distill as distill_service
+
+#: The fail-open reads of the fleet row say here what they swallowed. Nothing
+#: in the CLI configures logging, so a WARNING reaches stderr through the
+#: logging module's last-resort handler — a hook's stderr is Claude Code's hook
+#: log — as one line: a traceback is what an operator must never be handed for
+#: a preference that stopped working.
+_log = logging.getLogger(__name__)
 
 _SHORT_ID = 8
 _DELTA_LIMIT = 10
@@ -54,6 +74,20 @@ _CLAIM_ORPHAN_AFTER = timedelta(hours=4)
 MANAGER_ROLE = "manager"
 """The one role whose ``Stop`` hook may keep it going (docs/plans/fleet-tui.md §7.3)."""
 
+CLEAR_REASON = "clear"
+"""Claude Code's ``SessionEnd`` reason for ``/clear``: the session id ends, the process
+does not — and the ``SessionStart`` of the id that follows comes AFTER this end
+(measured on 2.1.272). See rule 2 in the fleet-row section below."""
+
+HANDOVER_STATE = "switching"
+"""The ``team_session.state`` ``fleet switch`` sets before it ``/exit``s an agent that is
+about to start again under another account (#146): its ``SessionEnd`` then parks the
+claims, as a ``/clear`` does, instead of releasing them (review of #205, finding 6) —
+for the SAME id when the replacement resumes the session, for the replacement's new
+id to take over when it starts fresh (fourth round). Transient — a resumed session's
+start hook writes ``working`` over it, a fresh start retires the old presence — and
+unknown to ``fleet._derive``, which falls back to the pane."""
+
 #: A numbered SEAT: a first-class role with a crew index glued on — ``coder1``,
 #: ``reviewer2``. ``cli/launch.py`` accepts these because crews run several agents
 #: in one role and need them apart on the board; the base is derived by stripping
@@ -75,7 +109,8 @@ def base_role(role: str) -> str:
 #: The board events worth waking a manager for: a sub-agent's verdict or hand-off
 #: (``task_review``, ``task_done``), a task that needs the manager back
 #: (``task_blocked``, ``task_reopened``), a result or a question on the board, and
-#: an agent that went away (``agent_exited`` is the fleet's, emitted by ``reap``).
+#: an agent that went away (``agent_exited`` is the fleet's, emitted wherever a
+#: fleet row ends: ``fleet.stop`` — and so ``fleet shutdown`` — and ``fleet.reap``).
 #: A plain note, a decision or a claim is news, not a decision the manager has to
 #: make — it arrives with the next prompt's delta like everyone else's.
 MANAGER_WAKE_KINDS: frozenset[str] = frozenset(
@@ -412,19 +447,47 @@ def session_account(transcript_path: str | None) -> str | None:
     return os.environ.get("CLAUDE_CONFIG_DIR", "").strip() or None
 
 
-def account_label(account: str | None) -> str | None:
+def slot_labels_via(store: ContextStore) -> Mapping[int, str]:
+    """Slot → label through the caller's OWN store handle, for a board rendered inside a hook.
+
+    The alias everywhere (review of #205, finding 10 and third round) — but a
+    hook renders the board while it holds a session with pending writes, and a
+    second connection opened underneath would wait on that write until the
+    busy timeout, so the labels are read through the handle it already has.
+    Fails open to ``{}``: ``account N`` is the fallback everywhere.
+    """
+    from aisquare.services import claude_accounts as accounts_service  # lazy: no import cycle
+
+    try:
+        return accounts_service.slot_labels(store=store)
+    except Exception:
+        return {}
+
+
+def account_label(account: str | None, labels: Mapping[int, str] | None = None) -> str | None:
     """The short display form of an account.
 
-    ``account N`` for a slot the CLI owns, the directory name otherwise. A
-    managed slot's directory is named by its number alone
-    (``…/claude-accounts/2``), and a bare ``[2]`` beside a session row would
-    read as a count.
+    The slot's label from ``labels`` (``services.claude_accounts.slot_labels``:
+    the alias when one is set) when the caller has them, else the built-in
+    name — ``plain claude`` for slot 1, ``account N`` for a managed slot — and
+    the directory name for one the CLI does not own. A managed slot's
+    directory is named by its number alone (``…/claude-accounts/2``), and a
+    bare ``[2]`` beside a session row would read as a count. Slot 1 is the
+    plain claude's own directory, which ``managed_slot`` does not know, so the
+    slot is read with ``slot_of``: through ``managed_slot`` alone an aliased
+    slot 1 was ``.claude`` on the board and in ``watch`` while ``fleet ls``
+    and the agent header said its alias (review of #205, fourth round).
     """
     if not account:
         return None
-    slot = claude_accounts_core.managed_slot(account)
+    from aisquare.services import claude_accounts as accounts_service  # lazy: no import cycle
+
+    slot = accounts_service.slot_of(account)
     if slot is not None:
-        return f"account {slot}"
+        named = (labels or {}).get(slot)
+        if named:
+            return named
+        return "plain claude" if slot == claude_accounts_core.DEFAULT_SLOT else f"account {slot}"
     return Path(account).name
 
 
@@ -678,7 +741,12 @@ def _signal_state(name: str, blob: str) -> SignalState:
 
 
 def set_signal(
-    name: str, value: str, *, session_ref: str | None = None, cwd: Path | None = None
+    name: str,
+    value: str,
+    *,
+    session_ref: str | None = None,
+    cwd: Path | None = None,
+    project_id: str | None = None,
 ) -> tuple[SignalState, str | None]:
     """Set a named board state (``team signal NAME VALUE``); returns (state, prev).
 
@@ -690,7 +758,44 @@ def set_signal(
     signal receipts like any other write.
     """
     _require_enabled()
+    _DELIVERY.set(None)  # FIRST: a refused signal must not leave the last write's receipt readable
+    _validate_signal(name, value)  # before any store is opened or board resolved
+    with store_session() as store:
+        session = _resolve_session(store, session_ref)
+        # A caller that names the project by ID resolves the board id-addressed,
+        # never through cwd — `AISQUARE_TEAM_HUB` redirects cwd resolution to one
+        # hub project, so `fleet shutdown -P b` cleared project A's pause and
+        # reported B (review of #121, round 8). `_board_of` also skips
+        # `ensure_project`, so a forgotten project's tombstone is not revived.
+        board = (
+            _board_of(store, project_id) if project_id is not None else _board(store, session, cwd)
+        )
+        state, prev, event = _write_signal(store, board, session, name, value)
+    _record_delivery(event, board)  # the receipt for this write; `state.seq` is already the row's
+    return state, prev
+
+
+def set_signal_in(store: ContextStore, project_id: str, name: str, value: str) -> None:
+    """:func:`set_signal` for ``project_id`` through a store the CALLER holds open.
+
+    For a pass over many projects — ``fleet shutdown`` clearing every confirmed
+    project's pause — which used to open a connection per project through
+    :func:`set_signal` (connect, WAL switch, migrations each time) on top of one
+    per row it ended (review of #203, round 4). Same validation, same
+    one-transaction write; no delivery receipt is published, because the caller
+    is not the ``team signal`` command and there is nobody to hand it to — and
+    the receipt of an EARLIER write in this process is cleared, so nothing reads
+    it as this one's (round 5). Returns nothing: its one caller reads nothing.
+    """
+    _require_enabled()
+    _validate_signal(name, value)
     _DELIVERY.set(None)
+    board = _board_of(store, project_id)
+    _write_signal(store, board, None, name, value)
+
+
+def _validate_signal(name: str, value: str) -> None:
+    """Names and values are single tokens by contract (#23); refused before any write."""
     if not _SIGNAL_NAME.fullmatch(name):
         raise ValueError(
             f"signal name {name!r} must be a lowercase token "
@@ -698,51 +803,80 @@ def set_signal(
         )
     if not _SIGNAL_VALUE.fullmatch(value):
         raise ValueError(f"signal value {value!r} must be a single token (no whitespace)")
-    with store_session() as store:
-        session = _resolve_session(store, session_ref)
-        board = _board(store, session, cwd)
-        key = _signal_key(board.id, name)
-        prior = store.get_meta(key)
-        prev = _signal_state(name, prior).value if prior is not None else None
-        text = f"{name}: {value}" if prev is None else f"{name}: {value} (was {prev})"
-        now = _now()
-        event = store.add_signal_event(
-            TeamEvent(
-                id=new_event_id(),
-                project_id=board.id,
-                session_id=session.id if session else None,
-                kind="signal",
-                text=text,
-                created_at=now,
-            ),
-            key,
-            {
-                "value": value,
-                "session_id": session.id if session else None,
-                "updated_at": now.isoformat(),
-            },
-        )
-    stored = _record_delivery(event, board)
+
+
+def _write_signal(
+    store: ContextStore,
+    board: _Board,
+    session: TeamSession | None,
+    name: str,
+    value: str,
+) -> tuple[SignalState, str | None, TeamEvent]:
+    """The one write behind :func:`set_signal` and :func:`set_signal_in`.
+
+    Validation is the CALLER's, before it opens or resolves anything:
+    ``_board`` runs ``ensure_project``, which revives a forgotten project's
+    tombstone, so a signal that was going to be refused used to register the
+    directory first (review of the fold).
+    """
+    key = _signal_key(board.id, name)
+    prior = store.get_meta(key)
+    prev = _signal_state(name, prior).value if prior is not None else None
+    text = f"{name}: {value}" if prev is None else f"{name}: {value} (was {prev})"
+    now = _now()
+    event = store.add_signal_event(
+        TeamEvent(
+            id=new_event_id(),
+            project_id=board.id,
+            session_id=session.id if session else None,
+            kind="signal",
+            text=text,
+            created_at=now,
+        ),
+        key,
+        {
+            "value": value,
+            "session_id": session.id if session else None,
+            "updated_at": now.isoformat(),
+        },
+    )
     state = SignalState(
         name=name,
         value=value,
         set_by=session.id if session else None,
-        seq=stored.seq,
+        seq=event.seq,
         updated_at=now,
     )
-    return state, prev
+    return state, prev, event
 
 
 def read_signal(
-    name: str, *, session_ref: str | None = None, cwd: Path | None = None
+    name: str,
+    *,
+    session_ref: str | None = None,
+    cwd: Path | None = None,
+    project_id: str | None = None,
 ) -> SignalState | None:
     """The current value of one named board state (``team signal NAME``)."""
     _require_enabled()
     with store_session() as store:
         session = _resolve_session(store, session_ref)
-        board = _board(store, session, cwd)
-        blob = store.get_meta(_signal_key(board.id, name))
-        return _signal_state(name, blob) if blob is not None else None
+        board = (
+            _board_of(store, project_id) if project_id is not None else _board(store, session, cwd)
+        )
+        return _read_signal(store, board.id, name)
+
+
+def read_signal_in(store: ContextStore, project_id: str, name: str) -> SignalState | None:
+    """:func:`read_signal` for ``project_id`` through a store the CALLER holds open
+    (see :func:`set_signal_in` for why)."""
+    _require_enabled()
+    return _read_signal(store, project_id, name)
+
+
+def _read_signal(store: ContextStore, project_id: str, name: str) -> SignalState | None:
+    blob = store.get_meta(_signal_key(project_id, name))
+    return _signal_state(name, blob) if blob is not None else None
 
 
 def list_signals(*, session_ref: str | None = None, cwd: Path | None = None) -> list[SignalState]:
@@ -1023,6 +1157,10 @@ def _finish_task(
             raise KeyError(ref)
         session = _resolve_session(store, session_ref)
         updated = store.set_task_status(task.id, status)
+        if status in CLOSED_STATUSES:
+            # Rule 3 of the fleet-row section: the rows spawned for this task
+            # have nothing left to be told about it.
+            store.retire_fleet_assignments(updated.id)
         text = updated.title if note is None else f"{updated.title} — {note}"
         event = _emit(
             store,
@@ -1112,7 +1250,7 @@ def next_task(
         # a looper picking from a pool; it was wrong for an agent the manager
         # started FOR a task: that one took whatever was oldest, and two spawned
         # together raced for the same one while their own sat idle.
-        row = _fleet_row_for(store, session.id, board.id) if session is not None else None
+        row = _fleet_row_hint(store, session, board.id, claim=claim)
         prefer = row.task_id if row is not None else None
         picked: TeamTask | None = None
         while True:
@@ -1304,7 +1442,10 @@ def hook_session_start(
         )
         if role is not None and known is not None and known.role != role:
             session = store.update_session(session.id, role=role)
-        assigned = _assignment(store, session.id, project.id, source)
+        # Before the board is read below: the assignment may move this agent's
+        # claims onto its new id, and a board read first still named the old one.
+        # ``source`` plays no part — see rule 1 of the fleet-row section.
+        assigned = _assignment(store, session.id, project.id)
         # Presence is board state, not feed traffic: /clear cycles, resumes and
         # ephemeral `claude -p` children would otherwise spam join/left pairs.
         return collision + _render_board(
@@ -1314,6 +1455,7 @@ def hook_session_start(
             store.recent_events(project.id, limit=_BOARD_EVENTS),
             me=session,
             assigned=assigned,
+            labels=slot_labels_via(store),
         )
 
 
@@ -1355,13 +1497,19 @@ def hook_prompt_heartbeat(
                     effort=harness.clean_effort(effort),
                 )
             )
+            # This door binds a fleet row too (an agent that started before the
+            # orchestrator was switched on) — and does so BEFORE the tasks are
+            # read: computed as an argument, the claim it moved was rendered
+            # under its old holder on this very board (review of #135).
+            assigned = _assignment(store, session.id, project.id)
             return _render_board(
                 project,
                 store.team_sessions(project.id),
                 store.team_tasks(project.id),
                 store.recent_events(project.id, limit=_BOARD_EVENTS),
                 me=session,
-                assigned=_assignment(store, session.id, project.id, None),
+                assigned=assigned,
+                labels=slot_labels_via(store),
             )
         # Same check as session_start, on the path that actually runs every turn.
         # It must survive the empty-delta early return below: a collision warning
@@ -1369,6 +1517,10 @@ def hook_prompt_heartbeat(
         # exactly as long as the two agents were quiet, which is when the
         # interleaved claims do their damage.
         collision = _shared_row_banner(session, transcript_path, _now())
+        # The fleet-row bind the start hook could not make is tried again here,
+        # and the briefing it was owed comes with it (rule 2, second half).
+        late = _late_assignment(store, session)
+        briefing = "\n".join(_assignment_lines(late, session)) + "\n" if late is not None else ""
         lease = _now() + timedelta(minutes=orchestrator.lease_minutes())
         store.renew_leases(session.id, lease)
         raw = store.events_since(
@@ -1382,12 +1534,12 @@ def hook_prompt_heartbeat(
         if not events or not orchestrator.delta_enabled():
             cursor = raw[-1].seq if raw else None
             store.touch_session(session.id, cursor=cursor, state="working")
-            return collision
+            return collision + briefing
         truncated = len(events) > _DELTA_LIMIT
         shown = events[:_DELTA_LIMIT]
         store.touch_session(session.id, cursor=shown[-1].seq, state="working")
         roles = {s.id: s.role for s in store.team_sessions(session.project_id)}
-        return collision + _render_delta(shown, roles, truncated=truncated)
+        return collision + briefing + _render_delta(shown, roles, truncated=truncated)
 
 
 def hook_stop(
@@ -1645,6 +1797,10 @@ class TurnFailure:
     session: TeamSession
     error: str
     notice: claude_accounts_core.LimitNotice | None
+    already_limited: bool = False
+    """The row was ``limited`` before this hook fired: Claude Code re-fires
+    ``StopFailure`` for the same window, and a second firing must start no second
+    hand-over (review of #205, second round)."""
 
     @property
     def limited(self) -> bool:
@@ -1653,7 +1809,6 @@ class TurnFailure:
 
 def hook_stop_failure(
     session_id: str,
-    cwd: Path | None,
     *,
     error: str | None,
     message: str | None,
@@ -1673,8 +1828,9 @@ def hook_stop_failure(
 
     Every other error (``overloaded``, ``authentication_failed``,
     ``billing_error``…) ends the turn like a Stop would — the row says
-    ``waiting`` — with a ``turn_failed`` feed line naming it, so the board does
-    not show a session as mid-turn for thirty minutes because its turn died.
+    ``waiting``, unless ``fleet switch`` has marked it :data:`HANDOVER_STATE` —
+    with a ``turn_failed`` feed line naming it, so the board does not show a
+    session as mid-turn for thirty minutes because its turn died.
     """
     if not orchestrator.team_enabled():
         return None
@@ -1685,15 +1841,26 @@ def hook_stop_failure(
         if session is None:
             return None
         if kind != "rate_limit":
-            store.touch_session(session.id, state="waiting")
+            # Not over a hand-over's mark either (the `rate_limit` branch below
+            # keeps it too): an `overloaded` landing while `fleet switch` waits
+            # for the `/exit` wrote `waiting` over it, and the SessionEnd that
+            # follows released the claims the replacement was to inherit
+            # (review of #205, fourth round). The feed line still goes out.
+            if session.state != HANDOVER_STATE:
+                store.touch_session(session.id, state="waiting")
             _emit(
                 store, session.project_id, "turn_failed", f"{kind}: {text}", session_id=session.id
             )
             refreshed = store.get_session(session.id) or session
             return TurnFailure(refreshed, kind, None)
         notice = claude_accounts_core.parse_limit_notice(message, now=_now())
-        already_limited = session.state == "limited"
-        store.mark_limited(session.id, notice.resets_at if notice is not None else None)
+        # A row `fleet switch` has marked HANDOVER_STATE is already handled: a
+        # re-fire during the hand-over must neither start a second worker nor
+        # write `limited` over the mark — its SessionEnd would then release the
+        # claims the resume was to inherit (review of #205, third round).
+        already_limited = session.state in ("limited", HANDOVER_STATE)
+        if session.state != HANDOVER_STATE:
+            store.mark_limited(session.id, notice.resets_at if notice is not None else None)
         agent = store.fleet_agent_for_session(session.project_id, session.id)
         label = agent.label if agent is not None else (session.label or short_id(session.id))
         if not already_limited:
@@ -1710,7 +1877,7 @@ def hook_stop_failure(
         # (it opens its own connection): path 2 types into a WAITING manager;
         # a working one reads the event on its next delta or its own Stop.
         _nudge_manager(session.project_id, reason=f"{label} hit its usage limit")
-    return TurnFailure(refreshed, kind, notice)
+    return TurnFailure(refreshed, kind, notice, already_limited=already_limited)
 
 
 def _limited_text(
@@ -1722,11 +1889,8 @@ def _limited_text(
     else:
         head = f"{label} hit its {notice.window} limit"
         if notice.resets_at is not None:
-            local = notice.resets_at.astimezone()
-            distance = notice.resets_at - _now()
-            far = distance > timedelta(hours=24)
-            stamp = local.strftime("%a %H:%M") if far else local.strftime("%H:%M")
-            head += f" · resets {stamp}"
+            # The one formatter (#152; review of #205, finding 9).
+            head += f" · resets {claude_accounts_core.format_reset(notice.resets_at, now=_now())}"
     if fleet:
         head += (
             f" — `aisquare fleet switch {label}` moves it to the account with the most headroom"
@@ -1743,29 +1907,122 @@ def hook_note(project_id: str, text: str, *, session_id: str | None = None) -> N
         _emit(store, project_id, "note", text, session_id=session_id)
 
 
-def hook_session_end(session_id: str, cwd: Path | None) -> None:
-    """Mark the session ended and release its claims back to the pool."""
+def hook_session_end(session_id: str, cwd: Path | None, *, reason: str | None = None) -> None:
+    """Mark the session ended and release its claims — unless a fleet agent is only clearing.
+
+    ``reason`` is Claude Code's. :data:`CLEAR_REASON` is a ``/clear``: the
+    session id ends, the process does not, and this hook fires BEFORE the
+    ``SessionStart`` of the id that follows. Releasing here put the agent's own
+    task back in the pool for the length of that gap — a looper's ``task next
+    --claim`` could take it, and the agent came back to "Claim it FIRST", or to a
+    stop order for what was now a stranger's claim (review of #135, finding 1).
+    So a clear from the process that holds a live fleet row's pane retires the
+    presence only (rule 2 of the fleet-row section); the start hook that follows
+    moves the claims to the new id with the row, in one transaction — or the
+    first prompt after it does, should tmux not answer the start hook. Anything
+    else — an exit, a logout, a reason this version does not know, a nested
+    child clearing ITS session — releases, as every end always did.
+    """
     if not orchestrator.team_enabled():
         return
     with store_session() as store:
         session = store.get_session(session_id)
         if session is None:
             return
-        released = store.end_session(session.id)
-        # No "left" feed event — the board's session panel is the presence
-        # view. Released claims below are real work signals and do go out.
-        for task in released:
+        # No "left" feed event either way — the board's session panel is the
+        # presence view. Released claims are real work signals and do go out;
+        # a clear releases nothing, so it says nothing.
+        if reason == CLEAR_REASON and _clearing_its_own_pane(store, session):
+            store.end_session(session.id, release_claims=False)
+        elif session.state == HANDOVER_STATE and _handing_over_a_fleet_row(store, session):
+            # A hand-over (``fleet switch``): the agent starts again on another
+            # account moments from now — the SAME id resumed, or a fresh one
+            # that takes the claims over — so they wait for it exactly as a
+            # /clear parks them. ``switch`` releases them itself should the
+            # replacement never start (review of #205, finding 6).
+            store.end_session(session.id, release_claims=False)
+        else:
+            released = _release_session(store, session, why="session ended")
+            if released.unannounced:
+                # The one path with no report to ride on — a hook, whose stderr
+                # goes to Claude Code's hook log — and the one that runs most
+                # often (every graceful /exit). Silently dropping the value the
+                # class was built to carry left the manager treating released
+                # work as held with nothing anywhere saying why (round 8 of
+                # #203). Said where the hook can say it.
+                print(
+                    f"aisquare: session {session.id} released {len(released.tasks)} task(s) back "
+                    f"to the board but could not announce {', '.join(released.unannounced)} "
+                    f"({released.reason}) — the manager will not see them come free until it "
+                    "lists the pool",
+                    file=sys.stderr,
+                )
+        root = _project_root(store, session.project_id)
+    # Safety drain: catch anything a per-command spawn missed this session.
+    distill_service.spawn_drain(cwd, root=root)
+
+
+@dataclass(frozen=True)
+class Released:
+    """What a session release did: the claims returned, and any the board was not told about.
+
+    The release is COMMITTED before its ``task_released`` events are written,
+    so a failed event must not read as "nothing was released" — `stop` used to
+    report an empty release over tasks already back on the board (review of the
+    fold). But the event is how the manager learns the work is free
+    (``events_since`` / ``terminal_events``), so a failed one is not swallowed
+    either: it is named here, for the caller to report (review of #203,
+    round 5). ``reason`` is the first failure's text.
+    """
+
+    tasks: list[TeamTask]
+    unannounced: list[str] = field(default_factory=list)
+    reason: str | None = None
+
+
+def _release_session(store: ContextStore, session: TeamSession, *, why: str) -> Released:
+    """Return ``session``'s ``doing`` claims to the pool, ending its presence
+    unless that already happened, and say so on the board (``task_released``)."""
+    if session.ended_at is None:
+        released = store.end_session(session.id, release_claims=True)
+    else:
+        released = store.release_claims(session.id)
+    unannounced: list[str] = []
+    reason: str | None = None
+    for task in released:
+        try:
             _emit(
                 store,
                 session.project_id,
                 "task_released",
-                f"{task.title} (session ended)",
+                f"{task.title} ({why})",
                 session_id=session.id,
                 task_id=task.id,
             )
-        root = _project_root(store, session.project_id)
-    # Safety drain: catch anything a per-command spawn missed this session.
-    distill_service.spawn_drain(cwd, root=root)
+        except sqlite3.Error as exc:  # the store refusing the event; a code fault still raises
+            unannounced.append(task.id)
+            reason = reason or f"{type(exc).__name__}: {exc}"
+    return Released(released, unannounced, reason)
+
+
+def release_agent_claims(store: ContextStore, agent: FleetAgent, *, why: str) -> Released:
+    """A fleet row that has just ENDED holds nothing: release the claims of the
+    session bound to it, and retire that presence if it is still up.
+
+    For ``fleet stop`` and ``fleet reap``, once the pane is verifiably dead or
+    gone. An agent's own ``SessionEnd`` hook releases on a clean exit; a killed
+    process fires none, and a ``/clear`` parks the claims on the id it ended
+    for the start hook that follows (rule 2) — so a stop that landed in that
+    gap, or on a row whose start hook could not adopt, left them on a dead id
+    with nothing to come back for them until the lease ran out (review of
+    #135, second round, finding 5). ``why`` is the board's word for it.
+    """
+    if agent.session_id is None:
+        return Released([])
+    session = store.get_session(agent.session_id)
+    if session is None:
+        return Released([])
+    return _release_session(store, session, why=why)
 
 
 # --- maintenance --------------------------------------------------------------
@@ -1924,7 +2181,11 @@ def render_board(
     events: list[TeamEvent],
 ) -> str:
     """The human/board view (``asq board``), without the protocol contract."""
-    return _render_board(project, sessions, tasks, events, me=None)
+    from aisquare.services import claude_accounts as accounts_service  # lazy: no import cycle
+
+    return _render_board(
+        project, sessions, tasks, events, me=None, labels=accounts_service.slot_labels()
+    )
 
 
 def _render_board(
@@ -1935,6 +2196,7 @@ def _render_board(
     *,
     me: TeamSession | None,
     assigned: Assignment | None = None,
+    labels: Mapping[int, str] | None = None,
 ) -> str:
     now = _now()
     lines = ["<aisquare-team>"]
@@ -1954,7 +2216,7 @@ def _render_board(
             parts = [f"  - {short_id(session.id)} {session.role}"]
             if me is not None and session.id == me.id:
                 parts.append("(you)")
-            label = account_label(session.account)
+            label = account_label(session.account, labels)
             # Only worth the noise once several accounts are actually in play.
             if label and accounts > 1:
                 parts.append(f"[{label}]")
@@ -2006,12 +2268,63 @@ def _render_board(
     return "\n".join(lines)
 
 
+# --- the fleet row: which SESSION is which AGENT ---------------------------------------
+#
+# ``fleet spawn --task`` records the task on a ``fleet_agent`` row and exports
+# ``AISQUARE_FLEET_AGENT`` — the row's id — onto the agent's tmux window. The
+# session-start hook reads it, joins the session to its row and briefs the agent
+# on the task the row was spawned for (``_assignment_lines``); ``task next`` puts
+# that task first. Three rules, written once here, that the whole section keeps:
+#
+# 1. THE ROW BELONGS TO A PROCESS, NOT TO A SESSION ID. Claude Code mints a new
+#    session id for a ``/clear`` and keeps the process; a nested ``claude -p``
+#    started from the agent's shell is a new process that inherits the same
+#    variable. The name alone therefore proves nothing. What does: Claude Code
+#    hands every hook the pid of the process that fired it (``CLAUDE_PID``), and
+#    tmux knows the pid at the root of the row's pane (``#{pane_pid}``);
+#    ``launch`` execs the agent, so for the pane's own agent the two are equal
+#    and for a child they never are (``orchestrator.env_claude_pid``, measured
+#    across a ``/clear`` on 2.1.272). A row bound to another session id is
+#    ADOPTED — rebound, its claims moved — only by the pane's process, whatever
+#    ``SessionStart`` source the caller reports: ``startup``, ``resume``, ``fork``
+#    and ``compact`` are all things a child can say, and a source allowlist let
+#    one take its parent's row and task (review of #135, finding 4). A row that
+#    cannot be checked — no ``CLAUDE_PID``, tmux not answering — stays with the
+#    session it has; only an UNBOUND row binds on first arrival then, because a
+#    binary that could not be started on a chosen id has nothing better.
+# 2. A /CLEAR KEEPS THE CLAIMS. Claude Code fires ``SessionEnd(reason=clear)``
+#    for the old id BEFORE ``SessionStart(source=clear)`` for the new one, so
+#    the end hook — when the pane's process is the one clearing — retires the
+#    presence and leaves the claims where they are, and the start hook moves
+#    them onto the new id together with the row, in one transaction. A looper's
+#    ``task next --claim`` in the gap finds the task still ``doing`` under a live
+#    lease. Every other end releases, as it always did (finding 1). The hand-off
+#    proves the process twice, in two hook processes; when tmux fails the second
+#    proof the claims sit on the ended id, so the bind is TRIED AGAIN at every
+#    prompt of a session under a fleet window that no row is bound to
+#    (``_late_assignment``), and a row that ENDS — ``fleet stop``, ``fleet
+#    reap`` — releases whatever its session still holds (``release_agent_claims``):
+#    parked claims never outlive the row they were parked for (second round,
+#    finding 5).
+# 3. AN ASSIGNMENT ENDS WITH ITS TASK. Once the task is done or dropped the rows
+#    spawned for it forget it (``retire_fleet_assignments``, from ``_finish_task``
+#    and, for rows that predate the rule, from the briefing itself): a later
+#    session start is not briefed on finished work, and a reopened task claimed
+#    by someone else is not read as an order to stand down (finding 5).
+#
+# Two doors read the row: the briefing — the session-start hook, and the
+# heartbeat's first-prompt board for a session that arrived before the
+# orchestrator was switched on, which binds too — and ``task next``. Both fail
+# open: an unreadable row costs the assignment block or the preference, never
+# the board and never the work loop.
+
+
 def _fleet_row_named(store: ContextStore, project_id: str) -> FleetAgent | None:
     """The live fleet row ``AISQUARE_FLEET_AGENT`` names, when it is this project's.
 
-    The variable names a row; it does not prove the reader IS that row's agent —
-    see :func:`_fleet_row_for`. Only the session-start hook may act on the name
-    alone, and only to bind the row to the session it just saw.
+    The variable names a row; it does not prove the reader IS that row's agent
+    (rule 1). Binding on the name goes through :func:`_adopt`; ``task next``
+    reads it for the order alone (:func:`_fleet_row_hint`).
     """
     agent_id = orchestrator.env_fleet_agent()
     if agent_id is None:
@@ -2028,63 +2341,156 @@ def _fleet_row_named(store: ContextStore, project_id: str) -> FleetAgent | None:
 def _fleet_row_for(store: ContextStore, session_id: str, project_id: str) -> FleetAgent | None:
     """The live fleet row a session *is* — the row already bound to that session.
 
-    ``fleet spawn`` exports ``AISQUARE_FLEET_AGENT`` onto the tmux window, so
-    every process the agent starts inherits it: a nested ``claude -p``, a
-    subagent, any tool that shells out. The name alone is therefore not proof of
-    identity — the ``session_id`` recorded on the row is. A reader that trusted
-    the variable resolved its PARENT's row and claimed the parent's assigned task
-    (review of the second version). Binding happens once, in the session-start
-    hook; every other reader requires it to have already happened.
-
-    One lookup for both readers (the briefing and ``task next``), so a session
-    that never went through the hook — ``task next --as coder-1`` from the
-    manager's shell, say — still resolves the same row as the pane itself.
-
-    Fail-open, like the briefing's side: which task comes first is a preference,
-    and an unreadable row must not take ``task next`` down with it. ``_assignment``
-    was guarded in the third round and this path was not, so a ``fleet_agent``
-    row that would not parse raised out of the core work loop — for plain CLI
-    callers too, which had no such dependency before (review of the fourth).
+    The name in the environment is accepted only when the row it names records
+    this very session; otherwise the row bound to the session, if any. So a
+    session that never went through the hook — ``task next --as coder-1`` from
+    the manager's shell, say — still resolves the same row as the pane itself,
+    and a nested child, which inherits the variable, resolves nothing (its
+    ``task next`` claimed its parent's task through the name alone in review
+    round 2 of #116). Fail-open: which task comes first is a preference, and an
+    unreadable row must not take ``task next`` down with it — but it is logged:
+    swallowed silently, a regression here (a renamed store method, a migrated
+    column) put every spawned agent back on oldest-first with nothing anywhere
+    saying the preference had stopped working (review of #116, round 5).
     """
     try:
         named = _fleet_row_named(store, project_id)
         if named is not None and named.session_id == session_id:
             return named
         return store.fleet_agent_for_session(project_id, session_id)
-    except Exception:
+    except Exception as exc:
+        _log.warning(
+            "the fleet row of session %s could not be read, so it has none (%s: %s)",
+            session_id,
+            type(exc).__name__,
+            exc,
+        )
         return None
 
 
-class Assignment(NamedTuple):
-    """The task a session was spawned for, and whether that session already holds it.
+def _fleet_row_hint(
+    store: ContextStore, session: TeamSession | None, project_id: str, *, claim: bool
+) -> FleetAgent | None:
+    """The row whose task ``task next`` should put first — for the ORDER, never for a claim.
 
-    ``mine`` is the answer to "is this MY work in flight?", which the task alone
-    cannot give: a ``/clear`` mints a new session id, so the claim on an agent's
-    own task names an id the agent no longer has (review of the second version).
+    A session bound to a row is that row. Without one — no session at all (the
+    plain ``task next --status review`` of a cycle typed by hand), or a session
+    no row is bound to (the MCP server's virtual ``mcp:`` session, whose process
+    is the agent's own child) — the window's variable still says which row this
+    process works under, and for the order that is enough: the worst a misread
+    costs is a nested child being shown its parent's task first, which it may
+    not claim anyway. Two testers spawned for two review tasks were both handed
+    the older one, because the cycle passed no session and nothing else was
+    consulted (review of #135, finding 11). A CLAIM is not taken on the name
+    alone: that is identity, and the variable is inherited, so it keeps needing
+    a session the row is bound to.
+    """
+    if session is not None:
+        row = _fleet_row_for(store, session.id, project_id)
+        if row is not None:
+            return row
+    if claim:
+        return None
+    try:
+        return _fleet_row_named(store, project_id)
+    except Exception as exc:  # the order is a preference: logged, as in _fleet_row_for
+        _log.warning(
+            "the fleet row AISQUARE_FLEET_AGENT names could not be read, so task next "
+            "hands out the oldest task first (%s: %s)",
+            type(exc).__name__,
+            exc,
+        )
+        return None
+
+
+def _pane_holds(agent: FleetAgent) -> bool | None:
+    """Whether the process running this hook is the one in ``agent``'s pane (rule 1).
+
+    ``None`` when it cannot be told: no ``CLAUDE_PID`` in the environment (a
+    binary that does not export one), a tmux that does not answer, or a pane
+    that is already gone. Callers treat that as "not proven" — a bound row is
+    not adopted on a guess, because the guess that was wrong here handed a
+    parent's task to its child. The fleet's own server factory is used so the
+    row's socket is asked (``[fleet] tmux_socket`` may have changed since the
+    spawn) and so a test's fake tmux is seen; imported here because
+    ``services.fleet`` imports this module the same lazy way.
+    """
+    pid = orchestrator.env_claude_pid()
+    if pid is None:
+        return None
+    from aisquare.services import fleet as fleet_service
+
+    try:
+        pane_pid = fleet_service.server_for(agent.tmux_socket).pane_pid(agent.pane_id)
+    except TmuxError:
+        return None
+    if pane_pid is None:
+        return None
+    return pane_pid == pid
+
+
+def _adopt(store: ContextStore, agent: FleetAgent, session_id: str) -> bool:
+    """Bind ``agent``'s row to ``session_id``; ``False`` when this session may not have it.
+
+    The pane's own process always may (a ``/clear``, a compaction, a resume —
+    whatever the source says); any other process never may; and when it cannot
+    be told, only a row nobody is bound to yet is taken, on first arrival. The
+    row and the claims of the session it leaves move in one store transaction
+    (``adopt_fleet_agent_session``), which also refuses a row that ended, or was
+    bound by somebody else, between the read and the write — ``fleet stop`` and
+    this hook are different processes.
+    """
+    holds = _pane_holds(agent)
+    if holds is False or (holds is None and agent.session_id is not None):
+        return False
+    lease = _now() + timedelta(minutes=orchestrator.lease_minutes())
+    return store.adopt_fleet_agent_session(agent.id, agent.session_id, session_id, lease)
+
+
+def _handing_over_a_fleet_row(store: ContextStore, session: TeamSession) -> bool:
+    """Whether ``session`` is a live fleet row's — the premise of parking its claims for the
+    replacement. Fail-open towards RELEASING, like :func:`_clearing_its_own_pane`."""
+    try:
+        return _fleet_row_for(store, session.id, session.project_id) is not None
+    except Exception:
+        return False
+
+
+def _clearing_its_own_pane(store: ContextStore, session: TeamSession) -> bool:
+    """Whether ``session`` is a live fleet row's, ended by the process in that row's pane.
+
+    The premise of rule 2: only then will the id that follows be able to adopt
+    the row and the claims kept for it. A nested child clearing its own session
+    is not (its pid is not the pane's), nor is a binary without ``CLAUDE_PID``,
+    and both release as before. Fail-open towards RELEASING: an unreadable row
+    must not leave claims parked on an id nothing will come back for.
+    """
+    try:
+        row = _fleet_row_for(store, session.id, session.project_id)
+        return row is not None and _pane_holds(row) is True
+    except Exception:
+        return False
+
+
+class Assignment(NamedTuple):
+    """The task a session was spawned for, with what the briefing has to decide on.
+
+    ``mine`` — this session holds the claim — is the answer to "is this MY work
+    in flight?", which the task alone cannot give across a ``/clear`` until the
+    claim has been moved (rule 2). ``waiting_on`` is the unmet needs of a
+    ``todo`` task; ``holder_gone`` says a ``doing`` task's holder is somebody
+    else whose lease has run out. Both were missing, and the briefing told an
+    agent to claim a task ``task next`` would have refused, and to stand down
+    from one ``task claim`` would have handed it (review of #135, finding 12).
     """
 
     task: TeamTask
     mine: bool
+    waiting_on: list[str]
+    holder_gone: bool
 
 
-def _is_continuation(source: str | None) -> bool:
-    """Whether this start is THIS pane's session carrying on under a new id.
-
-    Claude Code mints a fresh session id for ``resume``, ``clear`` and
-    ``compact`` alike, and the set grows — so the test is "not a new process"
-    rather than a list of the values known today. ``startup`` is what a new
-    process reports, and a nested ``claude -p`` is exactly that; no source at
-    all (the prompt heartbeat) is treated the same way, conservatively. An
-    allowlist of ``("clear", "resume")`` refused ``compact`` outright, so a
-    compacting agent lost both its assignment and the claim that follows it
-    (review of the fourth version).
-    """
-    return source is not None and source != "startup"
-
-
-def _assignment(
-    store: ContextStore, session_id: str, project_id: str, source: str | None
-) -> Assignment | None:
+def _assignment(store: ContextStore, session_id: str, project_id: str) -> Assignment | None:
     """The task this session was spawned for, joining the session to its fleet row.
 
     ``fleet spawn --task`` recorded the task on the ``fleet_agent`` row and named
@@ -2095,74 +2501,91 @@ def _assignment(
     spawned together raced for the same one; the manager ended up posting
     "you are coder-x, run task show …" notes by hand (observed 2026-09-10).
 
-    The variable is inherited by every process the agent starts, so a nested
-    ``claude -p`` reaches this hook too: while the row's recorded session is
-    still alive and this is not that session's own ``clear``/``resume``, the
-    caller is such a child — it is neither bound to the row nor briefed on the
-    task, or it would steal both (review of the first version). Fail-open
-    throughout: an unreadable row costs the assignment line, never the board —
-    the promise this docstring has always made, and the ``try`` below is what
-    finally keeps it (review of the third version).
+    Fail-open throughout: an unreadable row, a tmux that will not answer, a
+    task that will not parse — each costs the assignment block, never the board.
     """
     try:
-        return _resolve_assignment(store, session_id, project_id, source)
+        return _resolve_assignment(store, session_id, project_id)
     except Exception:
         return None
 
 
-def _resolve_assignment(
-    store: ContextStore, session_id: str, project_id: str, source: str | None
-) -> Assignment | None:
-    """The body of :func:`_assignment`, free to raise; see its docstring."""
+def _late_assignment(store: ContextStore, session: TeamSession) -> Assignment | None:
+    """The bind a session's start hook could not make, tried again at a prompt.
+
+    Only for a session under a fleet window (``AISQUARE_FLEET_AGENT`` set) that
+    no row is yet bound to — a bound session costs two indexed reads here and
+    is never re-briefed, and a session outside the fleet has no row to try
+    for. A ``/clear``'s hand-off needs the pane's process proven twice, at the
+    end hook and at the start hook that follows, in two processes; tmux not
+    answering the second time left the row bound to the ended id and its
+    claims parked there, with nothing coming back for either until the lease
+    ran out (review of #135, second round, finding 5). The prompt is the next
+    thing an agent does after a clear, so the bind lands a prompt late at
+    worst, and the ASSIGNED TO YOU block it was owed comes with it. A child
+    that inherited the variable pays one ``display-message`` per prompt to be
+    refused, exactly as it is at its start.
+    """
+    if orchestrator.env_fleet_agent() is None:
+        return None
+    if _fleet_row_for(store, session.id, session.project_id) is not None:
+        return None
+    return _assignment(store, session.id, session.project_id)
+
+
+def _resolve_assignment(store: ContextStore, session_id: str, project_id: str) -> Assignment | None:
+    """The body of :func:`_assignment`, free to raise; the rules are the section's."""
     agent = _fleet_row_named(store, project_id)
     if agent is None:
         agent = store.fleet_agent_for_session(project_id, session_id)
     if agent is None:
         return None
-    previous = agent.session_id
-    if previous is not None and previous != session_id:
-        holder = store.get_session(previous)
-        if holder is not None and holder.ended_at is None and not _is_continuation(source):
+    if agent.session_id != session_id and not _adopt(store, agent, session_id):
+        # The name in the environment is a row this session may not have
+        # (rule 1) — but the session may be bound to a row of its OWN, and
+        # `task next` (`_fleet_row_for`) reads that row for the order. The
+        # two doors read the same row now; this one used to give up here and
+        # the agent lost its ASSIGNED TO YOU block while `task next` still put
+        # its task first (round 8 of #203).
+        agent = store.fleet_agent_for_session(project_id, session_id)
+        if agent is None:
             return None
-    if previous != session_id and not store.bind_fleet_agent_session(agent.id, session_id):
-        # The row ended between the read above and this UPDATE. They are
-        # different processes — that is the whole reason the UPDATE is targeted
-        # rather than a row write — so `fleet stop` can land in between, and a
-        # stopped agent must not be briefed into claiming anything (review of
-        # the third version). Note ``previous`` may be None here: a row for a
-        # binary that cannot be started on a chosen id still binds on arrival.
-        return None
     if agent.task_id is None:
         return None
     task = store.get_task(agent.task_id)
     if task is None:
         return None
-    if previous is not None and previous != session_id and task.claimed_by == previous:
-        # Same worker, new id: the agent behind this row is the one working the
-        # task, and a /clear only renamed it. Move the claim across rather than
-        # compare ids forever — one hop could be recognised from ``previous``,
-        # but the second /clear left the claim on an id two generations back and
-        # the stop order came out again (review of #116, round 2). Moving it also
-        # keeps the BOARD honest: `task ls` names a session that exists.
-        lease = _now() + timedelta(minutes=orchestrator.lease_minutes())
-        if store.reassign_claim(task.id, previous, session_id, lease):
-            task = store.get_task(task.id) or task
-    # ``claimed_by is None`` is NOT a match for an unbound row's ``previous``
-    # (also None): that read an untouched `todo` task as the agent's own work in
-    # flight, so it was told to carry on and never claimed it — and the pool
-    # handed it to somebody else. `session_id` is None for any binary that
-    # cannot be started on a chosen id (`models.FleetAgent`), so this is a live
-    # case, not a theoretical one (review of the third version).
-    mine = task.claimed_by is not None and task.claimed_by in (session_id, previous)
-    return Assignment(task, mine)
+    if task.status in CLOSED_STATUSES:
+        # Rule 3, for a row that was spawned before the rule existed or whose
+        # task was closed by a path that did not know the row.
+        store.retire_fleet_assignments(task.id)
+        return None
+    # ``claimed_by is None`` is NOT this session's: an untouched ``todo`` task
+    # read as work in flight told the agent to carry on, and it never claimed
+    # it — the pool handed it to somebody else (review of #116, round 3).
+    mine = task.claimed_by is not None and task.claimed_by == session_id
+    waiting_on = unmet_needs(task, store.task_statuses(project_id)) if task.status == "todo" else []
+    expired = task.claim_expires_at is not None and task.claim_expires_at < _now()
+    return Assignment(task, mine, waiting_on, task.status == "doing" and not mine and expired)
 
 
-#: Roles whose job is to VERIFY a task in review rather than to work it. Pinned
-#: against the harness by ``test_every_verifying_role_is_known_to_the_assignment``:
+#: Roles whose job is to VERIFY a task in review rather than to work it: exactly
+#: the roles whose standing cycle pulls from the review pool, pinned both ways
+#: against the harness by ``test_every_verifying_role_is_known_to_the_assignment``.
 #: ``ui-tester`` was missing, so the browser verifier spawned for a ``[review]``
 #: task was told it was there for the rework — to edit and re-submit someone
 #: else's work, against its own lane rule (review of the fourth version).
-_VERIFYING_ROLES = frozenset({"tester", "runner", "reviewer", "validator", "ui-tester"})
+_VERIFYING_ROLES = frozenset({"tester", "runner", "reviewer", "ui-tester"})
+
+#: Roles that GATE the assembled deliverable once, before handoff — the roles
+#: whose standing cycle's verdict is a ``GATE:`` note, pinned by the same test.
+#: They neither work a task nor verify one, so no state of the task they were
+#: spawned for gives them anything to claim or a per-task verdict to render.
+#: The validator sat in the verifying set, and a ``[review]`` assignment sent it
+#: to "the verdict your standing cycle below describes" — a cycle that describes
+#: no verdict on a task; outside both sets it would be handed a coder's claim or
+#: rework (review of #116, round 5).
+_GATING_ROLES = frozenset({"validator"})
 
 
 def _assignment_lines(assignment: Assignment, me: TeamSession) -> list[str]:
@@ -2170,26 +2593,53 @@ def _assignment_lines(assignment: Assignment, me: TeamSession) -> list[str]:
 
     Written per state, not per the coder's cycle: the manager spawns a tester
     once a task reaches review, and that tester's assignment is a ``[review]``
-    task it must verify, not a ``[todo]`` one to claim — while a coder spawned at
+    task it must verify — and NOTHING else is its to touch: a ``[todo]`` task,
+    the one it reopened included, is a coder's to claim, and a verifier told to
+    claim it raced the coder for the rework (finding 12). A coder spawned at
     ``[review]`` is there for the rework, and was being handed the stop order
-    meant for a bystander (reviews of the first two versions).
+    meant for a bystander (reviews of the first two versions of #116). The
+    validator is told one thing in every state: the task is the context for its
+    GATE, never work or a verdict of its own (round 5).
 
     ``mine`` — this session IS the one holding the task, across a ``/clear``
     that renamed it — is read INSIDE each state, not ahead of them. Read ahead,
     it answered for states it had no answer for: an agent that put its own task
     up for review and then cleared was told to "carry on … `task review` when it
-    is finished", for work already sitting with a verifier (review of the third
-    version).
+    is finished", for work already sitting with a verifier.
 
-    Every branch ends in something to DO. The stop order is for the one case
-    that earns it — a teammate is live on the task right now.
+    Every instruction is one the commands would honour: "claim it" only when
+    ``task next`` would hand it out (its needs done) and ``task claim`` would
+    accept it (unclaimed, or held on a lease that has run out); the stop order
+    only for the one case that earns it — a teammate live on the task right now.
     """
     task = assignment.task
     mine = assignment.mine
     sid = short_id(me.id)
     verifier = base_role(me.role) in _VERIFYING_ROLES
     head = f"ASSIGNED TO YOU: {task.id} [{task.status}] {task.title}"
+    if base_role(me.role) in _GATING_ROLES:
+        return [
+            head,
+            "You gate the assembled deliverable, not this task: it is not yours to claim,",
+            f"work or verify on its own. `aisquare task show {task.id}` is the context you",
+            "were spawned with; your verdict is the GATE note your standing cycle describes.",
+        ]
+    if verifier and task.status != "review":
+        return [
+            head,
+            f"It is {task.status}, not in review — nothing for you to verify yet, and not",
+            "yours to claim. Take review work with your standing cycle; `task next` hands",
+            "you this one first the moment it is back in review.",
+        ]
     if task.status == "todo":
+        if assignment.waiting_on:
+            waits = ", ".join(need[-8:] for need in assignment.waiting_on)
+            return [
+                head,
+                f"It waits on {waits} — do not claim it yet; `task next` would not hand it",
+                "out either. Take pool work with your standing cycle; it comes to you first",
+                "the moment what it needs is done.",
+            ]
         return [
             head,
             f"Claim it FIRST — `aisquare task claim {task.id} --as {sid}` — then read its",
@@ -2203,13 +2653,23 @@ def _assignment_lines(assignment: Assignment, me: TeamSession) -> list[str]:
             f"Carry on: `aisquare task show {task.id}`, then `aisquare task review "
             f"{task.id} --as {sid}` / `task done` when it is finished.",
         ]
+    if task.status == "doing" and assignment.holder_gone:
+        holder = short_id(task.claimed_by) if task.claimed_by else "its holder"
+        return [
+            head,
+            f"{holder} went silent and the lease on it has run out, so it is yours to take:",
+            f"`aisquare task claim {task.id} --as {sid}`, then `aisquare task show {task.id}`",
+            "and work it to review/done.",
+        ]
     if task.status == "review":
         if verifier:
-            # No command for the verdict here: the roles differ on it, and this
-            # block used to name `task next --status review` for all of them —
-            # which the validator's cycle, a one-shot GATE note, never runs
-            # (review of the fourth version). `task show` is common to every
-            # verifier; the standing cycle below carries the verdict.
+            # No command for the verdict here: the roles differ on it (a
+            # tester's `task done`/`task reopen`, a reviewer's PR review), and
+            # this block used to name `task next --status review` for all of
+            # them — which the validator's cycle, a one-shot GATE note, never
+            # ran (review of the fourth version; the validator has its own
+            # block now). `task show` is common to every verifier; the standing
+            # cycle below carries the verdict.
             return [
                 head,
                 "It awaits your verification — start there, not with the pool:",
@@ -2236,13 +2696,7 @@ def _assignment_lines(assignment: Assignment, me: TeamSession) -> list[str]:
             f"claim it (`aisquare task claim {task.id} --as {sid}`); if you cannot, say so:",
             f'`aisquare note "…" --kind question --to manager --as {sid}`.',
         ]
-    if task.status in ("done", "dropped"):
-        return [
-            head,
-            f"It is already {task.status}; nothing here needs you. Take pool work with your",
-            f'standing cycle, and tell the manager: `aisquare note "spawned for {task.id}, '
-            f'already {task.status}" --kind question --to manager --as {sid}`.',
-        ]
+    # ``doing``, somebody else's, on a live lease: the one case that earns a stop.
     holder = f" by {short_id(task.claimed_by)}" if task.claimed_by else ""
     return [
         head,

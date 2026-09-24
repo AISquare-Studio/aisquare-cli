@@ -19,14 +19,17 @@ from __future__ import annotations
 import json
 import os
 import sys
+from collections.abc import Mapping
 from typing import Annotated, NoReturn
 
 import typer
+from rich.console import Console
 
-from aisquare.cli.common import fail
+from aisquare.cli.common import fail, refuse_conflicting_scope
 from aisquare.core.console import stdout_console
 from aisquare.core.state import get_state
 from aisquare.models import FleetAgentStatus, ProjectInfo
+from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import fleet as fleet_service
 
 app = typer.Typer(
@@ -97,7 +100,7 @@ def _project_json(project: ProjectInfo) -> dict[str, object]:
     }
 
 
-def _agent_line(status: FleetAgentStatus) -> str:
+def _agent_line(status: FleetAgentStatus, labels: Mapping[int, str] | None = None) -> str:
     agent = status.agent
     chip = _STATE_CHIP.get(status.state, status.state)
     if status.state == "exited" and agent.exit_status is not None:
@@ -105,9 +108,19 @@ def _agent_line(status: FleetAgentStatus) -> str:
     extra = f"  {status.detail}" if status.detail else ""
     where = "  (worktree)" if agent.worktree else ""
     # The slot the spawn resolved to (#145), so a row says which limit pool it
-    # draws on; absent when nothing chose and the window ran on its shell's claude.
-    on = f"  account {agent.account_slot}" if agent.account_slot is not None else ""
+    # draws on — under the label the launch line, the feed and the Accounts
+    # page use (the alias, or `plain claude` for slot 1; review of #205, finding
+    # 10); absent when nothing chose and the window ran on its shell's claude.
+    on = f"  {slot_label(agent.account_slot, labels)}" if agent.account_slot is not None else ""
     return f"  {agent.label:<24} {agent.role:<10} {chip}{where}{on}{extra}  {agent.pane_id}"
+
+
+def slot_label(slot: int, labels: Mapping[int, str] | None) -> str:
+    """``labels[slot]`` (``services.claude_accounts.slot_labels``), else the built-in name."""
+    named = (labels or {}).get(slot)
+    if named:
+        return named
+    return "plain claude" if slot == 1 else f"account {slot}"
 
 
 def _emit_agents(project: ProjectInfo, agents: list[FleetAgentStatus]) -> None:
@@ -124,8 +137,9 @@ def _emit_agents(project: ProjectInfo, agents: list[FleetAgentStatus]) -> None:
     if not agents:
         console.print("  (no agents) — start one: aisquare fleet spawn manager")
         return
+    labels = accounts_service.slot_labels() if any(s.agent.account_slot for s in agents) else {}
     for status in agents:
-        console.print(_agent_line(status))
+        console.print(_agent_line(status, labels))
 
 
 @app.command(
@@ -358,18 +372,302 @@ def stop(
     """Stop an agent: /exit, a grace period, then the window is killed."""
     target = _project(project)
     try:
-        agent = fleet_service.stop(target, label, force=force)
+        receipt = fleet_service.stop(target, label, force=force)
     except fleet_service.FleetError as exc:
         _fail_fleet(exc)
+    agent = receipt.agent
+    released = [task.id for task in receipt.released]
     if get_state().json_output:
-        typer.echo(json.dumps({"agent": agent.model_dump(mode="json")}))
-        return
-    stdout_console().print(f"✓ stopped {agent.label} ({agent.id})")
+        typer.echo(
+            json.dumps(
+                {
+                    "agent": agent.model_dump(mode="json"),
+                    "claims_released": released,
+                    "release_failed": receipt.release_failed,
+                }
+            )
+        )
+    else:
+        console = stdout_console()
+        console.print(f"✓ stopped {agent.label} ({agent.id})")
+        _say_released(console, len(released))
+        # The work the stop returned to the pool is the one thing the next agent
+        # inherits from this one; here the receipt carries the tasks, so they are
+        # named under the one line every fleet command uses for the count.
+        for task in receipt.released:
+            console.print(f"     · {task.title} ({task.id})")
+        if receipt.release_failed:
+            console.print(f"  ⚠ claims: {receipt.release_failed}")
+    if receipt.release_failed:
+        # One contract with `shutdown`: a claim left with a session that no
+        # longer exists is not a clean stop, whichever command produced it, and
+        # a script gating on the code must not read it as one (round 5).
+        raise typer.Exit(code=1)
+
+
+def _say_released(console: Console, count: int) -> None:
+    """The one line for "claims went back to the board", for stop, shutdown and reap alike."""
+    if count:
+        console.print(f"  🔓 {count} claimed task(s) released back to the board")
 
 
 def _exec_attach(argv: list[str]) -> None:
     """Replace this process with `tmux attach` (indirection so tests can intercept)."""
     os.execvp(argv[0], argv)
+
+
+def _stdin_is_a_terminal() -> bool:
+    """Whether there is somebody to ask (indirection so tests can intercept).
+
+    The same question ``project prune`` asks with ``sys.stdin.isatty()``; behind a
+    name because ``CliRunner`` replaces ``sys.stdin`` for the duration of an
+    invocation, so the confirmation branch of a destructive command would
+    otherwise be unreachable from a test.
+    """
+    return sys.stdin.isatty()
+
+
+def _row_json(row: fleet_service.ShutdownRow) -> dict[str, object]:
+    """A row with the reason the SERVICE gave for it — never a cause guessed here."""
+    return {"agent": row.agent.model_dump(mode="json"), "reason": row.reason}
+
+
+def _emit_shutdown_plan(plan: fleet_service.ShutdownPlan) -> None:
+    """What a shutdown would end, printed before anything is asked of tmux.
+
+    Mirrors ``project prune``: the plan is the same shape under ``--json``, where
+    it carries ``dry_run`` so a script cannot mistake it for a result.
+    """
+    if get_state().json_output:
+        typer.echo(
+            json.dumps(
+                {
+                    "dry_run": True,
+                    "projects": [p.model_dump(mode="json") for p in plan.projects],
+                    "agents": [a.model_dump(mode="json") for a in plan.agents],
+                    "sessions": plan.sessions,
+                    "absent_sockets": plan.absent_sockets,
+                }
+            )
+        )
+        return
+    console = stdout_console()
+    if not plan.agents and not plan.sessions:
+        console.print("nothing to shut down: no live agents and no fleet tmux sessions")
+        return
+    console.print(
+        f"about to shut down {len(plan.agents)} agent(s) "
+        f"and kill {len(plan.sessions)} fleet session(s):"
+    )
+    names = {p.id: (p.codename or p.root.name or p.id) for p in plan.projects}
+    for agent in plan.agents:
+        where = names.get(agent.project_id, agent.project_id)
+        if agent.tmux_socket in plan.absent_sockets:
+            console.print(
+                f"  ✗ {agent.label} · {where} — recorded lost "
+                f"(no server answers on '{agent.tmux_socket}')"
+            )
+        else:
+            console.print(f"  💤 {agent.label} · {where} — stopped ({agent.pane_id})")
+    for session in plan.sessions:
+        console.print(f"  ⌧ tmux session {session}")
+
+
+def _emit_shutdown(report: fleet_service.ShutdownReport) -> None:
+    """The result, with the service's reason per row and no claim it did not make."""
+    if get_state().json_output:
+        typer.echo(
+            json.dumps(
+                {
+                    "stopped": [a.model_dump(mode="json") for a in report.stopped],
+                    "recorded": [_row_json(row) for row in report.recorded],
+                    "failed": [_row_json(row) for row in report.failed],
+                    "sessions_killed": report.sessions_killed,
+                    "sessions_absent": report.sessions_absent,
+                    "sessions_failed": report.sessions_failed,
+                    "sessions_left_up": report.sessions_left_up,
+                    "servers_absent": report.servers_absent,
+                    "claims_released": report.claims_released,
+                    "release_failures": report.release_failures,
+                    "interrupted": report.interrupted,
+                    "paused_cleared": report.paused_cleared,
+                    "paused_kept": report.paused_kept,
+                    "incomplete_projects": report.incomplete_projects,
+                    "late_scan_failed": report.late_scan_failed,
+                    "pause_scan_failed": report.pause_scan_failed,
+                }
+            )
+        )
+        return
+    console = stdout_console()
+    partial = _not_down(report)
+    # Stuck claims are not "partly shut down" — every row is down — but they
+    # are the operator's to act on, and a script gating on the exit code must
+    # not read a fleet whose work stays claimed by dead sessions as clean
+    # (review of the fold). Said in the header, and a non-zero exit below.
+    stuck = (
+        f", {len(report.release_failures)} claim release(s) refused"
+        if report.release_failures
+        else ""
+    )
+    console.print(
+        f"{'⚠' if partial or stuck else '✓'} fleet {'PARTLY ' if partial else ''}shut down: "
+        f"{len(report.stopped)} stopped, {len(report.recorded)} recorded lost, "
+        f"{len(report.failed)} left live{stuck}; "
+        f"sessions killed: {', '.join(report.sessions_killed) or 'none'}"
+    )
+    for agent in report.stopped:
+        # No exit status is the ordinary shape under --force (a live pane is
+        # killed, and a status only ever comes from a pane that already died).
+        code = f" (exit {agent.exit_status})" if agent.exit_status is not None else ""
+        console.print(f"  💤 {agent.label}{code}")
+    for row in report.recorded:
+        console.print(f"  ✗ {row.agent.label}  recorded lost — {row.reason}")
+    for row in report.failed:
+        console.print(f"  ⚠ {row.agent.label}  LEFT LIVE — {row.reason}")
+    for session in report.sessions_failed:
+        # NOT "tmux refused to kill it": round 9 widened this field past a refused
+        # `kill-session` to a refused WINDOW kill (a late row's dead pane) and to a
+        # query that failed with no kill attempted at all. Each entry carries its
+        # own reason where it has one; the line above it must only claim the thing
+        # they share — the session is still standing (review of #121, round 9
+        # verification).
+        console.print(f"  ⚠ session {session} was not taken down")
+    for session in report.sessions_left_up:
+        console.print(f"  ⚠ session {session} left up: it holds a row left live")
+    for session in report.sessions_absent:
+        console.print(f"  · session {session} was already gone with its last window")
+    _say_released(console, len(report.claims_released))
+    for failure in report.release_failures:
+        console.print(f"  ⚠ claims of {failure}")
+    if report.interrupted:
+        console.print(
+            f"  ⚠ {report.interrupted} — `aisquare fleet ls --all` shows what is still running; "
+            "re-run this to finish"
+        )
+    for name in report.paused_cleared:
+        console.print(f"  ▶ the fleet-paused signal on {name} was cleared")
+    for name in report.paused_kept:
+        console.print(f"  ⏸ {name} stays fleet-paused: it was not confirmed down")
+    if report.late_scan_failed:
+        console.print(
+            f"  ⚠ the final scan for rows spawned during the shutdown did not run "
+            f"({report.late_scan_failed}) — nothing below is confirmed down; re-run once the "
+            "store answers"
+        )
+    if report.pause_scan_failed:
+        # "every pause is kept" is true only when the visible-projects lookup
+        # itself failed and none was reached. The field also carries PER-PROJECT
+        # failures, and those sit beside projects that DID clear — printed right
+        # above, which the old line then contradicted. Naming what is still set by
+        # what was not cleared holds in both shapes, including a signal nobody
+        # could read, which the report deliberately claims nothing about (review
+        # of #121, round 9 verification).
+        console.print(
+            f"  ⚠ the fleet-paused signals could not be fully reconciled "
+            f"({report.pause_scan_failed}) — any signal not named cleared above is still "
+            "set; re-run once the store answers, or clear it with `aisquare fleet resume`"
+        )
+    if partial:
+        console.print(
+            "  rows above marked LEFT LIVE were NOT ended: `aisquare fleet ls --all`, then "
+            "stop them (or re-run this) once tmux answers"
+        )
+    console.print(
+        "  board notes and tasks kept (claims of the rows this ended are released); "
+        "the next asq / fleet spawn starts a fresh server"
+    )
+
+
+@app.command("shutdown")
+def shutdown(
+    project: ProjectRef = None,
+    every: Annotated[
+        bool,
+        typer.Option(
+            "--all", help="Every project's fleet, not just this one (not with --project)."
+        ),
+    ] = False,
+    yes: Annotated[
+        bool, typer.Option("--yes", "-y", help="Shut down without asking; required off a terminal.")
+    ] = False,
+    force: Annotated[
+        bool, typer.Option("--force", help="Kill every agent without a graceful /exit.")
+    ] = False,
+) -> None:
+    """Stop this project's agents, kill the fleet's sessions, record every row.
+
+    The fleet's off switch. Unlike `tmux -L asq kill-server` by hand, the rows
+    are recorded: agents on an answering server are stopped (exit status where
+    tmux exposes one — `--force` kills a live pane and records none), and rows
+    whose server is already gone are ended as lost, on your word, each with the
+    reason. What is killed is the fleet's own `asq-<codename>` sessions, never
+    the server, so nothing else on that socket goes with it; a server with
+    nothing left on it exits by itself.
+
+    This project by default, `--all` for every project — one or the other,
+    never both. It prints what it would end and asks first at a terminal; off a
+    terminal it is a dry run unless --yes, and under --json without --yes it
+    prints the plan and changes nothing. Board notes and tasks are kept, the
+    ended rows' claims are released, and a `fleet-paused` signal is cleared.
+    Exits 1 when any row was left live or a claim release was refused, and 130
+    when interrupted — with the report of how far it got either way.
+    """
+    refuse_conflicting_scope(every, project)
+    target = None if every else _project(project)
+    if not yes:
+        try:
+            plan = fleet_service.shutdown_plan(target)
+        except fleet_service.FleetError as exc:
+            _fail_fleet(exc)
+        _emit_shutdown_plan(plan)
+        if get_state().json_output or not (plan.agents or plan.sessions):
+            return
+        if not _stdin_is_a_terminal():
+            stdout_console().print(
+                "dry run: nothing stopped — re-run with --yes to shut the fleet down"
+            )
+            return
+        # The prompt names BOTH numbers: a plan with no live agent and one
+        # leftover session asked "Shut down 0 agents?" while the real effect —
+        # killing the session — sat only in the lines above (round 8 of #203).
+        parts = []
+        if plan.agents:
+            parts.append(f"{len(plan.agents)} agent{'s' if len(plan.agents) != 1 else ''}")
+        if plan.sessions:
+            parts.append(
+                f"{len(plan.sessions)} tmux session{'s' if len(plan.sessions) != 1 else ''}"
+            )
+        if not typer.confirm(f"Shut down {' and '.join(parts)}?", default=False):
+            stdout_console().print("nothing stopped")
+            return
+    try:
+        report = fleet_service.shutdown(target, force=force)
+    except fleet_service.FleetInterrupted as exc:
+        # The operator's Ctrl-C: rows before it are down and their claims
+        # released, committed as they went, so they are told how far it got —
+        # and the code says it was not the whole fleet (round 5).
+        _emit_shutdown(exc.report)
+        raise typer.Exit(code=130) from None
+    except fleet_service.FleetError as exc:
+        _fail_fleet(exc)
+    _emit_shutdown(report)
+    if _not_down(report) or report.release_failures:
+        # The fleet is not down — or it is, with claims stuck on ended sessions.
+        # Said in the report AND in the exit code, so a script that only reads
+        # the code cannot mistake either for a clean run.
+        raise typer.Exit(code=1)
+
+
+def _not_down(report: fleet_service.ShutdownReport) -> bool:
+    """Whether the report leaves anything of the fleet standing or unverified."""
+    return bool(
+        report.failed
+        or report.sessions_failed
+        or report.late_scan_failed
+        or report.pause_scan_failed
+        or report.interrupted
+    )
 
 
 @app.command("attach")
@@ -406,7 +704,10 @@ def attach(project: ProjectRef = None) -> None:
 def reap(
     project: ProjectRef = None,
     every: Annotated[
-        bool, typer.Option("--all", help="Every project's fleet, not just this one.")
+        bool,
+        typer.Option(
+            "--all", help="Every project's fleet, not just this one (not with --project)."
+        ),
     ] = False,
     server_down: Annotated[
         bool,
@@ -418,7 +719,12 @@ def reap(
         ),
     ] = False,
 ) -> None:
-    """Record exited agents, mark vanished panes lost, remove merged worktrees."""
+    """Record exited agents, mark vanished panes lost, remove merged worktrees.
+
+    This project by default, `--all` for every project — never both. Exits 1
+    when a released claim could not be given back to the board.
+    """
+    refuse_conflicting_scope(every, project)
     target = None if every else _project(project)
     try:
         report = fleet_service.reap(target, server_down=server_down)
@@ -431,9 +737,13 @@ def reap(
                     "ended": [a.model_dump(mode="json") for a in report.ended],
                     "lost": [a.model_dump(mode="json") for a in report.lost],
                     "worktrees_removed": [str(p) for p in report.worktrees_removed],
+                    "claims_released": list(report.claims_released),
+                    "release_failures": list(report.release_failures),
                 }
             )
         )
+        if report.release_failures:
+            raise typer.Exit(code=1)
         return
     console = stdout_console()
     console.print(
@@ -448,6 +758,11 @@ def reap(
         console.print(f"  ✗ {agent.label}  pane {agent.pane_id} gone")
     for path in report.worktrees_removed:
         console.print(f"  🗑 {path}")
+    _say_released(console, len(report.claims_released))
+    for failure in report.release_failures:
+        console.print(f"  ⚠ claims of {failure}")
+    if report.release_failures:
+        raise typer.Exit(code=1)  # the same contract as `stop` and `shutdown` (round 5)
 
 
 @app.command("rename")

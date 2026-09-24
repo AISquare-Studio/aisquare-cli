@@ -592,14 +592,15 @@ several projects" error lists codenames, because basenames are what collide.
 Code session runs in is *captured* — registered so that its prompt history and
 injected memory work — but the sidebar and `aisquare project list` show only
 the projects added **on purpose**: `aisquare init`, `project onboard`,
-`project link`, the sidebar's `+`, `team on`, or a fleet spawn (#139). A
-captured directory stays out of the way until one of those happens; `a` in the
-sidebar shows the captured ones too (marked *captured*), `project list --all`
-lists them, and `project prune --captured-only [--older-than DAYS]` drops the
-stale ones — those with no context entries and nothing touched in 30 days by
+`project link`, `project switch`, the sidebar's `+`, `team on`, a fleet spawn,
+or a fact written by hand with `context add --project` (#139). A captured
+directory stays out of the way until one of those happens; `a` in the sidebar
+shows the captured ones too (marked *captured*), `project list --all` lists
+them, and `project prune --captured-only [--older-than DAYS]` drops the stale
+ones — those with no context entries and nothing touched in 30 days by
 default. `project forget` now sticks: the next prompt in that directory
-captures silently instead of putting it back on the list. `doctor` says how
-many are hidden.
+captures it again, silently, instead of putting it back on the list. `doctor`
+says how many are hidden.
 
 **Registrations you no longer want** — a deleted checkout, a throwaway worktree —
 go with `aisquare project forget <name|path>`; `aisquare project prune` sweeps

@@ -156,6 +156,10 @@ class StatusReport(BaseModel):
     project_entries: int
     active_project: ProjectInfo
     project_count: int
+    """The projects ``project list`` shows — added on purpose (#139)."""
+    captured_count: int = 0
+    """The directories hooked sessions captured that nothing added on purpose:
+    registered but hidden, listed by ``project list --all`` (#139)."""
     agents_detected: list[str] = Field(default_factory=list)
     agents_connected: list[str] = Field(default_factory=list)
     shipping: ShippingStatus | None = None
@@ -694,8 +698,9 @@ class ProjectForgetReport(BaseModel):
 
 
 PruneReason = Literal["missing", "worktree", "captured"]
-"""Why ``project prune`` selected a registration: its root is gone from disk, or
-its root is a linked git worktree of another registered project."""
+"""Why ``project prune`` selected a registration: its root is gone from disk, its
+root is a linked git worktree of another registered project, or it is a stale
+capture — a directory a session merely ran in, with no context entries (#139)."""
 
 
 class PruneCandidate(BaseModel):

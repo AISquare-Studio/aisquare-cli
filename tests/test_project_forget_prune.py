@@ -642,18 +642,45 @@ def test_forget_sticks_against_the_next_prompt(
     runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """The issue's complaint: `ensure_project` cleared `forgotten_at`, so the next
-    prompt in a forgotten directory resurrected it."""
+    prompt in a forgotten directory put it back on the list. It now comes back
+    CAPTURED — not listed, but not a tombstone the prompt vanishes into either."""
     project_id = _register(runner, monkeypatch, tmp_path / "gone")
     assert runner.invoke(app, ["project", "forget", project_id[:12]]).exit_code == 0
     assert _capture(runner, monkeypatch, tmp_path / "gone") == project_id
     assert project_id not in _listed(runner)
     everything = runner.invoke(app, ["--json", "project", "list", "--all"])
-    all_ids = {row["id"] for row in _json(everything.stdout)}
-    assert project_id not in all_ids, "forgotten, not captured"
-    # A deliberate add brings it back, history and all.
+    rows = {row["id"]: row for row in _json(everything.stdout)}
+    assert project_id in rows and rows[project_id]["onboarded_at"] is None, "captured again"
+    # A deliberate add lists it again, history and all.
     monkeypatch.chdir(tmp_path / "gone")
     assert runner.invoke(app, ["context", "add", "back", "--project"]).exit_code == 0
     assert project_id in _listed(runner)
+
+
+def test_a_pruned_capture_is_captured_again_by_the_next_prompt(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A forgotten row that a later prompt could not revive was a permanent, invisible
+    tombstone: the prompt was written into it, `log` said nothing had been captured,
+    and `--all`, `doctor` and the next prune never saw the directory again."""
+    scratch = _capture(runner, monkeypatch, tmp_path / "scratch")
+    pruned = runner.invoke(
+        app, ["--json", "project", "prune", "--captured-only", "--older-than", "0", "--yes"]
+    )
+    assert set(_json(pruned.stdout)["dropped"]) == {scratch}
+
+    assert _capture(runner, monkeypatch, tmp_path / "scratch") == scratch
+    everything = runner.invoke(app, ["--json", "project", "list", "--all"])
+    assert scratch in {row["id"] for row in _json(everything.stdout)}
+    assert scratch not in _listed(runner), "captured, so still not listed"
+    monkeypatch.chdir(tmp_path / "scratch")
+    logged = runner.invoke(app, ["--json", "log"])
+    assert logged.exit_code == 0, logged.output
+    assert [prompt["text"] for prompt in _json(logged.stdout)] == ["hi", "hi"]
+    again = runner.invoke(
+        app, ["--json", "project", "prune", "--captured-only", "--older-than", "0", "--yes"]
+    )
+    assert set(_json(again.stdout)["dropped"]) == {scratch}, "the next prune finds it again"
 
 
 def test_prune_captured_only_drops_stale_captures_and_keeps_the_rest(
@@ -688,3 +715,51 @@ def test_prune_captured_only_drops_stale_captures_and_keeps_the_rest(
     remaining = {row["id"] for row in _json(listing.stdout)}
     assert remaining == {shown, with_fact}
     assert _listed(runner) == {shown}
+
+
+def test_an_empty_list_names_the_captured_directories_it_hides(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """With nothing but captures on the machine, `project list` said "No projects
+    registered yet. Run: aisquare init" and `status` "0 project(s) registered" —
+    neither said a word about the directories they hide."""
+    _capture(runner, monkeypatch, tmp_path / "scratch")
+
+    listed = " ".join(runner.invoke(app, ["project", "list"]).stdout.split())
+    assert "No projects registered yet" not in listed
+    assert "1 captured directory hidden" in listed and "aisquare project list --all" in listed
+    status = " ".join(runner.invoke(app, ["status"]).stdout.split())
+    assert "0 project(s) registered (+1 captured, hidden" in status
+    assert _json(runner.invoke(app, ["--json", "status"]).stdout)["captured_count"] == 1
+
+
+def test_switching_to_a_captured_directory_lists_it(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Pinning a directory is choosing it: the active project must not be the one
+    `project list` (no `*` row) and the sidebar leave out."""
+    scratch = _capture(runner, monkeypatch, tmp_path / "scratch")
+    assert scratch not in _listed(runner)
+
+    switched = runner.invoke(app, ["project", "switch", "scratch"])
+
+    assert switched.exit_code == 0, switched.output
+    assert scratch in _listed(runner)
+    assert "│ * │ scratch" in runner.invoke(app, ["project", "list"]).stdout  # the active row
+
+
+def test_older_than_without_captured_only_is_refused(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, work_dir: Path
+) -> None:
+    """Ignored silently, `--older-than 7` read as "what is older than a week" and the
+    command swept every missing root instead."""
+    gone = _register(runner, monkeypatch, work_dir / "gone")
+    monkeypatch.chdir(work_dir)
+    shutil.rmtree(work_dir / "gone")
+
+    refused = runner.invoke(app, ["project", "prune", "--older-than", "7", "--yes"])
+    as_json = runner.invoke(app, ["--json", "project", "prune", "--older-than", "7", "--yes"])
+
+    assert refused.exit_code == 1 and "applies only with --captured-only" in refused.output
+    assert as_json.exit_code == 1 and _json(as_json.stdout)["error"] == "usage"
+    assert gone in _listed(runner), "nothing was dropped"

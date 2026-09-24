@@ -59,10 +59,14 @@ def list_projects(*, all: bool = False) -> list[ProjectInfo]:
 def switch(name: str) -> ProjectInfo:
     """Pin the project matching ``name`` (a name or id prefix) as active.
 
+    Pinning is choosing it on purpose, so a captured directory is onboarded
+    too (#139): otherwise the ACTIVE project would be missing from ``project
+    list`` — no ``*`` row — and from the sidebar.
+
     Raises ``KeyError`` if nothing matches and ``ValueError`` if it is ambiguous.
     """
     with store_session() as store:
-        project = _one_match(store, name)
+        project = store.onboard_project(_one_match(store, name))
     pin_project(project.id)
     return project
 
@@ -192,8 +196,8 @@ def prune_candidates(
             if (
                 cutoff is not None
                 and project.onboarded_at is None
-                and not store.entries("project", project_id=project.id)
                 and activity.get(project.id, "") < cutoff
+                and not store.entries("project", project_id=project.id)
             ):
                 found.append(PruneCandidate(project=project, reason="captured", live_agents=live))
                 continue

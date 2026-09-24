@@ -60,6 +60,7 @@ def status() -> StatusReport:
             project_entries=len(store.entries("project", project_id=project.id)),
             active_project=project,
             project_count=len(store.list_projects()),
+            captured_count=len(store.captured_projects()),
             agents_detected=[agent.name for agent in agents if agent.detected],
             agents_connected=[agent.name for agent in agents if agent.connected],
             shipping=_shipping_status(),

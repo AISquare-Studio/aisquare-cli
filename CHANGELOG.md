@@ -438,18 +438,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   auto-registered and listed — 27 projects on the reporting machine, 23 of
   them nothing but captured prompts — and `project forget` came undone on the
   next prompt, because registering was also the revival. The project row now
-  carries `onboarded_at` (schema v17): hooks, the MCP server and context writes
-  only *capture* (a row exists, prompt history and injection work, nothing is
-  shown), while `init`, `project onboard`, `project link`, the sidebar's `+`,
-  `team on` and a fleet spawn add a project **on purpose**. The sidebar and
-  `project list` show onboarded projects only; `a` in the sidebar and
+  carries `onboarded_at` (schema v17): hooks and the MCP server's session only
+  *capture* (a row exists, prompt history and injection work, nothing is
+  shown), while `init`, `project onboard`, `project link`, `project switch`,
+  the sidebar's `+`, `team on` (and `serve` or a role `launch`, which turn it
+  on), a fleet spawn or `fleet rename`, and a fact written by hand (`context
+  add --project`, `context import`) add a project **on purpose**. The sidebar
+  and `project list` show onboarded projects only; `a` in the sidebar and
   `project list --all` show the captured ones too (marked); `project prune
   --captured-only [--older-than DAYS]` drops captured directories with no
   context entries and nothing touched in that many days; `forget` clears the
-  mark so the next prompt captures silently; `doctor` gains a `projects` line
-  with the hidden count. The migration adopts the rows already used on purpose
-  (context entries, a codename, linked repos, board activity, a fleet agent, a
-  snapshot on disk) and hides the rest.
+  mark so the next prompt captures silently — the row comes back captured,
+  not listed; `doctor` gains a `projects` line with the hidden count, and an
+  empty `project list` and `status` say how many are hidden. The migration
+  adopts the rows already used on purpose (context entries, a codename,
+  linked repos, board activity, a fleet agent, a snapshot on disk; a
+  forgotten row never) and hides the rest.
 - **The snapshot token budget is a config knob, and the failure names its
   numbers (#82).** `aisquare project onboard` on a large repo printed only
   "codebase too large to pack within the token budget" against a hardcoded

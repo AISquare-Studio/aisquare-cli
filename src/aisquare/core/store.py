@@ -485,9 +485,17 @@ def _adopt_onboarded_projects(connection: sqlite3.Connection) -> None:
     ``init`` write. Everything else — the 23 of 27 registrations on the
     reporting machine that held nothing but captured prompts — stays hidden,
     reachable through ``project list --all``.
+
+    A FORGOTTEN row is never adopted, whatever it carries: ``forget`` clears
+    ``onboarded_at`` so that the next prompt there revives the row captured,
+    not listed (:meth:`SqliteStore.ensure_project`), and a row forgotten before
+    the column existed must land in that same state — a forgotten project
+    keeps its entries and its snapshot, so the evidence below would otherwise
+    re-list it on the next prompt.
     """
     connection.execute(
-        "UPDATE project SET onboarded_at = created_at WHERE onboarded_at IS NULL AND ("
+        "UPDATE project SET onboarded_at = created_at "
+        "WHERE onboarded_at IS NULL AND forgotten_at IS NULL AND ("
         "  codename IS NOT NULL"
         "  OR (linked_repos IS NOT NULL AND linked_repos NOT IN ('[]', ''))"
         "  OR id IN (SELECT project_id FROM entry WHERE project_id IS NOT NULL)"
@@ -498,7 +506,9 @@ def _adopt_onboarded_projects(connection: sqlite3.Connection) -> None:
     )
     from aisquare.core import snapshot as snapshot_core  # lazy: keeps store import-light
 
-    rows = connection.execute("SELECT id FROM project WHERE onboarded_at IS NULL").fetchall()
+    rows = connection.execute(
+        "SELECT id FROM project WHERE onboarded_at IS NULL AND forgotten_at IS NULL"
+    ).fetchall()
     with_snapshot = [row[0] for row in rows if snapshot_core.exists(str(row[0]))]
     for project_id in with_snapshot:
         connection.execute(
@@ -519,7 +529,8 @@ _FINISH: dict[int, Callable[[sqlite3.Connection], None]] = {
 # with no cascade and ``PRAGMA foreign_keys = ON``, so a project with any
 # context or prompt history cannot be deleted from under them. Every project
 # read filters ``forgotten_at IS NOT NULL`` out; ``ensure_project`` clears it, so
-# a registration comes back the moment something registers the root again.
+# a registration comes back the moment something registers the root again —
+# since v17 as a captured, unlisted row unless the registration is deliberate.
 # ``forget --purge`` deletes the dependents first and then the row, for real.
 #
 # v14, not v12 as first authored: main took v12 for the metric table and v13
@@ -1206,20 +1217,28 @@ class SqliteStore:
         return promoted
 
     def ensure_project(self, project: ProjectInfo) -> None:
-        """CAPTURE the project: make sure a row exists, and change nothing about a known one.
+        """CAPTURE the project: make sure a live row exists, and never list it.
 
-        This is what a hook recording a prompt, the MCP server and a context
-        write call — automatic registration, so prompt history and injection
-        work in every directory (#139). It never sets ``onboarded_at`` and never
-        clears ``forgotten_at``: a forgotten project stays forgotten and a
-        captured one stays hidden until something DELIBERATE registers it
-        (:meth:`onboard_project`). Before #139 this was also the revival, which
-        is how ``project forget`` came undone on the next prompt.
+        This is what a hook recording a prompt and the MCP server's session
+        call — automatic registration, so prompt history and injection work in
+        every directory (#139). It never sets ``onboarded_at``, so a captured
+        directory stays off the list until something DELIBERATE registers it
+        (:meth:`onboard_project`).
+
+        It does clear ``forgotten_at``: the next prompt in a forgotten or
+        pruned directory brings the row back CAPTURED — ``forget`` cleared its
+        ``onboarded_at``, so it is not listed, which is what makes a forget
+        stick. A tombstone left in place would take every later prompt and
+        turn metric into a row no read can reach: ``log`` would say nothing had
+        been captured, and ``project list --all``, ``doctor``, ``prune
+        --captured-only`` and ``metrics show --project`` would never see the
+        directory again. Before #139 this revival also re-listed the project,
+        which is how ``project forget`` came undone on the next prompt.
         """
         self._conn.execute(
             "INSERT INTO project (id, root, name, linked_repos, created_at) "
             "VALUES (?, ?, ?, ?, ?) "
-            "ON CONFLICT (id) DO NOTHING",
+            "ON CONFLICT (id) DO UPDATE SET forgotten_at = NULL",
             (
                 project.id,
                 str(project.root),
@@ -1233,8 +1252,9 @@ class SqliteStore:
     def onboard_project(self, project: ProjectInfo) -> ProjectInfo:
         """Register the project ON PURPOSE: shown from now on, and revived if forgotten.
 
-        ``init``, ``project onboard`` / ``link``, the sidebar's ``+``, ``team on``
-        and a fleet spawn — the actions that mean "this is one of my projects".
+        ``init``, ``project onboard`` / ``link`` / ``switch``, the sidebar's
+        ``+``, ``team on``, a fleet spawn and a fact written by hand — the
+        actions that mean "this is one of my projects".
         ``onboarded_at`` is set once and kept; ``forgotten_at`` is cleared, so
         the row comes back with whatever history it still carries (see v14).
         """

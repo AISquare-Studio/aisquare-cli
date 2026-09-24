@@ -234,12 +234,13 @@ def _project_name(project: ProjectInfo) -> str:
     return project.root.name or project.id
 
 
-def emit_projects(projects: list[ProjectInfo], *, active_id: str | None) -> None:
+def emit_projects(projects: list[ProjectInfo], *, active_id: str | None, hidden: int = 0) -> None:
     """Render the project list — a JSON array under ``--json``, a table otherwise.
 
     The JSON carries the same ``name`` the table shows (#83): it is derived from
     the root rather than stored on the model, and a script picking a project
-    by name had nothing to pick on.
+    by name had nothing to pick on. ``hidden`` is how many captured directories
+    the list leaves out (#139); only an empty table mentions them.
     """
     if get_state().json_output:
         typer.echo(
@@ -249,6 +250,15 @@ def emit_projects(projects: list[ProjectInfo], *, active_id: str | None) -> None
                     for project in projects
                 ]
             )
+        )
+        return
+    if not projects and hidden:
+        # "nothing registered, run init" was wrong for a machine whose hooked
+        # sessions captured directories that are simply not listed (#139).
+        noun = "directory" if hidden == 1 else "directories"
+        stdout_console().print(
+            f"No projects added yet — {hidden} captured {noun} hidden (a hooked session ran "
+            "there): aisquare project list --all; add one: aisquare project onboard <path>"
         )
         return
     if not projects:
@@ -636,9 +646,14 @@ def emit_status(report: StatusReport) -> None:
     console.print(f"aisquare: {'initialized' if report.initialized else 'not initialized'}")
     console.print(f"home:     {report.home}")
     console.print(f"project:  {project.root.name or project.id} ({project.id})")
+    hidden = (
+        f" (+{report.captured_count} captured, hidden: aisquare project list --all)"
+        if report.captured_count
+        else ""
+    )
     console.print(
         f"context:  {report.user_entries} user, {report.project_entries} in this project; "
-        f"{report.project_count} project(s) registered"
+        f"{report.project_count} project(s) registered{hidden}"
     )
     console.print(f"detected: {', '.join(report.agents_detected) or 'none'}")
     console.print(f"connected: {', '.join(report.agents_connected) or 'none'}")

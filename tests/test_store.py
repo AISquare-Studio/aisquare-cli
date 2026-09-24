@@ -840,12 +840,16 @@ def test_ensure_project_captures_and_only_onboard_project_shows() -> None:
         first = shown.onboarded_at
         assert store.onboard_project(quiet).onboarded_at == first  # set once, kept
 
-        # forget clears the mark and hides; a hook's capture afterwards does NOT revive…
+        # forget clears the mark and hides; a hook's capture afterwards brings the row
+        # back CAPTURED — reachable, with its history, but not listed…
         store.forget_project("prj_quiet")
         assert store.list_projects(all=True) == [] and store.get_project("prj_quiet") is None
         store.ensure_project(quiet)
-        assert store.list_projects(all=True) == [], "forget sticks against a capture"
-        # …and a deliberate add brings it back, with a fresh mark.
+        assert store.list_projects() == [], "forget sticks against a capture"
+        [back] = store.list_projects(all=True)
+        assert back.id == "prj_quiet" and back.onboarded_at is None
+        assert store.get_project("prj_quiet") is not None, "not a tombstone prompts vanish into"
+        # …and a deliberate add lists it again, with a fresh mark.
         again = store.onboard_project(quiet)
         assert again.onboarded_at is not None and again.onboarded_at >= first
         assert [p.id for p in store.list_projects()] == ["prj_quiet"]
@@ -869,6 +873,7 @@ def test_the_v17_migration_adopts_the_rows_already_used_on_purpose(
         ("prj_snap", "/w/snap"),
         ("prj_quiet", "/w/quiet"),
         ("prj_gone", "/w/gone"),
+        ("prj_gone_used", "/w/gone-used"),
     ]
 
     def insert(pid: str, root: str) -> str:
@@ -884,9 +889,13 @@ def test_the_v17_migration_adopts_the_rows_already_used_on_purpose(
         inserts
         + """
         UPDATE project SET codename = 'amber-otter' WHERE id = 'prj_named';
-        UPDATE project SET forgotten_at = '2026-09-02T00:00:00+00:00' WHERE id = 'prj_gone';
+        UPDATE project SET forgotten_at = '2026-09-02T00:00:00+00:00'
+            WHERE id IN ('prj_gone', 'prj_gone_used');
         INSERT INTO entry (id, pool, project_id, text, tags, source, created_at, updated_at)
             VALUES ('ent_1', 'project', 'prj_entries', 'a fact', '[]', 'cli',
+                    '2026-09-01T00:00:00+00:00', '2026-09-01T00:00:00+00:00');
+        INSERT INTO entry (id, pool, project_id, text, tags, source, created_at, updated_at)
+            VALUES ('ent_2', 'project', 'prj_gone_used', 'kept by forget', '[]', 'cli',
                     '2026-09-01T00:00:00+00:00', '2026-09-01T00:00:00+00:00');
         INSERT INTO team_event (id, project_id, session_id, kind, text, created_at)
             VALUES ('evt_1', 'prj_board', NULL, 'activate', 'on', '2026-09-01T00:00:00+00:00');
@@ -899,15 +908,24 @@ def test_the_v17_migration_adopts_the_rows_already_used_on_purpose(
     """
     )
     _at_version(16, after=after)
-    snapshot_core.meta_path("prj_snap").parent.mkdir(parents=True, exist_ok=True)
-    snapshot_core.meta_path("prj_snap").write_text("{}", encoding="utf-8")
+    for with_snapshot in ("prj_snap", "prj_gone_used"):  # forget keeps the snapshot
+        snapshot_core.meta_path(with_snapshot).parent.mkdir(parents=True, exist_ok=True)
+        snapshot_core.meta_path(with_snapshot).write_text("{}", encoding="utf-8")
 
     store = open_store()
     try:
         shown = {p.id for p in store.list_projects()}
         everything = {p.id for p in store.list_projects(all=True)}
+        # The next prompt in a directory forgotten before v17 captures it; it must
+        # not be re-listed by the entries and snapshot its forget left behind.
+        store.ensure_project(ProjectInfo(id="prj_gone_used", root=Path("/w/gone-used")))
+        revived = store.get_project("prj_gone_used")
+        listed_after_prompt = {p.id for p in store.list_projects()}
     finally:
         store.close()
     assert shown == {"prj_entries", "prj_named", "prj_linked", "prj_board", "prj_agent", "prj_snap"}
     assert everything == shown | {"prj_quiet"}, "the prompt-only row is captured, not shown"
     assert "prj_gone" not in everything, "forgotten stays forgotten"
+    assert "prj_gone_used" not in everything
+    assert revived is not None and revived.onboarded_at is None, "a forgotten row is not adopted"
+    assert "prj_gone_used" not in listed_after_prompt

@@ -456,7 +456,8 @@ def activate(cwd: Path | None = None) -> ProjectInfo:
     _require_enabled()
     _DELIVERY.set(None)
     with store_session() as store:
-        project = store.onboard_project(_project(store, cwd))  # `team on` is deliberate (#139)
+        # `team on` is deliberate (#139): one onboarding write, not _project's capture first.
+        project = store.onboard_project(orchestrator.team_project(cwd))
         event = None
         if not store.team_active(project.id):
             event = _emit(store, project.id, "activate", "agent orchestrator activated")

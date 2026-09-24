@@ -573,6 +573,25 @@ class Live:
         return selfcli.run(args, cwd=cwd, env=self.env, timeout=120.0)
 
 
+#: Everything that can pack a codebase. Both names, because
+#: ``snapshot._repomix_base`` tries ``repomix`` first and falls back to
+#: ``npx --yes repomix``, so hiding one leaves the other.
+PACKERS = ("repomix", "npx")
+
+
+def _packer_free(entries: Sequence[str]) -> str:
+    """``entries`` as a PATH, minus every directory that can resolve a packer.
+
+    Measured rather than assumed. Naming a directory believed to be packer-free
+    is what went wrong twice — see :func:`_hermetic_env` — so this asks
+    ``shutil.which`` about each entry instead, and is therefore correct on a
+    machine whose Node is somewhere nobody predicted.
+    """
+    return os.pathsep.join(
+        entry for entry in entries if not any(shutil.which(tool, path=entry) for tool in PACKERS)
+    )
+
+
 def _hermetic_env(**overrides: str) -> dict[str, str]:
     """This process's environment (the suite's isolated ``AISQUARE_HOME`` included).
 
@@ -599,15 +618,29 @@ def _hermetic_env(**overrides: str) -> dict[str, str]:
     the lane from 18/18 to 17/18. Stripping the PATH is what the docstring
     always said happened, so it now happens.
 
-    System32 stays on the Windows PATH: ``paths.restrict_to_owner`` resolves
-    ``icacls`` and ``whoami`` by name, and dropping those would trade a Node
-    problem for a silently unrestricted credentials file.
+    AND THE FIRST FIX FOR THAT WAS STILL A CLAIM. It cut POSIX back to
+    ``os.defpath`` — ``/bin:/usr/bin`` — which is precisely where a
+    distro-packaged Node lives: Debian and Ubuntu's ``npm`` and Fedora's
+    ``nodejs-npm`` all ship ``/usr/bin/npx``. So the cut hid nothing on the
+    commonest Linux install, and the latch below failed there every run.
+    Measured on a box with ``apt install npm``: ``which("npx", path=os.defpath)``
+    resolves ``/bin/npx``, and the protected test spends 25s packing.
+
+    A bare default is an ASSUMPTION about what a machine has. :func:`_packer_free`
+    measures instead, so the PATH handed to the child cannot resolve a packer
+    whatever is installed. That is one rule for both platforms; only the base set
+    differs, and it differs for a reason:
+
+    System32 stays on the Windows PATH because ``paths.restrict_to_owner``
+    resolves ``icacls`` and ``whoami`` there, and dropping those would trade a
+    Node problem for a silently unrestricted credentials file.
     """
     env = {**os.environ, **overrides, "NO_COLOR": "1"}
     if os.name == "posix":
-        env["PATH"] = os.defpath
+        base = os.defpath.split(os.pathsep)
     else:
-        env["PATH"] = str(Path(os.environ.get("SYSTEMROOT", r"C:\Windows")) / "System32")
+        base = [str(Path(os.environ.get("SYSTEMROOT", r"C:\Windows")) / "System32")]
+    env["PATH"] = _packer_free(base)
     return env
 
 
@@ -633,6 +666,33 @@ def test_the_hermetic_env_hides_node_from_the_child_on_every_platform(
     assert shutil.which(tool) is not None, "the fake is not on PATH; the assertion below is vacuous"
 
     assert shutil.which(tool, path=_hermetic_env()["PATH"]) is None
+
+
+@pytest.mark.parametrize("tool", PACKERS)
+def test_a_base_path_entry_that_ships_a_packer_is_dropped_whole(tool: str, tmp_path: Path) -> None:
+    """A directory on the BASE path that ships a packer is removed, not trusted.
+
+    This is Debian's ``/usr/bin`` in miniature, and it is the case the latch
+    above could not see. That one puts its fake in a directory of its own and
+    asks whether the cut excluded it — which the old ``os.defpath`` cut did,
+    correctly, while still handing the child a ``/usr/bin`` that had ``npx`` in
+    it all along. Both guards are needed: one says the cut excludes what it
+    should, this one says what the cut KEEPS is clean.
+
+    Root is not required, which is the point of doing it here rather than
+    against the real ``/usr/bin``.
+    """
+    ships_a_packer = tmp_path / "usr-bin"
+    innocent = tmp_path / "plain-bin"
+    innocent.mkdir()
+    fakebin.executable_fake(ships_a_packer, tool, posix="echo packed", windows="echo packed")
+
+    # The control: as a plain PATH the entry really does resolve the packer, so
+    # the assertion below cannot pass just because the fake was never written.
+    both = os.pathsep.join([str(ships_a_packer), str(innocent)])
+    assert shutil.which(tool, path=both) is not None
+
+    assert _packer_free([str(ships_a_packer), str(innocent)]) == str(innocent)
 
 
 def test_onboard_runs_the_real_cli_in_a_throwaway_home(tmp_path: Path) -> None:

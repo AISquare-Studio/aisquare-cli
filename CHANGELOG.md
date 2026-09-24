@@ -880,11 +880,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the group/other bits have no equivalent — so the API key and the bearer
   token guarding the HTTP server stayed readable by every other account on the
   machine, with no error to say so. The credentials file that holds both now
-  gets a DACL rebuilt from scratch — explicit entries reset, inheritance
-  stripped, then the owner granted — which matters because an explicit
-  `BUILTIN\Users` ACE survives the obvious `/inheritance:r` + `/grant:r`
-  pairing and would have left the file readable by everyone anyway. An
-  `Administrators` entry can remain, as root does for a 0600 file on POSIX.
+  is narrowed by a single `icacls` call: inheritance stripped, the three broad
+  principals (`Users`, `Everyone`, `Authenticated Users`) removed **by SID**,
+  and this account granted read/write — all in one invocation, so the file is
+  never briefly wider than it started and a failure cannot leave it wider than
+  it was. Removing those three by name is what the obvious `/inheritance:r` +
+  `/grant:r` pairing misses: an explicit `BUILTIN\Users` ACE survives it and
+  would have left the file readable by everyone anyway. SIDs rather than names
+  because the account's name is not reliably knowable from the environment.
+  The narrowing is exactly as wide as that list: an explicit grant to some
+  OTHER principal — `INTERACTIVE`, `Domain Users`, a second local account —
+  survives it, which `test_restrict_to_owner_names_three_principals_and_not_a_fourth`
+  pins deliberately rather than leaving to be discovered. An `Administrators`
+  entry can remain, as root does for a 0600 file on POSIX.
   The single credentials writer reports whether the restriction actually
   landed, so `init` and `serve` say so explicitly when it did not, rather than
   implying a protection that is not there. POSIX behaviour is unchanged.

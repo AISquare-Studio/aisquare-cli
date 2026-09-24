@@ -739,6 +739,31 @@ def test_tui_session_line_renders_model_and_mismatch() -> None:
     assert rendered.count("off-ladder") == 1  # only the runner is off its ladder
 
 
+def test_watch_names_a_parked_session_and_its_reset(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The one surface an operator leaves running printed a bare dim ``limited`` (review of
+    #205, second round): now the chip, the reset and the command that moves it."""
+    from datetime import UTC, datetime, timedelta
+
+    from aisquare.cli.watch import _session_lines
+    from aisquare.models import TeamSession
+
+    now = datetime.now(tz=UTC)
+    parked = TeamSession(
+        id="sess-limited-1",
+        project_id="prj_watch",
+        role="coder",
+        started_at=now,
+        last_seen_at=now,
+        state="limited",
+        limit_resets_at=now + timedelta(hours=2, minutes=10),
+    )
+    moving = parked.model_copy(update={"id": "sess-switching-1", "state": "switching"})
+    rendered = _session_lines([parked, moving]).plain
+    assert "⏳ limited — `aisquare fleet switch <label>`" in rendered
+    assert "(resets in 2h" in rendered
+    assert "⇄ switching accounts" in rendered
+
+
 def test_spawn_exec_requires_claude_on_path(
     isolated_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

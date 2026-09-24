@@ -103,7 +103,11 @@ class PathVerdict:
             where = f"will register {root} — the repository containing {self.path}"
         kind = "git repository" if self.is_git else "not a git repository, which is fine"
         line = f"{where} ({kind})"
-        if self.registered is not None:
+        if self.registered is not None and self.registered.onboarded_at is None:
+            # A hooked session ran there, so the row exists — but it is not
+            # listed yet, and onboarding is exactly what lists it (#139).
+            line += f" · captured as {self.registered.id} (not listed yet); onboarding adds it"
+        elif self.registered is not None:
             line += f" · already registered as {self.registered.id}; init is idempotent"
         elif self.store_error is not None:
             line += (

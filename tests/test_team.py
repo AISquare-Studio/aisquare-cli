@@ -339,6 +339,27 @@ def test_session_end_releases_claims(
     assert after[0]["claimed_by"] is None
 
 
+def test_a_plain_sessions_clear_still_releases_its_claims(
+    runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Rule 2 of the fleet-row section keeps claims across a ``/clear`` for the
+    process in a fleet pane only. A session with no fleet row has nothing that
+    could adopt them, so its ``reason: clear`` releases exactly as any end does."""
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
+    _start(runner, CODER, work_dir)
+    monkeypatch.delenv("AISQUARE_ROLE")
+    runner.invoke(app, ["task", "add", "wire auth", "--as", "bbbb2222"])
+    listed = json.loads(runner.invoke(app, ["--json", "task", "list"]).stdout)
+    runner.invoke(app, ["task", "claim", listed[0]["id"], "--as", "bbbb2222"])
+
+    payload = json.dumps({"cwd": str(work_dir), "session_id": CODER, "reason": "clear"})
+    end = runner.invoke(app, ["hook", "session-end"], input=payload)
+    assert end.exit_code == 0
+    after = json.loads(runner.invoke(app, ["--json", "task", "list"]).stdout)
+    assert after[0]["status"] == "todo"
+    assert after[0]["claimed_by"] is None
+
+
 def test_master_switch_disables_everything(
     runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1662,3 +1683,31 @@ def test_an_idle_notice_leaves_a_waiting_session_waiting_and_a_prompt_rings_the_
         app, ["hook", "stop"], input=json.dumps({"cwd": str(work_dir), "session_id": CODER})
     )
     assert state() == "waiting"  # a Stop clears it, as before
+
+
+def test_notification_lines_stay_out_of_teammate_deltas(
+    runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A ``notice`` is for the human board, like the bell: a teammate's delta never
+    carries one, so it takes none of the ``_DELTA_LIMIT`` slots meant for real news."""
+    monkeypatch.setenv("AISQUARE_ROLE", "planner")
+    _start(runner, PLANNER, work_dir)
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
+    _start(runner, CODER, work_dir)
+    monkeypatch.delenv("AISQUARE_ROLE")
+    for _ in range(3):
+        _notify(
+            runner,
+            CODER,
+            work_dir,
+            message="A sub-agent finished",
+            notification_type="agent_completed",
+        )
+    notices = [e for e in team_service.log_events(work_dir) if e.kind == "notice"]
+    assert len(notices) == 3  # control: they are on the board
+
+    assert _prompt(runner, PLANNER, work_dir).stdout == ""  # nothing else is news
+    runner.invoke(app, ["note", "real work item", "--as", "bbbb2222"])
+    delta = _prompt(runner, PLANNER, work_dir).stdout
+    assert "real work item" in delta and "1 teammate update" in delta
+    assert "A sub-agent finished" not in delta

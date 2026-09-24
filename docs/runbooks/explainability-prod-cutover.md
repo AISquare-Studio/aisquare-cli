@@ -2224,7 +2224,8 @@ dies.
    human text under the flag; it now returns a real payload — `enabled`,
    `target`, `gateway`/`gateway_source`,
    `key_env`/`key_set`/`key_source`/`key_origin` (never the key itself),
-   `proxy`, `identity`, `agents`, `probe`, `shipping`,
+   `proxy`, `identity`, `agents`, `probe`/`probe_severity`/`probe_fix`,
+   `shipping`,
    `redaction` — the spool counters are inside `.shipping`, and this list once
    claimed a top-level `.spool` that never existed.
    This matters more than it looks: §5b's split-brain assertion

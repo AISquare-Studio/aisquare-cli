@@ -18,6 +18,7 @@ import pytest
 from typer.testing import CliRunner
 
 import aisquare
+from aisquare.core import claude_accounts
 from aisquare.core.paths import HOME_ENV_VAR
 from aisquare.core.state import reset_state
 from aisquare.services import ci_client
@@ -147,11 +148,19 @@ def isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
     ``CLAUDE_CONFIG_DIR`` is cleared too: agent detection honours it, and a
     developer running the suite from inside a Claude session must never have
-    tests write hooks into their real config directory.
+    tests write hooks into their real config directory. So is the rest of what a
+    launch onto an account exports: ``CLAUDE_CODE_TMPDIR``, and the copies of
+    the shell's own two variables a launch onto a managed slot keeps under
+    ``claude_accounts.PLAIN_VARS``. ``plain_environment`` reads those copies
+    whenever ``CLAUDE_CONFIG_DIR`` names a managed slot, which the account tests
+    set up, so a suite run from a fleet pane on one of the developer's slots
+    resolved slot 1 to THEIR directory: four tests went red, and the hand-over
+    test read that directory's login (review of #205, seventh round).
     """
     home = tmp_path / "aisquare-home"
     monkeypatch.setenv(HOME_ENV_VAR, str(home))
-    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    for var in (*claude_accounts.LAUNCH_VARS, *claude_accounts.PLAIN_VARS.values()):
+        monkeypatch.delenv(var, raising=False)
     # The orchestrator and brain knobs are read from the ambient env; clear them so
     # the suite is hermetic (an embedding user's AISQUARE_BRAIN_EMBED=1 must not
     # change what tests build/assert), each test opting in explicitly instead.
@@ -172,6 +181,12 @@ def isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         "AISQUARE_EFFORT_RUNNER",
         "AISQUARE_EFFORT_VALIDATOR",
         "CLAUDE_EFFORT",
+        # A fleet agent's identity, and the process behind it. Both are ambient
+        # for a developer running the suite from inside a fleet pane or from
+        # inside Claude Code (which exports CLAUDE_PID to every subprocess) —
+        # left set, every session start would resolve THEIR row and THEIR pid.
+        "AISQUARE_FLEET_AGENT",
+        "CLAUDE_PID",
         "AISQUARE_MODEL_PLANNER",
         "AISQUARE_MODEL_CODER",
         "AISQUARE_MODEL_RUNNER",

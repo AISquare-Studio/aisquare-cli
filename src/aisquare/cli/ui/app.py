@@ -151,6 +151,7 @@ class HelpScreen(ModalScreen[None]):
             ("drag", "select text in a pane (double-click: a word) — copied on release"),
             ("t", "themes (applied live, autosaved)"),
             ("r", "refresh now"),
+            ("a", "show or hide the captured directories (never added)"),
             ("F1", "command palette"),
             ("q", "quit — from the sidebar; inside a pane every key goes to the agent"),
         ):
@@ -326,9 +327,14 @@ class FleetApp(App[None], inherit_bindings=False):
 
     def action_refresh_now(self) -> None:
         self.refresh_data()
+        self.run_doctor()
 
     def action_toggle_captured(self) -> None:
-        """Show, or hide again, the captured directories the sidebar leaves out (#139)."""
+        """Show, or hide again, the captured directories the sidebar leaves out (#139).
+
+        Only the project list changes, so only the store is re-read: the doctor's
+        findings do not depend on which cards are shown, and ``r`` re-runs it.
+        """
         self.show_captured = not self.show_captured
         self.refresh_data()
         self.notify(
@@ -337,7 +343,6 @@ class FleetApp(App[None], inherit_bindings=False):
             else "captured directories hidden — `a` shows them",
             timeout=4,
         )
-        self.run_doctor()
 
     # --- data ---------------------------------------------------------------------------
 

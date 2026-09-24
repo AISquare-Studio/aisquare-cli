@@ -1733,6 +1733,37 @@ def test_r_refreshes_from_the_sidebar_but_is_forwarded_from_a_pane(
     assert keys == ["r"]
 
 
+def test_r_re_runs_the_doctor_and_a_only_re_reads_the_list(tmp_path: Path, script: Script) -> None:
+    """`r` is "refresh now" — the fleet AND the doctor. #139's `a` action was first
+    inserted between the two calls and took the doctor run with it, so `r` re-read
+    the store only and `a`, which changes nothing the doctor looks at, re-ran it."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+    calls: list[int] = []
+
+    def doctor() -> list[DoctorCheck]:
+        calls.append(1)
+        return []
+
+    async def go(pilot: Pilot[None]) -> tuple[int, int, int]:
+        app = fleet_app(pilot)
+        await settle(app)
+        app.sidebar.focus()
+        at_mount = len(calls)
+        await pilot.press("r")
+        await pilot.pause()
+        await settle(app)
+        after_r = len(calls)
+        await pilot.press("a")
+        await pilot.pause()
+        await settle(app)
+        return at_mount, after_r, len(calls)
+
+    at_mount, after_r, after_a = drive(go, doctor=doctor)
+    assert at_mount == 1
+    assert after_r == 2, "r re-runs the doctor"
+    assert after_a == 2, "a changes which cards are shown, not what the doctor finds"
+
+
 # --- theme -------------------------------------------------------------------------
 
 
@@ -1830,23 +1861,27 @@ def test_the_sidebar_hides_captured_directories_until_a_shows_them(
     with store_session() as store:
         store.ensure_project(ProjectInfo(id="prj_scratch", root=tmp_path / "scratch"))  # a hook
 
-    async def go(pilot: Pilot[None]) -> tuple[list[str], list[str], str, list[str]]:
+    async def go(pilot: Pilot[None]) -> tuple[list[str], list[str], str, list[str], str]:
         app = fleet_app(pilot)
         before = [card.project.id for card in app.query(ProjectCard)]
         app.sidebar.focus()
         await pilot.press("a")
         await pilot.pause()
-        shown = [card.project.id for card in app.query(ProjectCard)]
+        with_captured = [card.project.id for card in app.query(ProjectCard)]
         title = shown_text(app, "prj_scratch")
         await pilot.press("a")
         await pilot.pause()
-        return before, shown, title, [card.project.id for card in app.query(ProjectCard)]
+        after = [card.project.id for card in app.query(ProjectCard)]
+        await pilot.press("question_mark")
+        await pilot.pause()
+        return before, with_captured, title, after, shown(app.screen.query_one(Static))
 
     def shown_text(app: FleetApp, project_id: str) -> str:
         return shown(card_for(app, project_id).query_one(ProjectTitle))
 
-    before, with_captured, title, after = drive(go)
+    before, with_captured, title, after, keys = drive(go)
     assert before == ["prj_a"], "a captured directory is not a card"
     assert with_captured == ["prj_a", "prj_scratch"]
     assert "captured" in title
     assert after == ["prj_a"], "a hides them again"
+    assert "captured directories" in keys, "the key is on the ? screen (it has no footer label)"

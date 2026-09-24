@@ -433,10 +433,15 @@ def test_a_launch_carries_its_projects_key_and_a_launch_elsewhere_the_machines(
     assert result.exit_code == 0, result.output
     assert _sent_key(launched["env"]) == PROJECT_KEY
 
+    # Cleared between commands, so each assertion reads the env THAT command
+    # exec'd — a spawn that never reached exec would otherwise pass on the
+    # env the launch above left behind.
+    launched.clear()
     spawned = runner.invoke(app, ["team", "spawn", "coder", "--exec", "--no-probe"])
     assert spawned.exit_code == 0, spawned.output
     assert _sent_key(launched["env"]) == PROJECT_KEY
 
+    launched.clear()
     monkeypatch.chdir(web.root)
     elsewhere = runner.invoke(app, ["launch", "coder"])
     assert elsewhere.exit_code == 0, elsewhere.output

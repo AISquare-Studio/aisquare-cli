@@ -1203,6 +1203,17 @@ aisquare explainability register --target prod
 Prints each agent name with its `publication_id`, and is **idempotent** — a
 second run returns the same ids rather than creating duplicates.
 
+**Run it from a directory whose project has no key of its own.** Since #141,
+`register` uses the key a launch from the current directory would use — the
+project's own key when that project (or `$AISQUARE_TEAM_HUB`'s) has one bound
+to prod, else the machine's — and registers the roster in the workspace that
+key names. From a checkout with its own prod key it registers there, and every
+machine-keyed launch still gets 409 `agent_not_registered`. The success line
+ends `under the project's own key (…)` when that happened;
+`aisquare --json explainability status --target prod` shows `key_source` and
+`key_project` before you run it. `--project <name>` registers a project's own
+workspace on purpose.
+
 > **[verified-stg by coder1, NOT re-run by me]** Against staging this returned
 > `aisquare-planner` / `aisquare-coder` / `aisquare-runner`, all
 > `publication_id 169`, idempotent on a second run. I did **not** execute it

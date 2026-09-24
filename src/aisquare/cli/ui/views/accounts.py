@@ -407,6 +407,7 @@ class AccountsView(Vertical):
         self._login_timer: Timer | None = None
         self._usage_timer: Timer | None = None
         self._cancel_sign_in: threading.Event | None = None
+        self._arranging = threading.Lock()  # one registry write at a time (arrange_accounts)
         self._on_screen = False
 
     # --- layout ------------------------------------------------------------------------
@@ -756,17 +757,24 @@ class AccountsView(Vertical):
         a second click overwrote it before the first worker reported — a thread
         worker ``exclusive`` cancels still finishes — and the notice named the
         wrong action (review of #205, fourth round).
+
+        One write at a time, and every one reported. ``exclusive`` cancelled the
+        earlier worker on paper only, since a thread cannot be stopped: two
+        quick ▲ clicks ran two read-then-write ``move`` calls at once and one
+        step was lost, and the cancelled worker's notice never showed (review of
+        the #205 fold, round 1). The lock takes the writes in turn instead, and
+        each worker reports its own ``done``.
         """
 
         def work() -> str:
-            change()
+            with self._arranging:
+                change()
             return done
 
         self.run_worker(
             work,
             name=ARRANGE_WORKER,
             group=ARRANGE_WORKER,
-            exclusive=True,
             thread=True,
             exit_on_error=False,
         )

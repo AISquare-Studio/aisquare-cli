@@ -1040,6 +1040,57 @@ def test_an_arrange_notice_names_the_action_its_own_worker_finished(
     assert late == first  # the first worker's own action, not the click that came after
 
 
+def test_two_quick_arrange_clicks_write_in_turn_and_both_report(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``exclusive`` cancelled the earlier thread worker on paper only — a thread runs to its
+    end — so two quick ▲ clicks ran two read-then-write ``move`` calls at once, one step was
+    lost, and the cancelled worker's notice never showed (review of the #205 fold, round 1).
+    The writes now take their turn, and each worker reports its own action."""
+    first_in = threading.Event()
+    release = threading.Event()
+    inside: list[str] = []
+    overlapped: list[bool] = []
+
+    def write(name: str, *, hold: bool) -> Callable[[], None]:
+        def run() -> None:
+            overlapped.append(bool(inside))
+            inside.append(name)
+            if hold:
+                first_in.set()
+                release.wait(timeout=5)
+            inside.remove(name)
+
+        return run
+
+    async def go(pilot: Pilot[None]) -> list[str]:
+        app = fleet_app(pilot)
+        view = await open_accounts(pilot)
+        said: list[str] = []
+        real_notice = view._notice
+
+        def spy(text: str, tone: str = "dim") -> None:
+            said.append(text)
+            real_notice(text, tone)
+
+        monkeypatch.setattr(view, "_notice", spy)
+        view.arrange_accounts(write("first", hold=True), done="✓ slot 3 moved up once")
+        assert await asyncio.to_thread(first_in.wait, 5)  # the first write is under way…
+        view.arrange_accounts(write("second", hold=False), done="✓ slot 3 moved up twice")
+        await asyncio.sleep(0.2)  # …and the second click's thread has had its chance to start
+        release.set()
+        await settle(app)
+        await pilot.pause()
+        return said
+
+    said = drive(go)
+    assert overlapped == [False, False]  # never two writes at once
+    assert [text for text in said if text.startswith("✓")] == [
+        "✓ slot 3 moved up once",
+        "✓ slot 3 moved up twice",
+    ]
+
+
 # --- the pace of the five-hour window (#146) ------------------------------------------------------
 
 

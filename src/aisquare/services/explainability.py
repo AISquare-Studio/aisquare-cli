@@ -1291,16 +1291,30 @@ def project_key_path(project_id: str) -> Path:
 
 
 def store_project_api_key(project_id: str, key: str) -> Path:
-    """Write a project's key at mode 600 and return where it landed.
+    """Write a project's key owner-only and return where it landed.
 
     The directory is created mode 700 when it does not exist yet; an existing
     one keeps its mode (it holds the codebase snapshot, which is not secret).
+
+    The key goes in as the machine's does (:func:`store_api_key`): by rename
+    from a temp restricted to this account while it is still empty
+    (``write_replacing(owner_only=True)``). Written in place and chmodded
+    afterwards, a first key sat under the umask mode (0644) until the chmod
+    ran, and on NTFS ``chmod(0o600)`` restricts nothing: the file kept the DACL
+    the data directory hands down. #141 wrote it that way beside the machine
+    key's old recipe; the #65 fold replaced that recipe (round 2, F5), and the
+    two met at the accounts stack's fold. A restriction that fails is said on
+    stderr, as for the machine key, and the key still lands.
     """
     target = project_key_path(project_id)
     if not target.parent.exists():
         target.parent.mkdir(parents=True, mode=0o700)
-    target.write_text(key.strip(), encoding="utf-8")
-    target.chmod(0o600)
+    if not write_replacing(Path(os.path.realpath(target)), key.strip(), owner_only=True):
+        print(
+            f"warning: could not restrict {target} to your account — "
+            "other users on this machine may be able to read this project's key.",
+            file=sys.stderr,
+        )
     return target
 
 

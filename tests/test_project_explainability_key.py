@@ -159,6 +159,44 @@ def test_the_binding_round_trips_and_the_value_lives_in_a_600_file_not_the_store
     assert service.clear_project_api_key(project.id) is False
 
 
+def test_a_project_key_goes_into_a_file_already_restricted_to_this_account(
+    home: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The machine key's recipe since the #65 fold (round 2, F5), for #141's key: written in
+    place and chmodded afterwards, a first project key sat under the umask mode (0644), or
+    on Windows under the DACL the data directory hands down, until the chmod ran — and
+    ``chmod`` restricts nothing on NTFS. The spy records what each restriction was applied
+    to: a temp, still empty, for a new file and over an existing one. A restriction that
+    fails is said out loud, and the key still lands."""
+    project = _project(tmp_path / "api")
+    real = paths.restrict_to_owner
+    applied: list[tuple[str, int]] = []
+    holds = True
+
+    def spy(path: Path) -> bool:
+        applied.append((path.name, path.stat().st_size))
+        real(path)
+        return holds
+
+    monkeypatch.setattr(paths, "restrict_to_owner", spy)
+    target = service.store_project_api_key(project.id, f" {PROJECT_KEY}\n")
+    service.store_project_api_key(project.id, "second-project-key")
+    assert capsys.readouterr().err == ""
+    holds = False
+    service.store_project_api_key(project.id, "third-project-key")
+    assert len(applied) == 3, applied
+    for name, size in applied:
+        assert name.startswith(".explainability-key.") and name.endswith(".tmp"), applied
+        assert size == 0, f"restricted with the key already in it: {applied}"
+    assert target == service.project_key_path(project.id)
+    assert target.read_text(encoding="utf-8") == "third-project-key"
+    assert "warning: could not restrict" in capsys.readouterr().err
+    assert not list(target.parent.glob(".explainability-key.*")), "a temp was left behind"
+
+
 def test_forget_purge_takes_an_attached_key_with_it(
     home: Path, tmp_path: Path, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
 ) -> None:

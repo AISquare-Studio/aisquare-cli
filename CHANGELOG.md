@@ -230,8 +230,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   machine; pointing one project at another workspace meant another shell or
   swapping the file for everyone. `aisquare explainability key set [--project
   P] [--target T]` attaches a key to a project — read from stdin or
-  `--from-env VAR`, never from argv — stored at mode 600 in the project's data
-  directory, with only the deployment and the path in the store (schema v19);
+  `--from-env VAR`, never from argv — stored owner-only in the project's data
+  directory (mode 600, and restricted to your account on Windows, written by
+  rename into a temp restricted while still empty, as the machine key is),
+  with only the deployment and the path in the store (schema v19);
   `key show` prints the origin (never the value) and `key clear` detaches it.
   Resolution stays in the one resolver: project key → the target's variable →
   the machine file, and a key attached for one deployment is never handed to

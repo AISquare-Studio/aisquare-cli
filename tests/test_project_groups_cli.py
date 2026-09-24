@@ -114,3 +114,32 @@ def test_onboard_into_a_group_creates_it_when_new(
     assert _names(runner, "--group", "new-things") == ["fresh", "web"]
     listing = json.loads(runner.invoke(app, ["--json", "project", "group", "list"]).stdout)
     assert [g["name"] for g in listing["groups"]] == ["new-things"], "created once, reused after"
+
+
+def test_a_filter_that_matches_nothing_says_so_not_that_nothing_is_registered(
+    runner: CliRunner, projects: dict[str, str]
+) -> None:
+    """``--pinned`` with nothing pinned, ``--group`` on an empty group: the list has rows,
+    and the empty table said "No projects registered yet. Run: aisquare init" (review of
+    #171, round 1). It names the filter and the step that fills it; ``--json`` is ``[]``."""
+
+    def shown(*args: str) -> str:
+        result = runner.invoke(app, ["project", "list", *args])
+        assert result.exit_code == 0, result.output
+        return " ".join(result.stdout.split())
+
+    pinned = shown("--pinned")
+    assert pinned == "No pinned projects — pin one: aisquare project pin <project>", pinned
+    assert runner.invoke(app, ["project", "group", "create", "empty set"]).exit_code == 0
+    grouped = shown("--group", "empty set")
+    assert grouped == (
+        "No projects in group empty set — add one: aisquare project group add 'empty set' <project>"
+    ), grouped
+    assert runner.invoke(app, ["project", "group", "create", "site", "web"]).exit_code == 0
+    both = shown("--group", "site", "--pinned")
+    assert both.startswith("No pinned projects in group site — pin one:"), both
+    assert _listed(runner, "--pinned") == [] and _listed(runner, "--group", "empty set") == []
+    # A list with nothing in it at all still says so, filter or not.
+    for project_id in projects.values():
+        assert runner.invoke(app, ["project", "forget", project_id]).exit_code == 0
+    assert "No projects registered yet" in shown("--pinned")

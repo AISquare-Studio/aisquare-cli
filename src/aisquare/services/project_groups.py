@@ -187,6 +187,12 @@ def undo(store: ContextStore, entry: UndoEntry) -> str:
             collapsed=before.collapsed,
         )
     for project_id, (scope, position, pinned_at) in entry.projects.items():
+        if store.get_project(project_id) is None:
+            # Forgotten (or purged) since the gesture. A forget takes the row out of
+            # the arrangement; written back onto the tombstone, its old group, number
+            # and pin came back with it when a prompt revived the row (review of
+            # #171, round 1).
+            continue
         if scope is not None and store.get_project_group(scope) is None:
             # Its group was deleted since — from a shell, between the sidebar's
             # gesture and its `u` — and is not one this entry re-creates. Written
@@ -199,7 +205,7 @@ def undo(store: ContextStore, entry: UndoEntry) -> str:
                 project_id, group_id=scope, position=position, pinned_at=pinned_at
             )
         except KeyError:
-            continue  # the project was purged meanwhile (a forgotten row is still there)
+            continue  # the project was purged since the read above
     return entry.description
 
 

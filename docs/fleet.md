@@ -756,8 +756,9 @@ cards. Pinned projects and groups sit in a **📌 Pinned** section at the top, i
 pin order; a group header carries the roll-up of its members' agents, so a
 folded group still tells you something is running. A group shares **nothing**:
 context, prompts, snapshots, boards and explainability settings stay per
-project, and deleting a group never deletes a project. The same layer from a
-shell, with the same store state:
+project, and deleting a group never deletes a project. Forgetting a project
+takes it out of its group and off the pin: added again, it comes back loose, at
+the end. The same layer from a shell, with the same store state:
 
 ```sh
 aisquare project group create frontend web docs     # a group, with its first members

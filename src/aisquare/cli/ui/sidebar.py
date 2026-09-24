@@ -356,8 +356,12 @@ class DragHandle(Activatable):
         if sidebar is None:
             return
         if event.button != 1:
-            # Another button let go while button 1 holds a drag from here: the drag
-            # goes on, and the Click the app builds from this release is no click.
+            # Only button 1 drags, so another button's release ends nothing here.
+            # Under FleetApp it arrives only as a lone click of that button: while
+            # button 1 is down, SelectionHost drops a second button's press and
+            # release at the app, before the screen sees either. Should one reach
+            # a held drag all the same, the drag goes on, and the Click the app
+            # builds from the release is no click.
             self._dragged = sidebar.dragging(self)
             return
         self._dragged = sidebar.end_drag(self)
@@ -987,7 +991,8 @@ class Sidebar(Vertical):
         return self._drag is not None and source is self._drag_source
 
     def cancel_drag(self, source: DragHandle) -> None:
-        """``source`` went away mid-drag: close its drag and clear its marks; nothing moves."""
+        """``source`` went away mid-drag, or its release was lost: close its drag and clear
+        its marks; nothing moves."""
         if not self.dragging(source):
             return
         self._drag, self._drag_source = None, None
@@ -997,6 +1002,18 @@ class Sidebar(Vertical):
     def drag_over(self, source: DragHandle, event: events.MouseMove) -> None:
         drag = self._drag
         if drag is None or source is not self._drag_source:
+            return
+        if event.button == 0:
+            # A move with NO button held: the release was lost — let go outside the
+            # terminal, or dropped by the driver — and this is the first report that
+            # says so (SelectionHost ends a pane's gesture by the same rule). The drag
+            # ends here and snaps back: where the button came up is nowhere this list
+            # saw, so nowhere is a place. Left held, the card stayed dimmed, the
+            # drop mark stayed on, and the handle kept the mouse — the next press
+            # anywhere was this handle's, and a click on another title opened this
+            # one's project (review of #171, round 1).
+            source.release_mouse()
+            self.cancel_drag(source)
             return
         if not drag.started:
             if abs(event.screen_y - drag.origin_y) < 1:

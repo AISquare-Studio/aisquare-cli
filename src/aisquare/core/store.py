@@ -1476,9 +1476,17 @@ class SqliteStore:
         should not cost history anyway. The context entries, prompt history,
         board rows, ended fleet-agent rows and turn metrics remain in the store,
         unreachable through any project read until the root is registered again.
+
+        Its place in the arrangement does not stay (#140): the group, the
+        position and the pin are cleared, and a project registered again comes
+        back loose and unpinned, like a new one. Kept, the next prompt there
+        revived a row that was still pinned and grouped, at a number its scope
+        had renumbered away while it was forgotten — two rows on one slot,
+        ordered by name (review of #171, round 1).
         """
         cursor = self._conn.execute(
-            "UPDATE project SET forgotten_at = ?, onboarded_at = NULL "
+            "UPDATE project SET forgotten_at = ?, onboarded_at = NULL, "
+            "group_id = NULL, position = NULL, pinned_at = NULL "
             "WHERE id = ? AND forgotten_at IS NULL",
             (_now_iso(), project_id),
         )

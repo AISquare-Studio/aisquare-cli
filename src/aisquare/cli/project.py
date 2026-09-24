@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 import sys
 from pathlib import Path
 from typing import Annotated
@@ -66,16 +67,34 @@ def list_(
             chosen = groups_service.resolve_group(store, group) if group else None
         except KeyError:
             fail(f"no group matches '{group}'", error="not_found", ref=str(group))
-        projects = arrangement.ordered_projects()
+        listed = arrangement.ordered_projects()
         # Counted only when nothing is listed at all, where "nothing registered"
         # would be wrong — not when --group or --pinned filtered the list empty.
-        hidden = 0 if all or projects else len(store.list_projects(all=True))
+        hidden = 0 if all or listed else len(store.captured_projects())
+    projects = listed
     if chosen is not None:
         projects = [p for p in projects if p.group_id == chosen.id]
     if pinned:
         projects = [p for p in projects if p.pinned_at is not None]
+    filtered = None
+    if listed and not projects:
+        # The filter matched nothing in a list that has rows, and the empty table
+        # said "No projects registered yet. Run: aisquare init" (review of #171,
+        # round 1). It names the filter instead, and the step that fills it.
+        where = f" in group {chosen.name}" if chosen is not None else ""
+        if pinned:
+            filtered = f"No pinned projects{where} — pin one: aisquare project pin <project>"
+        elif chosen is not None:
+            filtered = (
+                f"No projects{where} — add one: aisquare project group add "
+                f"{shlex.quote(chosen.name)} <project>"
+            )
     emit_projects(
-        projects, active_id=project_service.info().id, hidden=hidden, group_names=group_names
+        projects,
+        active_id=project_service.info().id,
+        hidden=hidden,
+        group_names=group_names,
+        filtered=filtered,
     )
 
 

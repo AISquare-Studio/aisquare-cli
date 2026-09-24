@@ -2925,7 +2925,10 @@ def test_another_button_let_go_mid_drag_does_not_end_it(
     tmp_path: Path, script: Script, isolated_home: Path
 ) -> None:
     """The drag is button 1's. A right button pressed and let go while it is held neither
-    drops the card there nor counts as a click on it; the left button's release does."""
+    drops the card there nor counts as a click on it; the left button's release does.
+    SelectionHost's one-gesture rule drops the right button's press and release at the
+    app, before the handle sees either, so this pins the whole path, not the handle's
+    own check."""
     seed(tmp_path, ("prj_a", "api", None), ("prj_b", "cli", None), ("prj_c", "docs", None))
     with store_session() as store:
         groups_service.create_group(store, "tools", ["prj_b"])
@@ -2951,6 +2954,45 @@ def test_another_button_let_go_mid_drag_does_not_end_it(
     assert midway == before == ["group:tools", "prj_b", "prj_a", "prj_c"], midway
     assert opened == "welcome", "the right button's click is no open"
     assert after == ["group:tools", "prj_b", "prj_c", "prj_a"], "the left release drops"
+
+
+def test_a_drag_whose_release_was_lost_ends_at_the_first_move_with_no_button_held(
+    tmp_path: Path, script: Script, isolated_home: Path
+) -> None:
+    """Let go outside the terminal, the release never arrives; the first move reported with
+    no button held says so. The drag ends there and snaps back — the release was nowhere a
+    place is — and the handle lets the mouse go. Left held and armed, the card stayed dimmed,
+    the card under the pointer kept its drop mark, and the next click anywhere went to the
+    dragged title: a click on api opened docs (review of #171, round 1)."""
+    seed(tmp_path, ("prj_a", "api", None), ("prj_b", "cli", None), ("prj_c", "docs", None))
+
+    async def go(
+        pilot: Pilot[None],
+    ) -> tuple[list[str], bool, list[bool], object, bool, int, list[str], str | None]:
+        app = fleet_app(pilot)
+        before = _cards(app)
+        docs = card_for(app, "prj_c")
+        api = card_for(app, "prj_a")
+        await _as_the_terminal_sends(pilot, events.MouseDown, docs.query_one(ProjectTitle))
+        await _as_the_terminal_sends(pilot, events.MouseMove, api)
+        running = docs.has_class("-dragging") and api.has_class("-drop-before")
+        await _as_the_terminal_sends(pilot, events.MouseMove, api, button=0)
+        await pilot.pause()
+        marks = [docs.has_class("-dragging"), api.has_class("-drop-before")]
+        captured = app.mouse_captured
+        closed = app.sidebar._drag is None
+        depth = len(app._undo)
+        after = _cards(app)
+        await _click(pilot, api.query_one(ProjectTitle))
+        view = app.current_view()
+        return before, running, marks, captured, closed, depth, after, view.id if view else None
+
+    before, running, marks, captured, closed, depth, after, opened = drive(go)
+    assert running, "the drag was over api's card when its release was lost"
+    assert marks == [False, False], "nothing dimmed, nothing marked"
+    assert captured is None and closed, "the handle let the mouse go and the drag is closed"
+    assert after == before and depth == 0, "a lost release drops nowhere"
+    assert opened == "project-prj_a", "the next click is the click it was"
 
 
 def test_a_step_with_nowhere_to_go_leaves_nothing_to_undo(

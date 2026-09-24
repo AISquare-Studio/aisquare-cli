@@ -249,3 +249,31 @@ def test_undo_brings_back_only_a_group_its_own_change_deleted(store: ContextStor
     assert [g.name for g in store.project_groups()] == ["site"], "tools stays deleted"
     assert groups.undo(store, gone) == "delete group tools"
     assert _shape(store)["groups"] == {"tools": ["prj_cli"], "site": ["prj_web"]}
+
+
+def test_a_forgotten_project_leaves_the_arrangement_and_comes_back_like_a_new_one(
+    store: ContextStore,
+) -> None:
+    """A forget kept the row's group, place and pin, and the next prompt in the directory
+    revives the row (#139): added again, it came back pinned and grouped, at a number its
+    scope had given away while it was forgotten — two rows at 0, ordered by name (review of
+    #171, round 1). The forget takes it out of the arrangement, and an undo of a gesture
+    made before the forget does not write its old place back onto the tombstone."""
+    groups.create_group(store, "tools", ["prj_api", "prj_cli", "prj_docs"])
+    pinned = groups.pin(store, "prj_api")
+    store.forget_project("prj_api")
+    groups.move_project(store, "prj_docs", position=0)  # tools renumbered without api
+    assert groups.undo(store, pinned) == "pin api"
+    api = ProjectInfo(id="prj_api", root=Path("/w/api"))
+    store.ensure_project(api)  # a prompt there: back, captured
+    store.onboard_project(api)  # added again on purpose
+    revived = store.get_project("prj_api")
+    assert revived is not None
+    assert (revived.group_id, revived.position, revived.pinned_at) == (None, None, None)
+    assert _shape(store) == {
+        "pinned": [],
+        "groups": {"tools": ["prj_docs", "prj_cli"]},
+        "loose": ["prj_web", "prj_api"],
+    }, "loose, and last, where a project arranged by nobody lands"
+    tools = groups.load_arrangement(store).groups[0].members
+    assert [p.position for p in tools] == [0, 1], "no shared slot"

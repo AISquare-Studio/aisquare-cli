@@ -217,6 +217,7 @@ def emit_projects(
     active_id: str | None,
     hidden: int = 0,
     group_names: Mapping[str, str] | None = None,
+    filtered: str | None = None,
 ) -> None:
     """Render the project list — a JSON array under ``--json``, a table otherwise.
 
@@ -226,7 +227,9 @@ def emit_projects(
     ``position`` and ``pinned`` (#140); the table shows a GROUP column and a
     📌 marker only when something is grouped or pinned. ``hidden`` is how many
     captured directories the list leaves out (#139); only an empty table
-    mentions them.
+    mentions them. ``filtered`` is what an empty table says when ``--group`` or
+    ``--pinned`` left nothing of a list that has rows: neither "nothing
+    registered" nor the captured count is true then.
     """
     names = group_names or {}
     if get_state().json_output:
@@ -243,6 +246,9 @@ def emit_projects(
                 ]
             )
         )
+        return
+    if not projects and filtered:
+        stdout_console().print(filtered)
         return
     if not projects and hidden:
         # "nothing registered, run init" was wrong for a machine whose hooked

@@ -1257,15 +1257,14 @@ def spawn(
     """
     config = settings()
     _require_role(role)
-    replayed_binary = spec is not None and binary is None
     replayed_args = spec is not None and not agent_args
     if spec is not None:
-        # The recorded launch stands in for the role's config, argument by argument.
-        binary = binary if binary is not None else spec.binary
-        # A spec's `None` is "no flag was passed" — the model's contract, and what
-        # the first specs recorded for `""`. Read as "not recorded" it handed the
-        # restart today's config mode, `auto` by default: the silent change of
-        # permissions a replay exists to prevent.
+        # The recorded launch stands in for the role's config, argument by argument
+        # (the binary: `_launch_binary`, below). A spec's `None` permission mode is
+        # "no flag was passed" — the model's contract, and what the first specs
+        # recorded for `""`. Read as "not recorded" it handed the restart today's
+        # config mode, `auto` by default: the silent change of permissions a replay
+        # exists to prevent.
         if permission_mode is None:
             permission_mode = spec.permission_mode or ""
         worktree = worktree if worktree is not None else spec.worktree
@@ -1276,15 +1275,9 @@ def spawn(
     srv = server(config)
     _require_tmux(srv)
     notes: list[str] = []
-    if replayed_binary:
-        resolution = harness.resolve_binary(role, override=binary)
-        if shutil.which(resolution.binary) is None:
-            # Replayed, and gone since: today's resolution, when it is the same kind of program.
-            resolution = _in_place_of_recorded(
-                role, resolution.binary, claude_code=claude_code, notes=notes
-            )
-    else:
-        resolution = _binary_for(role, override=binary)
+    resolution = _launch_binary(
+        role, binary=binary, spec=spec, claude_code=claude_code, notes=notes
+    )
     role_config = role_settings(role, config)
     with store_session() as store:
         # A spawn is a deliberate add (#139) whatever the row already carries, so
@@ -1358,13 +1351,6 @@ def spawn(
         )
 
     mode = role_config.permission_mode if permission_mode is None else permission_mode
-    # `auto` behind the explainability proxy is refused from the first tool call
-    # once the session baseline is past what the proxy's non-streaming forward
-    # survives (#150). Said on the receipt when this machine's transcripts say
-    # so; a warning, never a reason not to spawn.
-    with contextlib.suppress(Exception):
-        if (warning := auto_mode.spawn_note(mode, role=role, config=config)) is not None:
-            notes.append(warning)
     # WHICH ACCOUNT, decided here and carried into the window as an explicit
     # `--account <slot>` (#145). The one resolver `launch` itself uses — flag,
     # role binding, project default, machine default — runs HERE rather than
@@ -1504,6 +1490,16 @@ def spawn(
     stored = _record(
         agent, project, srv, wanted=label, notes=notes, cap=config.max_agents_per_project
     )
+    # `auto` behind the explainability proxy is refused from the first tool call
+    # once the session baseline is past what the proxy's non-streaming forward
+    # survives (#150). Said on the receipt when this machine's transcripts say
+    # so; a warning, never a reason not to spawn. Asked once the row is written,
+    # so the restart it names is under the label the agent was recorded with
+    # (`_record` re-picks one taken meanwhile).
+    with contextlib.suppress(Exception):
+        warning = auto_mode.spawn_note(mode, role=role, label=stored.label, config=config)
+        if warning is not None:
+            notes.append(warning)
     if takes_over is not None and identity.session_id is not None:
         stored = _take_over(stored, takes_over, identity.session_id, notes)
     _supersede(rows, views, stored, config)
@@ -1512,13 +1508,56 @@ def spawn(
     return SpawnReceipt(agent=stored, asked_label=label, tmux_session=tmux_session, notes=notes)
 
 
-def _binary_for(role: str, *, override: str | None = None) -> harness.BinaryResolution:
-    """The executable ``role`` launches with — refused when it is not on ``PATH``."""
+def _launch_binary(
+    role: str,
+    *,
+    binary: str | None,
+    spec: LaunchSpec | None,
+    claude_code: bool,
+    notes: list[str],
+    bin_flag: bool = True,
+) -> harness.BinaryResolution:
+    """The executable a spawn of ``role`` starts — refused when there is none to start.
+
+    An explicit ``binary`` (``--bin``) wins. Otherwise a replayed ``spec``
+    starts the binary it recorded or, once that has left the PATH, today's
+    resolution of the same kind of program (:func:`_in_place_of_recorded`);
+    and a launch with no spec — a new agent, or the replay of a row spawned
+    before v18 — starts the role's as it resolves today (:func:`_binary_for`).
+
+    :func:`spawn` asks this, and so does :func:`_refuse_a_replay_that_cannot_start`
+    before a running agent is stopped: two copies of the choice, kept in step by
+    hand, had already drifted apart once (review of #169, round 1). ``bin_flag``
+    is whether the caller takes ``--bin``; a refusal names it only then.
+    """
+    if spec is None or binary is not None:
+        return _binary_for(role, override=binary, bin_flag=bin_flag)
+    resolution = harness.resolve_binary(role, override=spec.binary)
+    if shutil.which(resolution.binary) is None:
+        # Replayed, and gone since: today's resolution, when it is the same kind of program.
+        resolution = _in_place_of_recorded(
+            role, resolution.binary, claude_code=claude_code, notes=notes
+        )
+    return resolution
+
+
+def _binary_for(
+    role: str, *, override: str | None = None, bin_flag: bool = True
+) -> harness.BinaryResolution:
+    """The executable ``role`` launches with — refused when it is not on ``PATH``.
+
+    The refusal names ``--bin`` only when ``bin_flag`` says the caller takes one.
+    """
     resolution = harness.resolve_binary(role, override=override)
     if shutil.which(resolution.binary) is None:
+        way_out = (
+            "install it, pass --bin, or change the role's binding"
+            if bin_flag
+            else "install it, or change the role's binding"
+        )
         raise FleetError(
             f"{resolution.binary!r} is not on your PATH (chosen by: {resolution.source}) — "
-            "install it, pass --bin, or change the role's binding"
+            + way_out
         )
     return resolution
 
@@ -3715,8 +3754,7 @@ def _respawn(
             else "binary, permission mode and arguments"
         )
         notes.append(
-            f"launched as recorded at its first spawn — {replayed} come from the row, not from "
-            "today's config (#144)"
+            f"launched as recorded — {replayed} come from the row, not from today's config (#144)"
         )
     receipt = spawn(
         project,
@@ -3751,17 +3789,22 @@ def _refuse_a_replay_that_cannot_start(agent: FleetAgent, session: TeamSession |
     started. Asked here first, with the evidence :func:`_respawn` hands
     :func:`spawn`, a running agent is left running.
 
-    The binary asked about is the one :func:`spawn` will start: the recorded
-    one when the row has a spec, the role's as it resolves today when it has
-    none (a row spawned before v18). Asking the role's for a row with a spec
-    refused the restart of an agent whose recorded binary was still there
-    because the role's binding had moved to one that is not.
+    The binary asked about is the one :func:`spawn` will start, chosen by the
+    function spawn asks (:func:`_launch_binary`): the recorded one when the
+    row has a spec, the role's as it resolves today when it has none (a row
+    spawned before v18). Asking the role's for a row with a spec refused the
+    restart of an agent whose recorded binary was still there because the
+    role's binding had moved to one that is not. A refusal names no ``--bin``:
+    ``fleet restart``, ``fleet switch`` and Restart take none.
     """
-    spec = agent.launch_spec
-    if spec is None:
-        _binary_for(agent.role)
-    elif shutil.which(spec.binary) is None:
-        _in_place_of_recorded(agent.role, spec.binary, claude_code=session is not None, notes=[])
+    _launch_binary(
+        agent.role,
+        binary=None,
+        spec=agent.launch_spec,
+        claude_code=session is not None,
+        notes=[],
+        bin_flag=False,
+    )
 
 
 @dataclass

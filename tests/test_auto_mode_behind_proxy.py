@@ -492,9 +492,10 @@ def test_a_transcript_doctor_may_not_stat_does_not_crash_doctor(
 # --- the spawn receipt ----------------------------------------------------------------------
 
 
-def _note(mode: str | None, *, role: str = "coder") -> str | None:
-    """The spawn note as ``fleet.spawn`` asks for it: the mode, the role, the loaded config."""
-    return auto_mode.spawn_note(mode, role=role, config=load_config().fleet)
+def _note(mode: str | None, *, role: str = "coder", label: str = "coder-1") -> str | None:
+    """The spawn note as ``fleet.spawn`` asks for it: the mode, the role, the label the
+    row was recorded with, the loaded config."""
+    return auto_mode.spawn_note(mode, role=role, label=label, config=load_config().fleet)
 
 
 def test_the_spawn_note_needs_auto_mode_a_proxy_and_evidence(
@@ -528,26 +529,27 @@ def test_the_spawn_note_names_a_step_a_restart_or_a_switch_receipt_can_follow(
     in the form this config accepts, for the agents spawned after it (review of #164,
     round 1), and ``fleet restart``'s own ``--permission-mode`` for the agent itself: a
     restart replays the mode the agent was launched with (#144), so the role's step
-    alone brought it back in ``auto``."""
+    alone brought it back in ``auto``. Under the agent's own label, as the board line
+    names it, so it runs as printed (review of #169, round 1)."""
     paths.ensure_home()
     _configure(tracing=True, modes={"coder": "auto"})
     project = _project(tmp_path / "repo")
     _session(project, "s-big", _sized(tmp_path / "t" / "big.jsonl", 141_000))
 
-    note = _note("auto", role="coder")
+    note = _note("auto", role="coder", label="coder-auth")
 
     assert note is not None and "fleet spawn" not in note
     command = "aisquare config set fleet.roles.coder.permission_mode acceptEdits"
     assert (
         f"set a non-classifier mode for coder ({command}) and "
-        "`aisquare fleet restart <label> --permission-mode acceptEdits` (its session resumes)"
+        "`aisquare fleet restart coder-auth --permission-mode acceptEdits` (its session resumes)"
         in note
     )
     result = runner.invoke(app, command.split()[1:])
     assert result.exit_code == 0, result.output
     assert "coder" not in auto_mode.auto_roles()
     # A role this config's [fleet.roles] leaves out: the table, as the doctor line names it.
-    manager = _note("auto", role="manager")
+    manager = _note("auto", role="manager", label="manager")
     assert manager is not None and "config set fleet.roles.manager" not in manager
     assert 'add a `[fleet.roles.manager]` table with `permission_mode = "acceptEdits"`' in manager
 

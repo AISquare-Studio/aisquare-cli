@@ -8370,6 +8370,36 @@ def test_the_auto_mode_board_line_s_own_way_out_brings_the_agent_back_off_auto(
     assert _flag(_command(tmux), "--permission-mode") == "acceptEdits", "the spec kept it"
 
 
+def test_the_spawn_note_names_the_restart_under_the_label_the_agent_was_recorded_with(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #169, round 1: the auto-mode note on a spawn's receipt (#150) printed
+    `aisquare fleet restart <label> --permission-mode acceptEdits` for an agent whose
+    label `spawn` had just recorded, where the board line names the real one. It names
+    the recorded label now, so the step runs as printed — on the receipt of a restart
+    that replays `auto` too, which starts its replacement through `spawn`."""
+    monkeypatch.setattr("aisquare.services.explainability.tracing_configured", lambda: True)
+    refused = auto_mode.Sample(
+        session_id="s-hit",
+        role="coder",
+        started_at=datetime.now(tz=UTC),
+        tokens=80_000,
+        refusals=auto_mode.REFUSAL_THRESHOLD,
+    )
+    monkeypatch.setattr(auto_mode, "measure_baseline", lambda: auto_mode.Baseline((refused,)))
+    step = "`aisquare fleet restart coder-auth --permission-mode acceptEdits`"
+
+    receipt = fleet_service.spawn(project, "coder", label="coder-auth", worktree=False)
+
+    assert any(step in note for note in receipt.notes), receipt.notes
+    tmux.die(receipt.agent.pane_id, 1)
+    again = fleet_service.restart(project, "coder-auth")
+    assert any(step in note for note in again.notes), again.notes
+
+
 def test_restarting_a_death_no_listing_recorded_announces_it_but_wakes_no_manager(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
 ) -> None:
@@ -8534,7 +8564,9 @@ def test_a_restart_given_a_permission_mode_changes_the_mode_alone_and_records_it
     config no longer reaches a running agent, and the way off ``auto`` that #150's
     board line names is ``fleet restart --permission-mode``. The explicit mode wins over
     the spec as it wins over the config — the binary and the arguments are still the
-    recorded ones — and the replacement's spec records it."""
+    recorded ones — and the replacement's spec records it. The next bare restart
+    replays it, and its receipt does not say the mode was recorded at the agent's first
+    spawn, which it no longer was (review of #169, round 1)."""
     _settings(
         monkeypatch,
         roles={"coder": FleetRoleSettings(permission_mode="auto", extra_args=["--effort", "high"])},
@@ -8554,6 +8586,15 @@ def test_a_restart_given_a_permission_mode_changes_the_mode_alone_and_records_it
     assert receipt.started.launch_spec is not None
     assert receipt.started.launch_spec.permission_mode == "acceptEdits"
     assert any("binary and arguments come from the row" in note for note in receipt.notes)
+    tmux.die(receipt.started.pane_id, 1)
+
+    again = fleet_service.restart(project, agent.label)
+
+    assert _flag(_command(tmux), "--permission-mode") == "acceptEdits", "the role says auto"
+    assert (
+        "launched as recorded — binary, permission mode and arguments come from the row, "
+        "not from today's config (#144)" in again.notes
+    )
 
 
 def test_a_restart_asks_for_the_recorded_binary_not_the_one_the_role_names_today(
@@ -9033,3 +9074,44 @@ def test_a_replay_that_cannot_start_leaves_a_running_agent_running(
     with store_session() as store:
         live = store.fleet_agent_by_label(project.id, agent.label, live_only=True)
     assert live is not None and live.id == agent.id
+
+
+def test_a_row_spawned_before_the_launch_spec_is_refused_its_replay_before_the_stop(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Review of #169, round 1: a row spawned before v18 has no launch spec, so its
+    replay starts the role's binary as the role resolves it today. With that binary
+    gone, the check before the stop is the one thing between the operator and an
+    agent stopped for a replacement that never starts — and no test asked it. It is
+    `spawn`'s own choice (`_launch_binary`), asked by `restart` and by `switch`
+    before either marks the session or types `/exit`, and its refusal names only
+    ways out a restart has: neither takes `--bin`."""
+    _two_slots_with_usage(monkeypatch, work=95, personal=10)
+    agent = fleet_service.spawn(project, "coder", worktree=False, account="2").agent
+    _with_transcript(agent, None)
+    with store_session() as store:
+        store.upsert_fleet_agent(agent.model_copy(update={"launch_spec": None}))
+    gone = tmp_path / "gone" / "claude"
+    monkeypatch.setenv("AISQUARE_BIN_CODER", str(gone))
+    started = len(tmux.spawned)
+    refusal = re.escape(
+        f"{str(gone)!r} is not on your PATH (chosen by: env) — install it, or change the "
+        "role's binding"
+    )
+
+    with pytest.raises(FleetError, match=f"^cannot restart {agent.label!r}: {refusal}$"):
+        fleet_service.restart(project, agent.label)
+    with pytest.raises(FleetError, match=f"^{refusal}$"):
+        fleet_service.switch(project, agent.label)
+
+    assert tmux.typed == [] and tmux.killed == [], "no /exit typed, no window killed"
+    assert len(tmux.spawned) == started
+    with store_session() as store:
+        live = store.fleet_agent_by_label(project.id, agent.label, live_only=True)
+        session = store.get_session(agent.session_id or "")
+    assert live is not None and live.id == agent.id and live.launch_spec is None
+    assert session is not None and session.state == "working", "the session is not marked"

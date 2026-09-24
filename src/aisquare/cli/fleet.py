@@ -285,7 +285,8 @@ def restart(
         typer.Option(
             "--permission-mode",
             help="Claude Code permission mode for the replacement (auto, acceptEdits, …); "
-            "default: the one the agent was launched with.",
+            "default: the one the agent was launched with, or the role's for an agent "
+            "spawned before that was recorded (#144).",
         ),
     ] = None,
     project: ProjectRef = None,

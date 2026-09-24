@@ -885,8 +885,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `auto` behind a configured proxy, it reads the first-turn size of recent
   sessions from their transcripts and warns above ~100k tokens or when a
   recent session was refused three times or more; `fleet spawn` carries the
-  same warning on its receipt, naming the role's mode fix that a `fleet
-  restart` or `fleet switch` receipt can follow too; a session launched through
+  same warning on its receipt, and so do `fleet restart` and `fleet switch`,
+  naming the role's mode fix for later spawns and `fleet restart <label>
+  --permission-mode acceptEdits`, under the agent's own label, for the agent
+  itself — a restart replays the mode it was launched with (#144), so the
+  role's fix alone never reaches it; a session launched through
   the proxy and refused three times is put in 🔔 attention by its Stop hook
   with one `auto_mode_blocked` board line, or, when a restart or switch is
   taking it down, leaves both to the replacement that resumes it, judged on

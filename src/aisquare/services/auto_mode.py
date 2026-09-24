@@ -320,7 +320,7 @@ def doctor_check() -> DoctorCheck | None:
     return DoctorCheck(name=CHECK_NAME, status=CheckStatus.ok, detail=detail)
 
 
-def spawn_note(mode: str | None, *, role: str, config: FleetSettings) -> str | None:
+def spawn_note(mode: str | None, *, role: str, label: str, config: FleetSettings) -> str | None:
     """A receipt note for a spawn in ``auto`` mode that the evidence says will be refused.
 
     Silent unless the mode is ``auto``, tracing is configured, AND a recent
@@ -331,10 +331,12 @@ def spawn_note(mode: str | None, *, role: str, config: FleetSettings) -> str | N
 
     The way out it names has two steps: the ROLE's (:func:`_mode_step` on
     ``config``), for every agent spawned after it, and ``fleet restart <label>
-    --permission-mode acceptEdits`` for the agent itself. A restart replays
-    the mode the agent was launched with (its launch spec, #144), so the
-    role's step alone never reaches a running agent — followed as the note
-    used to print it, the restart resumed it in ``auto``, refused as before.
+    --permission-mode acceptEdits`` for the agent itself, under ``label`` — the
+    one its row was recorded with, as the board line names it — so the step
+    runs as printed (review of #169, round 1). A restart replays the mode the
+    agent was launched with (its launch spec, #144), so the role's step alone
+    never reaches a running agent — followed as the note used to print it,
+    the restart resumed it in ``auto``, refused as before.
     The restart's own flag does, its session resumes, and its spec keeps the
     new mode through later restarts and switches, the automatic usage-limit
     hand-over included. ``fleet restart`` and ``fleet switch`` start their
@@ -365,7 +367,7 @@ def spawn_note(mode: str | None, *, role: str, config: FleetSettings) -> str | N
     return (
         f"auto mode behind the explainability proxy: {why} — expect its tool calls to be refused "
         f"({SDK_ISSUE}); set a non-classifier mode for {role} ({_mode_step(role, config)}) and "
-        f"`aisquare fleet restart <label> {_RESTART_OFF_AUTO}` (its session resumes), or see "
+        f"`aisquare fleet restart {label} {_RESTART_OFF_AUTO}` (its session resumes), or see "
         f"`aisquare doctor` ({CHECK_NAME})"
     )
 

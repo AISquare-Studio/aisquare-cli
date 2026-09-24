@@ -2694,7 +2694,12 @@ def test_every_button_sequence_up_to_five_events_keeps_the_gesture_invariant(
 
     Measured at the two seams that matter — ``App.on_event`` (the screen) and
     the two route functions — on a bare host, with the clock frozen so a repeat
-    press is always inside :data:`DUPLICATE_PRESS_WINDOW`."""
+    press is always inside :data:`DUPLICATE_PRESS_WINDOW`.
+
+    All of them in ONE event loop. An ``asyncio.run`` per sequence built and
+    closed 19 607 loops: eight seconds on Linux, and on the Windows leg, where
+    each one is a proactor loop with its own socket pair, the job was still in
+    this test after forty minutes."""
     forwarded: list[tuple[str, int]] = []
     routed: list[tuple[str, int | None]] = []
 
@@ -2754,17 +2759,22 @@ def test_every_button_sequence_up_to_five_events_keeps_the_gesture_invariant(
             await host.on_event(_mouse(kinds[kind], b))
         assert host._pressed is None or any(k == "D" for k, _ in steps)
 
-    checked = 0
-    for length in range(1, 6):
-        for steps in itertools.product(alphabet, repeat=length):
-            forwarded.clear()
-            routed.clear()
-            asyncio.run(drive(list(steps)))
-            expected_fwd, expected_rt = model(list(steps))
-            assert forwarded == expected_fwd, f"{steps}: forwarded {forwarded} != {expected_fwd}"
-            assert routed == expected_rt, f"{steps}: routed {routed} != {expected_rt}"
-            checked += 1
-    assert checked == 7 + 49 + 343 + 2401 + 16807
+    async def check_every_sequence() -> int:
+        checked = 0
+        for length in range(1, 6):
+            for steps in itertools.product(alphabet, repeat=length):
+                forwarded.clear()
+                routed.clear()
+                await drive(list(steps))
+                expected_fwd, expected_rt = model(list(steps))
+                assert forwarded == expected_fwd, (
+                    f"{steps}: forwarded {forwarded} != {expected_fwd}"
+                )
+                assert routed == expected_rt, f"{steps}: routed {routed} != {expected_rt}"
+                checked += 1
+        return checked
+
+    assert asyncio.run(check_every_sequence()) == 7 + 49 + 343 + 2401 + 16807
 
 
 def test_a_duplicated_primary_press_does_not_restart_the_drag(

@@ -77,6 +77,11 @@ DIRTY_SHELL = {
     # A second Claude login's scratch directory, exported the way the README's
     # role bindings set it.
     "CLAUDE_CODE_TMPDIR": "/home/someone/.cache/claude-account1",
+    # The shell's own two, as a launch onto one of that login's managed slots
+    # keeps them (`claude_accounts.PLAIN_VARS`) — read as slot 1 whenever a test
+    # points CLAUDE_CONFIG_DIR at a managed slot, as the account tests do.
+    "AISQUARE_PLAIN_CLAUDE_CONFIG_DIR": "/home/someone/.claude",
+    "AISQUARE_PLAIN_CLAUDE_CODE_TMPDIR": "/home/someone/.cache/claude",
     # A narrow terminal that has turned colour off. The width and NO_COLOR
     # alone fail 13 tests left set; conftest clears them with TERM.
     "COLUMNS": "40",
@@ -226,4 +231,26 @@ def test_conftest_clears_both_variables_an_account_is() -> None:
         f"a Claude account is {list(claude_accounts.LAUNCH_VARS)} for a launch, and "
         f"conftest does not clear {missing}, so the default account a test launches "
         "is whichever login the caller's shell pointed at"
+    )
+
+
+def test_conftest_clears_the_copies_a_launch_onto_a_managed_slot_keeps() -> None:
+    """Both of ``core.claude_accounts.PLAIN_VARS``' copies, beside the two above.
+
+    ``plain_environment`` reads them as slot 1's whenever ``CLAUDE_CONFIG_DIR``
+    names a managed slot, which the account tests set up, so a suite run from a
+    fleet pane on one of the developer's slots resolved slot 1 to THEIR
+    directory: four tests went red, and the hand-over test read that
+    directory's login (review of #205, seventh round). #205 cleared them in a
+    loop of its own in ``isolated_home``; since the #205 fold they are in
+    ``AMBIENT_ENV_VARS``, the one list these guards read, and this keeps them
+    there.
+    """
+    from aisquare.core import claude_accounts
+
+    missing = sorted(set(claude_accounts.PLAIN_VARS.values()) - set(AMBIENT_ENV_VARS))
+    assert not missing, (
+        f"a launch onto a managed slot keeps the shell's own account under {missing}, "
+        "and conftest does not clear them, so a test's slot 1 is the login of "
+        "whoever ran the suite from a fleet pane"
     )

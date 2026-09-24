@@ -23,6 +23,7 @@ from aisquare.core import state_file
 from aisquare.core.atomic import write_replacing
 from aisquare.core.locking import lock_exclusive, unlock
 from aisquare.core.state_file import StateUnwritableError, read_state, update_state
+from tests.fsperms import can_deny_reads, can_deny_writes, unwritable
 
 _not_root = pytest.mark.skipif(
     hasattr(os, "geteuid") and os.geteuid() == 0, reason="root reads through any file mode"
@@ -114,7 +115,7 @@ def test_a_value_json_cannot_encode_is_refused_not_raised_as_a_type_error(
     assert _siblings(isolated_home) == ["state.json"]
 
 
-@_not_root
+@pytest.mark.skipif(not can_deny_reads(), reason="mode 000 does not stop this user from reading")
 def test_strict_reading_raises_for_an_unreadable_file_but_not_a_missing_one(
     isolated_home: Path,
 ) -> None:
@@ -277,23 +278,21 @@ def test_a_temp_another_process_left_behind_is_swept_on_the_next_update(
     assert _siblings(isolated_home) == ["state.json"]
 
 
-@_not_root
+@pytest.mark.skipif(not can_deny_writes(), reason="writes into a directory cannot be denied here")
 def test_a_home_we_cannot_write_to_is_refused_as_a_permission_problem(
     isolated_home: Path,
 ) -> None:
     """With no lock file yet, the read-only fallback (`O_RDONLY` without `O_CREAT`) raised
     `ENOENT`, so the toast and `project switch` read 'No such file or directory' for what was a
-    permission problem."""
+    permission problem. The home is denied through `fsperms.unwritable`: a `chmod(0o555)` on a
+    directory is a no-op on NTFS, and advice to root."""
     update_state("board_theme", "nord")
     (isolated_home / "state.json.lock").unlink()
-    isolated_home.chmod(0o555)
-    try:
+    with unwritable(isolated_home):
         with pytest.raises(StateUnwritableError, match=r"state\.json\.lock could not be opened"):
             update_state("sidebar_width", 44)
         with pytest.raises(StateUnwritableError, match="Permission denied"):
             update_state("sidebar_width", 44)
-    finally:
-        isolated_home.chmod(0o755)
     assert read_state() == {"board_theme": "nord"}
 
 

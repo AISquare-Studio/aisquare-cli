@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import subprocess
+import sys
 import time
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
@@ -188,10 +189,6 @@ def test_text_after_the_zone_costs_neither_the_window_nor_the_reset() -> None:
     assert fine is not None and fine.resets_at is not None  # 12:30am is still a clock time
 
 
-@pytest.mark.skipif(
-    not hasattr(time, "tzset"),
-    reason="time.tzset is POSIX-only: the process zone cannot be switched for the test",
-)
 def test_a_reset_with_no_zone_named_is_resolved_in_the_local_rules_across_a_dst_change(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -202,6 +199,11 @@ def test_a_reset_with_no_zone_named_is_resolved_in_the_local_rules_across_a_dst_
 
     Skipped where ``time`` has no ``tzset`` (Windows): the zone cannot be switched for the
     process, and #65's windows-latest leg runs this file (review of #205, fifth round)."""
+    # In the body and on `sys.platform`, not a `hasattr` skipif: `pytest.skip` is
+    # `NoReturn`, so mypy's run on the Windows leg narrows past it and does not
+    # report `time.tzset` as missing from that platform's `time`.
+    if sys.platform == "win32":
+        pytest.skip("time.tzset is POSIX-only: the process zone cannot be switched for the test")
     friday = datetime(2026, 10, 30, 16, 0, tzinfo=UTC)  # noon EDT (-04:00)
     monday_midnight_est = datetime(2026, 11, 2, 5, 0, tzinfo=UTC)
     with monkeypatch.context() as local:

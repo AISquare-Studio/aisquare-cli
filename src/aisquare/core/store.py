@@ -490,13 +490,19 @@ def _converge_v15_fork(connection: sqlite3.Connection) -> None:
     persona step above 21 instead fails the other way: ``duplicate column name``
     on the stores that already carry it.
 
-    So both v15s are made idempotent and applied here, whichever route a store
-    took to 15: the account DDL as ``IF NOT EXISTS``, the three columns through
-    :func:`_add_column_if_absent`. Every statement is a no-op on a database that
-    already has it, and every cohort, this branch's v15, the persona v15 and a
-    fresh store passing through, lands in the same shape before v16 runs. The
-    persona columns therefore come from HERE, and the persona branch drops its
-    own v15 script when it lands rather than renumbering it.
+    So both v15s are made idempotent and applied here: the account DDL as
+    ``IF NOT EXISTS``, the three columns through :func:`_add_column_if_absent`.
+    Every statement is a no-op on a database that already has it. It runs TWICE
+    over, from two callers: as ``_PREPARE[15]`` for a store passing through 15
+    (a fresh store, main's v14), and from :func:`_converge_v15_shape` at every
+    open once a store is at 15 or ABOVE, keyed by what the catalog holds rather
+    than by the number. The second caller is the one the crew's own machine
+    needs: its board store took the persona v15 and was then run through v16 by
+    a build without this step, so it reads 16 with no ``claude_account``, and a
+    step keyed only on passing through 15 can never reach it (nor a persona
+    store already run to 21 the same way). The persona columns therefore come
+    from HERE, and the persona branch drops its own v15 script when it lands
+    rather than renumbering it.
 
     Statements run one at a time on the migration's own connection, never through
     ``executescript``, for the reason :func:`_migrate` gives.
@@ -506,6 +512,46 @@ def _converge_v15_fork(connection: sqlite3.Connection) -> None:
     _add_column_if_absent(connection, "fleet_agent", "account_slot", "INTEGER")
     _add_column_if_absent(connection, "team_session", "persona", "TEXT")
     _add_column_if_absent(connection, "fleet_agent", "persona", "TEXT")
+
+
+def _v15_shape_is_missing(connection: sqlite3.Connection) -> bool:
+    """Whether anything :func:`_converge_v15_fork` creates is absent: catalog reads only."""
+    tables = {
+        row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+    }
+    if not {"claude_account", "project_setting"} <= tables:
+        return True
+    fleet = {row[1] for row in connection.execute("PRAGMA table_info(fleet_agent)")}
+    session = {row[1] for row in connection.execute("PRAGMA table_info(team_session)")}
+    return not ({"account_slot", "persona"} <= fleet and "persona" in session)
+
+
+def _converge_v15_shape(connection: sqlite3.Connection) -> None:
+    """At every open, once a store is at 15 or above: converge by SHAPE, not number.
+
+    ``_PREPARE[15]`` reaches a store only when the ladder passes through 15. A
+    store the fork has already carried past that point, stamped 16 to 21 with
+    the persona shape and none of the registry (the crew's own board store is
+    one, at 16), is never touched by any migration again, so the same idempotent
+    step is applied here whenever the catalog says something is missing. Reads
+    first, and the write transaction only when something is missing, so the
+    hooks' first-open race stays exactly as :func:`_migrate` describes it; the
+    shape is re-read under the lock, since another opener may have converged the
+    store between the read and the ``BEGIN IMMEDIATE``.
+    """
+    if int(connection.execute("PRAGMA user_version").fetchone()[0]) < 15:
+        return  # the ladder itself brings it to 15, and _PREPARE[15] does the rest
+    if not _v15_shape_is_missing(connection):
+        return
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        if _v15_shape_is_missing(connection):
+            _converge_v15_fork(connection)
+        connection.execute("COMMIT")
+    except sqlite3.Error:
+        with contextlib.suppress(sqlite3.Error):
+            connection.execute("ROLLBACK")
+        raise
 
 
 # Python that must run before a migration's statements, inside its transaction,
@@ -3480,6 +3526,7 @@ def _migrate(connection: sqlite3.Connection) -> None:
     A loser whose script still fails re-reads the version: if another process
     advanced it, that's victory by other means; otherwise the error is real.
     """
+    _converge_v15_shape(connection)
     while True:
         if int(connection.execute("PRAGMA user_version").fetchone()[0]) >= len(_MIGRATIONS):
             return

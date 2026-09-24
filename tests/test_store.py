@@ -1064,7 +1064,8 @@ def test_ui_state_is_a_key_value_memory(store: ContextStore) -> None:
     assert store.ui_state("fleet.selected") is None
 
 
-# #201's v15, as its ladder writes it: the two persona columns and nothing else.
+# #201's v15 as its ladder writes it, copied line for line from _SCHEMA_V15 at
+# its head 87526ceff8d9 (2026-09-24): the two persona columns and nothing else.
 PERSONA_V15_DDL = """
 ALTER TABLE team_session ADD COLUMN persona TEXT;
 ALTER TABLE fleet_agent ADD COLUMN persona TEXT;
@@ -1093,6 +1094,8 @@ def test_the_if_absent_twin_of_v15_names_every_table_and_index_v15_creates() -> 
         ("main's v14, passing through this branch's v15", "V14"),
         ("the hackathon branch's persona v15 (#201)", "PERSONA15"),
         ("this branch's own v15, stamped before v16 existed", "ACCOUNTS15"),
+        ("the persona v15 run through v16 by a build without the step (this box)", "THISBOX16"),
+        ("the persona v15 run to 21 by a build without the step", "RANTO21"),
     ],
 )
 def test_every_shape_of_user_version_15_converges_on_one_schema(label: str, cohort: str) -> None:
@@ -1104,13 +1107,22 @@ def test_every_shape_of_user_version_15_converges_on_one_schema(label: str, coho
     cohort could silently lack: a persona-15 store opened by this ladder without
     the converge step stamps 21 with no ``claude_account`` and no
     ``fleet_agent.account_slot``, and nothing raises until the first fleet read.
+    The last two cohorts are stores that ALREADY went past 15 that way, stamped
+    16 (the crew's own board store, 2026-09-24) and 21: no migration will ever
+    run on them again, so only the open-time shape convergence can reach them.
     """
     from pathlib import Path
+
+    from aisquare.core.store import _MIGRATIONS
 
     if cohort == "V14":
         db = _at_version(14)
     elif cohort == "PERSONA15":
         db = _at_version(14, after=PERSONA_V15_DDL, stamp=15)
+    elif cohort == "THISBOX16":
+        db = _at_version(14, after=PERSONA_V15_DDL + _MIGRATIONS[15], stamp=16)
+    elif cohort == "RANTO21":
+        db = _at_version(14, after=PERSONA_V15_DDL + "".join(_MIGRATIONS[15:]), stamp=21)
     else:
         db = _at_version(15)
 

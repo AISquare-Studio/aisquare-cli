@@ -81,7 +81,7 @@ narrowing their environment would be change without a reason:
     credentials file to this account on Windows. A permissions tool, not a
     model process; it is also the seam that guards the API key, so an
     inherited base URL is irrelevant to it either way.
-  * ``core/paths.py::_current_user_sid`` — ``whoami /user``, reading this
+  * ``core/paths.py::_whoami_sid`` — ``whoami /user``, reading this
     account's SID so the ``icacls`` above can name a trustee that cannot be
     spoofed by a stray ``USER`` in the environment. Same argument as its
     caller.
@@ -249,7 +249,7 @@ SEAMS: dict[str, Seam] = {
     "aisquare/core/paths.py::restrict_to_owner": Seam(
         EXCLUDED, "`icacls` — locks the credentials file to this account; no model"
     ),
-    "aisquare/core/paths.py::_current_user_sid": Seam(
+    "aisquare/core/paths.py::_whoami_sid": Seam(
         EXCLUDED,
         "`whoami /user` — reads THIS account's SID for the icacls trustee above. "
         "An identity question about the operating system, not the model API",

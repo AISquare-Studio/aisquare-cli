@@ -935,14 +935,27 @@ def _task_for(store: ContextStore, project: ProjectInfo, task_id: str | None) ->
     return task
 
 
-def _live_agent(store: ContextStore, project: ProjectInfo, label: str) -> FleetAgent:
+def _live_agent(
+    store: ContextStore, project: ProjectInfo, label: str, *, agent_id: str | None = None
+) -> FleetAgent:
+    """The live row ``label`` names; with ``agent_id``, only if it is THAT row (:func:`stop`)."""
     agent = store.fleet_agent_by_label(project.id, label, live_only=True)
     if agent is None:
         raise NoSuchAgent(
             f"no live agent {label!r} in {_name(project)} — "
             "`aisquare fleet ls` shows who is running"
         )
+    if agent_id is not None and agent.id != agent_id:
+        raise _replaced(label, agent, agent_id)
     return agent
+
+
+def _replaced(label: str, current: FleetAgent, agent_id: str) -> NoSuchAgent:
+    """The refusal for a caller pinned to a row whose label has since passed to another."""
+    return NoSuchAgent(
+        f"{label!r} is another agent now ({current.id}) — {agent_id} ended and was "
+        "replaced since; nothing was done to either (`aisquare fleet ls` shows who is running)"
+    )
 
 
 # --- lifecycle ----------------------------------------------------------------------
@@ -1663,7 +1676,12 @@ def _file_note(project: ProjectInfo, label: str, text: str, sender: str | None) 
 
 
 def stop(
-    project: ProjectInfo, label: str, *, force: bool = False, grace: float = 5.0
+    project: ProjectInfo,
+    label: str,
+    *,
+    force: bool = False,
+    grace: float = 5.0,
+    agent_id: str | None = None,
 ) -> FleetAgent:
     """``/exit`` the agent, wait ``grace`` seconds, then kill its window.
 
@@ -1674,15 +1692,28 @@ def stop(
     end the row (see :func:`_verify_gone`): a row ended for a process still
     running is an agent no live listing shows and no ``stop`` can address, and
     the operator was told "stopped".
+
+    ``agent_id`` pins the ROW, for a caller that means one rather than whoever
+    holds the label now: the agent view. A view outlives its row (the shell
+    keeps a view whose row left the frame), and by the time Stop is pressed on
+    a 💤 view the label may name a replacement — the manager, woken by that very
+    ``agent_exited``, ran ``fleet restart coder-1``. By label, that Stop sent
+    ``/exit`` to the new coder-1, killed it and reported "stopped" (review of
+    #138). Pinned, it stops that row or removes that row's window, and refuses
+    when neither is left.
     """
     with store_session() as store:
         try:
-            agent = _live_agent(store, project, label)
+            agent = _live_agent(store, project, label, agent_id=agent_id)
         except NoSuchAgent:
             # No live row — but an ENDED agent's window may still be on the server
             # (`remain-on-exit`), which is what the UI's 💤 row and its Stop
             # button stand for (#138): stopping it means killing that window.
-            ended = store.fleet_agent_by_label(project.id, label, live_only=False)
+            ended = (
+                store.fleet_agent_by_label(project.id, label, live_only=False)
+                if agent_id is None
+                else store.get_fleet_agent(agent_id)
+            )
             if ended is None or not _kill_lingering_window(store, project, ended):
                 raise  # no such row, or no window of its own left (gone, or a reused id)
             return ended
@@ -1966,6 +1997,7 @@ def restart(
     fresh: bool = False,
     size: tuple[int, int] | None = None,
     spawned_by: str = "user",
+    agent_id: str | None = None,
 ) -> RestartReceipt:
     """Start an agent again under its own label — the **Restart** of #138.
 
@@ -1982,6 +2014,9 @@ def restart(
     with a hand-off prompt built from the board.
     For the manager that is "end the dead row, then spawn manager again" — the
     fix the issue asks for — with the session carried over when it can be.
+
+    ``agent_id`` pins the row, as for :func:`stop`: the agent view's Restart
+    means the row it shows, never a replacement that took the label since.
     """
     with store_session() as store:
         agent = store.fleet_agent_by_label(project.id, label, live_only=False)
@@ -1990,6 +2025,8 @@ def restart(
                 f"no agent {label!r} in {_name(project)} — `aisquare fleet ls --all` shows "
                 "every row"
             )
+        if agent_id is not None and agent.id != agent_id:
+            raise _replaced(label, agent, agent_id)
         session = store.get_session(agent.session_id) if agent.session_id else None
         try:
             # `spawn`'s refusal for the task (done, dropped, gone from the board),
@@ -2010,7 +2047,7 @@ def restart(
         # should not read "stopped and restarted" for an agent that was not
         # running. Either way the label is free afterwards.
         was_running = _pane_alive(agent)
-        agent = stop(project, label)
+        agent = stop(project, label, agent_id=agent.id)
     # An exited agent's dead window is NOT removed here: `spawn` supersedes it
     # once the replacement is up and recorded, so a restart that is refused on
     # the way (a missing binary, an unknown account, tmux) leaves the 💤 row and

@@ -186,8 +186,12 @@ class AgentView(Vertical):
     def _stop(self, event: Button.Pressed) -> None:
         event.stop()
         agent = self.status.agent
+        # Pinned to THIS row (``agent_id``), never to whoever holds the label now: the
+        # view outlives its row, and a 💤 view's Stop by label stopped the replacement.
         self.run_worker(
-            lambda: fleet_service.stop(fleet_service.project_of(agent), agent.label),
+            lambda: fleet_service.stop(
+                fleet_service.project_of(agent), agent.label, agent_id=agent.id
+            ),
             name=STOP_WORKER,
             group=STOP_WORKER,
             exclusive=True,
@@ -203,7 +207,9 @@ class AgentView(Vertical):
         width, height = self.pane.content_size
         size = (width, height) if width > 0 and height > 0 else None
         self.run_worker(
-            lambda: fleet_service.restart(fleet_service.project_of(agent), agent.label, size=size),
+            lambda: fleet_service.restart(
+                fleet_service.project_of(agent), agent.label, size=size, agent_id=agent.id
+            ),
             name=RESTART_WORKER,
             group=RESTART_WORKER,
             exclusive=True,

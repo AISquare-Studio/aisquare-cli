@@ -2743,13 +2743,13 @@ def test_agent_view_offers_stop_and_restart_and_routes_them_through_the_service(
     started = _status(pane_id="%2").agent.model_copy(update={"id": "fa_2"})
 
     def fake_stop(target: ProjectInfo, label: str, **kwargs: object) -> FleetAgent:
-        calls.append(("stop", target.id, label))
+        calls.append(("stop", target.id, label, kwargs.get("agent_id")))
         return exited.agent
 
     def fake_restart(
         target: ProjectInfo, label: str, *, size: tuple[int, int] | None = None, **kw: object
     ) -> fleet_service.RestartReceipt:
-        calls.append(("restart", target.id, label, size))
+        calls.append(("restart", target.id, label, size, kw.get("agent_id")))
         return fleet_service.RestartReceipt(
             replaced=exited.agent, started=started, resumed=True, was_running=False,
             tmux_session="asq-amber-otter", notes=["accounts: slot 2 (the row's)"],
@@ -2803,9 +2803,11 @@ def test_agent_view_offers_stop_and_restart_and_routes_them_through_the_service(
     exited_tip, working_tip = tips
     assert "dead window" in exited_tip and "/exit" not in exited_tip  # nothing to /exit
     assert working_tip.startswith("/exit, a grace period")
+    # Pinned to the view's own row: a view outlives its row, and by label a Stop on a
+    # 💤 view whose label a replacement had taken stopped that replacement.
     assert calls == [
-        ("restart", "prj_1", "coder-1", size),
-        ("stop", "prj_1", "coder-1"),
+        ("restart", "prj_1", "coder-1", size, "fa_1"),
+        ("stop", "prj_1", "coder-1", "fa_1"),
     ]
     assert [agent.id for agent in posted] == ["fa_2"]  # the shell is told which row to show
     assert len(refreshed) == 2  # one fresh frame per action, never an optimistic repaint

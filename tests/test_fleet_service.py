@@ -3755,6 +3755,44 @@ def test_a_fresh_switch_still_tells_the_replacement_it_moved_to_another_account(
 # --- the review of #138, round 2 -----------------------------------------------------------------
 
 
+def test_a_pinned_row_is_never_mistaken_for_the_agent_that_took_its_label(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """The agent view outlives its row (``_feed_open_views`` keeps a view whose row left
+    the frame), and Stop is offered on the 💤 row. By label, a Stop pressed on a 💤 view
+    after the manager had restarted that coder — woken by the very ``agent_exited`` the
+    operator was reading — sent ``/exit`` to the NEW coder, killed it and said "stopped",
+    and Restart stopped and restarted it. The view pins its row (``agent_id``): the
+    replacement is refused, never touched; the row that IS there is acted on as before."""
+    old = _coder(project, label="coder-1")
+    tmux.die(old.pane_id, 1)
+    [seen] = fleet_service.list_agents(project)  # the operator opens the 💤 row
+    assert seen.state == "exited"
+    new = fleet_service.restart(project, "coder-1").started  # the manager restarts it
+    assert old.pane_id in tmux.killed  # superseded: the 💤 row has left the listing
+    typed, killed, spawned = list(tmux.typed), list(tmux.killed), len(tmux.spawned)
+
+    with pytest.raises(NoSuchAgent, match=rf"'coder-1' is another agent now \({new.id}\)"):
+        fleet_service.stop(project, "coder-1", agent_id=old.id)
+    with pytest.raises(NoSuchAgent, match=rf"'coder-1' is another agent now \({new.id}\)"):
+        fleet_service.restart(project, "coder-1", agent_id=old.id)
+    assert (tmux.typed, tmux.killed, len(tmux.spawned)) == (typed, killed, spawned)
+    assert new.pane_id in tmux.facts and not tmux.facts[new.pane_id].dead
+    with store_session() as store:
+        live = store.fleet_agent_by_label(project.id, "coder-1")
+    assert live is not None and live.id == new.id
+
+    # Pinned to the row that is there, each acts as it always did: another 💤 row's
+    # own window goes, and the live coder-1 is stopped.
+    other = _coder(project, label="coder-2")
+    tmux.die(other.pane_id, 0)
+    fleet_service.list_agents(project)
+    assert fleet_service.stop(project, "coder-2", agent_id=other.id).id == other.id
+    assert other.pane_id in tmux.killed
+    assert fleet_service.stop(project, "coder-1", agent_id=new.id).id == new.id
+    assert (new.pane_id, "literal", "/exit") in tmux.typed
+
+
 def test_one_death_two_writers_record_at_once_is_announced_once(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Iterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, tzinfo
 from pathlib import Path
 
 import pytest
 
+from aisquare.core import store as store_module
 from aisquare.core.ids import new_entry_id
 from aisquare.core.store import (
     SCHEMA_VERSION,
@@ -222,15 +223,33 @@ def test_add_linked_repo_unknown_project_raises(store: ContextStore) -> None:
         store.add_linked_repo("prj_missing", "repo")
 
 
-def test_add_and_list_prompts(store: ContextStore) -> None:
+def test_add_and_list_prompts(store: ContextStore, monkeypatch: pytest.MonkeyPatch) -> None:
     # NO SLEEP. Both prompts are written inside one clock tick on purpose —
     # which is the case that used to sort by coin flip, because the tie-break
     # was an id whose tail is 128 random bits. `recent_prompts` breaks ties on
     # `rowid` now, so "written second" is what "sorts first" means, and this
     # asserts that rather than sleeping until the clock disambiguates it.
+    #
+    # The tick and the coin are both FIXED here rather than hoped for. On Linux
+    # `created_at` has microsecond resolution and two inserts almost never
+    # share it, so the tie never happened, and an `id DESC` tie-break passed
+    # too. The clock is frozen, and the ids come out in the REVERSE of
+    # insertion order, so only `rowid` puts the second prompt first (review of
+    # #65, R5).
+    frozen = datetime(2026, 9, 24, 12, 0, tzinfo=UTC)
+
+    class _Frozen(datetime):
+        @classmethod
+        def now(cls, tz: tzinfo | None = None) -> _Frozen:
+            return cls.fromtimestamp(frozen.timestamp(), tz)
+
+    ids = iter(["prm_zzz_written_first", "prm_aaa_written_second"])
+    monkeypatch.setattr(store_module, "datetime", _Frozen)
+    monkeypatch.setattr(store_module, "new_prompt_id", lambda: next(ids))
     store.add_prompt("first prompt", PROJECT.id)
     store.add_prompt("second prompt", PROJECT.id)
     prompts = store.recent_prompts(PROJECT.id)
+    assert [p.created_at for p in prompts] == [frozen, frozen], "the tick was not shared"
     assert [p.text for p in prompts] == ["second prompt", "first prompt"]  # newest first
 
 

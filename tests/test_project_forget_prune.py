@@ -15,6 +15,7 @@ properties held here are the ones that make removal safe to offer:
 
 from __future__ import annotations
 
+import itertools
 import json
 import shutil
 import sqlite3
@@ -357,6 +358,132 @@ def test_purge_copes_with_hundreds_of_recorded_sessions(
     assert report["removed"]["team_meta"] == 502
     assert _raw("SELECT key FROM team_meta") == [("nudge:sess-elsewhere",)]
     assert _raw("SELECT COUNT(*) FROM project WHERE id = ?", (alpha,)) == [(0,)]
+
+
+#: Values a CHECK needs that no made-up value meets, per table and column. A table a
+#: migration adds whose CHECK refuses the made-up row fails the test below with the
+#: constraint named; its values go here.
+_CHECKED_VALUES: dict[str, dict[str, object]] = {"entry": {"pool": "project"}}
+
+#: Distinct made-up values, so a UNIQUE column takes every one.
+_MADE_UP = itertools.count(1)
+
+
+def _pointing_at_a_project(connection: sqlite3.Connection) -> dict[str, list[str]]:
+    """Every table and the columns in it that hold a project's id, read off the schema.
+
+    A column whose foreign key references ``project (id)`` does, whatever it is
+    called; so does a column named ``project_id`` with no FK, which is how the team
+    tables, ``fleet_agent`` and ``metric`` are keyed. ``project`` itself is not one.
+    """
+    pointing: dict[str, list[str]] = {}
+    tables = connection.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' "
+        "AND name != 'project' ORDER BY rowid"
+    ).fetchall()
+    for (table,) in tables:
+        columns = [
+            str(fk[3])
+            for fk in connection.execute("SELECT * FROM pragma_foreign_key_list(?)", (table,))
+            if str(fk[2]).lower() == "project" and fk[4] in (None, "id")
+        ]
+        names = [str(col[1]) for col in connection.execute(f'PRAGMA table_info("{table}")')]
+        if "project_id" in names and "project_id" not in columns:
+            columns.append("project_id")
+        if columns:
+            pointing[table] = columns
+    return pointing
+
+
+def _a_row(connection: sqlite3.Connection, table: str, fixed: dict[str, object]) -> int:
+    """Insert a row into ``table`` with ``fixed``, making up every other required value.
+
+    Required is NOT NULL with no default, or a primary key that is not the rowid.
+    A required column whose foreign key references another table gets a row of its
+    own there first, so the insert holds under ``PRAGMA foreign_keys = ON`` however
+    the schema grows. The rowid is returned, for a child to read its key back.
+    """
+    parents = {
+        str(fk[3]): (str(fk[2]), fk[4])
+        for fk in connection.execute("SELECT * FROM pragma_foreign_key_list(?)", (table,))
+    }
+    values = {**_CHECKED_VALUES.get(table, {}), **fixed}
+    for _cid, name, declared, notnull, default, pk in connection.execute(
+        f'PRAGMA table_info("{table}")'
+    ).fetchall():
+        is_rowid = pk == 1 and str(declared).upper() == "INTEGER"
+        if name in values or is_rowid or not ((notnull and default is None) or pk):
+            continue
+        if name in parents:
+            parent, key = parents[name]
+            made = _a_row(connection, parent, {})
+            (values[name],) = connection.execute(
+                f'SELECT "{key or "rowid"}" FROM "{parent}" WHERE rowid = ?', (made,)
+            ).fetchone()
+            continue
+        made_up = next(_MADE_UP)
+        values[name] = made_up if "INT" in str(declared).upper() else f"{table}-{made_up}"
+    names = ", ".join(f'"{name}"' for name in values)
+    marks = ", ".join("?" * len(values))
+    try:
+        cursor = connection.execute(
+            f'INSERT INTO "{table}" ({names}) VALUES ({marks})', tuple(values.values())
+        )
+    except sqlite3.IntegrityError as exc:
+        pytest.fail(f"no made-up row fits {table} ({exc}); add what it needs to _CHECKED_VALUES")
+    return int(cursor.lastrowid or 0)
+
+
+def test_purge_empties_every_table_that_points_at_the_project_whatever_the_schema_adds(
+    runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A row in ANY table that holds the project's id goes with the project. The tables
+    are found by walking the schema, not read from a list, so one a later migration adds
+    is checked the day it lands.
+
+    A list is what kept failing: each branch that added a table with a foreign key to
+    ``project`` listed its own in ``purge_project`` and not the others', and one
+    missing table was enough for ``FOREIGN KEY constraint failed`` to roll the whole
+    purge back — ``forget --purge`` could not remove exactly the projects the new
+    features had been used on (review of #172, and of the #205 fold). A table keyed by
+    ``project_id`` WITHOUT a foreign key refuses nothing, so a purge that skipped it
+    succeeded and left its rows for the project's next registration; this fails on
+    that too. The bystander keeps its row in every table.
+    """
+    alpha = _register(runner, monkeypatch, work_dir / "alpha")
+    beta = _register(runner, monkeypatch, work_dir / "beta")
+    connection = sqlite3.connect(str(paths.db_path()))
+    try:
+        connection.execute("PRAGMA foreign_keys = ON")
+        # What a later migration adds, the way #170's and #172's did: a foreign key to
+        # the project, here through a column not called project_id and to its implied
+        # primary key.
+        connection.execute(
+            "CREATE TABLE a_later_feature (owner TEXT NOT NULL REFERENCES project, "
+            "note TEXT NOT NULL, PRIMARY KEY (owner, note))"
+        )
+        pointing = _pointing_at_a_project(connection)
+        # The control: the walk found the tables this tree is known to have.
+        known = {"entry", "prompt", "project_setting", "team_session", "metric", "a_later_feature"}
+        assert known <= set(pointing), pointing
+        for table, columns in pointing.items():
+            for project in (alpha, beta):
+                _a_row(connection, table, dict.fromkeys(columns, project))
+        connection.commit()
+    finally:
+        connection.close()
+
+    with store_session() as store:  # the store's own purge: made-up rows are no models
+        removed = store.purge_project(alpha)
+
+    assert removed["project"] == 1
+    for table, columns in pointing.items():
+        for column in columns:
+            count = f'SELECT COUNT(*) FROM "{table}" WHERE "{column}" = ?'
+            assert _raw(count, (alpha,)) == [(0,)], f"{table}.{column} kept the purged project"
+            assert _raw(count, (beta,)) != [(0,)], f"{table}.{column} lost the bystander's row"
+    assert _raw("SELECT COUNT(*) FROM project WHERE id = ?", (alpha,)) == [(0,)]
+    assert _raw("PRAGMA foreign_key_check") == []
 
 
 def test_a_forgotten_projects_facts_are_hidden_from_context_reads_until_it_registers_again(

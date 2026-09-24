@@ -1235,19 +1235,22 @@ class SqliteStore:
     def purge_project(self, project_id: str) -> dict[str, int]:
         """Delete the registration AND every row that belongs to it, in one transaction.
 
-        Dependents go first, in FK order, so the ``project`` delete is legal
-        under ``PRAGMA foreign_keys = ON``; the counts say what each table gave
-        up. The team tables, ``fleet_agent`` and ``metric`` carry no FK —
-        deleted by ``project_id`` the way every read of them is keyed; the
-        metric rows are written even with the CI test bed off, and left behind
-        they resurfaced in ``metrics list --all`` and in the project's own scope
-        if its root was registered again. ``team_meta`` is a key/value bag whose
-        keys embed either the project id (the distiller's watermark, signals) or
-        a session id (nudge debounce, continuation counters), so its rows are
-        matched on both — in bounded statements, see :meth:`_purge_team_meta`.
-        LIVE fleet agents are the caller's problem to refuse before getting
-        here: this deletes their rows too, and a pane that is still running
-        would then be unaccounted for.
+        Dependents go first, so the ``project`` delete is legal under ``PRAGMA
+        foreign_keys = ON``; the counts say what each table gave up. Every table
+        whose foreign key references ``project`` is found in the schema
+        (:meth:`_tables_referencing_project`), so a table a later migration adds
+        is purged without being listed here. The team tables, ``fleet_agent``
+        and ``metric`` carry no FK, so the schema cannot name them: they are
+        listed, and deleted by ``project_id`` the way every read of them is
+        keyed; the metric rows are written even with the CI test bed off, and
+        left behind they resurfaced in ``metrics list --all`` and in the
+        project's own scope if its root was registered again. ``team_meta`` is a
+        key/value bag whose keys embed either the project id (the distiller's
+        watermark, signals) or a session id (nudge debounce, continuation
+        counters), so its rows are matched on both — in bounded statements, see
+        :meth:`_purge_team_meta`. LIVE fleet agents are the caller's problem to
+        refuse before getting here: this deletes their rows too, and a pane that
+        is still running would then be unaccounted for.
         """
         sessions = [
             str(row["id"])
@@ -1257,18 +1260,14 @@ class SqliteStore:
         ]
         removed: dict[str, int] = {}
         with self._conn:  # one BEGIN…COMMIT: a purge is whole or it is nothing
-            for table in (
-                "entry",
-                "prompt",
-                "team_event",
-                "team_task",
-                "team_session",
-                "fleet_agent",
-                "metric",
-                # v15's per-project settings (#145) DO carry the FK, and left
-                # here the whole purge rolled back on it (review of #205).
-                "project_setting",
-            ):
+            for table, column in self._tables_referencing_project():
+                cursor = self._conn.execute(
+                    f'DELETE FROM "{table}" WHERE "{column}" = ?', (project_id,)
+                )
+                removed[table] = removed.get(table, 0) + cursor.rowcount
+            for table in ("team_event", "team_task", "team_session", "fleet_agent", "metric"):
+                if table in removed:
+                    continue  # it has gained the FK, and went above
                 cursor = self._conn.execute(
                     f"DELETE FROM {table} WHERE project_id = ?", (project_id,)
                 )
@@ -1279,6 +1278,37 @@ class SqliteStore:
         if removed["project"] != 1:
             raise KeyError(project_id)
         return removed
+
+    def _tables_referencing_project(self) -> list[tuple[str, str]]:
+        """Every ``(table, column)`` whose foreign key references ``project (id)``.
+
+        Read from the schema rather than listed, because the list is what kept
+        going wrong. Each branch that added a table with this FK listed its own
+        here, and a merge between two of them kept one side's list: at the
+        accounts stack's head the purge named ``project_destination`` but not
+        ``project_explainability`` (listed on #170, lost above it) nor #205's
+        ``project_setting``. A purge that met a row in a table it did not know
+        failed on ``FOREIGN KEY constraint failed`` and rolled back whole, so
+        ``project forget --purge`` and ``prune --purge`` could not remove
+        exactly the projects those features had been used on (review of #172,
+        and of the #205 fold).
+
+        In schema order, so the counts come out the same way every time. A
+        foreign key written ``REFERENCES project`` names no column and means the
+        primary key, so it counts. ``project`` itself is left out: a row there
+        that points at another project is that other project's, not this one's
+        to delete.
+        """
+        rows = self._conn.execute(
+            """
+            SELECT m.name AS table_name, f."from" AS column_name
+            FROM sqlite_master AS m JOIN pragma_foreign_key_list(m.name) AS f
+            WHERE m.type = 'table' AND m.name != 'project'
+              AND lower(f."table") = 'project' AND (f."to" IS NULL OR f."to" = 'id')
+            ORDER BY m.rowid, f.id
+            """
+        ).fetchall()
+        return [(str(row["table_name"]), str(row["column_name"])) for row in rows]
 
     def _purge_team_meta(self, project_id: str, sessions: list[str]) -> int:
         """Delete the ``team_meta`` rows keyed by the project or by its sessions.

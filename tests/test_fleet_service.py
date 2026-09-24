@@ -6563,7 +6563,13 @@ def test_a_fresh_switch_whose_old_presence_cannot_be_retired_still_moves_the_cla
     the retirement skipped the move too, and the claims waited on the old id for the start
     hook. Before, only the retirement was lost; now it is again. The loss is said, too:
     unexplained, the old id sat on the board as a live session until the prune (seventh
-    round)."""
+    round).
+
+    The refusal is the COMMIT's, after the UPDATE ran, as ``database is locked`` refuses
+    one: the transaction stays open with the retirement in it. Refused before any SQL,
+    as this test first did, it could not see that the claim move's commit then carried
+    the retirement, so the session WAS ended under a note saying it was not (review of
+    the #205 fold, A1 and A3). The note and the store must agree."""
     _two_slots_with_usage(monkeypatch, work=95, personal=10)
     task = _task(project, "moved though the presence stayed")
     agent = fleet_service.spawn(
@@ -6574,10 +6580,27 @@ def test_a_fresh_switch_whose_old_presence_cannot_be_retired_still_moves_the_cla
     team_service.claim_task(task.id, session_ref=old)
     original = SqliteStore.end_session
 
-    def locked(self: SqliteStore, session_id: str, **kwargs: Any) -> list[TeamTask]:
-        if session_id == old:
+    class RefusesTheCommit:
+        """``sqlite3.Connection`` whose COMMIT is refused, leaving the transaction open."""
+
+        def __init__(self, conn: sqlite3.Connection) -> None:
+            self._conn = conn
+
+        def commit(self) -> None:
             raise sqlite3.OperationalError("database is locked (fake)")
-        return original(self, session_id, **kwargs)
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(self._conn, name)
+
+    def locked(self: SqliteStore, session_id: str, **kwargs: Any) -> list[TeamTask]:
+        if session_id != old:
+            return original(self, session_id, **kwargs)
+        real = self._conn
+        self._conn = RefusesTheCommit(real)  # type: ignore[assignment]
+        try:
+            return original(self, session_id, **kwargs)
+        finally:
+            self._conn = real
 
     monkeypatch.setattr(SqliteStore, "end_session", locked)
 
@@ -6589,6 +6612,12 @@ def test_a_fresh_switch_whose_old_presence_cannot_be_retired_still_moves_the_cla
     assert _task_now(task.id).claimed_by == new and _row(receipt.started.id).session_id == new
     marked = f"{team_service.short_id(old)} was not marked ended"  # as the board names it
     assert any(marked in note for note in receipt.notes), receipt.notes
+    with store_session() as store:
+        kept = store.get_session(old)
+    assert kept is not None and kept.ended_at is None, (
+        "the switch said the old session was not marked ended, and the claim move's "
+        "commit ended it anyway"
+    )
 
 
 def test_a_switch_whose_courtesy_event_cannot_be_written_still_reports_the_move(

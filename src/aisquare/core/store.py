@@ -1559,16 +1559,28 @@ class SqliteStore:
         repairs it. Callers that cannot PROVE the session is dead pass False.
         The return value still lists the tasks that WOULD have been released,
         so the caller can report them either way.
+
+        All or nothing: a failure rolls the transaction back before it raises.
+        A COMMIT the database refuses (``database is locked``) leaves the
+        transaction open with the UPDATE in it, and the connection's next
+        commit made it land anyway. ``fleet switch`` reported "was not marked
+        ended" for a session its own claim move then ended, and a caller whose
+        next write rolled back discarded it without a word (review of the #205
+        fold, A1).
         """
         now = _now_iso()
-        released = self._doing_claims(session_id)
-        if release_claims:
-            self._release_doing_claims(session_id, now)
-        self._conn.execute(
-            "UPDATE team_session SET ended_at = ?, last_seen_at = ? WHERE id = ?",
-            (now, now, session_id),
-        )
-        self._conn.commit()
+        try:
+            released = self._doing_claims(session_id)
+            if release_claims:
+                self._release_doing_claims(session_id, now)
+            self._conn.execute(
+                "UPDATE team_session SET ended_at = ?, last_seen_at = ? WHERE id = ?",
+                (now, now, session_id),
+            )
+            self._conn.commit()
+        except Exception:
+            self._conn.rollback()
+            raise
         return released
 
     def release_claims(self, session_id: str) -> list[TeamTask]:

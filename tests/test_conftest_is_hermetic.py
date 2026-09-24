@@ -74,6 +74,12 @@ DIRTY_SHELL = {
     "AISQUARE_PIN_SESSION_ID": "0",
     "AISQUARE_SERVE_PORT": "1",
     "EXPLAINABILITY_INBOX_PATH": "/somewhere/theirs.db",
+    # A narrow terminal that has turned colour off. The width and NO_COLOR
+    # alone fail 13 tests left set; conftest clears them with TERM.
+    "COLUMNS": "40",
+    "LINES": "10",
+    "NO_COLOR": "1",
+    "COLORTERM": "truecolor",
 }
 
 

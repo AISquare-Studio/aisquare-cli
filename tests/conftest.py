@@ -280,6 +280,25 @@ AMBIENT_ENV_VARS = (
     "TERM",  # rendering assertions vary by terminal
     "TMUX_TMPDIR",  # core.tmux socket path
     "TMUX",  # services.fleet: shutdown's "inside the fleet's own server" guard
+    # How a terminal renders. Read by the libraries rather than by `src/`, which
+    # is why the sweep above missed them: every rich Console reads them when it
+    # is built — `core.console` builds one per call, typer one per help or error
+    # panel — and textual's App reads NO_COLOR. Measured on 0941fd0 in the
+    # gate's clean env: COLUMNS=40 fails 11 tests (panels and tables wrap at 40
+    # and split the sentences they assert), NO_COLOR=1 fails two in
+    # test_terminal_pane.py (the pane renders monochrome). The rest fail nothing
+    # today (measured) and are the same Console's height, colour and terminal
+    # switches; COLORTERM is TERM's partner in choosing a colour system. typer
+    # reads FORCE_COLOR, PY_COLORS and GITHUB_ACTIONS once, at import, before
+    # any fixture can clear them — which is why `tests/rendered.py` strips
+    # styling at the assert site.
+    "COLUMNS",
+    "LINES",
+    "NO_COLOR",
+    "FORCE_COLOR",
+    "COLORTERM",
+    "TTY_COMPATIBLE",
+    "TTY_INTERACTIVE",
 )
 
 #: The per-role FAMILIES the harness reads — ``<PREFIX><ROLE>`` for whatever role

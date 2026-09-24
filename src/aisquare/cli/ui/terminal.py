@@ -648,7 +648,7 @@ class TerminalPane(Widget, can_focus=True):
        A gesture that leaves a highlight with no text under it drops it at the
        release, so a highlight that stands always has something for ctrl+c to
        copy (review of #120, round 11).
-    4.*The pane is never selected whole.* ``Selection(None, None)`` is what
+    4. *The pane is never selected whole.* ``Selection(None, None)`` is what
        Textual writes for a multi-click on a neighbour (the container's
        select-all) and for a drag that starts and ends beyond both of the pane's
        edges; the pane refuses it in every reader and clears its entry, so a

@@ -3940,12 +3940,12 @@ def test_a_drag_across_two_panes_leaves_the_clipboard_with_the_highlight_the_cop
     """Review of #120, round 11. One drag across two visible panes changes both
     highlights, and at the release both copy — so the last pane told wins the
     clipboard, and the release told them in the register's order: a ``WeakSet``,
-    hash order, measured telling the top pane last on one run and the bottom on
-    another. They are told in the copy key's order now, the most recently
-    selected last. Driven in BOTH directions on one host: the drag's end is the
-    pane that changed last, and whatever order the set holds the two in, one
-    direction would fail without the order. The copy key, pressed after, copies
-    what the release left on the clipboard."""
+    hash order, which follows allocation (the review measured the top pane
+    winning a drag that ended in the bottom one). They are told in the copy
+    key's order now, the most recently selected last. Driven in BOTH directions
+    on one host: the drag's end is the pane that changed last, and whatever
+    order the set holds the two in, one direction would fail without the order.
+    The copy key, pressed after, copies what the release left on the clipboard."""
     fake.panes["%2"] = FakePane(screen=["BBB one", "BBB two", "BBB three"], cursor=(0, 0))
 
     async def drive() -> list[tuple[str, str]]:

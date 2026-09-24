@@ -488,14 +488,13 @@ def save_config(config: AppConfig, path: Path | None = None) -> Path:
         # refusing to write would strand the operator with the broken file.
         #
         # THROUGH THE RETRY, like the rename in `write_replacing` below and
-        # `load_config` above. A
-        # `PermissionError` IS an `OSError`, so under the NTFS contention this
-        # module measures, the fail-open silently skipped the unknown-key
-        # preservation — and `_keep_unknown`'s own docstring says what that
-        # costs: "exit 0, no warning, and because the tracing seam is fail-open
-        # the result is a green-looking machine with no tracing". Failing open
-        # is right for a config we cannot PARSE; it is not right for one that is
-        # busy for 40 microseconds.
+        # `load_config` above. A `PermissionError` IS an `OSError`, so under the
+        # NTFS contention this module measures, the fail-open silently skipped
+        # the unknown-key preservation — and `_keep_unknown`'s own docstring says
+        # what that costs: "exit 0, no warning, and because the tracing seam is
+        # fail-open the result is a green-looking machine with no tracing".
+        # Failing open is right for a config we cannot PARSE; it is not right for
+        # one that is busy for 40 microseconds.
         def _read_existing() -> dict[str, Any]:
             with written.open("rb") as handle:
                 loaded: dict[str, Any] = tomllib.load(handle)

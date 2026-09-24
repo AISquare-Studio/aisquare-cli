@@ -183,6 +183,12 @@ class HelpScreen(ModalScreen[None]):
         for key, what in (
             ("click", "select a project, an agent, Accounts, Doctor; + onboards a project"),
             ("↑ ↓ Enter", "move over the sidebar and open the row under the cursor"),
+            # Arranging the sidebar (#140): every one of these has a CLI twin.
+            ("shift+↑ ↓", "move the row under the cursor one place"),
+            ("g p space", "group · pin · fold the row under the cursor"),
+            ("u", "undo the last arrangement; a toast says what"),
+            ("shift+click", "mark cards — shift+g groups them, Esc clears"),
+            ("drag title", "move a card or a group header to a new place"),
             (self.escape_key.upper(), "hand focus from an agent's pane back to the sidebar"),
             ("wheel", "scroll an agent pane; shift/alt+PgUp/PgDn too, shift+Home/End"),
             ("drag", "select text in a pane (double-click: a word) — copied on release"),
@@ -191,7 +197,7 @@ class HelpScreen(ModalScreen[None]):
             ("F1", "command palette"),
             ("q", "quit — from the sidebar; inside a pane every key goes to the agent"),
         ):
-            text.append(f"  {key:<10}", style="bold cyan")
+            text.append(f"  {key:<11}", style="bold cyan")
             text.append(f" {what}\n")
         text.append("\nEsc closes this", style="dim")
         with Vertical(id="helpbox"):
@@ -730,15 +736,22 @@ class FleetApp(App[None], inherit_bindings=False):
         except Exception as exc:  # the store said no: the frame stands, the gesture is lost
             self.notify(f"could not {said}: {exc}", severity="error", timeout=6, markup=False)
             return
-        self._undo.append(entry)
-        del self._undo[:-UNDO_DEPTH]
+        if entry.projects or entry.groups:
+            # A gesture that touched no row ("nothing to move": a step at an end,
+            # a pinned row) is no step back — `u` would undo nothing and say it did.
+            self._undo.append(entry)
+            del self._undo[:-UNDO_DEPTH]
         self.refresh_data()
 
     def on_move_row(self, event: MoveRow) -> None:
         if event.kind == "group":
             self._layout(lambda s: project_groups.step_group(s, event.ident, event.delta), "move")
         else:
-            self._layout(lambda s: project_groups.step(s, event.ident, event.delta), "move")
+            # One step is one row ON SCREEN: the captured rows count only while `a` shows them.
+            shown = self.show_captured
+            self._layout(
+                lambda s: project_groups.step(s, event.ident, event.delta, all=shown), "move"
+            )
 
     def on_toggle_pin(self, event: TogglePin) -> None:
         def flip(store: ContextStore) -> project_groups.UndoEntry:

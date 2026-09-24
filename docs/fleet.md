@@ -593,7 +593,8 @@ several projects" error lists codenames, because basenames are what collide.
 **Groups, pins and your own order.** The navigator is a flat list until you
 arrange it: **drag** a project card onto a group header to put it in that
 group, between cards to reorder it, or onto the empty space below the list to
-take it out of its group; drag a group header to reorder the groups. Without a
+take it out of its group; drag a group header to reorder the groups. Released
+anywhere else — the main pane, a pinned card — a drag changes nothing. Without a
 mouse: with the sidebar focused, `shift+↑` / `shift+↓` move the project (or
 group) under the cursor one step, `g` opens the group picker (an existing
 group, *New group…*, or *Ungroup*), `p` pins or unpins, `space` folds a group

@@ -408,7 +408,10 @@ def move(
     ] = None,
     after: Annotated[str | None, typer.Option("--after", help="Put it after this project.")] = None,
     position: Annotated[
-        int | None, typer.Option("--position", min=0, help="Index in the scope.")
+        int | None,
+        typer.Option(
+            "--position", min=0, help="Index in the scope, counting the projects `list` shows."
+        ),
     ] = None,
 ) -> None:
     """Move a project: into a group or to the top level, and to a place in that scope.

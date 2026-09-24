@@ -31,10 +31,17 @@ TOP = "top"
 
 @dataclass(frozen=True)
 class GroupEntry:
-    """A group with its (unpinned) members in display order."""
+    """A group with its (unpinned) members in display order.
+
+    ``pinned_members`` are the members listed under Pinned instead: not shown
+    under the header, still the group's, so its roll-up counts them. Left out
+    of the entry, a header said nothing of an agent asking for the user in a
+    pinned member (review of #171, round 1).
+    """
 
     group: ProjectGroup
     members: list[ProjectInfo]
+    pinned_members: list[ProjectInfo] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -88,15 +95,20 @@ def arrange(projects: list[ProjectInfo], groups: list[ProjectGroup]) -> Arrangem
     pinned_projects = [p for p in projects if p.pinned_at is not None]
     pinned_groups = [g for g in groups if g.pinned_at is not None]
     members: dict[str, list[ProjectInfo]] = {g.id: [] for g in groups}
+    pinned_members: dict[str, list[ProjectInfo]] = {g.id: [] for g in groups}
     loose: list[ProjectInfo] = []
     for project in projects:
         if project.pinned_at is not None:
+            if project.group_id is not None and project.group_id in pinned_members:
+                pinned_members[project.group_id].append(project)
             continue
         if project.group_id is not None and project.group_id in members:
             members[project.group_id].append(project)
         else:
             loose.append(project)
-    entries = {g.id: GroupEntry(g, _by_position(members[g.id])) for g in groups}
+    entries = {
+        g.id: GroupEntry(g, _by_position(members[g.id]), pinned_members[g.id]) for g in groups
+    }
     pinned: list[tuple[datetime, ProjectInfo | GroupEntry]] = [
         (p.pinned_at, p) for p in pinned_projects if p.pinned_at is not None
     ] + [(g.pinned_at, entries[g.id]) for g in pinned_groups if g.pinned_at is not None]
@@ -168,12 +180,19 @@ def undo(store: ContextStore, entry: UndoEntry) -> str:
             collapsed=before.collapsed,
         )
     for project_id, (scope, position, pinned_at) in entry.projects.items():
+        if scope is not None and store.get_project_group(scope) is None:
+            # Its group was deleted since — from a shell, between the sidebar's
+            # gesture and its `u` — and is not one this entry re-creates. Written
+            # back as it was, the row failed the foreign key halfway through the
+            # restore (review of #171, round 1): it goes to the top level, last,
+            # where a deleted group's members go.
+            scope, position = None, None
         try:
             store.update_project_layout(
                 project_id, group_id=scope, position=position, pinned_at=pinned_at
             )
         except KeyError:
-            continue  # the project was forgotten meanwhile: nothing to put back
+            continue  # the project was purged meanwhile (a forgotten row is still there)
     return entry.description
 
 
@@ -192,6 +211,11 @@ def _scope_members(store: ContextStore, group_id: str | None) -> list[ProjectInf
         if entry.group.id == group_id:
             return list(entry.members)
     return []
+
+
+def _shown(projects: list[ProjectInfo], *, all: bool) -> list[ProjectInfo]:
+    """The rows a list shows: captured directories are hidden unless ``all`` (#139)."""
+    return list(projects) if all else [p for p in projects if p.onboarded_at is not None]
 
 
 def _renumber(store: ContextStore, ordered: list[ProjectInfo], group_id: str | None) -> None:
@@ -245,6 +269,7 @@ def move_project(
     before: str | None = None,
     after: str | None = None,
     position: int | None = None,
+    all: bool = False,
 ) -> UndoEntry:
     """Put a project into a scope (``to``: a group, ``"top"``, or ``None`` = stay) at a place.
 
@@ -253,6 +278,12 @@ def move_project(
     project lands, like a new tab. A pinned project keeps its pin: the pin is
     the stronger statement, and moving it changes where it goes back to when
     unpinned.
+
+    ``position`` counts the rows the list SHOWS: a captured directory it hides
+    (#139) is not a place, unless ``all`` — the sidebar's ``a`` — shows it.
+    Counted, ``--position 1`` over a hidden row put the project behind it,
+    which on screen was no move at all (review of #171, round 1). Every row of
+    the scope is still renumbered, hidden ones included, so none ties.
     """
     current = store.update_project_layout(project_id)  # a read, and a KeyError when unknown
     if to is None:
@@ -268,6 +299,10 @@ def move_project(
     entry = UndoEntry(f"move {current.root.name or current.id}")
     old_scope = _scope_members(store, current.group_id)
     new_scope = _scope_members(store, target_group)
+    if position is not None and before is None and after is None:
+        places = [p for p in _shown(new_scope, all=all) if p.id != project_id]
+        index = max(0, int(position))
+        before, position = (places[index].id if index < len(places) else None), None
     _remember(store, entry, [p.id for p in old_scope] + [p.id for p in new_scope] + [project_id])
     if target_group != current.group_id:
         _renumber(store, [p for p in old_scope if p.id != project_id], current.group_id)
@@ -437,16 +472,27 @@ def remove_from_group(store: ContextStore, project_ids: Sequence[str]) -> UndoEn
     return entry
 
 
-def step(store: ContextStore, project_id: str, delta: int) -> UndoEntry:
-    """Move a project one place up (-1) or down (+1) inside its scope — the keyboard's move."""
+def step(store: ContextStore, project_id: str, delta: int, *, all: bool = False) -> UndoEntry:
+    """Move a project one place up (-1) or down (+1) inside its scope — the keyboard's move.
+
+    One place is one place ON SCREEN: the project goes past the next row the
+    list shows, stepping over the captured directories it hides (unless
+    ``all``). Swapped with a hidden row, a shift+↓ changed nothing anyone could
+    see and still took an undo (review of #171, round 1). With nowhere to go —
+    an end of the scope, or a pinned project, which has no place in one — the
+    entry is "nothing to move" and remembers no row.
+    """
     project = store.update_project_layout(project_id)
-    scope = _scope_members(store, project.group_id)
-    ids = [p.id for p in scope]
+    ids = [p.id for p in _shown(_scope_members(store, project.group_id), all=all)]
     if project_id not in ids:
         return UndoEntry("nothing to move")
     index = ids.index(project_id)
     target = max(0, min(len(ids) - 1, index + delta))
-    return move_project(store, project_id, position=target)
+    if target == index:
+        return UndoEntry("nothing to move")
+    if target < index:
+        return move_project(store, project_id, before=ids[target])
+    return move_project(store, project_id, after=ids[target])
 
 
 def step_group(store: ContextStore, group_id: str, delta: int) -> UndoEntry:
@@ -455,4 +501,7 @@ def step_group(store: ContextStore, group_id: str, delta: int) -> UndoEntry:
     if group_id not in ids:
         return UndoEntry("nothing to move")
     index = ids.index(group_id)
-    return move_group(store, group_id, position=max(0, min(len(ids) - 1, index + delta)))
+    target = max(0, min(len(ids) - 1, index + delta))
+    if target == index:
+        return UndoEntry("nothing to move")
+    return move_group(store, group_id, position=target)

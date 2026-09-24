@@ -143,6 +143,46 @@ def _is_method_on_a_local(func: ast.expr, bound: set[str], aliases: dict[str, st
     return receiver in bound and receiver not in aliases
 
 
+def _methods_in_scope(tree: ast.AST) -> dict[ast.AST, frozenset[str]]:
+    """For each function, the methods its ``self`` can name: its class's own.
+
+    A ``self.<name>`` argument is a bound method handed on only when ``<name>``
+    is a method; otherwise it is a field, and a field's value is data, not a
+    call. By bare name a field borrows the identity of any project function
+    spelled the same, as a method on a local does above. Measured on the #205
+    fold: ``ci_augment.metric`` passes ``redaction_level=self.redaction``, a
+    string, and that one edge to the ``redaction`` command chained
+    ``hooks.hand_over`` -> ``fleet.switch`` -> ``spawn`` -> ``_record`` (by name,
+    ``ci_recall._record``) -> ``metric`` -> ``redaction`` -> ``save_config``, a
+    false alarm on a hook nobody could act on.
+
+    A method is one defined in the body of the nearest enclosing class; a
+    function nested in a method shares its method's ``self``. A method a class
+    only INHERITS is not counted, which under-approximates and is stated rather
+    than papered over: measured on the same tree, none of the ``self.<name>``
+    arguments that name no method of their own class names a method of a
+    project base class either. Iterative, because a deeply nested expression
+    must not cost a recursion limit.
+    """
+    in_scope: dict[ast.AST, frozenset[str]] = {}
+    pending: list[tuple[ast.AST, frozenset[str]]] = [(tree, frozenset())]
+    while pending:
+        node, methods = pending.pop()
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, ast.ClassDef):
+                own = frozenset(
+                    item.name
+                    for item in child.body
+                    if isinstance(item, ast.FunctionDef | ast.AsyncFunctionDef)
+                )
+                pending.append((child, own))
+                continue
+            if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef):
+                in_scope[child] = methods
+            pending.append((child, methods))
+    return in_scope
+
+
 def _call_graph(roots: list[Path] | None = None) -> tuple[dict[str, Path], dict[str, set[str]]]:
     defines: dict[str, Path] = {}
     calls: dict[str, set[str]] = defaultdict(set)
@@ -150,11 +190,13 @@ def _call_graph(roots: list[Path] | None = None) -> tuple[dict[str, Path], dict[
         tree = ast.parse(module.read_text(encoding="utf-8"), filename=str(module))
         imported = _import_aliases(tree)
         aliases = {**imported, **_rebinding_aliases(tree, imported)}
+        methods_in_scope = _methods_in_scope(tree)
         for node in ast.walk(tree):
             if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
                 continue
             defines[node.name] = module
             bound = _locally_bound(node)
+            methods = methods_in_scope.get(node, frozenset())
             for inner in ast.walk(node):
                 if not isinstance(inner, ast.Call):
                     continue
@@ -173,13 +215,17 @@ def _call_graph(roots: list[Path] | None = None) -> tuple[dict[str, Path], dict[
                 # ...and any bound method handed anywhere (`_tell(self._refuse)`,
                 # `set_timer(delay, self.wake)`, `call_after_refresh(self._restore)`).
                 # Every argument would swell the closure past the rebinding test's
-                # tolerance; every `self.<name>` keeps it exact and catches these.
+                # tolerance; every `self.<name>` that names a method of the
+                # enclosing class keeps it exact and catches these. A field
+                # (`redaction_level=self.redaction`) is data handed on, not a call:
+                # see `_methods_in_scope`.
                 passed += [
                     arg
                     for arg in (*inner.args, *(kw.value for kw in inner.keywords))
                     if isinstance(arg, ast.Attribute)
                     and isinstance(arg.value, ast.Name)
                     and arg.value.id == "self"
+                    and arg.attr in methods
                 ]
                 for handed in passed:
                     handed_name = getattr(handed, "id", None) or getattr(handed, "attr", None)
@@ -322,6 +368,58 @@ def test_a_method_on_a_local_is_not_a_call_to_a_function_of_the_same_name(
         "the closure must still find both writers"
     )
     assert "spawns_a_worker" not in reaching, "starting a thread is not a config write"
+
+
+def test_a_field_handed_on_is_not_a_call_and_a_bound_method_still_is(tmp_path: Path) -> None:
+    """``self.<name>`` is a hand-off only when ``<name>`` is a method of the class.
+
+    The rule that made ``_tell(self._refuse)`` an edge took EVERY ``self.<name>``
+    argument for a bound method, so a field passed as data borrowed the identity
+    of a function spelled the same. Measured on the #205 fold:
+    ``redaction_level=self.redaction`` in ``ci_augment.metric`` reached the
+    ``redaction`` command and through it ``save_config``, and the surface guard
+    reported ``hooks.py::hand_over``. The method half is asserted with it, a
+    nested function's included: narrowing must not lose the edge the rule was
+    written for.
+    """
+    module = tmp_path / "handed.py"
+    module.write_text(
+        "from aisquare.core.config import save_config\n\n"
+        "def redaction(config: object) -> None:\n"
+        "    save_config(config)\n\n"
+        "class Metric:\n"
+        "    def __init__(self, redaction: str) -> None:\n"
+        "        self.redaction = redaction\n\n"
+        "    def emit(self) -> None:\n"
+        "        record(redaction_level=self.redaction)\n\n"
+        "class Saver:\n"
+        "    def _refuse(self) -> None:\n"
+        "        save_config(None)\n\n"
+        "    def remember(self) -> None:\n"
+        "        _tell(self._refuse)\n\n"
+        "    def later(self) -> None:\n"
+        "        def fire() -> None:\n"
+        "            set_timer(1, callback=self._refuse)\n"
+        "        fire()\n\n"
+        "    def reads_a_field(self) -> None:\n"
+        "        record(self.redaction)\n",
+        encoding="utf-8",
+    )
+
+    _, calls = _call_graph(roots=[module])
+    reaching = _reaches_a_config_write(calls)
+
+    assert "redaction" not in calls["emit"], (
+        "a field passed as data was read as a call to the module's own redaction()"
+    )
+    assert "redaction" not in calls["reads_a_field"], (
+        "a name that is no method of THIS class was read as a hand-off"
+    )
+    assert {"remember", "fire"} <= reaching, (
+        "a bound method handed on, positionally or by keyword, from the method or "
+        "a function nested in it, must still be an edge"
+    )
+    assert "emit" not in reaching, "handing on a field is not a config write"
 
 
 def test_an_aliased_import_of_the_writer_is_still_a_config_write(tmp_path: Path) -> None:

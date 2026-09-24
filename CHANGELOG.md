@@ -6,6 +6,166 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **A schemeless gateway is refused by the writer, not only by the form.** The
+  Setup form refused `stg.example`; `aisquare explainability enable
+  --gateway-url stg.example` — the runbook command, four characters short —
+  stored it, after which the proxy lane read **green and silent** over a gateway
+  nothing could reach: a host-less URL parses with the whole string as the path,
+  `is_loopback` counts an empty host as local, and the loopback-pair exemption
+  fired. `configure_target` — the one writer both surfaces go through — now
+  validates the gateway, the proxy and the identity template before it mutates
+  anything and raises with the fix; `enable` prints it as one `✗` line and
+  stores nothing. `url_problem` is the shared validator and says *which* thing
+  is wrong (unparseable, bad port, no scheme, not http(s), no host) — the form
+  used to answer `http://[::1` with "try https://http://[::1". The proxy lane
+  no longer treats a host-less gateway as a loopback pair, and `doctor`'s config
+  lane flags a stored one, so a hand-edited config or
+  `EXPLAINABILITY_GATEWAY_URL` cannot reach the stranded state either.
+- **The Setup form's deployment field no longer moves the machine.** It set
+  `settings.target` on every save, so an operator on stg correcting prod's
+  gateway had moved their machine to prod — traffic to a deployment nobody
+  chose, the headline failure from the other side — and typing *only* a
+  deployment name flipped the target while writing no entry, under a `✓ setup
+  saved` toast. The field now names the entry the settings belong to; a **make
+  active** checkbox beside it is the switch, and the toast says which target
+  the machine is on. `enable --target` keeps switching: a flag typed in a shell
+  is the explicit act the box is.
+- **A key typed for a target that names its own key variable is refused.** The
+  key file is read only for the default variable — a single unlabelled key must
+  never satisfy a prod target — so key + custom variable in one save wrote a
+  file nothing reads: `✓ setup saved` over `$MY_WORKSPACE_KEY is NOT set`. The
+  rule is judged against the variable the target will read from after the save,
+  typed today or stored last month, and the notice says where the key should go
+  instead.
+- **A braced prefix is refused, not repaired.** The first cut detected `}` and
+  stripped at `{`, so `nishil}` passed through whole, was stored as
+  `nishil}-{role}`, and every `.format` raised: `agent_names` empty, every
+  launch untraced, a success line on the screen. The second stripped at either
+  brace and stored what preceded it — a template the operator never typed
+  (`team-{env}-{role}` became `team-{role}`) while the CLI's `--identity`
+  refused the same input. The field asks for a name: a brace of either kind is
+  refused with the reason and nothing is stored, and the writer refuses any
+  template that cannot render or renders every role to one name.
+- **The hosted-proxy suggestion respects a deliberate top-level `proxy_url`.**
+  The form read the per-target value only, so a chosen `[explainability]
+  proxy_url` — which `_proxy_source` already reports as `config` rather than
+  `default` for exactly this reason — was shadowed by a per-target suggestion.
+  `explainability_ops.chosen_proxy` is the resolver's fold minus the shipped
+  default, which is the one value nobody picked.
+- **The two unverifiable ambers are worded by mechanism.** A loopback sidecar is
+  told *why* it may ship elsewhere — it took its destination from
+  `EXPLAINABILITY_GATEWAY_URL` when it was started — with the restart and the
+  deployment's own proxy spelled out. A hosted proxy on a host that is not the
+  gateway's may be the deployment's own behind a load balancer or CNAME, which
+  from here looks exactly like another deployment's, so it is asked the question
+  and given both answers rather than ordered to repoint. The unset-gateway amber
+  prints the gateway the proxy *does* report, with the `--gateway-url` command
+  that adopts it.
+- **`explainability status` exits 1 for a live proxy shipping to another
+  deployment, and now says so.** The exit code's documented meaning was "the
+  proxy would not take a session"; the destination check widened it without a
+  word. Both states are "the traces are not arriving where you think", which is
+  what a cutover script gating on this code asks, so the rule stands and the
+  docstring, the comment and this entry carry it. Amber exits 0, and
+  `probe_severity` says which — that field is now tested, with `probe_fix`.
+- **The key field is cleared even when the key write fails.** A failed
+  `store_api_key` returned before the field was cleared, leaving the plaintext
+  live in a masked `Input` for the rest of the session.
+- **Every URL this integration takes from a human now goes through one guarded
+  parse.** `urlsplit` raises `ValueError` on a malformed authority — `http://[::1`
+  (a typo'd IPv6 bracket) is reachable by typing — and two callers took it
+  unguarded: `is_loopback` off a config value, so `aisquare doctor` tracebacked
+  where `main` returns its checks normally, and `hosted_proxy_for` off a form
+  field, so a Textual `Button.Pressed` handler took the fleet UI down while every
+  other failure in that handler was caught and shown as a notice. `split_url`
+  answers `None` instead of raising and is now the module's only parser, so a new
+  caller cannot reintroduce the hazard by forgetting a `try`. An unparseable URL
+  is **not** treated as loopback: that question decides whether a workspace key
+  may be omitted. `probe_proxy` likewise answers rather than raising when
+  `/health` returns valid JSON that is not an object (`[]`, `"ok"`) — the decode
+  succeeded, so its handler was already past, and four `payload.get` reads
+  followed.
+- **The hosted-proxy suggestion is silent where it would be wrong, not merely
+  where it is unsure.** `HOSTED_PROXY_PORT` is the hosted deployments'
+  convention; the wholly-local topology's own port is the shipped `proxy_url`
+  default (9090). Suggesting 9443 for a loopback gateway repointed a self-hosted
+  adopter — the topology in this change's own measured repro — at a port with
+  nothing on it. IPv6 hosts are re-bracketed, because `urlsplit().hostname`
+  strips them and `https://::1:9443` is not a URL any client can reach.
+- **The Setup form no longer overwrites a proxy the operator chose.** It tested
+  the blank *field*, not the stored *value*, so a target with a deliberate
+  `proxy_url` whose gateway was merely corrected had its proxy silently replaced
+  — the opposite of the "a blank field changes nothing" contract printed above
+  the form and asserted one layer down in `configure_target`. It also refuses a
+  schemeless gateway (which parses with the whole string as the path, leaving no
+  host, no suggestion, and an empty host that reads as loopback and suppresses
+  the very warning that would have flagged it), refuses a prefix typed as a
+  template (`nishil-{role}` would have composed to `nishil-coder-coder`, and a
+  stray brace empties `agent_names` entirely), and can set `key_env`, which it
+  was `configure_target`'s only caller to omit.
+- **An unset gateway is no longer reported as a misroute.** `resolve_target`
+  legitimately yields `gateway_url == ""`, and an empty string equals no
+  deployment, so the comparison called every such machine misrouted — printing a
+  sentence with a blank where a URL goes, and making `explainability status` exit
+  1. Nothing is misrouted; the CLI has no second value. Amber, and it says so.
+- **A hosted proxy on a host that is not the gateway's is no longer waved
+  through** — the failure class this change exists to close, still open inside
+  it. Such a proxy fell past the amber branch (which required a *loopback* proxy)
+  to the bare green return, on the docstring's assumption that "a hosted proxy is
+  addressed at the deployment, so it cannot disagree with it". That is an
+  assumption about the operator's typing, and `hosted_proxy_for` is this module's
+  own statement that the two share a host, so the comparison was available.
+- **The proxy verdict is one severity rather than three booleans.**
+  `healthy`/`problem`/`caution` could express states that mean nothing
+  (`problem` and `caution` together), and only `doctor` read the third — so the
+  amber rendered **green** on `explainability status` and in the fleet tab.
+  `ProxyState.severity` is the `CheckStatus` vocabulary every other check already
+  speaks; `problem` is derived from it, and `healthy` — a second, independently
+  settable encoding of the same fact, which the misroute branch contradicted by
+  setting it `False` for a proxy that *is* tracing — is gone, so `status`'s exit
+  code and the fleet tab's red both branch on `problem`. Both surfaces now
+  render the amber as amber **and** print its
+  remediation, against this module's own rule that a line which is not ok without
+  its next command is half a doctor. `status --json` gains `probe_severity` and
+  `probe_fix`, so a script watching for a misroute no longer has to regex an
+  English sentence.
+
+
+- **`doctor` and `status` no longer call the proxy lane green without knowing
+  where the proxy ships.** Both rested on one `GET {proxy_url}/health`, whose
+  payload says what the process *is* — `service`, `mode`, `status` — and never
+  what it does with the traffic. So a proxy pointed at a different deployment
+  than the configured target read green everywhere. Measured on a real machine
+  with `target = stg` and a sidecar started with the SDK's own `.env` in its
+  environment: `proxy`, `gateway` and `ingest` all green, every line true, while
+  the Runs from a real Claude Code session landed on `127.0.0.1:8000` — 274
+  ingest batches in four hours, none of them where the operator was looking. The
+  reported symptom was "I ran one query and did not receive anything on stg."
+  `gateway` and `ingest` verify the *CLI's* path; the proxy carries the model
+  traffic down a second one, and nothing compared them. This is the failure
+  `_active_deployment` already records for the client lane ("Both halves looked
+  healthy. Nobody was told") — fixed there, still open here.
+  - `ProxyProbe` carries the `gateway` the proxy reports, when it reports one.
+    A proxy that predates the field is not broken, merely unverifiable, and the
+    two are now told apart rather than both rendered green.
+  - A reported gateway that disagrees with the target is **red**, and names both
+    URLs: an operator who is told only that something is wrong has to go and
+    find which of two levers moved.
+  - No reported gateway, a loopback proxy and a remote gateway is **amber** —
+    `ProxyState.caution`, the verdict this had to grow. A sidecar takes its
+    destination from whoever started it, which need not be the target this CLI
+    resolved, and that is exactly the combination that stranded the traffic
+    above. Green was a lie and red would have been one too.
+  - The topologies that *cannot* disagree stay silent: a hosted proxy is
+    addressed at the deployment, and a loopback proxy against a loopback gateway
+    is the self-hosted topology working as intended.
+  - Gateways are compared on scheme, host and port, not as strings, so a
+    trailing slash or an explicitly written default port is not a misroute.
+  - `explainability.is_loopback` is public for the second module that needs the
+    same discriminator, on the precedent `stored_api_key` set.
+
 ### Added
 - **Usage-aware accounts: spawn where there is headroom, and hand an agent over
   when its limit hits** (#146). A new `[accounts]` section (Settings tab, or
@@ -27,11 +187,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   stops the agent as `fleet stop` would and starts it again under the same
   label, task and worktree on the account with the most headroom, **resuming
   the same session** from its transcript (`claude --resume <path>`) when it is
-  on disk, else with a hand-off prompt built from the board. With
+  on disk, else — or with `--fresh` — with a hand-off prompt built from the
+  board, the old session's claims moving onto the new session with its row. With
   `on_limit = switch` the fleet does that by itself when the limit lifts more
-  than `wait_if_reset_within_minutes` (15) away; a hand-over that finds no
-  headroom leaves the agent parked with Claude Code's own wait-and-continue
-  intact. `doctor` lists parked agents (`claude-account-limits`) and, with
+  than `wait_if_reset_within_minutes` (15) away — in a worker detached from
+  the agent's own hook, so the window kill cannot take the hand-over down; a
+  hand-over that finds no headroom leaves the agent parked with Claude Code's
+  own wait-and-continue intact. A moved agent keeps its task claims (its
+  session parks them, as a `/clear` does, for the same id when it resumes and
+  for the new one when it starts fresh), a resumed one is told in one line to
+  continue, and no `agent_exited` goes out for either; every reset a surface
+  shows — the feed, the agent header, doctor — comes from the one formatter. `doctor` lists parked agents (`claude-account-limits`) and, with
   `--live`, warns when every account is over the line
   (`claude-account-headroom`). Plan: `docs/plans/claude-accounts.md` §10.
 - **A Claude account can be chosen: a default, a priority order, aliases, and
@@ -106,6 +272,112 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `aisq_` token shape. Contract: `docs/plans/aisquare-login.md`; guide:
   `docs/signing-in.md`. The `auth rotate` stub is gone (sessions do not rotate).
 
+- **`aisquare fleet shutdown`: the fleet's off switch, and the end of rows stuck
+  at "unknown (tmux unavailable)".** Measured 2026-09-10: the only way to stop a
+  whole fleet was `tmux -L asq kill-server` by hand. After it, every manager row
+  kept reading `unknown (tmux unavailable)`, the UI showed dead managers with
+  `(pane gone)`, and `fleet reap` reaped 0 — correctly: reap and stop refuse to
+  end a row on a server they cannot reach, because an unreachable server is not
+  proof a pane died (an earlier release lost live agents' worktrees to exactly
+  that inference). Nothing in the CLI could say "yes, I stopped it". Now
+  `shutdown` can, because the operator is saying it — and it is scoped,
+  confirmable and specific about what it did. **This project by default, `--all`
+  for every project** (the shape `fleet reap` already had), and it prints what it
+  would end and asks first at a terminal, is a dry run off one without `--yes`,
+  and under `--json` without `--yes` prints the plan (`dry_run: true`) and
+  changes nothing. Agents on an answering server are stopped as `fleet stop`
+  stops one (graceful `/exit` unless `--force`; `agent_exited` is now emitted by
+  `stop` itself, so every stop path produces the event, not only `reap`), and
+  **the ended rows' claims are released** (`release_claims=True`) instead of
+  waiting out the four-hour claim orphan window. Rows whose socket had no server
+  are ended as lost and counted apart (`recorded`, never "stopped"), each
+  carrying the reason the service actually had — the CLI no longer asserts "its
+  server was not running" over a row whose server answered. An agent that exited
+  on its own between the snapshot and its turn is read back from the store and
+  counted as stopped with the status it recorded, rather than reported as left
+  live over an already-ended row. What is killed is the fleet's own
+  `asq-<codename>` **sessions**, never the server: `kill-server`
+  would take down a hand-made session, one a failed `rename` left under an old
+  name, or the operator's personal server if `[fleet] tmux_socket` names it, and
+  a server with nothing left on it exits by itself. A `fleet-paused` signal is
+  cleared for each project the run CONFIRMED down (and said in the output), so
+  the next manager does not come up staffing nothing — and KEPT, named as
+  `paused_kept`, for a project with a row left live, a session left up or a
+  listing that failed (review round 2). Round 2 also closed three safety holes:
+  a row spawned mid-run whose pane cannot be QUERIED is left live and said so
+  (a timeout is not a dead pane); the spare-this-session rule follows the pane
+  to the session it actually lives in, so an `asq-*` session left under an old
+  name is no longer prefix-swept over a row marked LEFT LIVE; and a socket
+  whose `list-sessions` fails after a good probe is reported as a failed kill
+  (`<socket>:*`), so the command exits 1 instead of printing a clean shutdown
+  over a surviving session. `incomplete_projects` in the `--json` report is the
+  set every one of those rules reads. The final pass asks reachability with a
+  probe that RAISES on an unavailable client (`TmuxServer.reachable()`, rounds
+  4-5) — a tmux that left PATH, or a shim whose interpreter is gone, after the
+  initial guard is "could not ask", so a late agent on that socket is left live
+  and its project stays paused rather than recorded lost. `reachable()` reads
+  tmux's own words, not the exit code: `No such file or directory` / `no server
+  running on` is absence, anything else (`Permission denied` on a live socket) is
+  a `TmuxError` — never a row ended (round 7). Round 7 also: the inside-server
+  guard parses `$TMUX` from the right (`rsplit(",", 2)`), so a comma in the
+  socket path cannot slip past it; a final row scan the store refused is
+  `late_scan_failed` in the report (PARTLY, exit 1, every snapshot project keeps
+  its pause); and a forgotten registration's pause is skipped, not read, so
+  `shutdown --all` no longer clears the tombstone `project forget` wrote.
+  **Exit status is recorded only where
+  tmux exposes one**: `--force` kills a live pane and records none. It refuses
+  rather than guess — no usable tmux, a socket that cannot be *asked* whether a
+  server is there (a wedged server's 30 s timeout used to escape as a traceback
+  with no `--json` output), or a call from INSIDE the fleet's own tmux server,
+  where the kill would take down the process printing the report. A row whose
+  `stop` refused because its pane was seen ALIVE is left live, reported with that
+  reason, its session spared, and the command exits 1. Round 9 closed the last
+  four places where the report could out-run what tmux confirmed. A
+  `kill-window` tmux REFUSED no longer ends the row: it was the one tmux failure
+  in `stop` still wrapped in `suppress(TmuxError)`, so a forced stop over a live
+  pane returned as *stopped* and released the running agent's claims to the next
+  worker; it goes through `_verify_gone` like every other failure there, and an
+  unconfirmed stop is LEFT LIVE with its claim and its board session intact.
+  Round 10 closed the other door into that outcome: the look `_verify_gone`
+  acts on read tmux LENIENTLY, so a socket that answered the probe and then
+  refused this user (`Permission denied`, exit 1) read as a pane that is gone —
+  row ended, claims released, agent running. It uses the strict reads now, and
+  a denied socket leaves the row live with "could not be asked". The report's
+  `sessions_failed` line no longer says "refused to kill" over a refused window
+  kill or a query that failed, and its `pause_scan_failed` line no longer claims
+  every pause is kept beside a project it has just cleared. The
+  confirmation plan uses the strict `has_session_or_raise` and refuses on an
+  enumeration that fails after a good probe, instead of quietly omitting the
+  sessions it could not ask about — the operator confirmed one session and the
+  run killed two. A `fleet-paused` signal this could not READ or CLEAR is
+  reported in `pause_scan_failed` (kept, named, exit 1) instead of vanishing
+  into a blanket `suppress(Exception)` that left the next manager told to spawn
+  nothing under an exit-0 "done". And a row that spawns after the kill phase and
+  exits on its own now has its retained `remain-on-exit` pane REMOVED with the
+  row, so its window no longer holds a session — and the session a server —
+  under a shutdown reporting itself complete; a session that survives that is
+  spared if it holds a row left live, killed if it does not, and reported either
+  way. Board notes and tasks are kept. Doctor's fleet row now decides "the
+  server is gone" with `answers()`
+  rather than an empty `list-sessions` (which cannot tell an empty server from an
+  absent one) and *appends* a scoped `fleet shutdown --project <codename>` to the
+  reap advice instead of replacing it. Twenty service tests and eight CLI
+  tests, including every refusal, the mixed one-gone-one-healthy socket state, a
+  row spawned mid-shutdown, and a forgotten registration's live rows — plus the
+  fake tmux made faithful where those paths live (a kill that fails with no
+  server up, a kill tmux REFUSES while pane, window and session all survive, an
+  `answers()` that can raise, the `running` gate on every write, and a
+  per-socket fake) and `fleet shutdown` added to the no-traceback sweeps'
+  `UNINVOKED` list, which it was missing: a plain `make test` ran it against the
+  developer's real `asq` socket and killed their live fleet. Its read-only plan
+  (`--json` without `--yes`) is held to the same property by a test of its own.
+  `fleet stop` returns what it released — the ended session's claims ride on a
+  `StopReceipt` and are named in the output (`claims_released` under `--json`) —
+  and `shutdown` counts that receipt instead of turning the release off and
+  making a second one; `fleet reap` reports its releases the same way. A release
+  the store refused, or one the board could not be told about, is named and
+  exits 1 from all three; an interrupted shutdown kills nothing further and
+  still prints how far it got (exit 130); `--all` with `--project` is refused.
 - **A `ui-tester` role: user-facing work is verified in a real browser, with
   evidence — and the role brings its own browser flag.** Eight first-class roles
   now. It takes tasks titled `UI: …` from the review pool and runs their
@@ -253,6 +525,39 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     only ever declared on `.duo` left every `.duo-wide` block silently stacking
     rather than splitting into two columns.
 
+
+- **Explainability setup is doable from the fleet UI.** The Explainability tab
+  could already *see* that a machine was unconfigured — it rendered
+  `$EXPLAINABILITY_API_KEY is NOT set` beside a red probe — and its five buttons
+  all operated on a configuration that had to exist already. So the path to a
+  first trace was four terminal commands, one of which (`--proxy-url …:9443`)
+  cannot be guessed: the shipped `proxy_url` default is a loopback sidecar this
+  CLI deliberately does not manage, while the hosted proxy sits beside the
+  gateway. Getting that one wrong is the silent failure above. A **Setup**
+  section now takes deployment, gateway URL, proxy URL, prefix and workspace key.
+  - A blank field leaves the setting alone, so the same form corrects one value
+    later without restating the rest.
+  - The deployment field names the entry the settings belong to; **make
+    active** beside it is what moves this machine, and the toast says which
+    target the machine is on.
+  - Type a gateway, leave the proxy blank, and the hosted proxy beside it is
+    filled in — offered, never imposed: an explicit value always wins, a proxy
+    already configured for the target (its own, or a deliberate top-level one)
+    is never overwritten, and a self-hosted adopter with no proxy tier types
+    their own. `hosted_proxy_for` returns `None` rather than assembling a URL
+    out of half an answer.
+  - The prefix field asks for a **name**, not a template: `nishil` becomes
+    `nishil-{role}`, and a prefix with a brace in it is refused rather than
+    repaired, so nobody types a format string into a form.
+  - The key is written to `~/.aisquare/explainability-key` at mode 600 and the
+    field is cleared — this view's own docstring already rules a key out of a
+    full-screen UI, and a masked `Input` still holds its value. The file is
+    read only for the default key variable, so a key typed for a target that
+    names its own variable is refused, with the reason.
+  - Consent stays a separate press: saving configures, **Enable** enables.
+  - One writer. `explainability.configure_target` is lifted out of the Typer
+    command so the form and `aisquare explainability enable` are the same write,
+    rather than two that agree until they do not.
 - **`aisquare serve` says out loud what a non-loopback `--bind` gives up.**
   0.6.0 changed the HTTP transport so that a bind outside `127.0.0.1`,
   `localhost` and `::1` runs with no Host/Origin validation — described at
@@ -557,11 +862,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   doctor` gains `explainability auto-mode` — present when a fleet role runs
   `auto` behind a configured proxy, it reads the first-turn size of recent
   sessions from their transcripts and warns above ~100k tokens or when a
-  recent session was refused; `fleet spawn` carries the same warning on its
-  receipt; a session being refused is put in 🔔 attention by its Stop hook
-  with one `auto_mode_blocked` board line; and the docs name the signature and
-  the three ways round it (a non-classifier mode per role, a lighter config
-  dir, tracing off).
+  recent session was refused three times or more; `fleet spawn` carries the
+  same warning on its receipt, naming the role's mode fix that a `fleet
+  restart` or `fleet switch` receipt can follow too; a session launched through
+  the proxy and refused three times is put in 🔔 attention by its Stop hook
+  with one `auto_mode_blocked` board line, or, when a restart or switch is
+  taking it down, leaves both to the replacement that resumes it, judged on
+  the refusals it adds; the mode fix they print is one the config
+  accepts (`config set` for a role the config lists, the TOML table for one
+  it leaves out); and the docs name the signature and the three ways round it
+  (a non-classifier mode per role, a lighter config dir, tracing off).
 - **An exited agent can be restarted from the UI, and a dead manager no
   longer blocks its own replacement** (#138). A manager whose Claude Code was
   ended with ctrl+c inside its window sat on the sidebar as 💤 forever: the
@@ -569,32 +879,45 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   a hand-run `fleet reap`, so `fleet spawn manager` refused with "already has
   a manager", wake-ups targeted a dead pane, and the agent view had no
   action. Now every listing (`fleet ls`, the UI's tick) records a dead pane
-  as ended the way `reap` does — exit status, `agent_exited` on the board,
-  the manager nudged — and `fleet spawn` does the same before its checks, so
-  a dead manager is replaceable at once. The row stays on the live listing as
-  **💤 exited** (the word, not only the glyph) for a day while tmux still
-  holds its window, and the agent view gains **Stop** and **Restart**.
+  as ended the way `reap` does — exit status, the claims a crash left held
+  released, `agent_exited` on the board, the manager nudged — and `fleet
+  spawn` does the same before its checks, so a dead manager is replaceable at
+  once (a row a hand-over is stopping is left to it, for a few minutes at
+  most). The row stays on the live listing as **💤 exited** (the word, not
+  only the glyph) for a day while tmux still holds its window, and the agent
+  view gains **Stop** and **Restart**.
   `aisquare fleet restart <label> [--fresh]` — and the button — starts the
   agent again under its own label with the same role, task, worktree and
   account, **resuming its session** from its transcript when that is on disk
   (`claude --resume <transcript>`), else fresh with a hand-off prompt from the
-  board; a running agent is stopped first. **Stop** on an exited row removes
-  the dead window, and so does spawning the same label again (the replacement
-  supersedes it — no two rows called manager). The Manager tab says *manager
-  exited (130)* over its Start button instead of "no manager yet". `doctor`
-  warns when a project's manager exited while its agents still run
-  (`fleet-manager`).
-- **Fleet windows are born the width they will be shown, and never wide
-  enough to grow Claude Code's diff panel on their own** (#149). Every window
-  started at 200x50 and only shrank to its pane when the UI attached it; past
-  144 columns Claude Code's fullscreen renderer opens the diff panel by itself
-  as soon as a file is edited, remembers that for later sessions, and inside
-  the fleet nothing could close it — clicks are not forwarded (#148) and a
-  `/diff` typed while Claude works is queued. The default is now 120x40
-  (`core.tmux.DEFAULT_WINDOW_WIDTH/HEIGHT`, under 144 and above the 110
-  `/diff` needs on demand), and a spawn from the UI's *Start manager* passes
-  the pane's real size. `docs/fleet.md` says how to close a panel that did
-  open: `/diff` once the agent is idle.
+  board; a running agent is stopped first and handed over as `fleet switch`
+  hands one over (its claims wait for the replacement and no exit is
+  announced), a resumed one is typed one line telling it to carry on, one
+  whose role, task, account or binary would refuse the restart is refused
+  before it is stopped, one a hand-over is already moving is refused (and so
+  is a second `fleet switch` of it), and a refused restart
+  leaves the 💤 row and its last screen as they were. **Stop** on an exited row
+  removes the dead window, and so does spawning the same label again once the
+  replacement is up (it supersedes the old window — no two rows called
+  manager); the view's buttons act on the row it shows, never on a replacement
+  that took its label since. The Manager tab says *manager exited (130)* over
+  its Start button instead of "no manager yet". `doctor` warns when a
+  project's manager exited while its agents still run (`fleet-manager`).
+- **Fleet windows are born the width they will be shown, and a headless one
+  under the width at which Claude Code grows its diff panel on its own**
+  (#149). Every window started at 200x50 and only shrank to its pane when the
+  UI attached it; past 144 columns Claude Code's fullscreen renderer opens the
+  diff panel by itself as soon as a file is edited, remembers that for later
+  sessions, and inside the fleet nothing could close it — clicks are not
+  forwarded (#148) and a `/diff` typed while Claude works is queued. The
+  default is now 120x40 (`core.tmux.DEFAULT_WINDOW_WIDTH/HEIGHT`, under 144
+  and above the 110 `/diff` needs on demand), and a spawn from the UI's
+  *Start manager* is born at the size its pane will have — a pane that is
+  itself 144 columns or wider still shows the panel. A window added to a
+  running session keeps its size under `fleet attach` instead of following the
+  attached terminal, which would leave it that wide after the detach; the
+  session's first window follows it until the UI has shown it. `docs/fleet.md`
+  says how to close a panel that did open: `/diff` once the agent is idle.
 - **The sidebar bell rings for a real prompt, not for every notification**
   (#153). Every Claude Code `Notification` flipped a session to 🔔 `attention`,
   and 164 of the 183 bells on the reporting machine were the routine idle notice
@@ -606,10 +929,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `quota_auto_resume_*` family, a sub-agent finishing and any type this build
   does not know become a `notice` feed line, never a bell. A payload without
   the field (an older Claude Code) is routed by its text, so the idle notice is
-  quiet there too and everything else keeps its old behaviour. The bell also
-  clears when the pane produces output after the notice — a permission that was
-  granted, or an action the classifier approved — not only on the next human
-  prompt.
+  quiet there too and everything else keeps its old behaviour. A `notice`, like
+  the bell, is for the human board: it never reaches a teammate's prompt delta
+  or a manager's wake-up. In the fleet (the sidebar, the project view,
+  `fleet ls`) the bell also clears while the pane is producing output after
+  the notice — a permission that was granted, or an action the classifier
+  approved — not only on the next human prompt; a pane that goes quiet again
+  without a Stop (a prompt dismissed with Esc) reads 🔔 again. `aisquare watch`
+  and the team board show the session row itself, which keeps 🔔 until the turn
+  ends.
 - **A usage reset now says when, not just what o'clock** (#152). `aisquare
   accounts usage`, `accounts list --usage` and the Accounts page showed a reset
   as a bare `HH:MM`, which for the seven-day window can be six days away and
@@ -626,21 +954,29 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   character="p")` and the key table's "printable input is literal" rule sent the
   bare letter. With alt or meta held the chord is the meaning; the character is
   only how the terminal spelt it, and `translate` now says `M-p`. ASCII letters
-  and digits, plus the keys the special-key table already names — alt+space
-  reaches the agent as `M-Space`, which the table could spell all along and
-  never got the chance to. Alt on punctuation stays the character, since through the
-  name table it was dropped (`;`) or became `ESC [`, the control-sequence
-  introducer, and every name this module emits was measured against a real tmux
-  — `M-é` never was. Shift and ctrl keep the existing rule. A modifier tmux
+  only, because that is all a parser ever delivers with an alt token and a
+  character — measured by feeding Textual's own parser the bytes a terminal
+  sends, not against hand-built events, which had promised alt+digit and
+  alt+space chords a legacy terminal cannot produce (its `ESC 1` reaches the
+  parser as `¡` and its `ESC Space` as a plain space, with no alt at all; they
+  are typed as such). `M-1` and `M-Space` are real where the terminal sends the
+  chord itself, under the kitty keyboard protocol, and reach the agent from
+  there. Alt on punctuation stays the character, since through the name table it
+  was dropped (`;`) or became `ESC [`, the control-sequence introducer, and every
+  name this module emits was measured against a real tmux — `M-é` never was. An
+  alt chord on a shifted letter keeps its case (`M-A`; a kitty `meta+P` used to
+  come out as a lowercase `M-p`) except N, O and P, whose `ESC` forms are the
+  SS2, SS3 and DCS introducers a program's key parser joins with the next key —
+  those type the letter. Shift and ctrl keep the existing rule. A modifier tmux
   cannot spell — `super`/`hyper`, which is how macOS Cmd arrives — now drops the
   key instead of falling through to its character, so Cmd+V no longer types a
-  `v`. A digit chord tmux has no name for (`ctrl+alt+1`, `alt+shift+1` — the
-  shifted key is layout-specific) falls back to the character the terminal
-  reported, so it still types what it always typed. Two limits are the parser's
-  and are documented in `docs/fleet.md`: a
-  kitty-protocol terminal reports the text and Textual then drops the `alt`
-  token (so kitty, ghostty, wezterm, foot and macOS Option are the *worse* case
-  here, not the better one), and Escape typed within ~100 ms before a letter
+  `v`. A chord tmux has no name for (`alt+shift+1` — the shifted key is
+  layout-specific) falls back to the character the terminal reported, so it
+  still types what it always typed; one an old server cannot carry is dropped
+  rather than mistyped. The parser's limits are documented in `docs/fleet.md`:
+  a terminal that reports the text a key produced (macOS Option) has the `alt`
+  token dropped by Textual, `ESC b`/`ESC f` are read as ctrl+arrows, ctrl+alt
+  on a letter loses the alt, and Escape typed within ~100 ms before a letter
   reads as that chord.
 - **A spawned agent is told the task it was spawned for.** `fleet spawn --task`
   recorded the task on the agent's row and named the label and branch after it
@@ -656,24 +992,59 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   or leave it with the verifier when it is the agent's own work already in
   review. Every role whose cycle pulls from the review pool counts as a
   verifier — `ui-tester` included, which was being told to rework the very
-  work it was spawned to check. The one branch that tells an agent to stand down and ask the manager
-  is the one that earns it: a teammate live on the task right now. An agent
-  meeting its OWN claimed task after a `/clear` or resume carries on — the claim
-  moves with the agent onto its new session id, for every status that keeps one
-  (`review` and `blocked` as well as `doing`), so the board names a session that
-  exists and a second `/clear` still recognises the work. `task next` puts the caller's
-  assigned task first through the same query as every other candidate, so
-  parallel spawns stop racing. `AISQUARE_FLEET_AGENT` is inherited by every
+  work it was spawned to check. Every instruction is one the commands would
+  honour: "claim it" only when `task next` would hand the task out (its needs
+  done) and `task claim` would accept it — so a `doing` task whose holder's
+  lease has run out is offered, not guarded — and a verifier is never told to
+  claim anything: a task it reopened, or one blocked or being worked, is
+  somebody else's turn until it is back in review. The one branch that tells an
+  agent to stand down and ask the manager is the one that earns it: a teammate
+  live on the task right now. An agent meeting its OWN claimed task after a
+  `/clear` carries on — Claude Code fires `SessionEnd(reason: clear)` for the
+  old id *before* the `SessionStart` of the new one, and the end hook used to
+  release the claim into that gap; it now keeps a fleet agent's claims across a
+  clear, and the start that follows moves every one of them (the assigned task
+  and the pool work it took, in every status that keeps a claim) onto the new
+  id together with the row, in one store transaction, so the board names a
+  session that exists and a looper's `task next --claim` in between finds the
+  task still held. `task next` puts the caller's assigned task first through
+  the same query as every other candidate, so parallel spawns stop racing — for
+  the tester, runner and reviewer cycles too, which now pass `--as`, and for the
+  MCP server's `task_next`, which runs under the agent's window and takes the
+  order (never a claim) from it. `AISQUARE_FLEET_AGENT` is inherited by every
   process the agent starts, so a nested `claude -p` reaches both the hook and
-  `task next`: identity is the session id recorded on the row, never the
-  variable alone, so a child is neither briefed on nor able to claim its
-  parent's task. `fleet spawn --task` refuses a task that is already `done` or
-  `dropped`. The whole lookup is fail-open on BOTH doors — the briefing's and
-  `task next`'s — as its docstring always claimed: a damaged or locked store
-  costs the assignment line, never the board and never the work loop. And a
-  session that comes back under a new id is recognised by not being a new
-  process rather than by a list of the harness's source strings, so `compact`
-  keeps its assignment exactly as `/clear` and `resume` do.
+  `task next`: the row belongs to the *process* in its pane — Claude Code hands
+  every hook the pid of the process that fired it (`CLAUDE_PID`), and the hook
+  compares it with the pane's — so a child is neither briefed on nor able to
+  claim its parent's task, whatever start it reports (`resume`, `fork` and
+  `compact` are all things a child can say), and the manager's task-less row
+  is not rebound under a child either; a binary that exports no pid binds its
+  row on first arrival and keeps that session. An assignment ends with its
+  task: once the task is done or dropped the row forgets it, so a later clear
+  or compaction is not re-briefed on finished work — each such briefing used
+  to tell the agent to send the manager a question note, and each note woke
+  the manager for nothing — and a reopened task claimed by someone else is no
+  order to stand down. `fleet spawn --task` refuses a task that is already
+  `done` or `dropped`. The whole lookup is fail-open on BOTH doors — the
+  briefing's and `task next`'s — as its docstring always claimed: a damaged or
+  locked store, or a tmux that does not answer, costs the assignment line,
+  never the board and never the work loop. The first-prompt board an agent
+  gets when it meets the orchestrator late shows the claim under its new
+  holder, not the old one. And `fleet spawn`'s `AISQUARE_FLEET_AGENT` no longer
+  lingers in the tmux *session* environment after the first window: a window
+  opened by hand in the fleet's session used to inherit the first agent's row.
+  The row is written after the window starts, so `aisquare launch` inside the
+  window now waits for it before starting the agent — a slow or locked store,
+  a relabel or the cap check can delay the agent's start, never strip its
+  briefing. A `/clear`'s hand-off proves the process twice, in two hooks; when
+  tmux fails to answer the second, the bind is tried again at the agent's next
+  prompt and the **ASSIGNED TO YOU** block arrives with it, once — and a row
+  that ends (`fleet stop`, `fleet reap`) releases whatever its session still
+  held, so a claim parked for a clear never outlives the row it was parked
+  for, and a killed agent's claims go back to the pool with its row rather
+  than sitting `doing` under a dead holder for the length of the lease. When
+  an assignment ends, the agent header's `task …` chip goes with it; the label
+  and branch keep the task's short id.
 - **The wheel goes to the program that can use it — Claude Code's fullscreen
   TUI first.** The root of "scroll not working" (reported 2026-09-08 from WSL2
   + Windows Terminal). Claude Code's fullscreen TUI turns on the alternate
@@ -708,34 +1079,69 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   widget: a Line API widget has no `render()` for Textual's default selection to
   read, and switched on alone every drag resolved to select-all, because the
   compositor takes the drag's content offset from segment metadata only the
-  `render()` path stamped. The pane now stamps every row it renders, supplies
+  `render()` path stamped. The pane now stamps the row the terminal library
+  reads when it resolves a press or a drag (that row only — see below), supplies
   its own extraction (a drag in the blank area below the output used to raise
   out of the handler), and paints the span itself — as cells, so a row with wide
   glyphs highlights what is copied, and tinting behind the text rather than over
   it, since the theme's selection style resolves with foreground equal to
   background. The text is copied when the gesture ends, wherever on screen it
-  ends — the app hears that from the screen and tells the panes, so a drag that
+  ends — the app sees every press and release itself and tells the panes, so a drag that
   crosses the pane's edge copies in either direction instead of depending on
   whether the neighbouring widget happens to capture the mouse. Only a
   left-button gesture that actually changed a pane's selection copies: a
   right-button drag across a standing highlight leaves the clipboard alone, and
   so does a release with nothing to do with a pane — a drag on the footer, a
-  scrollbar, a button. ctrl+c copies again while a selection stands and is the
-  agent's interrupt otherwise, including when the selection covers nothing;
-  cmd+c is only ever the copy, and types nothing when there is no selection;
-  double-click selects a word and a triple click nothing (Textual's defaults
-  would select the whole pane, and the next ctrl+c would copy it instead of
-  interrupting the agent).
+  scrollbar, a button. ctrl+c copies again while a selection stands — from the
+  pane or from the sidebar, through one path — and clears it; otherwise it is
+  the agent's interrupt, including when the selection covers nothing. cmd+c is
+  only ever the copy, and types nothing when there is no selection. The
+  highlight does not outlive what it means: a key or a paste into the agent
+  drops it, so does the agent printing something else under it, so a later
+  ctrl+c is the interrupt and never a copy of text nobody selected. Double-click
+  selects a word, a triple click nothing, and the pane is never selected whole
+  — not by a triple click on its header either (Textual's defaults would select
+  the whole pane, and the next ctrl+c would copy it instead of interrupting the
+  agent). A click is a press and a release in one cell, so a drag followed by a
+  click on its end cell is not a double click. The app reads every press and
+  release itself, before they bubble, so a burst of input handled back-to-back
+  cannot route a release with the previous gesture's button; and an empty copy
+  never reaches the terminal, where an empty OSC 52 clears the clipboard.
   The `(exited 0)` notice row is tinted by the drag that copies it, like every
   other row, and so is the `[↑k/history]` marker — whatever a row displays is
   what it highlights and what it copies, cut to the columns the pane shows
-  rather than to the width of a tmux window that outgrew it. The highlight and
-  the clipboard read the same rows at the same moment, so they cannot disagree:
-  under an agent that is still printing, a drag copies the text at release and
-  ctrl+c copies what is under the highlight when it is pressed. Switching the
-  pane to another agent drops the selection, and changing the theme drops the
+  rather than to the width of a tmux window that outgrew it. A line tmux
+  soft-wrapped is copied as one line (every frame carries tmux's own wrap
+  marks — `capture-pane -F`, tmux 3.7 and later — so the copy joins the rows
+  it shows, keeping a space that fell on the wrap, without a process of its
+  own; an older tmux gets one line per row), a tab is
+  expanded to the cells it occupies on screen so what is highlighted is what
+  the eye sees, and an emoji or a wide glyph is one unit to the highlight, the
+  cursor and the copy alike — the paint, the offsets the terminal library
+  resolves a drag with and the copied text share one grapheme model of the
+  row, cached beside the row's Strip rather than rebuilt for the cursor row
+  on every frame. The tint is visible on reverse-video cells too — under a
+  theme whose selection style names no background as well, where the fallback
+  used to draw the glyph in its own background — and the cursor stays
+  visible inside a highlight. Painting no longer stamps every row with
+  selection offsets: that gave each segment a unique link id and made a plain
+  mouse hover repaint the whole pane (120 pointer moves on a 200x60 pane: 7200
+  row renders, now 0), doubled the CPU per streamed frame (8.2 → 4.0 ms) and
+  held twice the memory in the strip cache; only the terminal library's own
+  offset lookup is stamped now. The highlight and the clipboard read the same
+  rows at the same moment, so they cannot disagree:
+  under an agent that is still printing, a drag copies the text at release.
+  Switching the pane to another agent drops the selection, so does hiding the
+  pane behind another tab or unmounting it, and changing the theme drops the
   highlight's resolved colour so a theme picked mid-drag does not leave the
-  tint in the old palette.
+  tint in the old palette. What decides whether a frame dropped the highlight
+  is the row as displayed: a `(pane gone)` notice replacing the row drops it
+  like any other change of the text, while a change hidden under the
+  `[↑k/history]` marker leaves it. A right click seeds no double click, so a
+  right click followed by a left click in the same cell selects nothing; the
+  copy key outside a pane takes the highlight made most recently when two
+  panes hold one; and the end of a gesture is routed even when the app's own
+  handling of it raises, so no press stays armed for the next gesture.
 - **One session is ONE Run again — the launcher owns the Run's trace id.**
   Measured against a production workspace on 2026-09-09: one
   `aisquare launch coder -p …` produced TWO dashboard Runs. `5efb96de…` held the

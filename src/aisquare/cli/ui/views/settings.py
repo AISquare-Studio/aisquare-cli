@@ -31,6 +31,7 @@ from textual import on
 from textual.app import ComposeResult
 from textual.containers import Horizontal, VerticalScroll
 from textual.widgets import Button, Input, Label, Select, Static, Switch
+from textual.worker import Worker, WorkerState
 
 from aisquare.core import claude_accounts as accounts_core
 from aisquare.core import codenames, paths
@@ -46,6 +47,7 @@ from aisquare.core.config import (
 from aisquare.models import ClaudeAccount, ProjectInfo
 from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import fleet as fleet_service
+from aisquare.services import settings as settings_service
 
 PERMISSION_MODES: tuple[tuple[str, str], ...] = (
     ("auto", "auto"),
@@ -71,6 +73,7 @@ ON_LIMIT_MODES: tuple[tuple[str, str], ...] = (
 )
 """``[accounts] on_limit``: what the fleet does when an agent's turn ends on a usage limit."""
 _ID_SAFE = re.compile(r"[^A-Za-z0-9_-]")
+ACCOUNTS_WORKER = "settings-accounts"
 
 
 def role_order(fleet: FleetSettings) -> list[str]:
@@ -139,23 +142,27 @@ class SettingsView(VerticalScroll):
     def __init__(self, project: ProjectInfo, *, id: str | None = None) -> None:
         super().__init__(id=id)
         self.project = project
-        self.fleet = fleet_service.settings()
-        self.accounts = accounts_service.accounts_settings()
+        config = self._read_config()
+        self.fleet = config.fleet
+        self.accounts = config.accounts
         self._roles: list[str] = role_order(self.fleet)
-        self._account_bindings: dict[str, str] = self._read_bindings()
-        self._accounts: list[ClaudeAccount] = self._read_accounts()
+        self._account_bindings: dict[str, str] = settings_service.role_account_bindings(config)
+        self._accounts: list[ClaudeAccount] = []
+        """The slots the account selects offer — filled by :meth:`_load_accounts`'s worker."""
 
     @staticmethod
-    def _read_bindings() -> dict[str, str]:
-        """Role → bound account reference; an unreadable config reads as no bindings."""
+    def _read_config() -> AppConfig:
+        """The file, read ONCE for every section on the form; unreadable reads as the defaults.
+
+        The form read it three times over — ``[fleet]``, ``[accounts]`` and the
+        role bindings each opened it (review of #205, fourth round) — with the
+        same fail-open each: a broken ``config.toml`` costs the customisation,
+        never the tab.
+        """
         try:
-            return {
-                role: profile.account
-                for role, profile in load_config().team.profiles.items()
-                if profile.account
-            }
+            return load_config()
         except Exception:
-            return {}
+            return AppConfig()
 
     @staticmethod
     def _read_accounts() -> list[ClaudeAccount]:
@@ -163,6 +170,55 @@ class SettingsView(VerticalScroll):
             return accounts_service.list_accounts()
         except Exception:  # no accounts to offer is a form with one row, not a crash
             return []
+
+    def _load_accounts(self) -> None:
+        """Read the slots for the account selects OFF the UI thread.
+
+        ``list_accounts`` opens ``context.db`` (a busy timeout of seconds), scans
+        the account directories and may write the reconcile, and the form did
+        it in its constructor, on the event loop (review of #205, fourth round)
+        — work the Accounts page and the agent header keep in thread workers.
+        The selects compose with the bindings alone and gain the slots when the
+        worker answers (:meth:`_accounts_read`).
+        """
+        self.run_worker(
+            self._read_accounts,
+            name=ACCOUNTS_WORKER,
+            group=ACCOUNTS_WORKER,
+            exclusive=True,
+            thread=True,
+            exit_on_error=False,
+        )
+
+    @on(Worker.StateChanged)
+    def _accounts_read(self, event: Worker.StateChanged) -> None:
+        if event.worker.group != ACCOUNTS_WORKER:
+            return
+        if event.state is WorkerState.SUCCESS and isinstance(event.worker.result, list):
+            self._accounts = event.worker.result
+            self._fill_account_selects()
+
+    def _fill_account_selects(self) -> None:
+        """Offer the slots the worker read, keeping what each select shows.
+
+        Before the first answer a select offers "no binding" and the binding
+        itself (``account_options`` keeps a value it does not know), and both
+        survive the new options, so what the operator picked meanwhile stays.
+        A slot picked from an earlier answer that this one no longer has — it
+        was removed in between — falls back to the binding rather than being
+        set as a value the select would refuse.
+        """
+        for role in self._roles:
+            try:
+                select = self.query_one(f"#acct-{widget_suffix(role)}", Select)
+            except Exception:  # a role bound since this form was composed; shown after a reopen
+                continue
+            shown = select.value
+            bound = self._account_bindings.get(role)
+            options = account_options(self._accounts, bound)
+            select.set_options(options)
+            offered = {value for _label, value in options}
+            select.value = shown if shown in offered else (bound or NO_ACCOUNT)
 
     # --- layout ----------------------------------------------------------------------
 
@@ -257,21 +313,24 @@ class SettingsView(VerticalScroll):
             id="settings-note",
         )
 
+    def on_mount(self) -> None:
+        self._load_accounts()
+
     # --- reading -----------------------------------------------------------------------
 
     @on(Button.Pressed, "#reload-settings")
     def reload_form(self) -> None:
         """Discard edits: show what the file holds (the roles list can change with it)."""
-        self.fleet = fleet_service.settings()
+        config = self._read_config()
+        self.fleet = config.fleet
         self._roles = role_order(self.fleet)
-        self._account_bindings = self._read_bindings()
-        self._accounts = self._read_accounts()
+        self._account_bindings = settings_service.role_account_bindings(config)
         self.query_one("#codename", Input).value = self.project.codename or ""
         self.query_one("#escape-key", Input).value = self.fleet.escape_key
         self.query_one("#max-agents", Input).value = str(self.fleet.max_agents_per_project)
         self.query_one("#worktree-dir", Input).value = self.fleet.worktree_dir
         self.query_one("#native-teams", Switch).value = self.fleet.disable_native_agent_teams
-        self.accounts = accounts_service.accounts_settings()
+        self.accounts = config.accounts
         self.query_one("#accounts-pick", Select).value = self.accounts.pick
         self.query_one("#accounts-switch-at", Input).value = str(self.accounts.switch_at)
         self.query_one("#accounts-on-limit", Select).value = self.accounts.on_limit
@@ -293,6 +352,7 @@ class SettingsView(VerticalScroll):
             bound = self._account_bindings.get(role)
             account.set_options(account_options(self._accounts, bound))
             account.value = bound or NO_ACCOUNT
+        self._load_accounts()  # the slots as they are now, off the UI thread
 
     # --- writing -----------------------------------------------------------------------
 

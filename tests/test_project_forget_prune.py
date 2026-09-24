@@ -308,6 +308,7 @@ def test_forget_purge_deletes_every_row_the_project_owns_and_its_data_dir(
         "team_session": 1,
         "fleet_agent": 1,
         "metric": 1,
+        "project_setting": 0,
         "team_meta": 3,
         "project": 1,
     }
@@ -406,8 +407,14 @@ def test_a_project_with_history_cannot_be_deleted_by_hand_which_is_why_forget_to
         connection.close()
 
     with store_session() as store:
+        store.set_project_setting(alpha, "claude_account", "2")  # v15's FK-carrying table
         removed = store.purge_project(alpha)
     assert removed["entry"] == 1 and removed["project"] == 1
+    # Left out of the purge, this row rolled the whole transaction back with a
+    # FOREIGN KEY traceback (review of #205, second round).
+    assert removed["project_setting"] == 1
+    with store_session() as store:
+        assert store.project_setting(alpha, "claude_account") is None
 
 
 # --- prune ---------------------------------------------------------------------

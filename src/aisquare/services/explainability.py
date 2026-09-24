@@ -66,14 +66,21 @@ import uuid
 from collections.abc import Callable, Mapping, MutableMapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from http.client import HTTPException
 from pathlib import Path
 from typing import Any
 from urllib.error import URLError
-from urllib.parse import urlparse
+from urllib.parse import SplitResult, urlsplit
 from urllib.request import urlopen
 
 from aisquare.core import harness, insights, outbox, paths, spawn
-from aisquare.core.config import ExplainabilitySettings, load_config, save_config
+from aisquare.core.config import (
+    AppConfig,
+    ExplainabilitySettings,
+    ExplainabilityTarget,
+    load_config,
+    save_config,
+)
 from aisquare.core.store import store_session
 
 #: Vars the wiring wants to set. If the user's environment already defines one
@@ -171,6 +178,16 @@ class ProxyProbe:
 
     healthy: bool
     reason: str
+    gateway: str | None = None
+    """Where the proxy says IT ships, when it says so at all.
+
+    The payload describes what the process IS -- service, mode, status -- and
+    said nothing about where the traffic goes, so a proxy pointed at another
+    deployment than the configured target read green on every surface. Optional
+    because a proxy that predates the field is not broken, merely unverifiable;
+    :func:`aisquare.services.explainability_ops.proxy_state` is what decides
+    which of those two the operator is in.
+    """
 
 
 @dataclass(frozen=True)
@@ -270,6 +287,21 @@ def _post_run_root(
 
     verdict = explainability_ops.open_run_root(gateway_url, api_key, agent_name, pipeline_id)
     return RootReceipt(posted=verdict.ok, detail=verdict.detail)
+
+
+def _resumed_session_id(value: str) -> str:
+    """The id behind ``--resume``: the value itself, or the stem of a transcript path.
+
+    ``claude --resume`` takes a session id OR the absolute path of its
+    transcript, ``<config-dir>/projects/<cwd-slug>/<session-id>.jsonl`` — the
+    form a fleet hand-over passes. Read as an id, the path keyed the Run to a
+    filename while the hooks recorded the real uuid, and the board-to-Run join
+    broke for every switched agent (review of #205, finding 4).
+    """
+    name = os.path.basename(value)
+    if name.endswith(".jsonl") and len(name) > len(".jsonl"):
+        return name[: -len(".jsonl")]
+    return value
 
 
 def _flag_value(args: Sequence[str], flag: str) -> tuple[bool, str | None]:
@@ -403,7 +435,7 @@ def plan_session_identity(binary: str, args: Sequence[str]) -> SessionIdentity:
         present, value = _flag_value(args, flag)
         if present:
             if value is not None:
-                return SessionIdentity(value)
+                return SessionIdentity(_resumed_session_id(value))
             return SessionIdentity(None, note=f"{flag} picks the session at run time")
     for flag in _CONTINUE_FLAGS:
         if flag in args:
@@ -485,16 +517,80 @@ def join_records(path: Path | None = None) -> list[dict[str, object]]:
     return records
 
 
-def _is_loopback(url: str) -> bool:
+def split_url(url: str) -> SplitResult | None:
+    """``urlsplit`` that answers ``None`` instead of raising.
+
+    EVERY url in this module arrives from a human -- a config file, a form field,
+    a flag -- and ``urlsplit`` raises ``ValueError`` on a malformed authority:
+    ``http://[::1`` (a typo'd IPv6 bracket) and an out-of-range port are both
+    reachable by typing. Unguarded, that exception leaves a parser and ends a
+    command: it propagated out of ``aisquare doctor`` and out of a Textual button
+    handler, neither of which has anything to do with URL syntax. One helper, so
+    a new caller cannot reintroduce the hazard by forgetting a ``try``.
+    """
+    try:
+        return urlsplit((url or "").strip().rstrip("/"))
+    except ValueError:
+        return None
+
+
+def is_loopback(url: str) -> bool:
     """Whether ``url`` names this machine.
+
+    Public because it has two modules' callers now: this one, and
+    ``explainability_ops.proxy_state``, which needs the same discriminator to
+    tell a proxy whose destination it CANNOT verify from one it never had to.
 
     The discriminator between the two proxy topologies. A loopback sidecar with
     ``AISQUARE_PROXY_INBOUND_KEYS`` unset skips its auth gate entirely, so it
     needs no workspace key; anything else is a hosted proxy that REQUIRES one and
     denies every request without it.
+
+    An EMPTY host counts as loopback, which is what the shipped default and a
+    bare path both produce; an UNPARSEABLE url does not, because nothing about
+    it has been established and the caller that asks this question is deciding
+    whether a workspace key may be omitted.
     """
-    host = (urlparse(url.strip()).hostname or "").lower()
+    split = split_url(url)
+    if split is None:
+        return False
+    host = (split.hostname or "").lower()
     return host in ("127.0.0.1", "localhost", "::1", "") or host.startswith("127.")
+
+
+def url_problem(url: str, *, what: str) -> str | None:
+    """Why ``url`` cannot be handed to an agent or a gateway client, or ``None``.
+
+    ONE validator for every URL this integration takes from a human, and it
+    says WHICH of five things is wrong, because the form used to answer all of
+    them with "needs a scheme -- try https://..." and prefixed ``https://`` onto
+    a URL that already had one (``http://[::1`` became ``try https://http://[::1``).
+
+    * an unparseable authority -- a typo'd IPv6 bracket;
+    * a port ``urlsplit`` accepts and ``.port`` then refuses (``:99999``), which
+      would otherwise be stored and fail at the first request;
+    * no scheme -- and ``stg.example:8000`` parses with ``stg.example`` as the
+      SCHEME, so "not http" is only the right diagnosis when ``://`` was typed;
+    * a scheme that is not http(s);
+    * no host -- ``https://`` alone, or ``https:///path``.
+
+    ``what`` is the noun the sentence opens with (``"gateway"``, ``"proxy"``).
+    """
+    text = (url or "").strip().rstrip("/")
+    split = split_url(text)
+    if split is None:
+        return f"{what} URL {text!r} cannot be parsed — check the brackets and the port"
+    try:
+        _ = split.port  # `urlsplit` defers the range check to the attribute
+    except ValueError:
+        return f"{what} URL {text!r} has a port that is not a number in range"
+    if not split.scheme or (split.scheme not in ("http", "https") and "://" not in text):
+        return f"{what} needs a scheme — try https://{text}"
+    if split.scheme not in ("http", "https"):
+        return f"{what} must be an http(s) URL, not {split.scheme}://"
+    if not split.hostname:
+        return f"{what} URL {text!r} names no host"
+    return None
 
 
 def _usable_base_url(value: str) -> bool:
@@ -504,13 +600,11 @@ def _usable_base_url(value: str) -> bool:
     and nothing about whether anyone is listening, which is the probe's job.
     It exists for one reason: to stop a value the AGENT cannot parse from
     reaching its environment, because that failure mode is not a lost trace,
-    it is a dead session.
+    it is a dead session. It IS :func:`url_problem`'s answer: the two used to be
+    separate parsers, and ``https://proxy.example:99999`` — a port the agent's
+    client refuses — passed this one and failed the other (review of #132).
     """
-    try:
-        parsed = urlparse(value.strip())
-    except ValueError:
-        return False
-    return parsed.scheme in ("http", "https") and bool(parsed.netloc)
+    return url_problem(value, what="base URL") is None
 
 
 def tracing_configured(settings: ExplainabilitySettings | None = None) -> bool:
@@ -540,8 +634,23 @@ def probe_proxy(proxy_url: str, timeout: float = _PROBE_TIMEOUT_SECONDS) -> Prox
             if response.status != 200:
                 return ProxyProbe(False, f"proxy /health returned HTTP {response.status}")
             payload = json.loads(response.read().decode("utf-8"))
-    except (URLError, OSError, TimeoutError, ValueError) as exc:
+    except (URLError, HTTPException, OSError, TimeoutError, ValueError) as exc:
+        # ``HTTPException`` is not an ``OSError``: ``urlopen`` raises
+        # ``http.client.InvalidURL`` for a port that is not a number or a
+        # stray space in the host before any network call, and ``read()``
+        # raises ``IncompleteRead`` for a body shorter than its Content-Length.
+        # Unlisted, both escaped through ``wire_session`` — which calls this
+        # unguarded — and stopped the agent from starting over a proxy URL a
+        # hand-edited config carried (review of #203). A verdict keeps "tracing
+        # may cost a trace and never a launch"; ``_request`` in
+        # ``explainability_ops`` closed the same hole the same way.
         return ProxyProbe(False, f"proxy unreachable at {url}: {exc}")
+    # `[]` and `"ok"` are valid JSON and have no `.get`; the decode succeeded, so
+    # the handler above is already past. Four attribute reads follow, and any
+    # server on the port can produce this -- the wrong service answering is the
+    # case this function exists to catch, and it must SAY so rather than raise.
+    if not isinstance(payload, dict):
+        return ProxyProbe(False, f"{url} answered {type(payload).__name__}, not a health object")
     service = payload.get("service")
     mode = payload.get("mode")
     status = payload.get("status")
@@ -556,6 +665,7 @@ def probe_proxy(proxy_url: str, timeout: float = _PROBE_TIMEOUT_SECONDS) -> Prox
             f"proxy at {url} runs mode {mode!r}, need {_EXPECTED_MODE!r} — "
             "point explainability.proxy_url at the claude_code proxy",
         )
+    gateway = payload.get("gateway")
     if status is not None and status != _EXPECTED_STATUS:
         # The field whose entire job is reporting health, previously discarded.
         # Tolerant of ABSENT on purpose: this rests on one payload from one
@@ -563,9 +673,11 @@ def probe_proxy(proxy_url: str, timeout: float = _PROBE_TIMEOUT_SECONDS) -> Prox
         # only an explicit not-ok is rejected. Named in the reason, because
         # "proxy unhealthy" without the value sends the operator nowhere.
         return ProxyProbe(
-            False, f"proxy at {url} reports status {status!r}, not {_EXPECTED_STATUS!r}"
+            False,
+            f"proxy at {url} reports status {status!r}, not {_EXPECTED_STATUS!r}",
+            gateway=gateway if isinstance(gateway, str) else None,
         )
-    return ProxyProbe(True, "proxy healthy")
+    return ProxyProbe(True, "proxy healthy", gateway=gateway if isinstance(gateway, str) else None)
 
 
 def _custom_headers(
@@ -761,8 +873,8 @@ def wire_session(
     # fine — it does not leave the machine, and it is the documented local shape.
     if (
         api_key
-        and not _is_loopback(settings.proxy_url)
-        and urlparse(settings.proxy_url).scheme != "https"
+        and not is_loopback(settings.proxy_url)
+        and (split_url(settings.proxy_url) or SplitResult("", "", "", "", "")).scheme != "https"
     ):
         return SessionWiring(
             traced=False,
@@ -773,7 +885,7 @@ def wire_session(
             ),
         )
 
-    if not api_key and not _is_loopback(settings.proxy_url):
+    if not api_key and not is_loopback(settings.proxy_url):
         return SessionWiring(
             traced=False,
             reason=(
@@ -951,6 +1063,192 @@ def resolve_api_key() -> str | None:
     except OSError:
         return None
     return stored or None
+
+
+#: Port the deployment convention puts the hosted claude_code proxy on, beside
+#: the gateway it ships to. Not a protocol constant and not a guess: it is where
+#: both deployed proxies answer, and the ONE fact that separated an operator who
+#: traced in four commands from one who spent an afternoon running a sidecar —
+#: the shipped `proxy_url` default is loopback, and this CLI deliberately does
+#: not manage a local proxy (see the revert in 8090045). A self-hosted adopter
+#: with no proxy tier overrides it; nothing here refuses their value.
+HOSTED_PROXY_PORT = 9443
+
+
+def hosted_proxy_for(gateway_url: str) -> str | None:
+    """The proxy that convention puts beside ``gateway_url``, or ``None``.
+
+    A SUGGESTION, never a write: the caller offers it so a blank field means
+    "the usual one" and a filled field always wins. ``None`` for anything this
+    cannot reason about, rather than assembling a URL out of half an answer --
+    and three things are not half an answer but a WRONG one:
+
+    * an unparseable authority (``split_url`` returns ``None``);
+    * no scheme or no host -- a schemeless ``stg.example`` parses with the whole
+      thing as the PATH, so a suggestion built from it would name no host;
+    * a LOOPBACK gateway. :data:`HOSTED_PROXY_PORT` is the hosted deployments'
+      convention; the wholly-local topology's own port is the shipped
+      ``proxy_url`` default (9090), and pointing a self-hosted adopter at 9443
+      sends them to a port with nothing on it. Silence leaves their configured
+      value alone, which is the right answer for the one topology that does not
+      use a hosted tier.
+
+    IPv6 hosts are re-bracketed: ``urlsplit().hostname`` strips them, and
+    ``https://::1:9443`` is not a URL any client can reach.
+    """
+    split = split_url(gateway_url)
+    if split is None or not split.scheme or not split.hostname:
+        return None
+    if is_loopback(gateway_url):
+        return None
+    host = f"[{split.hostname}]" if ":" in split.hostname else split.hostname
+    return f"{split.scheme}://{host}:{HOSTED_PROXY_PORT}"
+
+
+def identity_problem(template: str) -> str | None:
+    """Why ``template`` cannot name agents, or ``None``.
+
+    Two failures, and both end the same way -- ``agent_names`` empty, the tab
+    reading ``agents: (none)``, every launch untraced behind a success line: a
+    template that RAISES in ``.format`` (a stray brace, ``nishil}-{role}``, is
+    ``ValueError: Single '}'``), and one that renders every role to the same
+    name because ``{role}`` is not in it. Rendered twice with different roles
+    rather than searched for the literal, so ``{role!s}`` and friends count.
+    """
+    try:
+        one, two = template.format(role="planner"), template.format(role="coder")
+    except (KeyError, IndexError, ValueError) as exc:
+        return f"identity template {template!r} cannot render ({exc}) — try 'name-{{role}}'"
+    if one == two:
+        return (
+            f"identity template {template!r} has no {{role}} in it, so every agent would "
+            "share one name — try 'name-{role}'"
+        )
+    return None
+
+
+#: A POSIX environment-variable name: what a shell can `export`, so what
+#: `resolve_target` can ever find in `os.environ`.
+_ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def key_env_problem(name: str) -> str | None:
+    """Why ``name`` cannot be the variable a target reads its key from, or ``None``.
+
+    Stored unchecked, ``--key-env 'MY VAR'`` (or ``'$EXPLAINABILITY_API_KEY'``,
+    an easy paste out of a runbook) was accepted, after which nothing could ever
+    export it and every surface read "the key is NOT set" with nothing naming
+    the cause — the "configured, green and stranded" shape this function's four
+    siblings exist to refuse (round 6 of #203).
+    """
+    if not name:
+        return "key variable is empty — name the variable the key is exported in"
+    if name.startswith("$"):
+        return f"key variable {name!r} is a NAME, without the $ — try {name[1:]!r}"
+    if not _ENV_NAME.fullmatch(name):
+        return (
+            f"key variable {name!r} is not a variable name — letters, digits and _ only, not "
+            "starting with a digit"
+        )
+    return None
+
+
+def target_problem(name: str) -> str | None:
+    """Why ``name`` cannot name a deployment target, or ``None``.
+
+    A target name is a config key (``[explainability.targets.<name>]``) and
+    the word every surface prints after ``--target``; one with a line break or a
+    tab in it is neither typeable nor readable back, and an empty one is the
+    active target by accident. Inner spaces are allowed — ``prod west`` is a
+    name people use — so this refuses only what cannot be meant.
+    """
+    if not name:
+        return "target name is empty — name the deployment: --target stg"
+    if any(ch in name for ch in "\n\r\t\x0b\x0c"):
+        return f"target name {name!r} has a line break or tab in it — one line, no tabs"
+    return None
+
+
+def configure_target(
+    config: AppConfig,
+    *,
+    target_name: str | None = None,
+    gateway_url: str | None = None,
+    key_env: str | None = None,
+    proxy_url: str | None = None,
+    identity: str | None = None,
+    enable: bool = True,
+    make_active: bool = True,
+) -> str:
+    """Apply one deployment's settings to ``config`` and return the target's name.
+
+    The body of ``aisquare explainability enable``, lifted out of the Typer
+    command so the fleet UI's setup form is the SAME write rather than a second
+    one that agrees today. It mutates and returns; persisting is the caller's,
+    because the two have different failure surfaces to report into.
+
+    Every argument is optional and only a TRUTHY one is applied — repeating the
+    call with one field set is how a machine changes its proxy without restating
+    its gateway, and an empty string from a blank form field must not erase what
+    is configured.
+
+    VALIDATES BEFORE IT WRITES, and raises ``ValueError`` naming the fix. The
+    form refused a schemeless gateway on its own while this function stored one
+    from ``enable --gateway-url stg.example`` -- the runbook command, four
+    characters short -- and the machine ended configured, green and stranded: a
+    host-less gateway read as loopback and silenced the proxy lane's own warning.
+    A check in one caller guards one door; this is the writer both go through.
+    The identity template is held to the same standard because one that cannot
+    render empties ``agent_names`` and untraces every launch (see
+    :func:`identity_problem`). Nothing is mutated when this raises.
+
+    ``make_active`` is the switch ``enable --target`` has always thrown: this
+    machine moves to the named deployment. The form passes ``False`` unless the
+    operator ticked the box for it, because correcting prod's gateway from a
+    machine on stg must not move the machine to prod -- traffic landing on a
+    deployment nobody chose is this integration's headline failure, arrived at
+    from the other side.
+    """
+    # Judged and stored in ONE spelling, all five: the form strips every field
+    # and the CLI passed `--target 'stg '` and `--identity 'nishil-{role} '`
+    # through as typed, so the tab then read a second, empty target and every
+    # agent name carried a trailing space (review of #203, round 5).
+    target_name = target_name.strip() if target_name else None
+    identity = identity.strip() if identity else None
+    key_env = key_env.strip() if key_env else None
+    if target_name is not None and (problem := target_problem(target_name)):
+        raise ValueError(problem)
+    if key_env is not None and (problem := key_env_problem(key_env)):
+        raise ValueError(problem)
+    for what, value in (("gateway", gateway_url), ("proxy", proxy_url)):
+        if value and (problem := url_problem(value, what=what)):
+            raise ValueError(problem)
+    if identity and (problem := identity_problem(identity)):
+        raise ValueError(problem)
+    settings = config.explainability
+    name = target_name or settings.target
+    if target_name and make_active:
+        settings.target = target_name
+    if gateway_url or key_env or proxy_url or identity:
+        target = settings.targets.get(name, ExplainabilityTarget())
+        # Stored as VALIDATED: stripped, no trailing slash. `url_problem` judged
+        # that spelling, and every comparison downstream (`_proxy_source`
+        # against the shipped default, `chosen_proxy`, the remediation lines)
+        # is a string comparison — a pasted `https://g.example:9443/` used to
+        # be stored with its slash and read as a chosen, non-default proxy
+        # (review of #132).
+        if gateway_url:
+            target.gateway_url = gateway_url.strip().rstrip("/")
+        if key_env:
+            target.api_key_env = key_env  # stripped above, judged as stored
+        if proxy_url:
+            target.proxy_url = proxy_url.strip().rstrip("/")
+        if identity:
+            target.agent_name_template = identity  # stripped above, judged as stored
+        settings.targets[name] = target
+    if enable:
+        settings.enabled = True
+    return name
 
 
 def store_api_key(key: str) -> Path:
@@ -1343,9 +1641,14 @@ class _ClientLaneSegment:
         self._run_key = run_key
         self._span: Any = None
         self._token: Any = None
+        self._trace_api: Any = None
+        self._context_api: Any = None
 
     def __enter__(self) -> _ClientLaneSegment:
         otel_trace, otel_context = _otel()
+        # Kept for ``__exit__``: the close must not depend on a lookup that can
+        # itself raise, or nothing is ended and nothing detached.
+        self._trace_api, self._context_api = otel_trace, otel_context
         identity = trace_identity(self._run_key)
         root = otel_trace.SpanContext(
             trace_id=int(identity.trace_id, 16),
@@ -1368,14 +1671,27 @@ class _ClientLaneSegment:
         return self
 
     def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
-        otel_trace, otel_context = _otel()
-        if exc_type is not None:
-            self._span.set_status(otel_trace.StatusCode.ERROR, str(exc_val))
-        else:
-            self._span.set_status(otel_trace.StatusCode.OK)
-        self._span.end()
-        if self._token is not None:
-            otel_context.detach(self._token)
+        # Three things are owed, each independently of the one before it: the
+        # status, the span's end, the context's detach. `set_status` and `end`
+        # are SDK calls that can raise (a shut-down tracer provider raises on
+        # the FIRST of them, a processor can throw on the second), and `_drain`
+        # catches whatever escapes here and returns a deferral — so a raise
+        # before the detach left a dead segment attached as the current context
+        # for the life of the process (review of #203), and a raise before
+        # `end` left the span held by its processor, the whole group never
+        # exported (round 5, on the same function). Nested `finally`s, and no
+        # `_otel()` lookup in the way.
+        try:
+            try:
+                if exc_type is not None:
+                    self._span.set_status(self._trace_api.StatusCode.ERROR, str(exc_val))
+                else:
+                    self._span.set_status(self._trace_api.StatusCode.OK)
+            finally:
+                self._span.end()
+        finally:
+            if self._token is not None:
+                self._context_api.detach(self._token)
 
     def set_input(self, value: str) -> None:
         self._span.set_attribute("input.value", value)

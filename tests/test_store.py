@@ -196,6 +196,33 @@ def test_list_and_get_projects(store: ContextStore) -> None:
     assert ids >= {"prj_other"}
 
 
+def test_list_projects_hides_a_forgotten_registration_unless_asked(store: ContextStore) -> None:
+    """``include_forgotten`` is for the one question a tombstone must not hide: a
+    forgotten registration can still hold LIVE ``fleet_agent`` rows, whose panes are
+    real processes. ``fleet shutdown`` asks this way so it cannot take a pane down
+    while leaving its row live with nothing able to reconcile it.
+
+    It is not ``all`` (#139), which adds the captured rows and still hides a
+    tombstone. A forget clears ``onboarded_at``, so ``include_forgotten`` alone
+    reads past the onboarded filter too — kept, that filter would drop the very
+    tombstone the flag exists to find."""
+    store.onboard_project(PROJECT)  # the fixture only captured it
+    captured = ProjectInfo(id="prj_captured", root=Path("/tmp/captured-app"), linked_repos=[])
+    store.ensure_project(captured)
+    gone = ProjectInfo(id="prj_gone", root=Path("/tmp/gone-app"), linked_repos=[])
+    store.onboard_project(gone)
+    store.forget_project("prj_gone")
+
+    assert [p.id for p in store.list_projects()] == [PROJECT.id], "the default still hides it"
+    assert {p.id for p in store.list_projects(all=True)} == {PROJECT.id, "prj_captured"}, (
+        "so does all"
+    )
+    everything = {PROJECT.id, "prj_captured", "prj_gone"}
+    assert {p.id for p in store.list_projects(include_forgotten=True)} == everything
+    assert {p.id for p in store.list_projects(all=True, include_forgotten=True)} == everything
+    assert store.get_project("prj_gone") is None, "every OTHER read keeps the promise"
+
+
 def test_find_projects_by_name_and_id_prefix(store: ContextStore) -> None:
     assert [p.id for p in store.find_projects("example-project")] == [PROJECT.id]  # by name
     assert [p.id for p in store.find_projects(PROJECT.id[:8])] == [PROJECT.id]  # by id prefix
@@ -790,6 +817,9 @@ def test_claude_account_registry_keeps_one_default_unique_aliases_and_a_dense_or
     store.upsert_claude_account(3, Path("/h/.aisquare/claude-accounts/3"))
     store.order_claude_accounts([3, 9])  # 9 does not exist and is ignored
     assert [(r.slot, r.position) for r in store.claude_accounts()] == [(3, 1), (1, 2), (2, 3)]
+    store.order_claude_accounts([2, 2, 3])  # a repeated reference left position 1 unused
+    assert [(r.slot, r.position) for r in store.claude_accounts()] == [(2, 1), (3, 2), (1, 3)]
+    store.order_claude_accounts([3, 1, 2])  # back to the order the rest of the test reads
     assert store.delete_claude_account(1) is True
     assert store.delete_claude_account(1) is False
     assert [(r.slot, r.position) for r in store.claude_accounts()] == [(3, 1), (2, 2)]  # dense

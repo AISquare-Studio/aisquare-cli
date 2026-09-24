@@ -8,8 +8,9 @@ import json
 import os
 import re
 import shutil
+import string
 import sys
-from collections.abc import Callable, Container, Sequence
+from collections.abc import Callable, Container, Mapping, Sequence
 from datetime import UTC, datetime
 from importlib import metadata
 from pathlib import Path
@@ -857,8 +858,8 @@ def _claude_account_limit_checks() -> list[DoctorCheck]:
     parts = []
     for session, project_name in limited:
         when = (
-            f"resets {session.limit_resets_at.astimezone():%H:%M}"
-            if session.limit_resets_at is not None and session.limit_resets_at > now
+            f"resets {claude_accounts_core.format_reset(session.limit_resets_at, now=now)}"
+            if session.limit_resets_at is not None
             else "reset time unknown"
         )
         parts.append(f"{labels[session.id]} ({project_name}, {when})")
@@ -879,8 +880,14 @@ def _claude_account_headroom_check() -> DoctorCheck | None:
     why it runs only on ``doctor --live``. Warns when EVERY account is over the
     line — a fleet about to stall with nowhere to switch to — and reports the
     numbers otherwise so the operator can see them without opening the page.
-    ``None`` when there is nothing to measure (no signed-in account).
+    ``None`` when there is nothing to measure (no signed-in account) — and
+    ``None`` before ``context.db`` exists, like its two siblings: the arranged
+    list is read through the store, and a doctor run must not create the home
+    it is diagnosing (``tests/test_doctor_does_not_create_state.py``; review
+    of #205, second round).
     """
+    if not paths.db_path().exists():
+        return None
     accounts = [
         account
         for account in claude_accounts_service.list_accounts()
@@ -889,7 +896,7 @@ def _claude_account_headroom_check() -> DoctorCheck | None:
     if not accounts:
         return None
     settings = claude_accounts_service.accounts_settings()
-    readings = {account.slot: claude_accounts_service.sample_usage(account) for account in accounts}
+    readings = claude_accounts_service.read_usage(accounts)
     measured = [
         (account, reading.session_percent)
         for account in accounts
@@ -992,7 +999,9 @@ def _claude_account_default_checks() -> list[DoctorCheck]:
             dangling.append(f"project {names.get(project_id, project_id)} → slot {raw}")
     for role, ref in bindings.items():
         try:
-            claude_accounts_service.resolve(ref)
+            # Against the list in hand: `resolve` re-opened the store and rescanned
+            # the directories once per binding (review of #205, fourth round).
+            claude_accounts_service._resolve_in(accounts, ref)
         except claude_accounts_service.AccountsError:
             dangling.append(f"role {role} → {ref}")
     if dangling:
@@ -1162,20 +1171,99 @@ _BROWSER_PROVIDERS: tuple[str, ...] = (
 )
 
 #: Each identifier bounded by non-alphanumerics, so it matches as an identifier
-#: rather than as a substring: `@playwright/mcp@latest` and `npx
-#: chrome-devtools-mcp` hit, `browserslist-mcp` and `file-browser` do not.
+#: rather than as a substring: `@playwright/mcp@latest`, `npx chrome-devtools-mcp`,
+#: `@modelcontextprotocol/server-puppeteer`, `mcp-server-playwright` and
+#: `selenium-webdriver` all hit; `browserslist-mcp` and `file-browser` do not. A
+#: hyphen is deliberately NOT part of the identifier: the real package ids join
+#: the provider to `server`, `mcp` and a scope with hyphens, and a boundary that
+#: kept them out missed every one of those (review of the fold). What the rest of
+#: the identifier may be is `_names_browser_tool`'s question.
 _BROWSER_PROVIDER_RE = re.compile(
     "|".join(rf"(?<![A-Za-z0-9]){re.escape(name)}(?![A-Za-z0-9])" for name in _BROWSER_PROVIDERS),
     re.IGNORECASE,
 )
 
+#: Words that make an identifier ABOUT a browser tool rather than the tool:
+#: `playwright-report`, `playwright_report`, `playwright-reporter`,
+#: `selenium-grid-docs`, `selenium-docs-site`, `puppeteer-recorder`,
+#: `puppeteer-examples-repo`, `browser-use-examples`, `chrome-devtools-mcp-docs`.
+#: A small table of ENGLISH, deliberately — the alternative, a table of every
+#: word a real package id may carry beside its provider (`core`, `chromium`,
+#: `standalone`, `extra`, `manager`, `side`, `runner`, …), is the npm registry,
+#: and a closed one rejected seven of twelve real ids that `main` found
+#: (`puppeteer-core`, `selenium-server-standalone`, `webdriver-manager`; round 6
+#: of #203). The row's worst failure is telling an operator to install what
+#: they have, so an identifier that names a provider counts unless a word here
+#: says it is merely about one (rounds 4 to 6).
+_ABOUT_TOKENS: frozenset[str] = frozenset(
+    {
+        "doc",
+        "docs",
+        "documentation",
+        "example",
+        "examples",
+        "sample",
+        "samples",
+        "demo",
+        "demos",
+        "tutorial",
+        "tutorials",
+        "guide",
+        "guides",
+        "report",
+        "reports",
+        "reporter",
+        "recorder",
+        "site",
+        "repo",
+        "blog",
+        "notes",
+        "readme",
+        "template",
+        "templates",
+        # A test tree is ABOUT the tool too: `/home/me/playwright-tests/run.js`
+        # in a filesystem server's args, `selenium-e2e`, `puppeteer-fixtures`,
+        # `--dir=/srv/playwright-spec` (round 8). No npm id joins a provider to
+        # these words.
+        "test",
+        "tests",
+        "testing",
+        "spec",
+        "specs",
+        "e2e",
+        "fixture",
+        "fixtures",
+    }
+)
 
-def _read_json(path: Path) -> dict[str, object]:
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
-    return data if isinstance(data, dict) else {}
+#: The characters of an identifier — a set, not a regex: this walk runs once per
+#: character of every `command` and `args` string of every server in every
+#: `.claude.json`, the file this row's whole cost lives in (round 5).
+_IDENTIFIER_CHARS = frozenset(string.ascii_letters + string.digits + "_-")
+#: What joins the tokens of a package id: `-` and `_`. A scope (`@playwright/mcp`)
+#: and a version tail (`…@latest`) never reach this — `_IDENTIFIER_CHARS` stops
+#: the walk at `@` and `/`, so the split only ever sees one identifier's own
+#: tokens (round 7 of #203).
+_TOKEN_SPLIT_RE = re.compile(r"[-_]+")
+
+
+def _names_browser_tool(text: str) -> bool:
+    """Whether ``text`` names a browser-tooling provider, as a whole identifier."""
+    for match in _BROWSER_PROVIDER_RE.finditer(text):
+        # The identifier around the match: `mcp-server-playwright` for a match on
+        # `playwright`, `playwright-report` for the same match. `_` counts as a
+        # joiner exactly as `-` does, so the two spellings are one case. A scoped
+        # match (`@playwright/mcp`) is bounded by its own `@` and `/`: the walk
+        # hands the split `playwright` alone.
+        start, end = match.span()
+        while start > 0 and text[start - 1] in _IDENTIFIER_CHARS:
+            start -= 1
+        while end < len(text) and text[end] in _IDENTIFIER_CHARS:
+            end += 1
+        tokens = {t.lower() for t in _TOKEN_SPLIT_RE.split(text[start:end]) if t}
+        if not tokens & _ABOUT_TOKENS:
+            return True
+    return False
 
 
 def _mcp_servers(source: dict[str, object]) -> dict[str, object]:
@@ -1202,12 +1290,12 @@ def _browser_servers(servers: dict[str, object], *, declined: Container[str] = (
             args = spec.get("args")
             if isinstance(args, list):
                 candidates.extend(str(arg) for arg in args)
-        if any(_BROWSER_PROVIDER_RE.search(text) for text in candidates):
+        if any(_names_browser_tool(text) for text in candidates):
             found.append(f"mcp {name}")
     return found
 
 
-def _browser_tools_in(config_dir: Path) -> list[str]:
+def _browser_tools_in(config_dir: Path, parsed: Mapping[Path, dict[str, object]]) -> list[str]:
     """Browser tooling ONE Claude Code config directory declares, as short labels.
 
     ``settings.json`` is read for ``enabledPlugins`` only. Claude Code never
@@ -1222,10 +1310,14 @@ def _browser_tools_in(config_dir: Path) -> list[str]:
     the directory at ``~/.claude.json``, so probing only inside it left this
     whole layer — including the ``projects`` fan-out — dead on the common
     layout, and told an operator who had just run ``claude mcp add`` to install
-    what they already had.
+    what they already had. ``parsed`` is every such file already read
+    (:func:`_claude_jsons`): the same files feed :func:`_declined_project_servers`,
+    and ``~/.claude.json`` is routinely tens of megabytes (the ``projects``
+    fan-out grows without bound), so parsing it twice per directory per
+    ``doctor`` run was the row's whole cost (review of #203).
     """
     found: list[str] = []
-    settings = _read_json(config_dir / "settings.json")
+    settings = agent_core.read_json(config_dir / "settings.json")
     plugins = settings.get("enabledPlugins")
     if isinstance(plugins, dict):
         for key, enabled in plugins.items():
@@ -1234,10 +1326,10 @@ def _browser_tools_in(config_dir: Path) -> list[str]:
             # to the market's name while labelling only `my-linter`. Match and
             # label the same string.
             plugin = str(key).rsplit("@", 1)[0]
-            if enabled and _BROWSER_PROVIDER_RE.search(plugin):
+            if enabled and _names_browser_tool(plugin):
                 found.append(f"plugin {plugin}")
     for path in agent_core.claude_json_paths(config_dir):
-        claude_json = _read_json(path)
+        claude_json = parsed.get(path, {})
         found.extend(_browser_servers(_mcp_servers(claude_json)))
         projects = claude_json.get("projects")
         if isinstance(projects, dict):
@@ -1248,7 +1340,7 @@ def _browser_tools_in(config_dir: Path) -> list[str]:
     return list(dict.fromkeys(found))
 
 
-def _declined_project_servers(cwd: Path, dirs: Sequence[Path]) -> set[str]:
+def _declined_project_servers(cwd: Path, parsed: Mapping[Path, dict[str, object]]) -> set[str]:
     """``.mcp.json`` servers this machine's operator has explicitly declined.
 
     An unapproved project server never starts, and the record of that decision
@@ -1261,30 +1353,44 @@ def _declined_project_servers(cwd: Path, dirs: Sequence[Path]) -> set[str]:
     telling an operator to install what they have — and a name in neither is
     not declined: Claude Code asks at the next start rather than refusing.
     The project block is keyed by absolute path, so both spellings of ``cwd``
-    are tried (``/tmp`` vs ``/private/tmp``).
+    are tried (``/tmp`` vs ``/private/tmp``). ``parsed`` is every ``.claude.json``
+    of every config dir, already read once (:func:`_claude_jsons`).
     """
     keys = {str(cwd)}
     with contextlib.suppress(OSError):
         keys.add(str(cwd.resolve()))
     declined: set[str] = set()
     approved: set[str] = set()
+    for claude_json in parsed.values():
+        projects = claude_json.get("projects")
+        if not isinstance(projects, dict):
+            continue
+        for key in keys:
+            block = projects.get(key)
+            if not isinstance(block, dict):
+                continue
+            for field, sink in (
+                ("disabledMcpjsonServers", declined),
+                ("enabledMcpjsonServers", approved),
+            ):
+                listed = block.get(field)
+                if isinstance(listed, list):
+                    sink.update(str(item) for item in listed)
+    return declined - approved
+
+
+def _claude_jsons(dirs: Sequence[Path]) -> dict[Path, dict[str, object]]:
+    """Every ``.claude.json`` of every config dir, parsed ONCE, keyed by path.
+
+    The default install keeps it beside ``~/.claude``, so two directories can
+    name the same file; a path is read once whatever names it.
+    """
+    parsed: dict[Path, dict[str, object]] = {}
     for directory in dirs:
         for path in agent_core.claude_json_paths(directory):
-            projects = _read_json(path).get("projects")
-            if not isinstance(projects, dict):
-                continue
-            for key in keys:
-                block = projects.get(key)
-                if not isinstance(block, dict):
-                    continue
-                for field, sink in (
-                    ("disabledMcpjsonServers", declined),
-                    ("enabledMcpjsonServers", approved),
-                ):
-                    listed = block.get(field)
-                    if isinstance(listed, list):
-                        sink.update(str(item) for item in listed)
-    return declined - approved
+            if path not in parsed:
+                parsed[path] = agent_core.read_json(path)
+    return parsed
 
 
 def _check_browser_tools(cwd: Path | None = None) -> DoctorCheck:
@@ -1311,18 +1417,21 @@ def _check_browser_tools(cwd: Path | None = None) -> DoctorCheck:
     # disagree with itself between the CLI and the fleet UI, and the CLI was
     # the surface telling operators to install what their repo declares.
     cwd = Path.cwd() if cwd is None else cwd
-    dirs = _claude_config_dirs()
+    dirs = agent_core.claude_config_dirs()
+    # Every `.claude.json` parsed ONCE for both scans below; see `_browser_tools_in`.
+    parsed = _claude_jsons(dirs)
     declared: list[str] = []
     for directory in dirs:
         declared.extend(
-            f"{tool} ({_short_path(directory)})" for tool in _browser_tools_in(directory)
+            f"{tool} ({_short_path(directory)})" for tool in _browser_tools_in(directory, parsed)
         )
     mcp_json = cwd / ".mcp.json"
     # Parsed ONCE, outside the per-directory loop: its content cannot vary by
     # config dir, so reading it per dir opened and parsed one file four times
     # on a four-directory machine and deduped three of the results away.
     project_servers = _browser_servers(
-        _mcp_servers(_read_json(mcp_json)), declined=_declined_project_servers(cwd, dirs)
+        _mcp_servers(agent_core.read_json(mcp_json)),
+        declined=_declined_project_servers(cwd, parsed),
     )
     declared.extend(f"{tool} ({_short_path(mcp_json)})" for tool in project_servers)
     chrome_note = (
@@ -1346,39 +1455,6 @@ def _check_browser_tools(cwd: Path | None = None) -> DoctorCheck:
         "`claude mcp add -s user chrome-devtools npx chrome-devtools-mcp`, or install the "
         "Claude in Chrome extension (claude.ai/chrome)",
     )
-
-
-def _claude_config_dirs() -> list[Path]:
-    """The Claude Code directories a ui-tester of THIS home could start in.
-
-    The dirs this home connected plus the ambient one, and deliberately NOT
-    :func:`agent_core.hook_sites`, for two measured reasons.
-
-    It GRADES every site: ``hook_site_health`` runs ``classify_hook_binary``,
-    which runs a real ``<that install's aisquare> --version`` subprocess with a
-    10 s timeout, and its dedupe cache is built fresh per call. ``_check_claude_code``
-    already called it earlier in this same ``doctor()`` run, so a second call
-    re-ran every probe: 1 → 2 scans, 3 → 6 subprocesses, 683 ms → 1246 ms on a
-    four-directory machine (+82% on the whole run) for grading this row never
-    reads — on a path the fleet UI re-runs on every project switch, every
-    Doctor-tab activation and every one-click fix.
-
-    And it includes directories this home never connected
-    (``_claude_dirs_on_disk``, the #84 gap), which answers a different question:
-    "does ANY Claude install on this box declare a browser tool" rather than
-    "will the ui-tester's window find one". A playwright MCP in ``~/.claude4``
-    made the row green while the fleet spawned its ui-tester on ``~/.claude``,
-    where nothing answered.
-    """
-    dirs = [*agent_core.connected_dirs("claude-code"), agent_core._claude_home()]
-    seen: set[Path] = set()
-    unique: list[Path] = []
-    for directory in dirs:
-        key = agent_core._dir_key(directory)
-        if key not in seen:
-            seen.add(key)
-            unique.append(directory)
-    return unique
 
 
 def _short_path(path: Path) -> str:

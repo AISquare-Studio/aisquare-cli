@@ -175,11 +175,15 @@ def turn_stopped(
     """
     if session_id is None:
         return None
-    decision = team_service.hook_stop(session_id, cwd, stop_hook_active=stop_hook_active)
-    # After the team update, never before: a metrics failure must not cost the
-    # board its state change (or the manager its decisions), and close_turn
-    # swallows its own errors.
-    metrics_service.close_turn(session_id)
+    try:
+        decision = team_service.hook_stop(session_id, cwd, stop_hook_active=stop_hook_active)
+    finally:
+        # After the team update, never before: a metrics failure must not cost the
+        # board its state change (or the manager its decisions), and close_turn
+        # swallows its own errors. In a finally: a manager's failed wake-up raises
+        # after the row says waiting, and the turn is over all the same (review
+        # of the #205 fold, round 1; see turn_failed).
+        metrics_service.close_turn(session_id)
     return decision
 
 
@@ -200,15 +204,18 @@ def turn_failed(
 ) -> None:
     """The turn ended on an API error (Claude Code's ``StopFailure``), not a Stop (#146).
 
-    Three steps, each failing on its own. The board first: a ``rate_limit``
-    parks the session as ``limited`` with the reset time the message named and
-    wakes the manager; any other error returns it to ``waiting`` with a feed
-    line. Then this turn's metrics row is closed — the turn is over, however it
-    ended. Last, and only when ``[accounts] on_limit = "switch"`` names it, the
-    hand-over: a limited FLEET agent is moved to the account with the most
+    Three steps. The board first: a ``rate_limit`` parks the session as
+    ``limited`` with the reset time the message named and wakes the manager;
+    any other error returns it to ``waiting`` with a feed line. Then this
+    turn's metrics row is closed, whatever the board write did — the turn is
+    over however it ended, and ``close_turn`` closes only the NEWEST open row,
+    so one left open here stayed open for good (review of the #205 fold,
+    round 1). Last, and only when ``[accounts] on_limit = "switch"`` names it,
+    the hand-over: a limited FLEET agent is moved to the account with the most
     headroom (``services.fleet.switch``), unless the limit lifts within
     ``wait_if_reset_within_minutes`` — a reset ten minutes away is cheaper than a
-    cold start elsewhere, and Claude Code's own wait-and-continue covers it.
+    cold start elsewhere, and Claude Code's own wait-and-continue covers it. It
+    acts on the board's record, so a board write that failed skips it.
 
     The hand-over is DECIDED here and PERFORMED elsewhere: this hook is a child
     of the very pane ``switch`` is about to kill, so the work goes to a worker
@@ -219,10 +226,12 @@ def turn_failed(
     """
     if session_id is None:
         return
-    failure = team_service.hook_stop_failure(
-        session_id, error=error, message=message, details=details
-    )
-    metrics_service.close_turn(session_id)
+    try:
+        failure = team_service.hook_stop_failure(
+            session_id, error=error, message=message, details=details
+        )
+    finally:
+        metrics_service.close_turn(session_id)
     if failure is not None and failure.limited and not failure.already_limited:
         # A re-fire for the same window (Claude Code does that) is not a second
         # hand-over: the first worker is at work, or has already moved the agent.

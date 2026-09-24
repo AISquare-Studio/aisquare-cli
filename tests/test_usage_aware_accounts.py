@@ -22,6 +22,7 @@ The hand-over itself (``fleet switch``) is exercised against the fake tmux in
 from __future__ import annotations
 
 import json
+import sqlite3
 import subprocess
 import time
 from collections.abc import Mapping
@@ -38,11 +39,12 @@ from aisquare.core import paths, selfcli
 from aisquare.core.config import AccountsSettings, AppConfig, load_config, save_config
 from aisquare.core.orchestrator import team_project
 from aisquare.core.store import store_session
-from aisquare.models import ClaudeAccount, FleetAgent, ProjectInfo, TeamSession
+from aisquare.models import ClaudeAccount, FleetAgent, ProjectInfo, TeamSession, TurnMetric
 from aisquare.services import claude_accounts as service
 from aisquare.services import diagnostics
 from aisquare.services import fleet as fleet_service
 from aisquare.services import hooks as hooks_service
+from aisquare.services import metrics as metrics_service
 from aisquare.services import team as team_service
 from tests.test_claude_accounts import LIVE_USAGE, NOW, _sign_in
 from tests.test_claude_accounts import fake_home as _redirected_home
@@ -343,6 +345,56 @@ def test_an_unknown_session_and_a_missing_id_cost_nothing(
         result = runner.invoke(app, ["hook", "stop-failure"], input=json.dumps(payload))
         assert result.exit_code == 0 and result.stdout == ""
     assert _events(work) == [] or not any(kind == "limited" for kind, _ in _events(work))
+
+
+def _open_turn(project: ProjectInfo, session_id: str, trace_id: str) -> None:
+    metrics_service.open_turn(
+        TurnMetric(
+            trace_id=trace_id,
+            project_id=project.id,
+            session_id=session_id,
+            started_at=datetime.now(tz=UTC),
+        )
+    )
+
+
+def test_a_board_write_that_fails_still_closes_the_turn_and_hands_nothing_over(
+    fake_home: Path, work: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``turn_failed`` said its steps fail on their own, and none was guarded: a board write
+    that raised skipped the metrics close, and ``close_turn`` closes only the NEWEST open row,
+    so that turn stayed open for good (review of the #205 fold, round 1). The hand-over acts
+    on the board's record and is skipped; the error still reaches the hook's cost line."""
+    _session(work, "sess-coder")
+    _open_turn(work, "sess-coder", "trc_limited")
+
+    def refuses(session_id: str, **kwargs: Any) -> None:
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(team_service, "hook_stop_failure", refuses)
+    handed: list[team_service.TurnFailure] = []
+    monkeypatch.setattr(hooks_service, "_hand_over_if_configured", handed.append)
+
+    with pytest.raises(sqlite3.OperationalError, match="locked"):
+        hooks_service.turn_failed(
+            session_id="sess-coder", error="rate_limit", message=SESSION_LIMIT
+        )
+
+    [turn] = metrics_service.recent(session_id="sess-coder")
+    assert turn.ended_at is not None
+    assert handed == []
+
+    # `turn_stopped` had the same shape: a manager's failed wake-up raises after the row
+    # says waiting, and the close was skipped with it.
+    _open_turn(work, "sess-coder", "trc_stopped")
+
+    def wake_fails(*args: Any, **kwargs: Any) -> None:
+        raise team_service.ManagerWakeupError(RuntimeError("no delta"))
+
+    monkeypatch.setattr(team_service, "hook_stop", wake_fails)
+    with pytest.raises(team_service.ManagerWakeupError):
+        hooks_service.turn_stopped(work.root, session_id="sess-coder")
+    assert all(t.ended_at is not None for t in metrics_service.recent(session_id="sess-coder"))
 
 
 # --------------------------------------------------------------------------- the hand-over decision

@@ -274,6 +274,36 @@ def test_an_unexpected_error_is_a_toast_that_names_it(
     assert "it could not be saved; it will be retried" in seen[0]
 
 
+def test_a_refusal_after_a_save_that_landed_is_said_again(
+    isolated_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of the #167 fold, F5. The first refusal set `_said` and nothing cleared it, so
+    once a save had been refused every later refusal from the same saver was silent: a lock
+    held for a moment hid a disk that filled an hour later, while the picker showed each
+    theme as remembered. A save that lands ends the run of refusals. The negative half: two
+    refusals in a row are still one toast."""
+    writer = _Writer(
+        fail=lambda value, attempt: (
+            StateUnwritableError(f"{value} was refused") if value in (1, 2, 4) else None
+        )
+    )
+    monkeypatch.setattr(autosave_mod, "update_state", writer)
+    seen: list[str] = []
+
+    async def go(saver: Autosave, app: App[None]) -> None:
+        for value in (1, 2, 3, 4):  # refused, refused, landed, refused
+            saver.remember(value)
+            await _settled(saver)
+        await asyncio.sleep(0.05)  # the toast is posted to the loop after the refusal
+        seen.extend(toast.render().plain for toast in app.screen.query(Toast))
+
+    _run(go, notifications=True)
+    assert writer.calls == [1, 2, 3, 4]
+    assert len(seen) == 2, seen
+    assert any(line.startswith("1 was refused") for line in seen), seen
+    assert any(line.startswith("4 was refused") for line in seen), seen
+
+
 def test_a_quit_that_runs_out_of_time_says_so_and_starts_no_further_write(
     isolated_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

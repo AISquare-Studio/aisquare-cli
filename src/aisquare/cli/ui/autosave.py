@@ -110,6 +110,8 @@ class Autosave:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._context: contextvars.Context | None = None
         self._said = False
+        """A refusal has been toasted and no save has landed since: the loop's own flag
+        (:meth:`_refuse`, :meth:`_landed`)."""
         app = host if isinstance(host, App) else host.app
         _by_app.setdefault(app, weakref.WeakSet()).add(self)
 
@@ -251,8 +253,8 @@ class Autosave:
             self._timer = None
 
     def _refuse(self, why: str) -> None:
-        """On the loop: say it once. A host already detached at quit has no screen; the
-        launcher reads :attr:`unsaved` instead."""
+        """On the loop: say it once for a run of refusals. A host already detached at quit
+        has no screen; the launcher reads :attr:`unsaved` instead."""
         if self._said:
             return
         self._said = True
@@ -267,6 +269,18 @@ class Autosave:
         except Exception:
             return
 
+    def _landed(self) -> None:
+        """On the loop: a save landed, so the next refusal is news and is said.
+
+        Never cleared, one refused save silenced every later refusal from this
+        saver — a lock held for a moment hid a disk that filled an hour later
+        (review of the #167 fold, F5). Cleared here, on the loop, rather than on
+        the drain's thread: the refusal's toast is queued to the loop too, and a
+        flag cleared ahead of it would be set again by it after the save that
+        should have ended the run.
+        """
+        self._said = False
+
     # --- the drain's thread ----------------------------------------------------------------
 
     def _drain(self) -> None:
@@ -276,7 +290,8 @@ class Autosave:
         to do — cleared afterwards, a value queued in between saw a drain
         "running" that was about to exit, and stranded. A refusal leaves the
         value dirty for the next wake or the quit flush (a newer value queued
-        meanwhile is tried at once), and is said once on the loop.
+        meanwhile is tried at once), and is said once on the loop — once for a
+        run of refusals, which a save that lands ends.
         """
         try:
             while True:
@@ -299,6 +314,7 @@ class Autosave:
                 else:
                     with self._guard:
                         self._in_flight = None
+                    self._tell(self._landed)
                     continue
                 with self._guard:
                     self._in_flight = None
@@ -318,14 +334,15 @@ class Autosave:
                 self._in_flight = None
             raise
 
-    def _tell(self, callback: Callable[[str], None], arg: str) -> None:
+    def _tell(self, callback: Callable[..., None], *args: str) -> None:
         """Hand ``callback`` to the loop without waiting for it (a quit joining this thread must
-        not be waited on in turn), in the loop's own context so Textual's active app is set. A
-        loop that has gone away has nobody to tell."""
+        not be waited on in turn), in the loop's own context so Textual's active app is set —
+        and in order, so the loop hears of refusals and landings as they happened. A loop
+        that has gone away has nobody to tell."""
         loop = self._loop
         if loop is None or loop.is_closed():
             return
         try:
-            loop.call_soon_threadsafe(callback, arg, context=self._context)
+            loop.call_soon_threadsafe(callback, *args, context=self._context)
         except RuntimeError:
             return

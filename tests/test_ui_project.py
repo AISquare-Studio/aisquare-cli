@@ -1054,11 +1054,16 @@ def test_settings_saves_the_accounts_section_and_rejects_a_bad_line(project: Pro
     assert load_config().accounts.switch_at == 70  # a refused form never reaches the writer
 
 
+@pytest.mark.parametrize("columns", [120, 200])
 def test_start_manager_spawns_at_the_panes_own_size(
-    project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+    project: ProjectInfo, monkeypatch: pytest.MonkeyPatch, columns: int
 ) -> None:
     """#149: the window is born the size of the pane about to show it, never the 200x50
-    that grew Claude Code's diff panel before the first resize could shrink it."""
+    that grew Claude Code's diff panel before the first resize could shrink it.
+
+    At 200 columns too: the width is passed through uncapped (the CHANGELOG says a
+    pane 144 or more columns wide still shows the panel), so a clamp anywhere from
+    120 to 143 would pass on the 120-column host alone (review of #162, round 2)."""
     fleet: dict[str, FleetAgent | None] = {"manager": None}
     sizes: list[object] = []
 
@@ -1073,6 +1078,8 @@ def test_start_manager_spawns_at_the_panes_own_size(
     monkeypatch.setattr(fleet_service, "manager_of", lambda target: fleet["manager"])
 
     async def scenario(pilot: Pilot[None], host: Host) -> tuple[int, int]:
+        await pilot.resize_terminal(columns, 50)
+        await pilot.pause()
         await pilot.click("#start-manager")
         await settle(pilot)
         return host.query_one(ManagerTab).content_size
@@ -1084,7 +1091,7 @@ def test_start_manager_spawns_at_the_panes_own_size(
     width, height = size
     # The pane is hidden until the manager exists, so the tab's own size stands in:
     # the pane's width, and an estimate of the rows it will have under the header.
-    assert width == tab_width and 0 < height < tab_height
+    assert width == tab_width == columns and 0 < height < tab_height
     # Uncapped on purpose: the pane's first attach widens the window to the pane
     # whatever it was born at, so a pane 144 or more columns wide shows Claude Code's
     # panel either way (docs/fleet.md). What stays under that line is a window nobody

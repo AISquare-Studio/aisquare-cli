@@ -323,15 +323,26 @@ reported on its own line:
   target for this project (`stg-api.aisquare.studio` → `stg`, with the staging
   gateway and hosted proxy filled in; `api.aisquare.studio` → `prod`). It fills
   only what is empty, so a gateway or proxy you set by hand stays, and it does
-  **not** turn tracing on — that is still `aisquare explainability enable`.
+  **not** turn tracing on — that is still `aisquare explainability enable`. A
+  target `use` creates names its own key variable (`EXPLAINABILITY_PROD_API_KEY`,
+  …), so the machine key — issued for whichever deployment set the machine up —
+  never answers for another one; the exception is the machine whose top-level
+  gateway already is that deployment's. Launches, `fleet spawn` and
+  `explainability env` in the project take the proxy **and** the key from this
+  target, and `use` ends by naming it: `aisquare doctor --live --target <name>`.
 - **key** — ingest still needs a workspace key (neither the gateway nor the
-  hosted proxy accepts a sign-in token), so the CLI obtains one on your behalf,
-  scoped to `ingest:write`, named `aisquare-cli <host> <project>` in the
-  dashboard's key list, and stores it exactly as `key set` would (mode 600,
-  per project). The API does not accept a sign-in token on that endpoint yet;
-  until AISquare-Studio-BE#3493 lands the line reads `key: none — …` and
-  `aisquare explainability key set --from-env VAR` is the way in. A key you
-  attached by hand is used as is and never touched.
+  hosted proxy accepts a sign-in token), so the CLI obtains one on your behalf
+  unless the project already has its own, scoped to `ingest:write`, named
+  `aisquare-cli <host> <project>` in the dashboard's key list, and stores it
+  exactly as `key set` would (mode 600, per project). A machine key never stands
+  in for that: it only answers meanwhile, and the line says it is not checked to
+  be the workspace's. The API does not accept a sign-in token on that endpoint
+  yet; until AISquare-Studio-BE#3493 lands the line reads `key: none — …` and
+  `aisquare explainability key set --from-env VAR` is the way in — it binds the
+  key to the project's destination unless you pass `--target`. A key you
+  attached by hand is used as is and never minted over; `key set` over a minted
+  key revokes the minted one, and so do `use --clear` and a move into another
+  workspace.
 - **routing** — a span lands in the studio its agent identity is bound to in
   that workspace (unbound identities go to the workspace's *Unassigned* inbox),
   so `use` binds this machine's identities (`aisquare-planner`, `aisquare-coder`,
@@ -343,7 +354,10 @@ reported on its own line:
   leaves hand-attached keys alone.
 
 `status --json` carries the choice under `destination`; `use --json` carries
-the destination, the target, the key's standing and the routing result.
+the destination, the target, the key's standing and the routing result. Only a
+workspace you are a member of can be chosen; a pending invitation is listed so
+the reason is on screen. The client lane still ships under the machine's target
+and key — the per-project shipping follow-up of the section above.
 
 **How much is left.** With a destination chosen, `status` and `whoami` add a
 `credits:` line for that workspace — the run and build pools, today and this

@@ -38,6 +38,7 @@ it, a key attached by hand (#141) is the operator's and is left alone.
 from __future__ import annotations
 
 import contextlib
+import re
 import socket
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -46,7 +47,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from aisquare.core import paths
-from aisquare.core.config import AppConfig, ExplainabilityTarget
+from aisquare.core.config import AppConfig, ExplainabilitySettings, ExplainabilityTarget
 from aisquare.core.store import ContextStore
 from aisquare.models import ProjectInfo, TraceDestination
 from aisquare.services import iam
@@ -160,6 +161,30 @@ def environment_name(api_url: str) -> str:
     return (urlsplit(api_url).hostname or api_url).lower()
 
 
+def key_env_for(name: str) -> str:
+    """``EXPLAINABILITY_<NAME>_API_KEY``: the variable a target this module creates names.
+
+    The shape the settings docstring already shows for a hand-written prod
+    target, derived from the target name so an unknown host still yields a
+    legal variable name.
+    """
+    slug = re.sub(r"[^A-Za-z0-9]+", "_", name).strip("_").upper() or "TARGET"
+    return f"EXPLAINABILITY_{slug}_API_KEY"
+
+
+def _machine_key_serves(settings: ExplainabilitySettings, environment: Environment | None) -> bool:
+    """Whether the machine's unlabelled key is already this deployment's.
+
+    ``init --explainability`` writes the top-level gateway and the key file
+    together, so a top-level gateway equal to the deployment's IS the
+    single-deployment machine pointing at it; anything else is a key issued
+    for somewhere this function cannot see.
+    """
+    if environment is None or not settings.gateway_url:
+        return False
+    return settings.gateway_url.rstrip("/") == environment.gateway_url
+
+
 def ensure_target(config: AppConfig, api_url: str) -> tuple[str, bool]:
     """Make sure the deployment the session belongs to exists as an explainability target.
 
@@ -167,12 +192,24 @@ def ensure_target(config: AppConfig, api_url: str) -> tuple[str, bool]:
     Returns the target name and whether the config changed. Does not flip
     ``enabled`` — that is ``explainability enable``'s one job, and a command
     that picks a destination must not silently start tracing.
+
+    A target CREATED here names a key variable of its own
+    (:func:`key_env_for`). With the default one, the unlabelled machine key —
+    ``~/.aisquare/explainability-key`` or ``$EXPLAINABILITY_API_KEY`` — would
+    answer for every deployment anyone signs in to, and ``use`` would bind the
+    roster and every launch would authenticate with a key issued for somewhere
+    else: the hazard ``tests/test_key_never_crosses_deployments.py`` pins.
+    The one exception is the machine whose top-level gateway already is this
+    deployment's, where that key is exactly the right one and a new variable
+    would only take it away.
     """
     name = environment_name(api_url)
     environment = environment_for(api_url)
     settings = config.explainability
     target = settings.targets.get(name, ExplainabilityTarget())
     changed = name not in settings.targets
+    if changed and not _machine_key_serves(settings, environment):
+        target.api_key_env = key_env_for(name)
     if environment is not None:
         if not target.gateway_url:
             target.gateway_url = environment.gateway_url
@@ -291,6 +328,11 @@ def list_studios(session: iam.Session, workspace: Workspace) -> list[Studio]:
     the workspace from the header and falls back to the user's personal one
     without it, so the header is never optional here. The workspace is named
     by its uid when it has one (the header's documented shape), else by id.
+
+    A row that names ANOTHER workspace is dropped: that fallback also answers
+    a header the API does not honour for this user (an invitation not yet
+    accepted), and a personal studio recorded under the team workspace would
+    route nothing where the destination says.
     """
     rows = _pages(
         session,
@@ -302,12 +344,15 @@ def list_studios(session: iam.Session, workspace: Workspace) -> list[Studio]:
         ident = _int(row.get("id"))
         if ident is None:
             continue
+        owner = _int(row.get("workspace_id") or row.get("workspace"))
+        if owner is not None and owner != workspace.id:
+            continue
         found.append(
             Studio(
                 id=ident,
                 uid=str(row["uid"]) if row.get("uid") else None,
                 name=str(row.get("name") or ident),
-                workspace_id=_int(row.get("workspace_id") or row.get("workspace")),
+                workspace_id=owner,
                 is_default=bool(row.get("is_default")),
                 is_inbox=bool(row.get("is_inbox")),
                 visibility=str(row["visibility"]) if row.get("visibility") else None,
@@ -316,8 +361,26 @@ def list_studios(session: iam.Session, workspace: Workspace) -> list[Studio]:
     return sorted(found, key=lambda s: (s.is_inbox, not s.is_default, s.name.lower()))
 
 
-def pick_workspace(ref: str, workspaces: list[Workspace]) -> Workspace:
-    """A workspace by name (case-insensitive), uid or id; ambiguity and absence are errors."""
+def pick_workspace(
+    ref: str, workspaces: list[Workspace], *, members_only: bool = False
+) -> Workspace:
+    """A workspace by name (case-insensitive), uid or id; ambiguity and absence are errors.
+
+    ``members_only`` is for choosing a destination: the listing carries pending
+    invitations so the reason one cannot be picked is on screen, and a
+    workspace the user has not joined is not somewhere their traces can land.
+    """
+    found = _pick_workspace(ref, workspaces)
+    if members_only and not found.member:
+        raise DestinationError(
+            "not_a_member",
+            f"you are invited to {found.name} ({found.invite_status or 'pending'}) but not a "
+            "member yet — accept the invitation in the web app, then choose it",
+        )
+    return found
+
+
+def _pick_workspace(ref: str, workspaces: list[Workspace]) -> Workspace:
     wanted = ref.strip()
     exact = [w for w in workspaces if wanted in (str(w.id), w.uid)]
     if len(exact) == 1:
@@ -374,17 +437,29 @@ def choose(
     """Record where ``project``'s traces land.
 
     A re-point into ANOTHER workspace drops the key the CLI minted: it was that
-    workspace's credential and cannot serve this one. A re-point within the
-    same workspace (another studio) keeps it.
+    workspace's credential and cannot serve this one, so it is revoked (with
+    ``session``, when it belongs to the host that minted it) and forgotten. A
+    re-point within the same workspace (another studio) keeps it. "The same
+    workspace" is the id on the same API: workspace ids are per deployment, so
+    a staging 7 and a production 7 are two workspaces.
+
+    The project row is made sure of first — a destination references it, and
+    ``use`` may run in a directory nothing has registered yet. Captured, not
+    onboarded (#139): choosing where traces land is not adding it to the list.
     """
+    store.ensure_project(project)
     key_uid = None
-    if previous is not None and previous.workspace_id == workspace.id:
+    if (
+        previous is not None
+        and previous.workspace_id == workspace.id
+        and _same_api(previous.api_url, session.api_url)
+    ):
         key_uid = previous.key_uid
     if previous is not None and previous.key_uid and key_uid is None:
         # The minted key was the old workspace's; it cannot serve the new one.
         # The key FILE is dropped too: a binding to the old deployment would
         # otherwise keep answering for a project that moved.
-        _forget_minted_key(store, project.id, previous)
+        _forget_minted_key(store, project.id, previous, session)
     return store.set_project_destination(
         TraceDestination(
             project_id=project.id,
@@ -403,24 +478,90 @@ def choose(
     )
 
 
-def forget(store: ContextStore, project: ProjectInfo) -> TraceDestination | None:
-    """Drop the project's destination and the key the CLI minted for it; the old row, or None."""
+def forget(
+    store: ContextStore, project: ProjectInfo, *, session: iam.Session | None = None
+) -> TraceDestination | None:
+    """Drop the project's destination and the key the CLI minted for it; the old row, or None.
+
+    The minted key is revoked on the server when ``session`` belongs to the
+    host that minted it — dropped locally only, it would stay a live
+    ``ingest:write`` credential that nothing on this machine remembers.
+    """
     previous = store.project_destination(project.id)
     if previous is None:
         return None
     if previous.key_uid:
-        _forget_minted_key(store, project.id, previous)
+        _forget_minted_key(store, project.id, previous, session)
     store.clear_project_destination(project.id)
     return previous
 
 
-def _forget_minted_key(store: ContextStore, project_id: str, destination: TraceDestination) -> None:
-    """Delete a MINTED key: its file, its binding, its uid on the row. Hand-attached keys stay."""
+def _same_api(one: str, other: str) -> bool:
+    return one.rstrip("/") == other.rstrip("/")
+
+
+def _forget_minted_key(
+    store: ContextStore,
+    project_id: str,
+    destination: TraceDestination,
+    session: iam.Session | None,
+) -> None:
+    """Revoke and delete a MINTED key: on the server, its file, its binding, its uid on the row.
+
+    Only ever called for a row with ``key_uid``, and that uid is set only while
+    the project's key file holds the key the CLI minted: ``key set`` and
+    ``key clear`` retire it (:func:`retire_minted_key`) before they touch the
+    file. That invariant is what keeps a hand-attached key out of here — the
+    file and the binding are the same for both kinds.
+    """
+    _revoke(destination, session)
     binding = store.project_explainability(project_id)
     if binding is not None and binding.key_path == project_key_path(project_id):
         clear_project_api_key(project_id)
         store.clear_project_explainability(project_id)
     store.set_project_destination_key(project_id, None)
+
+
+def retire_minted_key(
+    store: ContextStore, project_id: str, *, session: iam.Session | None = None
+) -> None:
+    """A key attached (or cleared) by hand takes the minted key's place: revoke it, drop its uid.
+
+    One key file per project serves both kinds, so ``key set`` over a minted
+    key overwrites it. Left with its uid, the operator's key would go on being
+    described as minted, and ``logout``, ``use --clear`` or a re-point would
+    delete it. The FILE is the caller's: it is about to write or clear it.
+    Revoked on the server when ``session`` belongs to the host that minted it;
+    without one the old key stays in the workspace's key list, named
+    ``aisquare-cli <host> <project>``.
+    """
+    destination = store.project_destination(project_id)
+    if destination is None or not destination.key_uid:
+        return
+    _revoke(destination, session)
+    store.set_project_destination_key(project_id, None)
+
+
+def _revoke(destination: TraceDestination, session: iam.Session | None) -> None:
+    """Revoke the destination's minted key on the server — best effort, and only where it lives.
+
+    Only against the API the key was minted on: a session belongs to one host,
+    and sending the uid to another one gets a 404 that reads like success. The
+    endpoint has the mint's authentication gap and a machine may be offline, so
+    a refusal is tolerated, never raised.
+    """
+    uid = destination.key_uid
+    if session is None or not uid or uid == "minted":
+        return
+    if not _same_api(destination.api_url, session.api_url):
+        return
+    with contextlib.suppress(iam.IamError):
+        iam.request(
+            f"api/v2/iam/workspace-api-key/{uid}/revoke/",
+            method="POST",
+            api_url=session.api_url,
+            tolerate=(400, 401, 403, 404),
+        )
 
 
 # ── the credential, on the user's behalf ──────────────────────────────────────
@@ -454,7 +595,21 @@ def mint_key(
     workspaces a moment ago, is the endpoint's gap and not the session's, and
     the error says so with the backend issue to watch. Any other 4xx is the
     user's standing: only a workspace OWNER or ADMIN may mint keys.
+
+    NEVER OVER A KEY ATTACHED BY HAND. The project has one key file, so a mint
+    for this deployment while the operator's key is bound to another would
+    overwrite that key and rebind it — the operator's credential destroyed by
+    a command that promised to leave it alone. Refused before the request, so
+    no key is created only to be thrown away.
     """
+    binding = store.project_explainability(project.id)
+    if binding is not None and not destination.key_uid and binding.key_path.is_file():
+        raise DestinationError(
+            "hand_key_attached",
+            f"the project has a key attached by hand for target {binding.target}, and the CLI "
+            "does not overwrite it — `aisquare explainability key set --target "
+            f"{destination.environment}` replaces it, `key clear` removes it",
+        )
     result = iam.request(
         "api/v2/iam/workspace-api-key/",
         method="POST",
@@ -501,22 +656,19 @@ def revoke_minted_keys(store: ContextStore, session: iam.Session) -> list[str]:
     is revoked; it is best effort (the endpoint has the same authentication
     gap as the mint, and a machine may be offline), and the local copy goes
     regardless — a credential the CLI obtained on the user's behalf must not
-    outlive the sign-in that obtained it. Returns the project ids cleared.
+    outlive the sign-in that obtained it. A key minted on another host is not
+    revoked from this one (:func:`_revoke` says why), and one project's file
+    that will not delete does not keep the others'. Returns the project ids
+    cleared.
     """
     cleared: list[str] = []
     for destination in store.project_destinations():
         if not destination.key_uid:
             continue
-        if destination.key_uid != "minted":
-            # Offline, or a mismatched host: the local copy still goes.
-            with contextlib.suppress(iam.IamError):
-                iam.request(
-                    f"api/v2/iam/workspace-api-key/{destination.key_uid}/revoke/",
-                    method="POST",
-                    api_url=session.api_url,
-                    tolerate=(400, 401, 403, 404),
-                )
-        _forget_minted_key(store, destination.project_id, destination)
+        try:
+            _forget_minted_key(store, destination.project_id, destination, session)
+        except OSError:
+            continue
         cleared.append(destination.project_id)
     return cleared
 

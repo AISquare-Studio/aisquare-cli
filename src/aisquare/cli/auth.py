@@ -354,7 +354,13 @@ def logout() -> None:
         if get_state().json_output:
             typer.echo(
                 json.dumps(
-                    {"signed_out": False, "server_revoked": False, "env_token_still_set": env_set}
+                    {
+                        "signed_out": False,
+                        "server_revoked": False,
+                        "env_token_still_set": env_set,
+                        # The signed-in branch's shape (#142); no session, nothing to revoke with.
+                        "minted_keys_cleared": 0,
+                    }
                 )
             )
         else:

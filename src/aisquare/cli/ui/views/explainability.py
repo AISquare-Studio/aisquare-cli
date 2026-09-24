@@ -165,9 +165,21 @@ def attach_project_key(value: str) -> Notice:
     if project is None:
         return Notice("no active project to attach a key to", "error")
     settings = load_config().explainability
-    target = ops.resolve_target(settings, None).name
-    path = explainability_service.store_project_api_key(project.id, key)
+    # With the project, as `key set` resolves it: its destination (#142) names
+    # the deployment its traces go to, and a key bound elsewhere never answers.
+    target = ops.resolve_target(settings, None, project_id=project.id).name
     with store_session() as store:
+        minted = store.project_destination(project.id)
+        if minted is not None and minted.key_uid:
+            # The file holds a key the CLI minted. Replacing it here would leave
+            # that key live and forgotten — revoking it is a network call, and
+            # this handler runs on the UI thread — so the CLI does it instead.
+            return Notice(
+                "this project's key was minted by the CLI — replace it with "
+                "aisquare explainability key set, which revokes the minted one",
+                "warning",
+            )
+        path = explainability_service.store_project_api_key(project.id, key)
         store.set_project_explainability(
             project.id, target=target, key_path=path, set_by=os.environ.get("USER") or None
         )

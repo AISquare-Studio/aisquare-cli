@@ -310,7 +310,63 @@ class Disclosure(Static):
         return None
 
 
-class ProjectTitle(Activatable):
+class DragHandle(Activatable):
+    """A row that is also a drag handle (#140): a card's title, a group header.
+
+    The HANDLE holds the mouse from the press to the release, so the whole
+    gesture comes back to it, in order: the moves and the release are handed to
+    the sidebar's drag, and a press released without motion is still the row's
+    click. It must be the handle, not the sidebar: the app turns a MouseUp over
+    the pressed widget into a Click in the same call that queues the MouseUp,
+    and routes it by the capture standing then. Held by the sidebar, every
+    Click went to the sidebar — a plain click on a title opened nothing and one
+    on a header folded nothing (review of #171, round 1; ``pilot.click`` pauses
+    between its events, so the suite never saw it).
+    """
+
+    _dragged = False
+    """Whether the gesture that just ended here was a drag (so its Click is not a click)."""
+
+    def drag_state(self, sidebar: Sidebar) -> DragState:  # pragma: no cover - overridden
+        """What a press here would drag."""
+        raise NotImplementedError
+
+    def on_mouse_down(self, event: events.MouseDown) -> None:
+        self._dragged = False
+        sidebar = self._sidebar()
+        if sidebar is None or event.button != 1 or event.shift:
+            return  # a shift+click is a mark, decided on the click
+        state = self.drag_state(sidebar)
+        state.origin_y = event.screen_y
+        sidebar.begin_drag(state, self)
+
+    def on_mouse_move(self, event: events.MouseMove) -> None:
+        sidebar = self._sidebar()
+        if sidebar is not None:
+            sidebar.drag_over(self, event)
+
+    def on_mouse_up(self, event: events.MouseUp) -> None:
+        sidebar = self._sidebar()
+        if sidebar is not None:
+            self._dragged = sidebar.end_drag(self)
+
+    def on_click(self, event: events.Click) -> None:
+        if self._dragged:
+            # The release of a drag is not a click. Textual runs ``on_click`` of
+            # every class in the MRO, so returning alone would still let
+            # ``Activatable.on_click`` open the row: ``prevent_default`` is the stop.
+            self._dragged = False
+            event.stop()
+            event.prevent_default()
+
+    def on_unmount(self) -> None:
+        # Removed mid-drag (its project forgotten, its group deleted from a
+        # shell): Textual keeps a capture on a widget that is gone, and every
+        # later mouse event would be delivered nowhere.
+        self.release_mouse()
+
+
+class ProjectTitle(DragHandle):
     """The card's header line: name, codename badge, chips. Click → Project view.
 
     Also the card's drag handle (#140): press and hold, move, drop on a group
@@ -330,25 +386,20 @@ class ProjectTitle(Activatable):
     def message(self) -> Message:
         return ProjectSelected(self.project_id)
 
-    def on_mouse_down(self, event: events.MouseDown) -> None:
-        sidebar = self._sidebar()
-        if sidebar is None or event.button != 1 or event.shift:
-            return  # a shift+click is a mark, decided on the click
+    def drag_state(self, sidebar: Sidebar) -> DragState:
         ids = sidebar.marked_ids()
         if self.project_id not in ids:
             ids = [self.project_id]
-        state = DragState("project", self.project_id, ids, origin_y=event.screen_y)
-        sidebar.begin_drag(state, self)
+        return DragState("project", self.project_id, ids)
 
     def on_click(self, event: events.Click) -> None:
-        event.stop()
         sidebar = self._sidebar()
         if event.shift and sidebar is not None:
+            # A mark, not an open: ``prevent_default`` keeps the handlers of the
+            # base classes (which open the row) from running after this one.
+            event.stop()
+            event.prevent_default()
             sidebar.toggle_mark(self.project_id)
-            return
-        if sidebar is not None and sidebar.drag_happened():
-            return  # the release of a drag is not an open
-        self.activate()
 
 
 class AgentRow(Activatable):
@@ -401,7 +452,8 @@ def group_header_text(entry: GroupEntry, agents: Mapping[str, list[FleetAgentSta
     text.append(f"📁 {entry.group.name}", style="bold")
     if entry.group.pinned_at is not None:
         text.append(" 📌", style="dim")
-    statuses = [s for member in entry.members for s in agents.get(member.id, [])]
+    members = [*entry.members, *entry.pinned_members]
+    statuses = [s for member in members for s in agents.get(member.id, [])]
     alive = sum(1 for s in statuses if s.state in ALIVE_STATES)
     bells = sum(1 for s in statuses if s.state == "attention")
     if alive or bells:
@@ -415,7 +467,7 @@ def group_header_text(entry: GroupEntry, agents: Mapping[str, list[FleetAgentSta
     return text
 
 
-class GroupHeader(Activatable):
+class GroupHeader(DragHandle):
     """A group's line: Enter or a click folds and unfolds it; drag it to reorder groups (#140)."""
 
     DEFAULT_CSS = """
@@ -436,17 +488,8 @@ class GroupHeader(Activatable):
     def message(self) -> Message:
         return ToggleCollapse(self.group.id)
 
-    def on_mouse_down(self, event: events.MouseDown) -> None:
-        sidebar = self._sidebar()
-        if sidebar is not None and event.button == 1 and not event.shift:
-            sidebar.begin_drag(DragState("group", self.group.id, origin_y=event.screen_y), self)
-
-    def on_click(self, event: events.Click) -> None:
-        event.stop()
-        sidebar = self._sidebar()
-        if sidebar is not None and sidebar.drag_happened():
-            return
-        self.activate()
+    def drag_state(self, sidebar: Sidebar) -> DragState:
+        return DragState("group", self.group.id)
 
 
 class SectionLabel(Static):
@@ -680,9 +723,8 @@ class Sidebar(Vertical):
         self._marked: list[str] = []
         """Project ids shift+clicked into a multi-selection, in click order."""
         self._drag: DragState | None = None
-        self._drag_source: Widget | None = None
+        self._drag_source: DragHandle | None = None
         self._drop_target: Widget | None = None
-        self._last_drag_moved = False
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="fleet-header"):
@@ -886,69 +928,88 @@ class Sidebar(Vertical):
 
     # drag and drop: press on a title or a group header, move past its row, release on a target
 
-    def begin_drag(self, state: DragState, source: Widget) -> None:
-        """A press on a drag handle: nothing moves until the pointer leaves the row."""
+    def begin_drag(self, state: DragState, source: DragHandle) -> None:
+        """A press on a drag handle: nothing moves until the pointer leaves the row.
+
+        The handle takes the mouse, not the sidebar (:class:`DragHandle` says why),
+        and hands every move and the release back here.
+        """
         self._drag, self._drag_source = state, source
-        self._last_drag_moved = False
-        self.capture_mouse()
+        source.capture_mouse()
 
-    def drag_happened(self) -> bool:
-        """Whether the gesture that just ended was a drag (so its release is not a click)."""
-        return self._last_drag_moved
-
-    def on_mouse_move(self, event: events.MouseMove) -> None:
+    def drag_over(self, source: DragHandle, event: events.MouseMove) -> None:
         drag = self._drag
-        if drag is None or self._drag_source is None:
+        if drag is None or source is not self._drag_source:
             return
         if not drag.started:
             if abs(event.screen_y - drag.origin_y) < 1:
                 return
             drag.started = True
-            self._drag_source.add_class("-dragging")
+            source.add_class("-dragging")
         self._mark_drop(self._target_at(event.screen_x, event.screen_y))
 
-    def on_mouse_up(self, event: events.MouseUp) -> None:
-        drag, source = self._drag, self._drag_source
+    def end_drag(self, source: DragHandle) -> bool:
+        """The release: drop onto what is under the pointer; ``True`` when it was a drag."""
+        drag = self._drag
+        source.release_mouse()
+        if drag is None or source is not self._drag_source:
+            return False
         self._drag, self._drag_source = None, None
-        self.release_mouse()
-        if drag is None or source is None:
-            return
         source.remove_class("-dragging")
-        self._last_drag_moved = drag.started
         target = self._drop_target
         self._mark_drop(None)
         if not drag.started:
-            return
-        self.call_later(self._end_drag_flag)
+            return False
+        if target is None:
+            return True  # released where nothing is a place: snap back
         if drag.kind == "group":
             before = target.group.id if isinstance(target, GroupHeader) else None
-            if before == drag.ident:
-                return  # dropped on itself: snap back
-            self.post_message(DropGroup(drag.ident, before=before))
-            return
+            if before != drag.ident:  # dropped on itself: snap back
+                self.post_message(DropGroup(drag.ident, before=before))
+            return True
         if isinstance(target, GroupHeader):
             self.post_message(DropProject(drag.project_ids, scope=target.group.id, before=None))
         elif isinstance(target, ProjectCard):
-            if target.project.id in drag.project_ids:
-                return  # dropped on itself: snap back
-            self.post_message(
-                DropProject(drag.project_ids, scope=target.scope, before=target.project.id)
-            )
+            if target.project.id not in drag.project_ids:  # dropped on itself: snap back
+                self.post_message(
+                    DropProject(drag.project_ids, scope=target.scope, before=target.project.id)
+                )
         else:
-            # Empty space below the list: the top level's end (ungroup).
+            # The list's own empty space below the last row: the top level's end (ungroup).
             self.post_message(DropProject(drag.project_ids, scope=None, before=None))
-
-    def _end_drag_flag(self) -> None:
-        self._last_drag_moved = False
+        return True
 
     def _target_at(self, x: int, y: int) -> Widget | None:
-        """The card or group header under the pointer, or ``None`` over nothing."""
+        """What a release here would drop onto, or ``None`` where it would snap back.
+
+        A project drops onto a card (before it, in its scope) or a group header
+        (into that group, last); a group, onto an unpinned group's header (before
+        it). The list's own empty space below the last row is the end: the top
+        level for a project, the last group for a group. Nothing else is a place
+        — the main pane, the header, Accounts and Doctor, the Pinned label, a
+        pinned card (pin order is ``p``'s), a card for a group — and a release
+        there changes nothing. Read as "below the list", a drag abandoned over
+        the main pane ungrouped its project and moved it last, and one onto a
+        pinned card took a pinned member out of its group (review of #171).
+        """
+        drag = self._drag
         try:
             widget, _ = self.screen.get_widget_at(x, y)
         except Exception:
             return None
+        if drag is None:
+            return None
+        holder = self.query_one("#projects", VerticalScroll)
+        if widget is holder:
+            return holder
         for node in (widget, *widget.ancestors):
-            if isinstance(node, ProjectCard | GroupHeader):
+            if isinstance(node, GroupHeader):
+                if drag.kind == "group" and node.group.pinned_at is not None:
+                    return None
+                return node
+            if isinstance(node, ProjectCard):
+                if drag.kind == "group" or node.project.pinned_at is not None:
+                    return None
                 return node
         return None
 
@@ -958,7 +1019,7 @@ class Sidebar(Vertical):
         if self._drop_target is not None:
             self._drop_target.remove_class("-drop-before")
         self._drop_target = target
-        if target is not None and target is not self._drag_source:
+        if isinstance(target, ProjectCard | GroupHeader) and target is not self._drag_source:
             target.add_class("-drop-before")
 
     def show_notice(self, text: str | None) -> None:

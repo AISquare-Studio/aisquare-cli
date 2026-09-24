@@ -561,10 +561,10 @@ def spawn(
             # the two launch paths do not differ on a question a reader has to
             # re-prove.
             try:
-                effective = explainability_ops.effective_settings(tracing)
-                spawn_target = explainability_ops.resolve_target(
-                    tracing, project_id=orchestrator.team_project(None).id
-                )
+                # One project for both: its destination may name another target (#142).
+                spawn_project = orchestrator.team_project(None).id
+                effective = explainability_ops.effective_settings(tracing, project_id=spawn_project)
+                spawn_target = explainability_ops.resolve_target(tracing, project_id=spawn_project)
                 spawn_key, spawn_gateway = spawn_target.api_key, spawn_target.gateway_url
             except Exception as exc:
                 effective, spawn_key, spawn_gateway = tracing, None, None

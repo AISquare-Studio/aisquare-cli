@@ -520,25 +520,32 @@ def store_session(
     )
 
 
-def unrestricted_warning() -> str:
-    """What to say when a stored session's file could not be restricted to this account."""
+def unrestricted_warning(*, signed_out: bool = False) -> str:
+    """What to say when the credentials file could not be restricted to this account.
+
+    Signed in, what is exposed is the session token just stored; signed out,
+    it is what the rewritten file still holds (the API key, the serve token).
+    """
+    exposed = "the credentials left in it" if signed_out else "your session token"
     return (
         f"could not restrict {paths.credentials_path()} to your account — "
-        "other users on this machine may be able to read your session token."
+        f"other users on this machine may be able to read {exposed}."
     )
 
 
-def clear_session() -> None:
+def clear_session() -> bool:
+    """Forget the stored session; whether the file left behind is restricted to this account.
+
+    Dropping the session rewrites the file that still holds the API key and
+    the serve token, as a new file, and one that could not be restricted is
+    worth the same word on stderr that storing them got. The answer is also
+    returned, for the fleet UI, which never sees that line (review of the #65
+    fold, round 2, F3); ``True`` when there was nothing to rewrite.
+    """
     _, restricted = credentials.drop(*CREDENTIAL_KEYS)
     if not restricted:
-        # Dropping the session rewrites the file that still holds the API key
-        # and the serve token, as a new file; one that could not be restricted
-        # is worth the same word on stderr that storing them got.
-        print(
-            f"warning: could not restrict {paths.credentials_path()} to your account — "
-            "other users on this machine may be able to read the credentials left in it.",
-            file=sys.stderr,
-        )
+        print(f"warning: {unrestricted_warning(signed_out=True)}", file=sys.stderr)
+    return restricted
 
 
 def _parse_timestamp(value: str | None) -> datetime | None:

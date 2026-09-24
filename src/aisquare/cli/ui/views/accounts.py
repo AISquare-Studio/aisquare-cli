@@ -694,13 +694,16 @@ class AccountsView(Vertical):
 
     def _sign_out_finished(self, worker: Worker[Any], state: WorkerState) -> None:
         self.session = self._read_session()
-        if state is WorkerState.SUCCESS:
-            revoked = bool(worker.result)
-            self._notice(
-                "✓ Signed out of AISquare"
-                + ("" if revoked else " (locally — the server could not be reached to revoke)"),
-                "ok",
+        if state is WorkerState.SUCCESS and isinstance(worker.result, auth_service.SignedOut):
+            outcome = worker.result
+            said = "✓ Signed out of AISquare" + (
+                "" if outcome.revoked else " (locally — the server could not be reached to revoke)"
             )
+            if outcome.restricted:
+                self._notice(said, "ok")
+            else:
+                # As for a sign-in: the service warns on stderr, which Textual captures.
+                self._notice(f"{said}, but {iam.unrestricted_warning(signed_out=True)}", "warn")
             self.post_message(AccountsChanged())
         elif state is WorkerState.ERROR:
             self._notice(f"✗ sign-out failed: {worker.error}", "error")

@@ -1563,9 +1563,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   home hands down; and a file that exists but cannot be read (a root-owned
   one left by `sudo`) is refused rather than replaced by the one key being
   stored; a sign-out that cannot read it fails and says so, rather than
-  reporting a session gone that is still on disk. An `aisquare logout` whose
-  rewrite of the remaining keys could not be restricted says so on stderr, as
-  `login` does.
+  reporting a session gone that is still on disk. A sign-out whose rewrite of
+  the remaining keys could not be restricted says so, as a sign-in does: on
+  stderr from `aisquare logout`, and in the fleet UI's Accounts page.
 - **A limit message's named zone is read on Windows too.** Windows has no IANA
   time zone database, so `ZoneInfo("America/Toronto")` raised there and a
   reset named in a zone fell back to the offset in force now: a weekly reset

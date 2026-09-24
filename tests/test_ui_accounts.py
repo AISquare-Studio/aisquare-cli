@@ -45,7 +45,7 @@ from aisquare.cli.ui.views.accounts import (
     summarise,
     usage_bar,
 )
-from aisquare.core import browser
+from aisquare.core import browser, credentials, paths
 from aisquare.core import claude_accounts as core
 from aisquare.core import tmux as tmux_core
 from aisquare.core.store import store_session
@@ -626,10 +626,10 @@ def test_sign_out_revokes_and_forgets(
     no_network["session"] = _session()
     revoked: list[str] = []
 
-    def sign_out(session: iam.Session) -> bool:
+    def sign_out(session: iam.Session) -> auth_service.SignedOut:
         revoked.append(session.email)
         no_network["session"] = None
-        return True
+        return auth_service.SignedOut(revoked=True, restricted=True)
 
     monkeypatch.setattr(auth_service, "sign_out", sign_out)
 
@@ -649,6 +649,49 @@ def test_sign_out_revokes_and_forgets(
     assert revoked == ["me@aisquare.studio"]
     assert said == "✓ Signed out of AISquare"
     assert status.startswith("Not signed in") and not sign_out_shown
+
+
+def test_a_sign_out_whose_rewrite_could_not_be_restricted_says_so_on_the_page(
+    monkeypatch: pytest.MonkeyPatch, no_network: dict[str, Any]
+) -> None:
+    """Signing out rewrites the credentials file that still holds the API key and the serve
+    token, as a new file. One that could not be restricted was reported on stderr only, which
+    Textual captures, so the page said "✓ Signed out" as ok (review of the #65 fold, round 2,
+    F3). The real sign-out runs here, with the server out of reach and the restriction refused,
+    and the page reads the stored session back from the file."""
+    api_key = "-".join(["not", "a", "real", "key"])
+    credentials.store(api_key=api_key)
+    iam.store_session(
+        api_url="https://api.aisquare.studio",
+        token="aisq_secret",
+        expires_in=3600,
+        scope="",
+        claims={"email": "me@aisquare.studio", "sub": "usr_1"},
+    )
+    monkeypatch.setattr(iam, "current_session", lambda api_url=None: iam.stored_session())
+
+    def unreachable(api_url: str) -> iam.Endpoints:
+        raise iam.IamError("unreachable", "The identity provider could not be reached.")
+
+    monkeypatch.setattr(iam, "discover", unreachable)
+    monkeypatch.setattr(paths, "restrict_to_owner", lambda path: False)
+
+    async def go(pilot: Pilot[None]) -> tuple[str, str]:
+        app = fleet_app(pilot)
+        view = await open_accounts(pilot)
+        await pilot.click("#aisquare-sign-out")
+        await settle(app)
+        await pilot.pause()
+        return notice(view), shown(view.query_one("#aisquare-status", Static))
+
+    said, status = drive(go)
+    assert said.startswith(
+        "✓ Signed out of AISquare (locally — the server could not be reached to revoke), "
+        "but could not restrict"
+    ), said
+    assert "other users on this machine may be able to read the credentials left in it" in said
+    assert status.startswith("Not signed in")
+    assert credentials.load_all() == {"api_key": api_key}
 
 
 def test_an_environment_token_can_neither_sign_out_nor_start_a_browser_sign_in(

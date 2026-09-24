@@ -364,7 +364,7 @@ def logout() -> None:
             if env_set:
                 _say(f"⚠ {iam.TOKEN_ENV_VAR} is still set in this shell.")
         return
-    revoked = auth_service.sign_out(session)
+    revoked = auth_service.sign_out(session).revoked
     if get_state().json_output:
         typer.echo(
             json.dumps(

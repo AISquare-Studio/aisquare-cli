@@ -350,7 +350,7 @@ def test_a_restriction_that_failed_is_reported_by_both_writers(
     )
     assert credentials.drop("serve_token") == ({"api_key": _KEY, "iam_token": "t"}, False)
     assert credentials.drop("never_there") == ({"api_key": _KEY, "iam_token": "t"}, True)
-    iam.clear_session()
+    assert iam.clear_session() is False
     assert credentials.load_all() == {"api_key": _KEY}
     err = capsys.readouterr().err
     assert "warning: could not restrict" in err and "credentials left in it" in err, err

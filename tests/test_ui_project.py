@@ -150,7 +150,17 @@ async def settle(pilot: Pilot[None]) -> None:
     ``on_worker_state_changed``, so a test that scripts ``FleetUnavailable``
     reads the error notice off the page. ``settle_workers`` waits without
     raising for it.
+
+    It waits for the workers that EXIST, so the pause comes first: ``Button.press()``
+    only posts ``Pressed``, and the handler that starts a worker runs once the
+    message has bubbled to the view. Awaited straight after a press, this found
+    no worker yet and returned while the press's own status refresh was still
+    running — a race the next read lost wherever the refresh's file reads are
+    slow: on windows-latest the Explainability tab read the status from before
+    its key was attached ("no key of its own"). Measured here with that worker
+    held 0.3 s: both tests that attach a key then read the row failed the same way.
     """
+    await pilot.pause()
     await settle_workers(pilot.app)
     await pilot.pause()
 

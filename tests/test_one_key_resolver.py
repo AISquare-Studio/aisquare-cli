@@ -399,3 +399,42 @@ def test_the_ops_walk_inspects_something_and_the_rule_can_match() -> None:
     assert _resolves_from_a_named_variable(
         next(n for n in functions if n.name == "resolve_target")
     ), "the ops rule no longer matches the resolver itself, so it matches nothing"
+
+
+#: The project key's two shapes (#141), each written where the rule must accuse
+#: it and where it must not. Parsed, never imported.
+_PROJECT_KEY_SHAPES = """
+def calls_the_reader(project_id):
+    return _project_api_key(project_id, "stg")
+
+def reads_a_bindings_file(binding):
+    return binding.key_path.read_text(encoding="utf-8")
+
+def resolve_target(settings, name=None, *, project_id=None):
+    return _project_api_key(project_id, name)
+
+def _project_api_key(project_id, target_name):
+    return project_key_binding(project_id).key_path.read_text(encoding="utf-8")
+"""
+
+
+def test_the_project_key_shapes_are_matched_outside_the_resolver_and_only_there() -> None:
+    """Guard the guard for the project's key (review of #170).
+
+    The rule gained two branches — a call to ``_project_api_key`` outside
+    ``resolve_target``, and a read of a binding's ``key_path`` outside the
+    reader — and the only positive control above still matched through the old
+    ``environ.get`` shape, so a typo in either branch (``"keypath"``) passed
+    silently. Each shape is accused where it is a second resolver and excused
+    in the one function allowed to do it.
+    """
+    functions = {
+        node.name: node
+        for node in ast.parse(_PROJECT_KEY_SHAPES).body
+        if isinstance(node, ast.FunctionDef)
+    }
+
+    assert _resolves_from_a_named_variable(functions["calls_the_reader"])
+    assert _resolves_from_a_named_variable(functions["reads_a_bindings_file"])
+    assert not _resolves_from_a_named_variable(functions["resolve_target"])
+    assert not _resolves_from_a_named_variable(functions["_project_api_key"])

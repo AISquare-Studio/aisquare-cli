@@ -410,16 +410,27 @@ def _spec(name: str, config_dir: Path | None = None) -> AgentSpec | None:
     return next((spec for spec in _specs(config_dir) if spec.name == name), None)
 
 
-def _registry() -> dict[str, Any]:
-    """The raw agent registry, or ``{}`` when absent or unreadable."""
-    path = paths.agents_registry_path()
-    if not path.exists():
-        return {}
+def read_json(path: Path) -> dict[str, Any]:
+    """The JSON object at ``path``, or ``{}`` — absent, unreadable, invalid or not an object.
+
+    The rule for a config file this package only READS: one that cannot be read
+    is ``{}``, said once here for the agent registry and for every
+    ``.claude.json`` / ``settings.json`` the doctor scans, rather than a copy of
+    the same three lines per caller (review of #203). :func:`_read_settings`
+    is deliberately NOT this: it feeds a read-modify-WRITE of the operator's
+    ``settings.json``, where a permission error swallowed into ``{}`` would be
+    written back over their hooks — so it raises on ``OSError``.
+    """
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
     return data if isinstance(data, dict) else {}
+
+
+def _registry() -> dict[str, Any]:
+    """The raw agent registry, or ``{}`` when absent or unreadable."""
+    return read_json(paths.agents_registry_path())
 
 
 def _connected_set(registry: dict[str, Any] | None = None) -> set[str]:
@@ -824,6 +835,44 @@ def _dir_key(path: Path) -> Path:
         return path.expanduser().resolve()
     except OSError:
         return path.expanduser().absolute()
+
+
+def claude_config_dirs() -> list[Path]:
+    """The Claude Code directories an agent of THIS home could start in.
+
+    The dirs this home connected plus the ambient one (``CLAUDE_CONFIG_DIR``,
+    else ``~/.claude``), one entry per directory identity — and deliberately
+    NOT :func:`hook_sites`, for two measured reasons.
+
+    It GRADES every site: ``hook_site_health`` runs ``classify_hook_binary``,
+    which runs a real ``<that install's aisquare> --version`` subprocess with a
+    10 s timeout, and its dedupe cache is built fresh per call. The doctor's
+    ``_check_claude_code`` already calls it once per run, so a second call
+    re-ran every probe: 1 → 2 scans, 3 → 6 subprocesses, 683 ms → 1246 ms on a
+    four-directory machine (+82% on the whole run) for grading the browser-tools
+    row never reads — on a path the fleet UI re-runs on every project switch,
+    every Doctor-tab activation and every one-click fix.
+
+    And it includes directories this home never connected
+    (``_claude_dirs_on_disk``, the #84 gap), which answers a different question:
+    "does ANY Claude install on this box declare a browser tool" rather than
+    "will the ui-tester's window find one". A playwright MCP in ``~/.claude4``
+    made the row green while the fleet spawned its ui-tester on ``~/.claude``,
+    where nothing answered.
+
+    Public so ``services.diagnostics`` reads it by name rather than through
+    ``_claude_home`` and ``_dir_key``, which are this module's own (review of
+    #203).
+    """
+    dirs = [*connected_dirs("claude-code"), _claude_home()]
+    seen: set[Path] = set()
+    unique: list[Path] = []
+    for directory in dirs:
+        key = _dir_key(directory)
+        if key not in seen:
+            seen.add(key)
+            unique.append(directory)
+    return unique
 
 
 def hook_sites(name: str) -> list[HookSiteHealth]:

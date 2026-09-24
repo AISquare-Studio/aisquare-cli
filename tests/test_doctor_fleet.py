@@ -21,7 +21,7 @@ import os
 import re
 import shutil
 from collections.abc import Iterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -1195,3 +1195,49 @@ def test_doctor_counts_the_exited_agents_a_restart_would_resume(home: Path, tmp_
     assert "fleet-resume" in _by_name(diagnostics.doctor()), "it reaches the real doctor"
     on_disk.unlink()
     assert diagnostics._check_resumable_agents() == [], "no transcript, nothing to resume"
+
+
+def test_the_resume_line_reads_only_the_newest_row_under_each_label(
+    home: Path, tmp_path: Path
+) -> None:
+    """Review of #169: a resumed restart keeps the session id, so the row it
+    replaced still has a transcript on disk. Counting every row listed a label that
+    was live again — whose `fleet restart <label>` stops the live agent — and
+    listed a label once per restart."""
+    from aisquare.models import TeamSession
+
+    project = _seed(tmp_path / "repo")
+    now = datetime.now(tz=UTC)
+    on_disk = tmp_path / "t.jsonl"
+    on_disk.write_text("{}\n", encoding="utf-8")
+
+    def row(label: str, pane: str, session_id: str, *, ended: bool, age: int) -> FleetAgent:
+        return _agent(project.id, label, pane, ended=ended).model_copy(
+            update={"session_id": session_id, "created_at": now - timedelta(minutes=age)}
+        )
+
+    _seed(
+        tmp_path / "repo",
+        row("coder-1", "%1", "ses_back", ended=True, age=10),
+        row("coder-1", "%2", "ses_back", ended=False, age=5),  # restarted, resumed, live
+        row("coder-2", "%3", "ses_twice", ended=True, age=10),
+        row("coder-2", "%4", "ses_twice", ended=True, age=5),  # restarted, exited again
+    )
+    with store_session() as store:
+        for sid in ("ses_back", "ses_twice"):
+            store.upsert_session(
+                TeamSession(
+                    id=sid,
+                    project_id=project.id,
+                    role="coder",
+                    started_at=now,
+                    last_seen_at=now,
+                    transcript_path=str(on_disk),
+                )
+            )
+
+    [check] = diagnostics._check_resumable_agents()
+
+    assert check.detail.startswith("1 exited agent can be resumed"), check.detail
+    assert "coder-2 (repo)" in check.detail and check.detail.count("coder-2") == 1
+    assert "coder-1" not in check.detail, "live again: nothing to resume"

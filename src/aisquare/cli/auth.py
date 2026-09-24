@@ -28,11 +28,10 @@ from rich.live import Live
 from rich.text import Text
 
 from aisquare.cli.common import fail
-from aisquare.core import browser
+from aisquare.core import browser, orchestrator
 from aisquare.core.console import stderr_console, stdout_console
 from aisquare.core.state import get_state
 from aisquare.core.store import store_session
-from aisquare.core.workspace import active_project
 from aisquare.models import TraceDestination
 from aisquare.services import auth as auth_service
 from aisquare.services import destinations, iam
@@ -403,7 +402,7 @@ def whoami() -> None:
         _fail(exc)
     if session is None:
         fail("Not signed in. Run aisquare login.", error="not_authenticated")
-    lands_in = _active_destination()
+    lands_in = _destination_here()
     if get_state().json_output:
         typer.echo(json.dumps({**session.as_json(), "destination": destinations.as_json(lands_in)}))
         return
@@ -414,18 +413,27 @@ def whoami() -> None:
         expiry = f"expires in {days} days" if days is not None else "no recorded expiry"
         stdout_console().print(f"{session.email or session.sub} · {session.api_url} · {expiry}")
     if lands_in is not None:
-        # The active project's workspace and studio (#142), on the line that
-        # answers "who am I here": the same sign-in, the other half of it.
+        # The workspace and studio of the project a launch here joins (#142),
+        # on the line that answers "who am I here": the same sign-in, the other
+        # half of it.
         stdout_console().print(f"traces: {lands_in.label} · {lands_in.environment}")
 
 
-def _active_destination() -> TraceDestination | None:
-    """Where the active project's traces land, or ``None`` — never a reason whoami fails."""
+def _destination_here() -> TraceDestination | None:
+    """Where traces from here land, or ``None`` — never a reason whoami fails.
+
+    For the project a launch here joins (``orchestrator.team_project``:
+    ``$AISQUARE_TEAM_HUB``, else this checkout), the one ``explainability use``
+    and ``status`` default to. It read the ``project switch`` pin, which
+    launches ignore, so after ``use`` in one checkout with another project
+    pinned, this line named the pinned project's destination, or none.
+    """
     if not destinations.derived_credentials_exist():
         return None
     try:
+        project_id = orchestrator.team_project(None).id
         with store_session() as store:
-            return store.project_destination(active_project(store).id)
+            return store.project_destination(project_id)
     except Exception:
         return None
 

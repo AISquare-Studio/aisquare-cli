@@ -80,12 +80,25 @@ def signed_in(runner: CliRunner, idp: IdentityProviderStub, isolated_home: Path)
     return session
 
 
+@pytest.fixture(autouse=True)
+def run_from_web(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every command runs from the ``web`` checkout, the project most tests make.
+
+    Without ``--project``, ``use``, ``studios``, ``status`` and ``whoami`` ask
+    about the project a launch here joins — this checkout — and not the
+    ``project switch`` pin, which launches ignore (review of #170). So the
+    working directory, not a pin, is what makes ``web`` the default.
+    """
+    web = tmp_path / "web"
+    web.mkdir()
+    monkeypatch.chdir(web)
+
+
 def _project(root: Path) -> ProjectInfo:
     root.mkdir(parents=True, exist_ok=True)
     info = ProjectInfo(id=project_id_for(root.resolve()), root=root.resolve(), linked_repos=[])
     with store_session() as store:
         store.onboard_project(info)
-    pin_project(info.id)
     return info
 
 
@@ -602,7 +615,7 @@ def test_the_next_step_for_the_projects_key_resolves_the_projects_key(
     """`doctor` opens no store, so a minted key is invisible to it; `status` resolves it."""
     _trace_on(monkeypatch)
     _project(tmp_path / "lib")
-    _project(tmp_path / "web")  # pinned last, so the active one
+    _project(tmp_path / "web")  # the checkout the commands run from
     result = runner.invoke(app, ["explainability", "use", "acme/Frontend"])
     assert result.exit_code == 0, result.output
     step = _next_step(result.output)
@@ -612,13 +625,13 @@ def test_the_next_step_for_the_projects_key_resolves_the_projects_key(
     shown = json.loads(followed.stdout)
     assert (shown["key_source"], shown["key_set"]) == ("project", True)
 
-    # For a project that is not the active one, the check is about THAT project.
+    # For a project other than this checkout's, the check is about THAT project.
     other = runner.invoke(app, ["explainability", "use", "--project", "lib", "acme/API"])
     assert other.exit_code == 0, other.output
     step = _next_step(other.output)
     assert step == ["explainability", "status", "--target", "local", "--project", "lib"]
     shown = _json(runner, *step)
-    assert shown["destination"]["studio"]["name"] == "API", "the active project was checked"
+    assert shown["destination"]["studio"]["name"] == "API", "this checkout's project was checked"
     assert (shown["key_source"], shown["key_set"]) == ("project", True)
 
 
@@ -835,15 +848,21 @@ def test_the_cli_never_mints_over_a_hand_key_bound_to_another_target(
     assert binding is not None and binding.target == "stg"
 
 
-def test_the_ui_attach_resolves_the_project_and_leaves_a_minted_key_to_the_cli(
+def test_the_ui_attach_leaves_a_minted_key_to_the_cli(
     runner: CliRunner, idp: IdentityProviderStub, signed_in: iam.Session, tmp_path: Path
 ) -> None:
+    """The tab's one project-key writer never overwrites a key the CLI minted.
+
+    Revoking it is a network call and the tab's handlers run on the UI thread,
+    so the refusal names ``key set``, which revokes first. Which deployment the
+    form binds a key to is the form's question (tests/test_ui_project.py).
+    """
     from aisquare.cli.ui.views import explainability as view
 
     idp.key_mint = "token_not_valid"
     project = _project(tmp_path / "web")
     _json(runner, "explainability", "use", "acme/Frontend")
-    attached = view.attach_project_key("AIS_pasted_key")
+    attached = view.attach_project_key("AIS_pasted_key", project, "local")
     assert attached.severity == "information" and "for target local" in attached.message
     with store_session() as store:
         binding = store.project_explainability(project.id)
@@ -852,9 +871,32 @@ def test_the_ui_attach_resolves_the_project_and_leaves_a_minted_key_to_the_cli(
     idp.key_mint = "ok"
     runner.invoke(app, ["explainability", "key", "clear"])
     _json(runner, "explainability", "use", "acme/Frontend")
-    refused = view.attach_project_key("AIS_pasted_again")
+    assert view.minted_key_refusal(project) is not None
+    refused = view.attach_project_key("AIS_pasted_again", project, "local")
     assert refused.severity == "warning" and "minted by the CLI" in refused.message
     assert service.project_key_path(project.id).read_text() == idp.minted[0]["api_key"]
+
+
+def test_use_status_and_whoami_ask_about_this_checkout_not_the_pin(
+    runner: CliRunner, idp: IdentityProviderStub, signed_in: iam.Session, tmp_path: Path
+) -> None:
+    """Without ``--project`` every surface here names the project a launch from here joins.
+
+    ``use`` and ``status`` default to it through the key commands' resolver
+    (review of #170); ``whoami`` read the ``project switch`` pin, so with
+    another project pinned it reported that one's destination — none — right
+    after ``use`` had recorded this checkout's.
+    """
+    web = _project(tmp_path / "web")
+    lib = _project(tmp_path / "lib")
+    pin_project(lib.id)
+    _json(runner, "explainability", "use", "acme/Frontend", "--no-key")
+    with store_session() as store:
+        assert store.project_destination(web.id) is not None
+        assert store.project_destination(lib.id) is None, "the pin is not where launches go"
+    assert _json(runner, "explainability", "status")["destination"]["studio"]["name"] == "Frontend"
+    assert _json(runner, "whoami")["destination"]["studio"]["name"] == "Frontend"
+    assert "traces: acme / Frontend" in runner.invoke(app, ["whoami"]).output
 
 
 # --- revocation goes where the key was minted ---------------------------------------------------

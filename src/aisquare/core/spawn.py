@@ -54,6 +54,9 @@ otherwise inherit a live identity:
   * ``services/distill.py::spawn_drain`` — a detached ``aisquare team distill``
     of our own. A background worker of ours is not an agent session and has no
     business wearing one's identity.
+  * ``services/hooks.py::_detach`` — a detached ``aisquare hook hand-over`` of
+    our own, for the same reason; it also outlives the pane whose hook started
+    it, which is the whole point of detaching it.
 
 Excluded, nothing stripped — these are not model processes at all, and
 narrowing their environment would be change without a reason:
@@ -188,6 +191,13 @@ SEAMS: dict[str, Seam] = {
     "aisquare/services/distill.py::spawn_drain": Seam(
         EXCLUDED,
         "a detached `aisquare team distill` of ours — a background worker is not an agent session",
+        strips_identity=True,
+    ),
+    "aisquare/services/hooks.py::_detach": Seam(
+        EXCLUDED,
+        "a detached `aisquare hook hand-over` of ours (#146; review of #205, finding 1) — the "
+        "worker that moves a limited agent is not an agent session, and it outlives the pane "
+        "whose hook started it",
         strips_identity=True,
     ),
     "aisquare/cli/accounts.py::_exec": Seam(

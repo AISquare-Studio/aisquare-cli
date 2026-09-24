@@ -49,6 +49,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
+from aisquare.core import paths
 from aisquare.core.config import (
     ExplainabilitySettings,
     ExplainabilityTarget,
@@ -56,16 +57,24 @@ from aisquare.core.config import (
     save_config,
 )
 from aisquare.core.version import DISTRIBUTION
-from aisquare.models import CheckStatus, DoctorCheck, ProjectExplainability, RedactionLevel
+from aisquare.models import (
+    CheckStatus,
+    DoctorCheck,
+    ProjectExplainability,
+    ProjectInfo,
+    RedactionLevel,
+)
 from aisquare.services.explainability import (
     EDITABLE_INSTALL_HINT,
     FALLBACK_ROLE,
     KEY_ENV_VAR,
     ProxyProbe,
+    clear_project_api_key,
     key_path,
     probe_proxy,
     project_key_path,
     running_editable,
+    store_project_api_key,
     stored_api_key,
     trace_identity,
 )
@@ -358,17 +367,68 @@ def _project_api_key(project_id: str | None, target_name: str) -> str | None:
 def project_key_binding(project_id: str) -> ProjectExplainability | None:
     """The project's key BINDING — its deployment and file path, never the value.
 
-    ``None`` when the project has none, or when the store cannot be read.
+    ``None`` when the project has none, or when the store cannot be read. A
+    machine with no ``context.db`` has no binding either, and is answered
+    without opening one: opening creates the file, and ``explainability env``
+    and ``status`` are reads that created nothing before #141 (review of #170).
     """
     from aisquare.core.store import (
         store_session,  # lazy: this module is imported by the store's users
     )
 
+    if not paths.db_path().exists():
+        return None
     try:
         with store_session() as store:
             return store.project_explainability(project_id)
     except Exception:
         return None
+
+
+def key_owner() -> str | None:
+    """Who is attaching a key: the signed-in email when there is one, else the OS user.
+
+    ONE answer for ``key set`` and the UI's *Attach key*, so ``key show``
+    names the same person for the same act wherever it was done — the UI
+    recorded ``$USER`` alone while the CLI recorded the email (review of #170).
+    """
+    from aisquare.services import iam  # lazy: a sign-in read only this path needs
+
+    try:
+        session = iam.stored_session()
+        if session is not None and session.email:
+            return str(session.email)
+    except Exception:  # identity is decoration on the row
+        pass
+    return os.environ.get("USER") or None
+
+
+def attach_project_key(project: ProjectInfo, value: str, *, target: str) -> ProjectExplainability:
+    """Attach ``value`` as ``project``'s own key for ``target`` — ``key set`` and *Attach key*.
+
+    Attaching a key is a deliberate act, so the project is REGISTERED first
+    (``onboard_project``, as ``team on`` does): the binding is a FOREIGN KEY to
+    the project row, and a directory nothing had registered yet used to get
+    its mode-600 file written, fail the insert with an uncaught
+    ``IntegrityError``, and keep the key on disk with no binding (review of
+    #170). The file is written once the row can be recorded; if recording it
+    still fails, the file goes again unless an earlier binding points at it, so
+    a refusal leaves no credential behind that nothing names.
+    """
+    from aisquare.core.store import store_session  # lazy, as in project_key_binding
+
+    with store_session() as store:
+        store.onboard_project(project)
+        had_binding = store.project_explainability(project.id) is not None
+        path = store_project_api_key(project.id, value)
+        try:
+            return store.set_project_explainability(
+                project.id, target=target, key_path=path, set_by=key_owner()
+            )
+        except Exception:
+            if not had_binding:
+                clear_project_api_key(project.id)
+            raise
 
 
 def effective_settings(

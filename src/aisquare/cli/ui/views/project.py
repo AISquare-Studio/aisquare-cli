@@ -324,7 +324,9 @@ class ProjectView(TabbedContent):
             ),
             TabPane(
                 "Explainability",
-                ExplainabilityView(id="project-explainability"),
+                # ``project``: the key this tab shows and attaches is THIS
+                # project's (#141), not the ``project switch`` pin's.
+                ExplainabilityView(project, id="project-explainability"),
                 id="tab-explainability",
             ),
             TabPane("Settings", SettingsView(project, id="project-settings"), id="tab-settings"),

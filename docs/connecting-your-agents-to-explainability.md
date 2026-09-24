@@ -279,13 +279,22 @@ proxied under it. A project can carry its own (#141):
 ```bash
 cd ~/work/api
 aisquare explainability key set --from-env API_WORKSPACE_KEY   # from a variable (or pipe it on stdin)
+aisquare explainability register                                # once, if that workspace has not seen this machine's agents
 aisquare explainability key show                                # the origin, never the value
 aisquare explainability key clear
 ```
 
 The key comes from a named variable (`--from-env`) or from stdin (pipe it in);
 it is never an argument, because argv is in every process list and shell
-history.
+history. A directory nothing has registered yet is registered by `key set`:
+attaching a key is a deliberate act, like `team on`.
+
+**Which project** is the one a launch from here joins: `$AISQUARE_TEAM_HUB`
+when it is set, else this checkout (a worktree resolves to its principal) —
+never the `project switch` pin, which launches ignore. Every surface without a
+`--project` asks the same question, so the key `status` and `key show` report
+is the key `launch`, `team spawn` and `explainability env` authenticate with.
+Name another project with `--project P`.
 
 The key lands in the project's data directory, mode 600
 (`~/.aisquare/projects/<id>/explainability-key`); the store records only the
@@ -294,10 +303,16 @@ lane uses, is **project key → the target's variable → the machine file**, an
 key attached for `stg` is never handed to a `prod` gateway — the same rule the
 machine file follows. `aisquare launch`, `fleet spawn` (through `launch` in the
 window) and `explainability env [--project P]` authenticate the proxy with the
-project's key; `status` and the UI's Explainability view show the origin for the
-active project, and the view has an *Attach key* field (the key is pasted,
-never echoed). The client lane — the insights this CLI buffers and `ship`
-drains — still ships under the machine key; per-project shipping is a follow-up.
+project's key. A key for ANOTHER workspace traces nothing until that workspace
+knows this machine's agent identities — every span is refused 409
+`agent_not_registered` — so run `explainability register` there once;
+`register [--project P]` registers under the same project's key. `status`
+shows the origin for that project, and each project page's Explainability tab
+shows its own, with an *Attach key* field (the key is pasted, never echoed) and
+a *Register roster* button that registers under it. The client lane — the
+insights this CLI buffers and `ship` drains — still ships under the machine
+key, and `doctor --live` checks the machine's workspace; per-project shipping
+is a follow-up.
 `init --explainability` keeps writing the machine key, so a single-workspace
 machine is unaffected.
 

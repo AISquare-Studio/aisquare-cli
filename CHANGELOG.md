@@ -16,11 +16,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `key show` prints the origin (never the value) and `key clear` detaches it.
   Resolution stays in the one resolver: project key → the target's variable →
   the machine file, and a key attached for one deployment is never handed to
-  another. `launch`, `fleet spawn` and `explainability env [--project]`
-  authenticate the proxy with the project's key; `status` and the UI's
-  Explainability view show the origin for the active project, and the view
-  gains an *Attach key* field. The client lane (`ship`) still uses the
-  machine key.
+  another. "The project" is the one a launch from here joins
+  (`$AISQUARE_TEAM_HUB`, else this checkout — never the `project switch` pin)
+  everywhere: `launch`, `fleet spawn`, `explainability env [--project]` and
+  `register [--project]` use the project's key, `status` shows its origin,
+  and each project page's Explainability tab shows its own and gains an
+  *Attach key* field. The client lane (`ship`) still uses the machine key.
 - **A restart is the same agent, and the UI comes back where it was** (#144).
   `fleet_agent` rows record a `launch_spec` at spawn — the binary, the
   permission mode actually passed, the arguments after the role's own, the

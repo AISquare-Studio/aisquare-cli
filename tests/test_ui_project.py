@@ -53,7 +53,7 @@ from aisquare.cli.ui.views.project import ManagerTab, ProjectView
 from aisquare.cli.ui.views.settings import SettingsView
 from aisquare.core import paths
 from aisquare.core import tmux as tmux_core
-from aisquare.core.config import load_config
+from aisquare.core.config import ExplainabilityTarget, load_config, save_config
 from aisquare.core.store import store_session
 from aisquare.core.tmux import Capture, Completed, PaneFacts, TmuxServer
 from aisquare.models import (
@@ -1031,3 +1031,95 @@ def test_the_explainability_tab_attaches_a_key_to_the_active_project_without_ech
         binding = store.project_explainability(project.id)
     assert binding is not None and binding.key_path == path
     assert "its own key for target" in status and "pk-ui" not in status
+
+
+def _another_project_pinned(tmp_path: Path) -> ProjectInfo:
+    """A second registered project, pinned by ``project switch`` — the one the tab must ignore."""
+    from aisquare.core.workspace import pin_project, project_id_for
+
+    root = (tmp_path / "pinned-elsewhere").resolve()
+    root.mkdir()
+    other = ProjectInfo(id=project_id_for(root), root=root, linked_repos=[])
+    with store_session() as store:
+        store.onboard_project(other)
+    pin_project(other.id)
+    return other
+
+
+def test_the_explainability_tab_is_about_its_own_project_not_the_pinned_one(
+    project: ProjectInfo, quiet_explainability: dict[str, int], tmp_path: Path
+) -> None:
+    """The tab sits on ONE project's page, and that page's agents launch in that
+    project — so its key row and its Attach button are that project's. They read
+    the ``project switch`` pin, and attached the key to whichever project was
+    pinned while the page named another (review of #170)."""
+    other = _another_project_pinned(tmp_path)
+
+    async def scenario(pilot: Pilot[None], host: Host) -> str:
+        host.query_one(ProjectView).active = "tab-explainability"
+        await settle(pilot)
+        host.query_one("#explainability-key-value", Input).value = "pk-page-0123456789"
+        await pilot.click("#explainability-attach-key")
+        await settle(pilot)
+        return host.query_one(ExplainabilityView).status_text
+
+    status = drive(project, scenario)
+    with store_session() as store:
+        assert store.project_explainability(project.id) is not None
+        assert store.project_explainability(other.id) is None, "never the pinned project"
+    name = project.root.name or project.id
+    assert f"{name}: its own key for target stg (in use)" in status
+
+
+def test_the_explainability_tab_registers_the_roster_under_its_projects_key(
+    project: ProjectInfo, quiet_explainability: dict[str, int], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A project key for ANOTHER workspace traces nothing until that workspace knows
+    the agents; *Register roster* resolved at machine level only, and on a
+    machine with no key of its own refused "not set" right after *Attach key*
+    succeeded (review of #170)."""
+    config = load_config()
+    config.explainability.targets = {
+        "stg": ExplainabilityTarget(gateway_url="https://stg.example"),
+    }
+    save_config(config)
+    monkeypatch.delenv("EXPLAINABILITY_API_KEY", raising=False)
+    path = explainability_service.store_project_api_key(project.id, "pk-roster-0123456789")
+    with store_session() as store:
+        store.set_project_explainability(project.id, target="stg", key_path=path, set_by=None)
+    keys: list[str | None] = []
+
+    def register_roster(target: ops.ResolvedTarget, names: tuple[str, ...]) -> ops.HttpVerdict:
+        keys.append(target.api_key)
+        return ops.HttpVerdict(ok=True, status=200, detail="HTTP 200", payload={"agents": []})
+
+    monkeypatch.setattr(ops, "register_roster", register_roster)
+
+    async def scenario(pilot: Pilot[None], host: Host) -> list[tuple[str, str]]:
+        host.query_one(ProjectView).active = "tab-explainability"
+        await settle(pilot)
+        await pilot.click("#explainability-register")
+        await settle(pilot)
+        return host.notices
+
+    notices = drive(project, scenario)
+    assert keys == ["pk-roster-0123456789"]
+    assert any(m.startswith("✓ registered") for m, _ in notices), notices
+
+
+def test_the_key_row_names_a_missing_file_instead_of_contradicting_itself(
+    project: ProjectInfo, quiet_explainability: dict[str, int]
+) -> None:
+    """Bound to the active target with its file gone, the row read "its own key for
+    target stg (not used for target stg)"; it says what ``key show`` says."""
+    from aisquare.cli.ui.views.explainability import status_report
+
+    path = explainability_service.store_project_api_key(project.id, "pk-gone-0123456789")
+    with store_session() as store:
+        store.set_project_explainability(project.id, target="stg", key_path=path, set_by=None)
+    path.unlink()
+
+    row = dict(status_report(project).rows)["project"]
+
+    assert "file MISSING" in row and str(path) in row
+    assert "not used for target stg" not in row

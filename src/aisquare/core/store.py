@@ -1403,6 +1403,11 @@ class SqliteStore:
                 "team_session",
                 "fleet_agent",
                 "metric",
+                # v19's key binding (#141) DOES carry the FK, and left here the
+                # whole purge rolled back on it — `prune --purge` halfway
+                # through its loop (review of #170). The key file itself goes
+                # with the project's data directory.
+                "project_explainability",
             ):
                 cursor = self._conn.execute(
                     f"DELETE FROM {table} WHERE project_id = ?", (project_id,)

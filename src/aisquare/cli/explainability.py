@@ -32,21 +32,18 @@ from typing import Annotated
 import typer
 
 from aisquare.cli.common import expected_config_write_errors, fail
-from aisquare.core import outbox
+from aisquare.core import orchestrator, outbox
 from aisquare.core.config import ExplainabilityTarget, load_config, save_config
 from aisquare.core.state import get_state
 from aisquare.core.store import store_session
-from aisquare.core.workspace import active_project
 from aisquare.models import ProjectInfo
 from aisquare.services import explainability_ops as ops
-from aisquare.services import iam
 from aisquare.services import project as project_service
 from aisquare.services.explainability import (
     RESERVED_ENV_VARS,
     clear_project_api_key,
     ship_once,
     shipping_state,
-    store_project_api_key,
     trace_marker,
     wire_session,
 )
@@ -62,15 +59,28 @@ key_app = typer.Typer(
 app.add_typer(key_app, name="key")
 
 _PROJECT_OPTION = typer.Option(
-    "--project", "-P", help="Project by codename, name or id prefix (default: the active one)."
+    "--project",
+    "-P",
+    help="Project by codename, name or id prefix (default: the one a launch here joins — "
+    "$AISQUARE_TEAM_HUB, else this checkout).",
 )
 
 
 def _project_for(ref: str | None) -> ProjectInfo:
-    """The project a key command is about: ``--project``, else the active one."""
+    """The project a key command is about: ``--project``, else the one a launch here joins.
+
+    The default is ``orchestrator.team_project`` — ``AISQUARE_TEAM_HUB``, else
+    this checkout — because that is the board ``launch`` and ``team spawn
+    --exec`` put an agent on, so it is the project whose key authenticates the
+    agent. It is NOT the ``project switch`` pin, which launches ignore: this
+    used to resolve through the pin, so with project X pinned, ``env`` in
+    project Y — and the printed ``team spawn`` line that evals it — handed Y's
+    agent X's workspace key while ``launch`` in the same directory used Y's
+    (review of #170). It opens no store either, so ``env`` and ``status`` stay
+    reads that a damaged ``context.db`` cannot fail.
+    """
     if ref is None:
-        with store_session() as store:
-            return active_project(store)
+        return orchestrator.team_project(None)
     try:
         return project_service.resolve(ref)
     except KeyError:
@@ -79,15 +89,20 @@ def _project_for(ref: str | None) -> ProjectInfo:
         fail(str(exc), error="ambiguous_project", ref=ref)
 
 
-def _who() -> str | None:
-    """Who is attaching the key: the signed-in email when there is one, else the OS user."""
+def _key_project_id(ref: str | None) -> str | None:
+    """The project id a key is resolved FOR in ``status``, ``env`` and ``register``.
+
+    A ``--project`` that names nothing fails loudly; the default never fails:
+    these are the reads a launch is prepared with, and before #141 none of
+    them touched the store, so a directory that cannot be resolved costs the
+    project's key — the machine's answers — never the command (review of #170).
+    """
+    if ref is not None:
+        return _project_for(ref).id
     try:
-        session = iam.stored_session()
-        if session is not None and session.email:
-            return str(session.email)
-    except Exception:  # identity is decoration on the row
-        pass
-    return os.environ.get("USER") or None
+        return _project_for(None).id
+    except Exception:  # a project is decoration on these reads, never their gate
+        return None
 
 
 def _key_payload(project: ProjectInfo, target: str | None) -> dict[str, object]:
@@ -126,10 +141,24 @@ def key_set(
     in every process list and shell history. It lands in the project's data
     directory at mode 600; the store records only the deployment and the path.
     Launches, `fleet spawn` and `explainability env` for this project then
-    authenticate the proxy with it; other projects keep the machine key.
+    authenticate the proxy with it; other projects keep the machine key. A
+    project not registered yet is registered here: attaching a key is a
+    deliberate act, like `team on`.
     """
     project = _project_for(project_ref)
     settings = load_config().explainability
+    known = sorted({settings.target, *settings.targets})
+    if target_name is not None and target_name not in known:
+        # `resolve_target` answers for any name, so a typo (`--target prdo`)
+        # bound the key to a deployment nothing ever resolves and still printed
+        # success (review of #170). Refused before the key is read or written.
+        fail(
+            f"no target '{target_name}' on this machine (known: {', '.join(known)}) — "
+            f"create it first: aisquare explainability enable --target {target_name} "
+            "--gateway-url <url>",
+            error="unknown_target",
+            ref=target_name,
+        )
     target = ops.resolve_target(settings, target_name).name
     if from_env is not None:
         value = os.environ.get(from_env, "").strip()
@@ -145,19 +174,30 @@ def key_set(
         value = sys.stdin.read().strip()
         if not value:
             fail("nothing on stdin — the key was empty", error="no_key")
-    path = store_project_api_key(project.id, value)
-    with store_session() as store:
-        binding = store.set_project_explainability(
-            project.id, target=target, key_path=path, set_by=_who()
-        )
+    binding = ops.attach_project_key(project, value, target=target)
     payload = _key_payload(project, target)
     if get_state().json_output:
         typer.echo(json.dumps(payload))
         return
     name = project.root.name or project.id
+    # The register step, named: a key for ANOTHER workspace traces nothing until
+    # that workspace knows this machine's agent identities — every span is
+    # refused 409 agent_not_registered — and `register` resolves the same
+    # project's key as the launches do.
+    register = shlex.join(
+        [
+            "aisquare",
+            "explainability",
+            "register",
+            *(["--project", project_ref] if project_ref is not None else []),
+            "--target",
+            binding.target,
+        ]
+    )
     typer.echo(
-        f"✓ key attached to {name} for target {binding.target} — {path} (mode 600); "
-        "launches and spawns in this project authenticate the proxy with it"
+        f"✓ key attached to {name} for target {binding.target} — {binding.key_path} "
+        "(mode 600); launches and spawns in this project authenticate the proxy with it. "
+        f"If that workspace has not registered this machine's agents yet: {register}"
     )
 
 
@@ -227,14 +267,11 @@ def status(
     """
     config = load_config()
     settings = config.explainability
-    # The key is resolved FOR the active project (#141): a project with its own
-    # key shows that origin here; everything else the machine's.
-    try:
-        with store_session() as store:
-            project_id: str | None = active_project(store).id
-    except Exception:  # a project is decoration on this line, never its gate
-        project_id = None
-    target = ops.resolve_target(settings, target_name, project_id=project_id)
+    # The key is resolved FOR the project a launch from here joins (#141) — the
+    # one `env`, `launch` and the key commands use — so the origin shown is the
+    # key a launch would authenticate with; a project with its own key shows
+    # that, everything else the machine's.
+    target = ops.resolve_target(settings, target_name, project_id=_key_project_id(None))
     # One description of the proxy lane for both surfaces. It also decides
     # whether to probe at all: a machine that never configured tracing has
     # nothing to dial, and reporting a refused connection to a default address
@@ -273,6 +310,9 @@ def status(
                     # NAMES, set or not.
                     "key_source": target.key_source,
                     "key_origin": target.key_origin,
+                    # The project the key was resolved FOR (#141), so a script
+                    # can tell which project's origin it is reading.
+                    "key_project": target.project_id,
                     "proxy": target.proxy_url,
                     "identity": target.agent_name_template,
                     "agents": list(target.agent_names),
@@ -491,15 +531,21 @@ def register(
         list[str] | None,
         typer.Option("--role", help="Role to register; repeat for several. Defaults to config."),
     ] = None,
+    project_ref: Annotated[str | None, _PROJECT_OPTION] = None,
 ) -> None:
     """Declare this machine's agent identities to the workspace.
 
     Spans whose ``agent.name`` the workspace does not know are rejected, so a
     fresh deployment traces nothing until this runs. Idempotent: an already
     registered name returns its existing publication id.
+
+    The workspace is the one the project's key names when it has its own
+    (#141) — the key its launches authenticate with — else the machine's.
+    Registering at machine level only left a project pointed at another
+    workspace with every span refused 409 (review of #170).
     """
     settings = load_config().explainability
-    target = ops.resolve_target(settings, target_name)
+    target = ops.resolve_target(settings, target_name, project_id=_key_project_id(project_ref))
     if not target.gateway_url:
         fail(
             f"target '{target.name}' has no gateway URL — set one with: "
@@ -570,7 +616,10 @@ def register(
             )
         )
         return
-    typer.echo(f"✓ registered {len(names)} identities with target '{target.name}'")
+    # Whose workspace, when it is not the machine's: a project's own key (#141)
+    # registers in the workspace it names.
+    under = f" under {target.key_origin}" if target.key_source == "project" else ""
+    typer.echo(f"✓ registered {len(names)} identities with target '{target.name}'{under}")
     for agent_name in names:
         publication = published.get(agent_name)
         suffix = f"publication_id {publication}" if publication else "registered"
@@ -710,8 +759,11 @@ def env(
     help text says when it is wrong to add by hand.
     """
     settings = load_config().explainability
-    project = _project_for(project_ref)
-    target = ops.resolve_target(settings, target_name, project_id=project.id)
+    # The project's own key when it has one (#141), resolved without a store
+    # open that could fail: this output is evaled into a shell about to start
+    # an agent, and a context.db it cannot read costs the project's key, never
+    # the exports — the bar `status` and `launch` already hold.
+    target = ops.resolve_target(settings, target_name, project_id=_key_project_id(project_ref))
     # Print-only by default: no Run root is posted, so the target's gateway is
     # not even handed over — the key still is, because a hosted proxy
     # authenticates on it. `--post-root` takes the path `launch` takes: gateway,

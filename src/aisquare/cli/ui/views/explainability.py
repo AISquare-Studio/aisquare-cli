@@ -20,6 +20,7 @@ from __future__ import annotations
 import os
 from collections.abc import Callable
 from dataclasses import dataclass
+from functools import partial
 from typing import Literal
 
 from rich.text import Text
@@ -31,8 +32,6 @@ from textual.worker import Worker, WorkerState
 
 from aisquare.core import outbox
 from aisquare.core.config import AppConfig, load_config, save_config
-from aisquare.core.store import store_session
-from aisquare.core.workspace import active_project
 from aisquare.models import ProjectInfo
 from aisquare.services import explainability as explainability_service
 from aisquare.services import explainability_ops as ops
@@ -64,15 +63,15 @@ class StatusReport:
     """Tracing is on and the proxy would not take a session — the red state."""
 
 
-def status_report() -> StatusReport:
+def status_report(project: ProjectInfo | None = None) -> StatusReport:
     """Gather what ``status`` shows: the proxy lane, the client lane, the spool.
 
     The probe dials only when tracing is on (``ops.proxy_state`` decides, as it
     does for the CLI), so a machine that never asked for tracing costs nothing.
+    The key is resolved for ``project`` — the page this tab sits on (#141).
     """
     config = load_config()
     settings = config.explainability
-    project = _active()
     target = ops.resolve_target(settings, None, project_id=project.id if project else None)
     proxy = ops.proxy_state(target, on=settings.enabled)
     shipping = explainability_service.shipping_state()
@@ -101,46 +100,45 @@ def status_report() -> StatusReport:
     return StatusReport(rows=rows, problem=settings.enabled and not proxy.healthy)
 
 
-def _active() -> ProjectInfo | None:
-    """The active project, for the per-project key (#141); ``None`` when the store cannot say."""
-    try:
-        with store_session() as store:
-            return active_project(store)
-    except Exception:
-        return None
-
-
 def _project_key_row(project: ProjectInfo | None, target: ops.ResolvedTarget) -> str:
     """``<name>: its own key for stg`` / ``<name>: the machine key`` — the origin per project."""
     if project is None:
-        return "(no active project)"
+        return "(no project)"
     name = project.root.name or project.id
     binding = ops.project_key_binding(project.id)
     if binding is None:
         return f"{name}: no key of its own — the machine's applies (attach one below)"
-    used = "in use" if target.key_source == "project" else f"not used for target {target.name}"
-    return f"{name}: its own key for target {binding.target} ({used})"
+    if binding.target != target.name:
+        state = f"not used for target {target.name}"
+    elif target.key_source == "project":
+        state = "in use"
+    else:
+        # Bound to THIS target and still not the answer: the file is gone or
+        # unreadable. `key show`'s words for it — this row used to say "not used
+        # for target stg" about the very target it is bound to (review of #170).
+        state = f"file MISSING or unreadable at {binding.key_path} — attach it again below"
+    return f"{name}: its own key for target {binding.target} ({state})"
 
 
-def attach_project_key(value: str) -> Notice:
-    """What the Attach button does: the active project's key, for the active target."""
+def attach_project_key(value: str, project: ProjectInfo | None) -> Notice:
+    """What the Attach button does: ``project``'s own key, for the active target.
+
+    ``project`` is the page this tab sits on — the project the page's agents
+    are launched in — never the ``project switch`` pin (review of #170).
+    """
     key = value.strip()
     if not key:
         return Notice("paste the workspace key first — nothing was attached", "warning")
-    project = _active()
     if project is None:
-        return Notice("no active project to attach a key to", "error")
+        return Notice("no project to attach a key to", "error")
     settings = load_config().explainability
     target = ops.resolve_target(settings, None).name
-    path = explainability_service.store_project_api_key(project.id, key)
-    with store_session() as store:
-        store.set_project_explainability(
-            project.id, target=target, key_path=path, set_by=os.environ.get("USER") or None
-        )
+    binding = ops.attach_project_key(project, key, target=target)
     name = project.root.name or project.id
     return Notice(
-        f"✓ key attached to {name} for target {target} — {path} (mode 600); launches in this "
-        "project authenticate the proxy with it",
+        f"✓ key attached to {name} for target {target} — {binding.key_path} (mode 600); "
+        "launches in this project authenticate the proxy with it. If that workspace has not "
+        "registered this machine's agents yet, press Register roster",
         "information",
     )
 
@@ -155,10 +153,15 @@ def render_status(report: StatusReport) -> Text:
     return text
 
 
-def register_roster() -> Notice:
-    """What ``aisquare explainability register`` does, as a notice instead of an exit code."""
+def register_roster(project_id: str | None = None) -> Notice:
+    """What ``aisquare explainability register`` does, as a notice instead of an exit code.
+
+    Under ``project_id``'s own key when it has one (#141), as the CLI's
+    ``register`` does: registering at machine level left a project pointed at
+    another workspace refused 409 on every span (review of #170).
+    """
     settings = load_config().explainability
-    target = ops.resolve_target(settings, None)
+    target = ops.resolve_target(settings, None, project_id=project_id)
     if not target.gateway_url:
         return Notice(
             f"target '{target.name}' has no gateway URL — set one with: "
@@ -182,7 +185,8 @@ def register_roster() -> Notice:
             "error",
         )
     published = ops.publication_ids(verdict.payload)
-    lines = [f"✓ registered {len(names)} identities with target '{target.name}'"]
+    under = f" under {target.key_origin}" if target.key_source == "project" else ""
+    lines = [f"✓ registered {len(names)} identities with target '{target.name}'{under}"]
     for agent_name in names:
         publication = published.get(agent_name)
         lines.append(
@@ -238,8 +242,10 @@ class ExplainabilityView(VerticalScroll):
     ExplainabilityView #explainability-key Input { width: 1fr; }
     """
 
-    def __init__(self, *, id: str | None = None) -> None:
+    def __init__(self, project: ProjectInfo | None = None, *, id: str | None = None) -> None:
         super().__init__(id=id)
+        self.project = project
+        """The project page this tab sits on: its key is the one shown and attached (#141)."""
         self.status_text = ""
         """The plain text of the status block (what a test reads)."""
 
@@ -255,7 +261,7 @@ class ExplainabilityView(VerticalScroll):
             # A key per project (#141): pasted, never echoed (password input), stored
             # at mode 600 under the project's data directory.
             yield Input(
-                placeholder="paste a workspace key for the active project…",
+                placeholder="paste a workspace key for this project…",
                 password=True,
                 id="explainability-key-value",
             )
@@ -278,8 +284,8 @@ class ExplainabilityView(VerticalScroll):
     def refresh_status(self) -> None:
         """Re-read both lanes off the UI thread (the probe may dial the proxy)."""
         self.run_worker(
-            status_report, name=STATUS_WORKER, group=STATUS_WORKER, exclusive=True, thread=True,
-            exit_on_error=False,
+            partial(status_report, self.project), name=STATUS_WORKER, group=STATUS_WORKER,
+            exclusive=True, thread=True, exit_on_error=False,
         )  # fmt: skip
 
     def _show_status(self, report: StatusReport) -> None:
@@ -319,10 +325,10 @@ class ExplainabilityView(VerticalScroll):
 
     @on(Button.Pressed, "#explainability-attach-key")
     def _attach_key(self) -> None:
-        """Attach the pasted key to the active project (#141); the field is cleared either way."""
+        """Attach the pasted key to this page's project (#141); the field is cleared either way."""
         field = self.query_one("#explainability-key-value", Input)
         try:
-            notice = attach_project_key(field.value)
+            notice = attach_project_key(field.value, self.project)
         except Exception as exc:  # a refused write is a notice, never a crash
             notice = Notice(f"could not attach the key: {exc}", "error")
         field.value = ""
@@ -377,7 +383,8 @@ class ExplainabilityView(VerticalScroll):
 
     @on(Button.Pressed, "#explainability-register")
     def _register(self) -> None:
-        self._start_network_work(REGISTER_WORKER, register_roster)
+        project_id = self.project.id if self.project is not None else None
+        self._start_network_work(REGISTER_WORKER, partial(register_roster, project_id))
 
     @on(Button.Pressed, "#explainability-ship")
     def _ship(self) -> None:

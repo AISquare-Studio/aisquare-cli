@@ -198,7 +198,11 @@ def credits_text(readings: list[WorkspaceCredits], *, now: datetime | None = Non
                 window = reading.window(pool, span)
                 if window is None:
                     continue
-                piece = Text(f"{pool} {word} ", style="dim")
+                # The label is dim, the piece is not: a style handed to
+                # ``Text(...)`` covers everything appended after it, and the
+                # bar would draw faded beside the Claude rows' bars.
+                piece = Text()
+                piece.append(f"{pool} {word} ", style="dim")
                 percent = window.percent
                 if percent is None:  # the API's -1 only; a zero allowance is a full bar
                     piece.append("unlimited", style="dim")

@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from rich.console import Console
 from textual.pilot import Pilot
 from textual.widgets import Static
 from typer.testing import CliRunner
@@ -229,6 +230,25 @@ def test_a_zero_allowance_draws_a_full_bar_not_unlimited() -> None:
     reading = credits_service.parse(payload, workspace_id=42, workspace_name="acme", now=NOW)
     line = credits_text([reading]).plain
     assert line == "acme [exhausted]  build today ▮▮▮▮▮ 100%", line
+
+
+def test_the_bars_draw_in_their_own_colour_only_the_labels_are_dim() -> None:
+    """Review of #173, round 2: each window was built as ``Text(label,
+    style="dim")``, which makes dim the style of everything appended after the
+    label too — the bar and its percentage drew faded (``dim yellow``) beside
+    the Claude rows' bars below. ``.plain`` cannot see that; the drawn segments can."""
+    reading = credits_service.parse(BALANCE, workspace_id=42, workspace_name="acme", now=NOW)
+    drawn = [
+        (segment.text, str(segment.style))
+        for segment in credits_text([reading], now=NOW).render(Console(width=400))
+    ]
+    assert [(text, style) for text, style in drawn if "▮" in text or "%" in text] == [
+        ("▮▮▮▮▯", "yellow"),
+        (" 76%", "yellow"),
+        ("▮▮▯▯▯", "green"),
+        (" 40%", "green"),
+    ], drawn
+    assert ("run today ", "dim") in drawn and ("build today ", "dim") in drawn
 
 
 def test_a_truncated_answer_is_a_reason_on_the_row_not_a_traceback(

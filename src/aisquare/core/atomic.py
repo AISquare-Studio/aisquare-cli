@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import stat
 from pathlib import Path
 from uuid import uuid4
 
@@ -34,17 +35,30 @@ def write_replacing(
     directory after it — the two steps that make the write survive a crash,
     and the two that cost on a busy or network disk; a cache whose loss is a
     refetch passes ``False`` and keeps the atomicity alone.
+
+    The kept bits are the temp's from its creation, narrowed by the umask
+    like any new file's, and set exactly once the body is in. Created at the
+    umask default and given them afterwards, a 600 file's contents sat in a
+    644 temp for the whole write and fsync, and a kill before the chmod left
+    them there (review of the #167 fold, F7).
     """
     temporary = target.with_name(f".{target.name}.{os.getpid()}.{uuid4().hex[:8]}.tmp")
+    kept: int | None = None
+    if keep_mode:
+        with contextlib.suppress(FileNotFoundError):
+            kept = target.stat().st_mode & 0o777
     try:
+        # Created empty with those bits, plus its owner's write until the body is
+        # in (a read-only target's temp is written too), then opened by path.
+        mode = 0o666 if kept is None else kept | stat.S_IWUSR
+        os.close(os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode))
         with temporary.open("w", encoding="utf-8") as handle:
             handle.write(body)
             if durable:
                 handle.flush()
                 os.fsync(handle.fileno())
-        if keep_mode:
-            with contextlib.suppress(FileNotFoundError):
-                os.chmod(temporary, target.stat().st_mode & 0o777)
+        if kept is not None:
+            os.chmod(temporary, kept)  # exactly the target's: the umask may have narrowed them
         os.replace(temporary, target)
     except BaseException:
         with contextlib.suppress(OSError):

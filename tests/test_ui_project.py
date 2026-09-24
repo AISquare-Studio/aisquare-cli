@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import sys
 import threading
 import tomllib
 from collections.abc import Callable, Coroutine, Iterator, Sequence
@@ -1224,7 +1225,8 @@ def test_the_explainability_tab_attaches_a_key_to_the_active_project_without_ech
     assert field_after == "", "the field is cleared"
     path = explainability_service.project_key_path(project.id)
     assert path.read_text(encoding="utf-8") == "pk-ui-0123456789"
-    assert (path.stat().st_mode & 0o777) == 0o600
+    if sys.platform != "win32":  # NTFS keeps one bit of the mode: 0o666 or 0o444
+        assert (path.stat().st_mode & 0o777) == 0o600
     with store_session() as store:
         binding = store.project_explainability(project.id)
     assert binding is not None and binding.key_path == path

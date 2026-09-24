@@ -17,6 +17,7 @@ import json
 import shlex
 import sqlite3
 import stat
+import sys
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -240,7 +241,8 @@ def test_use_records_the_choice_targets_the_deployment_mints_a_key_and_binds_the
     assert minted["name"].startswith("aisquare-cli ") and minted["name"].endswith(" web")
     key_file = service.project_key_path(project.id)
     assert key_file.read_text() == minted["api_key"]
-    assert stat.S_IMODE(key_file.stat().st_mode) == 0o600
+    if sys.platform != "win32":  # NTFS keeps one bit of the mode: 0o666 or 0o444
+        assert stat.S_IMODE(key_file.stat().st_mode) == 0o600
     assert minted["api_key"] not in json.dumps(payload)
     assert payload["key"] == {
         "source": "project",

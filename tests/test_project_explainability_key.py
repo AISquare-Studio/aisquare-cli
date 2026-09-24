@@ -20,6 +20,7 @@ import os
 import re
 import shutil
 import sqlite3
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -133,9 +134,9 @@ def test_the_binding_round_trips_and_the_value_lives_in_a_600_file_not_the_store
     project = _project(tmp_path / "api")
     path = service.store_project_api_key(project.id, f"  {PROJECT_KEY}\n")
     assert path == service.project_key_path(project.id)
-    assert (
-        path.read_text(encoding="utf-8") == PROJECT_KEY and (path.stat().st_mode & 0o777) == 0o600
-    )
+    assert path.read_text(encoding="utf-8") == PROJECT_KEY
+    if sys.platform != "win32":  # NTFS keeps one bit of the mode: 0o666 or 0o444
+        assert (path.stat().st_mode & 0o777) == 0o600
     with store_session() as store:
         assert store.project_explainability(project.id) is None
         binding = store.set_project_explainability(
@@ -399,7 +400,8 @@ def test_a_re_attach_that_cannot_be_recorded_leaves_the_earlier_bindings_key_in_
     stg = ops.resolve_target(config.explainability, "stg", project_id=project.id)
     assert (stg.api_key, stg.key_source) == ("stg-key-aaaa", "project")
     path = service.project_key_path(project.id)
-    assert (path.stat().st_mode & 0o777) == 0o600
+    if sys.platform != "win32":  # NTFS keeps one bit of the mode: 0o666 or 0o444
+        assert (path.stat().st_mode & 0o777) == 0o600
     # An earlier binding whose file was already gone gets it gone again, not
     # the refused key: the row is left exactly as `key show` reported it.
     path.unlink()

@@ -621,6 +621,53 @@ def test_a_fail_open_launchs_insights_still_open_their_own_run(
     assert sdk.segments == []
 
 
+@pytest.mark.parametrize(
+    "raises", ["set_status", "end", "both"], ids=["status-raises", "end-raises", "both-raise"]
+)
+def test_the_segments_close_owes_each_step_whatever_the_span_refuses(
+    monkeypatch: pytest.MonkeyPatch, raises: str
+) -> None:
+    """The INVARIANT of ``_ClientLaneSegment.__exit__`` (reviews of #203, round
+    1 finding 7 and round 5 finding 2, on the same function): the status, the
+    span's end and the context's detach are each owed independently of the one
+    before. A shut-down tracer provider raises on ``set_status`` FIRST — the
+    round-1 fix put ``end()`` after it inside one ``try``, so the span was held
+    by its processor for the life of the process and the group never exported;
+    a processor that throws on ``end`` used to leave the segment attached as the
+    current context. Whatever raises, ``end`` is attempted and the detach runs."""
+
+    class _Refusing(_FakeSpan):
+        def set_status(self, code: Any, description: str | None = None) -> None:
+            if raises in ("set_status", "both"):
+                raise RuntimeError("tracer provider is shut down")
+            super().set_status(code, description)
+
+        def end(self) -> None:
+            self.end_called = True
+            if raises in ("end", "both"):
+                raise RuntimeError("processor threw on end")
+            super().end()
+
+    class _Tracer:
+        def start_span(self, name: str, *, context: Any, attributes: dict[str, Any]) -> _FakeSpan:
+            return _Refusing(name, context, attributes)
+
+    class _Sdk:
+        def get_tracer(self, name: str) -> _Tracer:
+            return _Tracer()
+
+    otel_context = _FakeOtelContext()
+    monkeypatch.setattr(service, "_otel", lambda: (_FakeOtelTrace, otel_context))
+
+    with (
+        pytest.raises(RuntimeError),
+        service._ClientLaneSegment(_Sdk(), "coder", "run-1") as segment,
+    ):
+        span = segment._span
+    assert getattr(span, "end_called", False), "end() was attempted"
+    assert len(otel_context.attached) == 1 == len(otel_context.detached), "and detached"
+
+
 def test_a_segment_that_fails_is_closed_and_the_records_stay_queued(
     isolated_home: Path,
     ship_sdk: tuple[_ShipSdk, _FakeOtelContext],

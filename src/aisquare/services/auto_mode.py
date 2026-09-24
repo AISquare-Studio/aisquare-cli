@@ -45,7 +45,7 @@ from pathlib import Path
 from aisquare.core import orchestrator, paths, transcripts
 from aisquare.core.config import FleetSettings
 from aisquare.core.store import store_session
-from aisquare.models import CheckStatus, DoctorCheck
+from aisquare.models import CheckStatus, DoctorCheck, FleetAgent, TeamSession
 from aisquare.services import explainability as explainability_service
 from aisquare.services import team as team_service
 
@@ -66,14 +66,20 @@ REFUSED_ABOVE_TOKENS = 100_000
 #: doctor stays quick — each is one bounded read of a transcript's head.
 SAMPLE_SESSIONS = 12
 
-#: Refusals in a transcript's tail before a Stop hook calls it blocked. One
-#: can be a real transient 5xx ("Wait a moment and then try this action
-#: again"); the sessions that reported this had 5 to 153.
+#: Refusals in a transcript's tail before a session counts as refused — by the
+#: Stop hook that calls it blocked, and by the doctor line and spawn note that
+#: read recent sessions. One can be a real transient 5xx ("Wait a moment and
+#: then try this action again"); the sessions that reported this had 5 to 153.
 REFUSAL_THRESHOLD = 3
 
 CHECK_NAME = "explainability auto-mode"
 EVENT_KIND = "auto_mode_blocked"
 _META_PREFIX = "auto-mode-blocked:"
+
+#: What a session's :data:`_META_PREFIX` key holds when its line was NOT said
+#: because a hand-over was taking the session down: this prefix and the
+#: transcript's size then. The time the line was said is the other value.
+_COUNT_FROM = "count-from:"
 
 
 @dataclass(frozen=True)
@@ -113,7 +119,13 @@ class Baseline:
 
     @property
     def refused_sessions(self) -> int:
-        return sum(1 for sample in self.samples if sample.refusals >= 1)
+        """Sessions refused as the Stop hook counts it: :data:`REFUSAL_THRESHOLD` or more.
+
+        The same bar as :func:`record_refusals`, so one transient 5xx in any of
+        the sampled sessions does not turn doctor yellow and every ``auto``
+        spawn into a warning for the next :data:`SAMPLE_SESSIONS` sessions.
+        """
+        return sum(1 for sample in self.samples if sample.refusals >= REFUSAL_THRESHOLD)
 
     @property
     def predicted(self) -> int | None:
@@ -140,7 +152,10 @@ def measure_baseline(limit: int = SAMPLE_SESSIONS) -> Baseline:
 
     Creates nothing: without a database there are no sessions to read, and the
     answer is an empty baseline. A store that cannot be read is the same
-    answer — the database line reports that.
+    answer — the database line reports that. A transcript that cannot be
+    stat'ed (a directory this user may not traverse raises ``PermissionError``
+    from ``is_file``) is skipped like one that is gone: this runs inside
+    ``aisquare doctor``, which must not die on one session's path.
     """
     if not paths.db_path().exists():
         return Baseline()
@@ -158,7 +173,11 @@ def measure_baseline(limit: int = SAMPLE_SESSIONS) -> Baseline:
     samples: list[Sample] = []
     for session in sessions:
         path = Path(session.transcript_path or "")
-        if not path.is_file():
+        try:
+            on_disk = path.is_file()
+        except OSError:
+            on_disk = False
+        if not on_disk:
             continue
         samples.append(
             Sample(
@@ -197,14 +216,43 @@ def exposed(baseline: Baseline) -> bool:
     return predicted is None or predicted >= REFUSED_ABOVE_TOKENS
 
 
-def _remedy(roles: list[str]) -> str:
-    role = roles[0] if roles else "coder"
+#: What takes a RUNNING agent off ``auto``: ``fleet restart`` replays the mode the
+#: agent was launched with (#144), so the role's step reaches only later spawns.
+_RESTART_OFF_AUTO = "--permission-mode acceptEdits"
+
+
+def _mode_step(role: str, config: FleetSettings) -> str:
+    """The step that takes ``role`` off ``auto`` — one that works on THIS config.
+
+    ``aisquare config set`` only writes a key the loaded config already has,
+    and a config file with its own ``[fleet.roles]`` holds only the roles it
+    lists; the others run on the built-in ``auto`` with no table to set. For
+    those the step is the table itself, because the command would answer
+    "unknown config key" — named as a header and a key, never as one line:
+    TOML ends a table header at its line, so ``[fleet.roles.x] permission_mode
+    = …`` pasted as printed does not parse, and a config that does not parse
+    costs every ``[fleet]`` customisation (the fleet falls back to its
+    defaults, every role back on ``auto``).
+    """
+    if role in config.roles:
+        return f"aisquare config set fleet.roles.{role}.permission_mode acceptEdits"
+    return (
+        f'add a `[fleet.roles.{role}]` table with `permission_mode = "acceptEdits"` '
+        f"to {paths.config_path()}"
+    )
+
+
+def _remedy(roles: list[str], config: FleetSettings) -> str:
+    # The example names a role `config set` can reach, when one of them is.
+    settable = [candidate for candidate in roles if candidate in config.roles]
+    role = (settable or roles or ["coder"])[0]
     return (
         f"Until the proxy fix ({SDK_ISSUE_URL}), one of: a non-classifier mode for the fleet "
-        f"roles — aisquare config set fleet.roles.{role}.permission_mode acceptEdits (per "
-        "spawn: aisquare fleet spawn <role> --permission-mode acceptEdits); a lighter Claude "
-        "config dir for the fleet's account (fewer MCP connectors — their schemas are most of "
-        "the baseline); or run agents untraced: aisquare explainability disable"
+        f"roles — {_mode_step(role, config)} (per spawn: aisquare fleet spawn <role> "
+        "--permission-mode acceptEdits; a running agent: aisquare fleet restart <label> "
+        f"{_RESTART_OFF_AUTO}); a lighter Claude config dir for the fleet's account "
+        "(fewer MCP connectors — their schemas are most of the baseline); or run agents "
+        "untraced: aisquare explainability disable"
     )
 
 
@@ -219,7 +267,10 @@ def doctor_check() -> DoctorCheck | None:
     try:
         if not explainability_service.tracing_configured():
             return None
-        roles = auto_roles()
+        from aisquare.services import fleet as fleet_service  # lazy: fleet imports this module
+
+        fleet = fleet_service.settings()
+        roles = auto_roles(fleet)
     except Exception:  # a config that will not load is the config line's report
         return None
     if not roles:
@@ -227,15 +278,19 @@ def doctor_check() -> DoctorCheck | None:
     baseline = measure_baseline()
     who = ", ".join(roles)
     if baseline.refused_sessions:
+        # Not "fails at this baseline": a refused session may have started
+        # under the line and grown past it, so the baseline is stated beside
+        # the measured line rather than as the size that failed.
         detail = (
             f"{who} run in auto mode behind the explainability proxy, and "
             f"{baseline.refused_sessions} of the last {len(baseline.samples)} sessions were "
-            f"refused there ('cannot determine the safety of Bash'): the classifier's "
-            f"non-streaming request fails at this machine's session baseline of "
+            f"refused there ('cannot determine the safety of Bash'): the proxy has been "
+            f"measured to fail the classifier's non-streaming request above "
+            f"~{_k(REFUSED_ABOVE_TOKENS)} tokens, and this machine's session baseline is "
             f"{baseline.describe()} ({SDK_ISSUE})"
         )
         return DoctorCheck(
-            name=CHECK_NAME, status=CheckStatus.warn, detail=detail, fix=_remedy(roles)
+            name=CHECK_NAME, status=CheckStatus.warn, detail=detail, fix=_remedy(roles, fleet)
         )
     if baseline.predicted is None:
         detail = (
@@ -244,7 +299,7 @@ def doctor_check() -> DoctorCheck | None:
             f"been measured to fail the classifier's non-streaming request ({SDK_ISSUE})"
         )
         return DoctorCheck(
-            name=CHECK_NAME, status=CheckStatus.warn, detail=detail, fix=_remedy(roles)
+            name=CHECK_NAME, status=CheckStatus.warn, detail=detail, fix=_remedy(roles, fleet)
         )
     if baseline.predicted >= REFUSED_ABOVE_TOKENS:
         detail = (
@@ -254,7 +309,7 @@ def doctor_check() -> DoctorCheck | None:
             f"request, so tool calls are refused from the first one ({SDK_ISSUE})"
         )
         return DoctorCheck(
-            name=CHECK_NAME, status=CheckStatus.warn, detail=detail, fix=_remedy(roles)
+            name=CHECK_NAME, status=CheckStatus.warn, detail=detail, fix=_remedy(roles, fleet)
         )
     detail = (
         f"{who} run in auto mode behind the explainability proxy; session baseline "
@@ -265,7 +320,7 @@ def doctor_check() -> DoctorCheck | None:
     return DoctorCheck(name=CHECK_NAME, status=CheckStatus.ok, detail=detail)
 
 
-def spawn_note(mode: str | None) -> str | None:
+def spawn_note(mode: str | None, *, role: str, label: str, config: FleetSettings) -> str | None:
     """A receipt note for a spawn in ``auto`` mode that the evidence says will be refused.
 
     Silent unless the mode is ``auto``, tracing is configured, AND a recent
@@ -273,6 +328,21 @@ def spawn_note(mode: str | None) -> str | None:
     with no transcript yet gets no note — the doctor line carries that case —
     so a fresh install is not warned on every spawn about a size nobody has
     measured. Never raises: a warning is not a reason not to spawn.
+
+    The way out it names has two steps: the ROLE's (:func:`_mode_step` on
+    ``config``), for every agent spawned after it, and ``fleet restart <label>
+    --permission-mode acceptEdits`` for the agent itself, under ``label`` — the
+    one its row was recorded with, as the board line names it — so the step
+    runs as printed (review of #169, round 1). A restart replays the mode the
+    agent was launched with (its launch spec, #144), so the role's step alone
+    never reaches a running agent — followed as the note used to print it,
+    the restart resumed it in ``auto``, refused as before.
+    The restart's own flag does, its session resumes, and its spec keeps the
+    new mode through later restarts and switches, the automatic usage-limit
+    hand-over included. ``fleet restart`` and ``fleet switch`` start their
+    replacement through ``spawn`` too, so the note rides on their receipts:
+    it names ``fleet restart``'s flag, which every one of them can follow,
+    never ``fleet spawn``'s (review of #164, round 1).
     """
     if mode != "auto":
         return None
@@ -296,8 +366,9 @@ def spawn_note(mode: str | None) -> str | None:
         )
     return (
         f"auto mode behind the explainability proxy: {why} — expect its tool calls to be refused "
-        f"({SDK_ISSUE}); pass --permission-mode acceptEdits, or see `aisquare doctor` "
-        f"({CHECK_NAME})"
+        f"({SDK_ISSUE}); set a non-classifier mode for {role} ({_mode_step(role, config)}) and "
+        f"`aisquare fleet restart {label} {_RESTART_OFF_AUTO}` (its session resumes), or see "
+        f"`aisquare doctor` ({CHECK_NAME})"
     )
 
 
@@ -311,30 +382,75 @@ def record_refusals(session_id: str) -> int:
     refusals stay in the transcript, and a feed that repeats them every turn is
     a feed nobody reads. Never raises — this runs inside the agent's hook, where
     a failure may cost nothing but the notice.
+
+    The bell and the line go together or not at all. Not over a hand-over's
+    mark (:data:`~aisquare.services.team.HANDOVER_STATE`): ``fleet restart`` of
+    a running agent or ``fleet switch`` typed ``/exit``, which waits for this
+    turn to end, and ``attention`` written over the mark had the ``SessionEnd``
+    that follows release the claims the replacement was to inherit. The line
+    would also name a restart that is already under way. Nor over a state
+    written since this hook read the session — the write is a compare-and-set
+    on what it read, so a mark that lands meanwhile is kept (review of #164,
+    round 1). Then nothing is said, and the key records where the transcript
+    ends instead: a replacement that resumes it keeps this session's id, and is
+    judged on the refusals it adds past that point, not on the ones it
+    inherits — still refused, it gets the bell and the line; started in a mode
+    that needs no classifier, neither. A mark is read as the fleet reads it
+    (:func:`_handing_over`), so one that outlived its hand-over holds nothing
+    back.
+
+    Only for a session LAUNCHED behind the proxy: untraced, the same sentence
+    is a classifier call that failed at Anthropic, and a board line blaming the
+    proxy and advising to run untraced would send the operator after the wrong
+    thing. Decided by the trace marker a traced launch leaves in the agent's
+    environment (:func:`~aisquare.services.explainability.traced_by`), which
+    this hook inherits — not by the machine's config, which :func:`doctor_check`
+    and :func:`spawn_note` rightly read for launches still to come. A session's
+    routing is fixed when it starts: after ``aisquare explainability disable``
+    an agent already running through the proxy is still refused and must still
+    be named, and one a guard launched untraced (an unhealthy probe, an
+    ``ANTHROPIC_BASE_URL`` of the operator's own) never reached the proxy
+    however the config reads. It also keeps a config file that does not parse
+    from costing the notice: the step then falls back to the built-in roles, as
+    the fleet itself does.
     """
     try:
         if not orchestrator.team_enabled():
+            return 0
+        if explainability_service.traced_by() is None:
             return 0
         with store_session() as store:
             session = store.get_session(session_id)
             if session is None or not session.transcript_path:
                 return 0
-            count = transcripts.refusal_count(Path(session.transcript_path))
-            if count < REFUSAL_THRESHOLD:
-                return count
+            transcript = Path(session.transcript_path)
             key = _META_PREFIX + session.id
-            if store.get_meta(key) is not None:
+            recorded = store.get_meta(key)
+            since = _counted_from(recorded)
+            count = transcripts.refusal_count(transcript, since=since or 0)
+            if count < REFUSAL_THRESHOLD or (recorded is not None and since is None):
                 return count
-            store.set_meta(key, datetime.now(tz=UTC).isoformat())
             agent = store.fleet_agent_for_session(session.project_id, session.id)
+            if _handing_over(session, agent) or not store.replace_session_state(
+                session.id, session.state, "attention"
+            ):
+                # A hand-over is taking the session down, or its state moved since the
+                # read above: no bell over it and no line. The replacement that resumes
+                # this transcript is judged on what it adds past this point.
+                store.set_meta(key, f"{_COUNT_FROM}{transcripts.size(transcript)}")
+                return count
             label = agent.label if agent is not None else (session.label or session.id[:8])
-            role = agent.role if agent is not None else session.role
-            store.mark_attention(session.id)
+            step = None
+            if agent is not None:
+                from aisquare.services import fleet as fleet_service  # lazy: fleet imports us
+
+                step = _mode_step(agent.role, fleet_service.settings())
+            store.set_meta(key, datetime.now(tz=UTC).isoformat())
             team_service._emit(
                 store,
                 session.project_id,
                 EVENT_KIND,
-                _blocked_text(label, role, count, fleet=agent is not None),
+                _blocked_text(label, count, step=step),
                 session_id=session.id,
             )
             return count
@@ -342,16 +458,48 @@ def record_refusals(session_id: str) -> int:
         return 0
 
 
-def _blocked_text(label: str, role: str, count: int, *, fleet: bool) -> str:
+def _handing_over(session: TeamSession, agent: FleetAgent | None) -> bool:
+    """Whether a hand-over in flight holds ``session`` — its mark, read by the fleet's own
+    rule (``fleet._handed_over``) when the session has a live row.
+
+    The raw mark is not enough: one that outlived its hand-over — ``restart`` or
+    ``switch`` interrupted between the mark and the ``/exit`` (``KeyboardInterrupt``
+    passes their ``except Exception``, so the take-back never runs) — would hold
+    back the bell and the line of an agent that is going nowhere. Older than
+    ``HANDOVER_GRACE``, a mark is the fleet's to disregard, and this hook's too
+    (review of #164, round 1). A marked session with no live row is one whose
+    stop has already ended it.
+    """
+    if session.state != team_service.HANDOVER_STATE:
+        return False
+    if agent is None:
+        return True
+    from aisquare.services import fleet as fleet_service  # lazy: fleet imports this module
+
+    return fleet_service._handed_over(agent, session, fleet_service._now())
+
+
+def _counted_from(recorded: str | None) -> int | None:
+    """The transcript offset a hand-over left under a session's key, or ``None`` for any
+    other value — none, or the time the line was said."""
+    if recorded is None or not recorded.startswith(_COUNT_FROM):
+        return None
+    try:
+        return int(recorded.removeprefix(_COUNT_FROM))
+    except ValueError:
+        return None
+
+
+def _blocked_text(label: str, count: int, *, step: str | None) -> str:
+    """The board line; ``step`` is a fleet agent's way off ``auto``, ``None`` for any other row."""
     head = (
         f"{label}: auto mode is refusing its tool calls behind the explainability proxy "
         f"({count} refusals: 'cannot determine the safety of Bash') — the classifier's "
         f"non-streaming request fails at this session's size ({SDK_ISSUE})"
     )
-    if fleet:
+    if step is not None:
         return (
-            head + f" · set a non-classifier mode (aisquare config set fleet.roles.{role}."
-            f"permission_mode acceptEdits) and `aisquare fleet restart {label}` (its session "
-            "resumes), or run it untraced"
+            head + f" · set a non-classifier mode ({step}) and `aisquare fleet restart {label} "
+            f"{_RESTART_OFF_AUTO}` (its session resumes), or run it untraced"
         )
     return head + " · restart it with --permission-mode acceptEdits, or untraced"

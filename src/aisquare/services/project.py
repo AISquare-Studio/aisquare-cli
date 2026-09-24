@@ -59,10 +59,14 @@ def list_projects(*, all: bool = False) -> list[ProjectInfo]:
 def switch(name: str) -> ProjectInfo:
     """Pin the project matching ``name`` (a name or id prefix) as active.
 
+    Pinning is choosing it on purpose, so a captured directory is onboarded
+    too (#139): otherwise the ACTIVE project would be missing from ``project
+    list`` — no ``*`` row — and from the sidebar.
+
     Raises ``KeyError`` if nothing matches and ``ValueError`` if it is ambiguous.
     """
     with store_session() as store:
-        project = _one_match(store, name)
+        project = store.onboard_project(_one_match(store, name))
     pin_project(project.id)
     return project
 
@@ -110,10 +114,16 @@ class ProjectBusyError(Exception):
 
     def __init__(self, project: ProjectInfo, agents: list[FleetAgent]) -> None:
         labels = ", ".join(agent.label for agent in agents)
+        # `reap` is named for rows whose SERVER still answers — it refuses to end a
+        # row on a server it cannot reach, and an operator following that advice
+        # after a hand-run `tmux kill-server` reaped nothing, twice. The scoped
+        # `fleet shutdown` is the command that can, on their word.
+        scope = project.codename or display_name(project)
         super().__init__(
             f"{display_name(project)} has {len(agents)} live fleet agent(s): {labels} — "
-            "stop them first (aisquare fleet stop <label>), or run aisquare fleet reap "
-            "if they are already gone"
+            "stop them first (aisquare fleet stop <label>), or run aisquare fleet reap if "
+            f"they are already gone; if their tmux server is gone too, aisquare fleet "
+            f"shutdown --project {scope} records them"
         )
         self.project = project
         self.agents = agents
@@ -192,8 +202,8 @@ def prune_candidates(
             if (
                 cutoff is not None
                 and project.onboarded_at is None
-                and not store.entries("project", project_id=project.id)
                 and activity.get(project.id, "") < cutoff
+                and not store.entries("project", project_id=project.id)
             ):
                 found.append(PruneCandidate(project=project, reason="captured", live_agents=live))
                 continue

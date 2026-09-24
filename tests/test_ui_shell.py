@@ -25,7 +25,7 @@ import time
 from collections.abc import Awaitable, Callable, Iterator, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TypeVar
+from typing import Any, TypeVar
 
 import pytest
 from textual import Logger, events
@@ -34,7 +34,7 @@ from textual.containers import Vertical, VerticalScroll
 from textual.content import Content
 from textual.geometry import Region
 from textual.pilot import Pilot
-from textual.widgets import Button, Static, Switch
+from textual.widgets import Button, Checkbox, Input, Static, Switch
 from textual.widgets._toast import Toast
 from textual.worker import Worker, WorkerState
 
@@ -53,6 +53,7 @@ from aisquare.cli.ui.sidebar import (
 )
 from aisquare.cli.ui.terminal import (
     EscapeToSidebar,
+    SelectionHost,
     TerminalPane,
     route_selection_gesture,
 )
@@ -64,10 +65,13 @@ from aisquare.cli.ui.views.explainability import ExplainabilityView
 from aisquare.cli.ui.views.onboard import OnboardFailed, ProjectOnboarded
 from aisquare.cli.ui.views.project import ManagerTab, ProjectView
 from aisquare.core import tmux as tmux_core
+from aisquare.core.config import load_config, save_config
 from aisquare.core.store import ContextStore, store_session
 from aisquare.core.tmux import Completed
 from aisquare.models import CheckStatus, DoctorCheck, FleetAgent, FleetAgentStatus, ProjectInfo
+from aisquare.services import explainability as explainability_service
 from aisquare.services import fleet as fleet_service
+from tests.pane_harness import FakePane, FakeTmux, asks_a_server, move, press, release, socket_of
 
 T = TypeVar("T")
 SIZE = (140, 40)
@@ -121,12 +125,6 @@ def status(
     return FleetAgentStatus(agent=agent, state=state)
 
 
-def _socket_of(argv: Sequence[str]) -> str | None:
-    """The ``-L <socket>`` a tmux argv addresses, or ``None`` when it names none."""
-    args = list(argv)
-    return args[args.index("-L") + 1] if "-L" in args else None
-
-
 @pytest.fixture(autouse=True)
 def no_real_tmux(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[tuple[str, ...]]]:
     """Every tmux command this file causes must address :data:`PRIVATE_SOCKET`.
@@ -148,7 +146,7 @@ def no_real_tmux(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[tuple[str, ..
 
     monkeypatch.setattr(tmux_core, "_tmux", record)
     yield ran
-    wrong = [argv for argv in ran if _socket_of(argv) != PRIVATE_SOCKET]
+    wrong = [argv for argv in ran if asks_a_server(argv) and socket_of(argv) != PRIVATE_SOCKET]
     assert not wrong, f"a UI test addressed a tmux socket that is not the test's: {wrong[:2]}"
 
 
@@ -251,14 +249,18 @@ def test_the_no_tmux_guard_is_reachable(
     drive(go)
 
     assert no_real_tmux, "no tmux call recorded — the guard inspects nothing here"
-    assert {_socket_of(argv) for argv in no_real_tmux} == {PRIVATE_SOCKET}
+    served = [argv for argv in no_real_tmux if asks_a_server(argv)]
+    assert served, "no tmux SERVER was addressed — the guard inspects nothing here"
+    assert {socket_of(argv) for argv in served} == {PRIVATE_SOCKET}
 
 
 def test_the_no_tmux_guard_rejects_the_real_fleets_socket() -> None:
     """The negative half, on the rule itself — and it must still SEE a good argv."""
-    assert _socket_of(("tmux", "-L", "asq", "capture-pane")) != PRIVATE_SOCKET
-    assert _socket_of(("tmux", "-L", PRIVATE_SOCKET, "capture-pane")) == PRIVATE_SOCKET
-    assert _socket_of(("tmux", "-V")) is None  # an argv naming no socket is not the test's
+    assert socket_of(("tmux", "-L", "asq", "capture-pane")) != PRIVATE_SOCKET
+    assert socket_of(("tmux", "-L", PRIVATE_SOCKET, "capture-pane")) == PRIVATE_SOCKET
+    assert socket_of(("tmux", "-V")) is None  # an argv naming no socket is not the test's…
+    assert not asks_a_server(("tmux", "-V"))  # …and a version query reaches no server to guard
+    assert asks_a_server(("tmux", "-L", "asq", "capture-pane"))
     assert FleetAgent.model_fields["tmux_socket"].default == "asq" != PRIVATE_SOCKET
 
 
@@ -483,41 +485,20 @@ def test_clicking_a_project_opens_its_project_view_once(tmp_path: Path, script: 
     assert selected
 
 
-class PaneScript:
-    """A tmux runner that answers a pane's frames, so a real ``AgentView`` in a
-    real ``FleetApp`` shows real rows.
+def scripted_pane(ran: list[tuple[str, ...]], rows: list[str]) -> FakeTmux:
+    """The shared fake tmux, answering one pane's frames so a real ``AgentView``
+    in a real ``FleetApp`` shows real rows.
 
     ``no_real_tmux`` stubs every command into a failure, which is right for
     tests about routing and wrong for one about SELECTING text — there is
-    nothing on screen to select. This answers the one call the pane makes per
-    frame (``capture-pane`` + ``display-message`` in a single process) and reads
-    the pane's size back out of the ``resize-window`` that precedes it, exactly
-    as the real server would.
+    nothing on screen to select. The fake answers the one call the pane makes
+    per frame (``capture-pane`` + ``display-message`` in a single process) and
+    follows the ``resize-window`` that precedes it, exactly as the real server
+    would; ``record=ran`` keeps the socket guard reading every argv.
     """
-
-    def __init__(self, ran: list[tuple[str, ...]], rows: list[str]) -> None:
-        self.ran = ran
-        self.rows = rows
-        self.width, self.height = 40, len(rows)
-
-    def __call__(self, argv: Sequence[str], stdin: bytes | None) -> Completed:
-        args = list(argv)
-        self.ran.append(tuple(args))
-        if args[1:] == ["-V"]:
-            return Completed(0, "tmux 3.5a\n", "")
-        command = args[5:]
-        if command and command[0] == "resize-window":
-            self.width = int(command[command.index("-x") + 1])
-            self.height = int(command[command.index("-y") + 1])
-            return Completed(0, "", "")
-        if command and command[0] == "capture-pane":
-            body = [*self.rows, *([""] * (self.height - len(self.rows)))][: self.height]
-            facts = tmux_core._SEP.join(
-                ["%1", str(self.width), str(self.height), "0", "0", "1", "0", "0",
-                 "0", "", "0", "bash", "0", "0", ""]
-            )  # fmt: skip
-            return Completed(0, "\n".join([*body, facts]) + "\n", "")
-        return Completed(0, "", "")
+    tmux = FakeTmux(record=ran)
+    tmux.panes["%1"] = FakePane(screen=list(rows), width=40, height=len(rows))
+    return tmux
 
 
 async def _agent_pane(pilot: Pilot[None]) -> tuple[TerminalPane, Static]:
@@ -548,33 +529,35 @@ def test_a_drag_from_the_agent_header_into_the_pane_copies_through_the_app(
 ) -> None:
     """The app is what turns the end of a selection gesture into a copy.
 
-    ``FleetApp.on_text_selected`` is the only thing that makes a drag crossing
-    the pane's edge copy, and nothing exercised it: replacing its body with
-    ``return`` left the whole suite green, because every test of that gesture
-    re-implemented the handler on its own test ``Host`` (review of #120, round
-    7). This drives the real app, the real ``AgentView``, and the real header.
+    ``SelectionHost.on_event`` — ``FleetApp``'s, by inheritance — is the only
+    thing that makes a drag crossing the pane's edge copy, and nothing used to
+    exercise it: replacing the app's handler with ``return`` left the whole
+    suite green, because every test of that gesture re-implemented the handler
+    on its own test ``Host`` (review of #120, round 7). This drives the real
+    app, the real ``AgentView``, and the real header, with the events the
+    driver would post.
     """
     seed(tmp_path, ("prj_a", "alpha", None))
     script["prj_a"] = [status("prj_a", "coder-auth", "coder", "working")]
     monkeypatch.setattr(
-        tmux_core, "_tmux", PaneScript(no_real_tmux, ["red plain", "second row", "third row"])
+        tmux_core, "_tmux", scripted_pane(no_real_tmux, ["red plain", "second row", "third row"])
     )
 
     async def go(pilot: Pilot[None]) -> tuple[str, int, str, int]:
         app = fleet_app(pilot)
         pane, header = await _agent_pane(pilot)
-        await pilot.mouse_down(header, offset=(1, 0))
-        await pilot.hover(pane, offset=(5, 1))
-        await pilot.mouse_up(pane, offset=(5, 1))
+        await press(pilot, header, (1, 0))
+        await move(pilot, pane, (5, 1), button=1)
+        await release(pilot, pane, (5, 1))
         await pilot.pause()
         crossed, toasts = app.clipboard, len(app._notifications)
         # The negative half: a gesture that touches no row of the pane must
         # leave both the clipboard and the toast count exactly as they were.
         app.screen.clear_selection()
         await pilot.pause()
-        await pilot.mouse_down(header, offset=(1, 0))
-        await pilot.hover(header, offset=(6, 0))
-        await pilot.mouse_up(header, offset=(6, 0))
+        await press(pilot, header, (1, 0))
+        await move(pilot, header, (6, 0), button=1)
+        await release(pilot, header, (6, 0))
         await pilot.pause()
         return crossed, toasts, app.clipboard, len(app._notifications)
 
@@ -592,22 +575,23 @@ def test_a_right_button_drag_from_the_agent_header_copies_nothing_through_the_ap
     no_real_tmux: list[tuple[str, ...]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """``FleetApp.on_mouse_down`` is the whole of the button fix: a pane only
-    sees a press that lands ON it, so without the app a right-button drag begun
-    on the header reads as a left one and copies. Nothing reached that handler —
-    replacing its body left the suite green (review of #120, round 8)."""
+    """The app's record of the press is the whole of the button fix: a pane
+    only sees a press that lands ON it, so without the app a right-button drag
+    begun on the header reads as a left one and copies. Nothing reached that
+    handler once — replacing its body left the suite green (review of #120,
+    round 8) — and it has since moved into ``SelectionHost.on_event``."""
     seed(tmp_path, ("prj_a", "alpha", None))
     script["prj_a"] = [status("prj_a", "coder-auth", "coder", "working")]
     monkeypatch.setattr(
-        tmux_core, "_tmux", PaneScript(no_real_tmux, ["red plain", "second row", "third row"])
+        tmux_core, "_tmux", scripted_pane(no_real_tmux, ["red plain", "second row", "third row"])
     )
 
     async def go(pilot: Pilot[None]) -> tuple[str, int, bool]:
         app = fleet_app(pilot)
         pane, header = await _agent_pane(pilot)
-        await pilot.mouse_down(header, offset=(1, 0), button=3)
-        await pilot.hover(pane, offset=(5, 1))
-        await pilot.mouse_up(pane, offset=(5, 1))
+        await press(pilot, header, (1, 0), button=3)
+        await move(pilot, pane, (5, 1), button=3)
+        await release(pilot, pane, (5, 1), button=3)
         await pilot.pause()
         return app.clipboard, len(app._notifications), pane.text_selection is not None
 
@@ -632,7 +616,7 @@ def test_one_panes_failure_does_not_stop_the_others_being_told(
         status("prj_a", "coder-two", "coder", "working", minute=1),
     ]
     monkeypatch.setattr(
-        tmux_core, "_tmux", PaneScript(no_real_tmux, ["red plain", "second row", "third row"])
+        tmux_core, "_tmux", scripted_pane(no_real_tmux, ["red plain", "second row", "third row"])
     )
 
     logged: list[str] = []
@@ -653,9 +637,9 @@ def test_one_panes_failure_does_not_stop_the_others_being_told(
         assert len(panes) >= 2, "the app keeps a view per opened agent mounted"
 
         async def cross() -> None:
-            await pilot.mouse_down(header, offset=(1, 0))
-            await pilot.hover(pane, offset=(5, 1))
-            await pilot.mouse_up(pane, offset=(5, 1))
+            await press(pilot, header, (1, 0))
+            await move(pilot, pane, (5, 1), button=1)
+            await release(pilot, pane, (5, 1))
             await pilot.pause()
 
         # The negative half first, while every pane still works.
@@ -696,7 +680,7 @@ def test_a_screen_that_cannot_be_queried_is_logged_not_a_crash(
     seed(tmp_path, ("prj_a", "alpha", None))
     script["prj_a"] = [status("prj_a", "coder-auth", "coder", "working")]
     monkeypatch.setattr(
-        tmux_core, "_tmux", PaneScript(no_real_tmux, ["red plain", "second row", "third row"])
+        tmux_core, "_tmux", scripted_pane(no_real_tmux, ["red plain", "second row", "third row"])
     )
     logged: list[str] = []
     original_call = Logger.__call__
@@ -722,6 +706,69 @@ def test_a_screen_that_cannot_be_queried_is_logged_not_a_crash(
     recorded, alive = drive(go)
     assert alive, "the app survives a screen it cannot resolve"
     assert any("no screen to tell" in line for line in recorded), recorded
+
+
+def test_the_shell_and_the_test_host_share_the_gesture_handlers() -> None:
+    """The pane tests' ``Host`` once mirrored ``FleetApp``'s gesture handlers by
+    hand and fell behind, which hid two regressions (reviews of #120, rounds 6
+    and 9). Both derive from ``SelectionHost`` now and add nothing of their own
+    to the press, the release, the copy key or the clipboard — so a change to
+    the shell's gesture path is a change to what the pane tests exercise."""
+    from tests.test_terminal_pane import Host
+
+    for app in (FleetApp, Host):
+        assert issubclass(app, SelectionHost), app
+        for name in ("on_event", "get_default_screen", "copy_to_clipboard", "on_mouse_down"):
+            assert name not in vars(app), f"{app.__name__} overrides {name}"
+            assert name not in vars(app) and "on_text_selected" not in vars(app)
+
+
+def test_ctrl_c_from_the_sidebar_copies_what_the_drag_copied(
+    tmp_path: Path,
+    script: Script,
+    no_real_tmux: list[tuple[str, ...]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Finding 10 of the #135 review, in the real shell. A drag from the agent
+    header into the pane leaves focus in the sidebar, and the pane's toast
+    promises that ctrl+c copies again — but the key reached Textual's own
+    ``screen.copy_text``, which joined the header line onto the pane's text. The
+    default screen is ``PaneScreen`` now: the pane copies, exactly as its
+    release did, and clears its highlight."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+    script["prj_a"] = [status("prj_a", "coder-auth", "coder", "working")]
+    monkeypatch.setattr(
+        tmux_core, "_tmux", scripted_pane(no_real_tmux, ["red plain", "second row", "third row"])
+    )
+
+    async def go(pilot: Pilot[None]) -> tuple[str, str, int, bool, bool]:
+        app = fleet_app(pilot)
+        pane, header = await _agent_pane(pilot)
+        app.sidebar.focus()
+        await pilot.pause()
+        await press(pilot, header, (1, 0))
+        await move(pilot, pane, (5, 1), button=1)
+        await release(pilot, pane, (5, 1))
+        dragged = app.clipboard
+        in_sidebar = app.focused is app.sidebar or app.sidebar in (
+            app.focused.ancestors if app.focused else []
+        )
+        await pilot.press("ctrl+c")
+        await pilot.pause()
+        return (
+            dragged,
+            app.clipboard,
+            len(app._notifications),
+            in_sidebar,
+            pane.text_selection is None,
+        )
+
+    dragged, again, toasts, in_sidebar, cleared = drive(go, notifications=True)
+    assert dragged == "red plain\nsecon"
+    assert in_sidebar, "the premise: focus never left the sidebar"
+    assert again == dragged, "ctrl+c copied the pane's text, not the header line joined onto it"
+    assert toasts == 2, "and said so, as the release did"
+    assert cleared, "and cleared the highlight, as the pane's own ctrl+c does"
 
 
 def test_clicking_an_agent_opens_its_agent_view(tmp_path: Path, script: Script) -> None:
@@ -1061,6 +1108,513 @@ def test_a_doctor_report_is_painted_only_in_the_scope_it_ran_for(
     assert Content.from_markup(rendered).plain == rendered.replace("[archive]", "")
 
 
+def test_the_setup_form_wires_a_machine_without_a_shell(tmp_path: Path, script: Script) -> None:
+    """#131's second half: the tab could SEE the key was missing and not set it.
+
+    An external adopter's first contact with tracing was a runbook of flags, one
+    of which — the hosted proxy beside the gateway — decides whether their Runs
+    arrive and cannot be guessed. Typing a gateway is enough to get it.
+    """
+    seed(tmp_path, ("prj_a", "alpha", None))
+
+    async def go(pilot: Pilot[None]) -> None:
+        app = fleet_app(pilot)
+        await app.content.add_content(ExplainabilityView(id="tracing"), set_current=True)
+        await pilot.pause()
+        await settle(app)
+        app.screen.query_one("#explainability-target", Input).value = "stg"
+        app.screen.query_one("#explainability-gateway", Input).value = "https://g.example"
+        app.screen.query_one("#explainability-prefix", Input).value = "nishil"
+        app.screen.query_one("#explainability-key", Input).value = "AIS_written_by_the_form"
+        app.screen.query_one("#explainability-save", Button).press()
+        await pilot.pause()
+        await settle(app)
+
+    drive(go, notifications=True)
+
+    target = load_config().explainability.targets["stg"]
+    assert target.gateway_url == "https://g.example"
+    assert target.proxy_url == "https://g.example:9443", "the hosted proxy, offered not demanded"
+    assert target.agent_name_template == "nishil-{role}"
+    assert explainability_service.stored_api_key() == "AIS_written_by_the_form"
+
+
+def _setup(app: Any, **fields: str) -> None:
+    """Type into the Setup form's fields by id (``key-env`` as ``key_env=``)."""
+    for name, value in fields.items():
+        app.screen.query_one(f"#explainability-{name.replace('_', '-')}", Input).value = value
+
+
+def test_a_configured_proxy_is_never_replaced_by_the_suggestion(
+    tmp_path: Path, script: Script
+) -> None:
+    """Review blocker #3: the test was the BLANK FIELD, not the stored value.
+
+    A target with a deliberate ``proxy_url`` whose gateway the operator merely
+    corrects (gateway typed, proxy left blank) had its proxy silently replaced
+    — the opposite of the "a blank field changes nothing" contract printed above
+    this very form, which ``test_configure_target_applies_only_what_was_given``
+    asserts one layer down.
+    """
+    seed(tmp_path, ("prj_a", "alpha", None))
+    config = load_config()
+    explainability_service.configure_target(
+        config,
+        target_name="stg",
+        gateway_url="https://old.example",
+        proxy_url="http://127.0.0.1:9090",
+        enable=False,
+    )
+    save_config(config)
+
+    async def go(pilot: Pilot[None]) -> None:
+        app = fleet_app(pilot)
+        await app.content.add_content(ExplainabilityView(id="tracing"), set_current=True)
+        await pilot.pause()
+        await settle(app)
+        _setup(app, target="stg", gateway="https://new.example")
+        app.screen.query_one("#explainability-save", Button).press()
+        await pilot.pause()
+        await settle(app)
+
+    drive(go, notifications=True)
+    target = load_config().explainability.targets["stg"]
+    assert target.gateway_url == "https://new.example", "the correction lands"
+    assert target.proxy_url == "http://127.0.0.1:9090", "the deliberate proxy survives it"
+
+
+def test_the_suggestion_still_fills_an_empty_proxy(tmp_path: Path, script: Script) -> None:
+    """The negative half of #3: with nothing to overwrite, the offer stands."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+
+    async def go(pilot: Pilot[None]) -> None:
+        app = fleet_app(pilot)
+        await app.content.add_content(ExplainabilityView(id="tracing"), set_current=True)
+        await pilot.pause()
+        await settle(app)
+        _setup(app, target="stg", gateway="https://g.example")
+        app.screen.query_one("#explainability-save", Button).press()
+        await pilot.pause()
+        await settle(app)
+
+    drive(go, notifications=True)
+    assert load_config().explainability.targets["stg"].proxy_url == "https://g.example:9443"
+
+
+def test_a_malformed_gateway_does_not_take_the_ui_down(tmp_path: Path, script: Script) -> None:
+    """Review blocker #2: ``ValueError`` escaping a ``Button.Pressed`` handler.
+
+    Every other failure in ``_save_setup`` — read, write, key — is caught and
+    turned into a notice; this one propagated.
+    """
+    seed(tmp_path, ("prj_a", "alpha", None))
+
+    async def go(pilot: Pilot[None]) -> str:
+        app = fleet_app(pilot)
+        await app.content.add_content(ExplainabilityView(id="tracing"), set_current=True)
+        await pilot.pause()
+        await settle(app)
+        _setup(app, target="stg", gateway="http://[::1")
+        app.screen.query_one("#explainability-save", Button).press()
+        await pilot.pause()
+        await settle(app)
+        return app.screen.query_one(Toast).render().plain
+
+    assert drive(go, notifications=True)  # the app is alive to be read at all
+
+
+def test_a_schemeless_gateway_is_refused_rather_than_stored(tmp_path: Path, script: Script) -> None:
+    """Review #12: the stranded state this PR prevents, reached through the form.
+
+    A bare host parses with the whole string as the PATH, so there is no host:
+    no suggestion is offered, the proxy stays at the loopback default, and
+    ``is_loopback`` reads the empty host as local — suppressing the very caution
+    that would have flagged it. Configured, green and stranded, four characters
+    from correct.
+    """
+    seed(tmp_path, ("prj_a", "alpha", None))
+
+    async def go(pilot: Pilot[None]) -> str:
+        app = fleet_app(pilot)
+        await app.content.add_content(ExplainabilityView(id="tracing"), set_current=True)
+        await pilot.pause()
+        await settle(app)
+        _setup(app, target="stg", gateway="stg-x.aisquare.studio")
+        app.screen.query_one("#explainability-save", Button).press()
+        await pilot.pause()
+        await settle(app)
+        return app.screen.query_one(Toast).render().plain
+
+    rendered = drive(go, notifications=True)
+    assert "scheme" in rendered and "https://stg-x.aisquare.studio" in rendered
+    assert load_config().explainability.targets == {}, "nothing is stored"
+
+
+@pytest.mark.parametrize("prefix", ["nishil-{role}", "nishil}", "team-{env}-{role}"])
+def test_a_prefix_with_braces_is_refused_not_repaired(
+    tmp_path: Path, script: Script, prefix: str
+) -> None:
+    """Review #10 and blocker B, re-decided in the #132 follow-ups. The field
+    asks for a NAME; an operator who has read the ``--identity`` examples types
+    ``nishil-{role}``, and composed again that is ``nishil-coder-coder``. The
+    first cuts REPAIRED the input — stripped at the first brace and stored what
+    preceded it — so the tab kept a template the operator never typed
+    (``team-{env}-{role}`` became ``team-{role}``) while the CLI's ``--identity``
+    refused the same input. One answer now: refused, with the reason, and
+    nothing stored."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+
+    async def go(pilot: Pilot[None]) -> str:
+        app = fleet_app(pilot)
+        await app.content.add_content(ExplainabilityView(id="tracing"), set_current=True)
+        await pilot.pause()
+        await settle(app)
+        _setup(app, target="stg", prefix=prefix)
+        app.screen.query_one("#explainability-save", Button).press()
+        await pilot.pause()
+        await settle(app)
+        return _toasts(app)
+
+    rendered = drive(go, notifications=True)
+    assert "is a name, not a template" in rendered
+    assert "stg" not in load_config().explainability.targets, "refused: nothing was stored"
+
+
+def test_the_form_can_name_the_key_variable(tmp_path: Path, script: Script) -> None:
+    """Review #11: ``configure_target`` already took ``key_env`` and the form was
+    its one caller omitting it, so a target configured with ``--key-env MY_VAR``
+    got a success toast and no effect."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+
+    async def go(pilot: Pilot[None]) -> None:
+        app = fleet_app(pilot)
+        await app.content.add_content(ExplainabilityView(id="tracing"), set_current=True)
+        await pilot.pause()
+        await settle(app)
+        _setup(app, target="stg", key_env="MY_WORKSPACE_KEY")
+        app.screen.query_one("#explainability-save", Button).press()
+        await pilot.pause()
+        await settle(app)
+
+    drive(go, notifications=True)
+    assert load_config().explainability.targets["stg"].api_key_env == "MY_WORKSPACE_KEY"
+
+
+def test_saving_setup_does_not_by_itself_turn_tracing_on(tmp_path: Path, script: Script) -> None:
+    """Consent stays a button (#50's boundary): configuring is not enabling."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+
+    async def go(pilot: Pilot[None]) -> None:
+        app = fleet_app(pilot)
+        await app.content.add_content(ExplainabilityView(id="tracing"), set_current=True)
+        await pilot.pause()
+        await settle(app)
+        app.screen.query_one("#explainability-gateway", Input).value = "https://g.example"
+        app.screen.query_one("#explainability-save", Button).press()
+        await pilot.pause()
+        await settle(app)
+
+    drive(go, notifications=True)
+    assert load_config().explainability.enabled is False
+
+
+def test_the_typed_key_is_never_rendered_back(tmp_path: Path, script: Script) -> None:
+    """The field is cleared after a save. A masked Input still holds the value,
+    and this view's own docstring rules the key out of a full-screen UI."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+
+    async def go(pilot: Pilot[None]) -> str:
+        app = fleet_app(pilot)
+        await app.content.add_content(ExplainabilityView(id="tracing"), set_current=True)
+        await pilot.pause()
+        await settle(app)
+        app.screen.query_one("#explainability-key", Input).value = "AIS_secret"
+        app.screen.query_one("#explainability-save", Button).press()
+        await pilot.pause()
+        await settle(app)
+        return app.screen.query_one("#explainability-key", Input).value
+
+    assert drive(go, notifications=True) == ""
+
+
+def test_a_blank_form_changes_nothing_and_says_so(tmp_path: Path, script: Script) -> None:
+    """The negative half: pressing Save with nothing typed is not a write."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+
+    async def go(pilot: Pilot[None]) -> str:
+        app = fleet_app(pilot)
+        await app.content.add_content(ExplainabilityView(id="tracing"), set_current=True)
+        await pilot.pause()
+        await settle(app)
+        app.screen.query_one("#explainability-save", Button).press()
+        await pilot.pause()
+        return app.screen.query_one(Toast).render().plain
+
+    assert "nothing to save" in drive(go, notifications=True)
+    assert load_config().explainability.targets == {}
+
+
+def _toasts(app: Any) -> str:
+    """Every toast on screen, oldest first — one save can raise more than one."""
+    return " | ".join(toast.render().plain for toast in app.screen.query(Toast))
+
+
+def test_the_form_diagnoses_a_key_variable_no_shell_can_export_by_name(
+    tmp_path: Path, script: Script
+) -> None:
+    """Round 7 of #203. The form's own key guard ran before the writer's
+    validation, so a ``$EXPLAINABILITY_API_KEY`` paste with a key typed beside it
+    was diagnosed as "export $$EXPLAINABILITY_API_KEY" — a sentence nobody can
+    act on — while ``key_env_problem``, which names the exact fault, never ran.
+    The writer's question first."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+
+    async def go(pilot: Pilot[None]) -> str:
+        app = fleet_app(pilot)
+        await app.content.add_content(ExplainabilityView(id="tracing"), set_current=True)
+        await pilot.pause()
+        await settle(app)
+        _setup(app, target="stg", key_env="$EXPLAINABILITY_API_KEY", key="wk-secret")
+        app.screen.query_one("#explainability-save", Button).press()
+        await pilot.pause()
+        await settle(app)
+        return _toasts(app)
+
+    rendered = drive(go, notifications=True)
+    assert "without the $" in rendered and "EXPLAINABILITY_API_KEY" in rendered
+    assert "$$" not in rendered, "never a variable nobody can export"
+    assert "stg" not in load_config().explainability.targets, "refused: nothing stored"
+
+
+def test_a_key_typed_for_a_target_that_names_its_own_variable_is_refused(
+    tmp_path: Path, script: Script
+) -> None:
+    """Review blocker C. ``resolve_target`` reads the key file only for the
+    default variable, so key + custom key variable in one save wrote a file
+    nothing reads and named a variable nothing exports: ``✓ setup saved`` over
+    ``$MY_WORKSPACE_KEY is NOT set``. The whole save is refused, with the reason."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+
+    async def go(pilot: Pilot[None]) -> str:
+        app = fleet_app(pilot)
+        await app.content.add_content(ExplainabilityView(id="tracing"), set_current=True)
+        await pilot.pause()
+        await settle(app)
+        _setup(app, target="stg", key_env="MY_WORKSPACE_KEY", key="AIS_typed")
+        app.screen.query_one("#explainability-save", Button).press()
+        await pilot.pause()
+        await settle(app)
+        return _toasts(app)
+
+    rendered = drive(go, notifications=True)
+    assert "MY_WORKSPACE_KEY" in rendered and "never be used" in rendered
+    assert load_config().explainability.targets == {}, "refused whole, not half"
+    assert explainability_service.stored_api_key() is None, "and no key file was written"
+
+
+def test_a_key_typed_for_a_target_that_already_names_its_own_variable_is_refused(
+    tmp_path: Path, script: Script
+) -> None:
+    """The deeper half of C: the variable was stored last month and the field
+    is blank today. The rule is judged against what the target will read from,
+    not against the field."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+    config = load_config()
+    explainability_service.configure_target(
+        config,
+        target_name="prod",
+        gateway_url="https://prod.example",
+        key_env="PROD_KEY",
+        enable=False,
+    )
+    save_config(config)
+
+    async def go(pilot: Pilot[None]) -> str:
+        app = fleet_app(pilot)
+        await app.content.add_content(ExplainabilityView(id="tracing"), set_current=True)
+        await pilot.pause()
+        await settle(app)
+        _setup(app, target="prod", key="AIS_typed")
+        app.screen.query_one("#explainability-save", Button).press()
+        await pilot.pause()
+        await settle(app)
+        return _toasts(app)
+
+    rendered = drive(go, notifications=True)
+    assert "PROD_KEY" in rendered
+    assert explainability_service.stored_api_key() is None
+
+
+def test_a_key_beside_the_default_variable_is_stored(tmp_path: Path, script: Script) -> None:
+    """The negative half of C: naming the default variable explicitly is fine."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+
+    async def go(pilot: Pilot[None]) -> None:
+        app = fleet_app(pilot)
+        await app.content.add_content(ExplainabilityView(id="tracing"), set_current=True)
+        await pilot.pause()
+        await settle(app)
+        _setup(app, target="stg", key_env="EXPLAINABILITY_API_KEY", key="AIS_typed")
+        app.screen.query_one("#explainability-save", Button).press()
+        await pilot.pause()
+        await settle(app)
+
+    drive(go, notifications=True)
+    assert explainability_service.stored_api_key() == "AIS_typed"
+    assert load_config().explainability.targets["stg"].api_key_env == "EXPLAINABILITY_API_KEY"
+
+
+def test_the_deployment_field_does_not_move_the_machine(tmp_path: Path, script: Script) -> None:
+    """Review blocker D. An operator on stg correcting prod's gateway had moved
+    the machine to prod — traffic to a deployment nobody chose, this tab's own
+    headline failure from the other side. The entry is written; the machine
+    stays; the toast says both and names the switch."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+
+    async def go(pilot: Pilot[None]) -> str:
+        app = fleet_app(pilot)
+        await app.content.add_content(ExplainabilityView(id="tracing"), set_current=True)
+        await pilot.pause()
+        await settle(app)
+        _setup(app, target="prod", gateway="https://prod.example")
+        app.screen.query_one("#explainability-save", Button).press()
+        await pilot.pause()
+        await settle(app)
+        return _toasts(app)
+
+    rendered = drive(go, notifications=True)
+    settings = load_config().explainability
+    assert settings.targets["prod"].gateway_url == "https://prod.example", "the correction lands"
+    assert settings.target == "stg", "the machine stays where it was"
+    assert "stays on 'stg'" in rendered and "make active" in rendered
+
+
+def test_ticking_make_active_is_the_switch(tmp_path: Path, script: Script) -> None:
+    """The affordance D asked for: moving the machine is a separate, visible act."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+
+    async def go(pilot: Pilot[None]) -> None:
+        app = fleet_app(pilot)
+        await app.content.add_content(ExplainabilityView(id="tracing"), set_current=True)
+        await pilot.pause()
+        await settle(app)
+        _setup(app, target="prod", gateway="https://prod.example")
+        app.screen.query_one("#explainability-switch", Checkbox).value = True
+        app.screen.query_one("#explainability-save", Button).press()
+        await pilot.pause()
+        await settle(app)
+
+    drive(go, notifications=True)
+    settings = load_config().explainability
+    assert settings.target == "prod"
+    assert settings.targets["prod"].gateway_url == "https://prod.example"
+
+
+def test_a_deployment_name_alone_writes_nothing_and_says_so(tmp_path: Path, script: Script) -> None:
+    """The sharper half of D: typing ONLY a name used to flip ``settings.target``
+    while writing no entry, under a ``✓ setup saved`` toast."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+
+    async def go(pilot: Pilot[None]) -> str:
+        app = fleet_app(pilot)
+        await app.content.add_content(ExplainabilityView(id="tracing"), set_current=True)
+        await pilot.pause()
+        await settle(app)
+        _setup(app, target="prod")
+        app.screen.query_one("#explainability-save", Button).press()
+        await pilot.pause()
+        return _toasts(app)
+
+    rendered = drive(go, notifications=True)
+    settings = load_config().explainability
+    assert settings.target == "stg" and settings.targets == {}
+    assert "nothing to save" in rendered and "'prod'" in rendered
+
+
+def test_a_deliberate_top_level_proxy_is_not_shadowed_by_the_suggestion(
+    tmp_path: Path, script: Script
+) -> None:
+    """Review follow-up F. A top-level ``[explainability] proxy_url`` that is not
+    the shipped default is a choice (``_proxy_source`` says ``config``), and the
+    hosted suggestion must not be written over it as a per-target value."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+    config = load_config()
+    config.explainability.proxy_url = "http://127.0.0.1:9190"
+    save_config(config)
+
+    async def go(pilot: Pilot[None]) -> None:
+        app = fleet_app(pilot)
+        await app.content.add_content(ExplainabilityView(id="tracing"), set_current=True)
+        await pilot.pause()
+        await settle(app)
+        _setup(app, target="stg", gateway="https://g.example")
+        app.screen.query_one("#explainability-save", Button).press()
+        await pilot.pause()
+        await settle(app)
+
+    drive(go, notifications=True)
+    settings = load_config().explainability
+    assert settings.targets["stg"].gateway_url == "https://g.example"
+    assert settings.targets["stg"].proxy_url is None, "no suggestion over a chosen proxy"
+    assert settings.proxy_url == "http://127.0.0.1:9190"
+
+
+def test_a_malformed_gateway_is_told_apart_from_a_schemeless_one(
+    tmp_path: Path, script: Script
+) -> None:
+    """Review follow-up I. ``http://[::1`` got "needs a scheme — try
+    https://http://[::1"; the regression test asserted only that a toast
+    appeared, so the wrong advice was uncovered."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+
+    async def go(pilot: Pilot[None]) -> str:
+        app = fleet_app(pilot)
+        await app.content.add_content(ExplainabilityView(id="tracing"), set_current=True)
+        await pilot.pause()
+        await settle(app)
+        _setup(app, target="stg", gateway="http://[::1")
+        app.screen.query_one("#explainability-save", Button).press()
+        await pilot.pause()
+        await settle(app)
+        return _toasts(app)
+
+    rendered = drive(go, notifications=True)
+    assert "cannot be parsed" in rendered
+    assert "https://http://" not in rendered
+    assert load_config().explainability.targets == {}
+
+
+def test_the_key_field_is_cleared_even_when_the_key_write_fails(
+    tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review follow-up M. A failed ``store_api_key`` returned before the field
+    was cleared, so the plaintext stayed live in the widget for the session —
+    against the view's own "never shown back". Cleared the moment a write
+    begins, and the notice says to type it again."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+
+    def refuse(_key: str) -> Path:
+        raise OSError("disk says no")
+
+    monkeypatch.setattr(explainability_service, "store_api_key", refuse)
+
+    async def go(pilot: Pilot[None]) -> tuple[str, str]:
+        app = fleet_app(pilot)
+        await app.content.add_content(ExplainabilityView(id="tracing"), set_current=True)
+        await pilot.pause()
+        await settle(app)
+        _setup(app, target="stg", gateway="https://g.example", key="AIS_secret")
+        app.screen.query_one("#explainability-save", Button).press()
+        await pilot.pause()
+        await settle(app)
+        return app.screen.query_one("#explainability-key", Input).value, _toasts(app)
+
+    value, rendered = drive(go, notifications=True)
+    assert value == ""
+    assert "could not be written" in rendered and "type it again" in rendered
+    assert load_config().explainability.targets["stg"].gateway_url == "https://g.example"
+
+
 def test_the_explainability_views_toasts_keep_bracketed_data(
     tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1167,7 +1721,9 @@ def test_q_quits_from_the_sidebar_but_reaches_a_focused_terminal_pane(
     keys, alive, with_pane, from_sidebar, after_q = drive(go)
     assert keys == list(probes)  # every probe reached the pane, none was eaten
     assert alive is None  # …and q / ctrl+q did not quit
-    assert with_pane == "Screen"  # no palette (f1), theme picker (t) or help (?) opened
+    # The default screen is the app's ``PaneScreen`` (the copy key outside a pane):
+    # no palette (f1), theme picker (t) or help (?) opened over it.
+    assert with_pane == "PaneScreen"
     assert from_sidebar == "CommandPalette"
     assert after_q == 0
 
@@ -1229,7 +1785,7 @@ def test_the_app_keys_are_refused_while_focus_is_in_a_view(tmp_path: Path, scrip
     # reader should read "q quit from a form", not "the second probe lost focus".
     assert codes == [None, None], "q in a form must not quit the fleet UI"
     assert focused == ["Button", "Switch", "Button"]  # the probes really had focus
-    assert screens == ["Screen", "Screen", "HelpScreen", "HelpScreen"]
+    assert screens == ["PaneScreen", "PaneScreen", "HelpScreen", "HelpScreen"]
     assert quit_code == 0  # …and the sidebar still quits
 
 
@@ -1733,6 +2289,37 @@ def test_r_refreshes_from_the_sidebar_but_is_forwarded_from_a_pane(
     assert keys == ["r"]
 
 
+def test_r_re_runs_the_doctor_and_a_only_re_reads_the_list(tmp_path: Path, script: Script) -> None:
+    """`r` is "refresh now" — the fleet AND the doctor. #139's `a` action was first
+    inserted between the two calls and took the doctor run with it, so `r` re-read
+    the store only and `a`, which changes nothing the doctor looks at, re-ran it."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+    calls: list[int] = []
+
+    def doctor() -> list[DoctorCheck]:
+        calls.append(1)
+        return []
+
+    async def go(pilot: Pilot[None]) -> tuple[int, int, int]:
+        app = fleet_app(pilot)
+        await settle(app)
+        app.sidebar.focus()
+        at_mount = len(calls)
+        await pilot.press("r")
+        await pilot.pause()
+        await settle(app)
+        after_r = len(calls)
+        await pilot.press("a")
+        await pilot.pause()
+        await settle(app)
+        return at_mount, after_r, len(calls)
+
+    at_mount, after_r, after_a = drive(go, doctor=doctor)
+    assert at_mount == 1
+    assert after_r == 2, "r re-runs the doctor"
+    assert after_a == 2, "a changes which cards are shown, not what the doctor finds"
+
+
 # --- theme -------------------------------------------------------------------------
 
 
@@ -1811,7 +2398,7 @@ def test_restart_from_the_agent_view_selects_the_new_row_in_the_shell(
         # The pane's own "(pane gone)" toast is there too: read them all.
         toasts = [toast.render().plain for toast in app.screen.query(Toast)]
         rows = [shown(row) for row in card_for(app, "prj_a").query(AgentRow)]
-        assert stop_shown is False
+        assert stop_shown is True  # the 💤 row's Stop removes its dead window
         return (current.id if current else None), app.sidebar.selected_key, toasts, rows
 
     current, selected, toasts, rows = drive(go, notifications=True)
@@ -1830,26 +2417,30 @@ def test_the_sidebar_hides_captured_directories_until_a_shows_them(
     with store_session() as store:
         store.ensure_project(ProjectInfo(id="prj_scratch", root=tmp_path / "scratch"))  # a hook
 
-    async def go(pilot: Pilot[None]) -> tuple[list[str], list[str], str, list[str]]:
+    async def go(pilot: Pilot[None]) -> tuple[list[str], list[str], str, list[str], str]:
         app = fleet_app(pilot)
         before = [card.project.id for card in app.query(ProjectCard)]
         app.sidebar.focus()
         await pilot.press("a")
         await pilot.pause()
-        shown = [card.project.id for card in app.query(ProjectCard)]
+        with_captured = [card.project.id for card in app.query(ProjectCard)]
         title = shown_text(app, "prj_scratch")
         await pilot.press("a")
         await pilot.pause()
-        return before, shown, title, [card.project.id for card in app.query(ProjectCard)]
+        after = [card.project.id for card in app.query(ProjectCard)]
+        await pilot.press("question_mark")
+        await pilot.pause()
+        return before, with_captured, title, after, shown(app.screen.query_one(Static))
 
     def shown_text(app: FleetApp, project_id: str) -> str:
         return shown(card_for(app, project_id).query_one(ProjectTitle))
 
-    before, with_captured, title, after = drive(go)
+    before, with_captured, title, after, keys = drive(go)
     assert before == ["prj_a"], "a captured directory is not a card"
     assert with_captured == ["prj_a", "prj_scratch"]
     assert "captured" in title
     assert after == ["prj_a"], "a hides them again"
+    assert "captured directories" in keys, "the key is on the ? screen (it has no footer label)"
 
 
 def test_the_shell_reopens_what_was_open_when_its_row_is_still_there(
@@ -1889,3 +2480,42 @@ def test_the_shell_reopens_what_was_open_when_its_row_is_still_there(
     assert drive(relaunch) == ("welcome", None)
     with store_session() as store:
         assert store.ui_state("fleet.selected") is None, "a stale memory is dropped, not retried"
+
+
+def test_the_shell_remembers_the_captured_toggle_and_reopens_a_page(
+    tmp_path: Path, script: Script
+) -> None:
+    """Review of #169: what the shell remembers beyond a row came back untested —
+    the captured directories shown with `a`, the Accounts page, the Doctor."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+    with store_session() as store:
+        store.ensure_project(ProjectInfo(id="prj_scratch", root=tmp_path / "scratch"))  # a hook
+
+    async def press_a(pilot: Pilot[None]) -> None:
+        fleet_app(pilot).sidebar.focus()
+        await pilot.press("a")
+        await pilot.pause()
+
+    async def relaunch(pilot: Pilot[None]) -> tuple[list[str], str | None, str | None]:
+        app = fleet_app(pilot)
+        await pilot.pause()
+        await pilot.pause()
+        view = app.current_view()
+        cards = [card.project.id for card in app.query(ProjectCard)]
+        return cards, (view.id if view else None), app.sidebar.selected_key
+
+    drive(press_a)
+    with store_session() as store:
+        assert store.ui_state("fleet.show_captured") == "1"
+    assert drive(relaunch)[0] == ["prj_a", "prj_scratch"], "the toggle survives a relaunch"
+    drive(press_a)
+    with store_session() as store:
+        assert store.ui_state("fleet.show_captured") is None, "hiding them again is remembered"
+    assert drive(relaunch)[0] == ["prj_a"]
+
+    with store_session() as store:
+        store.set_ui_state("fleet.selected", "accounts")
+    assert drive(relaunch)[1:] == ("accounts", "accounts")
+    with store_session() as store:
+        store.set_ui_state("fleet.selected", "doctor:")
+    assert drive(relaunch)[1:] == ("doctor", "doctor")

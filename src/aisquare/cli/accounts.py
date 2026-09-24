@@ -32,7 +32,6 @@ from aisquare.core.state import get_state
 from aisquare.models import (
     AccountsOverview,
     ClaudeAccount,
-    ClaudeAccountStatus,
     ClaudeUsage,
     ProjectInfo,
 )
@@ -206,10 +205,12 @@ def list_(
     """List the accounts: slot, who is signed in, plan, hooks; --usage adds the limits."""
     overview = accounts_service.overview()
     if usage:
-        for status in overview.accounts:
-            if status.signed_in:
-                # `sample_usage`, not `usage`: every reading feeds the trend (#146).
-                status.usage = accounts_service.sample_usage(status.account)
+        # One concurrent, RECORDING read for every signed-in slot (#146; review
+        # of #205, third round): a slow endpoint costs one timeout, not one each.
+        signed = [status for status in overview.accounts if status.signed_in]
+        readings = accounts_service.read_usage([status.account for status in signed])
+        for status in signed:
+            status.usage = readings.get(status.account.slot)
     if get_state().json_output:
         typer.echo(_overview_json(overview))
         return
@@ -220,28 +221,43 @@ def list_(
 def usage_(
     slot: Annotated[
         str | None,
-        typer.Argument(help="Slot number or email (default: every signed-in account)."),
+        typer.Argument(
+            help="Slot number, alias or email (default: every signed-in account, in priority "
+            "order)."
+        ),
     ] = None,
 ) -> None:
     """Session (5-hour) and weekly usage per signed-in account, as Claude Code's /usage shows it."""
-    accounts = [_resolve(slot)] if slot is not None else core.list_accounts()
-    statuses: list[ClaudeAccountStatus] = []
-    for account in accounts:
-        status = accounts_service.describe(account)
-        if status.signed_in or slot is not None:
-            status.usage = accounts_service.sample_usage(account)
-        statuses.append(status)
+    # The arranged list, like every other account surface: priority order, the
+    # alias as the label, disabled marked — and one concurrent read for all of
+    # them (review of #205, third round).
+    accounts = [_resolve(slot)] if slot is not None else accounts_service.list_accounts()
+    statuses = [accounts_service.describe(account) for account in accounts]
+    asked = [status for status in statuses if status.signed_in or slot is not None]
+    readings = accounts_service.read_usage([status.account for status in asked])
+    for status in asked:
+        status.usage = readings.get(status.account.slot)
     if get_state().json_output:
         typer.echo(json.dumps([status.model_dump(mode="json") for status in statuses]))
         return
     console = stdout_console()
-    table = Table(box=None, pad_edge=False, show_edge=False, header_style="bold")
-    for column in ("slot", "signed in as", "session", "week"):
-        table.add_column(column)
+    labels: list[Text] = []
     for status in statuses:
+        label = Text(status.label)  # `describe` put it there, as `_emit_overview` reads it
+        if status.account.disabled:
+            label.append(" (disabled)", style="dim")
+        labels.append(label)
+    table = Table(box=None, pad_edge=False, show_edge=False, header_style="bold")
+    table.add_column("slot")
+    # The label is never squeezed: a narrow terminal shortens the email instead.
+    widest = max((len(text.plain) for text in labels), default=5)
+    table.add_column("label", no_wrap=True, min_width=widest)
+    for column in ("signed in as", "session", "week"):
+        table.add_column(column)
+    for status, label in zip(statuses, labels, strict=True):
         who = Text(status.identity.email) if status.identity else Text("not signed in", style="dim")
         session, week = _usage_cells(status.usage)
-        table.add_row(str(status.account.slot), who, session, week)
+        table.add_row(str(status.account.slot), label, who, session, week)
     console.print(table)
 
 
@@ -356,6 +372,8 @@ def default(
     """
     if project is not None and role is not None:
         fail("--project and --role are mutually exclusive", error="usage")
+    if ref is not None and clear:
+        fail("pass an account or --clear, not both", error="usage")
     target = _project_for(project) if project is not None else None
     if ref is None and not clear:
         _show_defaults(
@@ -488,6 +506,12 @@ def _toggle(ref: str, *, disabled: bool) -> None:
             "still usable with --account",
             markup=False,
         )
+        if account.is_default:
+            stdout_console().print(
+                "  · it is the machine default: launches fall through to the next rung until "
+                "it is enabled again (doctor says so too)",
+                markup=False,
+            )
     else:
         stdout_console().print(f"✓ {_who(account)} is enabled", markup=False)
 
@@ -572,8 +596,9 @@ def remove(slot: SlotRef) -> None:
     """Forget a managed account: its directory is kept beside itself as <n>.removed-<stamp>."""
     account = _resolve(slot)
     identity = core.identity(account)
+    notes: list[str] = []
     try:
-        moved = accounts_service.remove(account)
+        moved = accounts_service.remove(account, notes=notes)
     except accounts_service.AccountsError as exc:
         fail(str(exc), error="not_removable", ref=slot)
     if get_state().json_output:
@@ -583,18 +608,22 @@ def remove(slot: SlotRef) -> None:
                     "removed": account.slot,
                     "email": identity.email if identity else None,
                     "moved_to": str(moved),
+                    "notes": notes,
                 }
             )
         )
         return
     who = f" ({identity.email})" if identity else ""
-    stdout_console().print(
+    console = stdout_console()
+    console.print(
         Text.assemble(
             ("✓ ", "green"),
             f"removed account {account.slot}{who} — its directory is kept at {moved}; "
             "delete it when you are sure",
         )
     )
+    for note in notes:
+        console.print(f"  · {note}", markup=False)
 
 
 def _exec(binary: str, argv: list[str], env: dict[str, str]) -> None:

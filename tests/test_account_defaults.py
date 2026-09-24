@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import shutil
 import sqlite3
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -31,7 +32,7 @@ from aisquare.core import claude_accounts as core
 from aisquare.core import paths
 from aisquare.core.config import load_config
 from aisquare.core.orchestrator import team_project
-from aisquare.core.store import store_session
+from aisquare.core.store import SqliteStore, store_session
 from aisquare.models import ProjectInfo
 from aisquare.services import claude_accounts as service
 from aisquare.services import diagnostics
@@ -118,6 +119,33 @@ def test_a_vanished_directory_drops_its_row_and_closes_the_gap(fake_home: Path) 
     assert service.machine_default() is None  # the default went with the directory
     with store_session() as store:
         assert [record.slot for record in store.claude_accounts()] == [1, 3]
+
+
+def test_pruning_several_vanished_slots_renumbers_the_order_once(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each delete renumbered the whole table, so pruning k slots was k passes of writes
+    inside one reconcile (review of #205, fourth round). One delete of all of them, one
+    renumbering, and the order still closes every gap."""
+    made = [core.create_account() for _ in range(4)]  # slots 2..5
+    service.list_accounts()  # the rows exist
+    for account in made[:3]:
+        shutil.rmtree(account.config_dir)
+    passes: list[int] = []
+    real = SqliteStore.order_claude_accounts
+
+    def counted(self: SqliteStore, slots: Any) -> None:
+        passes.append(1)
+        real(self, slots)
+
+    monkeypatch.setattr(SqliteStore, "order_claude_accounts", counted)
+
+    arranged = service.list_accounts()
+
+    assert _slots(arranged) == [1, 5] and _positions(arranged) == [1, 2]
+    assert len(passes) == 1
+    with store_session() as store:
+        assert [record.slot for record in store.claude_accounts()] == [1, 5]
 
 
 def test_set_default_marks_exactly_one_slot_and_clear_unmarks_it(fake_home: Path) -> None:
@@ -257,6 +285,88 @@ def test_a_disabled_binding_or_default_is_skipped_with_a_note(
     assert choice.notes == ["account 2 (bound to coder) is disabled — skipped"]
 
 
+def test_the_agent_header_and_fleet_ls_name_the_account_as_the_rest_of_the_cli_does(
+    fake_home: Path,
+) -> None:
+    """An aliased account is ``work`` on the launch line, the feed, the page — and now on the
+    agent header and ``fleet ls`` too; slot 1 is ``plain claude`` there as well (review of
+    #205, finding 10)."""
+    from datetime import UTC, datetime
+
+    from aisquare.cli import fleet as fleet_cli
+    from aisquare.cli.ui.views import agent as agent_view
+    from aisquare.models import FleetAgent, FleetAgentStatus
+
+    core.create_account()
+    service.set_alias("2", "work")
+    labels = service.slot_labels()
+    assert labels == {1: "plain claude", 2: "work"}
+
+    def status(slot: int) -> FleetAgentStatus:
+        agent = FleetAgent(
+            id="agt_label",
+            project_id="prj_label",
+            label="coder-1",
+            role="coder",
+            pane_id="%1",
+            cwd=Path("/tmp"),
+            account_slot=slot,
+            created_at=datetime.now(tz=UTC),
+        )
+        return FleetAgentStatus(agent=agent, state="waiting")
+
+    assert agent_view.account_text(status(2), labels) == "work"
+    assert agent_view.account_text(status(1), labels) == "plain claude"
+    assert agent_view.account_text(status(2)) == "account 2"  # no labels: the built-in name
+    assert "  work  " in fleet_cli._agent_line(status(2), labels)
+    assert "  plain claude  " in fleet_cli._agent_line(status(1), {})  # never `account 1`
+    assert "  account 2  " in fleet_cli._agent_line(status(2), {})
+
+
+def test_a_disabled_account_cannot_be_made_the_default_and_disabling_the_default_is_said(
+    fake_home: Path, runner: CliRunner
+) -> None:
+    """Accepted silently, the default was a rung every launch skipped (third round)."""
+    core.create_account()
+    core.create_account()
+    service.set_disabled("2", True)
+    with pytest.raises(service.AccountsError, match="enable it first: aisquare accounts enable 2"):
+        service.set_default("2")
+    refused = runner.invoke(app, ["accounts", "default", "2"])
+    assert refused.exit_code == 1 and "enable it first" in refused.output
+    assert service.machine_default() is None
+
+    service.set_default("3")
+    said = runner.invoke(app, ["accounts", "disable", "3"])
+    assert said.exit_code == 0, said.output
+    assert "it is the machine default: launches fall through" in said.stdout
+    assert service.machine_default() is not None  # the choice is kept (a temporary disable)
+
+
+def test_a_slot_removed_between_the_reconcile_and_the_write_is_a_sentence(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The store's ``KeyError`` reached the top as a traceback (third round)."""
+    from aisquare.core.store import SqliteStore
+
+    core.create_account()
+
+    def vanished(self: Any, *args: Any, **kwargs: Any) -> None:
+        raise KeyError(2)
+
+    monkeypatch.setattr(SqliteStore, "set_claude_account_alias", vanished)
+    monkeypatch.setattr(SqliteStore, "set_claude_account_disabled", vanished)
+    monkeypatch.setattr(SqliteStore, "set_claude_account_default", vanished)
+    calls: list[Callable[[], object]] = [
+        lambda: service.set_alias("2", "work"),
+        lambda: service.set_disabled("2", True),
+        lambda: service.set_default("2"),
+    ]
+    for call in calls:
+        with pytest.raises(service.NoSuchAccount, match="removed meanwhile"):
+            call()
+
+
 # --------------------------------------------------------------------------- launch and spawn
 
 
@@ -329,12 +439,29 @@ def test_remove_forgets_the_default_the_alias_and_every_project_default_that_nam
     service.set_alias("2", "work")
     core.create_account()  # slot 3, so the order has something left to renumber
 
-    service.remove(second)
+    _sign_in(second, "two@example.com")
+    settings_service.bind_role("reviewer", account="2")  # by NUMBER: the hazard of finding 8
+    settings_service.bind_role("tester", account="work")  # by alias: dies with the alias
+    settings_service.bind_role("coder", account="3")  # another slot: untouched
+    notes: list[str] = []
+
+    service.remove(second, notes=notes)
 
     assert service.machine_default() is None
     assert service.project_default(work) is None
     assert _slots(service.list_accounts()) == [1, 3]
     assert _positions(service.list_accounts()) == [1, 2]
+    # The bindings that named the number AND the alias now name the person — dangling on
+    # purpose; the alias is free again, and naming the next account `work` must not
+    # re-point `tester` (second round).
+    bindings = settings_service.role_account_bindings()
+    assert bindings == {"reviewer": "two@example.com", "tester": "two@example.com", "coder": "3"}
+    assert notes == [
+        "role reviewer was bound to slot 2; it now names two@example.com — refused at launch "
+        "until that account is signed in again, or re-bound",
+        "role tester was bound to alias 'work' (slot 2); it now names two@example.com — "
+        "refused at launch until that account is signed in again, or re-bound",
+    ]
     # THE reuse hazard: the next add takes slot 2 again and must inherit nothing.
     again = core.create_account()
     assert again.slot == 2
@@ -342,6 +469,28 @@ def test_remove_forgets_the_default_the_alias_and_every_project_default_that_nam
     assert fresh.alias is None and not fresh.is_default and not fresh.disabled
     with pytest.raises(service.NoSuchAccount):
         service.resolve("work")
+    with pytest.raises(service.NoSuchAccount, match=r"reviewer.*two@example\.com"):
+        service.choose(role="reviewer", project=work)  # refused with the rung named, not adopted
+    assert service.choose(role="coder", project=work).source == "role binding"
+    service.set_alias("2", "work")  # the ordinary thing to do with the newcomer…
+    with pytest.raises(service.NoSuchAccount, match=r"tester.*two@example\.com"):
+        service.choose(role="tester", project=work)  # …and tester does not follow it
+
+
+def test_remove_clears_a_number_binding_to_a_slot_that_never_signed_in(fake_home: Path) -> None:
+    blank = core.create_account()  # slot 2, no login, no email to name
+    settings_service.bind_role("reviewer", account="2", env={"FOO": "bar"})
+    notes: list[str] = []
+
+    service.remove(blank, notes=notes)
+
+    profile = load_config().team.profiles["reviewer"]
+    assert profile.account is None and profile.env == {"FOO": "bar"}  # the rest survives
+    assert notes == [
+        "role reviewer was bound to slot 2, which had no login — the account binding is cleared"
+    ]
+    removed = core.create_account()
+    assert removed.slot == 2 and service.choose(role="reviewer").source is None  # nothing inherited
 
 
 # --------------------------------------------------------------------------- a damaged store
@@ -371,6 +520,21 @@ def test_a_damaged_store_costs_the_arrangement_never_the_listing_or_the_launch(
     assert core.CONFIG_DIR_VAR not in handover["env"]  # no default could be read, so none applied
     assert "accounts registry unreadable" in launched.stderr
     assert "Traceback" not in launched.output
+
+    # An ALIAS binding cannot be checked against the fallback list (no aliases there): it
+    # costs its rung with a note, never the launch (review of #205, second round).
+    settings_service.bind_role("tester", account="work")
+    choice = service.choose(role="tester", project=work)
+    assert choice.account is None and choice.source is None
+    assert any("names account 'work', which cannot be resolved" in n for n in choice.notes)
+    handover.clear()
+    bound = runner.invoke(app, ["launch", "tester"])
+    assert bound.exit_code == 0, bound.output
+    assert handover and core.CONFIG_DIR_VAR not in handover["env"]
+    assert "cannot be resolved while the accounts registry unreadable" in bound.stderr
+    # A NUMBER binding still resolves on the fallback list, exactly as before.
+    settings_service.bind_role("runner", account="2")
+    assert service.choose(role="runner", project=work).source == "role binding"
 
     refused = runner.invoke(app, ["--json", "accounts", "default", "2"])
     assert refused.exit_code == 1
@@ -449,6 +613,31 @@ def test_accounts_default_sets_shows_and_clears_at_all_three_levels(
     assert "coder" not in load_config().team.profiles  # a refused reference binds nothing
 
 
+def test_a_project_default_lists_the_project_it_is_set_for(
+    fake_home: Path, work: ProjectInfo, runner: CliRunner
+) -> None:
+    """`accounts default <slot> --project` registered the project the way a hooked
+    prompt does, so since #139 a project configured on purpose stayed off `project
+    list` and the sidebar. Choosing its account is choosing it; clearing adds nothing."""
+    core.create_account()
+
+    def listed() -> set[str]:
+        with store_session() as store:
+            return {project.id for project in store.list_projects()}
+
+    assert work.id not in listed(), "the fixture's registration is a capture"
+    cleared = runner.invoke(app, ["accounts", "default", "--clear", "--project", "."])
+    assert cleared.exit_code == 0, cleared.output
+    assert work.id not in listed(), "clearing a default is not an add"
+
+    chosen = runner.invoke(app, ["accounts", "default", "2", "--project", "."])
+
+    assert chosen.exit_code == 0, chosen.output
+    assert work.id in listed()
+    default = service.project_default(work)
+    assert default is not None and default.slot == 2
+
+
 def test_accounts_alias_order_move_disable_and_enable_commands(
     fake_home: Path, runner: CliRunner
 ) -> None:
@@ -508,6 +697,20 @@ def test_team_bind_account_resolves_the_reference_before_writing_it(
     profile = load_config().team.profiles["coder"]
     assert profile.account is None and profile.env == {"FOO": "bar"}  # the rest survives
 
+    # `--account X --clear-account` used to clear and report success (review of #205,
+    # finding 13): refused as a usage error, nothing written — on both commands.
+    both = runner.invoke(
+        app, ["--json", "team", "bind", "coder", "--account", "2", "--clear-account"]
+    )
+    assert both.exit_code == 1 and json.loads(both.stdout)["error"] == "usage"
+    assert load_config().team.profiles["coder"].account is None
+    also = runner.invoke(app, ["--json", "accounts", "default", "2", "--role", "coder", "--clear"])
+    assert also.exit_code == 1 and json.loads(also.stdout)["error"] == "usage"
+    assert load_config().team.profiles["coder"].account is None
+    # The writer itself, asked for both, replaces rather than discards.
+    replaced = settings_service.bind_role("coder", account="2", clear_account=True)
+    assert replaced.account == "2"
+
     empty = runner.invoke(app, ["--json", "team", "bind", "tester"])
     assert empty.exit_code == 1 and json.loads(empty.stdout)["error"] == "nothing_to_bind"
 
@@ -549,6 +752,60 @@ def test_doctor_warns_when_the_default_cannot_launch_and_is_silent_when_nothing_
     assert dangling.status.value == "warn"
     assert "role coder → 9" in dangling.detail
     assert f"project {work.root.name} → slot 3" in dangling.detail
+
+
+def test_doctor_checks_every_binding_against_one_registry_read(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``resolve(ref)`` per binding re-opened the store and rescanned the directories each
+    time — six bound roles, seven opens for one doctor line (review of #205, fourth round).
+    The list already in hand answers every binding."""
+    core.create_account()  # slot 2
+    service.set_alias("2", "work")
+    for role in ("coder", "tester", "reviewer"):
+        settings_service.bind_role(role, account="work")
+    settings_service.bind_role("runner", account="9")  # dangling, still found
+    reads: list[int] = []
+    real = service._read_registry
+
+    def counted(project: Any = None) -> Any:
+        reads.append(1)
+        return real(project)
+
+    monkeypatch.setattr(service, "_read_registry", counted)
+
+    checks = {check.name: check for check in diagnostics._claude_account_default_checks()}
+
+    assert len(reads) == 1
+    detail = checks["claude-account-bindings"].detail
+    assert "role runner → 9" in detail and "role coder" not in detail
+
+
+def test_project_default_reads_the_registry_in_one_store_open(
+    fake_home: Path, work: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two opens — the slot, then the list with a directory scan of its own — for what one
+    guarded read returns (review of #205, fourth round). ``accounts default`` asks on every
+    invocation."""
+    import contextlib
+
+    core.create_account()  # slot 2
+    service.set_default("2", project=work)
+    opens: list[int] = []
+    real_session = store_session
+
+    @contextlib.contextmanager
+    def counted_session() -> Any:
+        opens.append(1)
+        with real_session() as store:
+            yield store
+
+    monkeypatch.setattr("aisquare.services.claude_accounts.store_session", counted_session)
+
+    chosen = service.project_default(work)
+
+    assert chosen is not None and chosen.slot == 2
+    assert len(opens) == 1
 
 
 def test_doctor_reads_no_registry_and_creates_no_store_before_one_exists(

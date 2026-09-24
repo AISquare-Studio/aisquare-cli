@@ -373,7 +373,7 @@ def test_validate_path_reports_an_already_registered_root(tmp_path: Path) -> Non
     unknown = tmp_path / "unknown"
     unknown.mkdir()
     with store_session() as store:
-        store.ensure_project(ProjectInfo(id=project_id_for(known.resolve()), root=known.resolve()))
+        store.onboard_project(ProjectInfo(id=project_id_for(known.resolve()), root=known.resolve()))
 
     registered = validate_path(str(known))
     assert registered.ok and registered.registered is not None
@@ -383,6 +383,21 @@ def test_validate_path_reports_an_already_registered_root(tmp_path: Path) -> Non
     fresh = validate_path(str(unknown))
     assert fresh.ok and fresh.registered is None and fresh.store_error is None
     assert "already registered" not in fresh.describe()
+
+
+def test_validate_path_says_a_captured_root_is_not_listed_yet(tmp_path: Path) -> None:
+    """A directory a hooked session ran in has a row, but onboarding is what lists it
+    (#139) — "already registered; init is idempotent" told the user there was
+    nothing to do."""
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    project_id = project_id_for(scratch.resolve())
+    with store_session() as store:
+        store.ensure_project(ProjectInfo(id=project_id, root=scratch.resolve()))  # a hook
+
+    line = validate_path(str(scratch)).describe()
+    assert f"captured as {project_id} (not listed yet); onboarding adds it" in line
+    assert "already registered" not in line
 
 
 def test_validate_path_fails_open_when_the_store_will_not_answer(tmp_path: Path) -> None:

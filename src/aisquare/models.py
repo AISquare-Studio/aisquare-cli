@@ -156,6 +156,10 @@ class StatusReport(BaseModel):
     project_entries: int
     active_project: ProjectInfo
     project_count: int
+    """The projects ``project list`` shows — added on purpose (#139)."""
+    captured_count: int = 0
+    """The directories hooked sessions captured that nothing added on purpose:
+    registered but hidden, listed by ``project list --all`` (#139)."""
     agents_detected: list[str] = Field(default_factory=list)
     agents_connected: list[str] = Field(default_factory=list)
     shipping: ShippingStatus | None = None
@@ -273,8 +277,8 @@ class ClaudeUsage(BaseModel):
 class UsageSample(BaseModel):
     """One reading of an account's two windows, kept so a rate can be computed (#146).
 
-    Written by ``services.claude_accounts.sample_usage`` whenever usage is
-    fetched — the Accounts page's minute tick, ``accounts usage``, a headroom
+    Written by ``services.claude_accounts``' recording readers whenever usage
+    is fetched — the Accounts page's minute tick, ``accounts usage``, a headroom
     pick — and read back to say how fast the window is filling. Samples are
     pruned after a week; they are a derived convenience, never the record.
     """
@@ -537,6 +541,21 @@ class MetricsSummary(BaseModel):
 TaskStatus = Literal["todo", "doing", "review", "blocked", "done", "dropped"]
 """Lifecycle of a shared team task: todo → doing → review → done (or parked)."""
 
+CLOSED_STATUSES: frozenset[TaskStatus] = frozenset({"done", "dropped"})
+"""The statuses after which a task needs nobody: a need it satisfies, a claim it
+cannot carry, a fleet assignment that is over. One constant because the pair was
+spelled out in five places (the store's readiness rule and its claim clearing,
+the fleet's spawn refusal, the briefing, the board's archive split), and a sixth
+status would have had to find them all."""
+
+CLAIM_KEEPING_STATUSES: frozenset[TaskStatus] = frozenset({"doing", "review", "blocked"})
+"""The statuses in which a task keeps its ``claimed_by``: the one being worked,
+the one with a verifier (its author is who rework goes back to), the one parked
+with a reason. ``set_task_status`` clears the claim for :data:`CLOSED_STATUSES`
+alone. Only ``doing`` carries a LEASE — the ``claim_expires_at`` that
+``renew_leases`` extends and ``claim_task`` reclaims when it lapses; the other
+two hold their claim indefinitely (review of #203)."""
+
 
 class TeamSession(BaseModel):
     """One live agent session on the orchestrator (id = the agent's session id)."""
@@ -694,8 +713,9 @@ class ProjectForgetReport(BaseModel):
 
 
 PruneReason = Literal["missing", "worktree", "captured"]
-"""Why ``project prune`` selected a registration: its root is gone from disk, or
-its root is a linked git worktree of another registered project."""
+"""Why ``project prune`` selected a registration: its root is gone from disk, its
+root is a linked git worktree of another registered project, or it is a stale
+capture — a directory a session merely ran in, with no context entries (#139)."""
 
 
 class PruneCandidate(BaseModel):
@@ -771,9 +791,12 @@ class LaunchSpec(BaseModel):
 
     binary: str
     permission_mode: str | None = None
-    """The ``--permission-mode`` passed; ``None`` or ``""`` means no flag was passed."""
+    """The ``--permission-mode`` passed; ``None`` or ``""`` means no flag was passed —
+    and a replay passes none, whatever the role's config says today."""
     extra_args: list[str] = Field(default_factory=list)
-    """The role's ``extra_args`` followed by the caller's, as they went after the flags."""
+    """The role's ``extra_args`` followed by the caller's, as they went after the flags,
+    less the ones that chose a session (``--session-id``, ``--resume``, ``--continue``):
+    those are per launch, like a restart's own ``--resume``."""
     account_slot: int | None = None
     worktree: bool = False
     command: list[str] = Field(default_factory=list)

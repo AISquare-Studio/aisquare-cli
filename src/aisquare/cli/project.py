@@ -51,7 +51,9 @@ def list_(
     `--all` shows the captured ones too, marked.
     """
     projects = project_service.list_projects(all=all)
-    emit_projects(projects, active_id=project_service.info().id)
+    # Counted only for an empty list, where "nothing registered" would be wrong.
+    hidden = 0 if all or projects else len(project_service.list_projects(all=True))
+    emit_projects(projects, active_id=project_service.info().id, hidden=hidden)
 
 
 @app.command("switch")
@@ -91,6 +93,10 @@ _PURGE_HELP = (
     "metrics and snapshot. Without it they stay in the store, hidden, and come back if the "
     "root is registered again."
 )
+
+
+_STALE_CAPTURE_DAYS = 30
+"""How long a captured directory sits untouched before ``prune --captured-only`` takes it."""
 
 
 @app.command("forget")
@@ -133,9 +139,13 @@ def prune(
         ),
     ] = False,
     older_than: Annotated[
-        int,
-        typer.Option("--older-than", min=0, help="Days of inactivity for --captured-only."),
-    ] = 30,
+        int | None,
+        typer.Option(
+            "--older-than",
+            min=0,
+            help=f"Days of inactivity for --captured-only (default {_STALE_CAPTURE_DAYS}).",
+        ),
+    ] = None,
     yes: Annotated[
         bool, typer.Option("--yes", "-y", help="Drop without asking; required off a terminal.")
     ] = False,
@@ -149,12 +159,17 @@ def prune(
     run unless --yes; under --json without --yes it lists the candidates and
     changes nothing.
     """
+    if older_than is not None and not captured_only:
+        # Ignored silently, `prune --older-than 7` read as "what is older than a
+        # week" and swept every missing root and worktree instead.
+        fail("--older-than applies only with --captured-only", error="usage")
     if not missing and not worktrees and not captured_only:
         missing = worktrees = True
+    days = _STALE_CAPTURE_DAYS if older_than is None else older_than
     candidates = project_service.prune_candidates(
         missing=missing,
         worktrees=worktrees,
-        captured_older_than=older_than if captured_only else None,
+        captured_older_than=days if captured_only else None,
     )
     if yes:
         emit_prune(project_service.prune(candidates, purge=purge))

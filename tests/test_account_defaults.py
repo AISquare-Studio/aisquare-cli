@@ -729,6 +729,29 @@ def test_doctor_warns_when_the_default_cannot_launch_and_is_silent_when_nothing_
     assert f"project {work.root.name} → slot 3" in dangling.detail
 
 
+def test_doctor_flags_the_binding_that_outlives_the_last_added_account(
+    fake_home: Path, work: ProjectInfo
+) -> None:
+    """``_retarget_bindings`` re-points a binding at the removed slot's email and says
+    ``doctor`` flags it — but the check ran only while an added account existed, so removing
+    the LAST one left the binding refusing every launch of its role with no doctor line
+    (review of the #205 fold, round 1)."""
+    only = core.create_account()  # slot 2, the only added account
+    _sign_in(only, "two@example.com")
+    settings_service.bind_role("reviewer", account="2")
+
+    service.remove(only)
+
+    assert settings_service.role_account_bindings() == {"reviewer": "two@example.com"}
+    checks = {check.name: check for check in diagnostics._claude_accounts_checks()}
+    assert "claude-accounts" not in checks  # nothing added: still no line of its own
+    dangling = checks["claude-account-bindings"]
+    assert dangling.status.value == "warn" and "role reviewer → two@example.com" in dangling.detail
+    # A machine with nothing arranged keeps the doctor output it had.
+    settings_service.bind_role("reviewer", clear_account=True)
+    assert diagnostics._claude_accounts_checks() == []
+
+
 def test_doctor_checks_every_binding_against_one_registry_read(
     fake_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

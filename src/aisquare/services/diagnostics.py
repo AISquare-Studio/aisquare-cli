@@ -728,8 +728,10 @@ def _claude_accounts_checks() -> list[DoctorCheck]:
     managed = claude_accounts_core.managed_accounts()
     if not managed:
         # No added accounts, so no `claude-accounts` line — but a plain-claude
-        # session can still be parked on a usage limit (#146).
-        return _claude_account_limit_checks()
+        # session can still be parked on a usage limit (#146), and removing the
+        # last added account leaves a role binding naming its email, which
+        # `_retarget_bindings` says this flags (review of the #205 fold, round 1).
+        return [*_claude_account_default_checks(), *_claude_account_limit_checks()]
     statuses = [claude_accounts_service.describe(account) for account in managed]
     parts = [
         f"{status.account.slot} {status.identity.email if status.identity else 'not signed in'}"

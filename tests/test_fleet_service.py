@@ -6165,16 +6165,23 @@ def test_a_switch_that_finds_nothing_says_the_default_was_the_account_being_left
     assert agent.pane_id not in tmux.killed  # refused before anything was stopped
 
 
+@pytest.mark.parametrize("fresh", [False, True], ids=["resume", "fresh"])
 def test_a_hand_over_that_does_not_complete_leaves_nothing_parked(
     tmux: FakeTmux,
     claude_on_path: Path,
     project: ProjectInfo,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    fresh: bool,
 ) -> None:
     """The two ways a switch can die after it has marked the session (review of #205, finding 6):
     a stop that raises leaves the session as it was; a spawn that raises releases the
-    parked claims and records the exit the hand-over withheld."""
+    parked claims and records the exit the hand-over withheld.
+
+    Resumed or fresh alike: since a fresh switch is a hand-over too, ``stop`` parks its
+    claims as well, and the release after a failed spawn is the only thing that returns
+    them. With the resume leg alone, that release could be limited to a resume and
+    nothing failed (review of #205, fifth round)."""
     _two_slots_with_usage(monkeypatch, work=95, personal=10)
     agent = fleet_service.spawn(project, "coder", worktree=False, account="2").agent
     transcript = tmp_path / f"{agent.session_id}.jsonl"
@@ -6202,7 +6209,7 @@ def test_a_hand_over_that_does_not_complete_leaves_nothing_parked(
     real_stop = fleet_service.stop
     monkeypatch.setattr(fleet_service, "stop", stop_refuses)
     with pytest.raises(FleetError, match="would not answer"):
-        fleet_service.switch(project, agent.label, reason="session limit")
+        fleet_service.switch(project, agent.label, fresh=fresh, reason="session limit")
     with store_session() as store:
         session = store.get_session(agent.session_id or "")
         held = store.get_task(task.id)
@@ -6210,12 +6217,20 @@ def test_a_hand_over_that_does_not_complete_leaves_nothing_parked(
     assert held is not None and held.claimed_by == agent.session_id
     monkeypatch.setattr(fleet_service, "stop", real_stop)
 
+    asked: list[dict[str, Any]] = []
+
     def spawn_refuses(*args: Any, **kwargs: Any) -> fleet_service.SpawnReceipt:
+        asked.append(kwargs)
         raise FleetError("tmux could not start the window: boom")
 
     monkeypatch.setattr(fleet_service, "spawn", spawn_refuses)
     with pytest.raises(FleetError, match="boom"):
-        fleet_service.switch(project, agent.label, reason="session limit")
+        fleet_service.switch(project, agent.label, fresh=fresh, reason="session limit")
+    [spawned] = asked  # the leg this is: a fresh replacement takes over, a resumed one resumes
+    if fresh:
+        assert spawned["resume"] is None and spawned["takes_over"] == agent.session_id
+    else:
+        assert spawned["resume"] is not None and spawned["takes_over"] is None
     with store_session() as store:
         released = store.get_task(task.id)
         kinds = [(e.kind, e.text) for e in store.recent_events(project.id, limit=10)]
@@ -6319,6 +6334,7 @@ def test_a_hand_over_stop_releases_nothing_and_announces_nothing(
     assert "agent_exited" not in kinds and "task_released" not in kinds
 
 
+@pytest.mark.parametrize("exits", [True, False], ids=["exits-in-the-grace", "killed"])
 @pytest.mark.parametrize("fresh", [True, False], ids=["asked-fresh", "no-transcript"])
 def test_a_fresh_switch_hands_the_claims_to_the_replacement_and_announces_no_exit(
     tmux: FakeTmux,
@@ -6327,6 +6343,7 @@ def test_a_fresh_switch_hands_the_claims_to_the_replacement_and_announces_no_exi
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     fresh: bool,
+    exits: bool,
 ) -> None:
     """Review of #205, fourth round. A switch with no transcript to resume — or with
     ``--fresh`` — stopped the agent as ``fleet stop`` does: its task went back to the
@@ -6334,7 +6351,12 @@ def test_a_fresh_switch_hands_the_claims_to_the_replacement_and_announces_no_exi
     replacement, so the manager staffed the task a second time. A fresh start is a
     hand-over too: the claims move onto the replacement's new session with its row,
     nothing is released or announced, and the replacement is briefed on its task as
-    work already its own."""
+    work already its own.
+
+    ``killed`` is an agent that never answers the ``/exit``: no ``SessionEnd`` fires, so
+    ``_take_over`` is the only thing that retires the old presence. With every leg
+    exiting in the grace, the old session's own hook ended it and a ``_take_over`` that
+    retired nothing passed (review of #205, fifth round)."""
     _two_slots_with_usage(monkeypatch, work=95, personal=10)
     task = _task(project, "keep it across the move")
     agent = fleet_service.spawn(
@@ -6353,16 +6375,17 @@ def test_a_fresh_switch_hands_the_claims_to_the_replacement_and_announces_no_exi
         return True
 
     monkeypatch.setattr(fleet_service, "nudge_manager", nudge)
-    # The old process's own SessionEnd lands during the grace, while its row is live.
-    monkeypatch.setenv("AISQUARE_ROLE", "coder")
-    real_kill = tmux.kill_window
+    if exits:
+        # The old process's own SessionEnd lands during the grace, while its row is live.
+        monkeypatch.setenv("AISQUARE_ROLE", "coder")
+        real_kill = tmux.kill_window
 
-    def exit_then_kill(pane_id: str) -> None:
-        if pane_id == agent.pane_id:
-            team_service.hook_session_end(old, project.root, reason="prompt_input_exit")
-        real_kill(pane_id)
+        def exit_then_kill(pane_id: str) -> None:
+            if pane_id == agent.pane_id:
+                team_service.hook_session_end(old, project.root, reason="prompt_input_exit")
+            real_kill(pane_id)
 
-    monkeypatch.setattr(tmux, "kill_window", exit_then_kill)
+        monkeypatch.setattr(tmux, "kill_window", exit_then_kill)
 
     receipt = fleet_service.switch(project, agent.label, fresh=fresh, reason="session limit")
 
@@ -6396,7 +6419,11 @@ def test_a_fresh_switch_whose_claims_cannot_be_moved_leaves_them_with_the_row(
     """``_take_over`` fails open: the window runs and its row is recorded, so a store
     that refuses the move leaves the row on the old id WITH the claims — the state a
     ``/clear`` leaves between its hooks — the switch says so, and the replacement's
-    own start hook makes the move (its pane's process adopts the row)."""
+    own start hook makes the move (its pane's process adopts the row).
+
+    That state includes the ended presence. The old session was retired only AFTER the
+    move, so a refused move left it live as ``switching`` — a killed agent fires no
+    ``SessionEnd`` — until the prune (review of #205, fifth round)."""
     _two_slots_with_usage(monkeypatch, work=95, personal=10)
     task = _task(project, "moved by the start hook instead")
     agent = fleet_service.spawn(
@@ -6420,6 +6447,11 @@ def test_a_fresh_switch_whose_claims_cannot_be_moved_leaves_them_with_the_row(
     assert any("claims were not moved" in note and "locked" in note for note in receipt.notes)
     assert receipt.started.session_id == old  # the row waits on the id holding the claims
     assert _task_now(task.id).claimed_by == old  # parked, not released
+    with store_session() as store:
+        retired = store.get_session(old)
+        kinds = [e.kind for e in store.recent_events(project.id, limit=20)]
+    assert retired is not None and retired.ended_at is not None  # no ghost mid-switch
+    assert "agent_exited" not in kinds and "task_released" not in kinds
     refusing = False
     new = _flag(_command(tmux), "--session-id")
     assert new is not None and new != old

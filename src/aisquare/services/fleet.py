@@ -1132,11 +1132,19 @@ def spawn(
 
     ``takes_over`` is a FRESH hand-over's (:func:`switch` with no transcript to
     resume, or ``--fresh``; never with ``resume``): the id of the session the
-    agent ran as until now, whose claims its ``SessionEnd`` parked
+    agent ran as until now, whose claims wait for the replacement
     (``team.HANDOVER_STATE``). The row is recorded on that id and then moved
     onto the new session's minted id together with the claims, in one store
-    transaction — the move a ``/clear`` makes (:func:`_take_over`) — before the
-    launcher lets the agent start, so its briefing finds its task its own.
+    transaction — the move a ``/clear`` makes (:func:`_take_over`) — right
+    after the insert. The launcher waits for the row, not for that move, so
+    nothing ORDERS the move before the agent's first hook: in practice the hook
+    comes seconds later (the launcher is still starting ``claude``, whose hook
+    starts an interpreter of its own), and a start hook that does get there
+    first makes the move itself when it can prove the pane is its own (rule 1
+    of ``services.team``'s fleet-row section). One that cannot is briefed
+    without its ASSIGNED TO YOU block — ``_late_assignment`` does not re-brief
+    a bound row — and the hand-off prompt still names the task (review of
+    #205, fifth round: this used to promise the move came first).
     """
     config = settings()
     if not _role_ok(role):
@@ -1322,24 +1330,27 @@ def _take_over(agent: FleetAgent, previous: str, session_id: str, notes: list[st
     the one transaction a ``/clear`` hands its claims over in (rule 2 of
     ``services.team``'s fleet-row section): the row and the claims can never
     disagree about who holds the work. The ``doing`` ones take a fresh lease.
-    ``previous``'s presence is retired with it, releasing nothing: its process
+    ``previous``'s presence is retired FIRST, releasing nothing: its process
     is dead (``stop`` verified the pane), and a kill fires no ``SessionEnd``,
-    so it would otherwise sit on the board as a session mid-switch.
+    so it would otherwise sit on the board as a session mid-switch. First, so
+    that a move the store refuses still leaves the state a ``/clear`` leaves
+    between its two hooks — an ended id whose claims wait for the start hook —
+    and not a live ``switching`` presence nothing retires before the prune
+    (review of #205, fifth round).
 
     Fail-open, because the window is running and its row is recorded: a store
-    that refuses leaves the row on ``previous`` with the claims — the state a
-    ``/clear`` leaves between its two hooks — and the agent's own start hook
-    moves them (the pane's process adopts its row); the row ending releases
-    them either way (``release_agent_claims`` reads the row's session). The
-    note says so.
+    that refuses the move leaves the row on ``previous`` with the claims, and
+    the agent's own start hook moves them (the pane's process adopts its row);
+    the row ending releases them either way (``release_agent_claims`` reads the
+    row's session). The note says so.
     """
     lease = _now() + timedelta(minutes=orchestrator.lease_minutes())
     try:
         with store_session() as store:
-            store.adopt_fleet_agent_session(agent.id, previous, session_id, lease)
             parked = store.get_session(previous)
             if parked is not None and parked.ended_at is None:
                 store.end_session(previous, release_claims=False)
+            store.adopt_fleet_agent_session(agent.id, previous, session_id, lease)
             current = store.get_fleet_agent(agent.id)
     except Exception as exc:  # the row and the window stand; the start hook is the second door
         notes.append(

@@ -110,6 +110,11 @@ def default_config_dir() -> Path:
     env = os.environ.get(CONFIG_DIR_VAR, "").strip()
     if env:
         return Path(env).expanduser()
+    return home_config_dir()
+
+
+def home_config_dir() -> Path:
+    """``~/.claude``: the directory a plain ``claude`` uses with ``CLAUDE_CONFIG_DIR`` unset."""
     return _home() / ".claude"
 
 

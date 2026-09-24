@@ -348,12 +348,23 @@ def slot_of(config_dir: str | Path) -> int | None:
     A reader, not a decider: ``services.team.session_account`` records the
     directory a session runs under from its transcript path, and this turns it
     back into the slot a hand-over (#146) is leaving.
+
+    The plain claude's directory is read off this process's environment, except
+    in a process that runs under one of OUR slots. Every hook of an agent on a
+    managed slot does (``launch_env`` set ``CLAUDE_CONFIG_DIR`` to the slot's
+    directory), and there the variable names that slot, never the plain claude:
+    an aliased slot 1 was ``.claude`` on the board those hooks render (review of
+    #205, fifth round). The plain claude is then ``~/.claude``, the directory it
+    uses with the variable unset.
     """
     managed = core.managed_slot(config_dir)
     if managed is not None:
         return managed
+    plain = core.default_config_dir()
+    if core.managed_slot(plain) is not None:
+        plain = core.home_config_dir()
     try:
-        if Path(config_dir).resolve() == core.default_config_dir().resolve():
+        if Path(config_dir).resolve() == plain.resolve():
             return core.DEFAULT_SLOT
     except OSError:
         return None

@@ -312,7 +312,9 @@ for the long ones.
   its claims — the session is marked `switching` before the `/exit`, so its
   `SessionEnd` parks them as a `/clear` does: for the same id when the agent
   resumes, and for the fresh replacement's new id, which its row and the claims
-  are moved onto in one transaction before it starts (`spawn(takes_over=…)`) —
+  are moved onto in one transaction right after the row is recorded
+  (`spawn(takes_over=…)`; the launcher waits for the row, not the move, so a
+  start hook that beats it makes the move itself when it can prove the pane) —
   a resumed agent is told in one line to continue, and no `agent_exited` goes
   out for a hand-over of either kind.
 - `_derive` trusts a `limited` row until its reset (+10 min) rather than the

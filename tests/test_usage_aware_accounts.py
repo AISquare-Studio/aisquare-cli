@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import time
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -185,15 +186,20 @@ def test_text_after_the_zone_costs_neither_the_window_nor_the_reset() -> None:
     assert fine is not None and fine.resets_at is not None  # 12:30am is still a clock time
 
 
+@pytest.mark.skipif(
+    not hasattr(time, "tzset"),
+    reason="time.tzset is POSIX-only: the process zone cannot be switched for the test",
+)
 def test_a_reset_with_no_zone_named_is_resolved_in_the_local_rules_across_a_dst_change(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Review of #205, fourth round: with no zone in the message — or one ``ZoneInfo`` cannot
     find — the local zone was ``now.astimezone().tzinfo``, the offset in force NOW, and a
     weekly reset on the far side of a DST change came out an hour early. Toronto, Friday
-    2026-10-30 (EDT); Monday 00:00 is after the 1 November change, so it is 05:00 UTC."""
-    import time
+    2026-10-30 (EDT); Monday 00:00 is after the 1 November change, so it is 05:00 UTC.
 
+    Skipped where ``time`` has no ``tzset`` (Windows): the zone cannot be switched for the
+    process, and #65's windows-latest leg runs this file (review of #205, fifth round)."""
     friday = datetime(2026, 10, 30, 16, 0, tzinfo=UTC)  # noon EDT (-04:00)
     monday_midnight_est = datetime(2026, 11, 2, 5, 0, tzinfo=UTC)
     with monkeypatch.context() as local:
@@ -1128,6 +1134,38 @@ def test_the_board_and_watch_name_an_aliased_slot_1_as_the_rest_does(
     assert "personal" in rendered and ".claude" not in rendered
     block = team_service._render_board(work, sessions, [], [], me=None, labels=labels)
     assert "[personal]" in block and "[.claude]" not in block
+
+
+def test_the_board_a_hook_renders_under_a_managed_slot_names_the_aliased_slot_1_too(
+    fake_home: Path, work: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #205, fifth round: ``slot_of`` knew slot 1 by comparing with
+    ``default_config_dir()``, which honours ``CLAUDE_CONFIG_DIR`` — and every hook of an
+    agent on a managed slot runs with that variable naming ITS slot (``launch_env``). So the
+    board those hooks render, the one the agents read, still showed an aliased slot 1 as
+    ``.claude``; the previous test renders from a plain shell and could not see it."""
+    two = _slot("work@example.com", "tok-work")
+    service.set_alias("1", "personal")
+    plain = fake_home / ".claude"
+
+    def transcript(config_dir: Path, session_id: str) -> str:
+        return str(config_dir / "projects" / "-repo" / f"{session_id}.jsonl")
+
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
+    team_service.hook_session_start(
+        "sess-plain", work.root, "startup", transcript_path=transcript(plain, "sess-plain")
+    )
+    monkeypatch.setenv(core.CONFIG_DIR_VAR, str(two.config_dir))  # an agent on slot 2's hook
+    board = team_service.hook_session_start(
+        "sess-work", work.root, "startup", transcript_path=transcript(two.config_dir, "sess-work")
+    )
+
+    assert "[personal]" in board and "[.claude]" not in board
+    assert service.slot_of(plain) == 1 and service.slot_of(two.config_dir) == 2
+    assert service.slot_of(fake_home / ".claude-c2") is None  # a hand-made layout is no slot
+    # A variable that is the operator's own, not one of our slots, still names the plain claude.
+    monkeypatch.setenv(core.CONFIG_DIR_VAR, str(fake_home / ".claude-c2"))
+    assert service.slot_of(fake_home / ".claude-c2") == 1 and service.slot_of(plain) is None
 
 
 def test_the_board_block_and_watch_name_the_account_as_the_rest_does(

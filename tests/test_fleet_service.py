@@ -6435,6 +6435,39 @@ def test_a_hand_overs_mark_does_not_outlive_the_stop_it_was_set_for(
     assert again is not None and again.limited and not again.already_limited
 
 
+def test_a_hand_overs_mark_that_could_not_be_taken_back_is_said_on_the_receipt(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The unmark is best effort, and it failed in silence: on a locked store the row kept
+    ``switching`` with nothing on the receipt to say so — and a replacement whose start hook
+    failed open too stayed there through every prompt (review of the #205 fold, round 3).
+    The move still stands; the receipt says what was left behind."""
+    _two_slots_with_usage(monkeypatch, work=95, personal=10)
+    agent = fleet_service.spawn(project, "coder", worktree=False, account="2").agent
+    sid = agent.session_id or ""
+    transcript = tmp_path / f"{sid}.jsonl"
+    transcript.write_text('{"type":"user"}\n', encoding="utf-8")
+    _with_transcript(agent, transcript)
+    with store_session() as store:
+        store.mark_limited(sid, datetime.now(tz=UTC) + timedelta(hours=2))
+
+    def locked(self: SqliteStore, session_id: str, state: str) -> None:
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(SqliteStore, "unmark_handover", locked)
+
+    receipt = fleet_service.switch(project, agent.label, reason="session limit")
+
+    assert receipt.resumed and receipt.started.session_id == sid  # moved all the same
+    assert _session_state(sid) == team_service.HANDOVER_STATE  # the control: it did stay on
+    [said] = [note for note in receipt.notes if "hand-over mark" in note]
+    assert "OperationalError: database is locked" in said and "`switching`" in said
+
+
 def test_switch_starts_fresh_with_a_hand_off_prompt_when_asked_or_when_there_is_no_transcript(
     tmux: FakeTmux,
     claude_on_path: Path,

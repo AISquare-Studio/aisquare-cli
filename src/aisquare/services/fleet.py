@@ -3012,8 +3012,8 @@ def switch(
         # a resumed replacement whose start hook failed open stayed `switching`
         # through every later prompt — no `limited` recorded, no hand-over, no bell
         # (review of the #205 fold, round 2).
-        if session is not None:
-            _unmark_handing_over(session)
+        if session is not None and (left := _unmark_handing_over(session)) is not None:
+            notes.append(left)
     try:
         receipt = spawn(
             project,
@@ -3076,10 +3076,25 @@ def _mark_handing_over(session: TeamSession) -> None:
         store.touch_session(session.id, state=_team().HANDOVER_STATE)
 
 
-def _unmark_handing_over(session: TeamSession) -> None:
-    # Not through `touch_session`: every state writer but this one keeps the mark.
-    with contextlib.suppress(Exception), store_session() as store:
-        store.unmark_handover(session.id, session.state)
+def _unmark_handing_over(session: TeamSession) -> str | None:
+    """Take the mark back; a note for the receipt when it could not be, else ``None``.
+
+    Never raises: it runs in ``switch``'s ``finally``, where a raise would replace
+    the stop's own outcome. Not in silence, though: a mark left on reads
+    ``switching`` until the session's own start replaces it, and one whose start
+    hook failed open too stays there through every prompt (review of the #205
+    fold, round 3).
+    """
+    try:
+        # Not through `touch_session`: every state writer but this one keeps the mark.
+        with store_session() as store:
+            store.unmark_handover(session.id, session.state)
+    except Exception as exc:
+        return (
+            f"the hand-over mark was not taken back ({type(exc).__name__}: {exc}) — the board "
+            "shows the agent `switching` until its session's start hook replaces it"
+        )
+    return None
 
 
 def _abandon_handover(stopped: FleetAgent) -> None:

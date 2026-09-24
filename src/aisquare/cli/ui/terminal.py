@@ -317,11 +317,13 @@ terminal that reports no motion without a button."""
 _monotonic: Callable[[], float] = time.monotonic
 
 _MOUNTED_PANES: weakref.WeakSet[TerminalPane] = weakref.WeakSet()
-"""Every mounted pane, so the start and end of a gesture reach them without a DOM walk."""
+"""Every mounted pane, so the start and end of a gesture reach them without a DOM walk.
+Unordered: :func:`_tell_panes` gives the panes their order."""
 
 _SELECTION_CLOCK = itertools.count(1)
 """Ticks once per pane selection that changed: the order the copy key reads
-when more than one pane holds a highlight (:func:`copy_pane_selection`)."""
+when more than one pane holds a highlight (:func:`copy_pane_selection`), and
+the order a release tells the panes in (:func:`_tell_panes`)."""
 
 
 def _tell_panes(app: App[Any], what: str, tell: Callable[[TerminalPane], object]) -> None:
@@ -334,13 +336,21 @@ def _tell_panes(app: App[Any], what: str, tell: Callable[[TerminalPane], object]
     10). Logged, never swallowed silently: resolving the screen, and anything a
     pane does with the news, are both places this widget's history says an
     unguarded exception in a mouse handler takes the app down.
+
+    Told in one order, the pane whose selection changed least recently first
+    (:attr:`TerminalPane.selected_at`) — never the register's, which is a
+    ``WeakSet`` iterated in hash order. At a release every pane whose highlight
+    the gesture changed copies, so the last one told is the one the clipboard
+    keeps: in hash order that was whichever pane happened to hash last (review
+    of #120, round 11); in this order it is the highlight made most recently,
+    the one the copy key takes first (:func:`copy_pane_selection`).
     """
     try:
         screen = app.screen
     except Exception as error:  # no screen on the stack
         app.log.error(f"{what}: no screen to tell", error)
         return
-    for pane in list(_MOUNTED_PANES):
+    for pane in sorted(_MOUNTED_PANES, key=lambda pane: pane.selected_at):
         # The filter answers apart from the pane's own handler: a pane detached
         # from the DOM while still registered here raises ``NoScreen`` from
         # ``pane.screen`` — it is not on the active screen, which is the
@@ -376,7 +386,9 @@ def route_selection_gesture(app: App[Any], button: int | None) -> None:
     broken cross-widget copy passed review twice (reviews of #120, rounds 6
     and 9). Every pane is told, always: a pane's per-gesture state is reset at
     the next press, not here, so there is nothing an early return could leave
-    armed (review of #120, round 9; review of #135, finding 6).
+    armed (review of #120, round 9; review of #135, finding 6). The most
+    recently selected pane is told last, so when one drag changed two panes
+    the clipboard ends with what the copy key would copy (``_tell_panes``).
     """
     _tell_panes(app, "selection gesture", lambda pane: pane.selection_gesture_ended(button))
 
@@ -1397,7 +1409,8 @@ class TerminalPane(Widget, can_focus=True):
     @property
     def selected_at(self) -> int:
         """When this pane's selection last changed, on the module's selection clock
-        — what orders the panes for the copy key (:func:`copy_pane_selection`)."""
+        — what orders the panes for the copy key (:func:`copy_pane_selection`)
+        and for a release (:func:`_tell_panes`)."""
         return self._selected_at
 
     def has_standing_selection(self) -> bool:

@@ -3934,6 +3934,50 @@ def test_the_copy_key_takes_the_highlight_made_most_recently(
     assert run(drive()) == ["oth", "red", "red", "oth"]
 
 
+def test_a_drag_across_two_panes_leaves_the_clipboard_with_the_highlight_the_copy_key_takes(
+    fake: FakeTmux, tmp_path: Path
+) -> None:
+    """Review of #120, round 11. One drag across two visible panes changes both
+    highlights, and at the release both copy — so the last pane told wins the
+    clipboard, and the release told them in the register's order: a ``WeakSet``,
+    hash order, measured telling the top pane last on one run and the bottom on
+    another. They are told in the copy key's order now, the most recently
+    selected last. Driven in BOTH directions on one host: the drag's end is the
+    pane that changed last, and whatever order the set holds the two in, one
+    direction would fail without the order. The copy key, pressed after, copies
+    what the release left on the clipboard."""
+    fake.panes["%2"] = FakePane(screen=["BBB one", "BBB two", "BBB three"], cursor=(0, 0))
+
+    async def drive() -> list[tuple[str, str]]:
+        host = PairHost(fake.server(tmp_path))
+        async with host.run_test(size=(40, 8)) as pilot:
+            top = host.query_one("#first", TerminalPane)
+            bottom = host.query_one("#second", TerminalPane)
+            await wait_until(pilot, lambda: synced(top) and synced(bottom))
+            results: list[tuple[str, str]] = []
+            # Down from the top pane, ending in the bottom one; then up from the
+            # bottom, ending in the top. Two moves in the pane the drag ends in:
+            # the first one Textual writes both panes' selections in, in one
+            # watcher call; the second changes the end pane's alone.
+            for pressed_in, start, released_in, end in (
+                (top, (1, 1), bottom, (4, 1)),
+                (bottom, (3, 1), top, (5, 1)),
+            ):
+                await drag(pilot, pressed_in, start, end, to=released_in)
+                on_release = host.clipboard
+                host.set_focus(None)
+                await pilot.press("ctrl+c")
+                await pilot.pause()
+                results.append((on_release, host.clipboard))
+                host.screen.clear_selection()
+                await pilot.pause()
+            return results
+
+    down, up = run(drive())
+    assert down == ("BBB one\nBBB ", "BBB one\nBBB "), down
+    assert up == ("d row\nthird row", "d row\nthird row"), up
+
+
 def test_a_failed_frame_drops_the_highlight_on_the_row_its_notice_replaces(
     fake: FakeTmux, tmp_path: Path
 ) -> None:

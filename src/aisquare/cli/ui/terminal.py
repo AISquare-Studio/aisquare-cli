@@ -102,6 +102,7 @@ from rich.text import Text
 from textual import events
 from textual.actions import SkipAction
 from textual.app import App
+from textual.dom import NoScreen
 from textual.geometry import Offset, Region
 from textual.message import Message
 from textual.screen import Screen
@@ -309,7 +310,10 @@ DUPLICATE_PRESS_WINDOW = 0.5
 A terminal that double-reports does so within milliseconds; a human whose
 release was lost — the pointer left the window with the button down — presses
 again after a drag's worth of time. The window tells the two apart, and a
-double-click is not in question: its second press finds nothing down."""
+double-click is not in question: its second press finds nothing down. A lost
+release is normally caught sooner, by the first move reported with no button
+held (:meth:`SelectionHost.on_event`); the window is what is left for a
+terminal that reports no motion without a button."""
 _monotonic: Callable[[], float] = time.monotonic
 
 _MOUNTED_PANES: weakref.WeakSet[TerminalPane] = weakref.WeakSet()
@@ -337,9 +341,19 @@ def _tell_panes(app: App[Any], what: str, tell: Callable[[TerminalPane], object]
         app.log.error(f"{what}: no screen to tell", error)
         return
     for pane in list(_MOUNTED_PANES):
+        # The filter answers apart from the pane's own handler: a pane detached
+        # from the DOM while still registered here raises ``NoScreen`` from
+        # ``pane.screen`` — it is not on the active screen, which is the
+        # filter's answer, and was logged as "failed for a pane" at every
+        # press and release in the app (review of #120, round 11). The line
+        # below means what it says: the pane's handler raised.
         try:
-            if not pane.is_mounted or pane.screen is not screen:
-                continue
+            on_screen = pane.is_mounted and pane.screen is screen
+        except NoScreen:
+            on_screen = False
+        if not on_screen:
+            continue
+        try:
             tell(pane)
         except Exception as error:
             app.log.error(f"{what} failed for a pane", error)
@@ -471,6 +485,24 @@ class SelectionHost(App[None]):
     async def on_event(self, event: events.Event) -> None:
         pressed = isinstance(event, events.MouseDown) and not event.is_forwarded
         released = isinstance(event, events.MouseUp) and not event.is_forwarded
+        if (
+            isinstance(event, events.MouseMove)
+            and not event.is_forwarded
+            and event.button == 0
+            and self._pressed is not None
+        ):
+            # A move with NO button held while a gesture is down: its release
+            # was lost — let go outside the terminal, or the driver dropped it —
+            # and this is the first report that says so. The gesture ends here,
+            # routed with its button BEFORE the move is forwarded, so a drag
+            # copies where it got to, not where the bare pointer came back in.
+            # Left armed, a press of the same button inside
+            # DUPLICATE_PRESS_WINDOW was dropped as a duplicate and the next
+            # drag extended the lost one (review of the fold with #167). A stray
+            # is left to its own release or the next press: its release reaching
+            # the screen is the damage the stray rule exists to prevent.
+            lost, self._pressed = self._pressed, None
+            route_selection_gesture(self, lost)
         # ONE gesture at a time. A second button pressed while one is down is
         # not a new gesture — and it is not the screen's to see either. Recording
         # it overwrote ``_pressed`` and re-baselined every pane to the selection
@@ -557,9 +589,10 @@ class TerminalPane(Widget, can_focus=True):
     1. *A gesture is what the app sees.* :class:`SelectionHost` reads every
        press and release in ``App.on_event`` and tells every pane on the active
        screen when a gesture starts (:meth:`selection_gesture_started`) and when
-       it ends (:meth:`selection_gesture_ended`, with the button that began it).
-       A pane's own ``on_mouse_down`` only adds what the app cannot know: where
-       in the pane the press landed.
+       it ends (:meth:`selection_gesture_ended`, with the button that began it)
+       — at its release, or, when the release was lost, at the first move
+       reported with no button held. A pane's own ``on_mouse_down`` only adds
+       what the app cannot know: where in the pane the press landed.
     2. *A release copies by value.* At the start of a gesture a pane notes the
        selection it has (its baseline); at the end it copies exactly when its
        selection differs from that baseline, and only for the left button. An
@@ -1431,13 +1464,20 @@ class TerminalPane(Widget, can_focus=True):
     def _with_selection(
         self, strip: Strip, span: tuple[int, int], row: DisplayedRow, width: int
     ) -> Strip:
-        """Paint ``span`` — CELL offsets from the compositor, ``-1`` to the end — as cells."""
+        """Paint ``span`` — CELL offsets from the compositor, ``-1`` to the end — as cells.
+
+        The row is skipped by the same test :func:`_extract` skips it by, so the
+        two count the same rows. ``start`` is not clamped (review of #120, round
+        11): at or past ``width`` — a selection left from a wider pane — the
+        test already skips the row; below 0 — which Textual never writes, its
+        compositor clamps offsets at 0 — ``Strip.crop`` starts at cell 0, as
+        :meth:`DisplayedRow.slice` copies from it. A clamp here changed nothing.
+        """
         start, end = span
-        cell_start = min(max(start, 0), width)
         cell_end = width if end == -1 else min(end, width)
-        if cell_start >= cell_end:
+        if start >= cell_end:
             return strip  # no cell of this row: nothing to widen, nothing to tint
-        cell_start, cell_end = row.snap(cell_start, cell_end)
+        cell_start, cell_end = row.snap(start, cell_end)
         tint = self._selection_tint()
         painted = strip.crop(cell_start, cell_end)
         segments = [self._tinted(segment, tint) for segment in painted]
@@ -1759,8 +1799,6 @@ class TerminalPane(Widget, can_focus=True):
         eighth and ninth versions). Both writers go through here, so the rule
         lives in one place.
         """
-        if not self.is_mounted:
-            return
         selections = {
             widget: span for widget, span in self.screen.selections.items() if widget is not self
         }

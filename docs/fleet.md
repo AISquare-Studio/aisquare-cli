@@ -202,8 +202,10 @@ the task's state asks of *this* role. A coder is told to claim a `todo` task
 ready), to carry on with a `doing` task it holds, to do the rework on a task
 back in `review`, to take over a `doing` task whose holder's lease has run out,
 or to stand down and ask the manager when a teammate is live on it right now. A
-verifier (tester, ui-tester, reviewer, validator) is told to verify a task in
-`review` and, in any other state, that it is not yet its turn. `task next` puts
+verifier (tester, ui-tester, reviewer) is told to verify a task in `review`
+and, in any other state, that it is not yet its turn. The validator gates the
+assembled deliverable, not a task, so in every state it is told the task is the
+context for its GATE note — nothing to claim, work or verify. `task next` puts
 the assigned task first — for the agent's own session, and for a verifier's
 cycle or the MCP server's `task_next` running under the same window (the order
 only; a claim needs the session). The assignment ends when its task is done or

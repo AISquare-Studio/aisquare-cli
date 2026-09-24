@@ -14,6 +14,7 @@ so repos that never opted in never see team output.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import sqlite3
@@ -41,6 +42,13 @@ from aisquare.models import (
     TeamTask,
 )
 from aisquare.services import distill as distill_service
+
+#: The fail-open reads of the fleet row say here what they swallowed. Nothing
+#: in the CLI configures logging, so a WARNING reaches stderr through the
+#: logging module's last-resort handler — a hook's stderr is Claude Code's hook
+#: log — as one line: a traceback is what an operator must never be handed for
+#: a preference that stopped working.
+_log = logging.getLogger(__name__)
 
 _SHORT_ID = 8
 _DELTA_LIMIT = 10
@@ -2243,14 +2251,23 @@ def _fleet_row_for(store: ContextStore, session_id: str, project_id: str) -> Fle
     and a nested child, which inherits the variable, resolves nothing (its
     ``task next`` claimed its parent's task through the name alone in review
     round 2 of #116). Fail-open: which task comes first is a preference, and an
-    unreadable row must not take ``task next`` down with it.
+    unreadable row must not take ``task next`` down with it — but it is logged:
+    swallowed silently, a regression here (a renamed store method, a migrated
+    column) put every spawned agent back on oldest-first with nothing anywhere
+    saying the preference had stopped working (review of #116, round 5).
     """
     try:
         named = _fleet_row_named(store, project_id)
         if named is not None and named.session_id == session_id:
             return named
         return store.fleet_agent_for_session(project_id, session_id)
-    except Exception:
+    except Exception as exc:
+        _log.warning(
+            "the fleet row of session %s could not be read, so it has none (%s: %s)",
+            session_id,
+            type(exc).__name__,
+            exc,
+        )
         return None
 
 
@@ -2279,7 +2296,13 @@ def _fleet_row_hint(
         return None
     try:
         return _fleet_row_named(store, project_id)
-    except Exception:
+    except Exception as exc:  # the order is a preference: logged, as in _fleet_row_for
+        _log.warning(
+            "the fleet row AISQUARE_FLEET_AGENT names could not be read, so task next "
+            "hands out the oldest task first (%s: %s)",
+            type(exc).__name__,
+            exc,
+        )
         return None
 
 
@@ -2449,12 +2472,23 @@ def _resolve_assignment(store: ContextStore, session_id: str, project_id: str) -
     return Assignment(task, mine, waiting_on, task.status == "doing" and not mine and expired)
 
 
-#: Roles whose job is to VERIFY a task in review rather than to work it. Pinned
-#: against the harness by ``test_every_verifying_role_is_known_to_the_assignment``:
+#: Roles whose job is to VERIFY a task in review rather than to work it: exactly
+#: the roles whose standing cycle pulls from the review pool, pinned both ways
+#: against the harness by ``test_every_verifying_role_is_known_to_the_assignment``.
 #: ``ui-tester`` was missing, so the browser verifier spawned for a ``[review]``
 #: task was told it was there for the rework — to edit and re-submit someone
 #: else's work, against its own lane rule (review of the fourth version).
-_VERIFYING_ROLES = frozenset({"tester", "runner", "reviewer", "validator", "ui-tester"})
+_VERIFYING_ROLES = frozenset({"tester", "runner", "reviewer", "ui-tester"})
+
+#: Roles that GATE the assembled deliverable once, before handoff — the roles
+#: whose standing cycle's verdict is a ``GATE:`` note, pinned by the same test.
+#: They neither work a task nor verify one, so no state of the task they were
+#: spawned for gives them anything to claim or a per-task verdict to render.
+#: The validator sat in the verifying set, and a ``[review]`` assignment sent it
+#: to "the verdict your standing cycle below describes" — a cycle that describes
+#: no verdict on a task; outside both sets it would be handed a coder's claim or
+#: rework (review of #116, round 5).
+_GATING_ROLES = frozenset({"validator"})
 
 
 def _assignment_lines(assignment: Assignment, me: TeamSession) -> list[str]:
@@ -2466,7 +2500,9 @@ def _assignment_lines(assignment: Assignment, me: TeamSession) -> list[str]:
     the one it reopened included, is a coder's to claim, and a verifier told to
     claim it raced the coder for the rework (finding 12). A coder spawned at
     ``[review]`` is there for the rework, and was being handed the stop order
-    meant for a bystander (reviews of the first two versions of #116).
+    meant for a bystander (reviews of the first two versions of #116). The
+    validator is told one thing in every state: the task is the context for its
+    GATE, never work or a verdict of its own (round 5).
 
     ``mine`` — this session IS the one holding the task, across a ``/clear``
     that renamed it — is read INSIDE each state, not ahead of them. Read ahead,
@@ -2484,6 +2520,13 @@ def _assignment_lines(assignment: Assignment, me: TeamSession) -> list[str]:
     sid = short_id(me.id)
     verifier = base_role(me.role) in _VERIFYING_ROLES
     head = f"ASSIGNED TO YOU: {task.id} [{task.status}] {task.title}"
+    if base_role(me.role) in _GATING_ROLES:
+        return [
+            head,
+            "You gate the assembled deliverable, not this task: it is not yours to claim,",
+            f"work or verify on its own. `aisquare task show {task.id}` is the context you",
+            "were spawned with; your verdict is the GATE note your standing cycle describes.",
+        ]
     if verifier and task.status != "review":
         return [
             head,
@@ -2523,11 +2566,13 @@ def _assignment_lines(assignment: Assignment, me: TeamSession) -> list[str]:
         ]
     if task.status == "review":
         if verifier:
-            # No command for the verdict here: the roles differ on it, and this
-            # block used to name `task next --status review` for all of them —
-            # which the validator's cycle, a one-shot GATE note, never runs
-            # (review of the fourth version). `task show` is common to every
-            # verifier; the standing cycle below carries the verdict.
+            # No command for the verdict here: the roles differ on it (a
+            # tester's `task done`/`task reopen`, a reviewer's PR review), and
+            # this block used to name `task next --status review` for all of
+            # them — which the validator's cycle, a one-shot GATE note, never
+            # ran (review of the fourth version; the validator has its own
+            # block now). `task show` is common to every verifier; the standing
+            # cycle below carries the verdict.
             return [
                 head,
                 "It awaits your verification — start there, not with the pool:",

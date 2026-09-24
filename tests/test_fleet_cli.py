@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import io
 import json
-import re
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -50,17 +49,12 @@ from aisquare.services.fleet import (
     StopReceipt,
     TellResult,
 )
-
-_ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+from tests.rendered import plain as _plain
 
 NOW = datetime(2026, 8, 28, 12, 0, tzinfo=UTC)
 PROJECT = ProjectInfo(id="prj_01abc", root=Path("/home/me/work/api"), codename="amber-otter")
 UNNAMED = ProjectInfo(id="prj_02def", root=Path("/home/me/oss/tool"), codename=None)
 SESSION = "asq-amber-otter"
-
-
-def _plain(text: str) -> str:
-    return " ".join(_ANSI.sub("", text).split())
 
 
 @pytest.fixture(autouse=True)

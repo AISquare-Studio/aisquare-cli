@@ -22,6 +22,7 @@ from aisquare.models import ClientReason, ProjectInfo, TurnMetric
 from aisquare.services import hooks as hooks_service
 from aisquare.services import metrics as metrics_service
 from aisquare.services import team as team_service
+from tests.rendered import plain
 
 PROJECT = ProjectInfo(id="prj_metrics", root=Path("/tmp/metrics"), linked_repos=[])
 
@@ -383,7 +384,7 @@ def test_metrics_refuses_all_together_with_project(
         store.ensure_project(PROJECT)
     result = runner.invoke(app, ["metrics", command, "--project", "alpha", "--all"])
     assert result.exit_code != 0
-    assert "--all and --project conflict" in result.output
+    assert "--all and --project conflict" in plain(result.output)
 
 
 def test_metrics_show_says_when_override_rows_are_present(

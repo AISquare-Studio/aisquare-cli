@@ -82,9 +82,15 @@ def read_state(*, strict: bool = False) -> dict[str, object]:
     read, so "the file says nothing" and "the file could not be read" stay
     distinct for the caller that needs them to (the pin). A file that does not
     DECODE is corrupt, not unreadable, and reads as ``{}`` either way.
+
+    Through ``paths.despite_windows_contention``, like ``config.load_config``
+    and ``credentials.load_all``: on NTFS a read racing :func:`update_state`'s
+    rename takes an ``Access is denied`` for the rename's width, which raised
+    from the strict pin read and read as "not set" everywhere else (review of
+    the #65 fold, R1-B). The writer's half is in ``core.atomic``.
     """
     try:
-        raw = paths.state_path().read_bytes()
+        raw = paths.despite_windows_contention(paths.state_path().read_bytes)
     except FileNotFoundError:
         return {}
     except OSError:

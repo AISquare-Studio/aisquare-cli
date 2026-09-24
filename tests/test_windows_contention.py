@@ -24,7 +24,7 @@ from typing import Any
 
 import pytest
 
-from aisquare.core import credentials, paths
+from aisquare.core import credentials, paths, state_file
 from aisquare.core.atomic import write_replacing
 from aisquare.core.config import load_config, save_config
 
@@ -82,6 +82,19 @@ def test_credentials_read_while_busy_are_not_read_as_empty(
     calls = _refuse_first_open(monkeypatch, paths.credentials_path(), "read_text")
     assert credentials.load_all() == {"api_key": "k", "serve_token": "t"}
     assert calls == ["read_text", "read_text"], "the busy read was not retried"
+
+
+@pytest.mark.parametrize("strict", [False, True], ids=["preference", "pin"])
+def test_a_state_read_while_busy_is_retried(
+    isolated_home: Path, windows: None, monkeypatch: pytest.MonkeyPatch, strict: bool
+) -> None:
+    """``read_state`` is lockless, so it races ``update_state``'s rename like any reader. A
+    busy read raised from the pin's strict read, so ``project`` commands failed on a file
+    that was only being replaced, and read as "not set" for the theme and the width."""
+    state_file.update_state("active_project_id", "p1")
+    calls = _refuse_first_open(monkeypatch, paths.state_path(), "read_bytes")
+    assert state_file.read_state(strict=strict) == {"active_project_id": "p1"}
+    assert calls == ["read_bytes", "read_bytes"]
 
 
 def test_a_config_read_while_busy_is_retried(

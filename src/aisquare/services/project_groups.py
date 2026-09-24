@@ -11,9 +11,10 @@ One place computes the order every surface shows (:func:`arrange`), one place
 applies each change (:func:`move_project`, :func:`move_group`, :func:`pin`,
 :func:`create_group`, …), and every change returns an :class:`UndoEntry` —
 the rows' layout as it was — so the sidebar's ``u`` and a CLI mistake have the
-same way back (:func:`undo`). Positions are dense integers per scope
-(the top level, or one group), renumbered after every move, so a gap can never
-make two projects tie.
+same way back (:func:`undo`). Positions are integers per scope (the top level,
+or one group), renumbered densely after every move, so two projects never tie.
+A pin or a forget can leave a gap, which orders the same: every placement is by
+index, never by number.
 """
 
 from __future__ import annotations
@@ -186,13 +187,9 @@ def undo(store: ContextStore, entry: UndoEntry) -> str:
             pinned_at=before.pinned_at,
             collapsed=before.collapsed,
         )
+    restored: set[str] = set()
+    scopes: set[str | None] = set()
     for project_id, (scope, position, pinned_at) in entry.projects.items():
-        if store.get_project(project_id) is None:
-            # Forgotten (or purged) since the gesture. A forget takes the row out of
-            # the arrangement; written back onto the tombstone, its old group, number
-            # and pin came back with it when a prompt revived the row (review of
-            # #171, round 1).
-            continue
         if scope is not None and store.get_project_group(scope) is None:
             # Its group was deleted since — from a shell, between the sidebar's
             # gesture and its `u` — and is not one this entry re-creates. Written
@@ -205,8 +202,37 @@ def undo(store: ContextStore, entry: UndoEntry) -> str:
                 project_id, group_id=scope, position=position, pinned_at=pinned_at
             )
         except KeyError:
-            continue  # the project was purged since the read above
+            # Forgotten or purged since the gesture. A forget takes the row out of
+            # the arrangement; written back onto the tombstone, its old group,
+            # number and pin came back with it when a prompt revived the row
+            # (review of #171, round 1).
+            continue
+        restored.add(project_id)
+        scopes.add(scope)
+    for scope in scopes:
+        _untie(store, scope, first=restored)
     return entry.description
+
+
+def _untie(store: ContextStore, group_id: str | None, *, first: set[str]) -> None:
+    """Renumber a scope an undo wrote into, when two of its rows now share a number.
+
+    An undo writes back the numbers its rows had. A change from elsewhere
+    between a gesture and its `u` — a move from a shell, a forget and a
+    revival — renumbers the scope meanwhile, and a restored row's old number can
+    be another row's by then: two rows on one slot, ordered by name (review of
+    #171, round 2). The rows ``first`` names — the restored ones — win the tie,
+    and the scope is numbered densely around them: back at the place they had,
+    as an unpin puts a project back at its own.
+    """
+    members = _scope_members(store, group_id)
+    numbers = [p.position for p in members if p.position is not None]
+    if len(numbers) == len(set(numbers)):
+        return
+    ordered = sorted(
+        members, key=lambda p: (p.position is None, p.position or 0, p.id not in first)
+    )
+    _renumber(store, ordered, group_id)
 
 
 # --- renumbering ------------------------------------------------------------------------------
@@ -240,7 +266,10 @@ def _renumber(store: ContextStore, ordered: list[ProjectInfo], group_id: str | N
     "joined" a group in memory and stayed loose in the store).
     """
     for index, project in enumerate(ordered):
-        store.update_project_layout(project.id, group_id=group_id, position=index)
+        try:
+            store.update_project_layout(project.id, group_id=group_id, position=index)
+        except KeyError:
+            continue  # forgotten since the scope was read: it has left the arrangement
 
 
 def _insert_at(

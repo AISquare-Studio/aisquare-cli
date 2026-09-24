@@ -338,7 +338,23 @@ class DragHandle(Activatable):
     def on_mouse_down(self, event: events.MouseDown) -> None:
         self._dragged = False
         sidebar = self._sidebar()
-        if sidebar is None or event.button != 1 or event.shift:
+        if sidebar is None:
+            return
+        if event.button == 1 and sidebar.dragging(self):
+            # Button 1 pressed while a press of it still holds a drag from here:
+            # that release was lost, on a terminal that reports no motion without
+            # a button, so no buttonless move ended the drag (``drag_over`` does
+            # where one is reported; DUPLICATE_PRESS_WINDOW is SelectionHost's
+            # side of the same case). This press reached the handle only because
+            # the handle still held the mouse. The old drag ends and snaps back,
+            # the handle lets go, and this press starts nothing: its release is a
+            # click on the row under the pointer. Re-armed here, the handle kept
+            # the mouse, the Click came to it, and a click on api opened docs
+            # (review of #171, round 2).
+            self.release_mouse()
+            sidebar.cancel_drag(self)
+            return
+        if event.button != 1 or event.shift:
             return  # a shift+click is a mark, decided on the click
         state = self.drag_state(sidebar)
         if state is None:

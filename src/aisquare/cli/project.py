@@ -23,7 +23,7 @@ from aisquare.core.console import stdout_console
 from aisquare.core.state import get_state
 from aisquare.core.store import store_session
 from aisquare.core.workspace import find_project_root, project_id_for
-from aisquare.models import ProjectInfo
+from aisquare.models import ProjectGroup, ProjectInfo
 from aisquare.services import project as project_service
 from aisquare.services import project_groups as groups_service
 
@@ -68,26 +68,38 @@ def list_(
         except KeyError:
             fail(f"no group matches '{group}'", error="not_found", ref=str(group))
         listed = arrangement.ordered_projects()
-        # Counted only when nothing is listed at all, where "nothing registered"
-        # would be wrong — not when --group or --pinned filtered the list empty.
-        hidden = 0 if all or listed else len(store.captured_projects())
-    projects = listed
-    if chosen is not None:
-        projects = [p for p in projects if p.group_id == chosen.id]
-    if pinned:
-        projects = [p for p in projects if p.pinned_at is not None]
+        captured = [] if all else store.captured_projects()
+    # Counted only when nothing is listed at all, where "nothing registered"
+    # would be wrong — not when --group or --pinned filtered the list empty.
+    hidden = 0 if listed else len(captured)
+    projects = _matching(listed, chosen, pinned=pinned)
     filtered = None
     if listed and not projects:
         # The filter matched nothing in a list that has rows, and the empty table
         # said "No projects registered yet. Run: aisquare init" (review of #171,
         # round 1). It names the filter instead, and the step that fills it.
         where = f" in group {chosen.name}" if chosen is not None else ""
-        if pinned:
+        unlisted = len(_matching(captured, chosen, pinned=pinned))
+        if unlisted:
+            # What it matches is captured, and the list hides it (#139): pinned or
+            # grouped from a shell, or from the sidebar while `a` shows it. "pin
+            # one" and "add one" named a step already taken, and taken again it
+            # changed nothing (review of #171, round 2).
+            noun = "directory" if unlisted == 1 else "directories"
+            flags = " --pinned" if pinned else ""
+            if chosen is not None:
+                flags += f" --group {shlex.quote(chosen.name)}"
+            filtered = (
+                f"No listed {'pinned ' if pinned else ''}projects{where} — {unlisted} captured "
+                f"{noun} hidden (a hooked session ran there): aisquare project list --all"
+                f"{flags}; add one: aisquare project onboard <path>"
+            )
+        elif pinned:
             filtered = f"No pinned projects{where} — pin one: aisquare project pin <project>"
         elif chosen is not None:
             filtered = (
                 f"No projects{where} — add one: aisquare project group add "
-                f"{shlex.quote(chosen.name)} <project>"
+                f"{_positional(chosen.name)} <project>"
             )
     emit_projects(
         projects,
@@ -96,6 +108,27 @@ def list_(
         group_names=group_names,
         filtered=filtered,
     )
+
+
+def _matching(
+    projects: list[ProjectInfo], group: ProjectGroup | None, *, pinned: bool
+) -> list[ProjectInfo]:
+    """The rows ``--group`` and ``--pinned`` keep, in the order given."""
+    if group is not None:
+        projects = [p for p in projects if p.group_id == group.id]
+    if pinned:
+        projects = [p for p in projects if p.pinned_at is not None]
+    return projects
+
+
+def _positional(value: str) -> str:
+    """``value`` as a shell word a command reads as an argument, never as an option.
+
+    ``shlex.quote`` keeps the shell from splitting a name, not Click from reading
+    ``-wip`` as options; ``--`` ends the options first (review of #171, round 2).
+    """
+    word = shlex.quote(value)
+    return f"-- {word}" if value.startswith("-") else word
 
 
 @app.command("switch")

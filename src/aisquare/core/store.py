@@ -698,6 +698,13 @@ SCHEMA_VERSION = len(_MIGRATIONS)
 
 _PROJECT_COLUMNS = "id, root, linked_repos, codename, onboarded_at, group_id, position, pinned_at"
 _GROUP_COLUMNS = "id, name, position, pinned_at, collapsed, created_at"
+_LAYOUT_KEPT_BY_A_LIVE_ROW = (
+    "group_id = CASE WHEN project.forgotten_at IS NULL THEN project.group_id END, "
+    "position = CASE WHEN project.forgotten_at IS NULL THEN project.position END, "
+    "pinned_at = CASE WHEN project.forgotten_at IS NULL THEN project.pinned_at END"
+)
+"""A revival's SET for the arrangement (#140): a live row keeps its place, a tombstone
+comes back loose and unpinned (:meth:`SqliteStore.ensure_project` says why)."""
 
 _COLUMNS = "id, pool, project_id, text, tags, source, created_at, updated_at, deleted_at"
 _PROMPT_COLUMNS = "id, project_id, text, source, created_at"
@@ -1363,13 +1370,18 @@ class SqliteStore:
         v17 backfill had no ``forgotten_at`` guard and stamped forgotten rows
         with history as onboarded, and stores already past v17 keep them. A
         live row keeps its mark: the SET reads the row as it was before the
-        update.
+        update. The same goes for its place in the arrangement (#140): a forget
+        clears the group, the position and the pin, but a tombstone written
+        before it did keeps all three, and revived as it was, the project came
+        back pinned and grouped at a number its scope had since given away
+        (review of #171, round 2).
         """
         self._conn.execute(
             "INSERT INTO project (id, root, name, linked_repos, created_at) "
             "VALUES (?, ?, ?, ?, ?) "
             "ON CONFLICT (id) DO UPDATE SET forgotten_at = NULL, onboarded_at = "
-            "CASE WHEN project.forgotten_at IS NULL THEN project.onboarded_at END",
+            "CASE WHEN project.forgotten_at IS NULL THEN project.onboarded_at END, "
+            f"{_LAYOUT_KEPT_BY_A_LIVE_ROW}",
             (
                 project.id,
                 str(project.root),
@@ -1388,13 +1400,16 @@ class SqliteStore:
         actions that mean "this is one of my projects".
         ``onboarded_at`` is set once and kept; ``forgotten_at`` is cleared, so
         the row comes back with whatever history it still carries (see v14).
+        A revived row comes back loose and unpinned, as :meth:`ensure_project`
+        says; a live one keeps its place.
         """
         now = _now_iso()
         self._conn.execute(
             "INSERT INTO project (id, root, name, linked_repos, created_at, onboarded_at) "
             "VALUES (?, ?, ?, ?, ?, ?) "
             "ON CONFLICT (id) DO UPDATE SET forgotten_at = NULL, "
-            "onboarded_at = COALESCE(project.onboarded_at, excluded.onboarded_at)",
+            "onboarded_at = COALESCE(project.onboarded_at, excluded.onboarded_at), "
+            f"{_LAYOUT_KEPT_BY_A_LIVE_ROW}",
             (
                 project.id,
                 str(project.root),
@@ -2569,7 +2584,14 @@ class SqliteStore:
         position: int | EllipsisType | None = ...,
         pinned_at: datetime | EllipsisType | None = ...,
     ) -> ProjectInfo:
-        """Change where a project sits — group, position, pin; ``...`` leaves a field alone."""
+        """Change where a project sits — group, position, pin; ``...`` leaves a field alone.
+
+        A forgotten project has no place to change: it is a ``KeyError``, as an
+        unknown one is. A gesture from a stale frame — the sidebar between two
+        refreshes, a drag, the group picker left open — while a shell ran
+        ``project forget`` was written onto the tombstone, and the revival
+        brought the project back pinned or grouped (review of #171, round 2).
+        """
         sets: list[str] = []
         params: list[object] = []
         if group_id is not ...:
@@ -2583,13 +2605,15 @@ class SqliteStore:
             params.append(pinned_at.isoformat() if pinned_at is not None else None)
         if sets:
             cursor = self._conn.execute(
-                f"UPDATE project SET {', '.join(sets)} WHERE id = ?", (*params, project_id)
+                f"UPDATE project SET {', '.join(sets)} WHERE id = ? AND forgotten_at IS NULL",
+                (*params, project_id),
             )
             self._conn.commit()
             if cursor.rowcount != 1:
                 raise KeyError(project_id)
         updated = self._conn.execute(
-            f"SELECT {_PROJECT_COLUMNS} FROM project WHERE id = ?", (project_id,)
+            f"SELECT {_PROJECT_COLUMNS} FROM project WHERE id = ? AND forgotten_at IS NULL",
+            (project_id,),
         ).fetchone()
         if updated is None:
             raise KeyError(project_id)

@@ -143,3 +143,60 @@ def test_a_filter_that_matches_nothing_says_so_not_that_nothing_is_registered(
     for project_id in projects.values():
         assert runner.invoke(app, ["project", "forget", project_id]).exit_code == 0
     assert "No projects registered yet" in shown("--pinned")
+
+
+def test_a_filter_whose_matches_are_hidden_points_to_them_not_to_a_step_already_taken(
+    runner: CliRunner, projects: dict[str, str], tmp_path: Path
+) -> None:
+    """A captured directory can be grouped and pinned (the sidebar's `a` arranges it too),
+    and the list hides it (#139). ``--group`` and ``--pinned`` then matched nothing listed,
+    and the empty table said "add one: … group add exp <project>" or "pin one" — a step
+    already taken, which changed nothing taken again (review of #171, round 2). It counts
+    the hidden matches and points to ``--all`` with the same filter."""
+
+    def shown(*args: str) -> str:
+        result = runner.invoke(app, ["project", "list", *args])
+        assert result.exit_code == 0, result.output
+        return " ".join(result.stdout.split())
+
+    with store_session() as store:
+        store.ensure_project(ProjectInfo(id="prj_scratch", root=tmp_path / "scratch"))
+    assert runner.invoke(app, ["project", "group", "create", "exp", "prj_scratch"]).exit_code == 0
+    grouped = shown("--group", "exp")
+    assert grouped == (
+        "No listed projects in group exp — 1 captured directory hidden (a hooked session ran "
+        "there): aisquare project list --all --group exp; add one: aisquare project onboard "
+        "<path>"
+    ), grouped
+    assert [row["name"] for row in _listed(runner, "--all", "--group", "exp")] == ["scratch"]
+    assert runner.invoke(app, ["project", "pin", "prj_scratch"]).exit_code == 0
+    pinned = shown("--pinned")
+    assert pinned.startswith("No listed pinned projects — 1 captured directory hidden"), pinned
+    assert pinned.endswith(
+        "aisquare project list --all --pinned; add one: aisquare project onboard <path>"
+    )
+    both = shown("--pinned", "--group", "exp")
+    assert "aisquare project list --all --pinned --group exp;" in both, both
+    # With nothing hidden that matches, the step that fills the filter is still named.
+    assert "scratch" in shown("--pinned", "--group", "exp", "--all")
+    assert runner.invoke(app, ["project", "group", "create", "site"]).exit_code == 0
+    assert shown("--group", "site").startswith("No projects in group site — add one:")
+
+
+def test_the_step_named_for_an_empty_group_reads_a_dashed_name_as_the_group(
+    runner: CliRunner, projects: dict[str, str]
+) -> None:
+    """``shlex.quote`` keeps ``-wip`` one word, and Click still read it as options: the step
+    the empty table named exited 2 with "No such option: -w" (review of #171, round 2).
+    ``--`` ends the options first, and the step it names works as printed."""
+    assert runner.invoke(app, ["project", "group", "create", "--", "-wip"]).exit_code == 0
+    result = runner.invoke(app, ["project", "list", "--group", "-wip"])
+    assert result.exit_code == 0, result.output
+    said = " ".join(result.stdout.split())
+    assert (
+        said == "No projects in group -wip — add one: aisquare project group add -- -wip <project>"
+    )
+    step = said.split(": aisquare ", 1)[1].replace("<project>", "web").split()
+    added = runner.invoke(app, step)
+    assert added.exit_code == 0, added.output
+    assert _names(runner, "--group", "-wip") == ["web"]

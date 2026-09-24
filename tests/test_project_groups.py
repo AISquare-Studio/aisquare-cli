@@ -7,6 +7,7 @@ outrank groups; positions stay dense; undo puts back exactly what a move touched
 
 from __future__ import annotations
 
+import sqlite3
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -277,3 +278,95 @@ def test_a_forgotten_project_leaves_the_arrangement_and_comes_back_like_a_new_on
     }, "loose, and last, where a project arranged by nobody lands"
     tools = groups.load_arrangement(store).groups[0].members
     assert [p.position for p in tools] == [0, 1], "no shared slot"
+
+
+def test_an_undo_after_a_change_from_elsewhere_puts_the_row_back_without_a_tie(
+    store: ContextStore,
+) -> None:
+    """An undo writes back the numbers its rows had. A move from a shell between the
+    gesture and its `u` renumbered the scope, and the restored row landed on a number
+    another row held by then: two rows at 0, ordered by name — web behind docs (review of
+    #171, round 2). It gets its place back, as an unpin does, and the scope stays dense.
+    A row forgotten and added again in between is put back the same way."""
+    groups.create_group(store, "tools", ["prj_web", "prj_cli", "prj_docs"])
+    pinned = groups.pin(store, "prj_web")
+    groups.move_project(store, "prj_docs", position=0)  # tools renumbered without web
+    assert groups.undo(store, pinned) == "pin web"
+    tools = groups.load_arrangement(store).groups[0].members
+    assert [(p.id, p.position) for p in tools] == [("prj_web", 0), ("prj_docs", 1), ("prj_cli", 2)]
+
+    again = groups.pin(store, "prj_web")
+    store.forget_project("prj_web")
+    groups.move_project(store, "prj_cli", position=0)
+    web = ProjectInfo(id="prj_web", root=Path("/w/web"))
+    store.ensure_project(web)
+    store.onboard_project(web)  # back, loose, before the `u`
+    assert groups.undo(store, again) == "pin web"
+    tools = groups.load_arrangement(store).groups[0].members
+    assert [(p.id, p.position) for p in tools] == [("prj_web", 0), ("prj_cli", 1), ("prj_docs", 2)]
+
+
+def test_a_forgotten_project_cannot_be_arranged_and_an_old_tombstone_comes_back_loose(
+    store: ContextStore,
+) -> None:
+    """A gesture from a stale frame — the sidebar between two refreshes, the group picker
+    left open — while a shell ran ``project forget`` was written onto the tombstone, and the
+    next prompt there revived the project pinned and grouped. It is refused as a project
+    that is gone. A tombstone an older forget left arranged comes back loose and unpinned,
+    by a capture or by an onboard; a live row keeps its place (review of #171, round 2)."""
+    groups.create_group(store, "tools", ["prj_api", "prj_cli"])
+    store.forget_project("prj_api")
+    with pytest.raises(KeyError):
+        groups.pin(store, "prj_api")
+    with pytest.raises(KeyError):
+        groups.move_project(store, "prj_api", to="tools", position=0)
+    with pytest.raises(KeyError):
+        store.update_project_layout("prj_api", pinned_at=datetime.now(tz=UTC))
+
+    groups.pin(store, "prj_cli")
+    groups.create_group(store, "site", ["prj_web", "prj_docs"])
+    raw = sqlite3.connect(str(paths.db_path()))
+    try:  # the forget as it was before round 1: the tombstone kept its place
+        raw.execute(
+            "UPDATE project SET forgotten_at = ?, onboarded_at = NULL "
+            "WHERE id IN ('prj_cli', 'prj_web')",
+            (datetime.now(tz=UTC).isoformat(),),
+        )
+        raw.commit()
+    finally:
+        raw.close()
+    store.ensure_project(ProjectInfo(id="prj_cli", root=Path("/w/cli")))  # a prompt there
+    store.onboard_project(ProjectInfo(id="prj_web", root=Path("/w/web")))  # added on purpose
+    for project_id in ("prj_cli", "prj_web"):
+        revived = store.get_project(project_id)
+        assert revived is not None
+        assert (revived.group_id, revived.position, revived.pinned_at) == (None, None, None)
+    store.ensure_project(ProjectInfo(id="prj_docs", root=Path("/w/docs")))
+    store.onboard_project(ProjectInfo(id="prj_docs", root=Path("/w/docs")))
+    assert _shape(store)["groups"] == {"tools": [], "site": ["prj_docs"]}, "a live row stays"
+
+
+def test_a_project_forgotten_mid_move_drops_out_and_the_move_completes(
+    store: ContextStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A forget from another process between a move's read of its scope and its writes: a
+    layout write to the tombstone is refused now, and the refusal cut the move off
+    halfway, one scope renumbered and the other not. The forgotten row drops out, and the
+    rest is numbered."""
+    groups.create_group(store, "tools", ["prj_cli", "prj_docs"])
+    read = groups._scope_members
+    reads: list[str | None] = []
+
+    def then_forgotten(opened: ContextStore, group_id: str | None) -> list[ProjectInfo]:
+        members = read(opened, group_id)
+        reads.append(group_id)
+        if len(reads) == 2:  # both scopes read, nothing written yet
+            opened.forget_project("prj_api")
+        return members
+
+    monkeypatch.setattr(groups, "_scope_members", then_forgotten)
+    groups.move_project(store, "prj_cli", to=groups.TOP, position=0)
+    monkeypatch.undo()
+    assert _shape(store)["groups"] == {"tools": ["prj_docs"]}
+    assert _shape(store)["loose"] == ["prj_cli", "prj_web"]
+    assert [p.position for p in groups.load_arrangement(store).loose] == [0, 2]

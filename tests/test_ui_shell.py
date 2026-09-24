@@ -56,6 +56,7 @@ from aisquare.cli.ui.sidebar import (
     short_path,
 )
 from aisquare.cli.ui.terminal import (
+    DUPLICATE_PRESS_WINDOW,
     EscapeToSidebar,
     SelectionHost,
     TerminalPane,
@@ -2993,6 +2994,55 @@ def test_a_drag_whose_release_was_lost_ends_at_the_first_move_with_no_button_hel
     assert captured is None and closed, "the handle let the mouse go and the drag is closed"
     assert after == before and depth == 0, "a lost release drops nowhere"
     assert opened == "project-prj_a", "the next click is the click it was"
+
+
+def test_a_drag_whose_release_was_lost_ends_at_the_next_press_where_no_motion_reports_it(
+    tmp_path: Path, script: Script, isolated_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A terminal that reports no motion without a button never sends the move that ends a
+    lost release. The next report is the next press: the same button, long past
+    DUPLICATE_PRESS_WINDOW, which SelectionHost takes as a new gesture. The handle still
+    held the mouse, so that press came to it and armed a drag again, and the Click of its
+    release came to it too: a click on api opened docs (review of #171, round 2). The press
+    ends the old drag instead — nothing dimmed or marked, nothing moved, nothing to undo,
+    the mouse let go — and the click is api's."""
+    seed(tmp_path, ("prj_a", "api", None), ("prj_b", "cli", None), ("prj_c", "docs", None))
+    now = {"t": 100.0}
+    monkeypatch.setattr("aisquare.cli.ui.terminal._monotonic", lambda: now["t"])
+
+    async def go(
+        pilot: Pilot[None],
+    ) -> tuple[list[str], bool, list[bool], object, bool, int, list[str], str | None]:
+        app = fleet_app(pilot)
+        before = _cards(app)
+        docs = card_for(app, "prj_c")
+        api = card_for(app, "prj_a")
+        await _as_the_terminal_sends(pilot, events.MouseDown, docs.query_one(ProjectTitle))
+        await _as_the_terminal_sends(pilot, events.MouseMove, api)
+        running = docs.has_class("-dragging") and api.has_class("-drop-before")
+        now["t"] += DUPLICATE_PRESS_WINDOW + 1.0  # let go outside; nothing reported it
+        await _click(pilot, api.query_one(ProjectTitle))
+        marks = [docs.has_class("-dragging"), api.has_class("-drop-before")]
+        captured = app.mouse_captured
+        closed = app.sidebar._drag is None
+        view = app.current_view()
+        return (
+            before,
+            running,
+            marks,
+            captured,
+            closed,
+            len(app._undo),
+            _cards(app),
+            view.id if view else None,
+        )
+
+    before, running, marks, captured, closed, depth, after, opened = drive(go)
+    assert running, "the drag was over api's card when its release was lost"
+    assert marks == [False, False], "nothing dimmed, nothing marked"
+    assert captured is None and closed, "the handle let the mouse go and the drag is closed"
+    assert after == before and depth == 0, "a lost release drops nowhere"
+    assert opened == "project-prj_a", "the click is the click it was"
 
 
 def test_a_step_with_nowhere_to_go_leaves_nothing_to_undo(

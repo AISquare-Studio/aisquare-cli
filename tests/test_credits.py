@@ -173,6 +173,25 @@ def test_failures_are_reasons_on_the_row(isolated_home: Path, monkeypatch: objec
     assert not cached, "failures are not cached"
 
 
+def test_a_zero_allowance_is_spent_not_unlimited() -> None:
+    """Review of #173, round 1: only the API's ``-1`` means unlimited.
+
+    A pool whose limit is 0 has nothing left. ``percent`` used to answer
+    ``None`` for it — the value an unlimited pool gets — so the Accounts page
+    drew ``unlimited`` and ``status --json`` said ``percent: null`` beside a CLI
+    line reading ``0 of 0 left``.
+    """
+    payload = {
+        "state": "exhausted",
+        "pools": {"build_credits": {"daily": {"used": 0, "limit": 0, "remaining": 0}}},
+    }
+    reading = credits.parse(payload, workspace_id=42, workspace_name="acme", now=NOW)
+    daily = reading.window("build", "daily")
+    assert daily is not None and daily.limit == 0 and daily.percent == 100.0
+    assert reading.as_json()["pools"]["build.daily"]["percent"] == 100.0
+    assert "build credits: today 0 of 0 left (0%)" in credits.describe(reading, now=NOW)
+
+
 def test_a_figure_past_a_floats_range_is_unreadable_not_an_error() -> None:
     """``parse`` never raises: an integer ``float()`` cannot hold is ``OverflowError``,
     not ``ValueError``, and read as no figure at all it costs one number, not the row."""

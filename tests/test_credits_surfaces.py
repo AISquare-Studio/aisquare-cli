@@ -17,6 +17,7 @@ from typer.testing import CliRunner
 
 from aisquare.cli import auth as auth_cli
 from aisquare.cli.app import app
+from aisquare.cli.ui.views.accounts import credits_text
 from aisquare.core.store import store_session
 from aisquare.core.workspace import pin_project, project_id_for
 from aisquare.models import ProjectInfo
@@ -24,7 +25,7 @@ from aisquare.services import auth as auth_service
 from aisquare.services import credits as credits_service
 from aisquare.services import iam
 from tests.idp_stub import IdentityProviderStub
-from tests.test_credits import BALANCE
+from tests.test_credits import BALANCE, NOW
 from tests.test_ui_accounts import (
     _overview,
     _status,
@@ -217,6 +218,17 @@ def test_signing_out_on_the_accounts_page_clears_the_credits_line(
     before, after = drive(go)
     assert before.startswith("acme [low]"), before
     assert after == "", after
+
+
+def test_a_zero_allowance_draws_a_full_bar_not_unlimited() -> None:
+    """Review of #173, round 1: a ``limit`` of 0 read ``unlimited`` on the page."""
+    payload = {
+        "state": "exhausted",
+        "pools": {"build_credits": {"daily": {"used": 0, "limit": 0, "remaining": 0}}},
+    }
+    reading = credits_service.parse(payload, workspace_id=42, workspace_name="acme", now=NOW)
+    line = credits_text([reading]).plain
+    assert line == "acme [exhausted]  build today ▮▮▮▮▮ 100%", line
 
 
 def test_a_truncated_answer_is_a_reason_on_the_row_not_a_traceback(

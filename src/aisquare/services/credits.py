@@ -64,9 +64,17 @@ class Window:
 
     @property
     def percent(self) -> float | None:
-        """Used, 0-100, or ``None`` when the window is unlimited (nothing to fill)."""
-        if self.limit is None or self.limit <= 0:
+        """Used, 0-100, or ``None`` when the window is unlimited (nothing to fill).
+
+        Only a ``None`` limit (the API's ``-1``) is unlimited. A limit of 0 is an
+        allowance of nothing — fully spent, 100 — not a second spelling of
+        unlimited: that read ``unlimited`` on the page beside a CLI line saying
+        ``0 of 0 left`` (review of #173, round 1).
+        """
+        if self.limit is None:
             return None
+        if self.limit <= 0:
+            return 100.0
         return max(0.0, min(100.0, self.used / self.limit * 100))
 
 

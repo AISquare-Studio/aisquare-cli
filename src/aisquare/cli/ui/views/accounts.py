@@ -200,7 +200,7 @@ def credits_text(readings: list[WorkspaceCredits], *, now: datetime | None = Non
                     continue
                 piece = Text(f"{pool} {word} ", style="dim")
                 percent = window.percent
-                if percent is None:
+                if percent is None:  # the API's -1 only; a zero allowance is a full bar
                     piece.append("unlimited", style="dim")
                 else:
                     piece.append_text(usage_bar(percent))

@@ -2387,6 +2387,20 @@ def _write_state(isolated_home: Path, data: object) -> Path:
     return path
 
 
+async def _through_the_app(pilot: Pilot[None]) -> None:
+    """Pause once the APP has handled what was posted to it, not merely the screen.
+
+    ``pilot.pause()`` waits for the screen and its widgets, not for the app's own queue, and
+    an event posted to the app (``_mouse``, ``Pilot.resize_terminal``, a queued key) could still
+    be waiting there when the pause returned. On the Windows leg that read a held-key burst
+    (run 36042754454) and a resize (run 36047190212) before the app had handed either on. A
+    callback the app queues behind the event runs only once the app has handed it to the
+    screen, and the pause after it waits for the screen to handle it and lay the result out.
+    """
+    await pilot.app.wait_for_refresh()
+    await pilot.pause()
+
+
 async def _mouse(
     pilot: Pilot[None], kind: type[events.MouseEvent], x: int, y: int, *, button: int = 1
 ) -> None:
@@ -2399,7 +2413,7 @@ async def _mouse(
     held and a release; this is the only way to make one.
     """
     pilot.app.post_message(kind(None, x, y, 0, 0, button, False, False, False))
-    await pilot.pause()
+    await _through_the_app(pilot)
 
 
 async def _drag(pilot: Pilot[None], from_x: int, to_x: int, y: int = 5) -> None:
@@ -2533,18 +2547,18 @@ def test_a_terminal_that_shrinks_re_clamps_the_navigator_and_keeps_the_divider_o
         await _drag(pilot, app.sidebar.outer_size.width, SIZE[0] - 2)
         seen["wide"] = app.sidebar.outer_size.width
         await pilot.resize_terminal(80, SIZE[1])
-        await pilot.pause()
+        await _through_the_app(pilot)
         seen["shrunk"] = (
             app.sidebar.outer_size.width,
             app.content.outer_size.width,
             app.query_one(Divider).region.x,
         )
         await pilot.resize_terminal(*SIZE)
-        await pilot.pause()
+        await _through_the_app(pilot)
         seen["back"] = app.sidebar.outer_size.width
         # A key at the small size steps from what is ON SCREEN, not from the wide screen's number.
         await pilot.resize_terminal(80, SIZE[1])
-        await pilot.pause()
+        await _through_the_app(pilot)
         app.sidebar.focus()
         await pilot.press("less_than_sign")
         await pilot.pause()
@@ -2692,13 +2706,7 @@ def test_the_keyboard_steps_the_partition_from_the_sidebar_and_a_held_key_is_one
         before = len(writes)
         for _ in range(5):
             app.post_message(events.Key("greater_than_sign", ">"))
-        # Queued on the APP, whose own queue `pilot.pause()` does not wait for: it waits
-        # for the screen and its widgets. On the Windows leg of run 36042754454 the width
-        # was read before the app had handed a single press on. A callback the app queues
-        # behind the five runs once it has handed all five to the screen, and the pause
-        # then waits for the screen to handle them and lay the result out.
-        await app.wait_for_refresh()
-        await pilot.pause()
+        await _through_the_app(pilot)  # queued on the app, which a bare pause does not wait for
         seen["burst"] = app.sidebar.outer_size.width
         await _settled(pilot)
         seen["burst_writes"] = writes[before:]
@@ -2939,10 +2947,10 @@ def test_a_gesture_on_a_narrow_terminal_keeps_a_wider_remembered_width(
         seen["after_drag"] = now()
         # The ask survives: room again, and the 90 is what is shown.
         await pilot.resize_terminal(140, SIZE[1])
-        await pilot.pause()
+        await _through_the_app(pilot)
         seen["after_room"] = now()
         await pilot.resize_terminal(80, SIZE[1])
-        await pilot.pause()
+        await _through_the_app(pilot)
         await pilot.press("less_than_sign")  # a step the screen shows is a real gesture
         await _settled(pilot)
         seen["after_narrower"] = now()
@@ -3129,7 +3137,7 @@ def test_a_min_width_of_zero_is_a_floor_of_zero(tmp_path: Path, script: Script) 
         app = fleet_app(pilot)
         app.sidebar.styles.min_width = 0
         await pilot.resize_terminal(1 + Panes.MIN_CONTENT, SIZE[1])  # room for the content alone
-        await pilot.pause()
+        await _through_the_app(pilot)
         return cells(app.sidebar.styles.max_width)
 
     assert drive(ceiling) == 0, "the container's ceiling honours a floor of 0 too"

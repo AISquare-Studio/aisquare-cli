@@ -723,7 +723,8 @@ def _claude_accounts_checks() -> list[DoctorCheck]:
     The default account is the ``claude-code`` line's business above. Reads
     only: ``managed_accounts`` lists directories and ``describe`` reads the
     files Claude Code left in them, so a machine that never added an account
-    is left exactly as it was (``tests/test_doctor_does_not_create_state.py``).
+    is left exactly as it was (``tests/test_doctor_does_not_create_state.py``)
+    — unless it binds a role to one, which the default checks then read.
     """
     managed = claude_accounts_core.managed_accounts()
     if not managed:
@@ -731,7 +732,13 @@ def _claude_accounts_checks() -> list[DoctorCheck]:
         # session can still be parked on a usage limit (#146), and removing the
         # last added account leaves a role binding naming its email, which
         # `_retarget_bindings` says this flags (review of the #205 fold, round 1).
-        return [*_claude_account_default_checks(), *_claude_account_limit_checks()]
+        # Only a binding: the default checks read the registry through
+        # `list_accounts`, which reconciles as it reads, and warn when the store
+        # cannot be opened — a write and a line a machine that bound nothing never
+        # had (round 2). A project default is a registry row `forget_arrangement`
+        # drops with its slot, so a binding is what a removal leaves behind.
+        defaults = _claude_account_default_checks() if _binds_an_account() else []
+        return [*defaults, *_claude_account_limit_checks()]
     statuses = [claude_accounts_service.describe(account) for account in managed]
     parts = [
         f"{status.account.slot} {status.identity.email if status.identity else 'not signed in'}"
@@ -755,6 +762,17 @@ def _claude_accounts_checks() -> list[DoctorCheck]:
         *_claude_account_default_checks(),
         *_claude_account_limit_checks(),
     ]
+
+
+def _binds_an_account() -> bool:
+    """Whether a role binding names an account — ``config.toml`` only, no store opened.
+
+    A file that cannot be read is the ``config`` line's to report, so it binds nothing here.
+    """
+    try:
+        return bool(settings_service.role_account_bindings())
+    except Exception:
+        return False
 
 
 def _claude_account_limit_checks() -> list[DoctorCheck]:

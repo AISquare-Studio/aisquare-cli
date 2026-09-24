@@ -752,6 +752,24 @@ def test_doctor_flags_the_binding_that_outlives_the_last_added_account(
     assert diagnostics._claude_accounts_checks() == []
 
 
+def test_doctor_leaves_a_machine_that_added_and_bound_nothing_as_it_was(
+    fake_home: Path, work: ProjectInfo
+) -> None:
+    """Round 1 ran the default checks with no added account too, for the binding a removal
+    leaves behind — and they read the registry through ``list_accounts``, which reconciles
+    as it reads: every doctor on a machine that never added an account wrote slot 1's row,
+    and a store it could not open was a ``claude-account-default`` warning that machine never
+    had (review of the #205 fold, round 2). Nothing bound, nothing is read."""
+    assert paths.db_path().exists()  # `work` opened the store: the gate is not the file
+
+    assert diagnostics._claude_accounts_checks() == []
+    with store_session() as store:
+        assert store.claude_accounts() == []  # no reconcile write
+
+    paths.db_path().write_bytes(CORRUPT)
+    assert diagnostics._claude_accounts_checks() == []  # the database line says it, alone
+
+
 def test_doctor_checks_every_binding_against_one_registry_read(
     fake_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

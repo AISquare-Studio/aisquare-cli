@@ -142,6 +142,23 @@ def _system32(program: str) -> str:
     return str(Path(os.environ.get("SYSTEMROOT", r"C:\Windows")) / "System32" / program)
 
 
+def warm_owner_restriction() -> None:
+    """Ask for this account's SID now, so a :func:`restrict_to_owner` later runs one subprocess.
+
+    For a caller that restricts inside a lock, as ``core.credentials``' writers
+    do. On a process's first restriction ``whoami`` is a second
+    ``CreateProcess`` with its own 15 second timeout, and a writer waiting for
+    that lock gives up after two seconds, so a slow start of either tool (an
+    antivirus scan, a loaded runner) failed a concurrent ``login`` or ``serve``
+    with a ``TimeoutError``. Asked before the lock is taken, only ``icacls``
+    runs inside it (review of the #65 fold, F3). A success is cached for the
+    process; a failure is not, and the restriction asks again and reports it.
+    Nothing to do off Windows.
+    """
+    if sys.platform == "win32":
+        _current_user_sid()
+
+
 def _current_user_sid() -> str | None:
     """This account's SID from ``whoami``, or ``None`` when it cannot be read.
 

@@ -142,6 +142,7 @@ def store(*, replace: Sequence[str] = (), **values: str) -> tuple[dict[str, str]
     :data:`LOCK_WAIT_S`; the file is then left as it was.
     """
     paths.ensure_home()
+    paths.warm_owner_restriction()  # whoami outside the lock, so only icacls runs inside it
     path = paths.credentials_path()
     with _locked(path):
         data = load_all(strict=True)
@@ -174,6 +175,7 @@ def drop(*keys: str) -> tuple[dict[str, str], bool]:
     if not any(key in data for key in keys):
         return data, True
     paths.ensure_home()
+    paths.warm_owner_restriction()  # as in `store`
     path = paths.credentials_path()
     with _locked(path):
         data = load_all()

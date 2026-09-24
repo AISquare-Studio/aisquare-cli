@@ -133,6 +133,43 @@ def test_a_lock_held_too_long_is_a_timeout_that_names_the_lock(
     assert credentials.load_all() == {"api_key": _KEY, "serve_token": _TOKEN}
 
 
+@pytest.mark.parametrize("write", ["store", "drop"])
+def test_whoami_is_asked_before_the_writers_lock_is_taken(
+    isolated_home: Path, monkeypatch: pytest.MonkeyPatch, write: str
+) -> None:
+    """On Windows a process's first restriction runs ``whoami`` as well as ``icacls``, each
+    allowed 15 seconds, and a writer waiting for the lock gives up after two. Asked inside
+    the lock, a slow ``CreateProcess`` failed a concurrent ``login`` or ``serve`` with a
+    ``TimeoutError`` (review of the #65 fold, F3). The fake answers no SID, as a failing
+    ``whoami`` does, so no ``icacls`` runs here, and the restriction asks again inside the
+    lock, as it should for an answer that was never cached. The first question is the one
+    that must come before the lock: it records whether the lock was free when asked."""
+    credentials.store(api_key=_KEY, iam_token="t")
+    lock_path = isolated_home / "credentials.lock"
+    free_when_asked: list[bool] = []
+
+    def whoami() -> str | None:
+        fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            lock_exclusive(fd)
+        except OSError:
+            free_when_asked.append(False)
+        else:
+            unlock(fd)
+            free_when_asked.append(True)
+        finally:
+            os.close(fd)
+        return None
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(paths, "_current_user_sid", whoami)
+    if write == "store":
+        credentials.store(serve_token=_TOKEN)
+    else:
+        credentials.drop("iam_token")
+    assert free_when_asked and free_when_asked[0], free_when_asked
+
+
 def test_dropping_what_is_not_there_creates_nothing(isolated_home: Path) -> None:
     """A sign-out on a machine that never signed in writes no home and no lock file."""
     assert credentials.drop("iam_token") == ({}, True)

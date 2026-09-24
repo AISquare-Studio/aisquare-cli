@@ -228,6 +228,9 @@ def test_a_damaged_fresh_cache_is_refetched_never_trusted(
         fresh | {"windows": {"run.daily": window | {"used": "lots"}}},  # drawn: TypeError
         fresh | {"windows": {"run.daily": window | {"limit": {"n": 500}}}},
         fresh | {"workspace_id": "forty-two", "windows": {}},
+        # Round 2: ``float`` reads both, and ``describe`` raised on them when drawn.
+        fresh | {"windows": {"run.daily": window | {"limit": float("nan")}}},  # ValueError
+        fresh | {"windows": {"run.daily": window | {"remaining": float("-inf")}}},  # Overflow
     ]
     for record in damaged:
         path.write_text(json.dumps(record), encoding="utf-8")

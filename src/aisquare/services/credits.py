@@ -264,6 +264,21 @@ def _cache_path(session: iam.Session, workspace_id: int) -> Path:
     return paths.cache_dir() / "credits" / f"{host}{port}-{workspace_id}-{credential}.json"
 
 
+def _cached_figure(value: Any) -> float:
+    """A figure as :func:`_remember` writes one — what :func:`_number` keeps — or ``ValueError``.
+
+    ``float`` alone let ``NaN`` and ``-Infinity`` through (``json`` reads both),
+    and ``describe`` raised on them when the row was drawn: a hand-edited
+    fresh cache still cost ``status`` and ``whoami`` their answer (review of
+    #173, round 2). ``_remember`` writes neither, nor any negative: an
+    unlimited window is ``null``, never ``-1``.
+    """
+    number = _number(value)
+    if number is None:
+        raise ValueError(f"not a figure the cache writes: {value!r}")
+    return number
+
+
 def _cached(session: iam.Session, workspace_id: int, now: datetime) -> WorkspaceCredits | None:
     """The last reading, if it was taken within :data:`CACHE_SECONDS` of ``now``.
 
@@ -273,8 +288,8 @@ def _cached(session: iam.Session, workspace_id: int, now: datetime) -> Workspace
 
     A record of any other shape than :func:`_remember` writes (an older or
     newer CLI, a hand edit) is a miss, as ``iam.discover`` treats its own cache:
-    refetched, never trusted. Every figure goes through ``float`` here, so one
-    that would only fail when the row is drawn fails now instead.
+    refetched, never trusted. Every figure goes through :func:`_cached_figure`
+    here, so one that would only fail when the row is drawn fails now instead.
     """
     try:  # the path under the guard too: a port urlparse cannot read is a ValueError
         raw = json.loads(_cache_path(session, workspace_id).read_text(encoding="utf-8"))
@@ -288,9 +303,9 @@ def _cached(session: iam.Session, workspace_id: int, now: datetime) -> Workspace
     try:
         windows = {
             str(key): Window(
-                used=float(w["used"]),
-                limit=None if w["limit"] is None else float(w["limit"]),
-                remaining=None if w["remaining"] is None else float(w["remaining"]),
+                used=_cached_figure(w["used"]),
+                limit=None if w["limit"] is None else _cached_figure(w["limit"]),
+                remaining=None if w["remaining"] is None else _cached_figure(w["remaining"]),
                 resets_at=_when(w["resets_at"]),
             )
             for key, w in raw["windows"].items()

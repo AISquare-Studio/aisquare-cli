@@ -535,6 +535,7 @@ def pane_text(pane: TerminalPane) -> str:
     return "\n".join(strip.text for strip in pane.render_lines(Region(0, 0, width, height)))
 
 
+@_needs_tmux
 def test_a_drag_from_the_agent_header_into_the_pane_copies_through_the_app(
     tmp_path: Path,
     script: Script,
@@ -583,6 +584,7 @@ def test_a_drag_from_the_agent_header_into_the_pane_copies_through_the_app(
     )
 
 
+@_needs_tmux
 def test_a_right_button_drag_from_the_agent_header_copies_nothing_through_the_app(
     tmp_path: Path,
     script: Script,
@@ -614,6 +616,7 @@ def test_a_right_button_drag_from_the_agent_header_copies_nothing_through_the_ap
     assert clipboard == "" and toasts == 0, "a right-button drag is not a copy request"
 
 
+@_needs_tmux
 def test_one_panes_failure_does_not_stop_the_others_being_told(
     tmp_path: Path,
     script: Script,
@@ -682,6 +685,7 @@ def test_one_panes_failure_does_not_stop_the_others_being_told(
     )
 
 
+@_needs_tmux
 def test_a_screen_that_cannot_be_queried_is_logged_not_a_crash(
     tmp_path: Path,
     script: Script,
@@ -737,6 +741,7 @@ def test_the_shell_and_the_test_host_share_the_gesture_handlers() -> None:
             assert name not in vars(app) and "on_text_selected" not in vars(app)
 
 
+@_needs_tmux
 def test_ctrl_c_from_the_sidebar_copies_what_the_drag_copied(
     tmp_path: Path,
     script: Script,
@@ -3347,6 +3352,7 @@ def test_hiding_the_divider_mid_drag_ends_the_drag(
     assert drive(go) == (False, None, 60, 60)
 
 
+@_needs_tmux
 def test_selecting_an_agent_focuses_its_pane_so_typing_reaches_the_agent_not_the_app(
     tmp_path: Path, script: Script, no_real_tmux: list[tuple[str, ...]]
 ) -> None:

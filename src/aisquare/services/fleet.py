@@ -2282,6 +2282,7 @@ def stop(
     grace: float = 5.0,
     handover: bool = False,
     agent_id: str | None = None,
+    nudge: bool = True,
 ) -> StopReceipt:
     """``/exit`` the agent named ``label``, wait ``grace`` seconds, then kill its window.
 
@@ -2318,7 +2319,7 @@ def stop(
             if ended is None or not _kill_lingering_window(store, project, ended):
                 raise  # no such row, or no window of its own left (gone, or a reused id)
             return StopReceipt(ended, [])
-    return _stop_row(project, agent, force=force, grace=grace, handover=handover)
+    return _stop_row(project, agent, force=force, grace=grace, handover=handover, nudge=nudge)
 
 
 def _stop_row(
@@ -2328,6 +2329,7 @@ def _stop_row(
     force: bool = False,
     grace: float = 5.0,
     handover: bool = False,
+    nudge: bool = True,
 ) -> StopReceipt:
     """``/exit`` the agent in ``agent``'s pane, wait ``grace`` seconds, then kill its window.
 
@@ -2365,6 +2367,11 @@ def _stop_row(
     caller: the §7.3 event the manager's Stop hook wakes on must not depend on
     which path ended the agent, and while it was reap's alone a stopped agent
     left the board no record of its exit while a merely crashed one did.
+
+    ``nudge=False`` is a RESTART's, as for :func:`_end_dead_rows`: the exit is
+    still announced, but the manager is not woken for an agent that is coming
+    back — woken by "exited" before ``restarted`` was on the board, it could
+    restart the label itself, onto the replacement (review of #163, round 2).
 
     tmux failing to ANSWER is not evidence that the agent died, so it does not
     end the row (see :func:`_verify_gone`): a row ended for a process still
@@ -2525,7 +2532,7 @@ def _stop_row(
             _emit_exit(store, ended)
     # Outside the store session, as ``reap`` does: the nudge types into a pane
     # and must not hold the write lock the woken manager's own hooks will want.
-    if not handover:
+    if not handover and nudge:
         nudge_manager(ended.project_id, reason=f"{ended.label} exited")
     return StopReceipt(ended, released, release_failed, withheld=handover)
 
@@ -3976,13 +3983,14 @@ def restart(
             # records it — announced, but with no manager woken for an agent that
             # is coming back — and its window LEFT like any 💤 row's (below). Only
             # a pane that is gone — or a tmux that will not say — goes through
-            # `stop`, which ends a vanished pane's row and refuses on a silent tmux.
+            # `stop`, which ends a vanished pane's row and refuses on a silent tmux,
+            # and wakes no manager either: it is the same agent coming back.
             tmux_session = session_name(current.codename) if current.codename else None
             ended = _end_dead_rows([agent], _observe_sockets([agent], tmux_session), nudge=False)
             if ended:
                 agent = ended[0]
             else:
-                stopped = stop(project, label, agent_id=agent.id)
+                stopped = stop(project, label, agent_id=agent.id, nudge=False)
                 agent = stopped.agent
                 if stopped.release_failed:
                     # Said, as `fleet stop` says it: a claim left with the ended

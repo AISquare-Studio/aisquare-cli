@@ -8726,6 +8726,26 @@ def test_restarting_a_death_no_listing_recorded_announces_it_but_wakes_no_manage
     assert [typed for typed in tmux.typed if typed[0] == manager.pane_id] == []
 
 
+def test_restarting_an_agent_whose_pane_vanished_announces_it_but_wakes_no_manager(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """The twin above, for a pane that is GONE rather than dead: ``_end_dead_rows``
+    records only a pane it sees dead, so ``restart`` ends a vanished one's row through
+    ``stop`` — which nudged the manager with "coder-1 exited" while the replacement
+    was starting, the race the dead pane's ``nudge=False`` closed (review of the
+    accounts stack's fold, round 1, F1)."""
+    manager = _waiting_manager(tmux, project)
+    coder = _coder(project, label="coder-1")
+    tmux.vanish(coder.pane_id)
+
+    receipt = fleet_service.restart(project, "coder-1")
+
+    assert receipt.replaced.id == coder.id and receipt.replaced.ended_at is not None
+    assert receipt.was_running is False and receipt.started.ended_at is None
+    assert _events(project, "agent_exited") == ["coder-1 exited (?)"]
+    assert [typed for typed in tmux.typed if typed[0] == manager.pane_id] == []
+
+
 def test_a_switch_whose_agent_a_restart_resumed_meanwhile_leaves_that_session_s_state_alone(
     tmux: FakeTmux,
     claude_on_path: Path,

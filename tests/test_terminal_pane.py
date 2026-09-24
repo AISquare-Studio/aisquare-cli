@@ -4158,6 +4158,139 @@ def test_a_paste_buffer_the_program_wrote_on_release_is_mirrored_to_the_clipboar
     assert len(reads) == 4, "a read at each left press and its release; none for the right button"
 
 
+def test_a_lost_release_ends_the_program_s_drag_where_it_got_to_and_frees_the_pointer(
+    fake: FakeTmux, tmp_path: Path
+) -> None:
+    """Review of the fold of #148 into rc/fixes. rc/fixes ends a gesture whose
+    release was lost at the first move with no button held, but a press this
+    pane FORWARDED is run by the pane, which had captured the mouse and was
+    never told: every bare move after it went to the program as a drag — Claude
+    Code's selection followed the pointer with no button down — and the next
+    click anywhere in the app, the header here, landed in the pane and was
+    forwarded as a press. The program now gets the release where the drag got
+    to, the pointer is free, and a click elsewhere is that widget's."""
+    pane = fake.panes["%1"]
+    pane.alternate_on = pane.mouse_on = pane.mouse_sgr = pane.mouse_drag = True
+
+    async def drive() -> tuple[str, Widget | None, str]:
+        host = Host(fake.server(tmp_path), "%1", with_header=True)
+        async with host.run_test(size=(40, 7)) as pilot:
+            widget = host.pane
+            await wait_until(pilot, lambda: synced(widget))
+            await press(pilot, widget, (3, 2))
+            await move(pilot, widget, (5, 2), button=1)
+            # …the release is lost outside, and the pointer comes back in
+            await move(pilot, widget, (7, 3))
+            await move(pilot, widget, (9, 3))
+            await pilot.pause(0.1)
+            forwarded, captured = _literals(fake), host.mouse_captured
+            header = host.query_one("#other", Static)
+            await press(pilot, header, (1, 0))
+            await release(pilot, header, (1, 0))
+            await pilot.pause(0.1)
+            return forwarded, captured, _literals(fake)[len(forwarded) :]
+
+    forwarded, captured, after = run(drive())
+    assert forwarded == "\x1b[<0;4;3M\x1b[<32;6;3M\x1b[<0;6;3m", repr(forwarded)
+    assert captured is None, "the pane let go of the pointer with the gesture"
+    assert after == "", f"the header's click went to the program: {after!r}"
+
+
+def test_a_lost_release_in_a_burst_still_ends_the_press_the_pane_had_yet_to_forward(
+    fake: FakeTmux, tmp_path: Path
+) -> None:
+    """The app reads a gesture as the driver reports it and the pane forwards it
+    from its own queue, so in a burst the app learns the release was lost before
+    the pane has handled the press. Ended there and then, the pane found nothing
+    to end, took the press and the pointer afterwards, and sent the bare move as
+    a drag; the end waits its turn behind the press instead."""
+    pane = fake.panes["%1"]
+    pane.alternate_on = pane.mouse_on = pane.mouse_sgr = pane.mouse_drag = True
+
+    async def drive() -> tuple[str, Widget | None]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 6)) as pilot:
+            widget = host.pane
+            await wait_until(pilot, lambda: synced(widget))
+            for event in (
+                mouse_event(events.MouseDown, widget, (3, 2), 1),
+                mouse_event(events.MouseMove, widget, (5, 2), 1),
+                # …the release is lost outside, and the pointer comes back in
+                mouse_event(events.MouseMove, widget, (7, 3), 0),
+            ):
+                host.post_message(event)
+            await pilot.pause()
+            await pilot.pause(0.1)
+            return _literals(fake), host.mouse_captured
+
+    forwarded, captured = run(drive())
+    assert forwarded == "\x1b[<0;4;3M\x1b[<32;6;3M\x1b[<0;6;3m", repr(forwarded)
+    assert captured is None
+
+
+def test_a_press_after_a_lost_release_goes_where_it_lands_not_to_the_last_program(
+    fake: FakeTmux, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other door rc/fixes reads a lost release by: no motion was reported
+    at all, and the same button goes down again after the duplicate window.
+    The pane still held the pointer, so that press — on the header — was the
+    program's, sent as a second press with no release between."""
+    now = {"t": 100.0}
+    monkeypatch.setattr(terminal_module, "_monotonic", lambda: now["t"])
+    pane = fake.panes["%1"]
+    pane.alternate_on = pane.mouse_on = pane.mouse_sgr = pane.mouse_drag = True
+
+    async def drive() -> tuple[str, Widget | None]:
+        host = Host(fake.server(tmp_path), "%1", with_header=True)
+        async with host.run_test(size=(40, 7)) as pilot:
+            widget = host.pane
+            await wait_until(pilot, lambda: synced(widget))
+            await press(pilot, widget, (3, 2))
+            await move(pilot, widget, (5, 2), button=1)
+            # …the release is lost, and nothing reports the pointer until the
+            # button goes down again, on the header, long after
+            now["t"] += terminal_module.DUPLICATE_PRESS_WINDOW + 1.0
+            header = host.query_one("#other", Static)
+            host.post_message(mouse_event(events.MouseDown, header, (1, 0), 1))
+            await pilot.pause()
+            await release(pilot, header, (1, 0))
+            await pilot.pause(0.1)
+            return _literals(fake), host.mouse_captured
+
+    forwarded, captured = run(drive())
+    assert forwarded == "\x1b[<0;4;3M\x1b[<32;6;3M\x1b[<0;6;3m", repr(forwarded)
+    assert captured is None
+
+
+def test_a_lost_release_ends_a_shift_drag_where_it_got_to(fake: FakeTmux, tmp_path: Path) -> None:
+    """The local half of #148 under the same rule: a shift+drag this pane runs
+    itself holds the pointer too. The lost release copied what it had selected
+    (rc/fixes routes the gesture's end), but the pane went on extending the
+    highlight to every bare move after it — the copy key then copied rows the
+    pointer had only wandered over, which is the screen drag's bug rc/fixes
+    closed in ``_end_screen_drag``."""
+    pane = fake.panes["%1"]
+    pane.alternate_on = pane.mouse_on = pane.mouse_sgr = True
+
+    async def drive() -> tuple[str, str | None, Widget | None]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 6)) as pilot:
+            widget = host.pane
+            await wait_until(pilot, lambda: synced(widget))
+            await press(pilot, widget, (7, 1), shift=True)
+            await move(pilot, widget, (3, 1), button=1, shift=True)
+            # …the release is lost outside, and the pointer comes back in
+            await move(pilot, widget, (1, 2))
+            await move(pilot, widget, (0, 3))
+            await pilot.pause()
+            return host.clipboard, widget.selected_text(), host.mouse_captured
+
+    copied, highlighted, captured = run(drive())
+    assert copied == "second row"[3:8], repr(copied)
+    assert highlighted == copied, f"the highlight followed the bare pointer: {highlighted!r}"
+    assert captured is None
+
+
 # --- against a real tmux ------------------------------------------------------------------------
 
 _needs_tmux = pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux is not installed")

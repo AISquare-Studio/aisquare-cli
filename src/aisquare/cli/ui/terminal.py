@@ -443,6 +443,19 @@ def route_selection_gesture(app: App[Any], button: int | None) -> None:
     _tell_panes(app, "selection gesture", lambda pane: pane.selection_gesture_ended(button))
 
 
+def route_lost_release(app: App[Any]) -> None:
+    """The gesture's release was lost: every pane on the active screen ends the
+    part of it the pane runs itself (see :meth:`TerminalPane.gesture_release_lost`).
+
+    Called by :class:`SelectionHost` at each door it reads a lost release by,
+    alongside ``_end_screen_drag``: the screen's drag-select and a pane's own
+    gestures — a press forwarded to the program, a shift+drag (#148) — are the
+    three things a release would have ended, and the app is the only place
+    that learns it never came.
+    """
+    _tell_panes(app, "lost release", TerminalPane.gesture_release_lost)
+
+
 def copy_pane_selection(app: App[Any]) -> bool:
     """Copy the pane highlight made MOST RECENTLY on ``app``'s active screen; whether one was.
 
@@ -586,9 +599,11 @@ class SelectionHost(App[None]):
             # is left to its own release or the next press: its release reaching
             # the screen is the damage the stray rule exists to prevent. The
             # screen's drag ends with it, or this move and every one after it
-            # would go on moving the highlight that was just copied.
+            # would go on moving the highlight that was just copied — and so do
+            # the gestures a pane runs itself (#148), which hold the pointer.
             lost, self._pressed = self._pressed, None
             self._end_screen_drag()
+            route_lost_release(self)
             route_selection_gesture(self, lost)
         # ONE gesture at a time. A second button pressed while one is down is
         # not a new gesture — and it is not the screen's to see either. Recording
@@ -620,7 +635,9 @@ class SelectionHost(App[None]):
                 # lost (the pointer left the terminal with it down), and refusing
                 # it would leave every later gesture unrouted (round 4). A new
                 # gesture — and it takes the screen's selection with it, as any
-                # press does.
+                # press does. A pane that ran the lost one lets go of the
+                # pointer first, so this press lands where it was made (#148).
+                route_lost_release(self)
             # A new gesture starts clean: a stray whose release never arrived
             # (the pointer left the terminal) used to outlive its gesture, and
             # the next press of THAT button was accepted while its release was
@@ -2092,10 +2109,11 @@ class TerminalPane(Widget, can_focus=True):
     def on_mouse_up(self, event: events.MouseUp) -> None:
         """End a gesture this widget began: the local shift+drag, or a forwarded button.
 
-        The shift+drag's copy is NOT made here: the screen posts ``TextSelected``
-        for this release too, the app routes it to :meth:`selection_gesture_ended`,
-        and that copies exactly as it does for a Textual-native drag — one
-        path, one toast. A forwarded left release arms the paste-buffer mirror.
+        The shift+drag's copy is NOT made here: the app routes this release to
+        :meth:`selection_gesture_ended` (:class:`SelectionHost`), and that copies
+        exactly as it does for a Textual-native drag — one path, one toast. A
+        forwarded left release arms the paste-buffer mirror. A release that never
+        comes is :meth:`gesture_release_lost`.
         """
         if self._shift_drag is not None:
             event.stop()
@@ -2111,6 +2129,46 @@ class TerminalPane(Widget, can_focus=True):
         self.release_mouse()
         x, y = self._cell(event)
         self._queue_mouse("release", self._button_code(button, event), x, y)
+        if button == 1:
+            self.set_timer(self.BUFFER_MIRROR_DELAY, self._mirror_buffer, name="buffer-mirror")
+
+    def gesture_release_lost(self) -> None:
+        """The app learned the gesture's release was lost: end what this widget runs itself.
+
+        :meth:`on_mouse_up` is the only other end of a forwarded press or a
+        shift+drag, and a release let go outside the terminal never reaches it.
+        Both hold the pointer, so every bare move after it was this widget's:
+        a forwarded press went on sending the program drags with no button down
+        — Claude Code's selection followed the pointer — and a shift+drag went
+        on extending the highlight the app had just copied; the next press
+        anywhere in the app landed here too, and was forwarded as a second
+        press with no release between (review of the fold of #148 into
+        rc/fixes, whose :class:`SelectionHost` reads the lost release).
+
+        The pointer is let go NOW, so the move or press that told the app is
+        routed by where it is. The rest waits its turn in this widget's queue:
+        the app hears of a gesture as the driver reports it, this widget when
+        its own handlers run, and a burst can put the loss ahead of the press
+        this widget has yet to forward. Then the program gets the release it
+        was owed where the drag got to — the last cell it was sent, with that
+        report's modifier bits — as it would have had the release come there,
+        and a left one arms the paste-buffer mirror, since the program copies
+        on that release. A shift+drag's highlight stays where it got to; whether
+        it is copied is the app's routing, as it is for the screen's own drag.
+        """
+        self.release_mouse()
+        self.call_later(self._end_lost_gesture)
+
+    def _end_lost_gesture(self) -> None:
+        """:meth:`gesture_release_lost`'s second half, after this widget's queued events."""
+        self.release_mouse()
+        self._shift_drag = None
+        if self._forwarding is None:
+            return
+        button, self._forwarding = self._forwarding, None
+        report, self._last_drag = self._last_drag, None
+        if report is not None:
+            self._queue_mouse("release", *report)
         if button == 1:
             self.set_timer(self.BUFFER_MIRROR_DELAY, self._mirror_buffer, name="buffer-mirror")
 

@@ -79,11 +79,40 @@ def _account_decision_offences(node: ast.FunctionDef) -> list[str]:
                 # decision. The receiver tells them apart — both launching modules
                 # reach the accounts code through an alias that says so.
                 name = func.attr
+            if name in _ALLOWED:
+                continue  # the resolver itself, and the helpers that act on its answer
             if name in _DECIDERS:
                 found.append(f"{node.name} calls {name}()")
         if isinstance(inner, ast.Attribute) and inner.attr in _DECIDING_ATTRIBUTES:
             found.append(f"{node.name} reads .{inner.attr}")
     return found
+
+
+def test_the_allow_list_shields_the_resolver_and_nothing_a_decider_could_hide_behind() -> None:
+    """``_ALLOWED`` is consulted by the rule (it was defined and read by nobody — review of
+    #205, second round): an allowed name is never an offence, the two sets are disjoint so
+    an allowance can never mask a decider, and every allowed name is one the launching
+    modules really call — a list of names nobody uses would be documentation, not a guard."""
+    assert _ALLOWED.isdisjoint(_DECIDERS)
+    shielded = ast.parse(
+        "def f(account, role, project):\n"
+        "    choice = claude_accounts_service.choose(account, role=role, project=project)\n"
+        "    return claude_accounts_core.label(choice.account)\n"
+    ).body[0]
+    assert isinstance(shielded, ast.FunctionDef) and _account_decision_offences(shielded) == []
+    caught = ast.parse("def f(ref):\n    return claude_accounts_service.resolve(ref)\n").body[0]
+    assert isinstance(caught, ast.FunctionDef) and _account_decision_offences(caught)
+    called: set[str] = set()
+    for path in LAUNCHERS.values():
+        for inner in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if isinstance(inner, ast.Call):
+                func = inner.func
+                if isinstance(func, ast.Attribute):
+                    called.add(func.attr)
+                elif isinstance(func, ast.Name):
+                    called.add(func.id)
+    unused = sorted(name for name in _ALLOWED if name not in called)
+    assert unused == [], f"allowed but never called by a launching module: {unused}"
 
 
 def _on_an_accounts_module(func: ast.Attribute) -> bool:

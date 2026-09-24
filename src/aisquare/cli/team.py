@@ -765,6 +765,8 @@ def bind(
             settings_service.clear_role_binding(role_name)
         bound = None
     else:
+        if account is not None and clear_account:
+            fail("--account and --clear-account are mutually exclusive", error="usage")
         if not any((agent_bin, env_pairs, extra_args, unset, account, clear_account)):
             fail(
                 "nothing to bind — pass --bin, --env, --arg, --unset, --account, "

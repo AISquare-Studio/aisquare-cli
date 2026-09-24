@@ -66,12 +66,17 @@ def list_(
             chosen = groups_service.resolve_group(store, group) if group else None
         except KeyError:
             fail(f"no group matches '{group}'", error="not_found", ref=str(group))
-    projects = arrangement.ordered_projects()
+        projects = arrangement.ordered_projects()
+        # Counted only when nothing is listed at all, where "nothing registered"
+        # would be wrong — not when --group or --pinned filtered the list empty.
+        hidden = 0 if all or projects else len(store.list_projects(all=True))
     if chosen is not None:
         projects = [p for p in projects if p.group_id == chosen.id]
     if pinned:
         projects = [p for p in projects if p.pinned_at is not None]
-    emit_projects(projects, active_id=project_service.info().id, group_names=group_names)
+    emit_projects(
+        projects, active_id=project_service.info().id, hidden=hidden, group_names=group_names
+    )
 
 
 @app.command("switch")
@@ -125,6 +130,10 @@ _PURGE_HELP = (
 )
 
 
+_STALE_CAPTURE_DAYS = 30
+"""How long a captured directory sits untouched before ``prune --captured-only`` takes it."""
+
+
 @app.command("forget")
 def forget(
     ref: Annotated[str, typer.Argument(help="Project id prefix, name, codename or path.")],
@@ -165,9 +174,13 @@ def prune(
         ),
     ] = False,
     older_than: Annotated[
-        int,
-        typer.Option("--older-than", min=0, help="Days of inactivity for --captured-only."),
-    ] = 30,
+        int | None,
+        typer.Option(
+            "--older-than",
+            min=0,
+            help=f"Days of inactivity for --captured-only (default {_STALE_CAPTURE_DAYS}).",
+        ),
+    ] = None,
     yes: Annotated[
         bool, typer.Option("--yes", "-y", help="Drop without asking; required off a terminal.")
     ] = False,
@@ -181,12 +194,17 @@ def prune(
     run unless --yes; under --json without --yes it lists the candidates and
     changes nothing.
     """
+    if older_than is not None and not captured_only:
+        # Ignored silently, `prune --older-than 7` read as "what is older than a
+        # week" and swept every missing root and worktree instead.
+        fail("--older-than applies only with --captured-only", error="usage")
     if not missing and not worktrees and not captured_only:
         missing = worktrees = True
+    days = _STALE_CAPTURE_DAYS if older_than is None else older_than
     candidates = project_service.prune_candidates(
         missing=missing,
         worktrees=worktrees,
-        captured_older_than=older_than if captured_only else None,
+        captured_older_than=days if captured_only else None,
     )
     if yes:
         emit_prune(project_service.prune(candidates, purge=purge))

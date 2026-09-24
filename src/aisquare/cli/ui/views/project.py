@@ -230,24 +230,35 @@ class ManagerTab(Vertical):
     def _start_manager(self) -> None:
         """Spawn the manager off the UI thread; the result arrives as a worker state."""
         self.query_one("#start-manager", Button).disabled = True
+        # Measured here, on the UI thread, and handed to the worker: a widget's
+        # size is read off the compositor, which is not thread-safe.
+        size = self._pane_size()
         # exit_on_error=False: a FleetError is an answer to show, not a crash.
-        self.run_worker(self._spawn_manager, name=SPAWN_WORKER, thread=True, exit_on_error=False)
+        self.run_worker(
+            lambda: self._spawn_manager(size),
+            name=SPAWN_WORKER,
+            thread=True,
+            exit_on_error=False,
+        )
 
-    def _spawn_manager(self) -> fleet_service.SpawnReceipt:
+    def _spawn_manager(self, size: tuple[int, int] | None) -> fleet_service.SpawnReceipt:
         # The window is born the size of the pane that is about to show it
         # (#149): Claude Code's diff panel opens by itself past 144 columns, and
         # a window spawned at the old 200x50 default grew one before the pane's
         # first resize could shrink it — a panel the UI then could not close.
-        return fleet_service.spawn(self.project, "manager", size=self._pane_size())
+        return fleet_service.spawn(self.project, "manager", size=size)
 
     def _pane_size(self) -> tuple[int, int] | None:
-        """The manager pane's content size, or ``None`` before it has one (the default applies)."""
-        pane = self.query_one("#manager-pane", TerminalPane)
-        width, height = pane.content_size
-        if width > 0 and height > 0:
-            return (width, height)
+        """The size the manager pane will have; ``None`` before the tab has one (the default).
+
+        Read off the tab, not the pane: the button that asks only shows while
+        the pane is hidden (:meth:`show`), and a hidden widget has no size. The
+        pane takes the tab's full width — the number #149 is about — and the
+        rows under the header; that height is an estimate, which the pane's
+        first attach corrects (``TerminalPane._sync_size``).
+        """
         width, height = self.content_size
-        return (width, max(height - 3, 1)) if width > 0 and height > 3 else None
+        return (width, height - 3) if width > 0 and height > 3 else None
 
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
         if event.worker.name != SPAWN_WORKER:
@@ -324,7 +335,10 @@ class ProjectView(TabbedContent):
             ),
             TabPane(
                 "Explainability",
-                ExplainabilityView(id="project-explainability"),
+                # ``project``: the key this tab shows and attaches is the one
+                # THIS page's launches use (#141) — the project they join from
+                # its root — not the ``project switch`` pin's.
+                ExplainabilityView(project, id="project-explainability"),
                 id="tab-explainability",
             ),
             TabPane("Settings", SettingsView(project, id="project-settings"), id="tab-settings"),

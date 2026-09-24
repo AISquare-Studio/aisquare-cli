@@ -127,6 +127,13 @@ def _credits_row(target: ops.ResolvedTarget) -> str:
     if session is None:
         return "(sign in to read them — aisquare login)"
     reading = credits_service.for_destination(session, destination)
+    if reading is None and session.source == "env":
+        # `aisquare login` refuses while the variable is set (`env_token_set`):
+        # the token goes to the API the environment names, so that is the fix.
+        return (
+            f"({iam.TOKEN_ENV_VAR} is used with {session.api_url}, not this workspace's API — "
+            f"set {iam.API_URL_ENV_VAR}={destination.api_url} to read them)"
+        )
     if reading is None:  # the session belongs to another API than the workspace's
         return (
             f"(signed in to {session.api_url}, not this workspace's API — "

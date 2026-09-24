@@ -3357,7 +3357,10 @@ def test_a_fleet_row_task_next_cannot_read_is_logged_not_swallowed(
     to oldest-first with nothing in the notes or the logs to say the preference
     had stopped working — the race the PR fixed, made invisible. Both doors log
     one line naming what they swallowed: the row the session is bound to, and
-    the row the window's variable names (a cycle with no session)."""
+    the row the window's variable names (a cycle with no session). Each is read
+    off its own call: a bound session's `task next` falls back to the name for
+    the order too, so it logs the name door's line as well, and read together
+    the call with no session proved nothing (review of #203, round 1)."""
     older = _task(project, "the older task")
     mine = _task(project, "the task this coder is for")
     _agent, first = _spawned(project, "coder", mine.id, tmux, monkeypatch)
@@ -3370,24 +3373,33 @@ def test_a_fleet_row_task_next_cannot_read_is_logged_not_swallowed(
     monkeypatch.setattr(SqliteStore, "get_fleet_agent", changed)
 
     ours = "aisquare.services.team"
+
+    def logged() -> list[logging.LogRecord]:
+        lines = [record for record in caplog.records if record.name == ours]
+        caplog.clear()
+        return lines
+
     with caplog.at_level(logging.WARNING, logger=ours):
+        caplog.clear()
         bound = team_service.next_task(role="coder", session_ref=first, cwd=project.root)
+        bound_lines = logged()
         named = team_service.next_task(role="coder", cwd=project.root)
+        named_lines = logged()
 
     assert bound is not None and bound.id == older.id, "still fail-open: the pool order"
     assert named is not None and named.id == older.id
-    lines = [record for record in caplog.records if record.name == ours]
     assert any(
         f"session {first}" in record.getMessage() and "TypeError" in record.getMessage()
-        for record in lines
-    ), caplog.text
-    assert any(
+        for record in bound_lines
+    ), [record.getMessage() for record in bound_lines]
+    assert [
         "AISQUARE_FLEET_AGENT" in record.getMessage() and "TypeError" in record.getMessage()
-        for record in lines
-    ), caplog.text
-    assert all(record.levelno == logging.WARNING and not record.exc_info for record in lines), (
-        "one line each, no traceback"
-    )
+        for record in named_lines
+    ] == [True], [record.getMessage() for record in named_lines]
+    assert all(
+        record.levelno == logging.WARNING and not record.exc_info
+        for record in bound_lines + named_lines
+    ), "one line each, no traceback"
 
 
 def test_spawning_for_a_finished_task_is_refused(

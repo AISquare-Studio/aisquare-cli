@@ -180,12 +180,15 @@ def key_set(
         value = sys.stdin.read().strip()
         if not value:
             fail("nothing on stdin — the key was empty", error="no_key")
-    # The same file holds a key the CLI minted (#142): this one replaces it, so
-    # the minted key is revoked and stops being called minted — before the
-    # write, as `key clear` does, because the write is what overwrites it.
-    with store_session() as store:
-        dest.retire_minted_key(store, project.id, session=_signed_in_quietly())
-    binding = ops.attach_project_key(project, value, target=target)
+    # The same file holds a key the CLI minted (#142): this one replaces it.
+    # The minted key stops being called minted before the write, so the uid
+    # never names a hand key, and is revoked once the new one is recorded: a
+    # write that fails puts the file back, and the uid with it (review of #172).
+    with (
+        store_session() as store,
+        dest.retiring_minted_key(store, project.id, session=_signed_in_quietly()),
+    ):
+        binding = ops.attach_project_key(project, value, target=target)
     payload = _key_payload(project, target)
     if get_state().json_output:
         typer.echo(json.dumps(payload))
@@ -247,8 +250,10 @@ def key_show(
 def key_clear(project_ref: Annotated[str | None, _PROJECT_OPTION] = None) -> None:
     """Detach the project's key and delete its file; the machine key applies again."""
     project = _project_for(project_ref)
-    with store_session() as store:
-        dest.retire_minted_key(store, project.id, session=_signed_in_quietly())  # (#142)
+    with (
+        store_session() as store,
+        dest.retiring_minted_key(store, project.id, session=_signed_in_quietly()),  # (#142)
+    ):
         had_row = store.clear_project_explainability(project.id)
     had_file = clear_project_api_key(project.id)
     if get_state().json_output:

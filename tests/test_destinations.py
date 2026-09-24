@@ -15,6 +15,7 @@ from __future__ import annotations
 import ast
 import json
 import shlex
+import sqlite3
 import stat
 from collections.abc import Iterator
 from pathlib import Path
@@ -27,7 +28,7 @@ import aisquare
 from aisquare.cli import auth as auth_cli
 from aisquare.cli.app import app
 from aisquare.core.config import AppConfig, ExplainabilityTarget, load_config, save_config
-from aisquare.core.store import store_session
+from aisquare.core.store import SqliteStore, store_session
 from aisquare.core.workspace import pin_project, project_id_for
 from aisquare.models import ProjectInfo, TraceDestination
 from aisquare.services import destinations as dest
@@ -813,6 +814,38 @@ def test_a_hand_key_over_a_minted_one_is_the_operators(
     assert service.project_key_path(project.id).read_text() == "AIS_handmade_key"
 
 
+def test_a_hand_key_that_does_not_land_leaves_the_minted_one_live_and_minted(
+    runner: CliRunner,
+    idp: IdentityProviderStub,
+    signed_in: iam.Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The minted key is revoked once its replacement is recorded, never before (review of #172).
+
+    ``key set`` revoked it and dropped its uid, then wrote; when the binding
+    could not be recorded, the write put the file back as it was — the key just
+    revoked, no longer called minted. ``use`` then called that dead key "the
+    project's own key" and never minted again, and ``logout`` left it alone.
+    """
+    project = _project(tmp_path / "web")
+    _json(runner, "explainability", "use", "acme/Frontend")
+    minted = service.project_key_path(project.id).read_text()
+
+    def locked(*_args: object, **_kwargs: object) -> None:
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(SqliteStore, "set_project_explainability", locked)
+    monkeypatch.setenv("WEB_KEY", "AIS_handmade_key")
+    failed = runner.invoke(app, ["explainability", "key", "set", "--from-env", "WEB_KEY"])
+    assert failed.exit_code != 0
+    assert idp.revoked_keys == [], "a key revoked before its replacement was in place"
+    with store_session() as store:
+        row = store.project_destination(project.id)
+    assert row is not None and row.key_uid == "key-1", "the key in the file stopped being minted"
+    assert service.project_key_path(project.id).read_text() == minted
+
+
 def test_key_clear_retires_a_minted_key(
     runner: CliRunner, idp: IdentityProviderStub, signed_in: iam.Session, tmp_path: Path
 ) -> None:
@@ -824,6 +857,33 @@ def test_key_clear_retires_a_minted_key(
         row = store.project_destination(project.id)
     assert row is not None and row.key_uid is None
     assert "— no key yet" in runner.invoke(app, ["explainability", "status"]).output
+
+
+def test_a_key_clear_that_does_not_land_leaves_the_minted_key_live_and_minted(
+    runner: CliRunner,
+    idp: IdentityProviderStub,
+    signed_in: iam.Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``key clear`` revokes once the binding is gone: a failed clear keeps a working key.
+
+    Revoked first, a clear whose row would not delete left the binding on a
+    dead key with no uid — the state a failed ``key set`` left (review of #172).
+    """
+    project = _project(tmp_path / "web")
+    _json(runner, "explainability", "use", "acme/Frontend")
+
+    def locked(*_args: object, **_kwargs: object) -> bool:
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(SqliteStore, "clear_project_explainability", locked)
+    assert runner.invoke(app, ["explainability", "key", "clear"]).exit_code != 0
+    assert idp.revoked_keys == []
+    with store_session() as store:
+        row = store.project_destination(project.id)
+    assert row is not None and row.key_uid == "key-1"
+    assert service.project_key_path(project.id).read_text() == idp.minted[0]["api_key"]
 
 
 def test_the_cli_never_mints_over_a_hand_key_bound_to_another_target(
@@ -854,7 +914,7 @@ def test_the_ui_attach_leaves_a_minted_key_to_the_cli(
     """The tab's one project-key writer never overwrites a key the CLI minted.
 
     Revoking it is a network call and the tab's handlers run on the UI thread,
-    so the refusal names ``key set``, which revokes first. Which deployment the
+    so the refusal names ``key set``, which revokes it. Which deployment the
     form binds a key to is the form's question (tests/test_ui_project.py).
     """
     from aisquare.cli.ui.views import explainability as view
@@ -991,6 +1051,51 @@ def test_a_mint_over_a_minted_key_revokes_the_one_it_replaces(
     with store_session() as store:
         row = store.project_destination(project.id)
     assert row is not None and row.key_uid == "key-2"
+
+
+def test_a_purge_revokes_the_minted_key_it_leaves_nothing_to_find(
+    runner: CliRunner,
+    idp: IdentityProviderStub,
+    signed_in: iam.Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``forget --purge`` and ``prune --purge`` delete the row ``logout`` finds the key by.
+
+    The row, its ``key_uid`` and the key file went, the key stayed live on the
+    server, and nothing on this machine could revoke it any more (review of
+    #172). Revoked once the purge is done: one that fails keeps a working key.
+    A plain forget keeps the row, hidden, and so keeps it for ``logout``.
+    """
+    web = _project(tmp_path / "web")
+    gone = _project(tmp_path / "gone")
+    kept = _project(tmp_path / "kept")
+    for project in (web, gone, kept):
+        _json(runner, "explainability", "use", "acme/Frontend", "--project", project.id)
+    assert [m["uid"] for m in idp.minted] == ["key-1", "key-2", "key-3"]
+
+    def locked(*_args: object, **_kwargs: object) -> dict[str, int]:
+        raise sqlite3.OperationalError("database is locked")
+
+    purge = SqliteStore.purge_project
+    monkeypatch.setattr(SqliteStore, "purge_project", locked)
+    assert runner.invoke(app, ["project", "forget", str(web.root), "--purge"]).exit_code != 0
+    assert idp.revoked_keys == [], "revoked for a purge that did not happen"
+    monkeypatch.setattr(SqliteStore, "purge_project", purge)
+
+    forgotten = runner.invoke(app, ["project", "forget", str(web.root), "--purge"])
+    assert forgotten.exit_code == 0, forgotten.output
+    assert idp.revoked_keys == ["key-1"]
+
+    gone.root.rmdir()
+    pruned = runner.invoke(app, ["project", "prune", "--missing", "--purge", "--yes"])
+    assert pruned.exit_code == 0, pruned.output
+    assert idp.revoked_keys == ["key-1", "key-2"]
+
+    assert runner.invoke(app, ["project", "forget", str(kept.root)]).exit_code == 0
+    assert idp.revoked_keys == ["key-1", "key-2"], "a forget without --purge keeps the row"
+    assert _json(runner, "logout")["minted_keys_cleared"] == 1
+    assert idp.revoked_keys == ["key-1", "key-2", "key-3"]
 
 
 # --- the store and the directory ----------------------------------------------------------------

@@ -145,7 +145,7 @@ def forget(ref: str, *, purge: bool = False) -> ProjectForgetReport:
     context entries, prompt history, board rows and ended fleet-agent rows stay
     in the store, hidden — reachable again only by registering the root again.
     With ``purge`` they are deleted, and so is ``~/.aisquare/projects/<id>/``
-    (the snapshot and brain).
+    (the snapshot and brain), and a key the CLI minted for it is revoked.
 
     If the project was the ACTIVE one — pinned, or the one the working
     directory resolves to — the pin moves to the most recently touched
@@ -157,7 +157,7 @@ def forget(ref: str, *, purge: bool = False) -> ProjectForgetReport:
         if live:
             raise ProjectBusyError(project, live)
         was_active = active_project(store).id == project.id
-        removed = store.purge_project(project.id) if purge else {}
+        removed = _purge(store, project.id) if purge else {}
         if not purge:
             store.forget_project(project.id)
         active = _repin(store) if was_active else None
@@ -261,7 +261,7 @@ def prune(candidates: list[PruneCandidate], *, purge: bool) -> ProjectPruneRepor
                 kept.append(candidate.model_copy(update={"live_agents": live}))
                 continue
             if purge:
-                store.purge_project(project_id)
+                _purge(store, project_id)
             else:
                 store.forget_project(project_id)
             dropped.append(project_id)
@@ -279,6 +279,20 @@ def prune(candidates: list[PruneCandidate], *, purge: bool) -> ProjectPruneRepor
         active=active,
         active_changed=active_changed,
     )
+
+
+def _purge(store: ContextStore, project_id: str) -> dict[str, int]:
+    """Delete what the project owns in the store, and revoke a key the CLI minted for it.
+
+    The purge takes the destination row (#142) that names that key, and
+    ``logout`` finds a minted key by that row alone: once it is gone, nothing
+    on this machine could revoke the key any more (review of #172).
+    """
+    from aisquare.services import destinations  # lazy: the explainability modules, for a purge
+
+    with destinations.purging_minted_key(store, project_id):
+        removed = store.purge_project(project_id)
+    return removed
 
 
 def _repin(store: ContextStore) -> ProjectInfo | None:

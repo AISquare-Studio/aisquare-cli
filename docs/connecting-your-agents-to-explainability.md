@@ -352,7 +352,10 @@ so the hub's under `$AISQUARE_TEAM_HUB` — and a *Register roster* button that
 registers under it. The **Setup** form's workspace key field attaches a key to
 that project when **this project only** is ticked (the key is pasted, never
 echoed), bound to the deployment the form names, or — when the field is blank —
-the one the project's destination names (#142), else the active one. The client lane — the insights this CLI buffers and `ship` drains — still
+the one an exported `$AISQUARE_EXPLAINABILITY_TARGET` or the project's
+destination names (#142), else the active one, as `key set` resolves it; typed
+beside other settings that would go to a different deployment, it is refused
+until the field names one. The client lane — the insights this CLI buffers and `ship` drains — still
 ships under the machine key, and `doctor --live` checks the machine's
 workspace; per-project shipping is a follow-up.
 `init --explainability` keeps writing the machine key, so a single-workspace
@@ -403,8 +406,10 @@ reported on its own line:
   `aisquare explainability key set --from-env VAR` is the way in — it binds the
   key to the project's destination unless you pass `--target`. A key you
   attached by hand is used as is and never minted over; `key set` over a minted
-  key revokes the minted one, and so do `use --clear`, a move into another
-  workspace, and a new mint over it (when its file is gone).
+  key revokes the minted one once the new key is recorded (a `key set` that
+  fails leaves the minted key working), and so do `use --clear`, a move into
+  another workspace, a new mint over it (when its file is gone), and
+  `project forget --purge` or `project prune --purge`.
 - **routing** — a span lands in the studio its agent identity is bound to in
   that workspace (unbound identities go to the workspace's *Unassigned* inbox),
   so `use` binds this machine's identities (`aisquare-planner`, `aisquare-coder`,

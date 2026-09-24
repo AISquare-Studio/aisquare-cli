@@ -1312,8 +1312,8 @@ def test_a_project_key_lands_where_its_destination_does_and_never_over_a_minted_
     """#142 on the Setup form. With the deployment field blank, the key is bound to
     the deployment the project's destination names — ``key set``'s default — not to
     the machine's active one. And a key the CLI minted is the CLI's to replace
-    (``key set`` revokes it first): refused before a write began, the field keeps
-    what was typed, and the minted key stays in its file."""
+    (``key set`` revokes it): refused before a write began, the field keeps what
+    was typed, and the minted key stays in its file."""
     from aisquare.services import destinations, iam
 
     config = load_config()
@@ -1356,6 +1356,61 @@ def test_a_project_key_lands_where_its_destination_does_and_never_over_a_minted_
     assert load_config().explainability.target == "stg", "the machine stays where it was"
     path = explainability_service.project_key_path(project.id)
     assert path.read_text(encoding="utf-8") == "pk-hand-0123456789"
+
+
+def test_one_save_never_splits_a_project_key_and_its_settings_across_deployments(
+    project: ProjectInfo, quiet_explainability: dict[str, int]
+) -> None:
+    """The deployment field blank, a gateway typed beside the project's key went to
+    the machine's target while the key went to the destination's: one press, two
+    deployments, and the project's launches never read that gateway (review of
+    #172). Refused before a write began; with the deployment typed, both land there."""
+    from aisquare.services import destinations, iam
+
+    config = load_config()
+    config.explainability.targets = {"prod": ExplainabilityTarget(gateway_url="https://p.example")}
+    save_config(config)
+    session = iam.Session(api_url="https://api.aisquare.studio", token="aisq_x", source="env")
+    with store_session() as store:
+        destinations.choose(
+            store,
+            project,
+            destinations.Workspace(id=42, uid="ws-uid-42", name="acme", role="ADMIN"),
+            destinations.Studio(id=301, uid="st-301", name="Frontend"),
+            session,
+        )
+
+    async def scenario(
+        pilot: Pilot[None], host: Host
+    ) -> tuple[list[tuple[str, str]], tuple[str, str], set[str], bool]:
+        host.query_one(ProjectView).active = "tab-explainability"
+        await settle(pilot)
+        _attach_in_setup(host, "pk-split-0123456789", gateway="https://new.example")
+        await settle(pilot)
+        refused = list(host.notices)
+        kept = (
+            host.query_one("#explainability-key", Input).value,
+            host.query_one("#explainability-gateway", Input).value,
+        )
+        gateways = {t.gateway_url for t in load_config().explainability.targets.values()}
+        bound = explainability_service.project_key_path(project.id).exists()
+        # The gateway field still holds what was typed: with the deployment, one save.
+        _attach_in_setup(host, "pk-split-0123456789", target="prod")
+        await settle(pilot)
+        return refused, kept, gateways, bound
+
+    refused, kept, gateways, bound = drive(project, scenario)
+    assert any(
+        "belongs to target 'prod'" in m and "saved for 'stg'" in m and s == "warning"
+        for m, s in refused
+    ), refused
+    assert kept == ("pk-split-0123456789", "https://new.example"), "the fields keep what was typed"
+    assert "https://new.example" not in gateways and not bound, "refused before any write"
+    saved = load_config().explainability
+    assert saved.targets["prod"].gateway_url == "https://new.example", "typed: both go to prod"
+    with store_session() as store:
+        binding = store.project_explainability(project.id)
+    assert binding is not None and binding.target == "prod"
 
 
 def test_a_store_that_cannot_say_whether_the_key_was_minted_refuses_the_attach(

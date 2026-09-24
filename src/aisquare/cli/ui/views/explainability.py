@@ -163,7 +163,7 @@ def minted_key_refusal(project: ProjectInfo) -> Notice | None:
 
     Replacing it here would leave that key live and forgotten — revoking it is
     a network call, and this tab's handlers run on the UI thread — so the CLI
-    does it instead: ``key set`` revokes the minted key before it writes.
+    does it instead: ``key set`` revokes the minted key once its own is written.
     """
     with store_session() as store:
         minted = store.project_destination(project.id)
@@ -459,9 +459,13 @@ class ExplainabilityView(VerticalScroll):
         "this project only" ticked, the key is attached to the project this
         page's agents launch into, instead of written to the machine file —
         ``key set``'s write, the one :func:`attach_project_key` makes — and for
-        ``key set``'s deployment: the one typed, else the one the project's
-        destination names (#142), else the machine's. Never over a key the CLI
-        minted (#142): that is refused before anything is written.
+        ``key set``'s deployment: the one typed, else the one an exported
+        ``$AISQUARE_EXPLAINABILITY_TARGET`` or the project's destination names
+        (#142), else the machine's. When that is not the deployment the other
+        typed settings go to, the save is refused before anything is written:
+        one press wrote a gateway to one deployment and bound the key to
+        another (review of #172). Never over a key the CLI minted (#142): that
+        is refused before anything is written too.
         """
         target = self.query_one("#explainability-target", Input).value.strip()
         switch = self.query_one("#explainability-switch", Checkbox).value
@@ -583,6 +587,20 @@ class ExplainabilityView(VerticalScroll):
                 self.notify(
                     f"no target '{key_target}' on this machine (known: {', '.join(known)}) — "
                     "give it a gateway URL here first, then attach the key",
+                    severity="warning",
+                    timeout=10,
+                    markup=False,
+                )
+                return
+            # The field blank, the settings go to the machine's target and the
+            # key to the project's: two deployments from one press, and the
+            # project's launches never read the gateway just typed (review of
+            # #172). Refused before a write began, so the fields keep it all.
+            if key_target != name and any((gateway, proxy, prefix, key_env)):
+                self.notify(
+                    f"this project's key belongs to target '{key_target}', where its traces "
+                    f"go, and the other settings would be saved for '{name}' — type a "
+                    "deployment to save both to it, or save the key on its own",
                     severity="warning",
                     timeout=10,
                     markup=False,

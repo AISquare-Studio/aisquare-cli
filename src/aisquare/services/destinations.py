@@ -510,7 +510,7 @@ def _forget_minted_key(
 
     Only ever called for a row with ``key_uid``, and that uid is set only while
     the project's key file holds the key the CLI minted: ``key set`` and
-    ``key clear`` retire it (:func:`retire_minted_key`) before they touch the
+    ``key clear`` drop it (:func:`retiring_minted_key`) before they touch the
     file. That invariant is what keeps a hand-attached key out of here — the
     file and the binding are the same for both kinds.
     """
@@ -522,24 +522,39 @@ def _forget_minted_key(
     store.set_project_destination_key(project_id, None)
 
 
-def retire_minted_key(
+@contextlib.contextmanager
+def retiring_minted_key(
     store: ContextStore, project_id: str, *, session: iam.Session | None = None
-) -> None:
-    """A key attached (or cleared) by hand takes the minted key's place: revoke it, drop its uid.
+) -> Iterator[None]:
+    """A key attached (or cleared) by hand takes the minted key's place: drop its uid, then revoke.
 
     One key file per project serves both kinds, so ``key set`` over a minted
     key overwrites it. Left with its uid, the operator's key would go on being
     described as minted, and ``logout``, ``use --clear`` or a re-point would
-    delete it. The FILE is the caller's: it is about to write or clear it.
-    Revoked on the server when ``session`` belongs to the host that minted it;
-    without one the old key stays in the workspace's key list, named
-    ``aisquare-cli <host> <project>``.
+    delete it — so the uid is dropped BEFORE the block, which is the caller's
+    write or clear of the file (:func:`_forget_minted_key` relies on that).
+
+    The key is revoked AFTER the block, once what replaces it is recorded, as
+    :func:`mint_key` does. Revoked first, a ``key set`` whose binding failed to
+    record put the file back — the key just revoked, no longer called minted —
+    and ``use`` went on calling that dead key "the project's own key" (review
+    of #172). So when the block raises, the uid is put back and nothing is
+    revoked: the file still holds the minted key, as ``attach_project_key``
+    and a failed ``key clear`` leave it. Revoked on the server when ``session``
+    belongs to the host that minted it; without one the old key stays in the
+    workspace's key list, named ``aisquare-cli <host> <project>``.
     """
     destination = store.project_destination(project_id)
     if destination is None or not destination.key_uid:
+        yield
         return
-    _revoke(destination, session)
     store.set_project_destination_key(project_id, None)
+    try:
+        yield
+    except Exception:
+        store.set_project_destination_key(project_id, destination.key_uid)
+        raise
+    _revoke(destination, session)
 
 
 def _revoke(destination: TraceDestination, session: iam.Session | None) -> None:
@@ -678,6 +693,32 @@ def revoke_minted_keys(store: ContextStore, session: iam.Session) -> list[str]:
             continue
         cleared.append(destination.project_id)
     return cleared
+
+
+@contextlib.contextmanager
+def purging_minted_key(store: ContextStore, project_id: str) -> Iterator[None]:
+    """``project forget --purge`` and ``prune --purge``: the purge in the block, then the revoke.
+
+    A purge deletes the destination row, and its ``key_uid`` with it, and the
+    project's directory with the key file — and ``logout`` finds a minted key
+    by that row alone. Unrevoked, the key stayed a live ``ingest:write``
+    credential that nothing on this machine remembered (review of #172). So
+    the row is read before the block and the key revoked after it — only once
+    the purge is done, as :func:`retiring_minted_key` revokes: a purge that
+    fails (it is one transaction) keeps the row, the file and a key that
+    still works. The row and the file are the purge's; only the server's copy
+    is revoked here, best effort as every revoke is: signed out, offline or
+    signed in to another host, the purge goes on.
+    """
+    destination = store.project_destination(project_id)
+    yield
+    if destination is None or not destination.key_uid:
+        return
+    try:
+        session = iam.current_session()
+    except iam.IamError:
+        session = None
+    _revoke(destination, session)
 
 
 def derived_credentials_exist() -> bool:

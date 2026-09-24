@@ -753,9 +753,12 @@ class LaunchSpec(BaseModel):
 
     binary: str
     permission_mode: str | None = None
-    """The ``--permission-mode`` passed; ``None`` or ``""`` means no flag was passed."""
+    """The ``--permission-mode`` passed; ``None`` or ``""`` means no flag was passed —
+    and a replay passes none, whatever the role's config says today."""
     extra_args: list[str] = Field(default_factory=list)
-    """The role's ``extra_args`` followed by the caller's, as they went after the flags."""
+    """The role's ``extra_args`` followed by the caller's, as they went after the flags,
+    less the ones that chose a session (``--session-id``, ``--resume``, ``--continue``):
+    those are per launch, like a restart's own ``--resume``."""
     account_slot: int | None = None
     worktree: bool = False
     command: list[str] = Field(default_factory=list)

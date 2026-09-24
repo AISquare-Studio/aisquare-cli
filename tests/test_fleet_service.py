@@ -3596,3 +3596,128 @@ def test_spawn_records_the_launch_spec_and_a_restart_replays_it_over_a_changed_c
     assert fresh.launch_spec is not None
     assert fresh.launch_spec.permission_mode == "acceptEdits"
     assert fresh.launch_spec.extra_args == ["--quiet"]
+
+
+def test_a_launch_that_passed_no_permission_flag_is_restarted_without_one(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Review of #169: the spec recorded ``""`` (pass no flag) as ``None``, and the
+    replay read ``None`` as "not recorded" — so the restart took the role's config
+    mode, ``auto``: a permission the agent was never launched with."""
+    _settings(monkeypatch, roles={"coder": FleetRoleSettings(permission_mode="auto")})
+    agent = fleet_service.spawn(project, "coder", worktree=False, permission_mode="").agent
+    assert "--permission-mode" not in _command(tmux)
+    assert agent.launch_spec is not None and agent.launch_spec.permission_mode == ""
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text("{}\n", encoding="utf-8")
+    _with_transcript(agent, transcript)
+    tmux.die(agent.pane_id, 1)
+
+    receipt = fleet_service.restart(project, agent.label)
+
+    assert "--permission-mode" not in _command(tmux), "no flag then, no flag now"
+    assert receipt.started.launch_spec is not None
+    assert receipt.started.launch_spec.permission_mode == ""
+
+    # A spec recorded before the fix holds `None` for the same launch: the model
+    # says that is "no flag was passed", and the replay honours it.
+    legacy = receipt.started.launch_spec.model_copy(update={"permission_mode": None})
+    with store_session() as store:
+        store.upsert_fleet_agent(receipt.started.model_copy(update={"launch_spec": legacy}))
+    tmux.die(receipt.started.pane_id, 1)
+    fleet_service.restart(project, agent.label)
+    assert "--permission-mode" not in _command(tmux)
+
+
+def test_a_restart_whose_recorded_binary_left_the_path_resolves_it_again_and_says_so(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Review of #169: the spec's binary was replayed as an override, so once it
+    was uninstalled `fleet restart`, `fleet switch` and Restart all refused with
+    advice none of them can take (`--bin`) — where a restart before the spec
+    re-resolved the binary and resumed."""
+    # A wrapper named `claude` (`/opt/wrap/claude`, harness.is_default_agent), so
+    # the agent has a session id to resume.
+    wrapper = tmp_path / "wrap" / "claude"
+    wrapper.parent.mkdir()
+    wrapper.write_text(claude_on_path.read_text(encoding="utf-8"), encoding="utf-8")
+    wrapper.chmod(0o755)
+    monkeypatch.setenv("AISQUARE_BIN_CODER", str(wrapper))
+    agent = fleet_service.spawn(project, "coder", worktree=False).agent
+    assert agent.launch_spec is not None and agent.launch_spec.binary == str(wrapper)
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text("{}\n", encoding="utf-8")
+    _with_transcript(agent, transcript)
+    tmux.die(agent.pane_id, 1)
+    wrapper.unlink()
+    monkeypatch.delenv("AISQUARE_BIN_CODER")
+
+    receipt = fleet_service.restart(project, agent.label)
+
+    assert receipt.resumed is True and receipt.started.binary == "claude"
+    assert "--command" not in _command(tmux), "today's resolution: the default"
+    assert any(
+        f"{str(wrapper)!r}, the binary it was launched with, is no longer on your PATH" in note
+        and "'claude' (chosen by: default)" in note
+        for note in receipt.notes
+    )
+    assert receipt.started.launch_spec is not None
+    assert receipt.started.launch_spec.binary == "claude", "the spec records what ran"
+
+
+def test_session_flags_the_caller_passed_are_not_replayed_by_a_restart(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Review of #169: `--session-id` given to `fleet spawn` was recorded with the
+    agent's arguments and replayed beside the restart's own `--resume` (which
+    Claude Code refuses without `--fork-session`), or put `--fresh` on the old id."""
+    _settings(monkeypatch, roles={"coder": FleetRoleSettings(extra_args=["--effort", "high"])})
+    sid = "11111111-2222-3333-4444-555555555555"
+    agent = fleet_service.spawn(
+        project, "coder", worktree=False, agent_args=["--session-id", sid, "--verbose"]
+    ).agent
+    assert agent.session_id == sid and _flag(_command(tmux), "--session-id") == sid
+    assert agent.launch_spec is not None
+    assert agent.launch_spec.extra_args == ["--effort", "high", "--verbose"]
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text("{}\n", encoding="utf-8")
+    _with_transcript(agent, transcript)
+    tmux.die(agent.pane_id, 1)
+
+    resumed = fleet_service.restart(project, agent.label)
+
+    command = _command(tmux)
+    assert _flag(command, "--resume") == str(transcript) and "--session-id" not in command
+    assert "--verbose" in command and command.count("--effort") == 1
+    assert resumed.started.session_id == sid
+
+    tmux.die(resumed.started.pane_id, 1)
+    fresh = fleet_service.restart(project, agent.label, fresh=True)
+    assert fresh.started.session_id not in (None, sid), "--fresh mints a new id"
+    assert _flag(_command(tmux), "--session-id") == fresh.started.session_id
+
+
+def test_the_launch_spec_drops_every_shape_of_a_session_choice() -> None:
+    def drop(args: list[str]) -> list[str]:
+        return fleet_service._without_session_choice("claude", args)
+
+    assert drop(["--resume", "abc", "--verbose"]) == ["--verbose"]
+    assert drop(["-r", "--verbose"]) == ["--verbose"], "a bare --resume (the picker)"
+    assert drop(["--resume=abc", "--session-id=x", "--model", "opus"]) == ["--model", "opus"]
+    assert drop(["--continue", "-c", "--fork-session", "--verbose"]) == ["--verbose"]
+    assert drop(["--session-id"]) == []
+    assert drop(["--effort", "high"]) == ["--effort", "high"]
+    # Claude Code's flags, not every program's: aider's `-c` is its config file.
+    assert fleet_service._without_session_choice("aider", ["-c", "a.yml"]) == ["-c", "a.yml"]

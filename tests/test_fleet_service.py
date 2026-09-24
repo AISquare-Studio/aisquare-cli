@@ -6527,7 +6527,9 @@ def test_a_fresh_switch_whose_old_presence_cannot_be_retired_still_moves_the_cla
     """Review of #205, sixth round. Since the fifth, ``_take_over`` retires the old presence
     BEFORE the move, each in a commit of its own, inside one ``try``: a store that refused
     the retirement skipped the move too, and the claims waited on the old id for the start
-    hook. Before, only the retirement was lost; now it is again."""
+    hook. Before, only the retirement was lost; now it is again. The loss is said, too:
+    unexplained, the old id sat on the board as a live session until the prune (seventh
+    round)."""
     _two_slots_with_usage(monkeypatch, work=95, personal=10)
     task = _task(project, "moved though the presence stayed")
     agent = fleet_service.spawn(
@@ -6551,6 +6553,8 @@ def test_a_fresh_switch_whose_old_presence_cannot_be_retired_still_moves_the_cla
     assert new is not None and new != old
     assert not any("claims were not moved" in note for note in receipt.notes)
     assert _task_now(task.id).claimed_by == new and _row(receipt.started.id).session_id == new
+    marked = f"{team_service.short_id(old)} was not marked ended"  # as the board names it
+    assert any(marked in note for note in receipt.notes), receipt.notes
 
 
 def test_a_switch_whose_courtesy_event_cannot_be_written_still_reports_the_move(

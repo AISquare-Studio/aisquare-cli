@@ -22,7 +22,7 @@ import signal
 import stat
 import subprocess
 import sys
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -271,6 +271,44 @@ def test_under_a_managed_slot_slot_1_is_the_launching_shells_own_claude(
     # The control: the copies count only where the variable names one of our slots.
     monkeypatch.setenv(core.CONFIG_DIR_VAR, str(fake_home / ".claude-c3"))
     assert core.default_account().config_dir == fake_home / ".claude-c3"
+
+
+@pytest.fixture(scope="class")
+def operators_shell(tmp_path_factory: pytest.TempPathFactory) -> Iterator[None]:
+    """What a launch onto a managed slot exports, set before any function fixture runs.
+
+    CLASS-scoped because it has to be there before the function-scoped
+    ``isolated_home`` runs, the way the operator's shell is there before pytest.
+    """
+    theirs = tmp_path_factory.mktemp("operator")
+    with pytest.MonkeyPatch.context() as shell:
+        for var in (*core.LAUNCH_VARS, *core.PLAIN_VARS.values()):
+            shell.setenv(var, str(theirs / var))
+        yield
+
+
+@pytest.mark.usefixtures("operators_shell")
+class TestASuiteRunUnderAManagedSlot:
+    """Review of #205, seventh round. An agent this build launches onto a managed
+    slot has the slot's two variables AND the shell's own copies under ``PLAIN_VARS``,
+    and so does a suite it runs. ``plain_environment`` reads the copies whenever
+    ``CLAUDE_CONFIG_DIR`` names a managed slot, which the tests above set up: with only
+    ``CLAUDE_CONFIG_DIR`` cleared by conftest, slot 1 resolved to the developer's real
+    directory, and four tests went red on their machine and green on CI.
+    """
+
+    def test_no_test_starts_with_the_accounts_variables(self) -> None:
+        exported = (*core.LAUNCH_VARS, *core.PLAIN_VARS.values())
+        assert [var for var in exported if var in os.environ] == []
+
+    def test_under_a_managed_slot_slot_1_is_still_the_tests_own(
+        self, fake_home: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        for var, value in core.launch_env(core.create_account()).items():
+            monkeypatch.setenv(var, value)
+
+        assert core.plain_environment() == {}
+        assert core.default_account().config_dir == fake_home / ".claude"
 
 
 def test_remove_renames_the_directory_beside_itself_and_frees_the_number(

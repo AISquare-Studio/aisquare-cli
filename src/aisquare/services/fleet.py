@@ -1336,7 +1336,9 @@ def _take_over(agent: FleetAgent, previous: str, session_id: str, notes: list[st
     that a move the store refuses still leaves the state a ``/clear`` leaves
     between its two hooks — an ended id whose claims wait for the start hook —
     and not a live ``switching`` presence nothing retires before the prune
-    (review of #205, fifth round).
+    (review of #205, fifth round). A store that refuses the retirement itself
+    costs only the retirement: the move still runs, and a note says the old id
+    stays on the board until ``aisquare team prune`` retires it.
 
     Fail-open, because the window is running and its row is recorded: a store
     that refuses the move leaves the row on ``previous`` with the claims, and
@@ -1351,9 +1353,17 @@ def _take_over(agent: FleetAgent, previous: str, session_id: str, notes: list[st
             if parked is not None and parked.ended_at is None:
                 # The retirement is the board's courtesy and the move is the record.
                 # Each commits on its own, and a store that refuses the first must
-                # not cost the second (review of #205, sixth round).
-                with contextlib.suppress(sqlite3.Error):
+                # not cost the second (review of #205, sixth round). Said, though:
+                # the old id is otherwise a live session on the board with nothing
+                # to explain it (review of #205, seventh round).
+                try:
                     store.end_session(previous, release_claims=False)
+                except sqlite3.Error as exc:
+                    notes.append(
+                        f"the previous session {_team().short_id(previous)} was not marked ended "
+                        f"({type(exc).__name__}: {exc}) — it shows on the board as a live "
+                        "session until `aisquare team prune` retires it"
+                    )
             store.adopt_fleet_agent_session(agent.id, previous, session_id, lease)
             current = store.get_fleet_agent(agent.id)
     except Exception as exc:  # the row and the window stand; the start hook is the second door

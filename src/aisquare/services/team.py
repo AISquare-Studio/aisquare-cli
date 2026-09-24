@@ -94,6 +94,12 @@ MANAGER_WAKE_KINDS: frozenset[str] = frozenset(
     }
 )
 
+#: Event kinds written for the HUMAN board only: the 🔔 transition and a Claude
+#: Code notification's feed line (#153). They never reach a teammate's prompt
+#: delta or a manager's wake-up reason — no agent can answer another's permission
+#: prompt, and each one would take a ``_DELTA_LIMIT`` slot from the real news.
+HUMAN_BOARD_KINDS: frozenset[str] = frozenset({"attention", "notice"})
+
 #: The last sentence of every wake-up reason. Claude Code continues the turn with
 #: the reason as its instruction, so the instruction must license stopping — a
 #: reason that only says "here is news" is an invitation to loop.
@@ -1371,8 +1377,8 @@ def hook_prompt_heartbeat(
             exclude_session=session.id,
             limit=_DELTA_LIMIT * 3 + 1,
         )
-        # Attention notices are for the human board, not teammate context.
-        events = [event for event in raw if event.kind != "attention"]
+        # Bells and notification lines are for the human board, not teammate context.
+        events = [event for event in raw if event.kind not in HUMAN_BOARD_KINDS]
         if not events or not orchestrator.delta_enabled():
             cursor = raw[-1].seq if raw else None
             store.touch_session(session.id, cursor=cursor, state="working")
@@ -1465,13 +1471,13 @@ def _wake_candidates(store: ContextStore, me: TeamSession) -> list[TeamEvent]:
 
     One function so the wake-up and the deferral below can never disagree about
     the window they are judging — same source, same exclusions, same limit as
-    :func:`hook_prompt_heartbeat`. Attention notices are for the human board,
-    not teammate context.
+    :func:`hook_prompt_heartbeat`. Bells and notification lines
+    (:data:`HUMAN_BOARD_KINDS`) are for the human board, not teammate context.
     """
     raw = store.events_since(
         me.project_id, me.cursor, exclude_session=me.id, limit=_DELTA_LIMIT * 3 + 1
     )
-    return [event for event in raw if event.kind != "attention"]
+    return [event for event in raw if event.kind not in HUMAN_BOARD_KINDS]
 
 
 def _deferred_wake_reason(store: ContextStore, me: TeamSession) -> str | None:
@@ -1556,11 +1562,10 @@ QUIET_NOTIFICATIONS: frozenset[str] = frozenset(
     {"idle_prompt", "elicitation_complete", "elicitation_response"}
 )
 
-#: Message fragments that identify the type when Claude Code sent none (a version
-#: before ``notification_type`` existed). The idle notice's text is the one that
-#: matters: without it every old-style notification rang the bell, as before #153.
+#: The idle notice's text, which identifies it when Claude Code sent no type (a
+#: version before ``notification_type`` existed). It is the one text that matters:
+#: without it every old-style notification rang the bell, as before #153.
 _IDLE_MESSAGE = "waiting for your input"
-_PROMPT_MESSAGES = ("needs your permission", "wants to use your", "needs your input")
 
 
 def classify_notification(notification_type: str | None, message: str | None) -> str:
@@ -1572,7 +1577,7 @@ def classify_notification(notification_type: str | None, message: str | None) ->
     prompt lost in the noise) is the defect this exists to end, and the cost of
     a missed bell on a brand-new type is one feed line the operator can read.
     Without a type — older Claude Code — the message decides: the idle notice
-    is quiet, a permission or browser request is attention, and anything else
+    is quiet, and everything else, a permission or browser request included,
     keeps the pre-#153 behaviour (attention), so an old install loses nothing.
     """
     if notification_type:
@@ -1581,12 +1586,7 @@ def classify_notification(notification_type: str | None, message: str | None) ->
         if notification_type in QUIET_NOTIFICATIONS:
             return "quiet"
         return "notice"
-    text = (message or "").lower()
-    if _IDLE_MESSAGE in text:
-        return "quiet"
-    if any(fragment in text for fragment in _PROMPT_MESSAGES) or not text:
-        return "attention"
-    return "attention"
+    return "quiet" if _IDLE_MESSAGE in (message or "").lower() else "attention"
 
 
 def hook_notification(
@@ -1606,7 +1606,8 @@ def hook_notification(
     board already says, and it was these — nine bells in ten — that made the
     bell meaningless. ``notice`` (``auth_success``, the quota auto-resume
     family, a sub-agent finishing, an unknown type) is a feed line for the
-    human board, no state change.
+    human board, no state change — and, like the bell, never part of an agent's
+    delta or a manager's wake-up (:data:`HUMAN_BOARD_KINDS`).
     """
     if not orchestrator.team_enabled():
         return

@@ -3173,6 +3173,37 @@ def test_fleet_switch_command_reports_the_move_and_its_json(
     assert json.loads(refused.stdout)["error"] in ("no_such_agent", "fleet")
 
 
+@pytest.mark.parametrize(
+    ("seen_ago", "printed_ago"),
+    [
+        # A prompt dismissed with Esc: no Stop follows, and the idle notice after it is quiet.
+        (timedelta(minutes=10), timedelta(minutes=9)),
+        # The redraw when the UI resizes the window on attach, or an arrow key in the dialog.
+        (ACTIVITY_WINDOW + timedelta(seconds=10), ACTIVITY_WINDOW + timedelta(seconds=2)),
+    ],
+    ids=["dismissed", "redrawn"],
+)
+def test_one_burst_after_the_notice_is_not_an_answer(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    seen_ago: timedelta,
+    printed_ago: timedelta,
+) -> None:
+    """#153: output after the notification reads as ``working`` only while the pane is
+    still producing it. Once it is quiet again the prompt may well still be there, and
+    the row must read 🔔 — not ▶ working for as long as it is fresh (``_STALE_AFTER``)."""
+    agent = fleet_service.spawn(project, "coder", worktree=False).agent
+    _stale_board_session(agent, "attention", seen_ago=seen_ago)  # still fresh, hooks quiet since
+    tmux.printed(agent.pane_id, ago=printed_ago)  # after the notice, then nothing
+    [quiet] = fleet_service.list_agents(project)
+    assert quiet.state == "attention"
+
+    tmux.printed(agent.pane_id)  # control: the same row, the pane moving now
+    [moving] = fleet_service.list_agents(project)
+    assert moving.state == "working"
+
+
 def test_the_bell_clears_when_the_pane_prints_after_the_notice(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
 ) -> None:

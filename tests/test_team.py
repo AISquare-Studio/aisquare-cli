@@ -1662,3 +1662,31 @@ def test_an_idle_notice_leaves_a_waiting_session_waiting_and_a_prompt_rings_the_
         app, ["hook", "stop"], input=json.dumps({"cwd": str(work_dir), "session_id": CODER})
     )
     assert state() == "waiting"  # a Stop clears it, as before
+
+
+def test_notification_lines_stay_out_of_teammate_deltas(
+    runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A ``notice`` is for the human board, like the bell: a teammate's delta never
+    carries one, so it takes none of the ``_DELTA_LIMIT`` slots meant for real news."""
+    monkeypatch.setenv("AISQUARE_ROLE", "planner")
+    _start(runner, PLANNER, work_dir)
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
+    _start(runner, CODER, work_dir)
+    monkeypatch.delenv("AISQUARE_ROLE")
+    for _ in range(3):
+        _notify(
+            runner,
+            CODER,
+            work_dir,
+            message="A sub-agent finished",
+            notification_type="agent_completed",
+        )
+    notices = [e for e in team_service.log_events(work_dir) if e.kind == "notice"]
+    assert len(notices) == 3  # control: they are on the board
+
+    assert _prompt(runner, PLANNER, work_dir).stdout == ""  # nothing else is news
+    runner.invoke(app, ["note", "real work item", "--as", "bbbb2222"])
+    delta = _prompt(runner, PLANNER, work_dir).stdout
+    assert "real work item" in delta and "1 teammate update" in delta
+    assert "A sub-agent finished" not in delta

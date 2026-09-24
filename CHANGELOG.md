@@ -535,10 +535,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `quota_auto_resume_*` family, a sub-agent finishing and any type this build
   does not know become a `notice` feed line, never a bell. A payload without
   the field (an older Claude Code) is routed by its text, so the idle notice is
-  quiet there too and everything else keeps its old behaviour. The bell also
-  clears when the pane produces output after the notice — a permission that was
-  granted, or an action the classifier approved — not only on the next human
-  prompt.
+  quiet there too and everything else keeps its old behaviour. A `notice`, like
+  the bell, is for the human board: it never reaches a teammate's prompt delta
+  or a manager's wake-up. In the fleet (the sidebar, the project view,
+  `fleet ls`) the bell also clears while the pane is producing output after
+  the notice — a permission that was granted, or an action the classifier
+  approved — not only on the next human prompt; a pane that goes quiet again
+  without a Stop (a prompt dismissed with Esc) reads 🔔 again. `aisquare watch`
+  and the team board show the session row itself, which keeps 🔔 until the turn
+  ends.
 - **A usage reset now says when, not just what o'clock** (#152). `aisquare
   accounts usage`, `accounts list --usage` and the Accounts page showed a reset
   as a bare `HH:MM`, which for the seven-day window can be six days away and

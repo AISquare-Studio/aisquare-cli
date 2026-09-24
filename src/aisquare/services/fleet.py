@@ -840,11 +840,20 @@ def _derive(
             # and since tmux reports activity in whole seconds while the hook
             # stamped `last_seen_at` with microseconds, "after" means a LATER
             # second, which keeps the drawing of the prompt (the same second as
-            # the hook) from reading as its answer.
+            # the hook) from reading as its answer. And the answer holds only
+            # while the pane is STILL producing output (ACTIVITY_WINDOW): one
+            # burst after the notice is not a working agent. A prompt dismissed
+            # with Esc fires no Stop, and the idle notice after it is quiet; the
+            # redraw when the UI resizes the window on attach, or arrow keys
+            # moving through the dialog, print too. Without the bound each held
+            # an unanswered prompt at `working` for the row's whole
+            # `_STALE_AFTER`; a granted permission keeps the pane moving until
+            # its turn's Stop.
             answered = (
                 pane is not None
                 and pane.last_output is not None
                 and pane.last_output > session.last_seen_at
+                and now - pane.last_output <= ACTIVITY_WINDOW
             )
             if answered:
                 return "working", None

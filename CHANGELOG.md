@@ -515,10 +515,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   — a modifier held, or a function key past the twelve tmux knows — keeps its
   notice, once per key name in a pane, but as information — `no way to type
   f13 into a tmux pane` — since tmux did not fail. A chord your tmux is too
-  old to carry is the one loss you can fix, and says so as a warning that
-  names the version you have and the one it needs (`tmux 3.4 cannot carry
-  shift+enter — 3.5 or newer can`), once per key name for each tmux server;
-  restarting an agent or signing in again repeats neither line. A chord on a
+  old to carry (shift+Enter aside, which travels as ctrl+J — #147) is the one
+  loss you can fix, and says so as a warning that names the version you have
+  and the one it needs (`tmux 3.4 cannot carry ctrl+shift+enter — 3.5 or newer
+  can`), once per key name for each tmux server; restarting an agent or
+  signing in again repeats neither line. A chord on a
   character beyond ASCII that arrives without its text (`ctrl+à` from the
   AZERTY 0 key, `alt+shift+ß`) gets the quiet `no way to type` line too,
   where it used to go out under a tmux name that arrived as a bare `à` or was

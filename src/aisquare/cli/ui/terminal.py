@@ -741,9 +741,11 @@ class TerminalPane(Widget, can_focus=True):
 
         Below :data:`~aisquare.core.keys.EXTENDED_MINIMUM` tmux TYPES those
         chords' names into the agent (measured on 3.3a/3.4), so ``translate``
-        drops them there. Fail-open to True when the version cannot be read:
-        ``tmux -V`` answers on anything alive, and refusing shift+enter on
-        every modern server to guard a hypothetical mute one inverts the trade.
+        refuses them there, sending shift+enter as ``C-j`` instead
+        (:data:`~aisquare.core.keys.LEGACY_FALLBACK`). Fail-open to True when
+        the version cannot be read: ``tmux -V`` answers on anything alive, and
+        refusing the extended chords on every modern server to guard a
+        hypothetical mute one inverts the trade.
         """
         version = self._server_version()
         return version is None or version >= EXTENDED_MINIMUM

@@ -636,8 +636,12 @@ this with Claude Code's own status glyphs.
 window, debounced 100 ms. Windows not currently shown keep the size they last
 had; Claude Code redraws on `SIGWINCH` when shown again.
 
-**Keys** (`core/keys.py`). `Key.character` printable → `send-keys -l`;
-otherwise map `Key.key`:
+**Keys** (`core/keys.py`). `Key.character` printable → `send-keys -l`, except
+alt on an ASCII letter: there the chord is the meaning and the character only
+how a legacy terminal spelt `ESC p`, so it goes as `M-p`, Claude Code's
+switch-model chord. Otherwise map `Key.key`. A key the table has no safe name for is never
+sent under a guessed one — the text the terminal reported with it is typed
+instead (a Cmd chord aside, which is a command), and with none nothing is sent:
 
 | Textual | tmux | Textual | tmux |
 | --- | --- | --- | --- |
@@ -648,8 +652,9 @@ otherwise map `Key.key`:
 | `home` `end` | `Home` `End` | `pageup` `pagedown` | `PPage` `NPage` |
 | `f1` … `f12` | `F1` … `F12` | `ctrl+<x>` | `C-<x>` |
 | `alt+<x>` | `M-<x>` | `ctrl+shift+<x>` | `C-S-<x>` |
-| `shift+enter` | `S-Enter` (tmux ≥ 3.5; below, refused with a warning naming the version you have and the one it needs — 3.3/3.4 mistype it) | anything else unspellable | dropped, one quiet line |
-| a modifier, a lock, Menu…, a Cmd chord (a closed set) | dropped in silence — nothing to type (#151) | a key named after its character, no text | that character |
+| `shift+enter` | `S-Enter` (tmux ≥ 3.5; below, `C-j` — Claude Code's same newline, since 3.3/3.4 would type `S-Enter` out) | any other chord tmux < 3.5 would type out | its text; with none, refused with a warning naming the version you have and the one it needs |
+| a key named after its character, no text | that character | anything else unspellable | its text; with none, one quiet line |
+| a modifier, a lock, Menu… (a closed set) | dropped in silence — nothing to type (#151) | a Cmd chord (`super`/`hyper`) | dropped in silence — a command, not text |
 
 The escape hatch key is consumed by us and never forwarded. Textual 8.2.7 /
 8.2.8 speak the kitty keyboard protocol, so modifier-rich chords arrive **when

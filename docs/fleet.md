@@ -32,7 +32,7 @@ Three ideas carry the whole feature:
 
 | Tool | Needed for | Minimum |
 | --- | --- | --- |
-| **`tmux`** | the fleet itself — spawning and surfacing agents | **3.2** (`new-window -e`, extended keys); **3.5+ recommended**, where shift+enter reaches the agent (3.3/3.4 would mistype it, so the fleet drops it there) |
+| **`tmux`** | the fleet itself — spawning and surfacing agents | **3.2** (`new-window -e`, extended keys); **3.5+ recommended**, where shift+enter and the other extended chords reach the agent (3.3/3.4 would mistype them, so there shift+enter travels as ctrl+J — Claude Code's same newline — and the rest are refused with a warning) |
 | **`claude`** | every fleet role runs on Claude Code | 2.1.x — `--session-id`, `--permission-mode`, `--restricted`, `--effort` |
 | `git` | worktrees for coders and reviewers | 2.20+ |
 | `gh` | *optional* — the coder opens PRs and the reviewer reviews them with it | any current release |
@@ -662,12 +662,14 @@ are named once rather than guessed. Shift on a letter beyond ASCII, from such a
 terminal, types its capital (`shift+ф` is `Ф`) — wrong only on the few keys
 that shift to something else, like AZERTY's `é`, which shifts to `2` — and a
 letter with no case (`ש`, `क`) or a two-letter capital (`ß`) is named once
-rather than guessed. A chord your tmux is too old to carry is
-refused rather than mistyped, with a warning that names the version you have
-and the one it needs (`tmux 3.4 cannot carry shift+enter — 3.5 or newer
-can`), once per key name for each tmux server the pane shows. The one
-exception is a modifier tmux cannot spell at all — Cmd (super) or hyper —
-which is dropped rather than typed, and without a word, because
+rather than guessed. A chord your tmux is too old to carry travels by an
+older spelling of the same meaning where there is one — shift+enter below 3.5
+is ctrl+J, Claude Code's newline either way — and is otherwise refused rather
+than mistyped, with a warning that names the version you have and the one it
+needs (`tmux 3.4 cannot carry ctrl+shift+enter — 3.5 or newer can`), once per
+key name for each tmux server the pane shows. The one exception is a modifier
+tmux cannot spell at all — Cmd (super) or hyper — which is dropped rather than
+typed, and without a word, because
 Cmd+V is a command for your terminal and not a request for a `v`. A key with
 nothing to type is ignored the same way, whatever is held with it: a modifier
 or a lock (Shift, Control, Caps Lock…), and the whole keys a terminal speaking

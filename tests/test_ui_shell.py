@@ -2692,6 +2692,12 @@ def test_the_keyboard_steps_the_partition_from_the_sidebar_and_a_held_key_is_one
         before = len(writes)
         for _ in range(5):
             app.post_message(events.Key("greater_than_sign", ">"))
+        # Queued on the APP, whose own queue `pilot.pause()` does not wait for: it waits
+        # for the screen and its widgets. On the Windows leg of run 36042754454 the width
+        # was read before the app had handed a single press on. A callback the app queues
+        # behind the five runs once it has handed all five to the screen, and the pause
+        # then waits for the screen to handle them and lay the result out.
+        await app.wait_for_refresh()
         await pilot.pause()
         seen["burst"] = app.sidebar.outer_size.width
         await _settled(pilot)

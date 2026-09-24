@@ -759,7 +759,7 @@ def test_doctor_leaves_a_machine_that_added_and_bound_nothing_as_it_was(
     leaves behind — and they read the registry through ``list_accounts``, which reconciles
     as it reads: every doctor on a machine that never added an account wrote slot 1's row,
     and a store it could not open was a ``claude-account-default`` warning that machine never
-    had (review of the #205 fold, round 2). Nothing bound, nothing is read."""
+    had (review of the #205 fold, round 2). Nothing arranged, nothing is written."""
     assert paths.db_path().exists()  # `work` opened the store: the gate is not the file
 
     assert diagnostics._claude_accounts_checks() == []
@@ -768,6 +768,38 @@ def test_doctor_leaves_a_machine_that_added_and_bound_nothing_as_it_was(
 
     paths.db_path().write_bytes(CORRUPT)
     assert diagnostics._claude_accounts_checks() == []  # the database line says it, alone
+
+
+def test_doctor_flags_a_project_default_that_outlives_the_last_added_account(
+    fake_home: Path, work: ProjectInfo
+) -> None:
+    """Round 2 gated the default checks, with no added account, on a role binding alone:
+    "a project default is a registry row ``forget_arrangement`` drops with its slot". It is
+    a project setting — ``forget_arrangement`` drops it best effort, and a slot directory
+    deleted by hand drops none — so every launch in that project was refused while doctor
+    said nothing. A disabled machine default on slot 1 went unsaid the same way (review of
+    the #205 fold, round 3)."""
+    only = core.create_account()  # slot 2, the only added account
+    _sign_in(only, "two@example.com")
+    service.set_default("2", project=work)
+    shutil.rmtree(only.config_dir)  # by hand, not through `remove`
+
+    with pytest.raises(service.NoSuchAccount, match="slot 2"):
+        service.choose(None, role="coder", project=work)
+    checks = {check.name: check for check in diagnostics._claude_accounts_checks()}
+    assert "claude-accounts" not in checks  # nothing added: still no line of its own
+    dangling = checks["claude-account-bindings"]
+    assert dangling.status.value == "warn"
+    assert f"project {work.root.name} → slot 2" in dangling.detail
+
+    service.set_default(None, project=work)
+    assert diagnostics._claude_accounts_checks() == []  # nothing arranged is left to report
+
+    service.set_default("1")
+    service.set_disabled("1", True)
+    checks = {check.name: check for check in diagnostics._claude_accounts_checks()}
+    default = checks["claude-account-default"]
+    assert default.status.value == "warn" and "disabled" in default.detail
 
 
 def test_doctor_checks_every_binding_against_one_registry_read(

@@ -724,7 +724,7 @@ def _claude_accounts_checks() -> list[DoctorCheck]:
     only: ``managed_accounts`` lists directories and ``describe`` reads the
     files Claude Code left in them, so a machine that never added an account
     is left exactly as it was (``tests/test_doctor_does_not_create_state.py``)
-    — unless it binds a role to one, which the default checks then read.
+    — unless it arranged one anyway, which the default checks then read.
     """
     managed = claude_accounts_core.managed_accounts()
     if not managed:
@@ -732,12 +732,14 @@ def _claude_accounts_checks() -> list[DoctorCheck]:
         # session can still be parked on a usage limit (#146), and removing the
         # last added account leaves a role binding naming its email, which
         # `_retarget_bindings` says this flags (review of the #205 fold, round 1).
-        # Only a binding: the default checks read the registry through
-        # `list_accounts`, which reconciles as it reads, and warn when the store
-        # cannot be opened — a write and a line a machine that bound nothing never
-        # had (round 2). A project default is a registry row `forget_arrangement`
-        # drops with its slot, so a binding is what a removal leaves behind.
-        defaults = _claude_account_default_checks() if _binds_an_account() else []
+        # Only when something was arranged: the default checks read the registry
+        # through `list_accounts`, which reconciles as it reads, and warn when the
+        # store cannot be opened — a write and a line a machine that arranged nothing
+        # never had (round 2). A binding alone missed the project default, which is a
+        # project setting: `forget_arrangement` drops it best effort and a slot
+        # directory deleted by hand drops none, so `choose` refused every launch in
+        # that project while this said nothing (round 3).
+        defaults = _claude_account_default_checks() if _arranges_an_account() else []
         return [*defaults, *_claude_account_limit_checks()]
     statuses = [claude_accounts_service.describe(account) for account in managed]
     parts = [
@@ -764,13 +766,24 @@ def _claude_accounts_checks() -> list[DoctorCheck]:
     ]
 
 
-def _binds_an_account() -> bool:
-    """Whether a role binding names an account — ``config.toml`` only, no store opened.
+def _arranges_an_account() -> bool:
+    """Whether anything the default checks report on was set: a binding or a default.
 
-    A file that cannot be read is the ``config`` line's to report, so it binds nothing here.
+    A role binding (``config.toml``), a project default (a project setting) or a
+    machine default (a registry row, slot 1's included). The store is read raw
+    and only when ``context.db`` exists: ``store.claude_accounts`` does not
+    reconcile, so deciding writes nothing. A file or a store that cannot be read
+    is the ``config`` or ``database`` line's to report, so it arranges nothing here.
     """
     try:
-        return bool(settings_service.role_account_bindings())
+        if settings_service.role_account_bindings():
+            return True
+        if not paths.db_path().exists():
+            return False
+        with store_session() as store:
+            if store.project_settings(claude_accounts_service.PROJECT_ACCOUNT_KEY):
+                return True
+            return any(record.is_default for record in store.claude_accounts())
     except Exception:
         return False
 

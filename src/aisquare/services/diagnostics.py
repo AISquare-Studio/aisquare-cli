@@ -13,7 +13,7 @@ import sys
 from collections.abc import Callable, Container, Mapping, Sequence
 from datetime import UTC, datetime
 from importlib import metadata
-from pathlib import Path
+from pathlib import Path, PurePath
 from urllib.parse import urlsplit
 
 from aisquare.core import agents as agent_core
@@ -1560,10 +1560,15 @@ def _check_browser_tools(cwd: Path | None = None) -> DoctorCheck:
     )
 
 
-def _short_path(path: Path) -> str:
-    """``path`` with the user's home as ``~`` — a detail line is read, not parsed."""
+def _short_path(path: PurePath, home: PurePath | None = None) -> str:
+    """``path`` with the user's home as ``~`` — a detail line is read, not parsed.
+
+    Forward slashes after the ``~``, as ``cli.ui.sidebar.short_path`` writes it.
+    ``~/`` is a POSIX spelling, and on Windows the rest came out in the
+    platform's own: ``~/AppData\\Local\\Temp\\…``.
+    """
     try:
-        return f"~/{path.relative_to(Path.home())}"
+        return "~/" + path.relative_to(Path.home() if home is None else home).as_posix()
     except ValueError:
         return str(path)
 

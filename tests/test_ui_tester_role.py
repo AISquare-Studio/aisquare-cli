@@ -25,7 +25,7 @@ from __future__ import annotations
 import json
 import shutil
 from collections.abc import Callable
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 import pytest
@@ -461,6 +461,18 @@ def test_doctor_names_the_directory_beside_each_tool(
     # asks — is each tool named with ITS OWN directory — is unchanged.
     assert f"mcp pw ({diagnostics._short_path(a)})" in check.detail
     assert f"mcp cdp ({diagnostics._short_path(b)})" in check.detail
+
+
+def test_a_path_under_the_home_is_shown_with_forward_slashes_on_every_platform() -> None:
+    """`~/` is a POSIX spelling, and the rest of the path came out in the platform's own: on
+    Windows every config dir under the profile read `~/AppData\\Local\\…` in doctor's line."""
+    home = PureWindowsPath(r"C:\Users\me")
+    claude = home / "AppData" / "Local" / "claude"
+    assert diagnostics._short_path(claude, home) == "~/AppData/Local/claude"
+    outside = PureWindowsPath(r"D:\work\claude")
+    assert diagnostics._short_path(outside, home) == str(outside)  # not under home: untouched
+    posix_home = PurePosixPath("/home/me")
+    assert diagnostics._short_path(posix_home / ".claude", posix_home) == "~/.claude"
 
 
 def test_doctor_reads_the_default_installs_claude_json_beside_the_directory(

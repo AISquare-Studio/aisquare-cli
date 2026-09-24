@@ -302,10 +302,40 @@ def test_the_doctor_line_exists_only_for_auto_mode_behind_a_configured_proxy(
     check = auto_mode.doctor_check()
     assert check is not None and check.status is CheckStatus.warn
     assert "manager" in check.detail and "not measurable yet" in check.detail
-    assert check.fix and "fleet.roles.manager.permission_mode acceptEdits" in check.fix
+    assert check.fix and "--permission-mode acceptEdits" in check.fix
     assert "AISquare-Explainability-SDK/issues/1144" in check.fix
     assert "explainability disable" in check.fix
     assert _doctor_row() is not None, "it reaches the real doctor"
+
+
+def test_the_printed_mode_fix_is_one_this_config_accepts(
+    isolated_home: Path, runner: CliRunner
+) -> None:
+    """`config set` only writes keys the config has; a trimmed [fleet.roles] has fewer."""
+    paths.ensure_home()
+    # A [fleet.roles] that lists only coder: manager runs on the built-in auto, no table.
+    _configure(tracing=True, modes={"coder": "acceptEdits"})
+    check = auto_mode.doctor_check()
+    assert check is not None and check.fix
+    assert "config set fleet.roles.manager" not in check.fix
+    assert (
+        f'add [fleet.roles.manager] permission_mode = "acceptEdits" to {paths.config_path()}'
+        in check.fix
+    )
+    refused = runner.invoke(
+        app, ["config", "set", "fleet.roles.manager.permission_mode", "acceptEdits"]
+    )
+    assert refused.exit_code != 0, "the command it no longer prints fails on this config"
+
+    # A role in auto WITH a table: the command is named for it, and it works.
+    _configure(tracing=True, modes={"coder": "acceptEdits", "tester": "auto"})
+    check = auto_mode.doctor_check()
+    assert check is not None and check.fix
+    command = "aisquare config set fleet.roles.tester.permission_mode acceptEdits"
+    assert command in check.fix
+    result = runner.invoke(app, command.split()[1:])
+    assert result.exit_code == 0, result.output
+    assert "tester" not in auto_mode.auto_roles()
 
 
 def test_the_doctor_line_reads_the_evidence(isolated_home: Path, tmp_path: Path) -> None:
@@ -328,6 +358,56 @@ def test_the_doctor_line_reads_the_evidence(isolated_home: Path, tmp_path: Path)
     assert refused is not None and refused.status is CheckStatus.warn
     assert "1 of the last 3 sessions were refused" in refused.detail
     assert "AISquare-Explainability-SDK#1144" in refused.detail
+    # A 98k baseline is under the line: it is stated beside it, not as the size that failed.
+    assert "above ~100k tokens, and this machine's session baseline is 98k" in refused.detail
+    assert "fails at this machine's session baseline" not in refused.detail
+
+
+def test_a_transient_refusal_or_two_is_not_a_refused_session(
+    isolated_home: Path, tmp_path: Path
+) -> None:
+    """The doctor line and the spawn note count a session refused at the Stop hook's bar."""
+    paths.ensure_home()
+    _configure(tracing=True)
+    project = _project(tmp_path / "repo")
+    _session(project, "s-blip", _sized(tmp_path / "t" / "blip.jsonl", 80_000, refusals=2))
+
+    baseline = auto_mode.measure_baseline()
+    assert baseline.samples[0].refusals == 2 and baseline.refused_sessions == 0
+    fine = auto_mode.doctor_check()
+    assert fine is not None and fine.status is CheckStatus.ok
+    assert auto_mode.spawn_note("auto") is None
+
+    _session(project, "s-hit", _sized(tmp_path / "t" / "hit.jsonl", 80_000, refusals=3))
+    assert auto_mode.measure_baseline().refused_sessions == 1
+    warned = auto_mode.doctor_check()
+    assert warned is not None and warned.status is CheckStatus.warn
+
+
+def test_a_transcript_doctor_may_not_stat_does_not_crash_doctor(
+    isolated_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``is_file`` raises PermissionError under a directory this user may not traverse."""
+    paths.ensure_home()
+    _configure(tracing=True)
+    project = _project(tmp_path / "repo")
+    locked = tmp_path / "locked"
+    _session(project, "s-locked", _sized(locked / "hidden.jsonl", 137_000), minutes_ago=0)
+    _session(project, "s-small", _sized(tmp_path / "t" / "small.jsonl", 72_000), minutes_ago=5)
+    real_is_file = Path.is_file
+
+    def is_file(self: Path) -> bool:
+        if self.parent == locked:
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_is_file(self)
+
+    monkeypatch.setattr(Path, "is_file", is_file)
+
+    baseline = auto_mode.measure_baseline()
+    assert [sample.session_id for sample in baseline.samples] == ["s-small"]
+    check = auto_mode.doctor_check()
+    assert check is not None and "72k" in check.detail
+    assert _doctor_row() is not None, "the whole doctor still runs"
 
 
 # --- the spawn receipt ----------------------------------------------------------------------
@@ -374,6 +454,7 @@ def test_a_refused_session_is_put_in_attention_once_with_one_board_line(
     isolated_home: Path, tmp_path: Path, runner: CliRunner
 ) -> None:
     paths.ensure_home()
+    _configure(tracing=True, modes={"coder": "auto"})
     project = _project(tmp_path / "repo")
     team_service.activate(project.root)
     transcript = _sized(tmp_path / "t" / "coder.jsonl", 137_000, refusals=5)
@@ -416,6 +497,7 @@ def test_fewer_refusals_than_the_threshold_or_no_transcript_change_nothing(
     isolated_home: Path, tmp_path: Path
 ) -> None:
     paths.ensure_home()
+    _configure(tracing=True)
     project = _project(tmp_path / "repo")
     team_service.activate(project.root)
     _session(project, "sess-two", _sized(tmp_path / "t" / "two.jsonl", 137_000, refusals=2))
@@ -429,6 +511,49 @@ def test_fewer_refusals_than_the_threshold_or_no_transcript_change_nothing(
 
     assert _state("sess-two") == "waiting"  # a transient 5xx or two is not a blocked session
     assert [kind for kind, _ in _events(project) if kind == auto_mode.EVENT_KIND] == []
+
+
+def _fleet_agent(project: ProjectInfo, session_id: str, *, label: str, role: str) -> None:
+    with store_session() as store:
+        store.upsert_fleet_agent(
+            FleetAgent(
+                id=f"agt_{label}",
+                project_id=project.id,
+                label=label,
+                role=role,
+                pane_id="%4",
+                cwd=project.root,
+                created_at=datetime.now(tz=UTC),
+                session_id=session_id,
+            )
+        )
+
+
+def test_an_untraced_session_is_not_blamed_on_the_proxy(
+    isolated_home: Path, tmp_path: Path
+) -> None:
+    """Untraced, the refusal is a classifier call that failed at Anthropic: no proxy line."""
+    paths.ensure_home()
+    _configure(tracing=False)
+    project = _project(tmp_path / "repo")
+    team_service.activate(project.root)
+    _session(project, "sess-plain", _sized(tmp_path / "t" / "plain.jsonl", 137_000, refusals=4))
+    _fleet_agent(project, "sess-plain", label="coder-plain", role="coder")
+
+    assert hooks_service.turn_stopped(project.root, session_id="sess-plain") is None
+    assert auto_mode.record_refusals("sess-plain") == 0
+    assert _state("sess-plain") == "waiting"
+    assert [kind for kind, _ in _events(project) if kind == auto_mode.EVENT_KIND] == []
+
+    # The same session once the machine traces through the proxy: named, once.
+    _configure(tracing=True)
+    assert auto_mode.record_refusals("sess-plain") == 4
+    assert _state("sess-plain") == "attention"
+    blocked = [text for kind, text in _events(project) if kind == auto_mode.EVENT_KIND]
+    assert len(blocked) == 1 and "behind the explainability proxy" in blocked[0]
+    # coder has no [fleet.roles] table in this config: the step is the table, not `config set`.
+    assert 'add [fleet.roles.coder] permission_mode = "acceptEdits"' in blocked[0]
+    assert "config set fleet.roles.coder" not in blocked[0]
 
 
 def test_the_hook_never_raises_when_the_store_is_damaged(

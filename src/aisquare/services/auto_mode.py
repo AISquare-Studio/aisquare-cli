@@ -66,9 +66,10 @@ REFUSED_ABOVE_TOKENS = 100_000
 #: doctor stays quick — each is one bounded read of a transcript's head.
 SAMPLE_SESSIONS = 12
 
-#: Refusals in a transcript's tail before a Stop hook calls it blocked. One
-#: can be a real transient 5xx ("Wait a moment and then try this action
-#: again"); the sessions that reported this had 5 to 153.
+#: Refusals in a transcript's tail before a session counts as refused — by the
+#: Stop hook that calls it blocked, and by the doctor line and spawn note that
+#: read recent sessions. One can be a real transient 5xx ("Wait a moment and
+#: then try this action again"); the sessions that reported this had 5 to 153.
 REFUSAL_THRESHOLD = 3
 
 CHECK_NAME = "explainability auto-mode"
@@ -113,7 +114,13 @@ class Baseline:
 
     @property
     def refused_sessions(self) -> int:
-        return sum(1 for sample in self.samples if sample.refusals >= 1)
+        """Sessions refused as the Stop hook counts it: :data:`REFUSAL_THRESHOLD` or more.
+
+        The same bar as :func:`record_refusals`, so one transient 5xx in any of
+        the sampled sessions does not turn doctor yellow and every ``auto``
+        spawn into a warning for the next :data:`SAMPLE_SESSIONS` sessions.
+        """
+        return sum(1 for sample in self.samples if sample.refusals >= REFUSAL_THRESHOLD)
 
     @property
     def predicted(self) -> int | None:
@@ -140,7 +147,10 @@ def measure_baseline(limit: int = SAMPLE_SESSIONS) -> Baseline:
 
     Creates nothing: without a database there are no sessions to read, and the
     answer is an empty baseline. A store that cannot be read is the same
-    answer — the database line reports that.
+    answer — the database line reports that. A transcript that cannot be
+    stat'ed (a directory this user may not traverse raises ``PermissionError``
+    from ``is_file``) is skipped like one that is gone: this runs inside
+    ``aisquare doctor``, which must not die on one session's path.
     """
     if not paths.db_path().exists():
         return Baseline()
@@ -158,7 +168,11 @@ def measure_baseline(limit: int = SAMPLE_SESSIONS) -> Baseline:
     samples: list[Sample] = []
     for session in sessions:
         path = Path(session.transcript_path or "")
-        if not path.is_file():
+        try:
+            on_disk = path.is_file()
+        except OSError:
+            on_disk = False
+        if not on_disk:
             continue
         samples.append(
             Sample(
@@ -197,14 +211,30 @@ def exposed(baseline: Baseline) -> bool:
     return predicted is None or predicted >= REFUSED_ABOVE_TOKENS
 
 
-def _remedy(roles: list[str]) -> str:
-    role = roles[0] if roles else "coder"
+def _mode_step(role: str, config: FleetSettings) -> str:
+    """The step that takes ``role`` off ``auto`` — one that works on THIS config.
+
+    ``aisquare config set`` only writes a key the loaded config already has,
+    and a config file with its own ``[fleet.roles]`` holds only the roles it
+    lists; the others run on the built-in ``auto`` with no table to set. For
+    those the step is the table itself, because the command would answer
+    "unknown config key".
+    """
+    if role in config.roles:
+        return f"aisquare config set fleet.roles.{role}.permission_mode acceptEdits"
+    return f'add [fleet.roles.{role}] permission_mode = "acceptEdits" to {paths.config_path()}'
+
+
+def _remedy(roles: list[str], config: FleetSettings) -> str:
+    # The example names a role `config set` can reach, when one of them is.
+    settable = [candidate for candidate in roles if candidate in config.roles]
+    role = (settable or roles or ["coder"])[0]
     return (
         f"Until the proxy fix ({SDK_ISSUE_URL}), one of: a non-classifier mode for the fleet "
-        f"roles — aisquare config set fleet.roles.{role}.permission_mode acceptEdits (per "
-        "spawn: aisquare fleet spawn <role> --permission-mode acceptEdits); a lighter Claude "
-        "config dir for the fleet's account (fewer MCP connectors — their schemas are most of "
-        "the baseline); or run agents untraced: aisquare explainability disable"
+        f"roles — {_mode_step(role, config)} (per spawn: aisquare fleet spawn <role> "
+        "--permission-mode acceptEdits); a lighter Claude config dir for the fleet's account "
+        "(fewer MCP connectors — their schemas are most of the baseline); or run agents "
+        "untraced: aisquare explainability disable"
     )
 
 
@@ -219,7 +249,10 @@ def doctor_check() -> DoctorCheck | None:
     try:
         if not explainability_service.tracing_configured():
             return None
-        roles = auto_roles()
+        from aisquare.services import fleet as fleet_service  # lazy: fleet imports this module
+
+        fleet = fleet_service.settings()
+        roles = auto_roles(fleet)
     except Exception:  # a config that will not load is the config line's report
         return None
     if not roles:
@@ -227,15 +260,19 @@ def doctor_check() -> DoctorCheck | None:
     baseline = measure_baseline()
     who = ", ".join(roles)
     if baseline.refused_sessions:
+        # Not "fails at this baseline": a refused session may have started
+        # under the line and grown past it, so the baseline is stated beside
+        # the measured line rather than as the size that failed.
         detail = (
             f"{who} run in auto mode behind the explainability proxy, and "
             f"{baseline.refused_sessions} of the last {len(baseline.samples)} sessions were "
-            f"refused there ('cannot determine the safety of Bash'): the classifier's "
-            f"non-streaming request fails at this machine's session baseline of "
+            f"refused there ('cannot determine the safety of Bash'): the proxy has been "
+            f"measured to fail the classifier's non-streaming request above "
+            f"~{_k(REFUSED_ABOVE_TOKENS)} tokens, and this machine's session baseline is "
             f"{baseline.describe()} ({SDK_ISSUE})"
         )
         return DoctorCheck(
-            name=CHECK_NAME, status=CheckStatus.warn, detail=detail, fix=_remedy(roles)
+            name=CHECK_NAME, status=CheckStatus.warn, detail=detail, fix=_remedy(roles, fleet)
         )
     if baseline.predicted is None:
         detail = (
@@ -244,7 +281,7 @@ def doctor_check() -> DoctorCheck | None:
             f"been measured to fail the classifier's non-streaming request ({SDK_ISSUE})"
         )
         return DoctorCheck(
-            name=CHECK_NAME, status=CheckStatus.warn, detail=detail, fix=_remedy(roles)
+            name=CHECK_NAME, status=CheckStatus.warn, detail=detail, fix=_remedy(roles, fleet)
         )
     if baseline.predicted >= REFUSED_ABOVE_TOKENS:
         detail = (
@@ -254,7 +291,7 @@ def doctor_check() -> DoctorCheck | None:
             f"request, so tool calls are refused from the first one ({SDK_ISSUE})"
         )
         return DoctorCheck(
-            name=CHECK_NAME, status=CheckStatus.warn, detail=detail, fix=_remedy(roles)
+            name=CHECK_NAME, status=CheckStatus.warn, detail=detail, fix=_remedy(roles, fleet)
         )
     detail = (
         f"{who} run in auto mode behind the explainability proxy; session baseline "
@@ -311,9 +348,16 @@ def record_refusals(session_id: str) -> int:
     refusals stay in the transcript, and a feed that repeats them every turn is
     a feed nobody reads. Never raises — this runs inside the agent's hook, where
     a failure may cost nothing but the notice.
+
+    Only behind a configured proxy, like :func:`doctor_check` and
+    :func:`spawn_note`: untraced, the same sentence is a classifier call that
+    failed at Anthropic, and a board line blaming the proxy and advising to run
+    untraced would send the operator after the wrong thing.
     """
     try:
         if not orchestrator.team_enabled():
+            return 0
+        if not explainability_service.tracing_configured():
             return 0
         with store_session() as store:
             session = store.get_session(session_id)
@@ -325,16 +369,20 @@ def record_refusals(session_id: str) -> int:
             key = _META_PREFIX + session.id
             if store.get_meta(key) is not None:
                 return count
-            store.set_meta(key, datetime.now(tz=UTC).isoformat())
             agent = store.fleet_agent_for_session(session.project_id, session.id)
             label = agent.label if agent is not None else (session.label or session.id[:8])
-            role = agent.role if agent is not None else session.role
+            step = None
+            if agent is not None:
+                from aisquare.services import fleet as fleet_service  # lazy: fleet imports us
+
+                step = _mode_step(agent.role, fleet_service.settings())
+            store.set_meta(key, datetime.now(tz=UTC).isoformat())
             store.mark_attention(session.id)
             team_service._emit(
                 store,
                 session.project_id,
                 EVENT_KIND,
-                _blocked_text(label, role, count, fleet=agent is not None),
+                _blocked_text(label, count, step=step),
                 session_id=session.id,
             )
             return count
@@ -342,16 +390,16 @@ def record_refusals(session_id: str) -> int:
         return 0
 
 
-def _blocked_text(label: str, role: str, count: int, *, fleet: bool) -> str:
+def _blocked_text(label: str, count: int, *, step: str | None) -> str:
+    """The board line; ``step`` is a fleet agent's way off ``auto``, ``None`` for any other row."""
     head = (
         f"{label}: auto mode is refusing its tool calls behind the explainability proxy "
         f"({count} refusals: 'cannot determine the safety of Bash') — the classifier's "
         f"non-streaming request fails at this session's size ({SDK_ISSUE})"
     )
-    if fleet:
+    if step is not None:
         return (
-            head + f" · set a non-classifier mode (aisquare config set fleet.roles.{role}."
-            f"permission_mode acceptEdits) and `aisquare fleet restart {label}` (its session "
-            "resumes), or run it untraced"
+            head + f" · set a non-classifier mode ({step}) and `aisquare fleet restart {label}` "
+            "(its session resumes), or run it untraced"
         )
     return head + " · restart it with --permission-mode acceptEdits, or untraced"

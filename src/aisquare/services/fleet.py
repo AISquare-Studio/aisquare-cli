@@ -2956,17 +2956,17 @@ def switch(
     notes.extend(choice.notes)
     if choice.account is None:
         where = f" (it is on slot {current})" if current is not None else ""
+        # With the notes, every one: what each rung skipped and why is the only
+        # account of how nothing was found (fourth round). The automatic refusal
+        # kept only the `headroom:` ones, so a registry it could not read went
+        # unsaid there, blamed on usage, with an empty `()` (the #205 fold, round 2).
+        said = f" ({'; '.join(choice.notes)})" if choice.notes else ""
         if automatic:
             raise FleetError(
                 f"no account under the line for {label!r}{where} — every other account is "
                 "over switch_at or unreadable; it stays parked until a reset, or "
-                "`aisquare fleet switch` moves it by hand ("
-                + "; ".join(note for note in choice.notes if note.startswith("headroom:"))
-                + ")"
+                f"`aisquare fleet switch` moves it by hand{said}"
             )
-        # With the notes, like the automatic refusal above: what each rung skipped
-        # and why is the only account of how nothing was found (fourth round).
-        said = f" ({'; '.join(choice.notes)})" if choice.notes else ""
         raise FleetError(
             f"no other account with headroom for {label!r}{where}"
             " — add or enable one (`aisquare accounts`), name one with --to, or wait for "

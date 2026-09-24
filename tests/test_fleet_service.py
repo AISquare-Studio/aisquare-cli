@@ -6209,6 +6209,36 @@ def test_a_switch_that_finds_nothing_says_the_default_was_the_account_being_left
     assert agent.pane_id not in tmux.killed  # refused before anything was stopped
 
 
+def test_a_switch_that_cannot_read_the_registry_says_so_automatic_or_not(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A registry it cannot read picks nothing (the #205 fold, round 1), and the refusal is the
+    only place the reason is said. The automatic one kept only the ``headroom:`` notes, so
+    its board note blamed usage and ended in an empty ``()`` (the #205 fold, round 2)."""
+    from aisquare.core import claude_accounts as accounts_core
+    from aisquare.services import claude_accounts as accounts_service
+
+    _two_slots_with_usage(monkeypatch, work=95, personal=10)
+    agent = fleet_service.spawn(project, "coder", worktree=False, account="2").agent
+    _with_transcript(agent, None)
+    monkeypatch.setattr(
+        accounts_service,
+        "_read_arranged",
+        lambda: (
+            accounts_core.list_accounts(),
+            "accounts registry unreadable (database is locked)",
+        ),
+    )
+
+    for automatic in (True, False):
+        with pytest.raises(FleetError) as refused:
+            fleet_service.switch(project, agent.label, automatic=automatic)
+        said = str(refused.value)
+        assert "(accounts registry unreadable (database is locked))" in said, said
+        assert "()" not in said
+    assert agent.pane_id not in tmux.killed  # refused before anything was stopped
+
+
 @pytest.mark.parametrize("left_at", [95, 10], ids=["five-hour-window-full", "weekly-limit"])
 def test_an_automatic_hand_over_from_a_managed_slot_reads_and_launches_the_plain_claude(
     tmux: FakeTmux,

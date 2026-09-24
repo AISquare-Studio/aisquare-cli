@@ -698,10 +698,23 @@ def _translate(
         # bare ``à``, the ctrl silently dropped — the ``C-1`` failure — and a
         # case change can be more than one character: ``'ß'.upper()`` made
         # ``M-SS`` and ``'İ'.lower()`` a two-character ``C-i̇``, names tmux
-        # TYPES into the agent. Nor is plain shift safe: AZERTY's ``é`` key
-        # shifts to ``2``, not ``É``. So every name this module emits is ASCII
-        # (past here ``upper``/``lower`` are one character each), and a bare
+        # TYPES into the agent. So every name this module emits is ASCII (past
+        # here ``upper``/``lower`` are one character each), and a bare
         # character went as text above (review of #161, round 7).
+        #
+        # Plain shift is not a chord: it types the capital, as text, as it
+        # always has — ``ф`` → ``Ф``, ``ä`` → ``Ä``, ordinary typing in whole
+        # alphabets. The trade: this runs only when the terminal sent no text
+        # (reported text wins above), and the few letter keys whose shift is
+        # not their capital are mistyped as they were before round 7 —
+        # AZERTY's ``é`` shifts to ``2``, Czech's ``ě`` too. A letter with no
+        # case has no capital to guess (``ש`` shifts to ``A`` on Hebrew, ``क``
+        # to ``ख`` on InScript), nor has one whose capital is two characters
+        # (``ß``), so those stay refused (review of #161, round 8).
+        capital = char.upper()
+        cased = len(capital) == 1 and capital != char.lower()
+        if shift and not (ctrl or alt) and char.isalpha() and cased:
+            return Translation("literal", capital)
         return Drop("no_name")
     if char.isalpha():
         # The letter's case IS the shift: ``ESC A`` is what alt+shift+a sends,

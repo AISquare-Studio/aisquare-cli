@@ -302,9 +302,9 @@ BEYOND_ASCII: list[tuple[str, str]] = [
     ("\x1b[223;4u", "alt+shift+ß"),  # 'ß'.upper() == 'SS'
     ("\x1b[304;5u", "ctrl+İ"),  # 'İ'.lower() is two characters
     ("\x1b[329;4u", "alt+shift+ŉ"),  # two characters again, past ESC_INTRODUCERS
-    ("\x1b[233;2u", "shift+é"),  # AZERTY's é key shifts to 2, not É
     ("\x1b[233;3u", "alt+é"),
     ("\x1b[1092;3u", "alt+ф"),
+    ("\x1b[1092;4u", "alt+shift+ф"),  # a capital, but alt is the meaning: never a bare Ф
     ("\x1b[178;3u", "alt+²"),  # a digit to isdigit()
     ("\x1b[188;4u", "alt+shift+¼"),  # alphanumeric, so no shifted-punctuation gate
 ]
@@ -330,11 +330,42 @@ def test_beyond_ascii_the_text_and_the_bare_key_still_travel(parsed: Parse) -> N
     """The guard is on the NAME only: reported text wins as for every key, a
     bare key named after its character is typed, and ASCII chords are named."""
     assert arrived("\x1b[224;5;224u", parsed) == [literal("à")], "ctrl+à with its text"
+    assert arrived("\x1b[233;2;50u", parsed) == [literal("2")], "AZERTY shift+é with its text"
     assert translate("alt+shift+ß", "?", printable=True) == literal("?")
     assert translate("à", None, printable=False) == literal("à")
     assert translate("ß", None, printable=False) == literal("ß")
     assert arrived("\x1b[97;5u", parsed) == [key("C-a")], "the control: ctrl+a"
     assert arrived("\x1b[97;4u", parsed) == [key("M-A")], "the control: alt+shift+a"
+
+
+#: Plain shift on a letter beyond ASCII, reported without its text, and what goes out.
+SHIFTED_BEYOND_ASCII: list[tuple[str, str, Translation | Drop]] = [
+    ("\x1b[1092;2u", "shift+ф", literal("Ф")),  # Russian
+    ("\x1b[228;2u", "shift+ä", literal("Ä")),  # German
+    ("\x1b[241;2u", "shift+ñ", literal("Ñ")),  # Spanish
+    ("\x1b[233;2u", "shift+é", literal("É")),  # the known cost: AZERTY's é key shifts to 2
+    ("\x1b[223;2u", "shift+ß", Drop("no_name")),  # 'ß'.upper() == 'SS'
+    ("\x1b[1513;2u", "shift+ש", Drop("no_name")),  # no case: Hebrew shifts it to A
+    ("\x1b[2325;2u", "shift+क", Drop("no_name")),  # no case: InScript shifts it to ख
+    ("\x1b[186;2u", "shift+º", Drop("no_name")),  # no case: Spanish shifts it to ª
+]
+
+
+@pytest.mark.parametrize(("sequence", "chord", "sent"), SHIFTED_BEYOND_ASCII)
+def test_plain_shift_beyond_ascii_types_the_capital_and_guesses_nothing_else(
+    parsed: Parse, sequence: str, chord: str, sent: Translation | Drop
+) -> None:
+    """Plain shift is not a chord, and round 7's guard refused it with them:
+    every capital outside ASCII from a terminal that reports no text —
+    Cyrillic, Greek, ``ä``, ``ñ``, ``ø`` — became ``no way to type shift+ф``,
+    where it had always been typed (review of #161, round 8). It is the capital
+    again, as text, and AZERTY's ``é`` key, which shifts to ``2``, types ``É``
+    as it did before — the known cost of guessing, paid only when no text came.
+    What has no capital to guess stays refused: a letter with no case, whose
+    shift only the layout knows, and a capital of two characters."""
+    [event] = parsed(sequence)
+    assert (event.key, event.character) == (chord, None), "the premise: shift, no text"
+    assert arrived(sequence, parsed) == [sent]
 
 
 def test_super_and_shift_chords_through_the_parser(parsed: Parse) -> None:

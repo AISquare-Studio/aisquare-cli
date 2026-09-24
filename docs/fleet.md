@@ -657,7 +657,11 @@ it, not a chord; a key named after its character (`§`, `±`, `«` on a non-US
 layout) and the numeric keypad's operators are typed even by a terminal that
 names the key without reporting its text (numpad `+` is a `+`) — except the
 keypad's decimal and separator keys, whose text only your layout knows, which
-are named once rather than guessed. A chord your tmux is too old to carry is
+are named once rather than guessed. Shift on a letter beyond ASCII, from such a
+terminal, types its capital (`shift+ф` is `Ф`) — wrong only on the few keys
+that shift to something else, like AZERTY's `é`, which shifts to `2` — and a
+letter with no case (`ש`, `क`) or a two-letter capital (`ß`) is named once
+rather than guessed. A chord your tmux is too old to carry is
 refused rather than mistyped, with a warning that names the version you have
 and the one it needs (`tmux 3.4 cannot carry shift+enter — 3.5 or newer
 can`), once per key name for each tmux server the pane shows. The one

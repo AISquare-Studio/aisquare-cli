@@ -491,7 +491,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   character beyond ASCII that arrives without its text (`ctrl+à` from the
   AZERTY 0 key, `alt+shift+ß`) gets the quiet `no way to type` line too,
   where it used to go out under a tmux name that arrived as a bare `à` or was
-  typed into the agent as `M-SS`. A key named after its character (`§`,
+  typed into the agent as `M-SS`. Plain shift is not such a chord and still
+  types the capital (`shift+ф` is `Ф`; AZERTY's `é` key, which shifts to `2`,
+  still types `É` — a terminal that reports the text types the `2`), but a
+  letter with no case (`ש`, `क`) or a two-letter capital (`ß`) is named rather
+  than typed unshifted or as `SS`. A key named after its character (`§`,
   `±`, `«`, `。`, `؟` on a non-US layout) and the keypad's operators, which a
   terminal may name without reporting their text, are typed rather than filed
   with the keys nobody pressed — except the keypad's decimal and separator,

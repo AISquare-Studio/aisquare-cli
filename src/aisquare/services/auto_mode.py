@@ -218,11 +218,18 @@ def _mode_step(role: str, config: FleetSettings) -> str:
     and a config file with its own ``[fleet.roles]`` holds only the roles it
     lists; the others run on the built-in ``auto`` with no table to set. For
     those the step is the table itself, because the command would answer
-    "unknown config key".
+    "unknown config key" — named as a header and a key, never as one line:
+    TOML ends a table header at its line, so ``[fleet.roles.x] permission_mode
+    = …`` pasted as printed does not parse, and a config that does not parse
+    costs every ``[fleet]`` customisation (the fleet falls back to its
+    defaults, every role back on ``auto``).
     """
     if role in config.roles:
         return f"aisquare config set fleet.roles.{role}.permission_mode acceptEdits"
-    return f'add [fleet.roles.{role}] permission_mode = "acceptEdits" to {paths.config_path()}'
+    return (
+        f'add a `[fleet.roles.{role}]` table with `permission_mode = "acceptEdits"` '
+        f"to {paths.config_path()}"
+    )
 
 
 def _remedy(roles: list[str], config: FleetSettings) -> str:
@@ -349,15 +356,25 @@ def record_refusals(session_id: str) -> int:
     a feed nobody reads. Never raises — this runs inside the agent's hook, where
     a failure may cost nothing but the notice.
 
-    Only behind a configured proxy, like :func:`doctor_check` and
-    :func:`spawn_note`: untraced, the same sentence is a classifier call that
-    failed at Anthropic, and a board line blaming the proxy and advising to run
-    untraced would send the operator after the wrong thing.
+    Only for a session LAUNCHED behind the proxy: untraced, the same sentence
+    is a classifier call that failed at Anthropic, and a board line blaming the
+    proxy and advising to run untraced would send the operator after the wrong
+    thing. Decided by the trace marker a traced launch leaves in the agent's
+    environment (:func:`~aisquare.services.explainability.traced_by`), which
+    this hook inherits — not by the machine's config, which :func:`doctor_check`
+    and :func:`spawn_note` rightly read for launches still to come. A session's
+    routing is fixed when it starts: after ``aisquare explainability disable``
+    an agent already running through the proxy is still refused and must still
+    be named, and one a guard launched untraced (an unhealthy probe, an
+    ``ANTHROPIC_BASE_URL`` of the operator's own) never reached the proxy
+    however the config reads. It also keeps a config file that does not parse
+    from costing the notice: the step then falls back to the built-in roles, as
+    the fleet itself does.
     """
     try:
         if not orchestrator.team_enabled():
             return 0
-        if not explainability_service.tracing_configured():
+        if explainability_service.traced_by() is None:
             return 0
         with store_session() as store:
             session = store.get_session(session_id)

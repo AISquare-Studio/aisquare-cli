@@ -11,8 +11,8 @@ meanwhile, each with its positive and its negative control:
 - the ``explainability auto-mode`` doctor line exists only when a fleet role
   runs ``auto`` behind a configured proxy, and says what the evidence says;
 - ``fleet spawn`` repeats the warning on its receipt when the evidence is there;
-- the Stop hook puts a session that is being refused in ``attention`` with ONE
-  board line.
+- the Stop hook puts a session that was launched through the proxy and is
+  being refused in ``attention`` with ONE board line.
 
 The transcript shapes are the ones read off the reporting machine's own
 transcripts (a coder's first turn: ``2 + 7,596 + 130,041`` tokens; a refusal
@@ -22,6 +22,7 @@ as a ``tool_result`` block).
 from __future__ import annotations
 
 import json
+import re
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -31,13 +32,20 @@ from typer.testing import CliRunner
 
 from aisquare.cli.app import app
 from aisquare.core import paths, transcripts
-from aisquare.core.config import AppConfig, FleetRoleSettings, FleetSettings, save_config
+from aisquare.core.config import (
+    AppConfig,
+    FleetRoleSettings,
+    FleetSettings,
+    load_config,
+    save_config,
+)
 from aisquare.core.orchestrator import team_project
 from aisquare.core.store import store_session
 from aisquare.models import CheckStatus, FleetAgent, ProjectInfo, TeamSession
 from aisquare.services import auto_mode, diagnostics
 from aisquare.services import hooks as hooks_service
 from aisquare.services import team as team_service
+from aisquare.services.explainability import PIPELINE_ID_ENV_VAR
 
 REFUSAL = (
     "claude-opus-5[1m] is temporarily unavailable (server error), so auto mode cannot "
@@ -188,12 +196,40 @@ def test_a_tool_output_that_quotes_the_refusal_is_not_one(tmp_path: Path) -> Non
         _plain_result(grep_hit),  # a grep that matched: exit 0
         _plain_result("Exit code 1\n" + grep_hit, is_error=True),  # grep … && false
         _plain_result("FAILED tests/x.py\n" + REFUSAL + "\n" + "E" * 2_000, is_error=True),
-        _plain_result(REFUSAL + "\n" + "x" * 2_000, is_error=True),  # long: an output
+        _plain_result(REFUSAL + "\n" + "x" * 5_000, is_error=True),  # long: an output
     ]
     assert transcripts.refusal_count(_transcript(tmp_path / "coder.jsonl", quoted)) == 0
     # The same session with the refusals themselves: they are still counted.
     refused = _transcript(tmp_path / "refused.jsonl", [*quoted, *[_refused()] * 3])
     assert transcripts.refusal_count(refused) == 3
+
+
+def test_a_refusal_that_goes_on_past_its_sentence_is_still_one(tmp_path: Path) -> None:
+    """The bare sentence need not be the whole tool result Claude Code writes.
+
+    Its auto-mode denials carry a guidance paragraph after their sentence and
+    run to ~1,050 characters, and #150 quotes this refusal as going on past
+    "try this action again". A length cap sized to the bare sentence would
+    zero every real count — no bell, no doctor evidence — while every other
+    fixture here, the bare sentence, stayed green.
+    """
+    # Stands in for the guidance paragraph at its length (~900 characters).
+    guidance = " ".join(
+        ["If you have other tasks that don't depend on this action, continue working on those."]
+        * 10
+    )
+    same_line = REFUSAL + " " + guidance
+    own_paragraph = REFUSAL + "\n\n" + guidance
+    assert min(len(same_line), len(own_paragraph)) > 1_000, "the premise: past the bare sentence"
+    path = _transcript(
+        tmp_path / "manager.jsonl",
+        [
+            _plain_result(same_line, is_error=True),
+            _plain_result(own_paragraph, is_error=True),
+            _refused(),
+        ],
+    )
+    assert transcripts.refusal_count(path) == 3
 
 
 # --- the baseline over the store ------------------------------------------------------------
@@ -308,6 +344,18 @@ def test_the_doctor_line_exists_only_for_auto_mode_behind_a_configured_proxy(
     assert _doctor_row() is not None, "it reaches the real doctor"
 
 
+_TABLE_STEP = re.compile(r"add a `(\[fleet\.roles\.[\w-]+\])` table with `([^`]+)`")
+
+
+def _follow_table_step(text: str) -> None:
+    """Do what the printed table step says: its header, then its key, in the config file."""
+    match = _TABLE_STEP.search(text)
+    assert match is not None, text
+    header, key = match.groups()
+    with paths.config_path().open("a", encoding="utf-8") as handle:
+        handle.write(f"\n{header}\n{key}\n")
+
+
 def test_the_printed_mode_fix_is_one_this_config_accepts(
     isolated_home: Path, runner: CliRunner
 ) -> None:
@@ -319,13 +367,21 @@ def test_the_printed_mode_fix_is_one_this_config_accepts(
     assert check is not None and check.fix
     assert "config set fleet.roles.manager" not in check.fix
     assert (
-        f'add [fleet.roles.manager] permission_mode = "acceptEdits" to {paths.config_path()}'
-        in check.fix
-    )
+        'add a `[fleet.roles.manager]` table with `permission_mode = "acceptEdits"` '
+        f"to {paths.config_path()}"
+    ) in check.fix
+    # Never the header and the key as one line: TOML does not parse that, and a config
+    # that does not parse sends every role back to the built-in auto.
+    assert "] permission_mode" not in check.fix
     refused = runner.invoke(
         app, ["config", "set", "fleet.roles.manager.permission_mode", "acceptEdits"]
     )
     assert refused.exit_code != 0, "the command it no longer prints fails on this config"
+    # Followed as printed, the file still parses, manager is off auto, and the
+    # config's own customisation survives.
+    _follow_table_step(check.fix)
+    assert load_config().fleet.roles["coder"].permission_mode == "acceptEdits"
+    assert "manager" not in auto_mode.auto_roles()
 
     # A role in auto WITH a table: the command is named for it, and it works.
     _configure(tracing=True, modes={"coder": "acceptEdits", "tester": "auto"})
@@ -450,11 +506,20 @@ def _state(session_id: str) -> str:
     return session.state
 
 
+def _launched(monkeypatch: pytest.MonkeyPatch, *, traced: bool) -> None:
+    """The environment the agent's hook inherits: a traced launch's marker, or none."""
+    if traced:
+        monkeypatch.setenv(PIPELINE_ID_ENV_VAR, "run-150")
+    else:
+        monkeypatch.delenv(PIPELINE_ID_ENV_VAR, raising=False)
+
+
 def test_a_refused_session_is_put_in_attention_once_with_one_board_line(
-    isolated_home: Path, tmp_path: Path, runner: CliRunner
+    isolated_home: Path, tmp_path: Path, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     paths.ensure_home()
     _configure(tracing=True, modes={"coder": "auto"})
+    _launched(monkeypatch, traced=True)
     project = _project(tmp_path / "repo")
     team_service.activate(project.root)
     transcript = _sized(tmp_path / "t" / "coder.jsonl", 137_000, refusals=5)
@@ -494,10 +559,11 @@ def test_a_refused_session_is_put_in_attention_once_with_one_board_line(
 
 
 def test_fewer_refusals_than_the_threshold_or_no_transcript_change_nothing(
-    isolated_home: Path, tmp_path: Path
+    isolated_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     paths.ensure_home()
     _configure(tracing=True)
+    _launched(monkeypatch, traced=True)
     project = _project(tmp_path / "repo")
     team_service.activate(project.root)
     _session(project, "sess-two", _sized(tmp_path / "t" / "two.jsonl", 137_000, refusals=2))
@@ -529,37 +595,68 @@ def _fleet_agent(project: ProjectInfo, session_id: str, *, label: str, role: str
         )
 
 
-def test_an_untraced_session_is_not_blamed_on_the_proxy(
-    isolated_home: Path, tmp_path: Path
+def test_only_a_session_launched_through_the_proxy_is_blamed_on_it(
+    isolated_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Untraced, the refusal is a classifier call that failed at Anthropic: no proxy line."""
+    """The hook asks how THIS session was launched, not what the config says now.
+
+    Untraced, the refusal is a classifier call that failed at Anthropic: no
+    proxy line, even on a machine configured to trace — a guard (an unhealthy
+    probe, the operator's own ANTHROPIC_BASE_URL) launched it untraced. Traced,
+    it is named even after ``explainability disable``: a running agent keeps
+    the proxy it started with, and is still refused through it.
+    """
     paths.ensure_home()
-    _configure(tracing=False)
+    _configure(tracing=True)
     project = _project(tmp_path / "repo")
     team_service.activate(project.root)
     _session(project, "sess-plain", _sized(tmp_path / "t" / "plain.jsonl", 137_000, refusals=4))
     _fleet_agent(project, "sess-plain", label="coder-plain", role="coder")
 
+    _launched(monkeypatch, traced=False)
     assert hooks_service.turn_stopped(project.root, session_id="sess-plain") is None
     assert auto_mode.record_refusals("sess-plain") == 0
     assert _state("sess-plain") == "waiting"
     assert [kind for kind, _ in _events(project) if kind == auto_mode.EVENT_KIND] == []
 
-    # The same session once the machine traces through the proxy: named, once.
-    _configure(tracing=True)
+    # The same refusals in a session launched traced, on a machine that has
+    # since turned tracing off: named, once.
+    _configure(tracing=False)
+    _launched(monkeypatch, traced=True)
     assert auto_mode.record_refusals("sess-plain") == 4
     assert _state("sess-plain") == "attention"
     blocked = [text for kind, text in _events(project) if kind == auto_mode.EVENT_KIND]
     assert len(blocked) == 1 and "behind the explainability proxy" in blocked[0]
     # coder has no [fleet.roles] table in this config: the step is the table, not `config set`.
-    assert 'add [fleet.roles.coder] permission_mode = "acceptEdits"' in blocked[0]
+    assert 'add a `[fleet.roles.coder]` table with `permission_mode = "acceptEdits"`' in blocked[0]
     assert "config set fleet.roles.coder" not in blocked[0]
+
+
+def test_a_config_that_does_not_parse_does_not_cost_the_notice(
+    isolated_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The hook reads the session's launch, not the config file, to decide."""
+    paths.ensure_home()
+    _configure(tracing=True)
+    _launched(monkeypatch, traced=True)
+    project = _project(tmp_path / "repo")
+    team_service.activate(project.root)
+    _session(project, "sess-coder", _sized(tmp_path / "t" / "coder.jsonl", 137_000, refusals=3))
+    _fleet_agent(project, "sess-coder", label="coder-auth", role="coder")
+    paths.config_path().write_text("[fleet\n", encoding="utf-8")
+
+    assert auto_mode.record_refusals("sess-coder") == 3
+    assert _state("sess-coder") == "attention"
+    blocked = [text for kind, text in _events(project) if kind == auto_mode.EVENT_KIND]
+    assert len(blocked) == 1 and blocked[0].startswith("coder-auth: auto mode is refusing")
 
 
 def test_the_hook_never_raises_when_the_store_is_damaged(
     isolated_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     paths.ensure_home()
+    # Launched traced, so the hook gets as far as opening the store.
+    _launched(monkeypatch, traced=True)
     with store_session():
         pass
     paths.db_path().write_bytes(b"not a database")

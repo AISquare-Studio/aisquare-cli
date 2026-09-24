@@ -45,10 +45,14 @@ _HEAD_BYTES = 1_000_000
 _TAIL_BYTES = 256_000
 
 #: The longest tool-result text that can still be a refusal. Claude Code's own
-#: sentence is ~170 characters; a tool's OUTPUT that happens to quote it — a
-#: failing test run over this module, a grep that exits non-zero — is longer,
-#: and is what the cap is for.
-_REFUSAL_MAX_CHARS = 1_000
+#: sentence is ~170 characters, but the tool result need not stop there: the
+#: auto-mode denials it writes carry a guidance paragraph after their sentence
+#: and run to ~1,050, and #150 quotes this one as going on past "try this
+#: action again". A cap under the real length zeroes every count — no bell, no
+#: doctor evidence — while tests on the bare sentence stay green, so it sits
+#: about four times above that. What it still turns away is a tool's long
+#: OUTPUT that happens to open with the sentence.
+_REFUSAL_MAX_CHARS = 4_000
 
 #: The model name Claude Code gives an assistant entry it writes itself — an
 #: API error in place of a reply — rather than one the API returned.

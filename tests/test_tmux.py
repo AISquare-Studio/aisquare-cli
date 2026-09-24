@@ -1357,8 +1357,18 @@ def test_live_spawn_cannot_be_talked_into_running_a_second_tmux_command(
     window = live.spawn_window(
         "asq-test-fox", name="w0", cwd=tmp_path, command=command, width=80, height=24
     )
-    assert _wait(lambda: argv_file.exists())
-    assert argv_file.read_text(encoding="utf-8").splitlines() == [f"[{arg}]" for arg in injection]
+    expected = [f"[{arg}]" for arg in injection]
+    # The file exists from the shell's `>` on, before printf has finished with
+    # it: waiting for `exists()` alone read three of the five lines once. So
+    # wait for a newline per expected line. Not asserted: on a timeout the
+    # comparison below says what the pane DID receive.
+    _wait(
+        lambda: (
+            argv_file.exists()
+            and argv_file.read_text(encoding="utf-8").count("\n") >= len(expected)
+        )
+    )
+    assert argv_file.read_text(encoding="utf-8").splitlines() == expected
     assert live.pane_facts(window.pane_id) is not None, "the window is alive, not a parse error"
     assert live.run("show", "-g", "history-limit").strip() == "history-limit 50000"
 

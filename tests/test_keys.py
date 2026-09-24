@@ -29,16 +29,19 @@ from textual import _parser, events
 from textual._xterm_parser import XTermParser
 
 from aisquare.core.keys import (
+    CHARACTERLESS_KEYS,
     CHORDS,
     CTRL_PUNCTUATION,
     ESC_INTRODUCERS,
     EXTENDED_MINIMUM,
+    KEYPAD_LAYOUT_DEPENDENT,
     LEGACY_FALLBACK,
     MAX_FUNCTION_KEY,
-    MODIFIER_ONLY_KEYS,
+    MODIFIERS,
     NO_CTRL,
     PUNCTUATION,
     SPECIAL,
+    UNSPELLABLE_MODIFIERS,
     Drop,
     DropReason,
     Translation,
@@ -123,39 +126,42 @@ def test_named_keys_take_tmux_names(textual: str, tmux: str) -> None:
     assert translate(textual, None, printable=False) == key(tmux)
 
 
-DROPPED: list[str] = [
-    "print_screen",
-    "menu",
-    "caps_lock",
-    "super+x",  # tmux has no super/hyper spelling
-    "hyper+x",
-    "f13",  # tmux knows F1-F12 only; F13 would be typed as three letters
-    "f24",
-    "ctrl+f13",
-    "ctrl+backspace",  # tmux 3.7c types the eight characters "C-BSpace"
-    "ctrl+escape",
-    "ctrl+shift+backspace",
-    "alt+ctrl+escape",
-    "ctrl+comma",  # tmux sends a bare "," — the modifier lost, the agent misled
-    "ctrl+full_stop",
-    "ctrl+equals_sign",
-    "ctrl+1",  # tmux sends "1"
-    "ctrl+shift+2",
-    "shift+1",  # "!" on one layout, "+" on another: unknowable without the character
-    "shift+minus",
-    "alt+semicolon",  # an argument ending in ";" is tmux's command separator
-    "ctrl+semicolon",
-    "return",
-    "<any>",
-    "",
-    "+",
-    "ctrl+",
+#: Each with the reason the pane acts on: ``isinstance(..., Drop)`` alone
+#: cannot see a name slide between one quiet line and total silence (review of
+#: #161, round 4).
+DROPPED: list[tuple[str, DropReason]] = [
+    ("print_screen", "nothing_to_type"),
+    ("menu", "nothing_to_type"),
+    ("caps_lock", "nothing_to_type"),
+    ("super+x", "command"),  # tmux has no super/hyper spelling
+    ("hyper+x", "command"),
+    ("foo+a", "no_name"),  # a modifier token this module has never met: not a command
+    ("f13", "no_name"),  # tmux knows F1-F12 only; F13 would be typed as three letters
+    ("f24", "no_name"),
+    ("ctrl+f13", "no_name"),
+    ("ctrl+backspace", "no_name"),  # tmux 3.7c types the eight characters "C-BSpace"
+    ("ctrl+escape", "no_name"),
+    ("ctrl+shift+backspace", "no_name"),
+    ("alt+ctrl+escape", "no_name"),
+    ("ctrl+comma", "no_name"),  # tmux sends a bare "," — the modifier lost, the agent misled
+    ("ctrl+full_stop", "no_name"),
+    ("ctrl+equals_sign", "no_name"),
+    ("ctrl+1", "no_name"),  # tmux sends "1"
+    ("ctrl+shift+2", "no_name"),
+    ("shift+1", "no_name"),  # "!" on one layout, "+" on another: unknowable without the character
+    ("shift+minus", "no_name"),
+    ("alt+semicolon", "no_name"),  # an argument ending in ";" is tmux's command separator
+    ("ctrl+semicolon", "no_name"),
+    ("<any>", "no_name"),  # a binding wildcard, never an event: named if it ever arrives
+    ("", "nothing_to_type"),  # malformed names: nothing to look up, nothing to say
+    ("+", "nothing_to_type"),
+    ("ctrl+", "nothing_to_type"),
 ]
 
 
-@pytest.mark.parametrize("textual", DROPPED)
-def test_keys_tmux_would_mistype_are_dropped(textual: str) -> None:
-    assert isinstance(translate(textual, None, printable=False), Drop)
+@pytest.mark.parametrize(("textual", "reason"), DROPPED)
+def test_keys_tmux_would_mistype_are_dropped(textual: str, reason: DropReason) -> None:
+    assert translate(textual, None, printable=False) == Drop(reason)
 
 
 # --- what the parser really delivers ---------------------------------------------------
@@ -286,6 +292,81 @@ def test_a_kitty_meta_shift_letter_keeps_its_case(parsed: Parse) -> None:
     The introducers are the same exception here as on a legacy terminal."""
     assert arrived("\x1b[97;34;65u", parsed) == [key("M-A")]
     assert arrived("\x1b[112;34;80u", parsed) == [literal("P")]
+
+
+#: Kitty chords on a character beyond ASCII, reported without their text.
+BEYOND_ASCII: list[tuple[str, str]] = [
+    ("\x1b[224;5u", "ctrl+à"),  # the unshifted 0 key on French AZERTY
+    ("\x1b[233;5u", "ctrl+é"),
+    ("\x1b[224;6u", "ctrl+shift+à"),
+    ("\x1b[224;7u", "alt+ctrl+à"),
+    ("\x1b[223;4u", "alt+shift+ß"),  # 'ß'.upper() == 'SS'
+    ("\x1b[304;5u", "ctrl+İ"),  # 'İ'.lower() is two characters
+    ("\x1b[329;4u", "alt+shift+ŉ"),  # two characters again, past ESC_INTRODUCERS
+    ("\x1b[233;3u", "alt+é"),
+    ("\x1b[1092;3u", "alt+ф"),
+    ("\x1b[1092;4u", "alt+shift+ф"),  # a capital, but alt is the meaning: never a bare Ф
+    ("\x1b[178;3u", "alt+²"),  # a digit to isdigit()
+    ("\x1b[188;4u", "alt+shift+¼"),  # alphanumeric, so no shifted-punctuation gate
+]
+
+
+@pytest.mark.parametrize(("sequence", "chord"), BEYOND_ASCII)
+def test_a_chord_on_a_character_beyond_ascii_is_named_never_spelt(
+    parsed: Parse, sequence: str, chord: str
+) -> None:
+    """A kitty terminal that reports every key but not its text hands over the
+    key's own character, and the name table spelt a chord on it as it spells
+    ``C-a``. Measured on tmux 3.7c: ``C-à`` arrives as a bare ``à`` — the ctrl
+    silently dropped, the ``C-1`` failure — and ``M-SS`` and ``C-i̇`` are TYPED
+    into the agent, since a case change can be more than one character. None
+    of those names was ever sent to 3.2-3.4 (review of #161, round 7). So the
+    chord is a keystroke lost, said once — never a name."""
+    [event] = parsed(sequence)
+    assert (event.key, event.character) == (chord, None), "the premise: a chord, no text"
+    assert arrived(sequence, parsed) == [Drop("no_name")]
+
+
+def test_beyond_ascii_the_text_and_the_bare_key_still_travel(parsed: Parse) -> None:
+    """The guard is on the NAME only: reported text wins as for every key, a
+    bare key named after its character is typed, and ASCII chords are named."""
+    assert arrived("\x1b[224;5;224u", parsed) == [literal("à")], "ctrl+à with its text"
+    assert arrived("\x1b[233;2;50u", parsed) == [literal("2")], "AZERTY shift+é with its text"
+    assert translate("alt+shift+ß", "?", printable=True) == literal("?")
+    assert translate("à", None, printable=False) == literal("à")
+    assert translate("ß", None, printable=False) == literal("ß")
+    assert arrived("\x1b[97;5u", parsed) == [key("C-a")], "the control: ctrl+a"
+    assert arrived("\x1b[97;4u", parsed) == [key("M-A")], "the control: alt+shift+a"
+
+
+#: Plain shift on a letter beyond ASCII, reported without its text, and what goes out.
+SHIFTED_BEYOND_ASCII: list[tuple[str, str, Translation | Drop]] = [
+    ("\x1b[1092;2u", "shift+ф", literal("Ф")),  # Russian
+    ("\x1b[228;2u", "shift+ä", literal("Ä")),  # German
+    ("\x1b[241;2u", "shift+ñ", literal("Ñ")),  # Spanish
+    ("\x1b[233;2u", "shift+é", literal("É")),  # the known cost: AZERTY's é key shifts to 2
+    ("\x1b[223;2u", "shift+ß", Drop("no_name")),  # 'ß'.upper() == 'SS'
+    ("\x1b[1513;2u", "shift+ש", Drop("no_name")),  # no case: Hebrew shifts it to A
+    ("\x1b[2325;2u", "shift+क", Drop("no_name")),  # no case: InScript shifts it to ख
+    ("\x1b[186;2u", "shift+º", Drop("no_name")),  # no case: Spanish shifts it to ª
+]
+
+
+@pytest.mark.parametrize(("sequence", "chord", "sent"), SHIFTED_BEYOND_ASCII)
+def test_plain_shift_beyond_ascii_types_the_capital_and_guesses_nothing_else(
+    parsed: Parse, sequence: str, chord: str, sent: Translation | Drop
+) -> None:
+    """Plain shift is not a chord, and round 7's guard refused it with them:
+    every capital outside ASCII from a terminal that reports no text —
+    Cyrillic, Greek, ``ä``, ``ñ``, ``ø`` — became ``no way to type shift+ф``,
+    where it had always been typed (review of #161, round 8). It is the capital
+    again, as text, and AZERTY's ``é`` key, which shifts to ``2``, types ``É``
+    as it did before — the known cost of guessing, paid only when no text came.
+    What has no capital to guess stays refused: a letter with no case, whose
+    shift only the layout knows, and a capital of two characters."""
+    [event] = parsed(sequence)
+    assert (event.key, event.character) == (chord, None), "the premise: shift, no text"
+    assert arrived(sequence, parsed) == [sent]
 
 
 def test_super_and_shift_chords_through_the_parser(parsed: Parse) -> None:
@@ -454,7 +535,9 @@ def test_function_keys_stop_at_twelve() -> None:
     for number in range(1, MAX_FUNCTION_KEY + 1):
         assert translate(f"f{number}", None, printable=False) == key(f"F{number}")
     assert translate(f"f{MAX_FUNCTION_KEY + 1}", None, printable=False) == Drop("no_name")
-    assert translate("f0", None, printable=False) == Drop("nothing_to_type")
+    # ``f0`` is no key at all — and no key Textual reports as characterless, so it
+    # is named, not silent: silence is a closed set (review of #161, round 4).
+    assert translate("f0", None, printable=False) == Drop("no_name")
 
 
 def test_translation_argv_shapes() -> None:
@@ -474,22 +557,77 @@ TMUX_NAME = re.compile(
 
 #: Textual key names that translate to nothing, by design. Everything else the
 #: ``Keys`` enum can produce must translate to a name TMUX_NAME accepts.
-DELIBERATELY_DROPPED = {
-    "<any>",
-    "<ignore>",
-    "<scroll-down>",
-    "<scroll-up>",
-    "ctrl-at",  # a legacy spelling with a hyphen; events carry "ctrl+@"
-    "return",
-    *(f"ctrl+{digit}" for digit in range(10)),
-    *(f"ctrl+shift+{digit}" for digit in range(10)),
-    *(f"f{number}" for number in range(MAX_FUNCTION_KEY + 1, 25)),
-    *(f"ctrl+f{number}" for number in range(MAX_FUNCTION_KEY + 1, 25)),
+#: Every name Textual can put in a key event — its ``Keys`` enum AND the kitty
+#: protocol's functional-key vocabulary, which is where all of #151 lives and
+#: which the enum does not contain (review of #161, round 4) — that
+#: ``translate`` refuses, WITH the reason the pane acts on. A flat set could not
+#: see the regression this branch is about: a name sliding from ``no_name``
+#: (one quiet line) to ``nothing_to_type`` (a keystroke lost in silence) or
+#: back (a toast for a key nobody pressed — #151 itself) left it green (review
+#: of #161, round 3). A functional key Textual adds tomorrow lands here as a
+#: complaint, never as inherited silence.
+DELIBERATELY_DROPPED: dict[str, DropReason] = {
+    # Binding wildcards, never events: a word if one ever arrives, not silence.
+    "<any>": "no_name",
+    "<ignore>": "no_name",
+    "<scroll-down>": "no_name",
+    "<scroll-up>": "no_name",
+    # The kitty protocol's characterless keys — CHARACTERLESS_KEYS, spelled out
+    # here a second time on purpose: the audit is the record, the set is the
+    # behaviour, and each must fail when the other changes.
+    **dict.fromkeys(
+        (
+            "left_shift",
+            "left_control",
+            "left_alt",
+            "left_super",
+            "left_hyper",
+            "left_meta",
+            "right_shift",
+            "right_control",
+            "right_alt",
+            "right_super",
+            "right_hyper",
+            "right_meta",
+            "iso_level3_shift",
+            "iso_level5_shift",
+            "caps_lock",
+            "num_lock",
+            "scroll_lock",
+            "menu",
+            "print_screen",
+            "pause",
+            "kp_begin",
+            "raise_volume",
+            "lower_volume",
+            "mute_volume",
+            "media_play",
+            "media_pause",
+            "media_play_pause",
+            "media_stop",
+            "media_reverse",
+            "media_fast_forward",
+            "media_rewind",
+            "media_track_next",
+            "media_track_previous",
+            "media_record",
+        ),
+        "nothing_to_type",
+    ),
+    # Keystrokes lost with a word.
+    "decimal": "no_name",  # the layout's to know — KEYPAD_LAYOUT_DEPENDENT
+    "separator": "no_name",
+    **{f"ctrl+{digit}": "no_name" for digit in range(10)},
+    **{f"ctrl+shift+{digit}": "no_name" for digit in range(10)},
+    **{f"f{number}": "no_name" for number in range(MAX_FUNCTION_KEY + 1, 36)},
+    **{f"ctrl+f{number}": "no_name" for number in range(MAX_FUNCTION_KEY + 1, 25)},
 }
 
 
-def audit_holes(holes: set[str], dropped: set[str], names: set[str]) -> list[str]:
-    """Both directions of the ratchet: new holes, and entries that no longer hole.
+def audit_holes(
+    holes: dict[str, DropReason], dropped: dict[str, DropReason], names: set[str]
+) -> list[str]:
+    """Three directions of the ratchet: new holes, healed entries, changed reasons.
 
     Returned as complaints rather than asserted so the SHAPE can be tested (the
     test below). It used to be one ``A == B or not (A - B)``, which cannot fail
@@ -497,42 +635,62 @@ def audit_holes(holes: set[str], dropped: set[str], names: set[str]) -> list[str
     ``DELIBERATELY_DROPPED`` unaudited, the allow list CONTRIBUTING warns about.
     """
     complaints: list[str] = []
-    if unexpected := sorted(holes - dropped):
+    if unexpected := sorted(holes.keys() - dropped.keys()):
         complaints.append(f"translate to nothing and are not deliberate: {unexpected}")
-    if stale := sorted((dropped & names) - holes):
+    if stale := sorted((dropped.keys() & names) - holes.keys()):
         complaints.append(f"translate now — remove from DELIBERATELY_DROPPED: {stale}")
+    if changed := sorted(
+        f"{name}: {dropped[name]} -> {holes[name]}"
+        for name in holes.keys() & dropped.keys()
+        if holes[name] != dropped[name]
+    ):
+        complaints.append(f"dropped for a different reason than recorded: {changed}")
     return complaints
 
 
 def test_every_textual_key_name_translates_or_is_deliberately_dropped() -> None:
+    from textual._keyboard_protocol import FUNCTIONAL_KEYS, MODIFIER_FUNCTIONAL_KEYS
     from textual.keys import Keys
 
-    names = sorted({member.value for member in Keys})
-    assert len(names) > 100  # the sweep must still see the enum
+    enum = {member.value for member in Keys}
+    kitty = set(FUNCTIONAL_KEYS.values()) | set(MODIFIER_FUNCTIONAL_KEYS)
+    assert len(enum) > 100 and len(kitty - enum) > 50  # the sweep must still see both
+    names = sorted(enum | kitty)
     translated: dict[str, Translation | Drop] = {
         name: translate(name, None, printable=False) for name in names
     }
-    holes = {name for name, translation in translated.items() if isinstance(translation, Drop)}
+    holes = {
+        name: translation.reason
+        for name, translation in translated.items()
+        if isinstance(translation, Drop)
+    }
     assert audit_holes(holes, DELIBERATELY_DROPPED, set(names)) == []
     for name, translation in translated.items():
         if isinstance(translation, Translation) and translation.kind == "key":
             assert TMUX_NAME.match(translation.value), (name, translation.value)
 
 
-def test_the_hole_audit_complains_in_both_directions() -> None:
-    """The ratchet must fire for a NEW hole and for one that healed."""
+def test_the_hole_audit_complains_in_every_direction() -> None:
+    """The ratchet must fire for a NEW hole, for one that healed, and for one
+    whose REASON moved — a keystroke going from one quiet line to silence is
+    the mute twin of #151, and a flat set could not see it."""
     names = {"enter", "ctrl+1", "shift+minus"}
-    dropped = {"ctrl+1"}
-    assert audit_holes({"ctrl+1"}, dropped, names) == [], "the steady state is silent"
-    assert audit_holes({"ctrl+1", "shift+minus"}, dropped, names) == [
+    dropped: dict[str, DropReason] = {"ctrl+1": "no_name"}
+    assert audit_holes({"ctrl+1": "no_name"}, dropped, names) == [], "the steady state is silent"
+    assert audit_holes({"ctrl+1": "no_name", "shift+minus": "no_name"}, dropped, names) == [
         "translate to nothing and are not deliberate: ['shift+minus']"
     ]
-    assert audit_holes(set(), dropped, names) == [
+    assert audit_holes({}, dropped, names) == [
         "translate now — remove from DELIBERATELY_DROPPED: ['ctrl+1']"
     ]
-    # The negative control: an entry Textual no longer has at all is not
-    # "healed" — the set may keep covering enum members that came and went.
-    assert audit_holes(set(), {"ctrl-at"}, names) == []
+    assert audit_holes({"ctrl+1": "nothing_to_type"}, dropped, names) == [
+        "dropped for a different reason than recorded: ['ctrl+1: no_name -> nothing_to_type']"
+    ]
+    # The negative control: an entry for a name the sweep does not see is not
+    # "healed" — the table may keep covering enum members that came and went.
+    # An invented name, so the premise cannot drift: round 4 used ``ctrl-at``
+    # here, which Textual does have and this branch made translate (round 5).
+    assert audit_holes({}, {"ctrl+eject": "no_name"}, names) == []
 
 
 def test_the_tmux_grammar_control_rejects_what_tmux_would_mistype() -> None:
@@ -684,6 +842,28 @@ def test_the_swept_vocabulary_is_everything_translate_emits() -> None:
     assert all(TMUX_NAME.match(name) for name in EMITTED)
 
 
+def test_no_base_the_sweep_leaves_out_reaches_a_name() -> None:
+    """``BASES`` is ASCII, and ``EXTENDED_MINIMUM`` rests on the sweep being
+    ALL of ``translate``'s names. A one-character base is whatever character a
+    terminal reported a key for, so every one in the plane goes through every
+    modifier set here and none may come out as a name the sweep did not send.
+    Round 6's head emitted over 250k such names — ``C-à``, ``M-SS``, ``M-ª`` …
+    — none of them ever measured against a tmux (review of #161, round 7)."""
+    swept = set(EMITTED)
+    stray: set[str] = set()
+    for mods in filter(None, MODIFIER_SETS):
+        for codepoint in range(0x21, 0x10000):
+            translation = translate(f"{mods}+{chr(codepoint)}", None, printable=False)
+            if (
+                isinstance(translation, Translation)
+                and translation.kind == "key"
+                and translation.value not in swept
+            ):
+                stray.add(translation.value)
+    assert not stray, sorted(stray)[:20]
+    assert all(name.isascii() for name in EMITTED)
+
+
 _needs_tmux = pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux is not installed")
 
 
@@ -721,13 +901,15 @@ def test_real_tmux_types_none_of_our_names_literally(
     the control at the end must see for ``Bogus`` and ``C-BSpace``, or the
     read-back proves nothing.
 
-    All 470 of :data:`EMITTED` on 3.7c: 1.4 s, none typed literally. The same
-    sweep was run by hand in containers on 2026-08-31 for the versions this
-    machine cannot install — 3.2a (ubuntu:22.04), 3.3a (debian:bookworm) and
-    3.4 (ubuntu:24.04, the CI runner). There the 352 names left after the
-    :func:`needs_extended_keys` gate all arrived as keys too, and of the 118 the
-    gate holds back, 117 were typed literally by those versions; the 118th is
-    ``C-M-Space``, gated with the class it belongs to.
+    All 470 of :data:`EMITTED` on 3.7c: 1.4 s, none typed literally (467 now,
+    every one of them among the 470: ``M-N``/``M-O``/``M-P`` are refused since,
+    as :data:`ESC_INTRODUCERS`). The same sweep was run by hand in containers on
+    2026-08-31 for the versions this machine cannot install — 3.2a
+    (ubuntu:22.04), 3.3a (debian:bookworm) and 3.4 (ubuntu:24.04, the CI
+    runner). There the 352 names left after the :func:`needs_extended_keys`
+    gate all arrived as keys too, and of the 118 the gate holds back, 117 were
+    typed literally by those versions; the 118th is ``C-M-Space``, gated with
+    the class it belongs to.
     """
     window = real_server.spawn_window(
         "keys",
@@ -766,30 +948,83 @@ def test_real_tmux_types_none_of_our_names_literally(
 # --- #151: the four reasons nothing is sent ---------------------------------------
 
 
-def test_the_modifier_set_is_textuals_own_list_plus_the_three_locks() -> None:
-    """The claim ``MODIFIER_ONLY_KEYS``' comment makes, asked of Textual.
-
-    ONE direction, deliberately. A name Textual ADDS to its modifier subset is
-    silent under the rule already (bare, not ``fN``), so a superset assertion
-    would go red on an upstream change that needs no change here (review of
-    #161, round 2). A name Textual moves OUT of its subset starts arriving with
-    its prefix — the shape that let ``shift+caps_lock`` through — and that is
-    what the surplus pins: it is the three locks, and nothing else.
+def test_every_modifier_token_textual_emits_is_spelt_or_a_command() -> None:
+    """The gate that makes ``Drop("command")`` is the only classifier for it, and
+    the pane says nothing for that reason — so a modifier token Textual starts
+    emitting that this module does not know would make every chord carrying it
+    vanish without a toast or a red test (review of #161, round 3). Pinned on
+    BEHAVIOUR rather than a name in Textual: each kitty modifier bit is sent on
+    an ``x`` and whatever token the parser puts in front is read back. Textual
+    8.2.8 reports nothing for the caps-lock and num-lock bits; the day it does,
+    this fails and ``MODIFIERS`` is the place to answer it.
     """
-    from textual._keyboard_protocol import MODIFIER_FUNCTIONAL_KEYS
+    tokens: set[str] = set()
+    for bit in range(8):
+        for event in XTermParser().feed(f"\x1b[120;{1 + (1 << bit)}u"):
+            if isinstance(event, events.Key):
+                tokens.update(event.key.split("+")[:-1])
+    assert tokens == {"shift", "alt", "ctrl", "super", "hyper", "meta"}
+    assert tokens - set(MODIFIERS) == UNSPELLABLE_MODIFIERS, "the two tmux cannot spell"
+    # And ONLY those two are a command: a token this module has never met is a
+    # keystroke it cannot spell, said once — never folded into the silent
+    # reason (review of #161, round 4) — and never a NAME with the token left
+    # out, which would hand tmux the chord with its modifier lost. The text
+    # the terminal reported still travels by the table's own rule, so the one
+    # exception holds too: alt on a letter is the chord, not the letter, and
+    # ``alt+foo+p`` must not reopen the alt+p bug (review of #161, round 5).
+    assert translate("foo+a", None, printable=False) == Drop("no_name")
+    assert translate("foo+a", "a", printable=True) == literal("a")
+    assert translate("foo+1", "1", printable=True) == literal("1")
+    assert translate("alt+foo+p", "p", printable=True) == Drop("no_name")
+    assert translate("alt+foo+p", None, printable=False) == Drop("no_name")
 
-    assert MODIFIER_ONLY_KEYS - set(MODIFIER_FUNCTIONAL_KEYS) == {
-        "caps_lock",
-        "num_lock",
-        "scroll_lock",
+
+def test_the_prefix_is_built_from_modifiers_so_a_token_added_there_reaches_the_name() -> None:
+    """``MODIFIERS`` is the one place a modifier is read: the values build the
+    prefix, in the dict's order. A hand-built prefix beside it once dropped any
+    token added to the dict on the floor — the chord emitted under a name with
+    the modifier missing, tmux delivering the bare key (review of #161, round
+    5). Pinned by the shape of the name rather than by mutating the module —
+    which cannot be done: the order is derived once, at import, so ``MODIFIERS``
+    is read-only, and a token added at runtime cannot pass the gate while
+    missing from the order (review of #161, round 7)."""
+    from aisquare.core.keys import _PREFIX_ORDER
+
+    with pytest.raises(TypeError):
+        MODIFIERS["hyper"] = "H-"  # type: ignore[index]
+    assert "hyper" not in MODIFIERS
+    assert _PREFIX_ORDER == ("C-", "M-", "S-")
+    assert set(_PREFIX_ORDER) == set(MODIFIERS.values())
+    assert translate("ctrl+shift+up", None, printable=False) == key("C-S-Up")
+    assert translate("alt+ctrl+shift+up", None, printable=False) == key("C-M-S-Up")
+    assert translate("meta+shift+up", None, printable=False) == key("M-S-Up")
+
+
+def test_the_characterless_keys_are_textuals_and_the_silence_is_stated_not_inherited() -> None:
+    """``nothing_to_type`` is membership of ``CHARACTERLESS_KEYS`` and nothing
+    else — never the fall-through of a lookup miss, which also caught every
+    emoji and every key Textual adds tomorrow (review of #161, round 4). Every
+    name in the set is one Textual can actually report, and it is the whole of
+    what Textual reports without a character: the audit above holds each of
+    them, and each name outside them, to its reason."""
+    from textual._keyboard_protocol import FUNCTIONAL_KEYS, MODIFIER_FUNCTIONAL_KEYS
+
+    reportable = set(FUNCTIONAL_KEYS.values()) | set(MODIFIER_FUNCTIONAL_KEYS)
+    assert reportable >= CHARACTERLESS_KEYS
+    assert set(MODIFIER_FUNCTIONAL_KEYS) <= CHARACTERLESS_KEYS
+    silent = {
+        name
+        for name in reportable
+        if translate(name, None, printable=False) == Drop("nothing_to_type")
     }
+    assert silent == CHARACTERLESS_KEYS
 
 
 @pytest.mark.parametrize(
     "key",
     [
-        # A modifier or a lock on its own, and — the case an exact match on
-        # event.key missed — a lock with a modifier HELD (review).
+        # A modifier or a lock, alone or with a modifier HELD — Textual keeps
+        # the prefix on the locks, so ``shift+caps_lock`` arrives as such.
         "left_shift",
         "right_control",
         "iso_level3_shift",
@@ -798,16 +1033,22 @@ def test_the_modifier_set_is_textuals_own_list_plus_the_three_locks() -> None:
         "ctrl+num_lock",
         "shift+scroll_lock",
         # Whole keys a kitty-protocol terminal reports only because Textual asks
-        # for every key. Never in any set: the #151 complaint with another key
-        # name on it.
+        # for every key: the #151 complaint with another key name on it. There
+        # is no character behind them, so a modifier held changes nothing —
+        # round 1 named ``ctrl+pause`` as a chord the reader meant, and round 2
+        # kept that residue undocumented (review, round 3).
         "menu",
         "print_screen",
         "pause",
         "raise_volume",
         "media_play",
         "kp_begin",
-        # A control character's Unicode name is not a literal to send.
-        "null",
+        "ctrl+pause",
+        "shift+menu",
+        "alt+media_play",
+        "ctrl+kp_begin",
+        "media_track_next",
+        "mute_volume",
     ],
 )
 def test_a_key_that_was_never_a_keystroke_is_nothing_to_type(key: str) -> None:
@@ -819,14 +1060,59 @@ def test_a_key_that_was_never_a_keystroke_is_nothing_to_type(key: str) -> None:
     [
         "f13",  # a function key past the twelve tmux knows
         "ctrl+f13",
-        "ctrl+comma",  # a modifier held: aimed at the program, deliberately
+        "ctrl+comma",  # a modifier held on a character: aimed at the program
         "ctrl+1",
+        "ctrl+backspace",  # tmux 3.7c types the eight characters "C-BSpace"
         "alt+shift+o",  # an ESC introducer: no safe name, and the user meant it
         "alt+section_sign",  # bare it is a literal (below); M-§ was never measured
+        "alt+no_break_space",
+        "decimal",  # a keystroke whose text only the layout knows (below)
+        "separator",
+        # Everything this module cannot resolve is a keystroke LOST, never
+        # silence: silence is CHARACTERLESS_KEYS and nothing else (round 4).
+        "grinning_face",  # U+1F600, outside the read-back's blocks
+        "null",  # a control's Unicode name: never a literal, and not characterless
+        "line_separator",  # U+2028, likewise
+        "\x85",  # NEL: no Unicode name, so Textual names the key after the byte
+        "ctrl+\x85",
+        "alt+ ",  # a whitespace byte as its own name, with a modifier
+        "foo+a",  # a modifier token this module has never met
+        "<any>",  # a binding wildcard, never an event
     ],
 )
 def test_a_chord_the_reader_meant_has_no_name(key: str) -> None:
     assert translate(key, None, printable=False, extended_keys=True) == Drop("no_name")
+
+
+def test_a_control_byte_named_after_itself_is_never_sent() -> None:
+    """U+0085 NEL has no ``unicodedata.name``, so Textual's ``_character_to_key``
+    names the key after the raw byte; on the round-3 head the bare key reached
+    ``send-keys -l`` — a C1 control into a running agent, the one thing this
+    module exists to prevent — while the same key with ctrl held was refused
+    (review of #161, round 4). Both are refused, and both say so — and the
+    refusal holds for a caller that CLAIMS the byte printable: the fallbacks
+    ask the character, not the flag (review of #161, round 5)."""
+    assert translate("\x85", "\x85", printable=False) == Drop("no_name")
+    assert translate("ctrl+\x85", None, printable=False) == Drop("no_name")
+    assert translate("\x85", "\x85", printable=True) == Drop("no_name")
+    # A malformed name whose character is a BEL: a keystroke ARRIVED and cannot
+    # be sent, so it is named — the silent reason is for events with no
+    # keystroke in them, and round 5 had routed this one there (round 6).
+    assert translate("+", "\x07", printable=True) == Drop("no_name"), "malformed, a BEL"
+    assert translate("+", None, printable=False) == Drop("nothing_to_type"), "malformed, nothing"
+    # An EMPTY character is no keystroke either: round 6's ``is None`` read it
+    # as one lost and toasted "no way to type +" (review of #161, round 7).
+    assert translate("+", "", printable=True) == Drop("nothing_to_type"), "malformed, empty"
+    assert translate("ctrl+", "", printable=False) == Drop("nothing_to_type")
+
+
+def test_return_and_ctrl_at_are_their_meanings() -> None:
+    """Textual's ``Keys.Return`` and ``Keys.ControlSpace`` (``"ctrl-at"``) are
+    binding spellings its parser never emits — but each has one meaning, and a
+    ratchet that blessed their silence would lose an Enter without a trace if
+    one ever arrived (review of #161, round 4)."""
+    assert translate("return", None, printable=False) == key("Enter")
+    assert translate("ctrl-at", None, printable=False) == key("C-@")
 
 
 @pytest.mark.parametrize("key", ["super+k", "super+f5", "hyper+x", "super+shift+a"])
@@ -840,18 +1126,10 @@ def test_a_cmd_chord_is_a_command_for_the_os_and_not_a_lost_keystroke(key: str) 
 
 @pytest.mark.parametrize(
     ("name", "char"),
-    [
-        ("add", "+"),
-        ("subtract", "-"),
-        ("multiply", "*"),
-        ("divide", "/"),
-        ("equal", "="),
-        ("decimal", "."),
-        ("separator", ","),
-    ],
+    [("add", "+"), ("subtract", "-"), ("multiply", "*"), ("divide", "/"), ("equal", "=")],
 )
 def test_a_numpad_operator_reported_without_its_text_is_typed(name: str, char: str) -> None:
-    """Textual's names for ``KP_ADD`` … ``KP_SEPARATOR``. With the text reported
+    """Textual's names for ``KP_ADD`` … ``KP_EQUAL``. With the text reported
     the text wins; without it the name says what was typed — these are
     keystrokes, unlike ``menu``, and "bare and unnamed" once swallowed them
     (review of #161, round 2). With alt they are the same chord as the row
@@ -861,19 +1139,117 @@ def test_a_numpad_operator_reported_without_its_text_is_typed(name: str, char: s
     assert translate(f"alt+{name}", None, printable=False) == key(f"M-{char}")
 
 
+def test_the_keypads_decimal_and_separator_are_named_once_and_never_guessed() -> None:
+    """Kitty key codes are physical: a German numpad's ``,`` arrives as
+    ``decimal`` too, and the only terminal that sends the bare name is one that
+    reports no text — exactly when the layout cannot be asked. Round 2 typed a
+    ``.`` there, the mistyping this module exists to prevent (review, round
+    3). With the text reported, the text wins as for every key."""
+    assert {"decimal", "separator"} == KEYPAD_LAYOUT_DEPENDENT
+    assert translate("decimal", ",", printable=True) == literal(",")
+    assert translate("decimal", None, printable=False) == Drop("no_name")
+    assert translate("separator", None, printable=False) == Drop("no_name")
+
+
 def test_a_bare_key_named_after_its_unicode_character_is_that_character() -> None:
-    """``section_sign``, ``degree_sign``, ``pound_sign`` on a non-US layout,
-    reported by a terminal that names the key but does not report its text:
-    Textual spelt the name from ``unicodedata.name``, so it can be read back.
-    Bare only — the chord table's names were measured against a tmux and
-    ``M-§`` was not (above)."""
+    """``section_sign``, ``plus_minus_sign``, ``«`` on a non-US layout, reported
+    by a terminal that names the key but does not report its text: Textual
+    spelt the name from ``unicodedata.name`` with hyphens AND spaces as
+    underscores, and a ``lookup`` on the respelt name missed every hyphenated
+    one (review of #161, round 3). Bare only — the chord table's names were
+    measured against a tmux and ``M-§`` was not (above)."""
     assert translate("section_sign", None, printable=False) == literal("§")
     assert translate("degree_sign", None, printable=False) == literal("°")
-    assert translate("pound_sign", None, printable=False) == literal("£")
-    assert translate("currency_sign", None, printable=False) == literal("¤")
-    # Controls and spaces are never a literal, whatever their name.
-    assert translate("null", None, printable=False) == Drop("nothing_to_type")
-    assert translate("no_break_space", None, printable=False) == Drop("nothing_to_type")
+    assert translate("plus_minus_sign", None, printable=False) == literal("±")
+    assert translate("left_pointing_double_angle_quotation_mark", None, printable=False) == (
+        literal("«")
+    )
+    # A NO-BREAK SPACE is a keystroke — AltGr+space on the French and Canadian
+    # layouts — and ``send-keys -l`` carries it: it is not a tmux key NAME.
+    assert translate("no_break_space", None, printable=False) == literal("\u00a0")
+    assert translate("euro_sign", None, printable=False) == literal("€")
+    assert translate("lozenge", None, printable=False) == literal("◊")  # macOS Option-Shift-V
+    # Not a Latin allowlist: the punctuation engraved on keyboards outside the
+    # Latin world is typed too (review of #161, round 5).
+    assert translate("ideographic_full_stop", None, printable=False) == literal("。")  # JIS
+    assert translate("katakana_middle_dot", None, printable=False) == literal("・")
+    assert translate("arabic_question_mark", None, printable=False) == literal("؟")
+    assert translate("devanagari_danda", None, printable=False) == literal("।")  # InScript
+    assert translate("greek_question_mark", None, printable=False) == literal("\u037e")
+    assert translate("fullwidth_tilde", None, printable=False) == literal("\uff5e")
+    # Where the table's boundary is (review of #161, round 6): a combining mark
+    # is a literal — the Indic matras are engraved keys, and a bare mark sent as
+    # text composes with what is already in the buffer, as the terminal itself
+    # would compose it — and so is an ideographic space; a format character
+    # (``Cf``) is not, nor a control or a line/paragraph separator — and none
+    # of those is silence either: they are not characterless keys, so they
+    # are named.
+    assert translate("combining_acute_accent", None, printable=False) == literal("\u0301")
+    assert translate("devanagari_vowel_sign_aa", None, printable=False) == literal("\u093e")
+    assert translate("ideographic_space", None, printable=False) == literal("\u3000")
+    assert translate("zero_width_space", None, printable=False) == Drop("no_name")
+    assert translate("null", None, printable=False) == Drop("no_name")
+    assert translate("line_separator", None, printable=False) == Drop("no_name")
+
+
+@pytest.fixture
+def cold_read_back() -> Iterator[None]:
+    """The read-back table unbuilt for the test, and unbuilt again after it.
+
+    ``_named_characters`` is a process-wide cache: a test that clears it by
+    hand leaves it in whatever state its last passing line did, and a failure
+    part-way would hand every later test a table in a state nobody chose
+    (review of #161, round 7). Cleared on both sides, it is rebuilt on its
+    next use, as it is in a fresh process.
+    """
+    from aisquare.core.keys import _named_characters
+
+    _named_characters.cache_clear()
+    yield
+    _named_characters.cache_clear()
+
+
+@pytest.mark.usefixtures("cold_read_back")
+def test_a_chord_on_a_symbol_name_is_refused_without_building_the_read_back() -> None:
+    """The answer for a chord on a symbol name is ``no_name`` whether or not
+    the read-back resolves it — ``M-§`` was never measured — so the table is
+    not consulted, let alone built: ``ctrl+§`` on a European layout paid the
+    whole 7 ms / 0.9 MB for an answer the lookup could not change (review of
+    #161, round 6)."""
+    from aisquare.core.keys import _named_characters
+
+    assert _named_characters.cache_info().currsize == 0, "the fixture's premise"
+    assert translate("ctrl+section_sign", None, printable=False) == Drop("no_name")
+    assert translate("alt+ideographic_full_stop", None, printable=False) == Drop("no_name")
+    assert _named_characters.cache_info().currsize == 0, "the table was built for nothing"
+    assert translate("section_sign", None, printable=False) == literal("§")
+    assert _named_characters.cache_info().currsize == 1, "the bare key is what builds it"
+
+
+def test_the_unicode_read_back_is_textuals_own_naming() -> None:
+    """The table ``core.keys`` builds must agree with ``_character_to_key`` for
+    every character it holds — the only disagreements being the six names
+    Textual rewrites AFTER naming (``KEY_NAME_REPLACEMENTS``), every one of
+    which ``PUNCTUATION`` carries under both spellings, so none reaches the
+    read-back."""
+    from types import MappingProxyType
+
+    from textual.keys import KEY_NAME_REPLACEMENTS, _character_to_key
+
+    from aisquare.core.keys import _named_characters
+
+    table = _named_characters()
+    assert isinstance(table, MappingProxyType), "read-only: @cache hands out the one instance"
+    assert len(table) > 5000, len(table)  # the plane, not a Latin allowlist (round 5)
+    # The ASCII names PUNCTUATION spells by hand are in the table too; the two
+    # must agree on every shared name, or the redundancy is a fork waiting to
+    # happen (review of #161, round 5).
+    shared = set(table) & set(PUNCTUATION)
+    assert len(shared) > 20
+    assert {name: table[name] for name in shared} == {name: PUNCTUATION[name] for name in shared}
+    disagreements = {name for name, char in table.items() if _character_to_key(char) != name}
+    assert disagreements == set(KEY_NAME_REPLACEMENTS)
+    assert disagreements <= set(PUNCTUATION)
 
 
 def test_the_reasons_as_the_parser_delivers_them(parsed: Parse) -> None:
@@ -881,16 +1257,26 @@ def test_the_reasons_as_the_parser_delivers_them(parsed: Parse) -> None:
     assert arrived("\x1b[57441u", parsed) == [Drop("nothing_to_type")], "left_shift"
     assert arrived("\x1b[57358;2u", parsed) == [Drop("nothing_to_type")], "shift+caps_lock"
     assert arrived("\x1b[57363u", parsed) == [Drop("nothing_to_type")], "menu"
+    assert arrived("\x1b[57362;5u", parsed) == [Drop("nothing_to_type")], "ctrl+pause"
     assert arrived("\x1b[57439u", parsed) == [Drop("nothing_to_type")], "raise_volume"
     assert arrived("\x1b[107;9u", parsed) == [Drop("command")], "super+k"
     assert arrived("\x1b[57376u", parsed) == [Drop("no_name")], "f13"
     assert arrived("\x1b[44;5u", parsed) == [Drop("no_name")], "ctrl+comma"
+    assert arrived("\x1b[57409u", parsed) == [Drop("no_name")], "numpad decimal, no text"
+    assert arrived("\x1b[128512u", parsed) == [Drop("no_name")], "an emoji key: lost, not silent"
+    assert arrived("\x1b[133u", parsed) == [Drop("no_name")], "NEL as its own name: never sent"
+    assert arrived("\x1b[133;5u", parsed) == [Drop("no_name")], "ctrl+NEL"
     assert arrived("\x1b[13;2u", parsed, extended=False) == [key("C-j")], (
         "shift+enter on 3.4 travels as ctrl+j (#147), not a refusal"
+    )
+    assert arrived("\x1b[13;6u", parsed, extended=False) == [Drop("too_old")], (
+        "ctrl+shift+enter, 3.4: no older spelling, so the refusal stands"
     )
     assert arrived("\x1b[57413u", parsed) == [literal("+")], "numpad + without its text"
     assert arrived("\x1b[57413;1;43u", parsed) == [literal("+")], "numpad + with its text"
     assert arrived("\x1b[167u", parsed) == [literal("§")], "§ without its text"
+    assert arrived("\x1b[177u", parsed) == [literal("±")], "± without its text"
+    assert arrived("\x1b[160u", parsed) == [literal("\u00a0")], "NBSP without its text"
 
 
 def test_a_key_the_table_can_answer_never_reaches_the_question() -> None:

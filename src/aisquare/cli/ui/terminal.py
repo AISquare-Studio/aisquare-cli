@@ -57,16 +57,18 @@ Input (§4.3). With the pane focused every key goes to tmux through
 ``core.keys.translate`` — literal text via ``send-keys -l``, everything else by
 tmux's key name — except the escape hatch (``F12`` by default), which posts
 :class:`EscapeToSidebar` and is never forwarded. A key tmux has no safe name
-for is dropped, and ``translate``'s reason decides what is said, once per key
-name and per pane: a chord the reader meant gets ONE quiet notice, a chord this
-tmux is too old to carry a warning that names the version, and a key with
-nothing to type — a modifier, a lock, a Cmd chord, a whole key a kitty-protocol
-terminal reports only because Textual asked for every key — nothing at all
-(#151). ``Paste`` goes through the paste buffer so the agent sees one bracketed
-paste. The wheel scrolls our own offset over the pane's history (clamped to
-``history_size``); any key returns to live. ``Resize`` is forwarded as
-``resize-window`` after a 100 ms debounce. Forwarded input re-arms the fast
-cadence, so an echo never waits for the idle tick.
+for is never sent under a guessed one: the text the terminal reported with it
+is typed instead, a Cmd chord aside, and with none nothing is sent. For what
+was not sent ``translate``'s reason decides what is said: a chord the reader
+meant gets ONE quiet notice per key name in the pane, a chord this tmux is too
+old to carry a warning that names the version, once per key name on each
+server, and a key with nothing to type — a modifier, a lock, a Cmd chord, a
+whole key a kitty-protocol terminal reports only because Textual asked for
+every key — nothing at all (#151). ``Paste`` goes through the paste buffer so
+the agent sees one bracketed paste. The wheel scrolls our own offset over the
+pane's history (clamped to ``history_size``); any key returns to live.
+``Resize`` is forwarded as ``resize-window`` after a 100 ms debounce. Forwarded
+input re-arms the fast cadence, so an echo never waits for the idle tick.
 
 Selection (§4.3). The pane owns its highlight; :class:`TerminalPane`'s docstring
 states the rules — who sees a gesture, when a highlight is dropped, and which
@@ -112,7 +114,7 @@ import itertools
 import weakref
 from bisect import bisect_left
 from collections.abc import Callable
-from typing import Any, ClassVar, NamedTuple
+from typing import Any, ClassVar, NamedTuple, assert_never
 
 from rich.cells import cell_len, set_cell_size, split_graphemes
 from rich.segment import Segment
@@ -516,6 +518,20 @@ class EscapeToSidebar(Message):
     """The user pressed the escape hatch: focus goes back to the sidebar."""
 
 
+def _printable_name(key: str) -> str:
+    """``key`` as a notice may carry it: every unprintable character spelt ``U+XXXX``.
+
+    Textual names a key it has no name for after the character itself, so a
+    raw C0/C1 byte a kitty-protocol terminal reports (``CSI 155 u`` is U+009B,
+    a CSI introducer; U+0007 rings the bell) arrived here as the key name and
+    went into the toast verbatim — ``markup=False`` only disables Rich markup,
+    and the emulator honoured the byte (review of #161, round 5). The table's
+    refusal keeps such a byte out of ``send-keys``; this keeps it off the
+    reader's screen.
+    """
+    return "".join(char if char.isprintable() else f"U+{ord(char):04X}" for char in key)
+
+
 class TerminalPane(Widget, can_focus=True):
     """One tmux pane, live. ``attach(pane_id)`` switches what it shows.
 
@@ -659,7 +675,8 @@ class TerminalPane(Widget, can_focus=True):
         self._resize_timer: Timer | None = None
         self._resize_retry: float = self.RESIZE_RETRY
         self._synced: tuple[str, int, int] | None = None
-        self._warned: set[str] = set()
+        self._warned: set[tuple[str | None, str]] = set()
+        """``(server socket or None, key)`` per notice said — see :meth:`_warn_once`."""
         self._reported_gone = False
         self._mouse_queue: list[tuple[str, int, int, int]] = []
         """Mouse events (kind, button code, pane column, pane row) awaiting one
@@ -787,7 +804,10 @@ class TerminalPane(Widget, can_focus=True):
         # then calls this — and a cached "extended chords are fine" from a 3.7
         # server would TYPE ``S-Enter`` into an agent on a 3.4 one, as a cached
         # "-F is known" would fail every frame. Re-read lazily: one ``tmux -V``
-        # per attach at most.
+        # per attach at most. The notices are NOT cleared with it: an attach is
+        # as often a restarted agent or a sign-in on the SAME server, and the
+        # one line that names a server is deduped per server by ``_warn_once``
+        # (reviews of #161, rounds 6-7).
         self._version_read = False
         if pane_id is not None and self.server is None:
             # The fleet's server from config — a default like any other (§3.10).
@@ -1566,6 +1586,7 @@ class TerminalPane(Widget, can_focus=True):
             # ``c`` into the agent for a copy gesture (review).
             self.copy_standing_selection()
             return
+        version = self._server_version()
         translation = translate(
             event.key,
             event.character,
@@ -1578,8 +1599,10 @@ class TerminalPane(Widget, can_focus=True):
             # and never from the key's shape: the shape misread a Cmd chord as
             # deliberate aim, numpad + as a key nobody pressed, and a tmux too
             # old for shift+enter as a chord with no spelling anywhere (review
-            # of #161, round 2).
-            self._explain(event.key, translation)
+            # of #161, round 2). The version the gate just read goes with it,
+            # so the too-old notice can say what the reader HAS as well as
+            # what they need (review of #161, round 5).
+            self._explain(event.key, translation, version)
             return
         if self.text_selection is not None:
             # Typing means the highlight is stale: the next ctrl+c must be the
@@ -1611,7 +1634,7 @@ class TerminalPane(Widget, can_focus=True):
         except TmuxError:
             self._fail(PANE_GONE)
 
-    def _explain(self, key: str, drop: Drop) -> None:
+    def _explain(self, key: str, drop: Drop, version: tuple[int, int] | None) -> None:
         """Say what became of a key that was not sent — from ``translate``'s reason.
 
         Two of the four reasons are silence, and they are the #151 fix: a
@@ -1622,20 +1645,53 @@ class TerminalPane(Widget, can_focus=True):
         whether the reader can do anything about it: a chord tmux has no safe
         spelling for is a fact about the key table, said once as information;
         a chord this tmux is too old to carry is a warning that names the
-        version, since a newer server delivers it (review of #161, round 2 —
-        the first version gave the old-server loss the "no way to type" line,
-        which is false: there is a way, on tmux 3.5).
-        """
-        if drop.reason == "too_old":
-            version = self._server_version()
-            server = f"tmux {version[0]}.{version[1]}" if version is not None else "this tmux"
-            need = ".".join(str(part) for part in EXTENDED_MINIMUM)
-            self._warn_once(key, f"{server} cannot carry {key} — {need} or newer can")
-        elif drop.reason == "no_name":
-            self._warn_once(key, f"no way to type {key} into a tmux pane", severity="information")
+        version it needs AND the one it has, since a newer server delivers it
+        (review of #161, round 2 — the first version gave the old-server loss
+        the "no way to type" line, which is false: there is a way, on tmux
+        3.5). ``version`` is what ``on_key`` read for the gate, handed down
+        rather than read again. ``too_old`` is only ever produced under a
+        version the gate read and found below the minimum — ``_extended_keys``
+        fails open on ``None`` — but the type admits ``None``, so the wording
+        covers it instead of asserting it away, and a direct call pins that
+        wording rather than leaving the branch dead (reviews of #161, rounds
+        3-5, one objection each to a dead string, an assert, and the number
+        gone missing).
 
-    def _warn_once(self, key: str, message: str, *, severity: SeverityLevel = "warning") -> None:
-        """Say ``message`` once per ``key``, at ``severity``.
+        TOTAL over ``DropReason``, and the type checker holds it so: a reason
+        added to ``core.keys`` that this does not answer is a red ``mypy``, not
+        a keystroke silently lost — the mute twin of the #151 bug (review of
+        #161, round 3).
+        """
+        reason = drop.reason
+        match reason:
+            case "too_old":
+                need = ".".join(str(part) for part in EXTENDED_MINIMUM)
+                have = f"tmux {version[0]}.{version[1]}" if version is not None else "this tmux"
+                self._warn_once(
+                    key,
+                    f"{have} cannot carry {_printable_name(key)} — {need} or newer can",
+                    server=self.server.socket if self.server is not None else None,
+                )
+            case "no_name":
+                self._warn_once(
+                    key,
+                    f"no way to type {_printable_name(key)} into a tmux pane",
+                    severity="information",
+                )
+            case "command" | "nothing_to_type":
+                pass  # nothing was pressed at the agent, and nothing is said
+            case _ as unreachable:
+                assert_never(unreachable)
+
+    def _warn_once(
+        self,
+        key: str,
+        message: str,
+        *,
+        severity: SeverityLevel = "warning",
+        server: str | None = None,
+    ) -> None:
+        """Say ``message`` once per ``key`` — and per ``server``, when it names one.
 
         Severity is a property of the MESSAGE and not of the once-per-name
         mechanism, so each caller keeps its own answer (review): the wheel's
@@ -1645,11 +1701,24 @@ class TerminalPane(Widget, can_focus=True):
 
         Once per PANE, not per session: ``_warned`` is this widget's, and the
         app composes a ``TerminalPane`` per view — so that is the scope
-        ``docs/fleet.md`` promises, and no wider (review).
+        ``docs/fleet.md`` promises, and no wider (review). A line about a
+        SERVER passes that server's socket as ``server`` — ``views/project.py``
+        builds a fresh ``TmuxServer`` for the same socket at every attach, so
+        the socket is what names a server here — and is said once per key name
+        on EACH: the too-old line names the version, so a pane moved to another
+        server hears it for that one (review of #161, round 6). A server
+        restarted on the same socket under another tmux counts as the same
+        one: the line is not said again, since its advice — 3.5 or newer —
+        still holds, though the version it named is stale (round 8). Everything
+        else is keyed by the key alone, and an attach re-arms nothing: round 6
+        cleared the whole set there, and a restarted agent or a sign-in — a new
+        pane on the same server — brought back the ``f13`` line, a fact about
+        the key table, and the fullscreen one, the very re-toasting #151 is
+        about (round 7).
         """
-        if key in self._warned:
+        if (server, key) in self._warned:
             return
-        self._warned.add(key)
+        self._warned.add((server, key))
         self.notify(message, severity=severity, markup=False)
 
     def on_paste(self, event: events.Paste) -> None:

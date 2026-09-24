@@ -61,6 +61,7 @@ from aisquare.cli.ui.terminal import (
     route_selection_gesture,
 )
 from aisquare.cli.ui.views.agent import AgentView, header_text
+from aisquare.core.keys import Drop
 from aisquare.core.tmux import BUNDLED_CONF, TmuxError, TmuxServer
 from aisquare.models import FleetAgent, FleetAgentStatus
 from tests.pane_harness import (
@@ -2911,8 +2912,8 @@ def test_a_cursor_above_the_shown_window_is_neither_drawn_nor_dirtied(
 # --- the tmux-version key gate -----------------------------------------------------------------
 
 
-def _press_shift_enter(
-    tmux: FakeTmux, tmp_path: Path
+def _press_then_enter(
+    tmux: FakeTmux, tmp_path: Path, chord: str
 ) -> tuple[list[tuple[str, ...]], list[str], list[str]]:
     """Press an extended-only chord (then a plain key) into a pane on ``tmux``."""
 
@@ -2921,7 +2922,7 @@ def _press_shift_enter(
         async with host.run_test(size=(40, 6)) as pilot:
             host.pane.focus()
             await pilot.pause()
-            await pilot.press("shift+enter", "enter")
+            await pilot.press(chord, "enter")
             await pilot.pause()
             return tmux.sent(), list(host.notices), list(host.severities)
 
@@ -2935,24 +2936,131 @@ def test_the_servers_tmux_version_gates_the_chords_it_would_type_out(
 
     Below 3.5 tmux TYPES ``S-Enter`` into the running agent instead of sending
     the key (measured on 3.3a/3.4), so the pane never sends it there: shift+enter
-    travels as ``C-j`` — Claude Code's newline on every tmux (#147) — and the
-    chord itself goes on every modern server. Nothing outside test_keys.py's
-    pure units reached the gate: the fake always answered 3.7c and no test
-    pressed an extended-only chord, so the widget's gate could have been stuck
-    at either value undetected.
+    travels as ``C-j`` — Claude Code's newline on every tmux (#147) — a chord
+    with no older spelling is refused with a warning, and the chord itself goes
+    on every modern server. Nothing outside test_keys.py's pure units reached
+    the gate: the fake always answered 3.7c and no test pressed an
+    extended-only chord, so the widget's gate could have been stuck at either
+    value undetected.
     """
     fake.version = "tmux 3.4"
-    old_sent, old_notices, old_severities = _press_shift_enter(fake, tmp_path)
+    old_sent, old_notices, old_severities = _press_then_enter(fake, tmp_path, "shift+enter")
+    refusing = FakeTmux()
+    refusing.version = "tmux 3.4"
+    refusing.panes["%1"] = FakePane(screen=["one row"])
+    refused_sent, refused_notices, refused_severities = _press_then_enter(
+        refusing, tmp_path, "ctrl+shift+enter"
+    )
     modern = FakeTmux()
     modern.panes["%1"] = FakePane(screen=["one row"])
-    modern_sent, modern_notices, _ = _press_shift_enter(modern, tmp_path)
+    modern_sent, modern_notices, _ = _press_then_enter(modern, tmp_path, "shift+enter")
 
     assert old_sent == [("C-j",), ("Enter",)], "the newline by its older spelling, never S-Enter"
     assert old_notices == [], "nothing was dropped, so nothing is said"
     assert old_severities == []
+    assert refused_sent == [("Enter",)], "a chord tmux 3.4 would type out must not be sent"
+    # A keystroke LOST for a reason the reader can fix: a warning, naming the
+    # version they have and the one they need — not the "no way to type" line,
+    # which is false here (there is a way, on 3.5) and was information (review
+    # of #161, round 2). The version is the one on_key read for the gate,
+    # handed down (review of #161, round 5).
+    assert refused_notices == ["tmux 3.4 cannot carry ctrl+shift+enter — 3.5 or newer can"]
+    assert refused_severities == ["warning"]
     assert modern.version == "tmux 3.7c"  # the control's premise, spelled out
     assert modern_sent == [("S-Enter",), ("Enter",)]  # …and there the chord goes through
     assert modern_notices == []
+
+
+def test_the_too_old_notice_words_an_unknown_version_rather_than_asserting_it_away(
+    fake: FakeTmux, tmp_path: Path
+) -> None:
+    """``too_old`` is never produced with an unknown version — the gate fails
+    open — but ``_explain``'s type admits ``None``, and a branch that cannot be
+    reached through the widget was a dead string in one round and an assert
+    in the next (reviews of #161, rounds 3-5). So it is reached directly."""
+
+    async def drive() -> tuple[list[str], list[str]]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 6)) as pilot:
+            await pilot.pause()
+            host.pane._explain("ctrl+shift+enter", Drop("too_old"), None)
+            host.pane._explain("ctrl+shift+enter", Drop("too_old"), (3, 4))  # once per key name
+            await pilot.pause()
+            return host.notices, host.severities
+
+    notices, severities = run(drive())
+    assert notices == ["this tmux cannot carry ctrl+shift+enter — 3.5 or newer can"]
+    assert severities == ["warning"]
+
+
+def test_the_too_old_notice_follows_the_pane_to_its_next_server(
+    fake: FakeTmux, tmp_path: Path
+) -> None:
+    """The line names a server's version, and a pane outlives its server: a
+    notice deduped across servers prescribed an upgrade for the server the
+    pane had LEFT while the keystroke on the new one was lost without a word
+    (review of #161, round 6). The line is deduped per server — per socket,
+    as two servers always are — so the next one hears it (round 7)."""
+    fake.version = "tmux 3.3"
+    older = FakeTmux()
+    older.version = "tmux 3.4"
+    older.panes["%1"] = FakePane(screen=["another old server"])
+
+    async def drive() -> tuple[list[str], list[tuple[str, ...]], list[tuple[str, ...]]]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 6)) as pilot:
+            pane = host.pane
+            pane.focus()
+            await pilot.pause()
+            await pilot.press("ctrl+shift+enter", "ctrl+shift+enter")
+            await pilot.pause()
+            pane.server = older.server(tmp_path, socket="older")
+            pane.attach("%1")
+            await pilot.pause()
+            await pilot.press("ctrl+shift+enter", "ctrl+shift+enter")
+            await pilot.pause()
+            return list(host.notices), fake.sent(), older.sent()
+
+    notices, first_sent, second_sent = run(drive())
+    assert first_sent == [] and second_sent == []
+    assert notices == [
+        "tmux 3.3 cannot carry ctrl+shift+enter — 3.5 or newer can",
+        "tmux 3.4 cannot carry ctrl+shift+enter — 3.5 or newer can",
+    ]
+
+
+def test_a_new_pane_on_the_same_server_repeats_no_notice(fake: FakeTmux, tmp_path: Path) -> None:
+    """An attach is as often a restarted agent (``views/agent.py``,
+    ``views/project.py``) or a sign-in (``views/accounts.py``) as a new server:
+    a new pane on the SAME one, under a fresh ``TmuxServer`` for its socket.
+    Round 6 cleared every notice at each attach, so a restart brought back the
+    ``f13`` line — a fact about the key table, never about a server — and the
+    too-old line the reader had already had for that server: the re-toasting
+    #151 is about (review of #161, round 7)."""
+    fake.version = "tmux 3.4"
+    fake.panes["%2"] = FakePane(screen=["the restarted agent"])
+
+    async def drive() -> tuple[list[str], list[tuple[str, ...]]]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 6)) as pilot:
+            pane = host.pane
+            pane.focus()
+            await pilot.pause()
+            await pilot.press("ctrl+shift+enter", "f13")
+            await pilot.pause()
+            pane.server = fake.server(tmp_path)  # a fresh handle, as views/project.py makes
+            pane.attach("%2")
+            await pilot.pause()
+            await pilot.press("ctrl+shift+enter", "f13")
+            await pilot.pause()
+            return list(host.notices), fake.sent()
+
+    notices, sent = run(drive())
+    assert sent == []
+    assert notices == [
+        "tmux 3.4 cannot carry ctrl+shift+enter — 3.5 or newer can",
+        "no way to type f13 into a tmux pane",
+    ]
 
 
 def test_attach_re_reads_the_version_for_a_new_server(fake: FakeTmux, tmp_path: Path) -> None:
@@ -3796,16 +3904,15 @@ def test_a_change_hidden_under_the_corner_marker_leaves_the_highlight_standing(
     assert after_visible is None, "a change under the highlight the user CAN see drops it"
 
 
-#: Keys a focused pane sees that are not keystrokes aimed at the agent, written
-#: out INDEPENDENTLY of ``MODIFIER_ONLY_KEYS`` — pressing the constant under test
-#: would shrink the loop rather than fail it when a name goes missing (review;
+#: Keys a focused pane sees that carry no keystroke at all, written out here
+#: rather than derived from ``core.keys``' tables — a loop over the thing under
+#: test shrinks rather than fails when a name goes missing (review;
 #: CONTRIBUTING's "emptiness as both goal and symptom"). Four groups, each a bug
 #: that reached a user or a review: the fourteen modifier names, the locks WITH a
 #: modifier held (Textual keeps the prefix for those, so an exact match on
 #: ``event.key`` let them through), the whole keys a kitty-protocol terminal
-#: reports only because Textual asks for every key, and the Cmd chords macOS
-#: hands the pane — commands for the OS, which the round-1 rule read as
-#: deliberate aim and toasted one by one.
+#: reports only because Textual asks for every key, and those same keys with a
+#: modifier held (a residue round 1 documented and round 2 lost).
 NOTHING_TO_TYPE = (
     "left_shift",
     "left_control",
@@ -3836,10 +3943,25 @@ NOTHING_TO_TYPE = (
     "media_play",
     "media_pause",
     "kp_begin",
-    "super+k",
-    "super+f5",
-    "hyper+x",
+    "ctrl+pause",
+    "shift+menu",
+    "alt+media_play",
 )
+
+#: The Cmd chords macOS hands the pane — a DIFFERENT reason (``command``: a
+#: keystroke was pressed, at the OS) that is silent for a different argument,
+#: kept apart so the list's name says what its entries are (review of #161,
+#: round 4). The round-1 rule read them as deliberate aim and toasted one by one.
+COMMAND_CHORDS = ("super+k", "super+f5", "hyper+x")
+
+#: Keys the pane cannot type but the reader may have meant — one quiet line
+#: each, never silence, and never a raw byte in the line. ``tests/test_keys.py``
+#: pins the reason; this pins what the pane SAYS for it, which is how a C1
+#: control byte went into the toast verbatim unnoticed for a round (review of
+#: #161, round 5). The two control bytes are that regression's own key names —
+#: two of them, so the dedupe is shown to key on the RAW name while the notice
+#: shows the spelt one (round 6).
+NAMED_LOSSES = ("f13", "ctrl+comma", "grinning_face", "\x85", "\x9b")
 
 
 def test_a_key_with_nothing_to_type_is_ignored_in_silence(fake: FakeTmux, tmp_path: Path) -> None:
@@ -3849,7 +3971,10 @@ def test_a_key_with_nothing_to_type_is_ignored_in_silence(fake: FakeTmux, tmp_pa
     volume keys are nobody's message to an agent — so nothing is sent and
     nothing is said. The old path raised one "tmux has no name for this key —
     dropped" toast per key, three red toasts into an ordinary typing session.
-    The control beside it is a chord that USES a modifier and still arrives.
+    The Cmd chords ride the same loop for a different reason that is silent on
+    a different argument (``tests/test_keys.py`` pins the reasons; this pins
+    the silence). The control beside them is a chord that USES a modifier and
+    still arrives.
     """
 
     async def drive() -> tuple[list[str], list[tuple[str, ...]]]:
@@ -3857,7 +3982,7 @@ def test_a_key_with_nothing_to_type_is_ignored_in_silence(fake: FakeTmux, tmp_pa
         async with host.run_test(size=(40, 6)) as pilot:
             host.pane.focus()
             await pilot.pause()
-            for key in NOTHING_TO_TYPE:
+            for key in (*NOTHING_TO_TYPE, *COMMAND_CHORDS):
                 await pilot.press(key)
             await pilot.press("ctrl+a")  # the modifier USED: the chord still arrives
             await pilot.pause()
@@ -3868,6 +3993,44 @@ def test_a_key_with_nothing_to_type_is_ignored_in_silence(fake: FakeTmux, tmp_pa
     assert sent == [("C-a",)]  # and not one stray send-keys
 
 
+def test_a_lost_keystroke_is_named_once_as_information_and_never_as_a_raw_byte(
+    fake: FakeTmux, tmp_path: Path
+) -> None:
+    """The pane-level pin for ``no_name``: one information notice per key name,
+    nothing sent, and the name spelt so the emulator cannot act on it — U+0085
+    as ``U+0085``, not as the byte that moves the cursor (review of #161,
+    round 5). Pressed twice each: once per key name is the whole of the
+    promise. The printable names go through the pilot — the app's own key
+    dispatch, the path the silent list's test measures — and only the raw
+    bytes, which the pilot cannot spell, are posted straight to the pane
+    (round 6)."""
+
+    async def drive() -> tuple[list[str], list[str], list[tuple[str, ...]]]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 6)) as pilot:
+            host.pane.focus()
+            await pilot.pause()
+            for name in (*NAMED_LOSSES, *NAMED_LOSSES):
+                if name.isprintable():
+                    await pilot.press(name)
+                else:
+                    host.pane.post_message(events.Key(name, name))
+            await pilot.pause()
+            return host.notices, host.severities, fake.sent()
+
+    notices, severities, sent = run(drive())
+    assert sent == []
+    assert notices == [
+        "no way to type f13 into a tmux pane",
+        "no way to type ctrl+comma into a tmux pane",
+        "no way to type grinning_face into a tmux pane",
+        "no way to type U+0085 into a tmux pane",
+        "no way to type U+009B into a tmux pane",  # its own line: deduped on the raw name
+    ]
+    assert severities == ["information"] * 5
+    assert all(char.isprintable() for notice in notices for char in notice)
+
+
 def test_a_numpad_operator_without_its_text_is_typed_not_swallowed(
     fake: FakeTmux, tmp_path: Path
 ) -> None:
@@ -3876,19 +4039,24 @@ def test_a_numpad_operator_without_its_text_is_typed_not_swallowed(
     the round-1 rule filed it with ``menu`` — neither typed nor mentioned, less
     than the toast it replaced (review of #161, round 2). It is a keystroke."""
 
-    async def drive() -> tuple[list[str], list[tuple[str, ...]]]:
+    async def drive() -> tuple[list[str], list[str], list[tuple[str, ...]]]:
         host = Host(fake.server(tmp_path), "%1")
         async with host.run_test(size=(40, 6)) as pilot:
             host.pane.focus()
             await pilot.pause()
-            for name in ("add", "divide", "decimal"):
+            for name in ("add", "divide", "multiply", "decimal"):
                 host.pane.post_message(events.Key(name, None))
             await pilot.pause()
-            return host.notices, fake.sent()
+            return host.notices, host.severities, fake.sent()
 
-    notices, sent = run(drive())
-    assert notices == []
-    assert sent == [("-l", "--", "+"), ("-l", "--", "/"), ("-l", "--", ".")]
+    notices, severities, sent = run(drive())
+    assert sent == [("-l", "--", "+"), ("-l", "--", "/"), ("-l", "--", "*")]
+    # The decimal key's text is the layout's to know — ``,`` on a German numpad
+    # arrives under the same physical key code — so without it nothing is
+    # guessed: one quiet line, the keystroke lost rather than mistyped (review
+    # of #161, round 3).
+    assert notices == ["no way to type decimal into a tmux pane"]
+    assert severities == ["information"]
 
 
 def test_a_truly_unmappable_key_is_still_named_once_but_as_information(

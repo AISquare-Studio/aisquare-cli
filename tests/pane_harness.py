@@ -128,10 +128,12 @@ class FakeTmux:
         """The newest tmux paste buffer — what ``show-buffer`` prints; ``None`` is
         a server with no buffers (``no buffers``, exit 1)."""
 
-    def server(self, tmp_path: Path) -> TmuxServer:
+    def server(self, tmp_path: Path, socket: str = "fake") -> TmuxServer:
         # ``binary`` must resolve through ``shutil.which`` on a machine WITHOUT
-        # tmux: an absolute executable path does, and is never run.
-        return TmuxServer("fake", binary=sys.executable, conf=tmp_path / "fake.conf", runner=self)
+        # tmux: an absolute executable path does, and is never run. ``socket``
+        # names the server: two fakes standing for two SERVERS take two sockets,
+        # as two servers do (the widget keys its too-old notice by socket).
+        return TmuxServer(socket, binary=sys.executable, conf=tmp_path / "fake.conf", runner=self)
 
     def sent(self) -> list[tuple[str, ...]]:
         """Every ``send-keys`` after ``-t <pane>``."""

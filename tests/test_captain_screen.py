@@ -42,8 +42,8 @@ MARK = shots.MARK
             "the session-rating prompt",
         ),
         ("a model picker", shots.MODEL_PICKER, None, "a dialog waiting for Enter or Esc"),
-        ("a fresh coder's idle box (constructed)", shots.FRESH_IDLE, None, None),
-        ("a box drawn mid-turn (constructed)", shots.WORKING_BOX, None, None),
+        ("a real box drawn mid-turn, its top rule named", shots.REAL_WORKING, None, None),
+        ("a real idle box after the first Stop, named", shots.REAL_IDLE_AFTER_STOP, None, None),
         ("an empty pane", [], None, None),
         ("a shell", ["$ ", "ready"], None, None),
     ],
@@ -66,17 +66,53 @@ def test_both_views_of_the_one_reader_agree_on_every_captured_screen(
         assert got is not None, f"{name}: say refuses a prompt that press cannot answer"
 
 
+def _with_footer(words: str) -> list[str]:
+    """The real mid-turn capture with its footer's 'esc to interrupt' swapped for ``words``."""
+    return [line.replace("esc to interrupt", words) for line in shots.REAL_WORKING]
+
+
+def _without_spinner() -> list[str]:
+    """The real mid-turn capture without its spinner line: only the footer says it."""
+    return [line for line in shots.REAL_WORKING if "Sautéing…" not in line]
+
+
+def test_the_box_is_found_on_both_real_captures_whose_top_rule_carries_the_name() -> None:
+    """T2b (13383): the fleet launches every agent with --name, and Claude Code draws it in
+    the box's TOP rule. A reader that took only bare rules found no box on any real pane,
+    so say and send never typed."""
+    for lines in (shots.REAL_WORKING, shots.REAL_IDLE_AFTER_STOP):
+        rows = screen.tail(lines)
+        top = screen.input_box_at(rows)
+        assert top is not None and "screen-coder" in rows[top]
+    assert screen.RULE.match(shots.REAL_TOP_RULE) and screen.RULE.match(shots.TOP_RULE)
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "the verdict ─── is in",
+        f"{'─' * 20} two words ─",
+        f"{'─' * 20} coder-1 ─ and more",
+        f"{'─' * 20} coder-1 {'─' * 20}",
+        "─── x ─",
+    ],
+)
+def test_a_rule_carries_one_name_and_a_short_close_nothing_else(line: str) -> None:
+    """The card's shape (T2b): 8 or more rule characters, then optionally one space, the name,
+    one space and a short closing run — nothing else on the line."""
+    assert screen.RULE.match(line) is None
+
+
 @pytest.mark.parametrize(
     ("name", "lines", "idle"),
     [
         ("the real idle pane, its finished turn's line above the box", shots.REAL_IDLE, True),
-        ("a fresh coder's box, no turn yet", shots.FRESH_IDLE, True),
+        ("the real idle box after the first Stop", shots.REAL_IDLE_AFTER_STOP, True),
         ("the plain input box", shots.INPUT_BOX, True),
-        ("a box drawn mid-turn: a live spinner above, esc to interrupt below",
-         shots.WORKING_BOX, False),
-        ("the live spinner alone says it",
-         [*shots.WORKING_BOX[:-1], "  ⏵⏵ accept edits on (shift+tab to cycle)"], False),
-        ("the footer alone says it", [shots.WORKING_BOX[0], *shots.WORKING_BOX[2:]], False),
+        ("the real box mid-turn: a live spinner above, esc to interrupt below",
+         shots.REAL_WORKING, False),
+        ("the live spinner alone says it", _with_footer("? for shortcuts"), False),
+        ("the footer alone says it", _without_spinner(), False),
         ("a chooser: no box at all", shots.REAL_CHOOSER, False),
         ("a spinner and no box", shots.MID_TURN_LIST, False),
         ("an empty pane", [], False),

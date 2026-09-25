@@ -150,7 +150,12 @@ class Clock:
         self.now += timedelta(seconds=seconds)
 
 
-from tests.captain_screens import BOX_WITH_ESC_FOOTER, INPUT_BOX, REAL_TRUST  # noqa: E402
+from tests.captain_screens import (  # noqa: E402
+    BOX_WITH_ESC_FOOTER,
+    INPUT_BOX,
+    REAL_IDLE_AFTER_STOP,
+    REAL_TRUST,
+)
 
 
 def _pane(*transcript: str, box: bool = True) -> list[str]:
@@ -759,6 +764,23 @@ def test_one_message_reaches_the_captain_at_a_time(captain: tuple[Captain, Clock
 
 
 # --- send: the one guarded door, without a reply wait (13325) -------------------------------
+
+
+@pytest.mark.parametrize("door", ["say", "send"])
+def test_both_doors_type_into_a_real_captain_whose_top_rule_carries_its_name(
+    captain: tuple[Captain, Clock], door: str
+) -> None:
+    """T2b (13383): on the RC every say and send to a real captain ended 'never drew its
+    prompt' — the box's top rule carries the agent's name, and the reader took bare rules
+    only. runner2's real capture, verbatim, as the captain's pane."""
+    fake, _ = captain
+    fake.present()  # type: ignore[attr-defined]
+    fake.screen = list(REAL_IDLE_AFTER_STOP)
+    if door == "say":
+        assert brain.say("what is up", timeout=60).text == "Nothing needs you right now."
+    else:
+        brain.send("what is up", timeout=60)
+    assert fake.typed == [("paste", "what is up"), ("keys", "Enter")]
 
 
 def test_send_types_into_a_waiting_captain_and_returns_without_waiting_for_a_reply(

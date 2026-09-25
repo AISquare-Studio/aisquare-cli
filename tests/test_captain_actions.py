@@ -1594,7 +1594,7 @@ def test_a_fresh_coder_takes_a_paste_when_its_box_is_drawn_and_idle(
 ) -> None:
     """Acceptance line 2 (13313; runner2's red-before at 13323): a just-spawned real claude
     reads working until its first Stop hook. Its drawn, idle box is the evidence."""
-    pane = _working(fleet_rec, shots.FRESH_IDLE)
+    pane = _working(fleet_rec, shots.REAL_IDLE_AFTER_STOP)
     result = ok(actions.paste("alpha", "coder-1", "run the fold's tests", submit=True))
     assert result["submitted"] is True
     assert pane.typed == [("paste", "run the fold's tests"), ("keys", "Enter")]
@@ -1613,7 +1613,7 @@ def test_a_box_drawn_mid_turn_refuses_the_paste(
 ) -> None:
     """Real Claude Code keeps its box during a turn: a live spinner above it and 'esc to
     interrupt' in its footer are what say the agent is working."""
-    pane = _working(fleet_rec, shots.WORKING_BOX)
+    pane = _working(fleet_rec, shots.REAL_WORKING)
     message = refused(lambda: actions.paste("alpha", "coder-1", "run the fold's tests"))
     assert "coder-1 is working" in message
     assert pane.typed == []
@@ -1634,7 +1634,7 @@ def test_only_working_is_read_past_an_idle_screen(
 ) -> None:
     """The screen overrides the activity window, never a stop: an agent parked on its usage
     limit, or gone, is refused whatever its last screen shows."""
-    pane = _working(fleet_rec, shots.FRESH_IDLE)
+    pane = _working(fleet_rec, shots.REAL_IDLE_AFTER_STOP)
     fleet_rec.states["coder-1"] = state  # type: ignore[assignment]
     message = refused(lambda: actions.paste("alpha", "coder-1", "next"))
     assert f"coder-1 is {state}" in message or "no live agent" in message
@@ -1647,7 +1647,7 @@ def test_a_working_pane_that_cannot_be_read_stays_refused_as_working(
     fleet_rec: Fleet,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    pane = _working(fleet_rec, shots.FRESH_IDLE)
+    pane = _working(fleet_rec, shots.REAL_IDLE_AFTER_STOP)
 
     def unreadable(*args: object, **kwargs: object) -> Capture:
         raise TmuxError("tmux capture-pane failed: no such pane")

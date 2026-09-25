@@ -43,8 +43,10 @@ bare two-byte sequences. T1's pattern, character for character (coderp's S1 on #
 PROMPT_MARK = "\u276f"
 """Claude Code's prompt mark, U+276F: its input line and a chooser's highlighted option."""
 
-RULE = re.compile(r"^\s*[─━]{8,}\s*$")
-"""A horizontal rule: the two that frame the input line."""
+RULE = re.compile(r"^\s*[─━]{8,}(?: \S+ [─━]{1,8})?\s*$")
+"""A horizontal rule: the two that frame the input line. The TOP one carries the agent's
+name (T2b, 13383): the fleet launches every agent with --name, and Claude Code draws it
+there — a long rule, one space, the name, one space, a short closing run, nothing else."""
 INPUT_LINE = re.compile(r"^\s*" + PROMPT_MARK)
 OPTION = re.compile(r"^\s*(" + PROMPT_MARK + r"\s*)?(\d)[.)]\s+(\S.*)$")
 MODAL_FOOTER = re.compile(r"Esc to cancel|Enter to confirm")

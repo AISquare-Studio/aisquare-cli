@@ -10,17 +10,38 @@ agree on every screen here.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 MARK = "\u276f"
 REAL_RULE = "─" * 100
+"""The input box's BOTTOM rule: bare."""
+REAL_TOP_RULE = f"{'─' * 105} screen-coder ─"
+"""Its TOP rule carries the agent's name (T2b): the fleet launches every agent with --name,
+the captain included, and Claude Code 2.1.282 draws it there — runner2's real captures."""
 RULE = "─" * 60
+TOP_RULE = f"{'─' * 50} captain ─"
+"""The captain's own top rule, so every say and send test meets the real shape."""
 
-INPUT_BOX = [RULE, f"{MARK} ", RULE, "  ⏵⏵ accept edits on (shift+tab to cycle)"]
+INPUT_BOX = [TOP_RULE, f"{MARK} ", RULE, "  ⏵⏵ accept edits on (shift+tab to cycle)"]
 """How a waiting Claude Code pane ends: the input line between two rules, the mode footer."""
+
+
+def _capture(name: str) -> list[str]:
+    """A real capture, verbatim: ``tmux capture-pane -p -J`` of a fleet-spawned Claude Code."""
+    return (Path(__file__).parent / "screens" / name).read_text(encoding="utf-8").split("\n")
+
+
+REAL_WORKING = _capture("real_working_mid_turn.txt")
+"""runner2's capture (13381): Claude Code 2.1.282 one second into a turn. The box is drawn
+DURING the turn — a live spinner two lines above it, 'esc to interrupt' in its footer."""
+REAL_IDLE_AFTER_STOP = _capture("real_idle_after_first_stop.txt")
+"""runner2's capture (13381): the same agent after its first Stop — the turn's closing line
+('✻ Baked for 2s · done'), the box, '? for shortcuts'. The fleet read it waiting."""
 
 REAL_IDLE = [
     "● Created probe2.txt in the working directory containing the word again.",
     "✻ Cooked for 5s · done 10:17 AM",
-    REAL_RULE,
+    REAL_TOP_RULE,
     f"{MARK} ",
     REAL_RULE,
     "  ⏸ manual mode on · ? for shortcuts · ← for agents",
@@ -51,14 +72,14 @@ REAL_QUOTED = [
     f"  {MARK} 1. Yes",
     "    2. No",
     "  Esc to cancel · Tab to amend",
-    REAL_RULE,
+    REAL_TOP_RULE,
     f"{MARK} ",
     REAL_RULE,
     "  ⏸ manual mode on · ? for shortcuts",
 ]
 BOX_WITH_ESC_FOOTER = [
     *REAL_QUOTED[:5],
-    REAL_RULE,
+    REAL_TOP_RULE,
     f"{MARK} ",
     REAL_RULE,
     "  ⏸ manual mode on · Esc to cancel a draft",
@@ -81,29 +102,6 @@ TRUST_QUOTED_MID_TURN = [
     "✻ Thinking… (esc to interrupt)",
 ]
 WORKING_QUOTING = [f"Reading coder-1's pane: {MARK} 1. Yes / Esc to cancel", "· Thinking…"]
-
-# CONSTRUCTED from the manager's description at 13313, until runner2 captures the real ones:
-# real Claude Code keeps its input box drawn DURING a turn, with a live spinner above it and
-# "esc to interrupt" in the footer; a fresh one draws its box before its first Stop hook, so
-# the fleet still reads it working while it is idle at its prompt.
-FRESH_IDLE = [
-    "╭───────────────────────────────────────────────╮",
-    "│ ✻ Welcome to Claude Code!                     │",
-    "│   cwd: /home/owner/proj-a                     │",
-    "╰───────────────────────────────────────────────╯",
-    REAL_RULE,
-    f"{MARK} ",
-    REAL_RULE,
-    "  ? for shortcuts",
-]
-WORKING_BOX = [
-    "● Reading the fold's test log",
-    "✻ Cogitating… (12s · ↓ 1.2k tokens)",
-    REAL_RULE,
-    f"{MARK} ",
-    REAL_RULE,
-    "  ⏵⏵ accept edits on (shift+tab to cycle) · esc to interrupt",
-]
 
 
 def pane(*transcript: str, box: bool = True) -> list[str]:

@@ -425,7 +425,8 @@ def _parse_toml(handle: IO[bytes]) -> dict[str, Any]:
     ``core.credentials`` and ``core.state_file`` read theirs; a file without
     a BOM reads exactly as before, and one that is not UTF-8 still raises
     ``UnicodeDecodeError`` as ``tomllib.load`` did (review of the #203 store
-    fixes, round 1).
+    fixes, round 1): ``load_config`` reports it, and ``save_config``'s merge
+    read fails open on it as on a ``TOMLDecodeError``.
     """
     loaded: dict[str, Any] = tomllib.loads(handle.read().decode("utf-8-sig"))
     return loaded
@@ -529,7 +530,13 @@ def save_config(config: AppConfig, path: Path | None = None) -> Path:
         # Keys this build has never heard of belong to whoever wrote them; see
         # _keep_unknown. Reading fails open on purpose — a config we cannot parse
         # is exactly the state a write is most likely trying to repair, and
-        # refusing to write would strand the operator with the broken file.
+        # refusing to write would strand the operator with the broken file. One
+        # we cannot DECODE is the same case: Windows PowerShell 5.1's `>` and
+        # `Out-File` write UTF-16, `doctor` reports that file as invalid and
+        # sends the operator to `init --reinit`, and the `UnicodeDecodeError`
+        # this read let escape made that reset crash on the file it replaces
+        # (review of the #203 store fixes, round 2). `load_config` still raises
+        # on it, so `doctor` still reports it.
         #
         # THROUGH THE RETRY, like the rename in `write_replacing` below and
         # `load_config` above. A `PermissionError` IS an `OSError`, so under the
@@ -543,7 +550,7 @@ def save_config(config: AppConfig, path: Path | None = None) -> Path:
             with written.open("rb") as handle:
                 return _parse_toml(handle)
 
-        with contextlib.suppress(OSError, tomllib.TOMLDecodeError):
+        with contextlib.suppress(OSError, tomllib.TOMLDecodeError, UnicodeDecodeError):
             dumped = _keep_unknown(despite_windows_contention(_read_existing), dumped, config)
     payload = tomli_w.dumps(dumped)
 

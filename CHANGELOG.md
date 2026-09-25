@@ -187,6 +187,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   not read the file it merges into and dropped the sections this build does
   not know. It is decoded past the BOM like the credentials file, and written
   back without it.
+- **`init --reinit` resets a `config.toml` that is not UTF-8.** Windows
+  PowerShell 5.1's `>` and `Out-File` write UTF-16. `doctor` reports such a file
+  as invalid and points to `aisquare init --reinit`, but the reset's save read
+  the file first to keep the keys this build does not know, and the decode
+  error escaped: the documented recovery exited 1 with a traceback. The save now
+  treats a file it cannot decode like one it cannot parse and writes the
+  defaults; `doctor` still reports the file until then.
 - **A store another line stamped 15 or 17 converges instead of failing.** Schema
   v15-v17 were claimed by other lines of development too: #136 stamps 15 for
   `work_brief`, #201 stamps 15 for persona columns, #113 stamps 15-17 for its

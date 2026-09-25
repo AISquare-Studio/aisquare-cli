@@ -1778,9 +1778,17 @@ def _audit_rejected_calls(server: MCPServer) -> None:
 
 
 def run_stdio(*, close_after: int) -> None:
-    """Serve over stdio until the client goes quiet for ``close_after`` seconds (0 = never)."""
-    from aisquare.services import mcp_server
+    """Serve over stdio until the client goes quiet for ``close_after`` seconds (0 = never).
 
+    This process is also where the captain's speech is played: the ONE spool
+    drainer (T3's ``speaker.start_drainer``) starts here and lives as long as the
+    server, so ``speak()`` is heard whether or not the voice page or the TUI is
+    open (manager, seq 13143).
+    """
+    from aisquare.services import mcp_server
+    from aisquare.services.captain import speaker
+
+    speaker.start_drainer(speaker.server_voice())
     mcp_server.run_stdio(
         close_after=close_after, server=build_server(), command="aisquare captain serve --stdio"
     )

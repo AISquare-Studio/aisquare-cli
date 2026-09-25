@@ -33,6 +33,7 @@ IMPLEMENTED: set[tuple[str, ...]] = {
     ("captain",),
     ("captain", "say"),
     ("captain", "chat"),
+    ("captain", "voice"),
     *(
         ("captain", verb)
         for verb in (

@@ -22,7 +22,7 @@ from typing import Annotated, Any
 import typer
 from typer.core import TyperGroup
 
-from aisquare.cli import captain_verbs
+from aisquare.cli import captain_verbs, captain_voice
 from aisquare.cli.common import fail
 from aisquare.cli.serve import dependency_error
 from aisquare.core.console import stderr_console, stdout_console
@@ -40,8 +40,9 @@ class _Captain(TyperGroup):
 
     **As typed, first.** Every verb's audit records the owner's words (13081), so the
     group keeps its args in ``ctx.meta`` BEFORE any rewrite, and ``invoke`` scopes them
-    for the verb (``captain_verbs.TYPED``). A rewrite added here later (T3's
-    ``--voice``) goes after the record, never before it (13350).
+    for the verb (``captain_verbs.TYPED``). Then the rewrites, in this order (13445):
+    ``--voice`` among the leading options goes to the ``voice`` leaf (T3); then a first
+    word that names no subcommand goes to ``say``.
 
     **Say by default.** A first WORD that names no subcommand is a message:
     ``captain "what is up"`` means ``captain say "what is up"``. Options before the
@@ -60,32 +61,41 @@ class _Captain(TyperGroup):
     """
 
     def parse_args(self, ctx: Any, args: list[str]) -> list[str]:
-        ctx.meta[_TYPED] = tuple(args)
-        word = self._first_word(args)
-        if word is not None and word not in self.commands:
-            args = ["say", *args]
+        ctx.meta[_TYPED] = tuple(args)  # 1. the words as typed, before any rewrite
+        at = self._first_word_at(args)
+        leading = args if at is None else args[:at]
+        if "--voice" in leading:
+            # 2. The plan's spelling of the voice page (T3, rider 13143 (1)): the leaf, not
+            # a message that starts with "--voice" — wherever it sits among the options.
+            index = leading.index("--voice")
+            args = ["voice", *args[:index], *args[index + 1 :]]
+        elif at is not None and args[at] not in self.commands:
+            args = ["say", *args]  # 3. say by default: the first word is no verb
         result: list[str] = super().parse_args(ctx, args)
         return result
 
-    def _first_word(self, args: list[str]) -> str | None:
-        """The first positional word, past the options before it (each with its value)."""
+    def _first_word_at(self, args: list[str]) -> int | None:
+        """Where the first positional word is, past the options before it (each with its
+        value); ``None`` when there is no word. ``--`` ends the options."""
         valued = self._valued_options()
         index = 0
         while index < len(args):
             arg = args[index]
             if arg == "--":
-                return args[index + 1] if index + 1 < len(args) else None
+                return index + 1 if index + 1 < len(args) else None
             if arg.startswith("-") and arg != "-":
                 index += 2 if arg in valued else 1  # --opt=value is one token
                 continue
-            return arg
+            return index
         return None
 
     def _valued_options(self) -> set[str]:
         """The option spellings that take a value: the group's own (the global flags) and
-        ``say``'s, the command a leading option goes to with a message."""
-        say = self.commands.get("say")
-        params = [*self.params, *(say.params if say is not None else [])]
+        those of ``say`` and ``voice``, the commands leading options go to."""
+        params = [*self.params]
+        for name in ("say", "voice"):
+            command = self.commands.get(name)
+            params += command.params if command is not None else []
         return {
             spelling
             for param in params
@@ -110,15 +120,34 @@ app = typer.Typer(
     invoke_without_command=True,
     no_args_is_help=False,
 )
+captain_voice.register(app)  # `voice`: the page, in its own module (T3)
 captain_verbs.register(
     app
 )  # attention, next, resolve, snooze, since, log, uav, wololo, bt, actions (T5)
 
 
 @app.callback()
-def captain(ctx: typer.Context) -> None:
-    """Start the home's captain, or attach to it when it is already running."""
+def captain(
+    ctx: typer.Context,
+    voice: Annotated[
+        bool,
+        typer.Option(
+            "--voice",
+            help="Serve the voice page — the plan's spelling of `aisquare captain voice`.",
+        ),
+    ] = False,
+) -> None:
+    """Start the home's captain, or attach to it when it is already running.
+
+    ``--voice`` is declared here so ``--help`` and the documented-commands guard
+    know the owner's spelling; the group's ``parse_args`` has already rewritten
+    it to the ``voice`` leaf before this callback runs, so the flag itself is
+    never seen true here.
+    """
     if ctx.invoked_subcommand is not None:
+        return
+    if voice:  # pragma: no cover — parse_args routes --voice to the leaf first
+        captain_voice.voice_page()
         return
     from aisquare.cli.fleet import _exec_attach, _fail_fleet, interactive_terminal
     from aisquare.services import fleet as fleet_service

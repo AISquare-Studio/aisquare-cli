@@ -383,3 +383,162 @@ def test_the_captain_row_is_still_an_ordinary_agent_row(tmp_path: Path, script: 
         assert [row.status.agent.id for row in rows] == [captain.agent.id]
 
     drive(body)
+
+
+# --- the voice controls (T3's page: services.captain.voice and speaker) -----------------------
+
+
+def _open_captain(pilot: Pilot[None]) -> CaptainView:
+    view = fleet_app(pilot).current_view()
+    assert isinstance(view, CaptainView)
+    return view
+
+
+async def _captain_view(pilot: Pilot[None]) -> CaptainView:
+    app = fleet_app(pilot)
+    app.refresh_data()
+    await pilot.pause()
+    await pilot.click("#captain-button")
+    await pilot.pause()
+    return _open_captain(pilot)
+
+
+async def _clicked(pilot: Pilot[None], selector: str) -> None:
+    """A click whose write runs in a worker: wait for it, then for the repaint it asks for.
+
+    Then past the button's press effect: Textual ignores a click on a Button still
+    showing it (``-active``, 0.2 s), as a person's double click flips a switch once.
+    """
+    await pilot.click(selector)
+    await pilot.pause()
+    await fleet_app(pilot).workers.wait_for_complete()
+    await pilot.pause(0.3)
+
+
+def _label(pilot: Pilot[None], selector: str) -> str:
+    return str(fleet_app(pilot).query_one(selector, Button).label)
+
+
+def test_the_speaker_toggle_flips_the_one_switch_both_ways(tmp_path: Path, script: Script) -> None:
+    """T3's ``captain_speaker`` in state.json: the page's toggle, the CLI's --speaker, and this."""
+    from aisquare.services.captain import speaker
+
+    script[captain_state.home_project().id] = [_captain()]
+
+    async def body(pilot: Pilot[None]) -> None:
+        await _captain_view(pilot)
+        assert speaker.speaker_on() and _label(pilot, "#captain-speaker") == "Speaker: on"
+        await _clicked(pilot, "#captain-speaker")
+        assert not speaker.speaker_on()
+        assert _label(pilot, "#captain-speaker") == "Speaker: off"
+        await _clicked(pilot, "#captain-speaker")
+        assert speaker.speaker_on() and _label(pilot, "#captain-speaker") == "Speaker: on"
+
+    drive(body)
+
+
+def test_the_mode_toggle_writes_the_one_mode_key(tmp_path: Path, script: Script) -> None:
+    """13178/13179: ``captain_voice_mode`` is the mode's single home; unset reads as focus."""
+    from aisquare.services.captain import voice
+
+    script[captain_state.home_project().id] = [_captain()]
+
+    async def body(pilot: Pilot[None]) -> None:
+        await _captain_view(pilot)
+        assert voice.voice_mode() is None and _label(pilot, "#captain-mode") == "Mode: focus"
+        await _clicked(pilot, "#captain-mode")
+        assert voice.voice_mode() == "listen" and _label(pilot, "#captain-mode") == "Mode: listen"
+        await _clicked(pilot, "#captain-mode")
+        assert voice.voice_mode() == "focus" and _label(pilot, "#captain-mode") == "Mode: focus"
+
+    drive(body)
+
+
+def test_the_view_follows_what_the_page_changed(tmp_path: Path, script: Script) -> None:
+    """The page writes the same keys from another process; the view's tick reads them."""
+    from aisquare.services.captain import speaker, voice
+
+    script[captain_state.home_project().id] = [_captain()]
+
+    async def body(pilot: Pilot[None]) -> None:
+        view = await _captain_view(pilot)
+        voice.set_voice_mode("listen")
+        speaker.set_speaker(False)
+        view.paint_thinking()  # the view's one tick paints the whole bar
+        await pilot.pause()
+        assert _label(pilot, "#captain-mode") == "Mode: listen"
+        assert _label(pilot, "#captain-speaker") == "Speaker: off"
+
+    drive(body)
+
+
+def _mic_text(pilot: Pilot[None]) -> str:
+    from aisquare.cli.ui.views.captain import MicScreen
+
+    screen = fleet_app(pilot).screen
+    assert isinstance(screen, MicScreen)
+    return "\n".join(shown(line) for line in screen.query(Static))
+
+
+async def _press_mic(pilot: Pilot[None]) -> str:
+    await _captain_view(pilot)
+    await pilot.click("#captain-mic")
+    await pilot.pause()
+    await fleet_app(pilot).workers.wait_for_complete()
+    await pilot.pause()
+    return _mic_text(pilot)
+
+
+def test_the_mic_prints_the_url_the_qr_and_the_start_command_with_no_page_running(
+    tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """13178 Q2: print only — with none running, the URL it would serve, the QR, the command."""
+    from aisquare.cli.ui.views import captain as captain_view
+    from aisquare.services.captain import voice
+    from aisquare.services.mcp_server import serve_token
+
+    script[captain_state.home_project().id] = [_captain()]
+    monkeypatch.setattr(captain_view, "page_serving", lambda port: False)
+    monkeypatch.setattr(voice, "qr_lines", lambda url: ["█▀▀█ qr", "█▄▄█ qr"])
+
+    async def body(pilot: Pilot[None]) -> str:
+        return await _press_mic(pilot)
+
+    text = drive(body)
+    assert voice.voice_url(voice.DEFAULT_PORT, serve_token()) in text
+    assert "█▀▀█ qr" in text and "█▄▄█ qr" in text
+    assert "aisquare captain voice" in text
+    assert voice.adb_reverse(voice.DEFAULT_PORT) in text
+    assert "not running" in text
+
+
+def test_the_mic_says_a_page_that_is_serving(
+    tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from aisquare.cli.ui.views import captain as captain_view
+    from aisquare.services.captain import voice
+
+    script[captain_state.home_project().id] = [_captain()]
+    monkeypatch.setattr(captain_view, "page_serving", lambda port: True)
+    monkeypatch.setattr(voice, "qr_lines", lambda url: None)
+
+    async def body(pilot: Pilot[None]) -> str:
+        return await _press_mic(pilot)
+
+    text = drive(body)
+    assert "serving" in text and "not running" not in text
+    assert "segno" in text, "no QR without segno — and it says why"
+
+
+def test_page_serving_is_a_real_connect_on_loopback() -> None:
+    """The probe answers False for a port nothing listens on, True for one that does."""
+    import socket
+
+    from aisquare.cli.ui.views.captain import page_serving
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        port = listener.getsockname()[1]
+        assert page_serving(port)
+    assert not page_serving(port)

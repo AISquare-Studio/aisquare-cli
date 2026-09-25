@@ -147,6 +147,13 @@ class FakeTmux(TmuxServer):
         self.pids: dict[str, int] = {}
         """The pid tmux started in each pane — what ``pane_pid`` answers. Unset
         means tmux cannot say, which the identity check reads as "cannot tell"."""
+        self.started: datetime | None = None
+        """When the server started — what ``#{start_time}`` answers. The server the
+        fake begins with never says, so ids alone decide as they did before the
+        question was asked; a spawn that brings a server up on a socket with none
+        (a reboot, a hand-run `kill-server`) sets it, as the real one's
+        `new-session` starts a new server. Kept to the microsecond where tmux
+        rounds down to the second, so a test never waits out a second boundary."""
         self.spawned: list[dict[str, object]] = []
         self.refuse_resize: str | None = None
         """What tmux says when it refuses the resize ``spawn_window`` makes after
@@ -289,6 +296,8 @@ class FakeTmux(TmuxServer):
         # listening and exits 0 — so "the next asq / fleet spawn starts a fresh
         # server", stated in the command's docstring and in docs/fleet.md, is
         # exercisable rather than merely claimed.
+        if not self.running:
+            self.started = datetime.now(tz=UTC)
         self.running = True
         self._counter += 1
         pane_id = f"%{self._counter}"
@@ -345,8 +354,8 @@ class FakeTmux(TmuxServer):
     # the server could not be asked, and that single distinction is `reachable()`
     # already — it raises for a denied socket (`socket_denied`), a wedged one
     # (`answers_raises`) and an unrunnable client (`exec_unavailable`), and is
-    # False (never raises) for a server that is simply not running. Deriving all
-    # four from it keeps the fake from drifting from the real contract.
+    # False (never raises) for a server that is simply not running. Deriving every
+    # one from it (the start time too) keeps the fake from drifting from the real contract.
     def sessions_or_raise(self) -> list[str]:
         self.reachable()
         return self.list_sessions()
@@ -362,6 +371,10 @@ class FakeTmux(TmuxServer):
     def pane_facts_or_raise(self, pane_id: str) -> PaneFacts | None:
         self.reachable()
         return self.pane_facts(pane_id)
+
+    def started_at(self) -> datetime | None:
+        self.reachable()
+        return self.started if self._read() else None
 
     def pane_pid(self, pane_id: str) -> int | None:
         self.binary()
@@ -9854,3 +9867,83 @@ def test_a_row_spawned_before_the_launch_spec_is_refused_its_replay_before_the_s
         session = store.get_session(agent.session_id or "")
     assert live is not None and live.id == agent.id and live.launch_spec is None
     assert session is not None and session.state == "working", "the session is not marked"
+
+
+# --- the final review of #203 ------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("act", ["stop", "shutdown --force", "restart"])
+def test_a_row_that_outlived_its_server_never_acts_on_another_projects_pane(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    plain_project: ProjectInfo,
+    act: str,
+) -> None:
+    """Review of #203, final round, FLEET-1: a pane id is unique for one SERVER's
+    lifetime. A reboot or a hand-run `kill-server` leaves A's rows live, and B's first
+    spawn starts a fresh server that numbers its panes from the start again, so B's
+    manager took the id A's manager had. Asked about by id, B's pane answered for A's
+    row: A's dead manager listed as `waiting`, a board write in A nudged B's manager,
+    and stopping, shutting down or restarting A's manager typed `/exit` into B's and
+    killed its window. A server that started after the row was written holds none of
+    the row's panes: the row is lost, and ending it touches nothing of B's."""
+    a_manager = fleet_service.spawn(project, "manager").agent
+    _board_session(a_manager, "waiting")
+    tmux.kill_server()
+    tmux._counter = 0  # the next server numbers from the start again
+    b_manager = fleet_service.spawn(plain_project, "manager").agent
+    assert b_manager.pane_id == a_manager.pane_id  # the shape under test
+    tmux.set_command(b_manager.pane_id, "claude")  # B's agent is up and reads input
+
+    [listed] = fleet_service.list_agents(project)
+    assert (listed.agent.id, listed.state, listed.detail) == (a_manager.id, "lost", "pane gone")
+    assert fleet_service.nudge_manager(project.id, reason="a board write in A") is False
+
+    if act == "stop":
+        ended = fleet_service.stop(project, "manager").agent
+        assert ended.id == a_manager.id and ended.ended_at is not None
+    elif act == "shutdown --force":
+        report = fleet_service.shutdown(project, force=True)
+        assert [row.id for row in report.stopped] == [a_manager.id] and report.failed == []
+    else:
+        restarted = fleet_service.restart(project, "manager")
+        assert restarted.replaced.id == a_manager.id and not restarted.was_running
+        assert restarted.started.pane_id != b_manager.pane_id
+
+    assert [typed for typed in tmux.typed if typed[0] == b_manager.pane_id] == []
+    assert b_manager.pane_id not in tmux.killed and b_manager.pane_id in tmux.facts
+    [b_listed] = fleet_service.list_agents(plain_project)
+    assert (b_listed.agent.id, b_listed.state) == (b_manager.id, "waiting")
+
+
+def test_a_row_that_outlived_its_server_is_not_its_own_projects_newer_agent(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """The same reuse inside ONE project reaches the row through its own session's
+    window list, before any lookup by id alone: after the restart of the server, the
+    project's next spawn (coder-2, as the stale coder-1 still holds its label) took the
+    stale manager's id in the project's own session, and the manager's restart typed
+    its `/exit` into coder-2. Neither name tmux keeps tells them apart — a relabelled
+    window keeps its first name — the server's start does."""
+    manager = fleet_service.spawn(project, "manager").agent
+    coder = _coder(project)
+    tmux.kill_server()
+    tmux._counter = 0
+    newer = _coder(project)
+    assert newer.label == "coder-2" and newer.pane_id == manager.pane_id
+
+    states = {s.agent.label: s.state for s in fleet_service.list_agents(project)}
+    assert states == {"manager": "lost", "coder-1": "lost", "coder-2": "waiting"}
+
+    restarted = fleet_service.restart(project, "manager")
+    assert restarted.replaced.id == manager.id and not restarted.was_running
+    # The replacement takes the stale coder-1's id in turn — and is not coder-1's either.
+    assert restarted.started.pane_id == coder.pane_id
+    fleet_service.stop(project, "coder-1")
+
+    touched = {pane for pane, _, _ in tmux.typed} | set(tmux.killed)
+    assert newer.pane_id not in touched, "coder-2 was never typed into nor killed"
+    assert coder.pane_id not in tmux.killed, "the new manager was not stopped for coder-1"
+    states = {s.agent.label: s.state for s in fleet_service.list_agents(project)}
+    assert states == {"coder-2": "waiting", "manager": "waiting"}

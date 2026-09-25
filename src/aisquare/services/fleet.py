@@ -906,10 +906,35 @@ def _server_answers(srv: TmuxServer) -> bool:
     return srv.answers()
 
 
+def _outlived(agent: FleetAgent, server_started: datetime | None) -> bool:
+    """Whether ``agent``'s row was written before its server started — so no pane there is its.
+
+    A pane id names a pane of one server's lifetime only: the next server on
+    the socket numbers from ``%0`` again. A reboot or a hand-run ``tmux -L asq
+    kill-server`` leaves live rows behind, and the first spawn in ANY project
+    starts a fresh server on the shared socket, whose panes take those rows'
+    ids: another project's manager, or a newer agent of the row's own project.
+    Asked about by id, that pane answered for the stale row, and ``stop``,
+    ``shutdown``, ``restart`` and ``switch`` typed ``/exit`` into it and killed
+    it (review of #203, final round, FLEET-1).
+
+    The row is written after its window exists (``_record``), so the server
+    that holds its pane was already running at ``created_at``; a server that
+    started later holds none of its panes. tmux reports the start rounded down
+    to the second, which can only err toward the row. Neither name tmux keeps
+    could say this: both projects' managers are called ``manager``, a
+    relabelled agent's window keeps its first name (:func:`_relabel`), and a
+    codename ``rename`` that tmux never heard of leaves the row's own panes
+    under another session's name. ``None`` — tmux did not say when it started —
+    judges nothing, and the id alone decides as it did before.
+    """
+    return server_started is not None and server_started > agent.created_at
+
+
 def _observe(
     srv: TmuxServer, tmux_session: str | None, agents: Sequence[FleetAgent]
 ) -> dict[str, _PaneView] | None:
-    """Pane facts for every live agent, or ``None`` when tmux cannot be asked at all.
+    """Row id → the facts of that row's pane, or ``None`` when tmux cannot be asked at all.
 
     One ``list-panes`` per project answers for every window in the session; a
     pane missing there is asked about individually, because a codename rename
@@ -921,8 +946,15 @@ def _observe(
     answers every one of those queries with an empty answer and no exception, so
     an empty result set is never taken as "every pane is gone" until
     :func:`_server_answers` has heard the server speak. That probe runs only in
-    the one case it can change — no pane answered at all — so the ordinary
-    listing still costs the same two commands.
+    the one case it can change — no pane answered at all.
+
+    Keyed by the ROW, not by the pane id, because an id alone does not name the
+    row's pane: a row that outlived its server holds an id the next server gives
+    to another agent (:func:`_outlived`). Such a row is given no view, so it
+    reads ``lost`` and not as the other agent's state, and nothing that acts on
+    a view — a listing's reconcile, ``reap``, a restart — takes that agent's
+    pane for the row's. The server is asked when it started only once some pane
+    has answered: with nothing to judge, the question is not asked.
     """
     try:
         windows = (
@@ -936,7 +968,7 @@ def _observe(
         for agent in agents:
             window = windows.get(agent.pane_id)
             if window is not None:
-                seen[agent.pane_id] = _PaneView(
+                seen[agent.id] = _PaneView(
                     window.dead,
                     window.dead_status,
                     window.current_command,
@@ -951,7 +983,7 @@ def _observe(
                 continue
             facts = srv.pane_facts(agent.pane_id)
             if facts is not None:
-                seen[agent.pane_id] = _PaneView(
+                seen[agent.id] = _PaneView(
                     facts.dead,
                     facts.dead_status,
                     facts.current_command,
@@ -959,6 +991,13 @@ def _observe(
                 )
         if live and not seen and not _server_answers(srv):
             return None
+        if seen:
+            started = srv.started_at()
+            seen = {
+                agent.id: seen[agent.id]
+                for agent in agents
+                if agent.id in seen and not _outlived(agent, started)
+            }
         return seen
     except TmuxError:
         return None
@@ -1089,7 +1128,7 @@ def _status(
     tmux_session: str | None,
     now: datetime,
 ) -> FleetAgentStatus:
-    pane = observed.get(agent.pane_id) if observed is not None else None
+    pane = observed.get(agent.id) if observed is not None else None
     state, detail = _derive(agent, session, pane, observed=observed is not None, now=now)
     return FleetAgentStatus(
         agent=agent, state=state, detail=detail, session=session, tmux_session=tmux_session
@@ -2158,7 +2197,7 @@ def _end_dead_rows(
         for agent in agents
         if agent.ended_at is None
         and (observed := views.get(agent.tmux_socket)) is not None
-        and (pane := observed.get(agent.pane_id)) is not None
+        and (pane := observed.get(agent.id)) is not None
         and pane.dead
     ]
     if not dead:
@@ -2216,7 +2255,7 @@ def _lingering_windows(
     owners: dict[tuple[str, str], FleetAgent] = {}
     for agent in agents:
         observed = views.get(agent.tmux_socket)
-        pane = observed.get(agent.pane_id) if observed else None
+        pane = observed.get(agent.id) if observed else None
         if pane is None or not pane.dead:
             continue
         key = (agent.tmux_socket, agent.pane_id)
@@ -2494,12 +2533,18 @@ def _stop_row(
         was already safe — ``_tmux`` raises on the timeout, through either twin
         — so what changes here is the answered-but-refused case, which now
         raises and lands in ``_verify_gone``'s "could not be asked" branch.
+
+        Either read finds a pane by its id, and on a server that started after
+        the row was written that pane is another agent's (:func:`_outlived`):
+        the row's own is gone with the server it ran on, which is what ``None``
+        says. Asked of tmux only once a pane has answered, and strictly, as the
+        reads before it.
         """
         for window in srv.windows_or_raise(session):
             if window.pane_id == agent.pane_id:
-                return window
+                return None if _outlived(agent, srv.started_at()) else window
         facts = srv.pane_facts_or_raise(agent.pane_id)
-        if facts is None:
+        if facts is None or _outlived(agent, srv.started_at()):
             return None
         return WindowInfo(
             session=session,
@@ -2551,7 +2596,11 @@ def _stop_row(
         # agent's claims to the next worker (review of #121, round 9). The comment
         # it carried, "already gone — which is what the kill wanted", is still true
         # for a pane that really is gone: `_verify_gone` looks again and says so.
-        srv.kill_window(agent.pane_id)
+        # A window `_window` did not find is not killed at all: gone is what the kill
+        # wanted, and on a server younger than the row the id names ANOTHER agent's
+        # pane (`_outlived`), whose window a `--force` stop or a shutdown killed.
+        if window is not None:
+            srv.kill_window(agent.pane_id)
     except TmuxError as exc:
         confirmed = _verify_gone(_window, agent.label, exc)
         # …but never at the cost of a status already READ: a pane seen dead with
@@ -4157,12 +4206,17 @@ def restart(
 
 
 def _pane_alive(agent: FleetAgent) -> bool:
-    """Whether the row's pane exists and has not died — ``False`` when tmux cannot say."""
+    """Whether the row's pane exists and has not died — ``False`` when tmux cannot say.
+
+    A pane under the row's id on a server younger than the row is another
+    agent's (:func:`_outlived`), so it is not the row's pane alive.
+    """
+    srv = server_for(agent.tmux_socket)
     try:
-        facts = server_for(agent.tmux_socket).pane_facts(agent.pane_id)
+        facts = srv.pane_facts(agent.pane_id)
+        return facts is not None and not facts.dead and not _outlived(agent, srv.started_at())
     except TmuxError:
         return False
-    return facts is not None and not facts.dead
 
 
 def project_of(agent: FleetAgent) -> ProjectInfo:
@@ -4367,7 +4421,7 @@ def reap(project: ProjectInfo | None = None, *, server_down: bool = False) -> Re
                     observed = views.get(agent.tmux_socket)
                     if observed is None:
                         continue  # that socket could not be asked: nothing is marked
-                    pane = observed.get(agent.pane_id)
+                    pane = observed.get(agent.id)
                     if (pane is None or pane.dead) and _handed_over(
                         agent,
                         store.get_session(agent.session_id) if agent.session_id else None,
@@ -4549,6 +4603,8 @@ def nudge_manager(project_id: str, *, reason: str) -> bool:
             facts = srv.pane_facts(manager.pane_id)
             if facts is None or facts.dead or not _agent_running(facts.current_command):
                 return False
+            if _outlived(manager, srv.started_at()):
+                return False  # the id is another agent's on a newer server
             pane = _PaneView(
                 facts.dead,
                 facts.dead_status,

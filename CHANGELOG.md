@@ -178,6 +178,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   last, whatever `user_version` says. The `onboarded_at` backfill comes with its
   column, so the projects of a store that skipped v17 stay listed. The other
   line's tables, columns and rows are left alone, and no step is renumbered.
+- **A fleet row that outlived its tmux server never acts on the pane that took
+  its id.** Pane ids are unique for one server's lifetime. After a reboot or a
+  hand-run `tmux -L asq kill-server`, the first spawn in any project starts a
+  fresh server that hands the same ids out again, and an old row, asked about by
+  id, answered with the new agent's pane — another project's manager, or a
+  newer agent of its own project. It listed as that agent's state, a board
+  write nudged that agent, and `fleet stop`, `shutdown`, `restart` and `switch`
+  of the old row typed `/exit` into it and killed its window. A server that
+  started after a row was written holds none of its panes (`#{start_time}`,
+  `TmuxServer.started_at`): the row reads `✗ lost`, a plain `reap` records it,
+  and ending it touches nothing else.
 
 ### Added
 - **The navigator is resizable** (#137). The line between the sidebar and the

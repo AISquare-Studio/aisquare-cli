@@ -410,6 +410,91 @@ def test_a_re_attach_that_cannot_be_recorded_leaves_the_earlier_bindings_key_in_
     assert not path.exists()
 
 
+def test_a_failure_after_the_bindings_commit_never_puts_the_earlier_key_under_it(
+    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The put-back is for a binding that was NOT recorded. ``set_project_explainability``
+    read the row back after its commit, and a read that failed there was taken for a
+    refused write: the stg key went back into the file under a row already committed
+    to prod (review of #170, D1b round 2, B2)."""
+    config = _settings()
+    project = _project(tmp_path / "api")
+    ops.attach_project_key(project, "stg-key-aaaa", target="stg")
+    reads = SqliteStore.project_explainability
+
+    def failing_once_committed(self: SqliteStore, project_id: str) -> Any:
+        found = reads(self, project_id)
+        if found is not None and found.target == "prod":
+            raise sqlite3.OperationalError("disk I/O error")
+        return found
+
+    monkeypatch.setattr(SqliteStore, "project_explainability", failing_once_committed)
+    binding = ops.attach_project_key(project, "prod-key-bbbb", target="prod")
+    monkeypatch.setattr(SqliteStore, "project_explainability", reads)
+
+    assert binding.target == "prod"
+    prod = ops.resolve_target(config.explainability, "prod", project_id=project.id)
+    assert (prod.api_key, prod.key_source) == ("prod-key-bbbb", "project")
+    stg = ops.resolve_target(config.explainability, "stg", project_id=project.id)
+    assert stg.key_source != "project", "the stg key is nowhere a prod row can hand it out"
+
+
+def test_a_put_back_that_fails_keeps_the_error_that_caused_it_and_not_the_refused_key(
+    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The put-back raised over the refusal, so the operator read ENOSPC and not "database
+    is locked", and the file kept the key just refused under the earlier binding
+    (review of #170, D1b round 2, B3)."""
+    config = _settings()
+    project = _project(tmp_path / "api")
+    ops.attach_project_key(project, "stg-key-aaaa", target="stg")
+    writes = service.store_project_api_key
+
+    def refuse(self: SqliteStore, *_args: object, **_kwargs: object) -> None:
+        raise sqlite3.OperationalError("database is locked")
+
+    def full_disk_for_the_put_back(project_id: str, key: str) -> Path:
+        if key == "stg-key-aaaa":
+            raise OSError(28, "No space left on device")
+        return writes(project_id, key)
+
+    record = SqliteStore.set_project_explainability
+    monkeypatch.setattr(SqliteStore, "set_project_explainability", refuse)
+    monkeypatch.setattr(ops, "store_project_api_key", full_disk_for_the_put_back)
+    with pytest.raises(sqlite3.OperationalError, match="database is locked") as refused:
+        ops.attach_project_key(project, "prod-key-bbbb", target="prod")
+    monkeypatch.setattr(SqliteStore, "set_project_explainability", record)
+    monkeypatch.setattr(ops, "store_project_api_key", writes)
+
+    assert any("could not be put back" in note for note in refused.value.__notes__)
+    path = service.project_key_path(project.id)
+    assert not path.exists(), "the refused prod key is not left under the stg binding"
+    stg = ops.resolve_target(config.explainability, "stg", project_id=project.id)
+    assert stg.key_source != "project" and stg.api_key != "prod-key-bbbb"
+
+
+def test_a_key_file_that_is_not_utf8_is_no_key_and_is_replaced_by_the_next_attach(
+    home: Path, tmp_path: Path, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The resolver raised ``UnicodeDecodeError`` on it, so ``key show`` and ``status``
+    failed, and the attach read it for its put-back and raised the same way, so the
+    one command that could repair it never could (review of #170, D1b round 2, B4)."""
+    config = _settings()
+    project = _project(tmp_path / "api")
+    path = _attach(project)
+    path.write_bytes(b"\xff\xfe not a key")
+    monkeypatch.chdir(project.root)
+
+    unreadable = ops.resolve_target(config.explainability, "stg", project_id=project.id)
+    assert unreadable.key_source != "project"
+    shown = runner.invoke(app, ["explainability", "key", "show"])
+    assert shown.exit_code == 0, shown.output
+
+    ops.attach_project_key(project, PROJECT_KEY, target="stg")
+    repaired = ops.resolve_target(config.explainability, "stg", project_id=project.id)
+    assert (repaired.api_key, repaired.key_source) == (PROJECT_KEY, "project")
+
+
 def test_key_set_refuses_a_target_this_machine_does_not_have(
     home: Path, tmp_path: Path, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
 ) -> None:

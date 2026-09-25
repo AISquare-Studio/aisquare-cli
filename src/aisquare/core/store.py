@@ -2837,14 +2837,30 @@ class SqliteStore:
         as minted and the key it replaced is never forgotten while still live.
         ``minted`` itself, if it was still owed, is owed no more
         (:meth:`_owe_no_revocation`): it is the project's key again.
+
+        THE COMMIT IS THE LAST THING THAT CAN FAIL. The binding returned is
+        built from the values written, not read back after the commit. Both
+        callers (``attach_project_key`` and ``destinations.mint_key``) take a
+        raise from here to mean "nothing was recorded" and put the key file
+        back as it was. A read-back that failed after the commit put the
+        earlier key under a row already committed to the new target: a prod
+        binding answering with the stg key (review of #170, D1b round 2, B2).
         """
+        now = _now_iso()
+        stored = ProjectExplainability(
+            project_id=project_id,
+            target=target,
+            key_path=Path(str(key_path)),
+            set_at=datetime.fromisoformat(now),
+            set_by=set_by,
+        )
         with self._conn:
             self._conn.execute(
                 "INSERT INTO project_explainability (project_id, target, key_path, set_at, "
                 "set_by) VALUES (?, ?, ?, ?, ?) "
                 "ON CONFLICT (project_id) DO UPDATE SET target = excluded.target, "
                 "key_path = excluded.key_path, set_at = excluded.set_at, set_by = excluded.set_by",
-                (project_id, target, str(key_path), _now_iso(), set_by),
+                (project_id, target, str(key_path), now, set_by),
             )
             self._owe_revocation(project_id, keep=minted)
             if minted is not None:
@@ -2853,8 +2869,6 @@ class SqliteStore:
                     (minted, project_id),
                 )
                 self._owe_no_revocation(project_id, minted)
-        stored = self.project_explainability(project_id)
-        assert stored is not None  # just written
         return stored
 
     def clear_project_explainability(self, project_id: str) -> bool:

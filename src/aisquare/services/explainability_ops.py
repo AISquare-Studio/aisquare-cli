@@ -402,7 +402,11 @@ def _project_api_key(project_id: str | None, target_name: str) -> str | None:
     ``tests/test_one_key_resolver.py`` pins that). A binding for another
     deployment is not a key for this one — the cross-deployment rule — and a
     binding whose file is gone reads as no project key, so the next rung
-    answers; ``explainability key show`` is where that is reported.
+    answers; ``explainability key show`` is where that is reported. So does a
+    file that is not UTF-8, which no key is: it raised ``UnicodeDecodeError``
+    out of the resolver, so ``status`` and ``key show`` failed on it and every
+    launch in the project read its target as unreadable (review of #170, D1b
+    round 2, B4).
     """
     if project_id is None:
         return None
@@ -411,7 +415,7 @@ def _project_api_key(project_id: str | None, target_name: str) -> str | None:
         return None
     try:
         value = binding.key_path.read_text(encoding="utf-8").strip()
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         return None
     return value or None
 
@@ -461,7 +465,7 @@ def project_key_binding(project_id: str) -> ProjectExplainability | None:
 def key_owner() -> str | None:
     """Who is attaching a key: the signed-in email when there is one, else the OS user.
 
-    ONE answer for ``key set`` and the UI's *Attach key*, so ``key show``
+    ONE answer for ``key set`` and the Setup form's *this project only*, so ``key show``
     names the same person for the same act wherever it was done — the UI
     recorded ``$USER`` alone while the CLI recorded the email (review of #170).
     """
@@ -486,7 +490,7 @@ class MintedKeyInPlace(Exception):
 def attach_project_key(
     project: ProjectInfo, value: str, *, target: str, refuse_minted: bool = False
 ) -> ProjectExplainability:
-    """Attach ``value`` as ``project``'s own key for ``target`` — ``key set`` and *Attach key*.
+    """Attach ``value`` as ``project``'s own key for ``target``: ``key set``, and *Save setup*.
 
     Attaching a key is a deliberate act, so the project is REGISTERED first
     (``onboard_project``, as ``team on`` does): the binding is a FOREIGN KEY to
@@ -513,6 +517,15 @@ def attach_project_key(
     key raises :class:`MintedKeyInPlace` and nothing is written. Asked here,
     in the session the write opens anyway: the tab asked it through a store
     session of its own, then again beside this one (review of #172).
+
+    A raise from ``set_project_explainability`` means nothing was committed:
+    its commit is the last thing it does. A file that is not UTF-8 is no key
+    and is replaced like a missing one; reading it for the put-back raised on
+    every attach, so it could never be repaired (review of #170, D1b round 2,
+    B4). A put-back that fails does not replace the error that caused it. The
+    file is removed instead, so the earlier binding reads as having no file
+    (``key show`` says so) rather than holding the key just refused, and the
+    error carries a note saying so (B3).
     """
     from aisquare.core.store import store_session  # lazy, as in project_key_binding
 
@@ -524,7 +537,7 @@ def attach_project_key(
         earlier = None
         if store.project_explainability(project.id) is not None:
             # A binding whose file is gone keeps no file: it stays as `key show` saw it.
-            with contextlib.suppress(OSError):
+            with contextlib.suppress(OSError, UnicodeDecodeError):
                 earlier = project_key_path(project.id).read_text(encoding="utf-8")
         minted = None
         if destination is not None and earlier is not None and earlier.strip() == value.strip():
@@ -534,12 +547,34 @@ def attach_project_key(
             return store.set_project_explainability(
                 project.id, target=target, key_path=path, set_by=key_owner(), minted=minted
             )
-        except BaseException:
-            if earlier is None:
-                clear_project_api_key(project.id)
-            else:
-                store_project_api_key(project.id, earlier)
+        except BaseException as refused:
+            _put_back(project.id, earlier, refused)
             raise
+
+
+def _put_back(project_id: str, earlier: str | None, refused: BaseException) -> None:
+    """Put the project's key file back as it was before a refused attach.
+
+    ``None`` means there was no file (or none a binding named), so none is
+    left. When the earlier key cannot be written back, the file is removed and
+    ``refused`` gets a note. The new key must not stay under the earlier
+    binding, which may be for another deployment.
+    """
+    try:
+        if earlier is None:
+            clear_project_api_key(project_id)
+        else:
+            store_project_api_key(project_id, earlier)
+    except OSError as undo:
+        with contextlib.suppress(OSError):
+            clear_project_api_key(project_id)
+        path = project_key_path(project_id)
+        left = (
+            f"it still holds the key just refused: delete {path}"
+            if path.exists()
+            else "it was removed, so the project has no key file until one is attached again"
+        )
+        refused.add_note(f"the key file could not be put back as it was ({undo}); {left}")
 
 
 def effective_settings(

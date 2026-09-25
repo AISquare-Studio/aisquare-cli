@@ -549,6 +549,9 @@ def use(
         # project already has THIS destination's key must not depend on an
         # exported $AISQUARE_EXPLAINABILITY_TARGET, or every `use` under it
         # mints again, and the roster is bound with the other deployment's key.
+        # Launches resolve the same one: the destination comes before the
+        # variable in `resolve_target`, so the target `use` reports is the one
+        # the project's launches use (review of #172, D2 round 2).
         target = ops.resolve_target(config.explainability, target_name, project_id=project.id)
         key_note: str
         minted = None
@@ -660,6 +663,21 @@ def use(
         typer.echo(f"  next:     {_next_check(target, project_ref)}")
 
 
+def _unused_env_note(target: ops.ResolvedTarget) -> str:
+    """Said beside the target when an exported variable names another one and is not used.
+
+    The project's destination comes before ``$AISQUARE_EXPLAINABILITY_TARGET``
+    (:func:`ops.resolve_target`), so an operator who exported it for a cutover
+    reads here that this project is not moved by it, and what does move it.
+    """
+    if target.unused_env_target is None:
+        return ""
+    return (
+        f" (the project's destination; ${ops.TARGET_ENV_VAR}={target.unused_env_target} "
+        "applies to projects without one, --target overrides both)"
+    )
+
+
 @app.command()
 def status(
     target_name: Annotated[str | None, _TARGET_OPTION] = None,
@@ -721,6 +739,8 @@ def status(
                 {
                     "enabled": settings.enabled,
                     "target": target.name,
+                    # What named it: argument, destination, env or config (#142).
+                    "target_source": target.target_source,
                     "gateway": target.gateway_url,
                     "gateway_source": target.gateway_source,
                     # Where `key_project`'s traces land (#142); null until chosen.
@@ -781,7 +801,7 @@ def status(
         )
     else:
         typer.echo(f"enabled:  {settings.enabled}")
-        typer.echo(f"target:   {target.name}")
+        typer.echo(f"target:   {target.name}{_unused_env_note(target)}")
         typer.echo(f"gateway:  {target.gateway_url or '(unset)'} [{target.gateway_source}]")
         # `destination:` — the same word as the JSON key, because
         # tests/test_redaction_surface.py holds every human label to a key.

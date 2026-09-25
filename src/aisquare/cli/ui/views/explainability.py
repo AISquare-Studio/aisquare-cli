@@ -512,13 +512,13 @@ class ExplainabilityView(VerticalScroll):
         "this project only" ticked, the key is attached to the project this
         page's agents launch into, instead of written to the machine file —
         ``key set``'s write, the one :func:`attach_project_key` makes — and for
-        ``key set``'s deployment: the one typed, else the one an exported
-        ``$AISQUARE_EXPLAINABILITY_TARGET`` or the project's destination names
-        (#142), else the machine's. When that is not the deployment the other
-        typed settings go to, the save is refused before anything is written:
-        one press wrote a gateway to one deployment and bound the key to
-        another (review of #172). Never over a key the CLI minted (#142): that
-        is refused before anything is written too.
+        ``key set``'s deployment: the one typed, else the one the project's
+        launches resolve — its destination (#142), else an exported
+        ``$AISQUARE_EXPLAINABILITY_TARGET``, else the machine's. When that is not
+        the deployment the other typed settings go to, the save is refused before
+        anything is written: one press wrote a gateway to one deployment and bound
+        the key to another (review of #172). Never over a key the CLI minted
+        (#142): that is refused before anything is written too.
         """
         target = self.query_one("#explainability-target", Input).value.strip()
         switch = self.query_one("#explainability-switch", Checkbox).value

@@ -112,8 +112,11 @@ _SDK_MODULE = "aisquare.explainability"
 #: this package rather than merging with it.
 INSTALL_HINT = _EXTRA_INSTALL_HINT
 
-#: Override the configured target for one command, e.g. during a cutover:
-#: ``AISQUARE_EXPLAINABILITY_TARGET=prod aisquare doctor --live``.
+#: Override the machine's configured target for one command, e.g. during a
+#: cutover: ``AISQUARE_EXPLAINABILITY_TARGET=prod aisquare doctor --live``. A
+#: project whose traces were pointed somewhere with ``use`` (#142) keeps its
+#: destination's deployment; ``--target`` is what overrides that (see
+#: :func:`resolve_target`).
 TARGET_ENV_VAR = "AISQUARE_EXPLAINABILITY_TARGET"
 
 #: The SDK's own name for the gateway; accepted as a fallback so a shell that
@@ -168,6 +171,13 @@ class ResolvedTarget:
     """The project the key was resolved FOR (#141); ``None`` for a machine-level read."""
     destination: TraceDestination | None = None
     """Where the project's traces land (#142), when one was chosen and ``project_id`` was given."""
+    target_source: str = "config"
+    """What named the target: "argument" (``--target``), "destination" (the project's,
+    #142), "env" (``$AISQUARE_EXPLAINABILITY_TARGET``) or "config" (the machine's)."""
+    unused_env_target: str | None = None
+    """The target an exported ``$AISQUARE_EXPLAINABILITY_TARGET`` names when the
+    project's destination won over it and names another, so a surface can say the
+    variable is not in play for this project; ``None`` otherwise."""
 
     @property
     def configured(self) -> bool:
@@ -277,6 +287,22 @@ def resolve_target(
 ) -> ResolvedTarget:
     """Fold the active target's overrides onto the top-level defaults.
 
+    THE TARGET is ``name`` (``--target``), then the project's destination
+    (#142, with ``project_id``), then ``$AISQUARE_EXPLAINABILITY_TARGET``, then
+    the machine's ``settings.target``, and ``target_source`` says which. The
+    destination comes BEFORE the variable, and this is the one place that
+    order is decided. The variable came first, so an exported
+    ``AISQUARE_EXPLAINABILITY_TARGET=stg`` moved every launch of a project whose
+    destination is on another deployment onto stg with the machine key, while
+    ``use``, which resolves the destination's deployment by name, reported that
+    deployment and the project's own key, and its next check passed (review of
+    #172, D2 round 2). The variable overrides the MACHINE's target for one
+    command. A destination is a choice recorded for one project, with a
+    workspace and a key of its own on its deployment. The explicit per-command
+    override over it is ``--target``. When the variable names another target
+    than the destination that won, ``unused_env_target`` carries it, so
+    ``status`` can say the variable is not in play for this project.
+
     Precedence for the gateway URL is the target, then the SDK's environment
     variable, then the top-level ``gateway_url`` — and the winning source is
     reported either way.
@@ -314,19 +340,23 @@ def resolve_target(
     ``tests/test_key_never_crosses_deployments.py``.
     """
     environ = os.environ if env is None else env
-    # THE DESTINATION NAMES THE TARGET (#142), between the explicit forms and
-    # the machine default: a project whose traces were pointed at a workspace
-    # on staging resolves the staging deployment, whatever the machine's
-    # default is — the same way its own key wins over the machine's. An
-    # explicit ``--target`` or the environment variable still wins, because
-    # both are someone saying so right now.
+    # THE DESTINATION NAMES THE TARGET (#142), after `--target` and before the
+    # variable and the machine default: a project whose traces were pointed at
+    # a workspace on staging resolves the staging deployment, whatever the
+    # machine's target is and whatever the shell exports — the same way its own
+    # key wins over the machine's. See the docstring for why the variable
+    # comes after it.
     destination = _project_destination(project_id)
-    chosen = (
-        name
-        or environ.get(TARGET_ENV_VAR)
-        or (destination.environment if destination is not None else None)
-        or settings.target
-    )
+    exported = environ.get(TARGET_ENV_VAR) or None
+    if name:
+        chosen, target_source = name, "argument"
+    elif destination is not None:
+        chosen, target_source = destination.environment, "destination"
+    elif exported is not None:
+        chosen, target_source = exported, "env"
+    else:
+        chosen, target_source = settings.target, "config"
+    unused_env_target = exported if target_source == "destination" and exported != chosen else None
     target = settings.targets.get(chosen, ExplainabilityTarget())
 
     gateway_url, source = target.gateway_url, "config"
@@ -360,6 +390,8 @@ def resolve_target(
         roles=tuple(roles),
         project_id=project_id,
         destination=destination,
+        target_source=target_source,
+        unused_env_target=unused_env_target,
     )
 
 

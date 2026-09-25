@@ -455,11 +455,16 @@ def test_the_destination_names_the_target_between_the_explicit_forms_and_the_def
     projected = ops.resolve_target(settings, None, project_id=project.id)
     assert projected.name == "stg" and projected.gateway_url == "https://stg.example"
     assert projected.destination is not None and projected.destination.workspace_name == "acme"
+    assert (machine.target_source, projected.target_source) == ("config", "destination")
     explicit = ops.resolve_target(settings, "prod", project_id=project.id)
-    assert explicit.name == "prod", "--target still wins"
+    assert (explicit.name, explicit.target_source) == ("prod", "argument"), "--target still wins"
     monkeypatch.setenv(ops.TARGET_ENV_VAR, "prod")
     by_variable = ops.resolve_target(settings, None, project_id=project.id)
-    assert by_variable.name == "prod", "so does the variable"
+    assert (by_variable.name, by_variable.target_source) == ("stg", "destination"), (
+        "the variable moves the machine's target, not a project's destination"
+    )
+    assert by_variable.unused_env_target == "prod", "and the resolution says it is not used"
+    assert ops.resolve_target(settings, None).name == "prod", "the machine still follows it"
 
 
 def test_describe_has_one_voice() -> None:
@@ -1586,14 +1591,22 @@ def test_every_write_that_takes_a_minted_uid_off_its_row_owes_it_in_the_same_com
         assert row is None or row.key_uid != "key-1", name
 
 
-def test_an_exported_target_does_not_make_use_mint_again(
+def test_an_exported_target_neither_makes_use_mint_again_nor_splits_it_from_the_launches(
     runner: CliRunner,
     idp: IdentityProviderStub,
     signed_in: iam.Session,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Whether the project has this destination's key is asked of the destination's deployment."""
+    """Whether the project has this destination's key is asked of the destination's deployment,
+    and so is the key its launches take.
+
+    ``use`` resolved the destination's deployment by name while launches let an
+    exported ``$AISQUARE_EXPLAINABILITY_TARGET`` win over the destination, so
+    ``use`` reported the project's key on ``local`` and every launch went to
+    ``stg`` with the machine key (review of #172, D2 round 2). This test pinned
+    the half ``use`` saw.
+    """
     monkeypatch.setenv(ops.TARGET_ENV_VAR, "stg")
     project = _project(tmp_path / "web")
     first = _json(runner, "explainability", "use", "acme/Frontend")
@@ -1605,6 +1618,17 @@ def test_an_exported_target_does_not_make_use_mint_again(
     with store_session() as store:
         row = store.project_destination(project.id)
     assert row is not None and row.key_uid == "key-1"
+    # What `launch` and `team spawn` resolve for the project, under the same shell.
+    launched = ops.resolve_target(load_config().explainability, project_id=project.id)
+    assert (launched.name, launched.key_source) == ("local", "project")
+    status = _json(runner, "explainability", "status", "--project", project.id)
+    assert (status["target"], status["target_source"], status["key_source"]) == (
+        "local",
+        "destination",
+        "project",
+    )
+    said = runner.invoke(app, ["explainability", "status", "--project", project.id])
+    assert f"${ops.TARGET_ENV_VAR}=stg applies to projects without one" in said.output
 
 
 def test_a_mint_over_a_minted_key_revokes_the_one_it_replaces(

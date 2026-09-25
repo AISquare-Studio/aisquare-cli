@@ -195,29 +195,31 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `project_destination`). The deployment the session belongs to becomes the
   project's explainability target with its gateway and hosted proxy filled in
   (`stg-api` → `stg`, `api` → `prod`; nothing typed, nothing enabled behind
-  your back); the one resolver consults it between `--target` and the machine
-  default. The CLI obtains a workspace `ingest:write` key on your behalf and
-  stores it as `key set` would — the API still refuses a sign-in token there
-  (AISquare-Studio-BE#3493), so until then the line says so and `key set` is the
-  way in — and binds this machine's agent identities to the chosen studio, which
-  is what makes spans land there. `status` shows `destination:` (the UI's
-  Explainability view `lands in`) and takes `--project`: it is the check `use`
-  names once tracing is on, since `doctor` resolves only the machine's key;
-  `whoami` gains a `traces:` line; `logout`, and *Sign out* on the fleet UI's
-  Accounts page, forget every key the CLI minted and leave hand-attached keys
-  alone. The key never crosses a deployment or a
-  workspace: a target `use` creates names its own key variable,
-  a machine key never stands in for the mint, launches take the proxy from the
-  same target as the key, `key set` binds to the destination's deployment, the
-  CLI never mints over a hand key, and a minted key that is replaced, cleared,
-  purged with its project or left behind by a move is revoked on the host that
-  minted it — a replaced one only once its replacement is recorded. Its uid is
-  never forgotten before the server confirms the revoke: the commit that takes
-  the key off its project records the revocation as owed (schema v22,
-  `pending_revocation`), and one that cannot be made yet — signed out, signed
-  in to another host, offline, refused — stays owed, is said by the command
-  that detached it, and is tried again by `use`, `logout` and `doctor --live`
-  (a `minted-keys` row names what is still live).
+  your back); the one resolver consults it after `--target` and before an
+  exported `$AISQUARE_EXPLAINABILITY_TARGET` and the machine default, so `use`
+  and the project's launches name one deployment, and `status` says when the
+  variable is not in play. The CLI obtains a workspace `ingest:write` key on
+  your behalf and stores it as `key set` would — the API still refuses a sign-in
+  token there (AISquare-Studio-BE#3493), so until then the line says so and
+  `key set` is the way in — and binds this machine's agent identities to the
+  chosen studio, which is what makes spans land there. `status` shows
+  `destination:` (the UI's Explainability view `lands in`) and takes
+  `--project`: it is the check `use` names once tracing is on, since `doctor`
+  resolves only the machine's key; `whoami` gains a `traces:` line; `logout`,
+  and *Sign out* on the fleet UI's Accounts page, forget every key the CLI
+  minted and leave hand-attached keys alone. The key never crosses a deployment
+  or a workspace: a target `use` creates names its own key variable, a machine
+  key never stands in for the mint, launches take the proxy from the same target
+  as the key, `key set` binds to the destination's deployment, the CLI never
+  mints over a hand key, and a minted key that is replaced, cleared, purged with
+  its project or left behind by a move is revoked on the host that minted it — a
+  replaced one only once its replacement is recorded. Its uid is never forgotten
+  before the server confirms the revoke: the commit that takes the key off its
+  project records the revocation as owed (schema v22, `pending_revocation`), and
+  one that cannot be made yet — signed out, signed in to another host, offline,
+  refused — stays owed, is said by the command that detached it, and is tried
+  again by `use`, `logout` and `doctor --live` (a `minted-keys` row names what
+  is still live).
 - **Project groups, pinning and manual order in the sidebar** (#140). A
   management layer only, like browser tab groups: a `project_group` table and
   `group_id` / `position` / `pinned_at` on the project row (schema v20); a

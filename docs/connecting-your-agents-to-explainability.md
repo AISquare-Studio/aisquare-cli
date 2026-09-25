@@ -352,8 +352,9 @@ so the hub's under `$AISQUARE_TEAM_HUB` — and a *Register roster* button that
 registers under it. The **Setup** form's workspace key field attaches a key to
 that project when **this project only** is ticked (the key is pasted, never
 echoed), bound to the deployment the form names, or — when the field is blank —
-the one an exported `$AISQUARE_EXPLAINABILITY_TARGET` or the project's
-destination names (#142), else the active one, as `key set` resolves it; typed
+the one the project's destination names (#142), else the one an exported
+`$AISQUARE_EXPLAINABILITY_TARGET` names, else the active one, as `key set` and
+the project's launches resolve it; typed
 beside other settings that would go to a different deployment, it is refused
 until the field names one. The client lane — the insights this CLI buffers and `ship` drains — still
 ships under the machine key, and `doctor --live` checks the machine's
@@ -389,12 +390,14 @@ reported on its own line:
   never answers for another one; the exception is the machine whose top-level
   gateway already is that deployment's. Launches, `fleet spawn` and
   `explainability env` in the project take the proxy **and** the key from this
-  target. `use` asks about this target whatever `AISQUARE_EXPLAINABILITY_TARGET`
-  says, and once tracing is on it ends with the check for what it set up:
-  `aisquare explainability status --target <name>` (plus `--project` when you
-  named one) for the project's own key, because `doctor` resolves only the
-  machine's; `aisquare doctor --live --target <name>` for a machine key; and
-  `key set` when there is no key yet.
+  target, whatever `AISQUARE_EXPLAINABILITY_TARGET` says: a project's destination
+  comes before that variable, which moves only the projects without one
+  (`--target` overrides both, and `status` says when the variable is not in
+  play). `use` asks about the same target, and once tracing is on it ends with
+  the check for what it set up: `aisquare explainability status --target <name>`
+  (plus `--project` when you named one) for the project's own key, because
+  `doctor` resolves only the machine's; `aisquare doctor --live --target <name>`
+  for a machine key; and `key set` when there is no key yet.
 - **key** — ingest still needs a workspace key (neither the gateway nor the
   hosted proxy accepts a sign-in token), so the CLI obtains one on your behalf
   unless the project already has its own, scoped to `ingest:write`, named

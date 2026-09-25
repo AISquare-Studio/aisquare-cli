@@ -2039,11 +2039,26 @@ def _type_prompt(srv: TmuxServer, pane_id: str, prompt: str, notes: list[str]) -
     has requested nothing — so tmux replaces every LF with a CR and the agent
     reads N submitted messages instead of one. That is not a slow start's cost
     to pay silently, so it is not typed; the note says what to do instead.
+
+    Never raises: it runs after the row is recorded, and ``restart`` and
+    ``switch`` read a raise out of ``spawn`` as "no replacement started" — they
+    gave the claims parked for a replacement that was up back to the pool,
+    announced its exit and woke the manager for a second worker (review of
+    #203, final round, FLEET-4). So a poll tmux will not answer (a wedged
+    server's timeout, an OS refusal) is a note, as a refused paste already was.
     """
     deadline = _monotonic() + PROMPT_TIMEOUT
     ready = False
     while True:
-        facts = srv.pane_facts(pane_id)
+        try:
+            facts = srv.pane_facts(pane_id)
+        except TmuxError as exc:
+            notes.append(
+                f"tmux could not be asked whether the agent is up ({exc}) — the prompt was "
+                "NOT typed. Send it once the agent is up: `aisquare fleet tell <label> …`, "
+                "or `aisquare fleet attach`"
+            )
+            return
         if facts is None or facts.dead:
             notes.append("the agent exited before the prompt could be typed")
             return

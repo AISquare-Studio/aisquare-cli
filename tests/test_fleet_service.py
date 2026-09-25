@@ -10072,3 +10072,52 @@ def test_a_switch_that_spawn_would_refuse_is_refused_before_the_stop(
         live = store.fleet_agent_by_label(project.id, agent.label, live_only=True)
     assert live is not None and live.id == agent.id
     assert _session_state(agent.session_id or "") == "working", "the session is not marked"
+
+
+@pytest.mark.parametrize("verb", ["switch", "restart"])
+def test_a_replacement_whose_prompt_poll_tmux_will_not_answer_keeps_the_claims(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    verb: str,
+) -> None:
+    """Review of #203, final round, FLEET-4: ``_type_prompt`` polls the new pane with
+    ``pane_facts``, which raises on a wedged server's timeout, and it runs after the
+    replacement's row is recorded. ``switch`` and ``restart`` read any raise out of
+    ``spawn`` as "no replacement started": a resumed replacement that was up on the
+    same session had its task put back in the pool, its exit announced and the manager
+    woken for a second worker, and the TmuxError went on to the caller (a traceback on
+    the CLI; the automatic worker died without a note). The poll is a note now, like
+    the paste it guards, and the hand-over completes."""
+    _two_slots_with_usage(monkeypatch, work=95, personal=10)
+    agent = fleet_service.spawn(project, "coder", worktree=False, account="2").agent
+    transcript = tmp_path / f"{agent.session_id}.jsonl"
+    transcript.write_text('{"type":"user"}\n', encoding="utf-8")
+    _with_transcript(agent, transcript)
+    task = _add_task(project, "Keep it")
+    assert team_service.claim_task(task.id, session_ref=agent.session_id or "").status == "doing"
+    before = set(tmux.facts)
+    real_facts = tmux.pane_facts
+
+    def wedged_for_the_newcomer(pane_id: str) -> PaneFacts | None:
+        if pane_id not in before:
+            raise TmuxError("tmux did not answer within 30s: display-message -p -t …")
+        return real_facts(pane_id)
+
+    monkeypatch.setattr(tmux, "pane_facts", wedged_for_the_newcomer)
+    if verb == "switch":
+        receipt: Any = fleet_service.switch(project, agent.label)
+    else:
+        receipt = fleet_service.restart(project, agent.label)
+    monkeypatch.setattr(tmux, "pane_facts", real_facts)
+
+    assert receipt.resumed and receipt.started.session_id == agent.session_id
+    assert any("could not be asked whether the agent is up" in note for note in receipt.notes)
+    with store_session() as store:
+        kept = store.get_task(task.id)
+    assert kept is not None and (kept.status, kept.claimed_by) == ("doing", agent.session_id)
+    assert _events(project, "task_released") == [] and _events(project, "agent_exited") == []
+    live = fleet_service.list_agents(project)
+    assert [status.agent.id for status in live] == [receipt.started.id]

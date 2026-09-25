@@ -246,9 +246,9 @@ def test_signing_out_on_the_accounts_page_clears_the_credits_line(
     current: dict[str, iam.Session | None] = {"session": session}
     monkeypatch.setattr(iam, "current_session", lambda api_url=None: current["session"])
 
-    def sign_out(_session: iam.Session) -> bool:
+    def sign_out(_session: iam.Session) -> auth_service.SignedOut:
         current["session"] = None
-        return True
+        return auth_service.SignedOut(revoked=True, restricted=True)
 
     monkeypatch.setattr(auth_service, "sign_out", sign_out)
 
@@ -431,9 +431,9 @@ def test_a_reading_in_flight_at_sign_out_is_never_painted(
 
     monkeypatch.setattr(credits_service, "for_destination", slow)
 
-    def sign_out(_session: iam.Session) -> bool:
+    def sign_out(_session: iam.Session) -> auth_service.SignedOut:
         current["session"] = None
-        return True
+        return auth_service.SignedOut(revoked=True, restricted=True)
 
     monkeypatch.setattr(auth_service, "sign_out", sign_out)
 

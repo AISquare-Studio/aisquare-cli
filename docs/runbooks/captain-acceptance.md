@@ -23,6 +23,12 @@ device is the headset; the browser's microphone prompt gets the headset mic.
 If the captain has never run in this home, `aisquare captain` first, and answer
 *Yes, I trust this folder* once in its window.
 
+Claude Code asks once per folder, and the captain's answer covers only its own
+brain folder. If step 2's project (alpha) has never been trusted under the
+config dir the fleet's coders run with, open `claude` in it once by hand and
+answer *Yes, I trust this folder* first. A new coder in an untrusted folder
+stops at its own trust dialog.
+
 ```text
 ⟨PASTE: aisquare captain voice --show-token⟩
 ```
@@ -56,7 +62,9 @@ when the captain asks (spawn needs your own words).
 Expect three tool calls with receipts: `ask_manager` (the manager's note seq),
 `spawn` (the new row, `confirm=true` only after your word), `paste` (chars and
 `submitted`). The captain reads the refusal aloud if it tried to spawn without
-your word.
+your word. The spawn tool needs a task for the coder, so when none names the
+work the captain adds one first: its `task` receipt sits before `spawn` in the
+log.
 
 ```sh
 aisquare captain log alpha --limit 8

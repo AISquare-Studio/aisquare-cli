@@ -1487,6 +1487,13 @@ def spawn(
         # the Accounts page's sign-in window carries them.
         command, carried = claude_accounts_service.carry_environment(command)
         env.update(carried)
+    # `auto` behind the explainability proxy is refused from the first tool call
+    # once the session baseline is past what the proxy's non-streaming forward
+    # survives (#150). The evidence is read NOW, before the window starts: past
+    # that the agent is starting, and neither its own session nor the store and
+    # transcript reads may land between the row and `_take_over` (review of
+    # #169, round 2). The note is said once the row is written, below.
+    evidence = auto_mode.spawn_evidence(mode)
     tmux_session = session_name(codename)
     width, height = size if size is not None else (DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT)
     try:
@@ -1550,14 +1557,13 @@ def spawn(
         cap=config.max_agents_per_project,
         onboard=onboard,
     )
-    # `auto` behind the explainability proxy is refused from the first tool call
-    # once the session baseline is past what the proxy's non-streaming forward
-    # survives (#150). Said on the receipt when this machine's transcripts say
-    # so; a warning, never a reason not to spawn. Asked once the row is written,
-    # so the restart it names is under the label the agent was recorded with
-    # (`_record` re-picks one taken meanwhile).
+    # The auto-mode note (#150), from the evidence read before the window: on the
+    # receipt when this machine's transcripts say so, a warning, never a reason
+    # not to spawn. Worded once the row is written, so the restart it names is
+    # under the label the agent was recorded with (`_record` re-picks one taken
+    # meanwhile); a sentence, no store or file read.
     with contextlib.suppress(Exception):
-        warning = auto_mode.spawn_note(mode, role=role, label=stored.label, config=config)
+        warning = auto_mode.spawn_note(evidence, role=role, label=stored.label, config=config)
         if warning is not None:
             notes.append(warning)
     if takes_over is not None and identity.session_id is not None:

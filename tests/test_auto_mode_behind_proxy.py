@@ -493,9 +493,11 @@ def test_a_transcript_doctor_may_not_stat_does_not_crash_doctor(
 
 
 def _note(mode: str | None, *, role: str = "coder", label: str = "coder-1") -> str | None:
-    """The spawn note as ``fleet.spawn`` asks for it: the mode, the role, the label the
-    row was recorded with, the loaded config."""
-    return auto_mode.spawn_note(mode, role=role, label=label, config=load_config().fleet)
+    """The spawn note as ``fleet.spawn`` asks for it: the evidence for the mode, the role,
+    the label the row was recorded with, the loaded config."""
+    return auto_mode.spawn_note(
+        auto_mode.spawn_evidence(mode), role=role, label=label, config=load_config().fleet
+    )
 
 
 def test_the_spawn_note_needs_auto_mode_a_proxy_and_evidence(

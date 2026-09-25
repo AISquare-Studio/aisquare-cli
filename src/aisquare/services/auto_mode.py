@@ -320,14 +320,40 @@ def doctor_check() -> DoctorCheck | None:
     return DoctorCheck(name=CHECK_NAME, status=CheckStatus.ok, detail=detail)
 
 
-def spawn_note(mode: str | None, *, role: str, label: str, config: FleetSettings) -> str | None:
+def spawn_evidence(mode: str | None) -> Baseline | None:
+    """What :func:`spawn_note` judges a spawn in ``mode`` by, or ``None`` for nothing to judge.
+
+    ``None`` unless the mode is ``auto`` and tracing is configured. Otherwise
+    this machine's baseline (:func:`measure_baseline`). ``fleet.spawn`` asks
+    BEFORE the agent's window starts. Asked after its row was written, the
+    store open and the dozen transcript reads sat between ``_record`` and the
+    hand-over's ``_take_over``, the window in which the agent's first hook
+    races that move. The new agent's own session could also be counted among
+    the recent ones and push out of the sample the refused session the
+    warning rested on (review of #169, round 2). Never raises: a warning is
+    not a reason not to spawn.
+    """
+    if mode != "auto":
+        return None
+    try:
+        if not explainability_service.tracing_configured():
+            return None
+        return measure_baseline()
+    except Exception:
+        return None
+
+
+def spawn_note(
+    baseline: Baseline | None, *, role: str, label: str, config: FleetSettings
+) -> str | None:
     """A receipt note for a spawn in ``auto`` mode that the evidence says will be refused.
 
-    Silent unless the mode is ``auto``, tracing is configured, AND a recent
-    session was refused or the measured baseline is above the line. A machine
-    with no transcript yet gets no note — the doctor line carries that case —
-    so a fresh install is not warned on every spawn about a size nobody has
-    measured. Never raises: a warning is not a reason not to spawn.
+    ``baseline`` is :func:`spawn_evidence`'s, measured before the window. Silent
+    unless there is some (the mode is ``auto`` and tracing is configured) AND a
+    recent session was refused or the measured baseline is above the line. A
+    machine with no transcript yet gets no note — the doctor line carries that
+    case — so a fresh install is not warned on every spawn about a size nobody
+    has measured.
 
     The way out it names has two steps: the ROLE's (:func:`_mode_step` on
     ``config``), for every agent spawned after it, and ``fleet restart <label>
@@ -344,15 +370,7 @@ def spawn_note(mode: str | None, *, role: str, label: str, config: FleetSettings
     it names ``fleet restart``'s flag, which every one of them can follow,
     never ``fleet spawn``'s (review of #164, round 1).
     """
-    if mode != "auto":
-        return None
-    try:
-        if not explainability_service.tracing_configured():
-            return None
-        baseline = measure_baseline()
-    except Exception:
-        return None
-    if not baseline.measured or not exposed(baseline):
+    if baseline is None or not baseline.measured or not exposed(baseline):
         return None
     if baseline.refused_sessions:
         why = (

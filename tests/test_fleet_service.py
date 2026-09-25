@@ -8859,6 +8859,59 @@ def test_the_spawn_note_names_the_restart_under_the_label_the_agent_was_recorded
     assert any(step in note for note in again.notes), again.notes
 
 
+def test_the_auto_mode_evidence_is_read_before_the_window_starts(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #169, round 2: the baseline behind the auto-mode note (#150) was read
+    after ``_record``, in the window in which the agent's first hook races ``_take_over``,
+    and by then the agent's own new session could be the newest "recent" one and push
+    the refused session out of the sample, so the warning was dropped. It is read before
+    the window starts. The note is still worded under the label ``_record`` settled on,
+    here one a parallel spawn made it re-pick (F10)."""
+    monkeypatch.setattr("aisquare.services.explainability.tracing_configured", lambda: True)
+    _coder(project, label="coder-auth")
+    refused = auto_mode.Sample(
+        session_id="s-hit",
+        role="coder",
+        started_at=datetime.now(tz=UTC),
+        tokens=80_000,
+        refusals=auto_mode.REFUSAL_THRESHOLD,
+    )
+    windows = len(tmux.spawned)
+
+    def measured() -> auto_mode.Baseline:
+        # Once the new window exists, its session is the newest and the refused one is gone.
+        return auto_mode.Baseline(() if len(tmux.spawned) > windows else (refused,))
+
+    monkeypatch.setattr(auto_mode, "measure_baseline", measured)
+    real = fleet_service.next_label
+    calls: list[str | None] = []
+
+    def racing(
+        project_: ProjectInfo,
+        role: str,
+        *,
+        wanted: str | None = None,
+        task_id: str | None = None,
+        store: object = None,
+    ) -> str:
+        calls.append(wanted)
+        if len(calls) == 1:
+            return "coder-auth"  # looked free a moment ago
+        return real(project_, role, wanted=wanted, task_id=task_id, store=store)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(fleet_service, "next_label", racing)
+
+    receipt = fleet_service.spawn(project, "coder", worktree=False, label="coder-auth")
+
+    assert receipt.agent.label == "coder-auth-2"
+    step = "`aisquare fleet restart coder-auth-2 --permission-mode acceptEdits`"
+    assert any(step in note for note in receipt.notes), receipt.notes
+
+
 def test_restarting_a_death_no_listing_recorded_announces_it_but_wakes_no_manager(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
 ) -> None:

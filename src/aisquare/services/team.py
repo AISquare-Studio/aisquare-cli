@@ -2373,26 +2373,47 @@ def _fleet_row_named(store: ContextStore, project_id: str) -> FleetAgent | None:
     return agent
 
 
+def _fleet_row(
+    store: ContextStore, session_id: str, project_id: str, *, allow_unbound: bool
+) -> FleetAgent | None:
+    """The live fleet row for a session: the ONE lookup both doors make, free to raise.
+
+    The row ``AISQUARE_FLEET_AGENT`` names (:func:`_fleet_row_named`), when it
+    records this session; otherwise the row bound to the session, if any. With
+    ``allow_unbound`` the named row is returned whoever it records, because that
+    is how a session comes to be bound: the briefing hands it to :func:`_adopt`,
+    which decides. Nothing else may take it on the name alone.
+
+    The briefing and ``task next`` each spelled this lookup out, with different
+    rules on purpose. Three review rounds of #116 running, a guard landed in one
+    copy and not the other: the session-identity check, the ended-row check,
+    the fail-open ``try`` (review of #116). With one lookup, the next guard has
+    one place to go.
+    """
+    named = _fleet_row_named(store, project_id)
+    if named is not None and (allow_unbound or named.session_id == session_id):
+        return named
+    return store.fleet_agent_for_session(project_id, session_id)
+
+
 def _fleet_row_for(store: ContextStore, session_id: str, project_id: str) -> FleetAgent | None:
     """The live fleet row a session *is* — the row already bound to that session.
 
     The name in the environment is accepted only when the row it names records
-    this very session; otherwise the row bound to the session, if any. So a
-    session that never went through the hook — ``task next --as coder-1`` from
-    the manager's shell, say — still resolves the same row as the pane itself,
-    and a nested child, which inherits the variable, resolves nothing (its
-    ``task next`` claimed its parent's task through the name alone in review
-    round 2 of #116). Fail-open: which task comes first is a preference, and an
-    unreadable row must not take ``task next`` down with it — but it is logged:
-    swallowed silently, a regression here (a renamed store method, a migrated
-    column) put every spawned agent back on oldest-first with nothing anywhere
-    saying the preference had stopped working (review of #116, round 5).
+    this very session; otherwise the row bound to the session, if any
+    (:func:`_fleet_row`). So a session that never went through the hook —
+    ``task next --as coder-1`` from the manager's shell, say — still resolves the
+    same row as the pane itself, and a nested child, which inherits the variable,
+    resolves nothing (its ``task next`` claimed its parent's task through the
+    name alone in review round 2 of #116). Fail-open: which task comes first is
+    a preference, and an unreadable row must not take ``task next`` down with it
+    — but it is logged: swallowed silently, a regression here (a renamed store
+    method, a migrated column) put every spawned agent back on oldest-first with
+    nothing anywhere saying the preference had stopped working (review of #116,
+    round 5).
     """
     try:
-        named = _fleet_row_named(store, project_id)
-        if named is not None and named.session_id == session_id:
-            return named
-        return store.fleet_agent_for_session(project_id, session_id)
+        return _fleet_row(store, session_id, project_id, allow_unbound=False)
     except Exception as exc:
         _log.warning(
             "the fleet row of session %s could not be read, so it has none (%s: %s)",
@@ -2570,9 +2591,7 @@ def _late_assignment(store: ContextStore, session: TeamSession) -> Assignment | 
 
 def _resolve_assignment(store: ContextStore, session_id: str, project_id: str) -> Assignment | None:
     """The body of :func:`_assignment`, free to raise; the rules are the section's."""
-    agent = _fleet_row_named(store, project_id)
-    if agent is None:
-        agent = store.fleet_agent_for_session(project_id, session_id)
+    agent = _fleet_row(store, session_id, project_id, allow_unbound=True)
     if agent is None:
         return None
     if agent.session_id != session_id and not _adopt(store, agent, session_id):
@@ -2581,8 +2600,8 @@ def _resolve_assignment(store: ContextStore, session_id: str, project_id: str) -
         # `task next` (`_fleet_row_for`) reads that row for the order. The
         # two doors read the same row now; this one used to give up here and
         # the agent lost its ASSIGNED TO YOU block while `task next` still put
-        # its task first (round 8 of #203).
-        agent = store.fleet_agent_for_session(project_id, session_id)
+        # its task first (round 8 of #203). The same lookup, bound rows only.
+        agent = _fleet_row(store, session_id, project_id, allow_unbound=False)
         if agent is None:
             return None
     if agent.task_id is None:

@@ -33,7 +33,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   first message at its idle input box even while the fleet still reads it
   working. `press yes`/`press no` answer Claude Code's real permission chooser
   by its Yes digit and Esc (read off the pane), and a key the prompt ignores is
-  said as an error. After a reboot a provably gone tmux server means a fresh
+  said as an error. Nothing the captain types reaches an agent's own trust
+  dialog: `press`, `paste`, `tell`, the manager ask and `wololo` refuse it by
+  name (*trust this folder first*), and a pane that cannot be read is refused.
+  After a reboot a provably gone tmux server means a fresh
   start, anything less a fast refusal naming
   `aisquare fleet reap -P <home> --server-down`.
 

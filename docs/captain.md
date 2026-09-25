@@ -209,8 +209,8 @@ Yes (usually `1`), and no is Esc. On a `[y/N]` line they are `y` and `n`. The
 letter `y` does nothing on Claude Code's chooser. `1` to `9` press a digit.
 After a key that answers a prompt, the pane is read back, and a prompt still
 showing is an error: the captain never reports a press the prompt ignored.
-The trust dialog is refused by name, because trusting a folder is yours to
-answer. An agent is ready for a key or a paste when it is waiting or asking. It
+The trust dialog is refused by name for every key, because trusting a folder is
+yours to answer. An agent is ready for a key or a paste when it is waiting or asking. It
 is also ready when the fleet still reads it working but its screen shows a
 prompt, or Claude Code's input box drawn and idle: a freshly spawned agent
 reads working until its first reply.
@@ -237,6 +237,11 @@ reads working until its first reply.
   first and refuses — naming what is showing — when Claude Code's trust dialog,
   a numbered choice, an Enter/Esc dialog or the session-rating prompt is on
   screen. `aisquare captain` attaches so you can answer it.
+- **Never into an agent's trust dialog.** An agent spawned into a folder
+  Claude Code has never trusted stops at its own trust dialog, where any typing
+  answers it. `press`, `paste`, `tell`, the manager ask and `wololo` read the
+  agent's pane first and refuse by name: *trust this folder first*. A pane that
+  cannot be read is refused too, so nothing is typed blind.
 - **One captain per home.** A second `aisquare captain` attaches; the fleet
   refuses a second row and refuses `captain` on a project.
 

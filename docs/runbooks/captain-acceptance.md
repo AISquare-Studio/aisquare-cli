@@ -27,7 +27,8 @@ Claude Code asks once per folder, and the captain's answer covers only its own
 brain folder. If step 2's project (alpha) has never been trusted under the
 config dir the fleet's coders run with, open `claude` in it once by hand and
 answer *Yes, I trust this folder* first. A new coder in an untrusted folder
-stops at its own trust dialog.
+stops at its own trust dialog. The captain never types into it: `paste`, `tell`
+and `press` refuse by name, saying *trust this folder first*.
 
 ```text
 ⟨PASTE: aisquare captain voice --show-token⟩

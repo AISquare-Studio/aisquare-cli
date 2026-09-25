@@ -20,9 +20,9 @@ import threading
 import time
 from array import array
 from collections.abc import Callable, Iterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, tzinfo
 from pathlib import Path
-from typing import Any
+from typing import Any, Self
 
 import pytest
 from starlette.testclient import TestClient
@@ -167,9 +167,18 @@ class Harness:
         self.app = build_app(token=TOKEN, hooks=self.hooks, mode=mode)
 
     def captain_speaks(self, at: datetime | None = None) -> None:
-        """What T1's ``speak()`` leaves behind: one ok ``captain_action`` on the home board."""
+        """What T1's ``speak()`` leaves behind: one ok ``captain_action`` on the home board.
+
+        Stamped now, and never at or before the last typing: a speak() made after the text
+        went in is audited after it. Windows' clock ticks every 15.6 ms, so "now" could be
+        the typing's own tick, which voice.spoke_since reads as the turn before's
+        (3e1fdeb7's Windows leg)."""
         self.seq += 1
-        self.speak_seqs.append((self.seq, at or datetime.now(tz=UTC)))
+        if at is None:
+            at = datetime.now(tz=UTC)
+            if self.deliveries.typed_at:
+                at = max(at, self.deliveries.typed_at[-1] + timedelta(microseconds=1))
+        self.speak_seqs.append((self.seq, at))
 
 
 @pytest.fixture
@@ -390,17 +399,31 @@ def test_the_reply_is_spoken_only_when_the_captain_made_no_speak_call_that_turn(
     """13143 (4): the brain decides what is worth saying. A turn in which the captain called
     ``speak()`` is already audible through the server's drainer, so the page stays quiet;
     a silent turn's reply is spoken so a captain that forgets still answers aloud."""
+    reply, lines = _a_turn(captain_spoke=captain_spoke)
+    assert reply == {"t": "reply", "text": "all green", "spoken": not captain_spoke}
+    assert lines == ([] if captain_spoke else ["all green"])
+
+
+def _a_turn(
+    *, captain_spoke: bool = False, spoke_while_waiting: bool = False
+) -> tuple[dict[str, Any], list[str]]:
+    """One typed turn: the reply frame and the lines the page's voice spoke. An earlier turn's
+    speak() is always on the board; ``captain_spoke`` adds one inside this turn, and
+    ``spoke_while_waiting`` one while say waited to type (the busy turn's, S3)."""
     harness = Harness(deliveries=Deliveries("all green"))
     harness.captain_speaks()  # an earlier turn's line: not this turn's, never counted
     if captain_spoke:
         harness.deliveries.during = harness.captain_speaks
+    if spoke_while_waiting:
+        harness.deliveries.before_typing = lambda: harness.captain_speaks(
+            at=datetime.now(tz=UTC)
+        )  # the busy turn's own speak(), landing while say waits to type
     with TestClient(harness.app) as client:
         for connection in _authed(client):
             connection.send_text(json.dumps({"t": "text", "text": "how is the fold"}))
             reply = _until(connection, "reply")
             _spoken(harness, 0 if captain_spoke else 1)
-    assert reply == {"t": "reply", "text": "all green", "spoken": not captain_spoke}
-    assert harness.spoken.lines == ([] if captain_spoke else ["all green"])
+    return reply, harness.spoken.lines
 
 
 def test_a_turn_without_text_shows_the_pages_own_note_and_speaks_nothing() -> None:
@@ -511,19 +534,36 @@ def test_deliver_to_captain_says_a_fleet_refusal_as_a_failed_delivery(
         voice.deliver_to_captain("what is up")
 
 
+class _WindowsClock(datetime):
+    """Windows' clock: it ticks every 15.625 ms, so two stamps taken in a row are often equal."""
+
+    @classmethod
+    def now(cls, tz: tzinfo | None = None) -> Self:
+        t = super().now(tz)
+        return t.replace(microsecond=t.microsecond // 15625 * 15625)
+
+
+@pytest.mark.parametrize("captain_spoke", [False, True])
+def test_the_speak_window_holds_on_a_windows_clock(
+    captain_spoke: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """3e1fdeb7's Windows leg: on a 15.6 ms clock the turn's own speak() and the typing shared a
+    stamp, and the strict window (a tie is the turn before's) left the reply spoken twice. The
+    harness stamps a speak made after the typing after it, as the audit would be; this runs the
+    two window tests on that clock, so Linux CI sees what only Windows did."""
+    monkeypatch.setattr(sys.modules[__name__], "datetime", _WindowsClock)
+    reply, lines = _a_turn(captain_spoke=captain_spoke)
+    assert reply["spoken"] is not captain_spoke, "this turn's own speak() mutes the reply"
+    assert lines == ([] if captain_spoke else ["all green"])
+    reply, lines = _a_turn(spoke_while_waiting=True)
+    assert reply["spoken"] is True and lines == ["all green"], "the busy turn's does not"
+
+
 def test_a_speak_from_the_wait_before_the_text_was_typed_does_not_mute_this_reply() -> None:
     """coderp's S3: the window opened before brain.say waited for the lock or a busy captain,
     so another turn's speak() muted this reply. It opens when the text is typed."""
-    harness = Harness(deliveries=Deliveries("all green"))
-    harness.deliveries.before_typing = lambda: harness.captain_speaks(
-        at=datetime.now(tz=UTC)
-    )  # the busy turn's own speak(), landing while say waits to type
-    with TestClient(harness.app) as client:
-        for connection in _authed(client):
-            connection.send_text(json.dumps({"t": "text", "text": "how is the fold"}))
-            reply = _until(connection, "reply")
-            _spoken(harness, 1)
-    assert reply["spoken"] is True and harness.spoken.lines == ["all green"]
+    reply, lines = _a_turn(spoke_while_waiting=True)
+    assert reply["spoken"] is True and lines == ["all green"]
 
 
 def test_when_the_home_board_cannot_be_read_the_reply_is_still_spoken_and_it_is_said(
@@ -1110,8 +1150,6 @@ def test_spoke_since_counts_only_ok_speak_audits_on_the_home_board(isolated_home
     assert voice.spoke_since(voice.home_seq()) == 0, "a speak() before a turn is not the turn's"
     # coderp's S3: the window opens when the text is typed. A speak() audited before that
     # moment (the busy turn's, another page's) is not this turn's, seq or no seq.
-    from datetime import timedelta
-
     later = datetime.now(tz=UTC) + timedelta(seconds=5)
     assert voice.spoke_since(before, later) == 0, "spoken before the text went in"
     assert voice.spoke_since(before, later - timedelta(minutes=1)) == 1

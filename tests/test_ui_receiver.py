@@ -1067,6 +1067,11 @@ def test_every_bundled_ui_step_names_an_action_the_receiver_knows() -> None:
     assert all(actions._UI_ACTION.fullmatch(name) for name in receiver.ACTIONS)
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="conftest's private_ui_socket_root is off on Windows: no unix sockets, nothing "
+    "binds, so a long home's short root is the shared temp folder there by design",
+)
 def test_a_long_homes_socket_folder_is_the_tests_own_never_the_shared_tmp(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1079,7 +1084,7 @@ def test_a_long_homes_socket_folder_is_the_tests_own_never_the_shared_tmp(
     """
     monkeypatch.setenv("AISQUARE_HOME", str(tmp_path / ("a" * 70) / ("b" * 40)))
     path = captain_state.ui_socket_path()
-    shared = Path(tempfile.gettempdir() if sys.platform == "win32" else "/tmp")
+    shared = Path("/tmp")  # POSIX's short root; the Windows run skips (see the mark)
     assert path.parent.name == f"aisquare-{captain_state._user_tag()}", (
         "the premise: the short root"
     )

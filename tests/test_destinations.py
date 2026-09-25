@@ -1274,6 +1274,33 @@ def test_a_refused_revoke_is_said_kept_owed_and_retried_by_doctor_live(
     assert diagnostics._minted_keys_check(live=False) is None, "nothing owed: no row"
 
 
+def test_a_store_that_cannot_be_read_for_the_revokes_costs_them_not_the_command(
+    runner: CliRunner,
+    idp: IdentityProviderStub,
+    signed_in: iam.Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``revoke_owed`` read the records owed unguarded: a locked store turned a
+    ``key clear`` that had already committed into a traceback (review of #172's
+    follow-ups, round 1, F3). The key stays owed, and the next pass revokes it."""
+    project = _project(tmp_path / "web")
+    _json(runner, "explainability", "use", "acme/Frontend")
+
+    def locked() -> Iterator[ContextStore]:
+        raise sqlite3.OperationalError("database is locked")
+
+    with monkeypatch.context() as patched:
+        patched.setattr(dest, "store_session", locked)
+        cleared = runner.invoke(app, ["explainability", "key", "clear"])
+    assert cleared.exit_code == 0, cleared.output
+    assert "✓ key cleared for web" in cleared.output
+    assert idp.revoked_keys == [] and not service.project_key_path(project.id).exists()
+    again = dest.revoke_owed(signed_in)
+    assert [record.key_uid for record in again.revoked] == ["key-1"]
+    assert idp.revoked_keys == ["key-1"]
+
+
 def test_an_interrupted_key_set_keeps_the_minted_key_minted_and_in_its_file(
     runner: CliRunner,
     idp: IdentityProviderStub,

@@ -598,14 +598,20 @@ def revoke_owed(
     in to another host, offline, refused, out of ``budget`` — keeps it, with
     the reason, for the next pass. ``project_ids`` limits the pass to what a
     command just detached; ``None`` is every key owed, which is what ``use``,
-    ``doctor --live`` and ``logout`` retry. A store that cannot record the
-    outcome costs the bookkeeping, not the command: a key the server revoked
-    and this could not forget answers 404 on the next pass, which settles it.
+    ``doctor --live`` and ``logout`` retry. A store that cannot be read or
+    cannot record the outcome costs the bookkeeping, not the command, whose
+    own write has already committed: what could not be read stays owed for the
+    next pass, and a key the server revoked and this could not forget answers
+    404 on the next pass, which settles it.
     """
     report = Revocations()
     if not paths.db_path().exists():
         return report  # nothing was ever detached; a read must not create the store
-    with store_session() as store:
+    owed: list[PendingRevocation] = []
+    # Guarded like the write below: unguarded, a locked store turned a `key clear`
+    # or a purge that had already committed into a traceback (review of #172's
+    # follow-ups, round 1, F3).
+    with contextlib.suppress(sqlite3.Error, OSError), store_session() as store:
         owed = [
             record
             for record in store.pending_revocations()

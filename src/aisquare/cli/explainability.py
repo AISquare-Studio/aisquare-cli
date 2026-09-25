@@ -31,7 +31,7 @@ from typing import Annotated
 
 import typer
 
-from aisquare.cli.common import expected_config_write_errors, fail
+from aisquare.cli.common import expected_config_write_errors, fail, project_for_ref
 from aisquare.core import orchestrator, outbox
 from aisquare.core.config import load_config, save_config
 from aisquare.core.state import get_state
@@ -42,7 +42,6 @@ from aisquare.services import destinations as dest
 from aisquare.services import explainability as explainability_service
 from aisquare.services import explainability_ops as ops
 from aisquare.services import iam
-from aisquare.services import project as project_service
 from aisquare.services.explainability import (
     RESERVED_ENV_VARS,
     clear_project_api_key,
@@ -85,12 +84,7 @@ def _project_for(ref: str | None) -> ProjectInfo:
     """
     if ref is None:
         return orchestrator.team_project(None)
-    try:
-        return project_service.resolve(ref)
-    except KeyError:
-        fail(f"no project matches '{ref}'", error="not_found", ref=ref)
-    except ValueError as exc:
-        fail(str(exc), error="ambiguous_project", ref=ref)
+    return project_for_ref(ref)
 
 
 def _key_project_id(ref: str | None) -> str | None:
@@ -712,9 +706,11 @@ def status(
     script gating on this code is asking, so the second case joined without a
     flag day. Amber -- a destination that cannot be checked from here -- exits
     0; ``probe_severity`` in the JSON says which. A ``--project`` that names no
-    project is a usage error, and fails as one before anything is read: the
+    project is a usage error, and exits 2 before anything is read: the
     contract is about the lane, and a status for a project that is not there
-    has no lane to report (review of #172, D2 round 2, D6).
+    has no lane to report (review of #172, D2 round 2, D6). It exited 1, the
+    red lane's code, so a script gating on this one could not tell a typo from
+    a red lane (review of #170's follow-ups, round 1, F6).
 
     Honours ``--json``, because this is the command a cutover gets scripted
     against: without it every check in the runbook is a grep against prose,
@@ -725,8 +721,9 @@ def status(
     # The key is resolved FOR the project a launch from here joins (#141) — the
     # one `env`, `launch` and the key commands use — so the origin shown is the
     # key a launch would authenticate with; a project with its own key shows
-    # that, everything else the machine's. `--project` names another one — the
-    # check `use --project` sends the operator to (#142).
+    # that, everything else the machine's. `--project` names another one (#142);
+    # the check `use` sends the operator to is `doctor --live --project`, which
+    # puts the key to the gateway, and this one does not.
     target = ops.resolve_target(settings, target_name, project_id=_key_project_id(project_ref))
     # One description of the proxy lane for both surfaces. It also decides
     # whether to probe at all: a machine that never configured tracing has

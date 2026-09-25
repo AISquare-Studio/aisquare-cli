@@ -1461,7 +1461,8 @@ set`. Everything else is what a correctly wired machine prints.
 `status` exits non-zero **only** when tracing is enabled *and* the probe fails —
 the precise state in which launches would silently fall back to untraced. That
 is what makes it the right single check. (A `--project` that names no project
-is a usage error, and fails as one.)
+is a usage error, and exits **2** before anything is read, where a red lane
+exits **1**.)
 
 > **[verified-train]** `status` honours `--json` now (it used to print human
 > text under the flag). `aisquare --json explainability status` returns a real

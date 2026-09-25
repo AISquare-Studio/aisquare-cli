@@ -19,6 +19,7 @@ from aisquare.cli.common import (
     emit_status,
     expected_config_write_errors,
     fail,
+    project_for_ref,
     resolve_pool,
 )
 from aisquare.models import CheckStatus
@@ -27,7 +28,6 @@ from aisquare.services import diagnostics as diagnostics_service
 from aisquare.services import explainability as explainability_service
 from aisquare.services import explainability_ops
 from aisquare.services import lifecycle as lifecycle_service
-from aisquare.services import project as project_service
 from aisquare.services import sync as sync_service
 
 
@@ -162,14 +162,7 @@ def doctor(
     proxy, so a revoked or wrong-workspace key passed it (review of #172, D2
     round 2).
     """
-    project_id = None
-    if project is not None:
-        try:
-            project_id = project_service.resolve(project).id
-        except KeyError:
-            fail(f"no project matches '{project}'", error="not_found", ref=project)
-        except ValueError as exc:
-            fail(str(exc), error="ambiguous_project", ref=project)
+    project_id = project_for_ref(project).id if project is not None else None
     if fix:
         for action in explainability_ops.apply_fixes(
             target=target, assume_yes=yes, confirm=typer.confirm

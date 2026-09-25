@@ -39,6 +39,7 @@ from aisquare.models import (
     StatusReport,
     TurnMetric,
 )
+from aisquare.services import project as project_service
 
 _DEFAULT_EMPTY = 'No context entries yet. Add one with: aisquare remember "…"'
 
@@ -59,6 +60,24 @@ def refuse_conflicting_scope(every: bool, project: str | None) -> None:
             "drop one of them",
             param_hint="--all",
         )
+
+
+def project_for_ref(ref: str) -> ProjectInfo:
+    """The project a ``--project`` names, by codename, name or id prefix; a usage error if none.
+
+    Exit 2, as for every usage error, and not ``fail``'s 1: ``explainability
+    status`` exits 1 for a red proxy lane and ``doctor`` for a failed check, so
+    a cutover script gating on ``$?`` read a typo'd ``--project`` as either one
+    (review of #170's follow-ups, round 1, F6). One lookup for the
+    explainability commands and ``doctor``, which carried a copy of it (F9).
+    The JSON error stays ``not_found`` or ``ambiguous_project``.
+    """
+    try:
+        return project_service.resolve(ref)
+    except KeyError:
+        fail(f"no project matches '{ref}'", error="not_found", ref=ref, exit_code=2)
+    except ValueError as exc:
+        fail(str(exc), error="ambiguous_project", ref=ref, exit_code=2)
 
 
 def local_time(value: datetime) -> datetime:

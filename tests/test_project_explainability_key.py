@@ -607,6 +607,26 @@ def test_status_says_nothing_about_the_spools_key_while_shipping_is_off(
     assert line.startswith("shipping: off") and "the spool is the machine's" not in line
 
 
+def test_a_project_that_is_not_there_is_a_usage_error_and_not_a_red_lane(
+    home: Path, runner: CliRunner
+) -> None:
+    """``status --project <typo>`` exited 1, ``status``'s code for tracing on and the proxy
+    lane red, and ``doctor --project <typo>`` 1, its code for a failed check. A cutover
+    script gating on ``$?`` read the typo as either (review of #170's follow-ups, round 1,
+    F6). Both exit 2, a usage error, and the JSON error is still ``not_found``."""
+    _settings()
+    for argv in (
+        ["explainability", "status", "--project", "nope"],
+        ["doctor", "--project", "nope"],
+    ):
+        result = runner.invoke(app, argv)
+        assert result.exit_code == 2, (argv, result.output)
+        assert "no project matches 'nope'" in result.output
+    payload = runner.invoke(app, ["--json", "explainability", "status", "--project", "nope"])
+    assert payload.exit_code == 2
+    assert json.loads(payload.stdout)["error"] == "not_found"
+
+
 def test_key_set_records_the_signed_in_email_as_who_attached_it(
     home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

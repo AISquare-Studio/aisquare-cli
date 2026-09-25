@@ -206,7 +206,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `destination:` (the UI's Explainability view `lands in`) and takes
   `--project`; `doctor --project P` resolves P's key as its launches do, and
   `doctor --live --project <id>`, which posts a span with that key, is the check
-  `use` names once tracing is on; `whoami` gains a `traces:` line; `logout`, and
+  `use` names once tracing is on, and a `--project` naming no project exits 2,
+  a usage error; `whoami` gains a `traces:` line; `logout`, and
   *Sign out* on the fleet UI's Accounts page, forget every key the CLI minted
   and leave hand-attached keys alone. The key never crosses a deployment or a
   workspace: a target `use` creates names its own key variable, a machine key

@@ -520,17 +520,34 @@ def _adopt_onboarded_projects(connection: sqlite3.Connection) -> None:
         "  OR id IN (SELECT project_id FROM fleet_agent)"
         ")"
     )
-    from aisquare.core import snapshot as snapshot_core  # lazy: keeps store import-light
-
     rows = connection.execute(
         "SELECT id FROM project WHERE onboarded_at IS NULL AND forgotten_at IS NULL"
     ).fetchall()
-    with_snapshot = [row[0] for row in rows if snapshot_core.exists(str(row[0]))]
+    with_snapshot = [row[0] for row in rows if _snapshot_on_disk(str(row[0]))]
     for project_id in with_snapshot:
         connection.execute(
             "UPDATE project SET onboarded_at = created_at WHERE id = ? AND onboarded_at IS NULL",
             (project_id,),
         )
+
+
+def _snapshot_on_disk(project_id: str) -> bool:
+    """Whether the project's snapshot is on disk; one that cannot be looked at is no evidence.
+
+    ``Path.exists`` answers ``False`` for a path that is not there and RAISES for a
+    snapshot directory this user cannot search (``PermissionError``). Raised out of
+    the backfill, it escaped the migration's ``sqlite3.Error`` handler with the
+    transaction still open, so every command failed on the open with a raw
+    traceback until the directory was readable again (review of #203). The row
+    stays captured, as one without a snapshot does, and a later ``project
+    onboard`` adds it.
+    """
+    from aisquare.core import snapshot as snapshot_core  # lazy: keeps store import-light
+
+    try:
+        return snapshot_core.exists(project_id)
+    except OSError:
+        return False
 
 
 #: Backfills that belong to a column, keyed ``(table, column)``. Each runs in the

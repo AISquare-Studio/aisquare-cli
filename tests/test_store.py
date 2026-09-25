@@ -1325,6 +1325,46 @@ def test_the_v17_migration_adopts_the_rows_already_used_on_purpose(
     assert "prj_gone_used" not in listed_after_prompt
 
 
+def test_an_unreadable_snapshot_is_no_evidence_and_the_store_still_opens(
+    isolated_home: Path,
+) -> None:
+    """The v17 backfill looks for each captured row's snapshot on disk, and ``Path.exists``
+    raises for a directory this user cannot search. The ``PermissionError`` escaped the
+    migration, which rolls back only on ``sqlite3.Error``, so the open failed with a raw
+    traceback and the write transaction left open, on every command until the directory
+    was readable again (review of #203). It is no evidence: the row stays captured."""
+    from aisquare.core import snapshot as snapshot_core
+
+    after = "".join(
+        "INSERT INTO project (id, root, name, linked_repos, created_at) VALUES "
+        f"('{pid}', '/w/{pid}', '{pid}', '[]', '2026-09-01T00:00:00+00:00');\n"
+        for pid in ("prj_locked", "prj_snap")
+    )
+    _at_version(16, after=after)
+    for pid in ("prj_locked", "prj_snap"):
+        snapshot_core.meta_path(pid).parent.mkdir(parents=True, exist_ok=True)
+        snapshot_core.meta_path(pid).write_text("{}", encoding="utf-8")
+    locked = snapshot_core.snapshot_dir("prj_locked")
+    locked.chmod(0o000)
+    try:
+        try:
+            snapshot_core.exists("prj_locked")
+        except PermissionError:
+            pass
+        else:
+            pytest.skip("this user can search a directory with no permissions (root, or no modes)")
+        store = open_store()
+        try:
+            shown = {p.id for p in store.list_projects()}
+            everything = {p.id for p in store.list_projects(all=True)}
+        finally:
+            store.close()
+    finally:
+        locked.chmod(0o700)
+    assert shown == {"prj_snap"}, "a readable snapshot still adopts its row"
+    assert everything == {"prj_snap", "prj_locked"}, "the unreadable one stays captured"
+
+
 # --- the launch spec and ui_state (#144) ----------------------------------------------------
 
 

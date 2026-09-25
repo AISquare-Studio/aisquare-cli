@@ -463,7 +463,8 @@ def _uncreated_home(name: str) -> DoctorCheck | None:
 #: "and N more".
 _MISSING_SHOWN = 6
 
-#: Where the database row sends a schema gap this build cannot close (``project.urls``).
+#: Where the database row sends a schema gap this build cannot close: a copy of
+#: pyproject's ``[project.urls] Issues``, kept in step by the tests.
 _ISSUES_URL = "https://github.com/AISquare-Studio/aisquare-cli/issues"
 
 

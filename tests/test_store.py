@@ -1216,6 +1216,20 @@ def test_doctor_says_what_a_missing_index_or_trigger_costs(
     assert not [cost for cost in not_said if cost in row.detail], row.detail
 
 
+def test_doctor_reports_a_schema_gap_where_the_package_says_issues_go() -> None:
+    """The database row's remedy says where to report a gap it cannot close. The address
+    is a copy of pyproject's ``[project.urls] Issues``, so a tracker that moves there
+    must move here too."""
+    import tomllib
+
+    from aisquare.services import diagnostics
+
+    pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
+    urls = tomllib.loads(pyproject.read_text(encoding="utf-8"))["project"]["urls"]
+
+    assert urls["Issues"] == diagnostics._ISSUES_URL
+
+
 def test_every_trigger_of_this_build_keeps_the_notes_search_index() -> None:
     """Doctor's database row calls any missing trigger a note trigger and tells what
     its absence does to `aisquare context search`. That holds while every trigger the

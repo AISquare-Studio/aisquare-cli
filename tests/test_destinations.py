@@ -881,6 +881,50 @@ def test_the_entry_use_names_for_an_unknown_host_takes_no_machine_key(
     assert (machine.key_source, machine.api_key) == ("file", "AIS_machine_prod_key")
 
 
+def test_a_machine_target_that_reads_another_variable_never_sends_it_the_machine_key(
+    isolated_home: Path, tmp_path: Path
+) -> None:
+    """The machine's own target counted as a deployment the machine key already goes to
+    even when it names a variable of its own, so the machine never sent the key file there.
+    A prod machine from ``init`` moved onto a ``staging`` target reading ``MY_STAGING_KEY``,
+    and a destination on staging: the destination kept the default variable, and the prod
+    key file went to the staging gateway and proxy (review of #203, round 2)."""
+    config = AppConfig()
+    config.explainability.enabled = True
+    config.explainability.gateway_url = "https://explainability-api.aisquare.studio"
+    config.explainability.proxy_url = "https://explainability-api.aisquare.studio:9443"
+    config.explainability.target = "staging"
+    config.explainability.targets["staging"] = ExplainabilityTarget(
+        gateway_url="https://stg-explainability-api.aisquare.studio", api_key_env="MY_STAGING_KEY"
+    )
+    save_config(config)
+    service.store_api_key("AIS_machine_prod_key")
+    project = _project(tmp_path / "web")
+    with store_session() as store:
+        dest.choose(
+            store,
+            project,
+            dest.Workspace(id=42, uid="ws-uid-42", name="acme", role="ADMIN"),
+            dest.Studio(id=301, uid="st-301", name="Frontend"),
+            iam.Session(api_url="https://stg-api.aisquare.studio", token="aisq_x", source="env"),
+        )
+
+    settings = load_config().explainability
+    staging = dest.deployment_target(settings, _destination("https://stg-api.aisquare.studio"))
+    assert staging.api_key_env == "EXPLAINABILITY_STG_API_KEY"
+    resolved = ops.resolve_target(settings, None, project_id=project.id)
+    assert resolved.gateway_url == "https://stg-explainability-api.aisquare.studio"
+    assert (resolved.key_source, resolved.api_key) == ("unset", None), (
+        "the machine's prod key went to the staging gateway and proxy"
+    )
+    machine = ops.resolve_target(settings, None)
+    assert (machine.name, machine.api_key_env, machine.key_source) == (
+        "staging",
+        "MY_STAGING_KEY",
+        "unset",
+    )
+
+
 def test_another_deployments_machine_key_is_never_used_for_the_destination(
     runner: CliRunner,
     idp: IdentityProviderStub,

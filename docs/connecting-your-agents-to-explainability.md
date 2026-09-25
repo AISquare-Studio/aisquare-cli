@@ -391,19 +391,21 @@ reported on its own line:
   `[explainability.targets.<name>]` you wrote for that deployment is used, and
   only what it leaves empty is filled in, and `use` does **not** turn tracing
   on — that is still `aisquare explainability enable`. Unless your entry names
-  an `api_key_env`, the target names its own key variable
-  (`EXPLAINABILITY_PROD_API_KEY`, …), so the machine key — issued for whichever
-  deployment set the machine up — never answers for another one; the exception
-  is a deployment the machine key already goes to, the machine's top-level
-  gateway or its own target's. An API host this CLI does not know (a
-  self-hosted API, `[::1]`) has no gateway or proxy it can fill in, and the
-  machine's never stand in: `use` says `(no gateway known)` and where to set
+  an `api_key_env` other than the default `EXPLAINABILITY_API_KEY` (which is the
+  machine key's, so it is replaced like a missing one), the target names its
+  own key variable (`EXPLAINABILITY_PROD_API_KEY`, …), so the machine key —
+  issued for whichever deployment set the machine up — never answers for
+  another one; the exception is a deployment the machine key already goes to:
+  the machine's top-level gateway, or its own target's while that target reads
+  the machine key (names no variable of its own). An API host this CLI does not
+  know (a self-hosted API, `[::1]`) has no gateway or proxy it can fill in, and
+  the machine's never stand in: `use` says `(no gateway known)` and where to set
   them — `gateway_url` and `proxy_url` under
   `[explainability.targets."<host>"]`, not `enable --target`, which would make
   it the whole machine's target, and that entry reads its key from
-  `EXPLAINABILITY_<HOST>_API_KEY` unless it names a variable — and until then
-  the project's launches go untraced, saying why. The doctor's and `status`'s
-  other fixes for a project's deployment name that entry, or `key set
+  `EXPLAINABILITY_<HOST>_API_KEY` unless it names another variable — and until
+  then the project's launches go untraced, saying why. The doctor's and
+  `status`'s other fixes for a project's deployment name that entry, or `key set
   --project`, for the same reason. Launches, `fleet spawn` and
   `explainability env` in the project take the proxy **and** the key from this
   target, whatever `AISQUARE_EXPLAINABILITY_TARGET` says: a project's

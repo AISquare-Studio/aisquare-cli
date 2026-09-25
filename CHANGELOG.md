@@ -235,8 +235,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   bound off the machine's target ever falls back to the machine's gateway or
   proxy (no gateway known is said, the launch goes untraced, and the doctor's
   and `status`'s fixes name the config entry or `key set`, never `enable
-  --target`), `key set` binds to the destination's deployment and a key bound
-  there answers only while a destination names it, never as the machine's
+  --target`, and first rename the machine's own target when it has the
+  deployment's name and is another deployment, as `stg` by default is on a
+  machine `init --explainability` set up for prod), `key set` binds to the
+  destination's deployment and a key bound there answers only while a
+  destination names it, never as the machine's
   target of the same name (schema v24, `project_explainability.api_url`; after
   `use --clear` it is kept and `key show` says why it is not used), the CLI
   never mints over a hand key, and a minted

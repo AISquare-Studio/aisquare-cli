@@ -414,16 +414,28 @@ class SettingsView(VerticalScroll):
         )
 
     def _apply_account_bindings(self, config: AppConfig) -> None:
-        """Fold the account selects into ``config.team.profiles`` — the binding's one home.
+        """Fold the account selects the operator CHANGED into ``config.team.profiles``.
 
         A role whose select says "no binding" and whose profile holds nothing
         else has its profile REMOVED, not emptied: `team bind --clear` is one
         pop for the same reason, and an empty ``[team.profiles.coder]`` table
         would make ``_declared_roles`` think the operator declared a role.
+
+        A select still showing the binding the form was read with is left
+        alone: ``config`` is the file as it is NOW, and the form's copy may be
+        stale. Written back regardless, it undid every binding changed since
+        the tab was read — among them the re-pointing ``accounts remove`` does
+        (``_retarget_bindings``) so that a removed slot's number is not
+        inherited by the next login in that slot, run from the Accounts page
+        of this same app, which the kept-alive tab never hears about. The next
+        ``add`` reuses the slot, and the role launched on a stranger's login
+        without a word (final review of #203, accounts F3).
         """
         for role in self._roles:
             value = self.query_one(f"#acct-{widget_suffix(role)}", Select).value
             chosen = value if isinstance(value, str) and value != NO_ACCOUNT else None
+            if chosen == self._account_bindings.get(role):
+                continue  # untouched on the form: the file's binding stands
             profile = config.team.profiles.get(role)
             if chosen is None:
                 if profile is None:

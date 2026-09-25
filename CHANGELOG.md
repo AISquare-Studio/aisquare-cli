@@ -367,7 +367,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   directories stay the record of which accounts exist; a removed slot's
   default, alias and project defaults go with it, so the next `add` in that
   number inherits nothing. On the Accounts page each row carries ★ *Default*,
-  ↑/↓ and *Disable*/*Enable*; the Settings tab binds an account per role; the
+  ↑/↓ and *Disable*/*Enable*; the Settings tab binds an account per role, and
+  its *Save* writes only the bindings changed there, so a binding `accounts
+  remove` or `team bind` changed while the tab was open stands; the
   agent header and `fleet ls` show the slot an agent was resolved to. `doctor`
   warns when the default is not signed in or disabled (`claude-account-default`)
   and when a role or project names a missing account (`claude-account-bindings`).

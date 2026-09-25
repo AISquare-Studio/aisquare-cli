@@ -1870,7 +1870,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   left the file readable by everyone anyway. It is not a reset: an explicit
   grant to any other principal (`INTERACTIVE`, `Domain Users`, a second local
   account) is left in place. The DACL is read back afterwards, and such a
-  grant counts as NOT restricted. `SYSTEM` and `Administrators` entries can
+  grant counts as NOT restricted. So does a grant to `LA`, this machine's own
+  Administrator, unless that is the account the file belongs to: a domain's
+  Administrator, whose SID ends in -500 as well, is not it. `SYSTEM` and `Administrators` entries can
   remain, as root does for a 0600 file on POSIX. The single credentials
   writer reports whether the restriction actually landed, so `init`, `serve`
   and `login` say so explicitly when it did not, rather than implying a

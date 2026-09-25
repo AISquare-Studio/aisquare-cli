@@ -36,6 +36,7 @@ from textual.worker import Worker, WorkerState
 from aisquare.core import claude_accounts as accounts_core
 from aisquare.core import codenames, paths
 from aisquare.core.config import (
+    CLAUDE_PERMISSION_MODES,
     AccountsSettings,
     AppConfig,
     FleetRoleSettings,
@@ -50,15 +51,10 @@ from aisquare.services import fleet as fleet_service
 from aisquare.services import settings as settings_service
 
 PERMISSION_MODES: tuple[tuple[str, str], ...] = (
-    ("auto", "auto"),
-    ("acceptEdits", "acceptEdits"),
-    ("bypassPermissions", "bypassPermissions"),
-    ("manual", "manual"),
-    ("dontAsk", "dontAsk"),
-    ("plan", "plan"),
+    *((mode, mode) for mode in CLAUDE_PERMISSION_MODES),
     ("(no flag)", ""),
 )
-"""Claude Code's ``--permission-mode`` choices (2.1.250), plus "pass no flag"."""
+"""Claude Code's ``--permission-mode`` choices (``core.config``), plus "pass no flag"."""
 
 DEFAULT_ESCAPE_KEY = FleetSettings().escape_key
 DEFAULT_WORKTREE_DIR = FleetSettings().worktree_dir

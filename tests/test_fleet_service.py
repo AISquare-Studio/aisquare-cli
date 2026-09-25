@@ -9163,6 +9163,34 @@ def test_a_restart_given_a_permission_mode_changes_the_mode_alone_and_records_it
     )
 
 
+def test_a_restart_refuses_a_permission_mode_claude_code_does_not_take_before_stopping_anything(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, runner: CliRunner
+) -> None:
+    """Review of #169, round 1: ``fleet restart --permission-mode`` took any string. A
+    typo stopped the running agent for a replacement Claude Code refuses to start, and
+    the replacement's spec recorded it, so every later restart, switch and automatic
+    hand-over replayed it. It is refused first; the agent keeps running, on its spec."""
+    agent = _coder(project)
+    spawned = len(tmux.spawned)
+
+    with pytest.raises(FleetError, match=r"'acceptEdit' is not a Claude Code permission mode"):
+        fleet_service.restart(project, agent.label, permission_mode="acceptEdit")
+    result = runner.invoke(
+        app, ["fleet", "restart", agent.label, "--permission-mode", "Auto", "-P", project.id]
+    )
+
+    assert result.exit_code == 1 and "nothing was stopped" in result.output, result.output
+    assert agent.pane_id not in tmux.killed and len(tmux.spawned) == spawned
+    with store_session() as store:
+        [live] = store.fleet_agents(project.id, live_only=True)
+    assert live.id == agent.id and live.launch_spec is not None
+    assert live.launch_spec.permission_mode == "auto"
+    # Every mode the Settings page offers is taken, "" (no flag) included.
+    receipt = fleet_service.restart(project, agent.label, permission_mode="")
+    assert receipt.started.launch_spec is not None
+    assert receipt.started.launch_spec.permission_mode == ""
+
+
 def test_a_restart_asks_for_the_recorded_binary_not_the_one_the_role_names_today(
     tmux: FakeTmux,
     claude_on_path: Path,

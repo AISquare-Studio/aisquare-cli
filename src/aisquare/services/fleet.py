@@ -45,7 +45,12 @@ from typing import Any
 from aisquare.core import claude_accounts as claude_accounts_core
 from aisquare.core import codenames, harness, orchestrator, selfcli
 from aisquare.core import tmux as tmux_core
-from aisquare.core.config import FleetRoleSettings, FleetSettings, load_config
+from aisquare.core.config import (
+    CLAUDE_PERMISSION_MODES,
+    FleetRoleSettings,
+    FleetSettings,
+    load_config,
+)
 from aisquare.core.ids import new_agent_id
 from aisquare.core.store import AmbiguousIdError, ContextStore, store_session
 from aisquare.core.tmux import (
@@ -3974,7 +3979,18 @@ def restart(
     that hand-over ends it and starts the replacement itself.
     ``agent_id`` pins the row, as for :func:`stop`: the agent view's Restart
     means the row it shows, never a replacement that took the label since.
+    ``permission_mode`` is refused first when Claude Code does not take it
+    (:data:`~aisquare.core.config.CLAUDE_PERMISSION_MODES`, or ``""`` for no
+    flag). The replacement records it, so a typo was replayed by every later
+    restart, switch and hand-over, and it stopped a running agent for a
+    replacement that could not start (review of #169, round 1).
     """
+    if permission_mode is not None and permission_mode not in ("", *CLAUDE_PERMISSION_MODES):
+        raise FleetError(
+            f"cannot restart {label!r}: {permission_mode!r} is not a Claude Code permission "
+            f"mode ({', '.join(CLAUDE_PERMISSION_MODES)}, or empty for no flag) — nothing "
+            "was stopped"
+        )
     with store_session() as store:
         current = store.get_project(project.id) or project
         agent = store.fleet_agent_by_label(project.id, label, live_only=False)

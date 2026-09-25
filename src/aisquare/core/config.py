@@ -212,6 +212,18 @@ class TeamSettings(BaseModel):
     profiles: dict[str, RoleLaunchProfile] = Field(default_factory=dict)
 
 
+CLAUDE_PERMISSION_MODES: tuple[str, ...] = (
+    "auto",
+    "acceptEdits",
+    "bypassPermissions",
+    "manual",
+    "dontAsk",
+    "plan",
+)
+"""Claude Code's ``--permission-mode`` values (2.1.250): the Settings page offers them,
+and ``fleet restart --permission-mode`` takes nothing else, or ``""`` for no flag."""
+
+
 class FleetRoleSettings(BaseModel):
     """How the fleet launches one role — every field is a DEFAULT the user may change.
 

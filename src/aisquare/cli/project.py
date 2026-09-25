@@ -166,6 +166,11 @@ def onboard(
     ] = False,
 ) -> None:
     """Pack the codebase into a snapshot and seed its context pool."""
+    if group is not None and not group.strip():
+        # Refused before the onboard, as `group create` refuses it: found by no name,
+        # a blank group went to `create_group`, whose ValueError escaped uncaught after
+        # the onboard had committed (review of #203, round 2).
+        fail("a group needs a name", error="invalid_group", ref=group)
     report = project_service.onboard(path, refresh=refresh)
     if group:
         project_id = project_id_for(find_project_root(path or Path.cwd()))

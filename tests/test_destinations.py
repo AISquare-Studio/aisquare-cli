@@ -19,6 +19,7 @@ import sqlite3
 import stat
 import sys
 from collections.abc import Callable, Iterator
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -679,6 +680,71 @@ def test_a_key_attached_for_the_destinations_deployment_never_answers_as_the_mac
         "https://stg-explainability.api.aisquare.studio:9443",
         "project",
         "AIS_staging_hand_key",
+    )
+
+
+def test_no_remediation_for_a_projects_deployment_makes_it_the_machines_target(
+    isolated_home: Path, tmp_path: Path
+) -> None:
+    """``deployment_fix`` worded the rows with no gateway, and the other rows that can
+    name a project's own deployment still said ``enable --target <name>``: that makes the
+    target the whole machine's, which moves every project without a destination onto it
+    (review of #203). The most reachable is the doctor's key row for a project ``use``d
+    on staging whose mint was refused. Each names the project's key or its config entry;
+    the machine's own target still gets ``enable --target``."""
+    config = AppConfig()
+    config.explainability.enabled = True
+    config.explainability.gateway_url = "https://explainability-api.aisquare.studio"
+    config.explainability.proxy_url = "https://explainability-api.aisquare.studio:9443"
+    save_config(config)
+    service.store_api_key("AIS_machine_prod_key")
+    project = _project(tmp_path / "web")
+    session = iam.Session(api_url="https://stg-api.aisquare.studio", token="aisq_x", source="env")
+    with store_session() as store:
+        dest.choose(
+            store,
+            project,
+            dest.Workspace(id=42, uid="ws-uid-42", name="acme", role="ADMIN"),
+            dest.Studio(id=301, uid="st-301", name="Frontend"),
+            session,
+        )
+
+    doctor = {check.name: check for check in ops.checks(project_id=project.id)}
+    key_row = " ".join((doctor["explainability config"].fix or "").split())
+    assert "$EXPLAINABILITY_STG_API_KEY" in key_row
+    assert f"aisquare explainability key set --project {project.id}" in key_row
+    assert "enable --target" not in key_row
+
+    target = ops.resolve_target(load_config().explainability, None, project_id=project.id)
+    assert target.project_deployment
+    entry = '[explainability.targets."stg"]'
+    unusable = replace(target, gateway_url="stg.example")
+    remediations = {
+        "config: unusable gateway": ops._check_config(unusable, on=True).fix or "",
+        "proxy: no gateway": ops.proxy_state(
+            replace(target, gateway_url="", gateway_source="unset"),
+            on=True,
+            prober=lambda _url: service.ProxyProbe(True, "healthy"),
+        ).remediation,
+        "proxy: unusable gateway": ops.proxy_state(
+            unusable, on=True, prober=lambda _url: service.ProxyProbe(True, "healthy")
+        ).remediation,
+        "proxy: local sidecar": ops.proxy_state(
+            replace(target, proxy_url="http://127.0.0.1:9090"),
+            on=True,
+            prober=lambda _url: service.ProxyProbe(True, "healthy"),
+        ).remediation,
+        "proxy: another host": ops.proxy_state(
+            replace(target, proxy_url="https://proxy.elsewhere.example:9443"),
+            on=True,
+            prober=lambda _url: service.ProxyProbe(True, "healthy"),
+        ).remediation,
+    }
+    for row, fix in remediations.items():
+        assert entry in fix and "enable --target" not in fix, row
+    machine = replace(target, project_deployment=False, gateway_url="stg.example")
+    assert "enable --target stg --gateway-url https://<host>" in (
+        ops._check_config(machine, on=True).fix or ""
     )
 
 

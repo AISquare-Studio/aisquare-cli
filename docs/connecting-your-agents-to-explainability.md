@@ -402,7 +402,9 @@ reported on its own line:
   `[explainability.targets."<host>"]`, not `enable --target`, which would make
   it the whole machine's target, and that entry reads its key from
   `EXPLAINABILITY_<HOST>_API_KEY` unless it names a variable — and until then
-  the project's launches go untraced, saying why. Launches, `fleet spawn` and
+  the project's launches go untraced, saying why. The doctor's and `status`'s
+  other fixes for a project's deployment name that entry, or `key set
+  --project`, for the same reason. Launches, `fleet spawn` and
   `explainability env` in the project take the proxy **and** the key from this
   target, whatever `AISQUARE_EXPLAINABILITY_TARGET` says: a project's
   destination comes before that variable, which moves only the projects without

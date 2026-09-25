@@ -455,21 +455,29 @@ def resolve_target(
     )
 
 
-def deployment_fix(target: ResolvedTarget, *, what: str = "gateway") -> str:
-    """Where ``target``'s missing gateway (or proxy) is set: one wording for every surface.
+def deployment_fix(
+    target: ResolvedTarget, *, what: str = "gateway", value: str | None = None
+) -> str:
+    """Where ``target``'s gateway (or proxy) is set: one wording for every surface.
 
     For one of the machine's targets, ``enable --target … --gateway-url``. For a
     project's own deployment (:attr:`ResolvedTarget.project_deployment`) that
     command is the wrong one: it makes the named target the MACHINE's, which
     moves every project without a destination onto it — the re-point ``use``
     itself made (review of #203). The config entry moves that deployment alone.
+
+    With no ``value`` it says where both go, for a deployment that has neither;
+    with one — a URL to store, or a placeholder — it names that one setting,
+    for a remediation that corrects it (the doctor's and ``status``'s proxy and
+    gateway rows, which named ``enable --target`` for a project's deployment
+    too).
     """
     if target.project_deployment:
-        return (
-            f'gateway_url and proxy_url under [explainability.targets."{target.name}"] '
-            f"in {paths.config_path()}"
-        )
-    return f"aisquare explainability enable --target {target.name} --{what}-url <url>"
+        entry = f'[explainability.targets."{target.name}"] in {paths.config_path()}'
+        if value is None:
+            return f"gateway_url and proxy_url under {entry}"
+        return f'{what}_url = "{value}" under {entry}'
+    return f"aisquare explainability enable --target {target.name} --{what}-url {value or '<url>'}"
 
 
 def _project_api_key(
@@ -1471,18 +1479,25 @@ def _check_config(target: ResolvedTarget, *, on: bool) -> DoctorCheck:
             name,
             f"target '{target.name}' ({target.gateway_source}): {unusable} — nothing can "
             "be posted to it, and the proxy lane cannot tell whether the proxy agrees with it",
-            f"Store a full URL: aisquare explainability enable --target {target.name} "
-            "--gateway-url https://<host>",
+            f"Store a full URL: {deployment_fix(target, value='https://<host>')}",
         )
     if not target.api_key:
+        # For a project's own deployment, `enable --target … --key-env` would make it the
+        # machine's target, re-pointing every project without a destination (review of #203):
+        # the project's own key is the way in, as `use` says.
+        other = (
+            "attach it to the project: aisquare explainability key set --project "
+            f"{shlex.quote(target.project_id or '<project>')}"
+            if target.project_deployment
+            else "point the target at another variable: aisquare explainability enable "
+            f"--target {target.name} --key-env <VAR>"
+        )
         return degrade(
             name,
             f"target '{target.name}' -> {target.gateway_url} ({target.gateway_source}), "
             f"but ${target.api_key_env} is not set in this shell",
             f"Export the workspace key as ${target.api_key_env} (the CLI reads it from "
-            "the environment and never stores it), or point the target at another "
-            "variable: aisquare explainability enable --target "
-            f"{target.name} --key-env <VAR>",
+            f"the environment and never stores it), or {other}",
         )
     identities = ", ".join(target.agent_names) or "none"
     return _ok(
@@ -1796,10 +1811,7 @@ def _destination(target: ResolvedTarget, verdict: ProxyProbe) -> ProxyState:
                 f"{target.name!r}, so that cannot be compared with anything"
             ),
             severity=CheckStatus.warn,
-            remediation=(
-                f"Name the deployment: aisquare explainability enable --target {target.name} "
-                f"--gateway-url {adopt}"
-            ),
+            remediation=f"Name the deployment: {deployment_fix(target, value=adopt)}",
         )
     unusable = url_problem(target.gateway_url, what="gateway")
     if unusable:
@@ -1809,10 +1821,7 @@ def _destination(target: ResolvedTarget, verdict: ProxyProbe) -> ProxyState:
                 f"unusable ({unusable}), so where the proxy ships cannot be compared with it"
             ),
             severity=CheckStatus.warn,
-            remediation=(
-                f"Store a full URL: aisquare explainability enable --target {target.name} "
-                "--gateway-url https://<host>"
-            ),
+            remediation=f"Store a full URL: {deployment_fix(target, value='https://<host>')}",
         )
     if verdict.gateway:
         if foreign_view:
@@ -1903,8 +1912,8 @@ def _destination(target: ResolvedTarget, verdict: ProxyProbe) -> ProxyState:
             severity=CheckStatus.warn,
             remediation=(
                 f"Restart the local proxy with EXPLAINABILITY_GATEWAY_URL={target.gateway_url}, "
-                "or point this CLI at the deployment's own proxy: aisquare explainability "
-                f"enable --target {target.name} --proxy-url {hosted}"
+                "or point this CLI at the deployment's own proxy: "
+                f"{deployment_fix(target, what='proxy', value=hosted)}"
             ),
         )
     return ProxyState(
@@ -1920,8 +1929,7 @@ def _destination(target: ResolvedTarget, verdict: ProxyProbe) -> ProxyState:
             "is wrong: confirm on that host that it was started with "
             f"EXPLAINABILITY_GATEWAY_URL={target.gateway_url} (a proxy that reports its "
             "gateway from /health clears this on its own). Otherwise point this CLI at the "
-            f"deployment's proxy: aisquare explainability enable --target {target.name} "
-            f"--proxy-url {hosted}"
+            f"deployment's proxy: {deployment_fix(target, what='proxy', value=hosted)}"
         ),
     )
 

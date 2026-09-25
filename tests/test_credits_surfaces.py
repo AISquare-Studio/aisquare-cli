@@ -369,9 +369,32 @@ def test_the_explainability_views_row_says_why_it_has_no_reading(
     rows = dict(status_report(pointed).rows)
     assert rows["credits"] == (
         "(AISQUARE_TOKEN is used with https://api.aisquare.studio, not this workspace's API — "
-        f"set AISQUARE_API_URL={idp.url} and a token that API issued to read them)"
+        f"set AISQUARE_API_URL={idp.url} and a token that API issued to read them; every "
+        "command in that shell then talks to that API)"
     ), rows["credits"]
     assert len(_balance_calls(idp)) == 1, "none of these cases asks anyone"
+
+
+def test_whoami_says_why_a_session_for_another_api_has_no_credits_line(
+    runner: CliRunner,
+    idp: IdentityProviderStub,
+    pointed: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #173 after the stack's merge (J3): signed in to another API than the
+    destination's, ``whoami`` dropped its credits line in silence, while the tab's row
+    named the fix. It says the same thing now, from the same sentence."""
+    elsewhere = iam.Session(api_url="https://api.aisquare.studio", token="aisq_x", source="file")
+    monkeypatch.setattr(iam, "current_session", lambda api_url=None: elsewhere)
+
+    who = runner.invoke(app, ["whoami"])
+
+    assert who.exit_code == 0, who.output
+    assert (
+        "credits: (signed in to https://api.aisquare.studio, not this workspace's API — "
+        f"aisquare login --api-url {idp.url} to read them)"
+    ) in who.output
+    assert _balance_calls(idp) == [], "nobody was asked"
 
 
 def test_a_sign_in_or_out_in_another_terminal_follows_on_the_next_frame(

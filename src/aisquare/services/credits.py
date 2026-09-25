@@ -365,6 +365,30 @@ def for_destination(
     return credits
 
 
+def why_unread(session: iam.Session, destination: TraceDestination) -> str:
+    """Why :func:`for_destination` has no reading for a signed-in ``session``: another API.
+
+    Asking a server other than the workspace's about its id would be a wrong
+    answer at best, so there is no reading. That is said, never left out:
+    ``whoami`` dropped its credits line in silence where the Explainability
+    tab named the fix (review of #173 after the stack's merge, J3). An
+    ``AISQUARE_TOKEN`` session cannot ``aisquare login`` (``env_token_set``),
+    and its token was issued by the other server, so its fix is the variable
+    pair. That pair moves EVERY command in the shell to the workspace's API,
+    not this reading alone, and the sentence says so (J4).
+    """
+    if session.source == "env":
+        return (
+            f"{iam.TOKEN_ENV_VAR} is used with {session.api_url}, not this workspace's API — "
+            f"set {iam.API_URL_ENV_VAR}={destination.api_url} and a token that API issued to "
+            "read them; every command in that shell then talks to that API"
+        )
+    return (
+        f"signed in to {session.api_url}, not this workspace's API — "
+        f"aisquare login --api-url {destination.api_url} to read them"
+    )
+
+
 # ── one voice ───────────────────────────────────────────────────────────────────
 
 

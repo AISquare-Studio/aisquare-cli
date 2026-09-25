@@ -198,23 +198,11 @@ def _credits_row(target: ops.ResolvedTarget) -> str:
     if session is None:
         return "(sign in to read them — aisquare login)"
     reading = credits_service.for_destination(session, destination)
-    if reading is None and session.source == "env":
-        # `aisquare login` refuses while the variable is set (`env_token_set`):
-        # the token goes to the API the environment names, so that is the fix,
-        # with a token that API issued. The one set now most likely came from
-        # the other server (docs/signing-in.md: set it only where every command
-        # talks to the server that issued it); pointed at this API alone, the
-        # row read a 401 instead (review of #173, round 2).
-        return (
-            f"({iam.TOKEN_ENV_VAR} is used with {session.api_url}, not this workspace's API — "
-            f"set {iam.API_URL_ENV_VAR}={destination.api_url} and a token that API issued "
-            "to read them)"
-        )
     if reading is None:  # the session belongs to another API than the workspace's
-        return (
-            f"(signed in to {session.api_url}, not this workspace's API — "
-            f"aisquare login --api-url {destination.api_url} to read them)"
-        )
+        # For an AISQUARE_TOKEN session the fix is the environment's, with a token
+        # that API issued: pointed at this API alone, the row read a 401 (review of
+        # #173, round 2). `credits.why_unread` words both, for `whoami` too.
+        return f"({credits_service.why_unread(session, destination)})"
     return credits_service.describe(reading)
 
 

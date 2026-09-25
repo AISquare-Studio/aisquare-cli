@@ -186,8 +186,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   under the AISquare card on its minute tick; the Explainability view has a
   `credits` row; `doctor --live` gains `workspace-credits`, warning before a
   fleet is spawned into a low or exhausted workspace. One request per
-  workspace, cached a minute, never on a hook or session path; failures are a
-  reason on the row, nothing else.
+  workspace, a balance it read reused for a minute, never on a hook or session
+  path; failures are a reason on the row, nothing else, and so is a session
+  for another API than the workspace's, with the command that fixes it.
 - **Pick where a project's traces land with your sign-in** (#142).
   `aisquare explainability workspaces`, `studios [--workspace W]` and
   `use <workspace>[/<studio>] [--project P] [--no-key] [--clear]` list what the

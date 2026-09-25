@@ -407,7 +407,10 @@ def logout() -> None:
 
 
 def whoami() -> None:
-    """Show which account this machine is signed in as (from the file; credits ask the API)."""
+    """Show which account this machine is signed in as (credits ask the API).
+
+    The session is `AISQUARE_TOKEN` when that is set, else the stored file.
+    """
     try:
         session = iam.current_session()
     except iam.IamError as exc:
@@ -416,9 +419,10 @@ def whoami() -> None:
         fail("Not signed in. Run aisquare login.", error="not_authenticated")
     lands_in = _destination_here()
     # The one request `whoami` makes (#143), and only with a destination for
-    # the project here: that workspace's balance, cached a minute and given at
-    # most `credits.TIMEOUT_SECONDS`. It said "(offline)" before the credits
-    # line, which is no longer so (review of #173, round 1).
+    # the project here: that workspace's balance, a reading reused for a minute,
+    # each network operation given `credits.TIMEOUT_SECONDS`. It said
+    # "(offline)" before the credits line, which is no longer so (review of
+    # #173, round 1).
     credits = credits_service.for_destination(session, lands_in)
     if get_state().json_output:
         typer.echo(
@@ -444,6 +448,12 @@ def whoami() -> None:
         stdout_console().print(f"traces: {lands_in.label} · {lands_in.environment}")
     if credits is not None:
         stdout_console().print(f"credits: {credits_service.describe(credits)}")
+    elif lands_in is not None:
+        # A session for another API than the destination's: said, as the tab says it
+        # (review of #173 after the stack's merge, J3).
+        stdout_console().print(
+            f"credits: ({credits_service.why_unread(session, lands_in)})", markup=False
+        )
 
 
 def _destination_here() -> TraceDestination | None:

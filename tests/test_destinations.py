@@ -206,6 +206,27 @@ def test_picking_by_name_uid_or_id_and_the_ambiguous_and_missing_cases() -> None
     assert needed.value.code == "studio_required" and "Docs" in needed.value.message
 
 
+def test_a_destination_is_picked_among_your_workspaces_before_the_invitations() -> None:
+    """A pending invitation named like a workspace you belong to made that name
+    ``ambiguous`` for ``use``, which could then not choose it by name (review of #172)."""
+    workspaces = [
+        dest.Workspace(id=1, uid="u1", name="acme", role="ADMIN"),
+        dest.Workspace(id=9, uid="u9", name="Acme", invite_status="pending"),
+        dest.Workspace(id=5, uid="u5", name="guests", invite_status="pending"),
+    ]
+    assert dest.pick_workspace("ACME", workspaces, members_only=True).id == 1
+    for invited in ("guests", "u9"):
+        with pytest.raises(dest.DestinationError) as refused:
+            dest.pick_workspace(invited, workspaces, members_only=True)
+        assert refused.value.code == "not_a_member", invited
+    with pytest.raises(dest.DestinationError) as missing:
+        dest.pick_workspace("nope", workspaces, members_only=True)
+    assert missing.value.code == "not_found" and "acme, Acme, guests" in missing.value.message
+    with pytest.raises(dest.DestinationError) as listed:  # the listing's own view: both
+        dest.pick_workspace("acme", workspaces)
+    assert listed.value.code == "ambiguous"
+
+
 # --- use: record, target, key, routing -------------------------------------------------------
 
 

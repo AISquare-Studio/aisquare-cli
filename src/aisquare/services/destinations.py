@@ -373,15 +373,25 @@ def pick_workspace(
     ``members_only`` is for choosing a destination: the listing carries pending
     invitations so the reason one cannot be picked is on screen, and a
     workspace the user has not joined is not somewhere their traces can land.
+    The ref is matched among the workspaces the user belongs to FIRST: matched
+    across the invitations too, a member workspace named like a pending one
+    read as ``ambiguous`` and could not be chosen by name at all (review of
+    #172). Only a ref no member workspace answers is looked for among the
+    invitations, to say why it cannot be picked.
     """
-    found = _pick_workspace(ref, workspaces)
-    if members_only and not found.member:
-        raise DestinationError(
-            "not_a_member",
-            f"you are invited to {found.name} ({found.invite_status or 'pending'}) but not a "
-            "member yet — accept the invitation in the web app, then choose it",
-        )
-    return found
+    if not members_only:
+        return _pick_workspace(ref, workspaces)
+    try:
+        return _pick_workspace(ref, [w for w in workspaces if w.member])
+    except DestinationError as exc:
+        if exc.code != "not_found":
+            raise
+    found = _pick_workspace(ref, workspaces)  # not a member's: an invitation, or nothing
+    raise DestinationError(
+        "not_a_member",
+        f"you are invited to {found.name} ({found.invite_status or 'pending'}) but not a "
+        "member yet — accept the invitation in the web app, then choose it",
+    )
 
 
 def _pick_workspace(ref: str, workspaces: list[Workspace]) -> Workspace:

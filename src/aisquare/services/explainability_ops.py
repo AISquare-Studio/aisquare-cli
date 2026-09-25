@@ -630,7 +630,7 @@ def binding_serves(
         return binding.api_url is None
     if binding.api_url is not None:
         return True
-    if target_name != settings.target and target_name not in settings.targets:
+    if target_name not in known_targets(settings):
         return False
     from aisquare.services.destinations import deployment_target  # lazy: it imports this
 
@@ -662,7 +662,7 @@ def kept_key_note(
             f"attached for the deployment of {binding.api_url}, which no destination of this "
             f"project names now: not used for this machine's target {target.name}"
         )
-    if binding.target != settings.target and binding.target not in settings.targets:
+    if binding.target not in known_targets(settings):  # `binding_serves`' rule, as it reads it
         return (
             f"attached for this machine's target {binding.target}, which it no longer has, so "
             "not known to be a key for the deployment this project's destination names "

@@ -1196,10 +1196,14 @@ def identity_problem(template: str) -> str | None:
         )
     unsafe = next((name for name in (one, two) if not _SAFE_ROLE.match(name)), None)
     if unsafe is not None:
+        # The example is a NAME, not a template: the Setup form shows this sentence as
+        # it is, and its prefix field refuses braces, so "try 'name-{role}'" could not be
+        # followed there (review of the #203 final-review fixes, F5).
+        example = re.sub(r"[^A-Za-z0-9._-]+", ".", unsafe)
         return (
             f"identity template {template!r} names agents like {unsafe!r}, which cannot "
             "travel in a header, so every launch would go untraced — letters, digits, '.', "
-            "'_' and '-' only: try 'name-{role}'"
+            f"'_' and '-' only, as in {example!r}"
         )
     return None
 

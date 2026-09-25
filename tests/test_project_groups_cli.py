@@ -140,6 +140,21 @@ def test_onboard_into_a_new_group_the_store_refuses_leaves_no_empty_group(
     assert [g["name"] for g in listing["groups"]] == [], "an empty group was left behind"
 
 
+def test_onboard_into_a_blank_group_is_refused_before_the_onboard(
+    runner: CliRunner, projects: dict[str, str], tmp_path: Path
+) -> None:
+    """``onboard --group ' '`` found no group by that name and asked ``create_group`` for
+    one, whose ``ValueError("a group needs a name")`` escaped uncaught, after the onboard
+    had committed (review of #203, round 2). It is refused as ``group create ' '`` is,
+    and nothing is onboarded."""
+    fresh = tmp_path / "fresh"
+    fresh.mkdir()
+    result = runner.invoke(app, ["--json", "project", "onboard", str(fresh), "--group", " "])
+    assert result.exit_code == 1 and isinstance(result.exception, SystemExit), result.output
+    assert json.loads(result.stdout)["error"] == "invalid_group"
+    assert "fresh" not in _names(runner, "--all"), "onboarded before the group was refused"
+
+
 def test_a_filter_that_matches_nothing_says_so_not_that_nothing_is_registered(
     runner: CliRunner, projects: dict[str, str]
 ) -> None:

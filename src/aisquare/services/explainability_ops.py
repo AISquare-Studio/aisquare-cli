@@ -184,6 +184,12 @@ class ResolvedTarget:
     """The deployment is the PROJECT's — its destination's, or the one its own key is
     bound to off the machine's target — so the machine's top-level gateway and proxy
     never stand in for it, and its fix is its own entry (:func:`deployment_fix`)."""
+    entry_shared: str | None = None
+    """For a project's own deployment that has the machine's own target's name, what
+    names that target: "config" (``settings.target``) or "env" (an exported
+    ``$AISQUARE_EXPLAINABILITY_TARGET``). Its ``[explainability.targets."<name>"]`` is
+    then also the entry every project without a destination reads, so a fix written
+    there moves them too (:func:`deployment_fix`); ``None`` otherwise."""
 
     @property
     def configured(self) -> bool:
@@ -359,7 +365,8 @@ def resolve_target(
     with ``explainability key set`` and bound to ONE deployment, so it answers
     only when that deployment is the one resolved here (:func:`binding_serves`:
     a key attached for a destination's deployment never answers for the
-    machine's target of the same name) — then the target's environment
+    machine's target of the same name, nor one bound to the machine's target
+    for a destination's deployment elsewhere) — then the target's environment
     variable, then the machine key file under the same rule as before.
     Without a project id the read is machine-level, as every caller made it
     until now; ``doctor`` passes none and so opens no store.
@@ -414,7 +421,8 @@ def resolve_target(
     else:
         target, placed = settings.targets.get(chosen, ExplainabilityTarget()), False
 
-    api_key, key_source = _project_api_key(project_id, chosen, destination), "project"
+    api_key = _project_api_key(project_id, chosen, destination, settings, environ)
+    key_source = "project"
     if api_key is None:
         api_key, key_source = environ.get(target.api_key_env) or None, "env"
     if api_key is None and target.api_key_env == KEY_ENV_VAR:
@@ -433,6 +441,13 @@ def resolve_target(
     if not gateway_url:
         source = "unset"
     proxy_url = target.proxy_url or (settings.proxy_url if machine else "")
+    # The project's deployment, named like the machine's own target: one config entry
+    # for both, which `deployment_fix` must not name as this deployment's alone.
+    entry_shared = None
+    if not machine and chosen == settings.target:
+        entry_shared = "config"
+    elif not machine and chosen == exported:
+        entry_shared = "env"
 
     roles = target.roles if target.roles is not None else settings.roles
     return ResolvedTarget(
@@ -452,6 +467,7 @@ def resolve_target(
         target_source=target_source,
         unused_env_target=unused_env_target,
         project_deployment=not machine,
+        entry_shared=entry_shared,
     )
 
 
@@ -471,17 +487,44 @@ def deployment_fix(
     for a remediation that corrects it (the doctor's and ``status``'s proxy and
     gateway rows, which named ``enable --target`` for a project's deployment
     too).
+
+    UNLESS THE MACHINE'S OWN TARGET HAS THE SAME NAME
+    (:attr:`ResolvedTarget.entry_shared`): then the entry is its too, and every
+    project without a destination reads it. The machine ``init
+    --explainability`` writes is on prod and named ``stg`` by default, so for a
+    project on staging the proxy row's fix, followed word for word, moved every
+    other project's proxy to staging, with the prod gateway and key (review of
+    #203, round 2). The entry is still where the setting goes, and the fix says
+    the machine's target needs a name of its own first.
     """
     if target.project_deployment:
         entry = f'[explainability.targets."{target.name}"] in {paths.config_path()}'
-        if value is None:
-            return f"gateway_url and proxy_url under {entry}"
-        return f'{what}_url = "{value}" under {entry}'
+        setting = "gateway_url and proxy_url" if value is None else f'{what}_url = "{value}"'
+        fix = f"{setting} under {entry}"
+        if target.entry_shared == "config":
+            return (
+                f"{fix}, once this machine's own target has a name of its own: it is "
+                f'"{target.name}" too, so every project without a destination reads that '
+                f'entry. Rename it first: target = "<name>" under [explainability], its own '
+                "entry moved with it if it has one, and `key set` again for a project whose "
+                f'key was attached for "{target.name}"'
+            )
+        if target.entry_shared == "env":
+            return (
+                f"{fix}, once ${TARGET_ENV_VAR} names another target: it names "
+                f'"{target.name}" in this shell, so every project without a destination here '
+                "reads that entry too"
+            )
+        return fix
     return f"aisquare explainability enable --target {target.name} --{what}-url {value or '<url>'}"
 
 
 def _project_api_key(
-    project_id: str | None, target_name: str, destination: TraceDestination | None
+    project_id: str | None,
+    target_name: str,
+    destination: TraceDestination | None,
+    settings: ExplainabilitySettings,
+    environ: Mapping[str, str],
 ) -> str | None:
     """The project's own key, when one is attached FOR ``target_name`` and its file reads.
 
@@ -499,13 +542,20 @@ def _project_api_key(
     if project_id is None:
         return None
     binding = project_key_binding(project_id)
-    if binding is None or not binding_serves(binding, target_name, destination):
+    if binding is None or not binding_serves(
+        binding, target_name, destination, settings, env=environ
+    ):
         return None
     return read_project_key(binding.key_path)
 
 
 def binding_serves(
-    binding: ProjectExplainability, target_name: str, destination: TraceDestination | None
+    binding: ProjectExplainability,
+    target_name: str,
+    destination: TraceDestination | None,
+    settings: ExplainabilitySettings,
+    *,
+    env: Mapping[str, str] | None = None,
 ) -> bool:
     """Whether the project's key ``binding`` is a key for the deployment ``target_name`` names.
 
@@ -521,15 +571,65 @@ def binding_serves(
     kept and not used until a destination names its deployment again, and the
     machine's key applies meanwhile (review of #203).
 
+    The other way round too. A key bound to one of the machine's targets
+    (``api_url`` NULL) answered for a destination's deployment of the same name.
+    On that machine, a prod key attached with ``key set`` before any ``use`` is
+    bound to the machine's ``stg``. ``use`` on a staging workspace then took it
+    as the project's own key and bound the staging roster with it, and every
+    launch sent it to the staging gateway and proxy. The mint never overwrites
+    a hand key, so nothing replaced it (review of #203, round 2). Such a key
+    does not answer for the destination's deployment when the machine's target
+    of that name resolves another gateway: it is kept and not used, as above.
+    A name none of the machine's targets has, or a machine target with no
+    gateway at all, is a deployment by name only, and the name is the
+    destination's, so the key answers there as it did (``key set`` on a
+    machine whose target was set to ``local`` before ``use``, #141).
+
     ONE rule, for the resolver and for the surfaces that say whether the key is
-    in use (``key show``, the Explainability page's key row), so neither calls a
-    kept key the one in use, or a key in use a missing file.
+    in use (``key show``, the Explainability page's key row, through
+    :func:`kept_key_note`), so neither calls a kept key the one in use, or a key
+    in use a missing file.
     """
     if binding.target != target_name:
         return False
-    if binding.api_url is None:
+    if destination is None or destination.environment != target_name:
+        return binding.api_url is None
+    if binding.api_url is not None:
         return True
-    return destination is not None and destination.environment == target_name
+    if target_name != settings.target and target_name not in settings.targets:
+        return True
+    from aisquare.services.destinations import deployment_target  # lazy: it imports this
+
+    # Both resolved, the machine's by the one resolver: neither is read off the config.
+    machine = resolve_target(settings, target_name, env=env)
+    theirs = deployment_target(settings, destination)
+    return not machine.gateway_url or machine.gateway_url == theirs.gateway_url.rstrip("/")
+
+
+def kept_key_note(
+    binding: ProjectExplainability, target: ResolvedTarget, settings: ExplainabilitySettings
+) -> str:
+    """Why the project's key, bound to ``target``'s name, is kept and not used for it.
+
+    Empty when it is a key for ``target`` (:func:`binding_serves`), or is bound
+    to another name, which each surface words on its own. ONE sentence for
+    ``key show`` and the Explainability page's key row, which wrote it twice
+    (review of #203, round 2).
+    """
+    if binding.target != target.name or binding_serves(
+        binding, target.name, target.destination, settings
+    ):
+        return ""
+    if binding.api_url is not None:
+        return (
+            f"attached for the deployment of {binding.api_url}, which no destination of this "
+            f"project names now: not used for this machine's target {target.name}"
+        )
+    return (
+        f"attached for this machine's own target {binding.target}, another deployment than "
+        f"the one this project's destination names ({target.gateway_url or 'no gateway known'}): "
+        "not used for it"
+    )
 
 
 def read_project_key(path: Path) -> str | None:
@@ -1484,10 +1584,11 @@ def _check_config(target: ResolvedTarget, *, on: bool) -> DoctorCheck:
     if not target.api_key:
         # For a project's own deployment, `enable --target … --key-env` would make it the
         # machine's target, re-pointing every project without a destination (review of #203):
-        # the project's own key is the way in, as `use` says.
+        # the project's own key is the way in, as `use` says. With `--from-env`: from a
+        # terminal, `key set` with nothing on stdin refuses (review of #203, round 2).
         other = (
             "attach it to the project: aisquare explainability key set --project "
-            f"{shlex.quote(target.project_id or '<project>')}"
+            f"{shlex.quote(target.project_id or '<project>')} --from-env <VAR>"
             if target.project_deployment
             else "point the target at another variable: aisquare explainability enable "
             f"--target {target.name} --key-env <VAR>"

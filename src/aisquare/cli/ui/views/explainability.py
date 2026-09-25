@@ -31,7 +31,13 @@ from textual.widgets import Button, Checkbox, Input, Label, Static
 from textual.worker import Worker, WorkerState
 
 from aisquare.core import orchestrator, outbox, paths
-from aisquare.core.config import AppConfig, ExplainabilityTarget, load_config, save_config
+from aisquare.core.config import (
+    AppConfig,
+    ExplainabilitySettings,
+    ExplainabilityTarget,
+    load_config,
+    save_config,
+)
 from aisquare.core.store import store_session
 from aisquare.models import CheckStatus, ProjectInfo
 from aisquare.services import credits as credits_service
@@ -156,7 +162,7 @@ def status_report(page: ProjectInfo | None = None) -> StatusReport:
         ("lands in", destinations.describe(target.destination, key_source=target.key_source)),
         ("credits", _credits_row(target)),
         ("key", f"{target.key_origin} {'is set' if target.api_key else 'is NOT set'}"),
-        ("project", _project_key_row(project, target, page)),
+        ("project", _project_key_row(project, target, settings, page)),
         ("proxy", target.proxy_url),
         ("identity", target.agent_name_template),
         ("agents", ", ".join(target.agent_names) or "(none)"),
@@ -207,7 +213,10 @@ def _credits_row(target: ops.ResolvedTarget) -> str:
 
 
 def _project_key_row(
-    project: ProjectInfo | None, target: ops.ResolvedTarget, page: ProjectInfo | None = None
+    project: ProjectInfo | None,
+    target: ops.ResolvedTarget,
+    settings: ExplainabilitySettings,
+    page: ProjectInfo | None = None,
 ) -> str:
     """``<name>: its own key for stg`` / ``<name>: the machine key`` — the origin per project.
 
@@ -218,7 +227,7 @@ def _project_key_row(
     """
     if project is None:
         return "(no project)"
-    return _key_origin_row(project, target) + _unused_page_key(page, project)
+    return _key_origin_row(project, target, settings) + _unused_page_key(page, project)
 
 
 def _unused_page_key(page: ProjectInfo | None, project: ProjectInfo) -> str:
@@ -234,7 +243,9 @@ def _unused_page_key(page: ProjectInfo | None, project: ProjectInfo) -> str:
     )
 
 
-def _key_origin_row(project: ProjectInfo, target: ops.ResolvedTarget) -> str:
+def _key_origin_row(
+    project: ProjectInfo, target: ops.ResolvedTarget, settings: ExplainabilitySettings
+) -> str:
     name = project.root.name or project.id
     binding = ops.project_key_binding(project.id)
     if binding is None:
@@ -242,15 +253,13 @@ def _key_origin_row(project: ProjectInfo, target: ops.ResolvedTarget) -> str:
             f"{name}: no key of its own — the machine's applies (attach one below: the "
             f"workspace key, '{own_key_label()}' ticked)"
         )
+    # `key show`'s words, from one renderer: attached for another deployment than the
+    # one this name resolves now (review of #203).
+    kept = ops.kept_key_note(binding, target, settings)
     if binding.target != target.name:
         state = f"not used for target {target.name}"
-    elif not ops.binding_serves(binding, target.name, target.destination):
-        # `key show`'s words: attached for a destination's deployment that no
-        # destination of the project names now (review of #203).
-        state = (
-            f"attached for the deployment of {binding.api_url}, which no destination of "
-            f"this project names now: not used for this machine's target {target.name}"
-        )
+    elif kept:
+        state = kept
     elif target.key_source == "project":
         state = "in use"
     else:

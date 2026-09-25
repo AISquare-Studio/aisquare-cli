@@ -189,15 +189,22 @@ def _machine_key_serves(settings: ExplainabilitySettings, gateway_url: str) -> b
 
     ``init --explainability`` writes the top-level gateway and the key file
     together, so a top-level gateway equal to the deployment's IS the
-    single-deployment machine pointing at it. The machine's own target reads
-    that key too, so its gateway counts as well: the machine already sends the
-    key there. Anything else is a key issued for somewhere this function cannot
+    single-deployment machine pointing at it. The machine's own target's
+    gateway counts as well while that target reads the key, which it does by
+    naming the default variable: the machine already sends the key there. One
+    that names a variable of its own never sent the key file to its gateway,
+    and counting it anyway gave a destination there the default variable: on a
+    prod machine moved onto a staging target with a variable of its own, the
+    prod key file went to the staging gateway and proxy (review of #203,
+    round 2). Anything else is a key issued for somewhere this function cannot
     see, and so is a deployment with no gateway known.
     """
     if not gateway_url:
         return False
+    served = {settings.gateway_url}
     own = settings.targets.get(settings.target)
-    served = {settings.gateway_url, own.gateway_url if own is not None else ""}
+    if own is not None and own.api_key_env == KEY_ENV_VAR:
+        served.add(own.gateway_url)
     return gateway_url.rstrip("/") in {url.rstrip("/") for url in served if url}
 
 
@@ -210,18 +217,20 @@ def deployment_target(
     there is one, with only what is empty filled from the table: a gateway or
     proxy set by hand stays. Otherwise a target of its own. Either way it names
     a key variable of its own (:func:`key_env_for`) unless it already names
-    one. With the default one, the unlabelled machine key —
-    ``~/.aisquare/explainability-key`` or ``$EXPLAINABILITY_API_KEY`` — would
-    answer for every deployment anyone signs in to, and ``use`` would bind the
-    roster and every launch would authenticate with a key issued for somewhere
-    else: the hazard ``tests/test_key_never_crosses_deployments.py`` pins. An
-    entry the operator wrote without an ``api_key_env`` is no exception: it is
-    the entry ``use`` tells them to write for a host outside the table (its
-    gateway and proxy), and the machine's prod key went to the self-hosted
-    gateway and proxy with it (review of #203). The one exception is the
-    deployment the machine key already serves (:func:`_machine_key_serves`),
-    where that key is exactly the right one and a new variable would only take
-    it away.
+    one other than the default. With the default one, the unlabelled machine
+    key — ``~/.aisquare/explainability-key`` or ``$EXPLAINABILITY_API_KEY`` —
+    would answer for every deployment anyone signs in to, and ``use`` would
+    bind the roster and every launch would authenticate with a key issued for
+    somewhere else: the hazard ``tests/test_key_never_crosses_deployments.py``
+    pins. An entry the operator wrote without an ``api_key_env`` is no
+    exception: it is the entry ``use`` tells them to write for a host outside
+    the table (its gateway and proxy), and the machine's prod key went to the
+    self-hosted gateway and proxy with it (review of #203). Nor is one that
+    writes the default out: ``save_config`` writes every field, so every entry
+    the CLI saved names it, and the two cannot be told apart. The one exception
+    is the deployment the machine key already serves
+    (:func:`_machine_key_serves`), where that key is exactly the right one and a
+    new variable would only take it away.
 
     BUILT FOR THE ONE RESOLUTION, NEVER WRITTEN TO THE CONFIG. ``use`` used to
     write it into the ``targets`` map the machine's own target is read from, so

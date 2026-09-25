@@ -99,6 +99,8 @@ _DoctorReport = tuple[Path | None, list[DoctorCheck]]
 """What the doctor worker hands back: the scope it ran for, and its checks."""
 
 _DOCTOR_WORKER = "doctor"
+ACCOUNTS_WORKER = "shell-accounts"
+"""The thread worker that reads the Accounts section's frame (``FleetApp.refresh_accounts``)."""
 _CHECK_SYMBOL = {CheckStatus.ok: "✓", CheckStatus.warn: "⚠", CheckStatus.fail: "✗"}
 _CHECK_STYLE = {CheckStatus.ok: "green", CheckStatus.warn: "yellow", CheckStatus.fail: "bold red"}
 
@@ -354,6 +356,8 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         self._accounts = accounts
         self.accounts_overview: AccountsOverview | None = None
         """The last Accounts frame that was read; ``None`` before the first or when disabled."""
+        self._accounts_worker: Worker[AccountsOverview] | None = None
+        """The newest accounts read; an older one's frame is not ours to paint."""
         self.escape_key = escape_key or fleet_service.settings().escape_key
         self.snapshot: FleetSnapshot | None = None
         """The last frame that was read successfully; ``None`` before the first."""
@@ -560,19 +564,47 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         self.refresh_accounts()
 
     def refresh_accounts(self) -> None:
-        """Re-read the Claude accounts and the AISquare session; the section and the page follow.
+        """Re-read the Claude accounts OFF the UI thread; the section and the page follow.
 
-        Files only — a few small JSON reads — which is why it rides the same
-        two-second tick as the store. The usage numbers are the view's own,
-        slower business (``AccountsView.refresh_usage``).
+        ``accounts_service.overview`` reads the registry through ``context.db``
+        and reconciles it as it reads: a slot ``+ Add`` just made gets its row,
+        a vanished one is deleted and the order renumbered. Behind another
+        process's write that waits out the store's busy timeout, and this rides
+        the two-second tick whatever page is open, so the whole UI froze for as
+        long as a writer held the lock. The board, the agent header and the
+        Settings tab moved this same call into thread workers (review of #205,
+        fourth round); the shell's tick was the caller they missed (final
+        review of #203, accounts F2). :meth:`_accounts_read` paints the answer,
+        the newest read's only: ``exclusive`` means a tick that finds the last
+        read still waiting replaces it rather than queueing behind it. The
+        usage numbers are the view's own, slower business
+        (``AccountsView.refresh_usage``).
         """
         if self._accounts is None:
             return
+        self._accounts_worker = self.run_worker(
+            self._accounts,
+            name=ACCOUNTS_WORKER,
+            group=ACCOUNTS_WORKER,
+            exclusive=True,
+            thread=True,
+            exit_on_error=False,
+        )
+
+    def _accounts_read(self, event: Worker.StateChanged) -> None:
+        """Paint the frame the newest accounts read answered, and the AISquare session beside it.
+
+        The session is a file read, as it always was here; only the registry
+        went to the worker.
+        """
+        if event.state is WorkerState.SUCCESS:
+            result = event.worker.result
+            overview = result if isinstance(result, AccountsOverview) else None
+        elif event.state is WorkerState.ERROR:
+            overview = None  # a directory we cannot read costs the line, never the frame
+        else:
+            return
         sidebar = self.sidebar
-        try:
-            overview: AccountsOverview | None = self._accounts()
-        except Exception:  # a directory we cannot read costs the line, never the frame
-            overview = None
         self.accounts_overview = overview
         session_known = True
         try:
@@ -679,6 +711,10 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         )
 
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
+        if event.worker.name == ACCOUNTS_WORKER:
+            if event.worker is self._accounts_worker:
+                self._accounts_read(event)
+            return
         if event.worker.name != _DOCTOR_WORKER:
             return
         if event.worker is not self._doctor_worker:

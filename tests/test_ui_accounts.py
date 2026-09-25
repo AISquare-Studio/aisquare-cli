@@ -16,6 +16,7 @@ the slot that must not be discarded.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import dataclasses
 import os
 import sys
@@ -30,9 +31,9 @@ import pytest
 from textual.containers import Vertical
 from textual.pilot import Pilot
 from textual.widgets import Button, Static
-from textual.worker import Worker, WorkerState
+from textual.worker import Worker, WorkerError, WorkerState
 
-from aisquare.cli.ui.app import FleetApp
+from aisquare.cli.ui.app import ACCOUNTS_WORKER, FleetApp
 from aisquare.cli.ui.sidebar import AccountsSection, AccountsTitle
 from aisquare.cli.ui.terminal import TerminalPane
 from aisquare.cli.ui.views.accounts import (
@@ -186,7 +187,7 @@ def drive(
     async def run() -> T:
         app = FleetApp(refresh_seconds=3600, doctor=lambda: [], accounts=lambda: frame)
         async with app.run_test(size=SIZE, notifications=notifications) as pilot:
-            await pilot.pause()
+            await accounts_read(app)  # the first frame is painted before the test looks
             return await fn(pilot)
 
     return asyncio.run(run())
@@ -208,6 +209,26 @@ async def settle(app: FleetApp) -> None:
     test had read the page, which had no usage at all. See ``settle_page``.
     """
     await settle_page(app)
+
+
+async def accounts_read(app: FleetApp) -> None:
+    """Wait until the shell's accounts read has answered and its frame is painted.
+
+    ``refresh_accounts`` reads in a thread worker (final review of #203, accounts
+    F2), so a test that asks for a frame and then reads the page waits for that
+    worker, and only that one: :func:`settle` would also wait for a worker a
+    test is holding on purpose. Rounds, as ``settle_page`` goes round, because
+    the answer is a message the app handles after the worker has finished.
+    """
+    pilot = Pilot(app)
+    for _ in range(20):
+        await pilot.pause()
+        reads = [w for w in app.workers if w.group == ACCOUNTS_WORKER and not w.is_finished]
+        if not reads and not app.message_queue_size:
+            return
+        for worker in reads:
+            with contextlib.suppress(WorkerError):
+                await worker.wait()
 
 
 def fleet_app(pilot: Pilot[None]) -> FleetApp:
@@ -358,6 +379,55 @@ def test_the_section_summarises_and_opens_the_page(no_network: dict[str, Any]) -
     assert rows[1].startswith("  2  account 2") and "two@example.com" in rows[1]
     assert "Signed in as me@aisquare.studio" in status
     assert claude.startswith("Claude Code 2.1.266")
+
+
+def test_the_shells_tick_reads_the_accounts_off_the_ui_thread_and_paints_the_answer(
+    no_network: dict[str, Any],
+) -> None:
+    """Final review of #203, accounts F2: ``refresh_accounts`` called the reader on the
+    event loop every two seconds. The real one reads ``context.db`` and may write the
+    registry's reconcile, which waits out the busy timeout behind another writer, so
+    the UI froze for as long as a hook held the lock. Held here as that writer would
+    hold it: the tick returns at once, the section keeps its frame, and the answer is
+    painted when it comes."""
+    no_network["session"] = _session()
+    frames = [
+        _overview(_status(1, "me@example.com")),
+        _overview(_status(1, "me@example.com"), _status(2, "two@example.com")),
+    ]
+    threads: list[str] = []
+    hold, asked, release = threading.Event(), threading.Event(), threading.Event()
+
+    def reader() -> AccountsOverview:
+        threads.append(threading.current_thread().name)
+        if hold.is_set():
+            asked.set()
+            release.wait(10)
+        return frames[0]
+
+    async def run() -> tuple[str, bool, str, str]:
+        app = FleetApp(refresh_seconds=3600, doctor=lambda: [], accounts=reader)
+        async with app.run_test(size=SIZE) as pilot:
+            await accounts_read(app)
+            detail = app.query_one(AccountsSection).query_one(".accounts-line", Static)
+            first = shown(detail)
+            hold.set()
+            frames.pop(0)
+            try:
+                app.refresh_data()  # the two-second tick, with the registry held
+                held = await asyncio.to_thread(asked.wait, 5)
+                await pilot.pause()
+                while_held = shown(detail)
+            finally:
+                release.set()
+            await accounts_read(app)
+            return first, held, while_held, shown(detail)
+
+    first, held, while_held, after = asyncio.run(run())
+    assert threads and threading.main_thread().name not in threads, threads
+    assert held, "the tick asked for the accounts"
+    assert first == while_held == "1 Claude · me@example.com"  # the last frame, kept
+    assert after == "2 Claude · me@example.com"  # the answer, painted when it came
 
 
 def test_buttons_follow_each_slots_state() -> None:
@@ -1124,7 +1194,7 @@ def test_default_move_and_disable_buttons_write_through_the_service_and_refresh(
         # The shell's next frame is the arranged one; the page follows it.
         frames.pop(0)
         app.refresh_accounts()
-        await pilot.pause()
+        await accounts_read(app)
         order = [r.slot for r in view.rows()]
         await pilot.click("#account-down-2")
         await settle(app)
@@ -1136,7 +1206,7 @@ def test_default_move_and_disable_buttons_write_through_the_service_and_refresh(
     async def run() -> tuple[str, list[int], str]:
         app = FleetApp(refresh_seconds=3600, doctor=lambda: [], accounts=lambda: frames[0])
         async with app.run_test(size=SIZE) as pilot:
-            await pilot.pause()
+            await accounts_read(app)
             return await go(pilot)
 
     after_default, order, last = asyncio.run(run())

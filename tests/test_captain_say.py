@@ -20,6 +20,7 @@ from typer.testing import CliRunner
 
 from aisquare.cli.app import app
 from aisquare.core import transcripts
+from aisquare.core.tmux import TmuxError
 from aisquare.models import FleetAgent, FleetAgentState, FleetAgentStatus, TeamSession
 from aisquare.services import fleet
 from aisquare.services.captain import brain
@@ -33,8 +34,16 @@ def _write_transcript(path: Path, entries: list[dict[str, Any]]) -> Path:
     return path
 
 
-def _user(text: str) -> dict[str, Any]:
-    return {"type": "user", "message": {"role": "user", "content": text}}
+def _stamp(at: datetime) -> str:
+    """Claude Code's own shape: UTC, milliseconds, a ``Z``."""
+    return at.astimezone(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def _user(text: str, at: datetime | None = None) -> dict[str, Any]:
+    entry: dict[str, Any] = {"type": "user", "message": {"role": "user", "content": text}}
+    if at is not None:
+        entry["timestamp"] = _stamp(at)
+    return entry
 
 
 def _tool_result(text: str) -> dict[str, Any]:
@@ -67,10 +76,62 @@ def test_the_reply_is_the_assistant_text_after_the_last_prompt(tmp_path: Path) -
     assert transcripts.last_reply(path) == "Checking.\nNothing needs you right now."
 
 
-def test_no_reply_yet_or_no_file_reads_as_none(tmp_path: Path) -> None:
+def test_an_unanswered_prompt_no_prompt_or_no_file_read_as_none(tmp_path: Path) -> None:
     path = _write_transcript(tmp_path / "t.jsonl", [_assistant(_text("old")), _user("new ask")])
-    assert transcripts.last_reply(path) is None
+    assert transcripts.last_reply(path) is None, "the prompt is there; nothing answers it yet"
+    assert transcripts.last_reply(_write_transcript(tmp_path / "u.jsonl", [])) is None
     assert transcripts.last_reply(tmp_path / "missing.jsonl") is None
+
+
+def test_an_answer_without_text_reads_as_empty(tmp_path: Path) -> None:
+    path = _write_transcript(
+        tmp_path / "t.jsonl",
+        [_user("do it"), _assistant({"type": "tool_use", "name": "mcp__captain__tell"})],
+    )
+    assert transcripts.last_reply(path) == ""
+
+
+def test_a_prompt_from_before_since_is_not_the_one_answered(tmp_path: Path) -> None:
+    """``since`` is the moment the text went in: an older prompt's answer is not its reply."""
+    typed = datetime(2026, 9, 25, 10, 0, tzinfo=UTC)
+    path = _write_transcript(
+        tmp_path / "t.jsonl",
+        [_user("an older question", typed - timedelta(seconds=30)), _assistant(_text("old"))],
+    )
+    assert transcripts.last_reply(path, since=typed) is None
+    _write_transcript(
+        path,
+        [
+            _user("an older question", typed - timedelta(seconds=30)),
+            _assistant(_text("old")),
+            _user("what is up", typed + timedelta(milliseconds=400)),
+            _assistant(_text("new")),
+        ],
+    )
+    assert transcripts.last_reply(path, since=typed) == "new"
+
+
+def test_a_meta_entry_is_not_a_prompt(tmp_path: Path) -> None:
+    """Claude Code writes command caveats and hook context as ``user`` text marked isMeta."""
+    meta = {"type": "user", "isMeta": True, "message": {"content": "<local-command-caveat>…"}}
+    path = _write_transcript(
+        tmp_path / "t.jsonl", [_user("what is up"), _assistant(_text("the answer")), meta]
+    )
+    assert transcripts.last_reply(path) == "the answer"
+
+
+def test_a_turn_larger_than_the_tail_still_yields_its_reply(tmp_path: Path) -> None:
+    """A tool result of several hundred KB between the prompt and the answer."""
+    path = _write_transcript(
+        tmp_path / "t.jsonl",
+        [
+            _user("read every pane"),
+            _assistant(_text("Reading."), {"type": "tool_use", "name": "mcp__captain__read_pane"}),
+            _tool_result("x" * 600_000),
+            _assistant(_text("All quiet.")),
+        ],
+    )
+    assert transcripts.last_reply(path) == "Reading.\nAll quiet."
 
 
 # --- say ------------------------------------------------------------------------------------
@@ -103,8 +164,16 @@ class Captain:
     started: list[str | None] = field(default_factory=list)
     told: list[str] = field(default_factory=list)
     typed_at: datetime | None = None
+    typed_text: str = ""
     row: FleetAgent | None = None
     session: TeamSession | None = None
+    prompt_typed: bool = True
+    notes: list[str] = field(default_factory=list)
+    paste_fails: bool = False
+    dies_after: float | None = None
+    """Seconds after the text goes in until the captain's pane dies."""
+    limited_after: float | None = None
+    """Seconds after the text goes in until the captain parks on its usage limit."""
 
 
 @pytest.fixture
@@ -136,15 +205,29 @@ def captain(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Captain, C
         )  # fmt: skip
 
     def status_now() -> FleetAgentState:
+        if (
+            fake.dies_after is not None
+            and fake.typed_at is not None
+            and clock.now >= fake.typed_at + timedelta(seconds=fake.dies_after)
+        ):
+            return "exited"
+        if (
+            fake.limited_after is not None
+            and fake.typed_at is not None
+            and clock.now >= fake.typed_at + timedelta(seconds=fake.limited_after)
+        ):
+            return "limited"
         if fake.busy_for > 0:
             return "working"
         return fake.state
 
     class Pane:
         def paste(self, pane_id: str, text: str) -> None:
+            if fake.paste_fails:
+                raise TmuxError("tmux paste-buffer failed: no server running")
             fake.typed.append(("paste", text))
-            fake.typed_at = clock.now
-            _write_transcript(transcript, [_user(text)])
+            fake.typed_at, fake.typed_text = clock.now, text
+            _write_transcript(transcript, [_user(text, clock.now)])
 
         def send_keys(self, pane_id: str, *keys: str) -> None:
             fake.typed.append(("keys", " ".join(keys)))
@@ -157,17 +240,28 @@ def captain(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Captain, C
             and fake.turn_ends_after is not None
             and clock.now >= fake.typed_at + timedelta(seconds=fake.turn_ends_after)
         ):
-            _write_transcript(transcript, [_user("x"), _assistant(_text(fake.reply))])
+            _write_transcript(
+                transcript,
+                [_user(fake.typed_text, fake.typed_at), _assistant(_text(fake.reply))],
+            )
             board_session("waiting", clock.now)
 
     def start(prompt: str | None = None, *, size: Any = None) -> fleet.SpawnReceipt:
         fake.started.append(prompt)
         fake.row = make_row()
-        fake.typed_at = clock.now
-        if prompt is not None:
-            _write_transcript(transcript, [_user(prompt)])
-        board_session("working", clock.now)
-        return fleet.SpawnReceipt(agent=fake.row, asked_label="captain", tmux_session="asq-x")
+        board_session("waiting", clock.now)  # its SessionStart: at its prompt
+        clock.sleep(2.0)  # the window comes up, then the fleet types the prompt
+        if prompt is not None and fake.prompt_typed:
+            fake.typed_at, fake.typed_text = clock.now, prompt
+            _write_transcript(transcript, [_user(prompt, clock.now)])
+            board_session("working", clock.now)
+        return fleet.SpawnReceipt(
+            agent=fake.row,
+            asked_label="captain",
+            tmux_session="asq-x",
+            notes=list(fake.notes),
+            prompt_typed=prompt is not None and fake.prompt_typed,
+        )
 
     def tell(*args: Any, **kwargs: Any) -> fleet.TellResult:
         fake.told.append(str(args))
@@ -177,7 +271,7 @@ def captain(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Captain, C
     monkeypatch.setattr(brain, "_sleep", sleep)
     monkeypatch.setattr(brain, "start", start)
     monkeypatch.setattr(brain, "find", lambda: fake.row)
-    monkeypatch.setattr(brain, "_session_of", lambda agent: fake.session)
+    monkeypatch.setattr(brain, "_bound", lambda agent: (fake.row, fake.session))
     monkeypatch.setattr(fleet, "tell", tell)
     monkeypatch.setattr(
         fleet, "status_of", lambda agent: FleetAgentStatus(agent=agent, state=status_now())
@@ -251,12 +345,114 @@ def test_a_previous_turns_waiting_is_not_taken_for_the_answer(
     assert reply.text == "Nothing needs you right now."
 
 
+def test_a_prompt_the_spawn_could_not_type_is_said_at_once(
+    captain: tuple[Captain, Clock],
+) -> None:
+    """The fleet notes a prompt it did not type; waiting the timeout out for it hid why."""
+    fake, clock = captain
+    fake.prompt_typed = False
+    fake.notes = ["the agent exited before the prompt could be typed"]
+    with pytest.raises(brain.NoReply, match="exited before the prompt could be typed") as caught:
+        brain.say("what is up", timeout=60)
+    assert caught.value.timed_out is False
+    assert clock.slept < 10
+
+
+def test_a_captain_that_dies_before_answering_is_said_at_once(
+    captain: tuple[Captain, Clock],
+) -> None:
+    fake, clock = captain
+    fake.present()  # type: ignore[attr-defined]
+    fake.turn_ends_after = None
+    fake.dies_after = 4.0
+    with pytest.raises(brain.NoReply, match="exited") as caught:
+        brain.say("what is up", timeout=120)
+    assert caught.value.timed_out is False
+    assert clock.slept < 10, "not the whole timeout"
+
+
+def test_a_captain_parked_on_its_usage_limit_is_said_at_once(
+    captain: tuple[Captain, Clock],
+) -> None:
+    fake, clock = captain
+    fake.present()  # type: ignore[attr-defined]
+    fake.turn_ends_after = None
+    fake.limited_after = 3.0
+    with pytest.raises(brain.NoReply, match="usage limit") as caught:
+        brain.say("what is up", timeout=120)
+    assert caught.value.timed_out is False
+    assert clock.slept < 10
+
+
+def test_a_waiting_row_without_the_answering_prompt_is_not_the_answer(
+    captain: tuple[Captain, Clock], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A hook that bumps ``last_seen_at`` on a ``waiting`` row — a SessionEnd, a quiet
+    notification — is not the turn that answered: the transcript must hold the prompt
+    typed at or after the text went in."""
+    fake, clock = captain
+    fake.present()  # type: ignore[attr-defined]
+    fake.turn_ends_after = None
+
+    real_sleep = brain._sleep
+
+    def bump(seconds: float) -> None:
+        real_sleep(seconds)
+        assert fake.session is not None
+        fake.session = fake.session.model_copy(update={"last_seen_at": clock.now})
+
+    monkeypatch.setattr(brain, "_sleep", bump)
+    _write_transcript(Path(str(fake.session.transcript_path)), [])  # type: ignore[union-attr]
+    with pytest.raises(brain.NoReply, match="did not answer within 20s"):
+        brain.say("what is up", timeout=20)
+
+
+def test_an_ended_session_is_never_taken_for_the_answer(
+    captain: tuple[Captain, Clock], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake, clock = captain
+    fake.present()  # type: ignore[attr-defined]
+    fake.turn_ends_after = 2.0
+    real_sleep = brain._sleep
+
+    def end_it(seconds: float) -> None:
+        real_sleep(seconds)
+        if fake.session is not None and fake.session.state == "waiting" and fake.typed_at:
+            fake.session = fake.session.model_copy(update={"ended_at": clock.now})
+
+    monkeypatch.setattr(brain, "_sleep", end_it)
+    with pytest.raises(brain.NoReply, match="did not answer within 20s"):
+        brain.say("what is up", timeout=20)
+
+
+def test_tmux_failing_to_type_is_said_not_raised(captain: tuple[Captain, Clock]) -> None:
+    fake, _ = captain
+    fake.present()  # type: ignore[attr-defined]
+    fake.paste_fails = True
+    with pytest.raises(brain.NoReply, match="could not type") as caught:
+        brain.say("what is up", timeout=60)
+    assert caught.value.timed_out is False
+
+
+def test_one_message_reaches_the_captain_at_a_time(captain: tuple[Captain, Clock]) -> None:
+    """Two says into one waiting captain would both type and both read the same reply."""
+    fake, _ = captain
+    fake.present()  # type: ignore[attr-defined]
+    held = brain._one_at_a_time(brain._now() + timedelta(seconds=5), 5.0)
+    with held, pytest.raises(brain.NoReply, match="another message to the captain") as caught:
+        brain.say("what is up", timeout=5)
+    assert caught.value.timed_out is True
+    assert fake.typed == []
+    assert brain.say("what is up", timeout=60).text == "Nothing needs you right now."
+
+
 # --- the CLI ----------------------------------------------------------------------------------
 
 
 @dataclass
 class Said:
     texts: list[str] = field(default_factory=list)
+    timeouts: list[float] = field(default_factory=list)
 
 
 @pytest.fixture
@@ -265,10 +461,15 @@ def said(monkeypatch: pytest.MonkeyPatch) -> Said:
 
     def fake_say(text: str, *, timeout: float = 180.0) -> brain.Reply:
         record.texts.append(text)
+        record.timeouts.append(timeout)
         if text == "silence":
             raise brain.NoReply(
                 "the captain did not answer within 5s — its answer will be in its pane"
             )
+        if text == "dead":
+            raise brain.NoReply("the captain exited before it answered", timed_out=False)
+        if text == "refused":
+            raise fleet.FleetError("the home already has a captain (agt_x) — one per home")
         return brain.Reply(
             text=f"reply to: {text}", ended_at=datetime(2026, 9, 25, 10, 5, tzinfo=UTC)
         )
@@ -367,3 +568,85 @@ def test_the_reply_carries_the_answering_turns_end(captain: tuple[Captain, Clock
     reply = brain.say("what is up", timeout=60)
     assert fake.session is not None
     assert reply.ended_at == fake.session.last_seen_at
+
+
+def test_options_before_the_text_still_reach_say(runner: CliRunner, said: Said) -> None:
+    result = runner.invoke(app, ["captain", "--timeout", "30", "what", "is", "up"])
+    assert result.exit_code == 0, result.output
+    assert (said.texts, said.timeouts) == (["what is up"], [30.0])
+
+
+def test_a_message_that_starts_with_a_dash_goes_after_a_double_dash(
+    runner: CliRunner, said: Said
+) -> None:
+    result = runner.invoke(app, ["captain", "--", "-5 degrees outside"])
+    assert result.exit_code == 0, result.output
+    assert said.texts == ["-5 degrees outside"]
+
+
+def test_captain_help_is_the_groups_own(runner: CliRunner, said: Said) -> None:
+    result = runner.invoke(app, ["captain", "--help"])
+    assert result.exit_code == 0
+    assert said.texts == []
+    assert "chat" in result.output and "serve" in result.output
+
+
+def test_captain_text_json_says_an_unreachable_captain_is_not_a_timeout(
+    runner: CliRunner, said: Said
+) -> None:
+    result = runner.invoke(app, ["--json", "captain", "dead"])
+    assert result.exit_code == 1
+    body = json.loads(result.stdout)
+    assert (body["reply"], body["timed_out"]) == (None, False)
+    assert body["said"] == "the captain exited before it answered"
+
+
+def test_captain_text_json_keeps_the_reason_the_fleet_refused(
+    runner: CliRunner, said: Said
+) -> None:
+    result = runner.invoke(app, ["--json", "captain", "refused"])
+    assert result.exit_code == 1
+    assert "already has a captain" in result.stdout
+
+
+def test_bare_captain_under_json_prints_one_object_and_never_attaches(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from aisquare.cli import fleet as fleet_cli
+
+    row = FleetAgent(
+        id="agt_c", project_id="prj_home", label="captain", role="captain",
+        pane_id="%1", cwd=Path("/tmp"), created_at=datetime.now(tz=UTC),
+    )  # fmt: skip
+    monkeypatch.setattr(brain, "find", lambda: row)
+    monkeypatch.setattr(fleet_cli, "interactive_terminal", lambda: True)
+    monkeypatch.setattr(fleet_cli, "_exec_attach", lambda argv: pytest.fail("exec'd under --json"))
+    monkeypatch.setattr(fleet, "attach_argv", lambda project: ["tmux", "attach", "-t", "asq-h"])
+    result = runner.invoke(app, ["--json", "captain"])
+    assert result.exit_code == 0, result.output
+    body = json.loads(result.stdout)
+    assert body["agent"]["id"] == "agt_c"
+    assert body["started"] is False
+    assert body["argv"] == ["tmux", "attach", "-t", "asq-h"]
+
+
+def test_bare_captain_says_a_tmux_it_cannot_run(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from aisquare.cli import fleet as fleet_cli
+
+    row = FleetAgent(
+        id="agt_c", project_id="prj_home", label="captain", role="captain",
+        pane_id="%1", cwd=Path("/tmp"), created_at=datetime.now(tz=UTC),
+    )  # fmt: skip
+
+    def gone(argv: list[str]) -> None:
+        raise FileNotFoundError(2, "No such file or directory", argv[0])
+
+    monkeypatch.setattr(brain, "find", lambda: row)
+    monkeypatch.setattr(fleet_cli, "interactive_terminal", lambda: True)
+    monkeypatch.setattr(fleet_cli, "_exec_attach", gone)
+    monkeypatch.setattr(fleet, "attach_argv", lambda project: ["tmux", "attach", "-t", "asq-h"])
+    result = runner.invoke(app, ["captain"])
+    assert result.exit_code == 1
+    assert "could not run tmux" in result.output

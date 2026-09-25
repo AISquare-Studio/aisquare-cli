@@ -76,11 +76,12 @@ FLEET_ROLES: tuple[str, ...] = ("manager", "coder", "tester", "reviewer", "valid
 """The fleet's own roles (§3.3). Any harness or ``team bind`` role is accepted too."""
 
 MANAGER_LABEL = "manager"
+"""A label the fleet reserves: exactly one manager per project."""
+
 CAPTAIN_ROLE = "captain"
 CAPTAIN_LABEL = "captain"
 """The home-level captain (services.captain): one per HOME, on the home board — its role
-and its label are one word, as the manager's are (T2, 13121)."""
-"""The one label the fleet reserves: exactly one manager per project."""
+and its label are one word, as the manager's are, and the label is reserved (T2, 13121)."""
 
 LABEL = re.compile(r"^[a-z][a-z0-9-]{1,23}$")
 """An agent label: ≤ 24 chars, no ``.``, ``:`` or spaces (tmux target separators)."""
@@ -211,6 +212,9 @@ class SpawnReceipt:
     branch it was put on), a prompt that could not be typed, an agent that will not
     join the board. NOT a permission-mode fallback — there is none: the mode is the
     flag, then the role's config, then ``auto``, and nothing here rewrites it."""
+    prompt_typed: bool = False
+    """Whether a ``prompt`` went in — pasted and submitted. A caller waiting for the
+    answer (the captain's ``say``) must not wait on one the notes say never did."""
 
 
 @dataclass(frozen=True)
@@ -548,6 +552,17 @@ def _is_home_project(project: ProjectInfo) -> bool:
     """Whether ``project`` is the aisquare home's own row — the captain's home board."""
     home = paths.aisquare_home().resolve()
     return project.id == project_id_for(home)
+
+
+def _is_the_captains_launch(cwd: Path | None, agent_args: Sequence[str] | None) -> bool:
+    """Whether a captain spawn carries what makes it the captain: a folder of its own and
+    no tool but its server (``services.captain.brain.launch_args``, replayed by a restart)."""
+    args = list(agent_args or ())
+    no_tools = any(
+        word == "--tools" and index + 1 < len(args) and args[index + 1] == ""
+        for index, word in enumerate(args)
+    )
+    return cwd is not None and "--strict-mcp-config" in args and no_tools
 
 
 def next_label(
@@ -1322,6 +1337,13 @@ def spawn(
         worktree = worktree if worktree is not None else spec.worktree
         if replayed_args:
             agent_args = list(spec.extra_args)
+    if role == CAPTAIN_ROLE and not _is_the_captains_launch(cwd, agent_args):
+        # `fleet spawn captain` on the home was a captain with every tool, in the
+        # home itself — and `aisquare captain` then attached to it and typed into it.
+        raise FleetError(
+            "the captain is started by `aisquare captain`, which gives it its brain folder "
+            "and no tool but its own server"
+        )
     # A transcript to resume is one only Claude Code writes.
     claude_code = claude_code or resume is not None
     srv = server(config)
@@ -1490,6 +1512,14 @@ def spawn(
     flags += ["--name", picked]
     command = selfcli.argv_for(["launch", role, *flags, *role_args, *extra])
     env = {orchestrator.FLEET_AGENT_ENV_VAR: agent_id}
+    if role == CAPTAIN_ROLE:
+        # The launcher activates a board BEFORE it hands the agent its `-e` pairs,
+        # from its cwd — the brain folder, where `.aisquare` above it is a project
+        # marker. With the hub only in `-e`, it onboarded the brain folder (or
+        # `$HOME`, under `~/.aisquare`) as a project; here the launcher lands on the
+        # home board, which the store keeps captured (T2).
+        env["AISQUARE_HOME"] = str(paths.aisquare_home().resolve())
+        env["AISQUARE_TEAM_HUB"] = str(project.root)
     if config.disable_native_agent_teams:
         env["CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"] = "0"
     # The desktop as THIS process sees it (#147). A window inherits the tmux
@@ -1578,9 +1608,10 @@ def spawn(
     if takes_over is not None and identity.session_id is not None:
         stored = _take_over(stored, takes_over, identity.session_id, notes)
     _supersede(rows, views, stored, config)
-    if prompt:
-        _type_prompt(srv, stored.pane_id, prompt, notes)
-    return SpawnReceipt(agent=stored, asked_label=label, tmux_session=tmux_session, notes=notes)
+    typed = _type_prompt(srv, stored.pane_id, prompt, notes) if prompt else False
+    return SpawnReceipt(
+        agent=stored, asked_label=label, tmux_session=tmux_session, notes=notes, prompt_typed=typed
+    )
 
 
 def _chosen_persona(
@@ -1990,8 +2021,10 @@ def _verify_cap(store: ContextStore, stored: FleetAgent, cap: int) -> None:
     )
 
 
-def _type_prompt(srv: TmuxServer, pane_id: str, prompt: str, notes: list[str]) -> None:
+def _type_prompt(srv: TmuxServer, pane_id: str, prompt: str, notes: list[str]) -> bool:
     """Wait (bounded) for the agent to come up, then paste the prompt and press Enter.
+
+    ``True`` when both went in; otherwise a note says why not.
 
     Ready means the pane's foreground process is no longer our launcher (or it
     has produced scrollback). Past :data:`PROMPT_TIMEOUT` a SINGLE-LINE prompt
@@ -2012,7 +2045,7 @@ def _type_prompt(srv: TmuxServer, pane_id: str, prompt: str, notes: list[str]) -
         facts = srv.pane_facts(pane_id)
         if facts is None or facts.dead:
             notes.append("the agent exited before the prompt could be typed")
-            return
+            return False
         if _agent_running(facts.current_command) or facts.history_size > 0:
             ready = True
             break
@@ -2029,7 +2062,7 @@ def _type_prompt(srv: TmuxServer, pane_id: str, prompt: str, notes: list[str]) -
             "as its own message. Send it once the agent is up: `aisquare fleet tell "
             "<label> …`, or `aisquare fleet attach`"
         )
-        return
+        return False
     else:
         notes.append(
             f"the agent did not come up within {PROMPT_TIMEOUT:.0f} s — prompt typed anyway"
@@ -2039,6 +2072,8 @@ def _type_prompt(srv: TmuxServer, pane_id: str, prompt: str, notes: list[str]) -
         srv.send_keys(pane_id, "Enter")
     except TmuxError as exc:
         notes.append(f"could not type the prompt: {exc}")
+        return False
+    return True
 
 
 #: How long after its end an agent whose window is still on the tmux server stays in

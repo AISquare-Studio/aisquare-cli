@@ -116,7 +116,9 @@ def test_the_bundled_personas_are_clean_skills_inside_the_body_budget() -> None:
     for persona in personas:
         assert persona.layer == "bundled"
         assert persona.path == core.BUNDLED_DIR / persona.name
-        assert len(persona.body) <= 1_200, persona.name
+        # Counted as a Windows checkout reads it (CRLF): the captain's body fitted on
+        # Linux at 1,196 and was 1,208 on the Windows leg of CI (#219).
+        assert len(persona.body.replace("\n", "\r\n")) <= 1_200, persona.name
         assert persona.description, persona.name
         assert persona.roles and persona.tags, persona.name
         assert persona.frontmatter["name"] == persona.name

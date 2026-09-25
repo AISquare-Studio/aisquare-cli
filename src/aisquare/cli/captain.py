@@ -27,15 +27,21 @@ from aisquare.core.state import get_state
 
 class _SayByDefault(TyperGroup):
     """A first word that names no subcommand is a message: ``captain "what is up"`` means
-    ``captain say "what is up"``. An option (``--help``) still reaches the group.
+    ``captain say "what is up"``. Only the group's own help stays the group's.
+
+    Rewritten BEFORE the group parses (``parse_args``): at ``resolve_command`` the
+    group had already refused ``--timeout`` as its own unknown option and eaten a
+    ``--`` that was to let a message start with ``-``. So ``captain --timeout 30
+    "what is up"`` and ``captain -- "-5 degrees"`` both reach ``say`` whole.
 
     ``ctx`` is typed ``Any``: click is vendored (``typer._click``), and like
     ``cli/global_flags.py`` this stays on the public typer surface."""
 
-    def resolve_command(self, ctx: Any, args: list[str]) -> Any:
-        if args and args[0] not in self.commands and not args[0].startswith("-"):
+    def parse_args(self, ctx: Any, args: list[str]) -> list[str]:
+        if args and args[0] not in self.commands and args[0] not in ctx.help_option_names:
             args = ["say", *args]
-        return super().resolve_command(ctx, args)
+        result: list[str] = super().parse_args(ctx, args)
+        return result
 
 
 app = typer.Typer(
@@ -57,36 +63,58 @@ def captain(ctx: typer.Context) -> None:
     from aisquare.services.captain import brain
     from aisquare.services.captain import state as captain_state
 
+    as_json = get_state().json_output
     console = stdout_console()
     try:
         agent = brain.find()
-        if agent is None:
-            receipt = brain.start()
-            console.print(
-                f"✓ started the captain ({receipt.agent.id}) in tmux session "
-                f"{receipt.tmux_session}",
-                markup=False,
-                highlight=False,
-            )
-            for note in receipt.notes:
-                console.print(f"  {note}", markup=False, highlight=False)
-        else:
-            console.print(
-                f"the captain is already running ({agent.id})", markup=False, highlight=False
-            )
-        if not interactive_terminal():
-            console.print(
-                "attach from a terminal with `aisquare captain`; ask it with "
-                '`aisquare captain "what is up"`',
-                markup=False,
-                highlight=False,
-            )
-            return
-        argv = fleet_service.attach_argv(captain_state.home_project())
+        receipt = brain.start() if agent is None else None
+        attaching = as_json or interactive_terminal()
+        argv = fleet_service.attach_argv(captain_state.home_project()) if attaching else []
     except fleet_service.FleetError as exc:
         _fail_fleet(exc)
+    if as_json:
+        # One object, never an exec — `fleet attach --json`'s rule: the caller runs argv.
+        live = receipt.agent if receipt is not None else agent
+        assert live is not None  # found, or just started
+        typer.echo(
+            json.dumps(
+                {
+                    "agent": live.model_dump(mode="json"),
+                    "started": receipt is not None,
+                    "tmux_session": receipt.tmux_session if receipt is not None else None,
+                    "notes": receipt.notes if receipt is not None else [],
+                    "argv": argv,
+                }
+            )
+        )
+        return
+    if receipt is not None:
+        console.print(
+            f"✓ started the captain ({receipt.agent.id}) in tmux session {receipt.tmux_session}",
+            markup=False,
+            highlight=False,
+        )
+        for note in receipt.notes:
+            console.print(f"  {note}", markup=False, highlight=False)
+    elif agent is not None:
+        console.print(f"the captain is already running ({agent.id})", markup=False, highlight=False)
+    if not attaching:
+        console.print(
+            "attach from a terminal with `aisquare captain`; ask it with "
+            '`aisquare captain "what is up"`',
+            markup=False,
+            highlight=False,
+        )
+        return
     sys.stdout.flush()
-    _exec_attach(argv)  # the fleet's one attach seam (core.spawn.SEAMS: EXCLUDED)
+    try:
+        _exec_attach(argv)  # the fleet's one attach seam (core.spawn.SEAMS: EXCLUDED)
+    except OSError as exc:  # tmux vanished between the service's check and the exec
+        fail(
+            f"could not run {argv[0]}: {exc} — is tmux installed and on PATH?",
+            error="fleet_unavailable",
+            detail=str(exc),
+        )
 
 
 @app.command("say")
@@ -99,8 +127,9 @@ def say(
     """Say something to the captain and print its reply.
 
     Under ``--json``: one object, ``{"reply", "ended_at", "timed_out"}`` — the reply,
-    when the answering turn ended, and whether it timed out (then ``"said"`` says why,
-    and the exit is 1).
+    when the answering turn ended, and whether it timed out. With no reply, ``"said"``
+    says why and the exit is 1; ``timed_out`` is false when waiting longer would not
+    have helped (the captain died, tmux refused the keys).
     """
     from aisquare.services import fleet as fleet_service
     from aisquare.services.captain import brain
@@ -113,12 +142,12 @@ def say(
         reply = brain.say(text, timeout=timeout)
     except brain.NoReply as exc:
         if as_json:
-            typer.echo(json.dumps({"reply": None, "ended_at": None, "timed_out": True,
+            typer.echo(json.dumps({"reply": None, "ended_at": None, "timed_out": exc.timed_out,
                                    "said": str(exc)}))  # fmt: skip
             raise typer.Exit(1) from exc
         fail(str(exc), error="captain_no_reply")
     except fleet_service.FleetError as exc:
-        fail(str(exc), error="captain_unavailable")
+        fail(str(exc), error="captain_unavailable", detail=str(exc))
     if as_json:
         ended = reply.ended_at.isoformat() if reply.ended_at is not None else None
         typer.echo(json.dumps({"reply": reply.text, "ended_at": ended, "timed_out": False}))

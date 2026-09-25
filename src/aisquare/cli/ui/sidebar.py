@@ -737,6 +737,7 @@ class CaptainSection(Vertical):
     CaptainSection { height: auto; padding: 0 1; }
     CaptainSection #captain-title { height: 1; }
     CaptainSection #captain-empty { height: 1; color: $text-muted; }
+    CaptainSection #captain-notice { height: auto; color: $text-muted; }
     """
 
     def compose(self) -> ComposeResult:
@@ -744,10 +745,20 @@ class CaptainSection(Vertical):
         yield Static(
             Text("no captain — `aisquare captain` starts one", style="dim"), id="captain-empty"
         )
+        yield Static("", id="captain-notice")
 
-    def show(self, status: FleetAgentStatus | None) -> None:
-        """Show the captain's row, or the line saying how to start one."""
+    def show(self, status: FleetAgentStatus | None, *, notice: str | None = None) -> None:
+        """Show the captain's row, or the line saying how to start one.
+
+        ``notice`` says the read behind this frame failed; ``status`` is then the
+        last frame's row, or ``None`` when there was none. It takes the place of
+        the "starts one" line, which is true only when the fleet ANSWERED none —
+        the project cards' rule (``Sidebar.show_projects``), for the captain.
+        """
         empty = self.query_one("#captain-empty", Static)
+        said = self.query_one("#captain-notice", Static)
+        said.update(Text(notice or "", style="dim"))
+        said.display = bool(notice)
         rows = list(self.query(AgentRow))
         keep = next(
             (row for row in rows if status and row.status.agent.id == status.agent.id), None
@@ -755,11 +766,12 @@ class CaptainSection(Vertical):
         for row in rows:
             if row is not keep:
                 row.remove()
-        empty.display = status is None
+        empty.display = status is None and not notice
         if status is None:
             return
         if keep is None:
-            self.mount(AgentRow(status))
+            # Under the heading, above the two lines that stand in for it.
+            self.mount(AgentRow(status), after=self.query_one("#captain-title"))
         else:
             keep.show(status)
 
@@ -902,9 +914,12 @@ class Sidebar(Vertical):
 
     # --- data in -----------------------------------------------------------------
 
-    def show_captain(self, status: FleetAgentStatus | None) -> None:
-        """The home's captain row, above the projects (``None``: there is none)."""
-        self.query_one(CaptainSection).show(status)
+    def show_captain(self, status: FleetAgentStatus | None, *, notice: str | None = None) -> None:
+        """The home's captain row, above the projects (``None``: there is none).
+
+        ``notice``: why the read failed — the row is then the last frame's, kept.
+        """
+        self.query_one(CaptainSection).show(status, notice=notice)
 
     def show_projects(
         self,

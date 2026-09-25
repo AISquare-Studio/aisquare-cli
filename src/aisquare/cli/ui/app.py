@@ -35,7 +35,8 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from rich.text import Text
-from textual.app import App, ComposeResult
+from textual import events
+from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.css.query import NoMatches
@@ -44,25 +45,39 @@ from textual.widget import Widget
 from textual.widgets import ContentSwitcher, Footer, Static
 from textual.worker import Worker, WorkerState
 
+from aisquare.cli.ui.autosave import Autosave
+from aisquare.cli.ui.divider import Divider, floor_of
+from aisquare.cli.ui.groups import (
+    DropGroup,
+    DropProject,
+    GroupPicker,
+    GroupProjects,
+    MoveRow,
+    ToggleCollapse,
+    TogglePin,
+    UndoLayout,
+)
 from aisquare.cli.ui.sidebar import (
     AccountsSelected,
     AddProject,
     AgentSelected,
     DoctorSelected,
     ProjectSelected,
+    ResizeSidebar,
     Sidebar,
     SpawnAgent,
     accounts_summary_text,
 )
-from aisquare.cli.ui.terminal import EscapeToSidebar
-from aisquare.cli.ui.theme import ThemePicker, remember_theme, restore_theme
+from aisquare.cli.ui.terminal import EscapeToSidebar, SelectionHost, TerminalPane
+from aisquare.cli.ui.theme import ThemePicker, restore_theme, theme_autosave
 from aisquare.cli.ui.views.accounts import AccountsChanged, AccountsView, read_session, summarise
-from aisquare.cli.ui.views.agent import AgentView
+from aisquare.cli.ui.views.agent import AgentRestarted, AgentView
 from aisquare.cli.ui.views.doctor import DoctorRefreshed, DoctorView
 from aisquare.cli.ui.views.onboard import OnboardFailed, OnboardView, ProjectOnboarded
 from aisquare.cli.ui.views.project import ProjectView
 from aisquare.cli.ui.views.welcome import WelcomeView
-from aisquare.core.store import store_session
+from aisquare.core.console import stderr_console
+from aisquare.core.store import ContextStore, store_session
 from aisquare.models import (
     AccountsOverview,
     CheckStatus,
@@ -71,7 +86,7 @@ from aisquare.models import (
     ProjectInfo,
 )
 from aisquare.services import claude_accounts as accounts_service
-from aisquare.services import diagnostics
+from aisquare.services import diagnostics, project_groups
 from aisquare.services import fleet as fleet_service
 
 DoctorRunner = Callable[[], list[DoctorCheck]]
@@ -84,8 +99,15 @@ _DoctorReport = tuple[Path | None, list[DoctorCheck]]
 """What the doctor worker hands back: the scope it ran for, and its checks."""
 
 _DOCTOR_WORKER = "doctor"
+ACCOUNTS_WORKER = "shell-accounts"
+"""The thread worker that reads the Accounts section's frame (``FleetApp.refresh_accounts``)."""
 _CHECK_SYMBOL = {CheckStatus.ok: "✓", CheckStatus.warn: "⚠", CheckStatus.fail: "✗"}
 _CHECK_STYLE = {CheckStatus.ok: "green", CheckStatus.warn: "yellow", CheckStatus.fail: "bold red"}
+
+SIDEBAR_WIDTH_KEY = "sidebar_width"
+"""The ``state.json`` key the navigator's width is remembered under (#137) — beside
+``board_theme`` and ``active_project_id``; ``core.state_file`` is the file's one
+reader and writer."""
 
 
 def _doctor_report(result: object) -> _DoctorReport | None:
@@ -100,6 +122,33 @@ def _doctor_report(result: object) -> _DoctorReport | None:
         if (scope is None or isinstance(scope, Path)) and isinstance(checks, list):
             return scope, list(checks)
     return None
+
+
+UNDO_DEPTH = 50
+"""How many layout gestures ``u`` can walk back in one session (#140)."""
+
+SELECTED_KEY = "fleet.selected"
+"""``ui_state`` key for what is open: ``project:<id>``, ``agent:<project>/<id>``,
+``accounts`` or ``doctor:<project or ''>`` (#144)."""
+SHOW_CAPTURED_KEY = "fleet.show_captured"
+
+
+def _ui_state(key: str) -> str | None:
+    """A remembered UI fact — ``None`` when there is none or the store cannot say."""
+    try:
+        with store_session() as store:
+            return store.ui_state(key)
+    except Exception:
+        return None
+
+
+def _remember_ui_state(key: str, value: str | None) -> None:
+    """Every change is the save; a store that will not take it costs the memory, never the UI."""
+    try:
+        with store_session() as store:
+            store.set_ui_state(key, value)
+    except Exception:
+        return
 
 
 @dataclass(frozen=True)
@@ -145,14 +194,25 @@ class HelpScreen(ModalScreen[None]):
         for key, what in (
             ("click", "select a project, an agent, Accounts, Doctor; + onboards a project"),
             ("↑ ↓ Enter", "move over the sidebar and open the row under the cursor"),
+            # Arranging the sidebar (#140): every one of these has a CLI twin.
+            ("shift+↑ ↓", "move the row under the cursor one place"),
+            ("g p space", "group · pin · fold the row under the cursor"),
+            ("u", "undo the last arrangement; a toast says what"),
+            ("m", "mark the card under the cursor, as shift+click does"),
+            ("shift+g", "group the marked cards; Esc clears the marks"),
+            ("drag title", "move a card or a group header to a new place"),
             (self.escape_key.upper(), "hand focus from an agent's pane back to the sidebar"),
             ("wheel", "scroll an agent pane; shift/alt+PgUp/PgDn too, shift+Home/End"),
+            ("drag", "select text in a pane (double-click: a word) — copied on release"),
+            ("divider", "drag the line beside the sidebar to resize it; double-click puts it back"),
+            ("> < =", "from the sidebar: widen, narrow, reset the divider"),
             ("t", "themes (applied live, autosaved)"),
             ("r", "refresh now"),
+            ("a", "show or hide the captured directories (never added)"),
             ("F1", "command palette"),
             ("q", "quit — from the sidebar; inside a pane every key goes to the agent"),
         ):
-            text.append(f"  {key:<10}", style="bold cyan")
+            text.append(f"  {key:<11}", style="bold cyan")
             text.append(f" {what}\n")
         text.append("\nEsc closes this", style="dim")
         with Vertical(id="helpbox"):
@@ -162,8 +222,99 @@ class HelpScreen(ModalScreen[None]):
         self.dismiss(None)
 
 
-class FleetApp(App[None], inherit_bindings=False):
-    """One `asq` view over every project, agent and session."""
+class Panes(Horizontal):
+    """The two panes and the partition between them — and the partition's wiring (#137).
+
+    ``Sidebar`` and ``Divider`` are siblings, so a message that bubbles from one
+    can never reach the other; it reaches this container, which is where the
+    sidebar's keyboard request (``ResizeSidebar``) meets the handle. Two more
+    things are the container's because they are about the layout, not about
+    either child:
+
+    - **The content's minimum.** A ``TerminalPane`` under :data:`MIN_CONTENT`
+      columns wraps every prompt line and Claude Code's own layout gives up.
+      Rather than re-derive that bound on every gesture — which left it
+      unenforced when the TERMINAL shrank, collapsing the pane to one column
+      with the handle off screen — the container writes it as the sidebar's
+      ``max-width`` whenever its own width changes, and Textual clamps against
+      ``max-width`` on every layout pass. Too narrow for both minimums, the
+      navigator's wins: one you can read beats a pane you cannot, and the pane
+      says so with its own placeholder.
+    - **The focus signal.** Focus is in the sidebar or in a pane (§4.3), and
+      the sidebar's ``border-right`` used to say which. The divider is that
+      line now — one column, the one the hand grabs — and lights ``$accent``
+      while focus is in the sidebar.
+
+    The app keeps no handler for any of it, and nothing here assumes there is
+    one ``Divider`` on the screen: the handle and the navigator are this
+    container's direct children, and a later split inside a view is not its
+    business.
+    """
+
+    MIN_CONTENT: ClassVar[int] = 40
+    """The columns the content pane keeps, whatever the drag or the terminal's size."""
+
+    @property
+    def sidebar(self) -> Sidebar:
+        return self.query_children(Sidebar).first()
+
+    @property
+    def divider(self) -> Divider:
+        return self.query_children(Divider).first()
+
+    @classmethod
+    def sidebar_ceiling(cls, total: int, floor: int) -> int:
+        """The widest the navigator may be in ``total`` columns; the divider takes one of them."""
+        return max(floor, total - 1 - cls.MIN_CONTENT)
+
+    def on_mount(self) -> None:
+        # Before the first layout as well as on every resize, so a width the
+        # divider restores from the file is bounded whenever it is applied.
+        self._fit(self.app.size.width)
+
+    def on_resize(self, event: events.Resize) -> None:
+        self._fit(event.size.width)
+
+    def _fit(self, total: int) -> None:
+        sidebar = self.sidebar
+        sidebar.styles.max_width = self.sidebar_ceiling(total, floor_of(sidebar))
+
+    def on_resize_sidebar(self, event: ResizeSidebar) -> None:
+        """The sidebar's keyboard fallback: step or reset the partition."""
+        event.stop()
+        if event.delta is None:
+            self.divider.reset()
+        else:
+            self.divider.step(event.delta)
+
+    def on_descendant_focus(self, event: events.DescendantFocus) -> None:
+        self._mark_focus()
+
+    def on_descendant_blur(self, event: events.DescendantBlur) -> None:
+        self._mark_focus()
+
+    def _mark_focus(self) -> None:
+        """Light the divider iff focus is in the sidebar — read off the screen, not the event.
+
+        A pane's ``DescendantBlur`` bubbles up through the content switcher while
+        the sidebar's ``DescendantFocus`` is posted straight here, so the two can
+        arrive in either order; the screen's ``focused`` is already settled by
+        the time either does.
+        """
+        focused = self.screen.focused
+        sidebar = self.sidebar
+        beside = focused is not None and (focused is sidebar or sidebar in focused.ancestors)
+        self.divider.set_class(beside, "-neighbour-focused")
+
+
+class FleetApp(SelectionHost, inherit_bindings=False):
+    """One `asq` view over every project, agent and session.
+
+    A :class:`~aisquare.cli.ui.terminal.SelectionHost`: the press, the release
+    and the copy key of a pane selection are the base class's, shared with the
+    pane tests' host so the two cannot drift (review of #120, round 9; review
+    of #135, findings 7 and 10).
+    """
 
     TITLE = "aisquare"
     COMMAND_PALETTE_BINDING = "f1"
@@ -176,10 +327,19 @@ class FleetApp(App[None], inherit_bindings=False):
         Binding("ctrl+q", "quit", "quit", show=False),
         Binding("t", "pick_theme", "theme"),
         Binding("r", "refresh_now", "refresh"),
+        Binding("a", "toggle_captured", "captured", show=False),
         Binding("question_mark", "help", "help", key_display="?"),
     ]
     SIDEBAR_ACTIONS: ClassVar[frozenset[str]] = frozenset(
-        {"quit", "pick_theme", "refresh_now", "help", "command_palette", "change_theme"}
+        {
+            "quit",
+            "pick_theme",
+            "refresh_now",
+            "help",
+            "command_palette",
+            "change_theme",
+            "toggle_captured",
+        }
     )
     """Actions that are live only while focus is in the sidebar (§4.3)."""
 
@@ -197,6 +357,10 @@ class FleetApp(App[None], inherit_bindings=False):
         self._accounts = accounts
         self.accounts_overview: AccountsOverview | None = None
         """The last Accounts frame that was read; ``None`` before the first or when disabled."""
+        self._accounts_worker: Worker[AccountsOverview] | None = None
+        """The accounts read in flight, or the last one; only one runs at a time."""
+        self._accounts_owed = False
+        """A frame was asked for while a read was in flight: read once more after it."""
         self.escape_key = escape_key or fleet_service.settings().escape_key
         self.snapshot: FleetSnapshot | None = None
         """The last frame that was read successfully; ``None`` before the first."""
@@ -208,12 +372,23 @@ class FleetApp(App[None], inherit_bindings=False):
         self._doctor_worker: Worker[Any] | None = None
         """The newest doctor run; an older one's result is not ours to paint."""
         self._theme_restored = False
+        self._theme_autosave = theme_autosave(self)
+        self.unsaved: list[str] = []
+        """What the quit-time flush could not land (a preference each), for ``run_ui`` to say
+        once the screen is gone."""
+        self.show_captured = False
+        """Whether the sidebar also lists the directories sessions merely ran in (#139)."""
+        self._undo: list[project_groups.UndoEntry] = []
+        """The layout gestures of this session, newest last; ``u`` reverts the last (#140)."""
 
     # --- layout -------------------------------------------------------------------
 
     def compose(self) -> ComposeResult:
-        with Horizontal(id="main"):
+        with Panes(id="main"):
             yield Sidebar(id="sidebar")
+            # The partition is a widget, not a border: drag it, or step it with
+            # < > = from the sidebar; the width is remembered (#137).
+            yield Divider("#sidebar", state_key=SIDEBAR_WIDTH_KEY, id="divider")
             with ContentSwitcher(id="content", initial="welcome"):
                 yield WelcomeView(escape_key=self.escape_key, id="welcome")
                 # The Onboard view is built on the first `+` (on_add_project): its
@@ -225,9 +400,48 @@ class FleetApp(App[None], inherit_bindings=False):
     def on_mount(self) -> None:
         restore_theme(self)
         self._theme_restored = True
+        self.show_captured = _ui_state(SHOW_CAPTURED_KEY) == "1"
         self.refresh_data()
         self.set_interval(self.refresh_seconds, self.refresh_data)
         self.run_doctor()
+        self._restore_selection()
+
+    # --- what was open (#144) ---------------------------------------------------------
+
+    def _restore_selection(self) -> None:
+        """Reopen the view that was open when the UI last ran, if its row is still there.
+
+        Read from the store's ``ui_state`` (v18), never from a file the UI
+        keeps for itself: the theme stays in ``state.json`` because the board
+        shares it. A remembered agent whose row has left the frame falls back
+        to its project; a project that is gone falls back to the welcome view,
+        and the memory is dropped rather than retried every launch.
+        """
+        remembered = _ui_state(SELECTED_KEY)
+        if not remembered or self.snapshot is None:
+            return
+        kind, _, ident = remembered.partition(":")
+        if kind == "agent":
+            project_id, _, agent_id = ident.partition("/")
+            if self.snapshot.agent(project_id, agent_id) is not None:
+                self.post_message(AgentSelected(project_id, agent_id))
+                return
+            if self.snapshot.project(project_id) is not None:
+                self.post_message(ProjectSelected(project_id))
+                return
+        elif kind == "project" and self.snapshot.project(ident) is not None:
+            self.post_message(ProjectSelected(ident))
+            return
+        elif kind == "accounts":
+            self.post_message(AccountsSelected())
+            return
+        elif kind == "doctor":
+            self.post_message(DoctorSelected(ident or None))
+            return
+        _remember_ui_state(SELECTED_KEY, None)
+
+    def _remember_selection(self, value: str | None) -> None:
+        _remember_ui_state(SELECTED_KEY, value)
 
     @property
     def sidebar(self) -> Sidebar:
@@ -282,7 +496,12 @@ class FleetApp(App[None], inherit_bindings=False):
         if parent is not None:
             parent(theme_name)
         if self._theme_restored:
-            remember_theme(theme_name)
+            self._theme_autosave.remember(theme_name)
+
+    def on_unmount(self) -> None:
+        # Every saver — the theme's here, the divider's — started first and joined
+        # against ONE deadline, so quit waits once, not once per preference.
+        self.unsaved = Autosave.flush_all(self)
 
     # --- help / refresh ---------------------------------------------------------------
 
@@ -293,6 +512,22 @@ class FleetApp(App[None], inherit_bindings=False):
         self.refresh_data()
         self.run_doctor()
 
+    def action_toggle_captured(self) -> None:
+        """Show, or hide again, the captured directories the sidebar leaves out (#139).
+
+        Only the project list changes, so only the store is re-read: the doctor's
+        findings do not depend on which cards are shown, and ``r`` re-runs it.
+        """
+        self.show_captured = not self.show_captured
+        _remember_ui_state(SHOW_CAPTURED_KEY, "1" if self.show_captured else None)
+        self.refresh_data()
+        self.notify(
+            "showing captured directories too — `a` hides them again"
+            if self.show_captured
+            else "captured directories hidden — `a` shows them",
+            timeout=4,
+        )
+
     # --- data ---------------------------------------------------------------------------
 
     def refresh_data(self) -> None:
@@ -300,7 +535,8 @@ class FleetApp(App[None], inherit_bindings=False):
         sidebar = self.sidebar
         try:
             with store_session() as store:
-                projects = store.list_projects()
+                projects = store.list_projects(all=self.show_captured)
+                groups = store.project_groups()
         except Exception as exc:  # the store is briefly unavailable — keep what is shown
             self.store_error = f"{type(exc).__name__}: {exc}"
             if self.snapshot is None:
@@ -326,24 +562,66 @@ class FleetApp(App[None], inherit_bindings=False):
         self.store_error = None
         self.snapshot = FleetSnapshot(projects, agents, notices)
         sidebar.show_notice(None)
-        sidebar.show_projects(projects, agents, notices=notices)
+        sidebar.show_projects(projects, agents, notices=notices, groups=groups)
         self._feed_open_views(self.snapshot)
         self.refresh_accounts()
 
     def refresh_accounts(self) -> None:
-        """Re-read the Claude accounts and the AISquare session; the section and the page follow.
+        """Re-read the Claude accounts OFF the UI thread; the section and the page follow.
 
-        Files only — a few small JSON reads — which is why it rides the same
-        two-second tick as the store. The usage numbers are the view's own,
-        slower business (``AccountsView.refresh_usage``).
+        ``accounts_service.overview`` reads the registry through ``context.db``
+        and reconciles it as it reads: a slot ``+ Add`` just made gets its row,
+        a vanished one is deleted and the order renumbered. Behind another
+        process's write that waits out the store's busy timeout, and this rides
+        the two-second tick whatever page is open, so the whole UI froze for as
+        long as a writer held the lock. The board, the agent header and the
+        Settings tab moved this same call into thread workers (review of #205,
+        fourth round); the shell's tick was the caller they missed (final
+        review of #203, accounts F2). :meth:`_accounts_read` paints the answer.
+
+        One read at a time. It was an ``exclusive`` worker, so each tick
+        cancelled the read still waiting and started another; a thread cannot be
+        stopped, so the cancelled read kept its thread and its answer was
+        dropped. While the store stayed busy every read outlived the tick,
+        nothing was painted, and a thread piled up per tick (review of that fix,
+        round 1). A call that finds a read waiting now leaves it be and marks one
+        more read owed, which :meth:`_accounts_read` starts once it has painted:
+        however many ticks a wait outlives, they cost one read after it, and
+        what the page asked for meanwhile (``AccountsChanged`` after a write it
+        does not show optimistically) is still read after that write. The usage
+        numbers are the view's own, slower business
+        (``AccountsView.refresh_usage``).
         """
         if self._accounts is None:
             return
+        reading = self._accounts_worker
+        if reading is not None and not reading.is_finished:
+            self._accounts_owed = True
+            return
+        self._accounts_owed = False
+        self._accounts_worker = self.run_worker(
+            self._accounts,
+            name=ACCOUNTS_WORKER,
+            group=ACCOUNTS_WORKER,
+            thread=True,
+            exit_on_error=False,
+        )
+
+    def _accounts_read(self, event: Worker.StateChanged) -> None:
+        """Paint the frame the accounts read answered, and the AISquare session beside it.
+
+        The session is a file read, as it always was here; only the registry
+        went to the worker. Then the read that was owed while this one waited,
+        if one was (:meth:`refresh_accounts`).
+        """
+        if event.state is WorkerState.SUCCESS:
+            result = event.worker.result
+            overview = result if isinstance(result, AccountsOverview) else None
+        elif event.state is WorkerState.ERROR:
+            overview = None  # a directory we cannot read costs the line, never the frame
+        else:
+            return  # still running, or cancelled with the app: nothing to paint or owe
         sidebar = self.sidebar
-        try:
-            overview: AccountsOverview | None = self._accounts()
-        except Exception:  # a directory we cannot read costs the line, never the frame
-            overview = None
         self.accounts_overview = overview
         session_known = True
         try:
@@ -355,6 +633,8 @@ class FleetApp(App[None], inherit_bindings=False):
         if overview is not None:
             for view in self.query(AccountsView):
                 view.show(overview)
+        if self._accounts_owed:
+            self.refresh_accounts()  # the ticks this read outlived: one read, after it
 
     def _feed_open_views(self, snapshot: FleetSnapshot) -> None:
         """Hand every open Project/Agent view its row from the new frame.
@@ -450,6 +730,14 @@ class FleetApp(App[None], inherit_bindings=False):
         )
 
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
+        if event.worker.name == ACCOUNTS_WORKER:
+            # Every read's answer, not only the newest read's: a worker is finished
+            # before its StateChanged is handled, so a tick handled in between
+            # starts the next read, and the answer that then arrived was dropped
+            # (review of the #203 accounts fix, round 2). Reads never overlap
+            # (`refresh_accounts`), so answers arrive in the order they were read.
+            self._accounts_read(event)
+            return
         if event.worker.name != _DOCTOR_WORKER:
             return
         if event.worker is not self._doctor_worker:
@@ -549,6 +837,7 @@ class FleetApp(App[None], inherit_bindings=False):
         await self._show(view_id, lambda: ProjectView(project, id=view_id))
         self.sidebar.select(f"project:{project.id}")
         self._set_doctor_scope(project.id)
+        self._remember_selection(f"project:{project.id}")
 
     async def on_agent_selected(self, event: AgentSelected) -> None:
         status = self.snapshot.agent(event.project_id, event.agent_id) if self.snapshot else None
@@ -559,6 +848,178 @@ class FleetApp(App[None], inherit_bindings=False):
         await self._show(view_id, lambda: AgentView(status, id=view_id))
         self.sidebar.select(f"agent:{status.agent.id}")
         self._set_doctor_scope(event.project_id)
+        self._remember_selection(f"agent:{event.project_id}/{status.agent.id}")
+        self._focus_pane(view_id)
+
+    def _focus_pane(self, view_id: str) -> None:
+        """Give the agent just selected the keyboard (#147).
+
+        Selecting a row showed the pane and left focus in the sidebar, where the
+        app's bindings are live: a sentence typed at what looked like Claude Code
+        quit the UI on its first ``q``. The pane takes focus once the frame that
+        shows it has been drawn — a view mounted this instant has no size to
+        focus into yet — and ``F12`` stays the deliberate way back.
+        """
+        try:
+            view = self.content.get_child_by_id(view_id)
+        except NoMatches:
+            return
+        pane = getattr(view, "pane", None)
+        if isinstance(pane, TerminalPane):
+            self.call_after_refresh(pane.focus)
+
+    async def on_agent_restarted(self, event: AgentRestarted) -> None:
+        """A restart minted a new row (#138): show it where the old one was.
+
+        The view that posted this refreshed the frame first, so the row is
+        normally in the snapshot already; one more read covers a store that
+        was briefly busy. A row still missing is reported, not invented — the
+        next tick lists it. The new pane takes the keyboard, as a selected
+        agent's does (#147): the Restart button that had it went with the view
+        it was on, and focus was left with nobody — where the app's keys are
+        live, so a ``q`` typed at the restarted agent quit the UI.
+        """
+        started = event.agent
+        status = self.snapshot.agent(started.project_id, started.id) if self.snapshot else None
+        if status is None:
+            self.refresh_data()
+            status = self.snapshot.agent(started.project_id, started.id) if self.snapshot else None
+        if status is None:
+            self.notify(
+                f"{started.label} restarted — its row appears on the next refresh",
+                timeout=5,
+                markup=False,
+            )
+            return
+        view_id = f"agent-{status.agent.id}"
+        await self._show(view_id, lambda: AgentView(status, id=view_id))
+        self.sidebar.select(f"agent:{status.agent.id}")
+        self._set_doctor_scope(started.project_id)
+        self._remember_selection(f"agent:{started.project_id}/{status.agent.id}")
+        self._focus_pane(view_id)
+
+    # --- groups, pins and order (#140) -------------------------------------------------
+
+    def _layout(self, what: Callable[[ContextStore], project_groups.UndoEntry], said: str) -> None:
+        """Apply one gesture through the service, remember its way back, repaint, say so."""
+        try:
+            with store_session() as store:
+                entry = what(store)
+        except KeyError as exc:
+            self.notify(f"nothing to do: {exc.args[0]!r} is gone", severity="warning", timeout=4)
+            return
+        except ValueError as exc:
+            self.notify(str(exc), severity="error", timeout=6, markup=False)
+            return
+        except Exception as exc:  # the store said no: the frame stands, the gesture is lost
+            self.notify(f"could not {said}: {exc}", severity="error", timeout=6, markup=False)
+            return
+        if entry.projects or entry.groups:
+            # A gesture that touched no row ("nothing to move": a step at an end,
+            # a pinned row) is no step back — `u` would undo nothing and say it did.
+            self._undo.append(entry)
+            del self._undo[:-UNDO_DEPTH]
+        self.refresh_data()
+
+    def on_move_row(self, event: MoveRow) -> None:
+        if event.kind == "group":
+            self._layout(lambda s: project_groups.step_group(s, event.ident, event.delta), "move")
+        else:
+            # One step is one row ON SCREEN: the captured rows count only while `a` shows them.
+            shown = self.show_captured
+            self._layout(
+                lambda s: project_groups.step(s, event.ident, event.delta, all=shown), "move"
+            )
+
+    def on_toggle_pin(self, event: TogglePin) -> None:
+        def flip(store: ContextStore) -> project_groups.UndoEntry:
+            if event.kind == "group":
+                group = store.get_project_group(event.ident)
+                if group is None:
+                    raise KeyError(event.ident)
+                return project_groups.pin_group(store, event.ident, group.pinned_at is None)
+            project = store.update_project_layout(event.ident)
+            return project_groups.pin(store, event.ident, project.pinned_at is None)
+
+        self._layout(flip, "pin")
+
+    def on_toggle_collapse(self, event: ToggleCollapse) -> None:
+        def fold(store: ContextStore) -> project_groups.UndoEntry:
+            group = store.get_project_group(event.group_id)
+            if group is None:
+                raise KeyError(event.group_id)
+            return project_groups.set_collapsed(store, event.group_id, not group.collapsed)
+
+        self._layout(fold, "fold")
+
+    def on_drop_project(self, event: DropProject) -> None:
+        ids = list(event.project_ids)
+
+        def drop(store: ContextStore) -> project_groups.UndoEntry:
+            entry = project_groups.UndoEntry(f"move {len(ids)} project(s)")
+            before = event.before
+            # One gesture, one transaction, as the service's own changes are: a move
+            # the store refuses part-way leaves the moves before it undone too, so no
+            # part of the drop lands without its entry (review of #203).
+            with store.layout_change():
+                for project_id in ids:
+                    part = project_groups.move_project(
+                        store, project_id, to=event.scope or project_groups.TOP, before=before
+                    )
+                    for pid, layout in part.projects.items():
+                        entry.projects.setdefault(pid, layout)
+            return entry
+
+        self._layout(drop, "move")
+        self.sidebar.action_clear_marks()
+
+    def on_drop_group(self, event: DropGroup) -> None:
+        self._layout(
+            lambda s: project_groups.move_group(s, event.group_id, before=event.before), "move"
+        )
+
+    def on_group_projects(self, event: GroupProjects) -> None:
+        """``g`` / ``shift+g``: the picker, then the move it chose."""
+        ids = list(event.project_ids)
+        try:
+            with store_session() as store:
+                groups = [g for g in store.project_groups()]
+        except Exception as exc:
+            self.notify(f"could not read the groups: {exc}", severity="error", markup=False)
+            return
+
+        def chosen(choice: str | None) -> None:
+            if choice is None:
+                return
+            if choice == "ungroup":
+                self._layout(lambda s: project_groups.remove_from_group(s, ids), "ungroup")
+            elif choice.startswith("new:"):
+                name = choice[4:]
+                self._layout(lambda s: project_groups.create_group(s, name, ids)[1], "group")
+            elif choice.startswith("group:"):
+                gid = choice[6:]
+                self._layout(lambda s: project_groups.add_to_group(s, gid, ids), "group")
+            self.sidebar.action_clear_marks()
+
+        self.push_screen(GroupPicker(groups, len(ids)), chosen)
+
+    def on_undo_layout(self, event: UndoLayout) -> None:
+        if not self._undo:
+            self.notify("nothing to undo", timeout=3)
+            return
+        entry = self._undo.pop()
+        try:
+            with store_session() as store:
+                done = project_groups.undo(store, entry)
+        except Exception as exc:
+            # Back on the stack: an undo is one transaction (`project_groups.undo`), so
+            # one the store refused changed nothing, and popped for good it was the way
+            # back lost with nothing done — `u` again said "nothing to undo" (review of #203).
+            self._undo.append(entry)
+            self.notify(f"could not undo: {exc}", severity="error", markup=False)
+            return
+        self.refresh_data()
+        self.notify(f"undid: {done}", timeout=4, markup=False)
 
     def on_spawn_agent(self, event: SpawnAgent) -> None:
         # The Spawn dialog is Phase 7 (§9); until it lands the CLI is the way.
@@ -572,6 +1033,7 @@ class FleetApp(App[None], inherit_bindings=False):
             "accounts", lambda: AccountsView(escape_key=self.escape_key, id="accounts")
         )
         self.sidebar.select("accounts")
+        self._remember_selection("accounts")
         if self.accounts_overview is not None:
             self.query_one("#accounts", AccountsView).show(self.accounts_overview)
 
@@ -583,6 +1045,7 @@ class FleetApp(App[None], inherit_bindings=False):
         await self._show("doctor")
         self.sidebar.select("doctor")
         self.doctor_scope = event.project_id
+        self._remember_selection(f"doctor:{event.project_id or ''}")
         self.run_doctor()
 
     async def on_project_onboarded(self, event: ProjectOnboarded) -> None:
@@ -631,5 +1094,8 @@ class FleetApp(App[None], inherit_bindings=False):
 
 
 def run_ui(**options: Any) -> None:
-    """Run the fleet UI until the user quits."""
-    FleetApp(**options).run()
+    """Run the fleet UI until the user quits; then say what its last saves could not land."""
+    app = FleetApp(**options)
+    app.run()
+    for line in app.unsaved:
+        stderr_console().print(f"⚠ {line}", markup=False, highlight=False)

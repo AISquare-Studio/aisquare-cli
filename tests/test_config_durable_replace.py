@@ -27,12 +27,27 @@ launch, session or heartbeat path.
 from __future__ import annotations
 
 import os
+import stat
+import sys
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from aisquare.core.config import AppConfig, load_config, save_config
+
+
+def _is_dir_fd(fd: int) -> bool:
+    """Whether ``fd`` is a directory — asked of the DESCRIPTOR, not of /proc.
+
+    Both fsync spies in this file need this, and both originally asked
+    `os.path.isdir(f"/proc/self/fd/{fd}")`. That predicate is always False off
+    Linux, which does not fail a test — it makes one pass for the wrong reason:
+    the classifier below reads every descriptor as "file", and the injector
+    further down never raises the failure it exists to inject. One helper so
+    the next spy cannot re-learn it.
+    """
+    return stat.S_ISDIR(os.fstat(fd).st_mode)
 
 
 def _record(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str]]:
@@ -46,7 +61,7 @@ def _record(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str]]:
         real_replace(src, dst, **kwargs)
 
     def _fsync(fd: int) -> None:
-        kind = "dir" if os.path.isdir(f"/proc/self/fd/{fd}") else "file"
+        kind = "dir" if _is_dir_fd(fd) else "file"
         events.append(("fsync", kind))
         real_fsync(fd)
 
@@ -70,12 +85,23 @@ def test_the_parent_directory_is_flushed_after_the_rename(
     save_config(AppConfig(), target)
     monkeypatch.undo()
 
-    assert ("fsync", "dir") in events, (
-        f"the parent directory was never flushed after the rename: {events}"
-    )
     kinds = [f"{what}:{detail}" for what, detail in events]
     file_sync = kinds.index("fsync:file")
     renamed = next(i for i, k in enumerate(kinds) if k.startswith("replace:"))
+
+    if sys.platform == "win32":
+        # Windows has no directory-flush equivalent, and `save_config` already
+        # says so by construction: `os.open(parent, O_RDONLY)` raises there and
+        # the documented fail-open path returns. So the assertion is the half of
+        # the recipe that DOES exist, plus the fail-open itself — the write
+        # completed and the file is readable.
+        assert file_sync < renamed, f"durable-replace out of order: {kinds}"
+        assert load_config(target).profile == "default", "the fail-open cost the write"
+        return
+
+    assert ("fsync", "dir") in events, (
+        f"the parent directory was never flushed after the rename: {events}"
+    )
     dir_sync = kinds.index("fsync:dir")
     assert file_sync < renamed < dir_sync, f"durable-replace out of order: {kinds}"
 
@@ -97,11 +123,20 @@ def test_a_directory_that_cannot_be_synced_does_not_cost_the_write(
     real_fsync = os.fsync
 
     def _fail_on_directories(fd: int) -> None:
-        if os.path.isdir(f"/proc/self/fd/{fd}"):
+        if _is_dir_fd(fd):
             raise OSError("this filesystem does not permit directory fsync")
         real_fsync(fd)
 
     monkeypatch.setattr(os, "fsync", _fail_on_directories)
+
+    # Windows never reaches the injection at all: `os.open(parent, O_RDONLY)`
+    # raises there, so `save_config` takes its documented fail-open return and
+    # no directory descriptor is ever fsynced. The test would still PASS — the
+    # write does survive — while having injected nothing, which is the same
+    # vacuity the `/proc/self/fd` predicate used to produce. Said out loud, so
+    # `-ra` shows it rather than a green tick standing in for a run.
+    if sys.platform == "win32":
+        pytest.skip("no directory fsync on Windows, so there is no failure to inject")
 
     save_config(config, target)  # must not raise
     monkeypatch.undo()
@@ -177,3 +212,17 @@ def test_the_replace_precondition_holds_wherever_the_config_lives(tmp_path: Path
         f"{target_dev} — os.replace is not atomic across filesystems, so the "
         "guarantee save_config relies on would be void"
     )
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX file modes")
+def test_a_config_the_operator_tightened_keeps_its_mode(tmp_path: Path) -> None:
+    """`save_config` passes `keep_mode=True` on purpose: a `chmod 600 config.toml` stays 600
+    across a rewrite, where the old recipe reset it to the umask default (review of #167)."""
+    import stat
+
+    target = tmp_path / "config.toml"
+    save_config(AppConfig(), target)
+    target.chmod(0o600)
+    save_config(AppConfig(), target)
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+    assert load_config(target) == AppConfig()

@@ -143,6 +143,7 @@ def test_connect_targets_an_alternate_config_dir(runner: CliRunner, fake_home: P
         "SessionEnd",
         "Stop",
         "Notification",
+        "StopFailure",
     }
     assert not (fake_home / ".claude" / "settings.json").exists()
 
@@ -172,7 +173,7 @@ def test_hook_commands_are_never_a_bare_name(
     # 1) The running executable wins, even when PATH knows nothing about it.
     fake_bin = tmp_path / "somewhere" / "aisquare"
     fake_bin.parent.mkdir(parents=True)
-    fake_bin.write_text("#!/bin/sh\n")
+    fake_bin.write_text("#!/bin/sh\n", encoding="utf-8")
     monkeypatch.setattr("aisquare.core.agents.sys.argv", [str(fake_bin)])
     monkeypatch.setattr("aisquare.core.agents.shutil.which", lambda _: None)
     result = runner.invoke(app, ["agents", "connect", "claude-code"])
@@ -323,7 +324,7 @@ def test_spaced_install_path_roundtrips_through_hooks(
 
     spaced = tmp_path / "some dir" / "aisquare"
     spaced.parent.mkdir(parents=True)
-    spaced.write_text("#!/bin/sh\n")
+    spaced.write_text("#!/bin/sh\n", encoding="utf-8")
     monkeypatch.setattr("aisquare.core.agents.sys.argv", [str(spaced)])
     assert runner.invoke(app, ["agents", "connect", "claude-code"]).exit_code == 0
     assert agent_core.hooks_installed("claude-code") is True  # quoted path matches
@@ -552,6 +553,6 @@ def test_connect_gives_the_context_hooks_room_for_the_ci_ceiling(
     for event in ("SessionStart", "UserPromptSubmit"):
         entry = settings["hooks"][event][0]["hooks"][0]
         assert entry["timeout"] == CONTEXT_HOOK_TIMEOUT_SECONDS, event
-    for event in ("Stop", "SessionEnd", "Notification"):
+    for event in ("Stop", "SessionEnd", "Notification", "StopFailure"):
         assert "timeout" not in settings["hooks"][event][0]["hooks"][0], event
     assert CONTEXT_HOOK_TIMEOUT_SECONDS > 60

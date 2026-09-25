@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import re
 import stat
+import sys
 from pathlib import Path
 
 import pytest
@@ -81,6 +82,13 @@ def test_the_installer_exists_and_is_executable() -> None:
     "download it, read it, then run it" (§10), and that path runs `./install.sh`.
     """
     assert SCRIPT.is_file(), f"{SCRIPT} is missing"
+    if sys.platform == "win32":
+        # NTFS has no execute bit and a Windows checkout does not synthesise one,
+        # so `st_mode` here describes this working tree rather than the
+        # repository. The bit IS asserted wherever it exists — the ubuntu `check`
+        # legs and the whole installer matrix — so the property stays pinned; it
+        # is only unaskable here. The existence half above still runs.
+        pytest.skip("no execute bit on NTFS; the POSIX legs assert it")
     mode = SCRIPT.stat().st_mode
     assert mode & stat.S_IXUSR, "install.sh is not executable"
 

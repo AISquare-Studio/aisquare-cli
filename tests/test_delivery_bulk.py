@@ -4,15 +4,16 @@ Single-call suites lie (the fixer notes on issue #19): the misrouting and
 lying-success bugs only surfaced under many concurrent writers with reader
 loops hammering the same store. This harness drives the REAL CLI as
 subprocesses — 8 writers x 25 mixed writes against ONE shared isolated
-``AISQUARE_HOME`` while while-read+timeout reader loops (the #19 repro
-signature) run alongside — and holds the #20 delivery contract in bulk:
+``AISQUARE_HOME`` while time-boxed reader loops (the #19 repro signature)
+run alongside — and holds the #20 delivery contract in bulk:
 
 (a) every write that exited 0 and carried the success marker
     (``delivered: true``) is on the board EXACTLY once, via read-back;
 (b) every dropped write exited nonzero with a machine-readable error and
     no success marker (at-least-once semantics: a failed confirm may still
     have committed, so absence is deliberately NOT asserted);
-(c) zero ``aisquare serve --stdio`` daemons accumulate across the run;
+(c) zero ``aisquare serve --stdio`` daemons accumulate across the run
+    (where the probe can tell ours from anyone else's: ``/proc``);
 (d) the whole storm stays inside a CI-friendly time box.
 """
 
@@ -20,7 +21,6 @@ from __future__ import annotations
 
 import json
 import os
-import shlex
 import subprocess
 import sys
 import time
@@ -148,16 +148,38 @@ def _writer(index: int, *, project: Path, env: dict[str, str]) -> list[WriteResu
     return results
 
 
+_READER_SCRIPT = """\
+import subprocess
+import sys
+
+# The #19 repro signature, in Python rather than `seq | while read` + `timeout`:
+# separate short-lived processes hammering one store, each call time-boxed, each
+# failure swallowed (the shell's `|| true`). Driving it from Python keeps the
+# repro identical on every platform instead of only where coreutils exists.
+iterations = int(sys.argv[1])
+for _ in range(iterations):
+    for args in (["board"], ["--json", "task", "list"]):
+        try:
+            subprocess.run(
+                [sys.executable, "-m", "aisquare", *args],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+            )
+        except (subprocess.TimeoutExpired, OSError):
+            pass
+"""
+
+
 def _reader_loop(project: Path, env: dict[str, str], iterations: int) -> subprocess.Popen[bytes]:
-    """The #19 repro signature: a while-read loop with per-call timeouts."""
-    aisq = f"{shlex.quote(sys.executable)} -m aisquare"
-    script = (
-        f"seq {iterations} | while read -r _; do "
-        f"timeout 5 {aisq} board >/dev/null 2>&1 || true; "
-        f"timeout 5 {aisq} --json task list >/dev/null 2>&1 || true; "
-        "done"
+    """The #19 repro signature: a read loop with per-call timeouts."""
+    return subprocess.Popen(
+        [sys.executable, "-c", _READER_SCRIPT, str(iterations)],
+        cwd=project,
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
     )
-    return subprocess.Popen(["bash", "-c", script], cwd=project, env=env)
 
 
 class _ProbeUnavailable(RuntimeError):
@@ -183,9 +205,10 @@ def _stdio_daemon_pids(home: Path) -> list[int]:
     the phrase as one argument can never satisfy. And is it OURS: the process
     environment must carry this test's ``AISQUARE_HOME``.
 
-    Both answers come from ``/proc``, so this is Linux-only; the caller skips
+    Both answers come from ``/proc``, so this is Linux-only. It raises
     rather than silently counting nothing, because an assertion that cannot
-    observe its subject is worse than one that is merely awkward.
+    observe its subject is worse than one that is merely awkward: the storm
+    leaves out the one check that needs it, and runs the rest.
     """
     if not Path("/proc").is_dir():
         raise _ProbeUnavailable("/proc is required to tell our daemons from anyone else's")
@@ -214,18 +237,39 @@ def test_bulk_concurrent_writes_never_lose_a_confirmed_write(tmp_path: Path) -> 
     activated = _cli(["team", "on"], cwd=project, env=env)
     assert activated.returncode == 0, activated.stderr
 
+    # Without /proc (Windows) only the leak check (c) is left out. This skipped
+    # the whole storm there, so (a), (b), (d) and the Python reader port never
+    # ran on the Windows lane while the CHANGELOG said the storm was ported
+    # (final review of #203, tests-ci TC2).
     try:
-        daemons_before = _stdio_daemon_pids(home)
-    except _ProbeUnavailable as exc:
-        pytest.skip(str(exc))
+        daemons_before: list[int] | None = _stdio_daemon_pids(home)
+    except _ProbeUnavailable:
+        daemons_before = None
     started = time.monotonic()
     readers = [_reader_loop(project, env, iterations=20) for _ in range(READERS)]
     try:
         with ThreadPoolExecutor(max_workers=WRITERS) as pool:
             batches = list(pool.map(partial(_writer, project=project, env=env), range(WRITERS)))
     finally:
-        for reader in readers:
-            reader.wait(timeout=60)
+        try:
+            for reader in readers:
+                reader.wait(timeout=60)
+        finally:
+            # A reader loop still running a minute after the writers fails the
+            # test (the `TimeoutExpired` above), and is killed so that it starts
+            # no more calls against this store and, on Windows, stops holding the
+            # temp directory it runs in against pytest's cleanup. Readers make 40
+            # calls to a writer's 25, and the storm's first windows-latest runs
+            # are this release's (review of the #203 tests-ci fixes, round 1).
+            # The one CLI call a loop has in flight is its own process and is
+            # NOT killed with it: it runs until that call ends, with nothing left
+            # to enforce the call's 5 s limit. Killing the tree would need the
+            # readers in a process group of their own, which would also keep a
+            # Ctrl-C at the terminal from reaching them (round 2).
+            for reader in readers:
+                if reader.poll() is None:
+                    reader.kill()
+                    reader.wait()
     elapsed = time.monotonic() - started
 
     results = [result for batch in batches for result in batch]
@@ -278,7 +322,8 @@ def test_bulk_concurrent_writes_never_lose_a_confirmed_write(tmp_path: Path) -> 
 
     # (c) the storm strands no stdio daemons OF OURS. Scoped to this test's
     # home, so a sibling checkout running its own suite cannot fail this.
-    assert _stdio_daemon_pids(home) == daemons_before
+    if daemons_before is not None:
+        assert _stdio_daemon_pids(home) == daemons_before
 
     # (d) bounded runtime — the whole point is that this stays in CI.
     assert elapsed < TIME_BOX_SECONDS, f"bulk run took {elapsed:.1f}s"
@@ -290,8 +335,19 @@ def test_bulk_concurrent_writes_never_lose_a_confirmed_write(tmp_path: Path) -> 
 # dismiss, and it teaches the team to dismiss failures. So the probe is tested
 # from both ends — it must not see what is not ours, and it must still see a
 # real leak.
+#
+# Both ends are asserted against `/proc`, `/bin/sh` and `pgrep`, so they are
+# Linux-only — not by preference but by construction: telling OUR daemon from a
+# sibling checkout's needs each process's ENVIRONMENT, and Win32_Process does
+# not carry it (only the command line). The storm above runs everywhere and
+# leaves out only its own leak check (c) when the probe raises
+# `_ProbeUnavailable`, so nothing silently asserts against a probe that cannot
+# see.
+
+_needs_proc = pytest.mark.skipif(not Path("/proc").is_dir(), reason="the daemon probe reads /proc")
 
 
+@_needs_proc
 def test_the_probe_ignores_a_shell_that_merely_mentions_the_daemon(tmp_path: Path) -> None:
     """The self-match that made the old probe flaky, reproduced deliberately.
 
@@ -328,6 +384,7 @@ def test_the_probe_ignores_a_shell_that_merely_mentions_the_daemon(tmp_path: Pat
         decoy.wait(timeout=10)
 
 
+@_needs_proc
 def test_the_probe_still_catches_a_daemon_that_is_really_ours(tmp_path: Path) -> None:
     """And it must still fail the storm if a daemon genuinely leaks.
 

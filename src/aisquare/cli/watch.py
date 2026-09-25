@@ -16,25 +16,28 @@ Two implementations behind one entry point:
 Only presentation lives here; all data comes from ``services.team``. The pure
 renderers (``feed_line``, ``_session_lines``, the detail texts, the transcript
 helpers) live here rather than beside the widgets because the fallback needs
-them without Textual, and ``_load_saved_theme`` / ``_save_theme`` are imported
-by the fleet UI, which reuses the theme persistence verbatim.
+them without Textual, and ``_load_saved_theme`` and the theme's key are imported
+by the fleet UI, which reuses the theme persistence verbatim (the saver itself is
+``cli.ui.theme.theme_autosave``'s, for both apps).
 """
 
 from __future__ import annotations
 
-import json
 import time
+from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from rich.text import Text
 
-from aisquare.cli.common import local_time
+from aisquare.cli.common import format_reset, local_time
 from aisquare.core import harness, paths
 from aisquare.core.console import stderr_console, stdout_console
+from aisquare.core.state_file import read_state
 from aisquare.core.store import unmet_needs
 from aisquare.models import ProjectInfo, TeamEvent, TeamSession, TeamTask
+from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import team as team_service
 
 if TYPE_CHECKING:
@@ -140,10 +143,24 @@ _STATE_CHIP = {
     "working": ("▶ working", "green"),
     "waiting": ("⏸ waiting for input", "yellow"),
     "attention": ("🔔 NEEDS YOU", "bold red"),
+    # The two #146 states, so the one surface an operator leaves running does
+    # not print a bare dim word for a parked agent (review of #205, second round).
+    "limited": ("⏳ limited — `aisquare fleet switch <label>`", "magenta"),
+    "switching": ("⇄ switching accounts", "magenta dim"),
 }
 
 
-def _session_lines(sessions: list[TeamSession]) -> Text:
+def _session_lines(sessions: list[TeamSession], labels: Mapping[int, str] | None = None) -> Text:
+    """The sessions block: who is here, in what state, on which account, how long ago.
+
+    The account is named by ``labels`` (``services.claude_accounts.slot_labels``
+    — the alias, as every other surface shows it; review of #205, third round).
+    A caller on an event loop passes its own map, read off that loop — the
+    board panel does, and a read here was a store open and a directory scan on
+    the UI thread at every tick (fourth round). Without one, as ``watch``'s
+    Rich loop calls it, they are read here: once per render, and only once
+    several accounts are in play.
+    """
     text = Text(no_wrap=True, overflow="ellipsis")
     live = [s for s in sessions if s.ended_at is None]
     if not live:
@@ -151,6 +168,8 @@ def _session_lines(sessions: list[TeamSession]) -> Text:
         return text
     now = datetime.now(tz=live[0].last_seen_at.tzinfo)
     accounts = len({s.account for s in live if s.account})
+    if labels is None:
+        labels = accounts_service.slot_labels() if accounts > 1 else {}
     for session in live:
         emoji = _ROLE_EMOJI.get(session.role, "🤖")
         style = _ROLE_STYLE.get(session.role, "white")
@@ -158,7 +177,9 @@ def _session_lines(sessions: list[TeamSession]) -> Text:
         text.append(f"{emoji} {session.role}·{team_service.short_id(session.id)}", style=style)
         chip, chip_style = _STATE_CHIP.get(session.state, (session.state, "dim"))
         text.append(f"  {chip}", style=chip_style)
-        label = team_service.account_label(session.account)
+        if session.state == "limited" and session.limit_resets_at is not None:
+            text.append(f" (resets {format_reset(session.limit_resets_at)})", style="magenta")
+        label = team_service.account_label(session.account, labels)
         # Only meaningful once the board spans several accounts.
         if label and accounts > 1:
             text.append(f"  {label}", style="cyan dim")
@@ -225,37 +246,14 @@ _THEME_KEY = "board_theme"
 
 
 def _load_saved_theme() -> str | None:
-    """The autosaved board theme from ``state.json``, if any."""
-    path = paths.state_path()
-    if not path.exists():
-        return None
-    try:
-        value = json.loads(path.read_text(encoding="utf-8")).get(_THEME_KEY)
-    except json.JSONDecodeError:
-        return None
-    return value if isinstance(value, str) else None
+    """The autosaved board theme from ``state.json``, if any.
 
-
-def _save_theme(name: str) -> None:
-    """Autosave the board theme (every change persists — no save step).
-
-    Tolerates a corrupt state.json (same anticipation as the loader) and
-    writes atomically (tmp + rename) so a mid-write crash can never leave
-    the shared state file truncated.
+    The file has one reader (``core.state_file``): a missing, corrupt or
+    non-object file is no theme, never an exception — ``.get`` on a list used to
+    raise ``AttributeError`` from here, one line into the fleet UI's mount.
     """
-    try:
-        paths.ensure_home()
-        path = paths.state_path()
-        try:
-            data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
-        except (OSError, ValueError):
-            data = {}
-        data[_THEME_KEY] = name
-        temp = path.with_suffix(".json.tmp")
-        temp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-        temp.replace(path)
-    except OSError:
-        return
+    value = read_state().get(_THEME_KEY)
+    return value if isinstance(value, str) else None
 
 
 def action_open_transcript(app: App[Any], command: list[str]) -> str | None:
@@ -297,7 +295,9 @@ def _build_app_class(interval: float) -> Any:
     from textual.widgets import Footer, OptionList, Static
     from textual.widgets.option_list import Option
 
+    from aisquare.cli.ui.autosave import Autosave
     from aisquare.cli.ui.board import BoardPanel
+    from aisquare.cli.ui.theme import theme_autosave
 
     class ThemePicker(ModalScreen[None]):
         """A theme browser that STAYS OPEN: every highlight applies (and
@@ -365,7 +365,13 @@ def _build_app_class(interval: float) -> Any:
             saved = _load_saved_theme()
             if saved and saved in self.available_themes:
                 self.theme = saved
+            self._theme_autosave = theme_autosave(self)
             self._theme_restored = True
+
+        def on_unmount(self) -> None:
+            # Started first, joined against one deadline; what did not land is said
+            # by ``_run_tui`` once the screen is gone.
+            self.unsaved = Autosave.flush_all(self)
 
         def on_board_panel_refreshed(self, event: BoardPanel.Refreshed) -> None:
             self.title = f"aisquare board — {event.project.root.name or event.project.id}"
@@ -394,18 +400,22 @@ def _build_app_class(interval: float) -> Any:
 
         def watch_theme(self, theme_name: str) -> None:
             # Fires on ANY theme change (our picker or the command palette):
-            # every change is the save. Restored on the next launch.
+            # every change is the save — debounced and off the event loop, a
+            # refusal said once. Restored on the next launch.
             parent = getattr(super(), "watch_theme", None)
             if parent is not None:
                 parent(theme_name)
             if getattr(self, "_theme_restored", False):
-                _save_theme(theme_name)
+                self._theme_autosave.remember(theme_name)
 
     return BoardApp
 
 
 def _run_tui(interval: float) -> None:
-    _build_app_class(interval)().run()
+    app = _build_app_class(interval)()
+    app.run()
+    for line in getattr(app, "unsaved", ()):
+        stderr_console().print(f"⚠ {line}", markup=False, highlight=False)
 
 
 # --- the Rich fallback ------------------------------------------------------------

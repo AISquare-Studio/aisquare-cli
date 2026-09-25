@@ -30,14 +30,29 @@ class ExplainabilityResetRefused(RuntimeError):
     band. Afterwards ``status`` reads as a plausible *unconfigured* machine
     rather than a broken one, so nothing downstream reports it.
 
-    Not raised when the config cannot be parsed: ``doctor`` sends an operator
-    here to reset an invalid file, and a refusal built on a section we cannot
-    read would strand exactly that person.
+    A config that cannot be read is refused too, as
+    :class:`UnreadableConfigResetRefused`: what it configures cannot be seen,
+    so neither can what a reset would take.
     """
 
     def __init__(self, summary: str) -> None:
         super().__init__(summary)
         self.summary = summary
+
+
+class UnreadableConfigResetRefused(ExplainabilityResetRefused):
+    """``--reinit`` would replace a ``config.toml`` it cannot read; ``summary`` is why not.
+
+    The reset used to go ahead on such a file, on the grounds that a section
+    nobody can read has nothing to protect. That held only while "cannot read"
+    meant "holds nothing". A config.toml PowerShell 5.1 saved as UTF-16 holds
+    everything its operator configured, and it was replaced with the defaults
+    by a plain ``--reinit`` (review of the #203 final-review fixes). A file in
+    an encoding this build now reads is refused like any other. One it still
+    cannot read needs ``--yes``, which says the operator means to lose what
+    is in it. ``doctor``'s fix for an invalid config says so, so the recovery
+    it prescribes is still one command.
+    """
 
 
 def _configured_explainability(settings: ExplainabilitySettings) -> str | None:
@@ -80,24 +95,31 @@ def initialize(
     paths.ensure_home()
 
     discarded: str | None = None
+    unreadable: str | None = None
     if reinit and paths.config_path().exists():
         try:
-            existing = load_config().explainability
-        except Exception:
-            existing = None  # unreadable: --reinit is the documented recovery
+            existing: ExplainabilitySettings | None = load_config().explainability
+        except Exception as exc:
+            # Nothing can say what it configures, so the reset needs consent
+            # (UnreadableConfigResetRefused).
+            existing, unreadable = None, str(exc)
+            if not assume_yes:
+                raise UnreadableConfigResetRefused(unreadable) from exc
         if existing is not None:
             discarded = _configured_explainability(existing)
             if discarded and not assume_yes:
                 raise ExplainabilityResetRefused(discarded)
 
     if reinit or not paths.config_path().exists():
-        save_config(AppConfig())
+        save_config(AppConfig(), discard_unreadable=unreadable is not None)
 
     project = current_project(path)
     with store_session() as store:
-        store.ensure_project(project)
+        store.onboard_project(project)  # init is the deliberate add (#139)
 
     notes: list[str] = []
+    if unreadable is not None:
+        notes.append(f"reset replaced a config.toml it could not read ({unreadable})")
     if discarded:
         # Consent was given, so the reset happened — but say what went, because
         # nothing downstream reports a missing targets table.
@@ -105,9 +127,22 @@ def initialize(
     if api_key:
         # Merged rather than replaced: `serve` keeps its bearer token in the same
         # file, and a whole-file write erased it (and, in the other order, this
-        # key). One helper owns the format so the two cannot diverge again.
-        credentials_store.store(**{credentials_store.API_KEY: api_key})
-        notes.append("Stored API key in ~/.aisquare/credentials.")
+        # key). One helper owns the format so the two cannot diverge again --
+        # and reports whether the file could really be locked to this account,
+        # because on NTFS the 0600 that guarded it is a no-op.
+        _, restricted = credentials_store.store(**{credentials_store.API_KEY: api_key})
+        # One string with one branch, rather than two near-copies sharing a
+        # prefix: the two paths cannot drift into saying different things about
+        # where the key landed.
+        notes.append(
+            "Stored API key in ~/.aisquare/credentials"
+            + (
+                "."
+                if restricted
+                else " — but could NOT restrict it to your account; other users on this "
+                "machine may be able to read it."
+            )
+        )
     elif not local:
         notes.append(
             "No API key given — running local-only; re-run with --api-key to connect later."

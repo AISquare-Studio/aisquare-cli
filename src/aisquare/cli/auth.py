@@ -28,11 +28,14 @@ from rich.live import Live
 from rich.text import Text
 
 from aisquare.cli.common import fail
-from aisquare.core import browser
+from aisquare.core import browser, orchestrator
 from aisquare.core.console import stderr_console, stdout_console
 from aisquare.core.state import get_state
+from aisquare.core.store import store_session
+from aisquare.models import TraceDestination
 from aisquare.services import auth as auth_service
-from aisquare.services import iam
+from aisquare.services import credits as credits_service
+from aisquare.services import destinations, iam
 
 app = typer.Typer(help="Sign in to AISquare and inspect the session.", no_args_is_help=True)
 
@@ -309,21 +312,27 @@ class _EscapeWatcher:
                 time.sleep(0.05)
 
     def _run_posix(self) -> None:
-        import select
-        import termios
-        import tty
+        # The mirror of `_run_windows` above, and guarded the same way for the
+        # same reason: `termios` and `tty` do not exist on Windows, and mypy now
+        # checks this file under Windows too — `check` has a windows-latest leg.
+        # `_run` never routes a Windows process here; the guard is what makes
+        # that fact checkable rather than merely true.
+        if sys.platform != "win32":
+            import select
+            import termios
+            import tty
 
-        fd = sys.stdin.fileno()
-        saved = termios.tcgetattr(fd)
-        try:
-            tty.setcbreak(fd)
-            while not self._stop.is_set():
-                ready, _, _ = select.select([fd], [], [], 0.1)
-                if ready and os.read(fd, 1) == b"\x1b":
-                    self._cancel.set()
-                    return
-        finally:
-            termios.tcsetattr(fd, termios.TCSADRAIN, saved)
+            fd = sys.stdin.fileno()
+            saved = termios.tcgetattr(fd)
+            try:
+                tty.setcbreak(fd)
+                while not self._stop.is_set():
+                    ready, _, _ = select.select([fd], [], [], 0.1)
+                    if ready and os.read(fd, 1) == b"\x1b":
+                        self._cancel.set()
+                        return
+            finally:
+                termios.tcsetattr(fd, termios.TCSADRAIN, saved)
 
 
 def _emit_signed_in(session: iam.Session) -> None:
@@ -350,7 +359,14 @@ def logout() -> None:
         if get_state().json_output:
             typer.echo(
                 json.dumps(
-                    {"signed_out": False, "server_revoked": False, "env_token_still_set": env_set}
+                    {
+                        "signed_out": False,
+                        "server_revoked": False,
+                        "env_token_still_set": env_set,
+                        # The signed-in branch's shape (#142); no session, nothing to revoke with.
+                        "minted_keys_cleared": 0,
+                        "minted_keys_still_live": [],
+                    }
                 )
             )
         else:
@@ -358,14 +374,27 @@ def logout() -> None:
             if env_set:
                 _say(f"⚠ {iam.TOKEN_ENV_VAR} is still set in this shell.")
         return
-    revoked = auth_service.sign_out(session)
+    # Before the session is revoked: revoking a minted key needs the Bearer.
+    keys = destinations.forget_minted_keys(session)
+    revoked = auth_service.sign_out(session).revoked
     if get_state().json_output:
         typer.echo(
             json.dumps(
-                {"signed_out": True, "server_revoked": revoked, "env_token_still_set": env_set}
+                {
+                    "signed_out": True,
+                    "server_revoked": revoked,
+                    "env_token_still_set": env_set,
+                    "minted_keys_cleared": keys.detached,
+                    "minted_keys_still_live": keys.revocations.as_json()["still_live"],
+                }
             )
         )
         return
+    if keys.detached:
+        _say(f"✓ Forgot {keys.detached} ingest key(s) the CLI had minted for your projects.")
+    if keys.revocations.owed:
+        # Kept owed, not forgotten: the next sign-in's `use` or `doctor --live` tries again.
+        _say(f"⚠ {destinations.describe_owed(keys.revocations.owed)} — {destinations.REVOKE_RETRY}")
     if revoked:
         _say("✓ Signed out. The session was revoked on the server.")
     else:
@@ -378,22 +407,72 @@ def logout() -> None:
 
 
 def whoami() -> None:
-    """Show which account this machine is signed in as (offline)."""
+    """Show which account this machine is signed in as (credits ask the API).
+
+    The session is `AISQUARE_TOKEN` when that is set, else the stored file.
+    """
     try:
         session = iam.current_session()
     except iam.IamError as exc:
         _fail(exc)
     if session is None:
         fail("Not signed in. Run aisquare login.", error="not_authenticated")
+    lands_in = _destination_here()
+    # The one request `whoami` makes (#143), and only with a destination for
+    # the project here: that workspace's balance, a reading reused for a minute,
+    # each network operation given `credits.TIMEOUT_SECONDS`. It said
+    # "(offline)" before the credits line, which is no longer so (review of
+    # #173, round 1).
+    credits = credits_service.for_destination(session, lands_in)
     if get_state().json_output:
-        typer.echo(json.dumps(session.as_json()))
+        typer.echo(
+            json.dumps(
+                {
+                    **session.as_json(),
+                    "destination": destinations.as_json(lands_in),
+                    "credits": credits.as_json() if credits is not None else None,
+                }
+            )
+        )
         return
     if session.source == "env":
         stdout_console().print(f"token from {iam.TOKEN_ENV_VAR} · {session.api_url}")
-        return
-    days = session.expires_in_days()
-    expiry = f"expires in {days} days" if days is not None else "no recorded expiry"
-    stdout_console().print(f"{session.email or session.sub} · {session.api_url} · {expiry}")
+    else:
+        days = session.expires_in_days()
+        expiry = f"expires in {days} days" if days is not None else "no recorded expiry"
+        stdout_console().print(f"{session.email or session.sub} · {session.api_url} · {expiry}")
+    if lands_in is not None:
+        # The workspace and studio of the project a launch here joins (#142),
+        # on the line that answers "who am I here": the same sign-in, the other
+        # half of it.
+        stdout_console().print(f"traces: {lands_in.label} · {lands_in.environment}")
+    if credits is not None:
+        stdout_console().print(f"credits: {credits_service.describe(credits)}")
+    elif lands_in is not None:
+        # A session for another API than the destination's: said, as the tab says it
+        # (review of #173 after the stack's merge, J3).
+        stdout_console().print(
+            f"credits: ({credits_service.why_unread(session, lands_in)})", markup=False
+        )
+
+
+def _destination_here() -> TraceDestination | None:
+    """Where traces from here land, or ``None`` — never a reason whoami fails.
+
+    For the project a launch here joins (``orchestrator.team_project``:
+    ``$AISQUARE_TEAM_HUB``, else this checkout), the one ``explainability use``
+    and ``status`` default to. It read the ``project switch`` pin, which
+    launches ignore, so after ``use`` in one checkout with another project
+    pinned, this line named the pinned project's destination, or none.
+    """
+    if not destinations.derived_credentials_exist():
+        return None
+    try:
+        project_id = orchestrator.team_project(None).id
+        with store_session() as store:
+            return store.project_destination(project_id)
+    except Exception:
+        return None
 
 
 # --------------------------------------------------------------------------- aisquare auth

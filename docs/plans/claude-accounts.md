@@ -1,7 +1,9 @@
 # Accounts: the AISquare sign-in and the Claude Code accounts, in one page
 
 Status: implemented 2026-09-09 on top of PR #77 (`aisquare login`), which lands
-first. The user guide is the "Accounts" section of `docs/fleet.md`; the README's
+first; §9 (the default, the priority order, aliases — #145) and §10 (headroom,
+limits, hand-over — #146) added 2026-09-13.
+The user guide is the "Accounts" section of `docs/fleet.md`; the README's
 "Several accounts, one team" covers the command line.
 
 This document is a reference, not a script: commands appear as inline code.
@@ -42,6 +44,16 @@ account is a second directory and a launch that points the variable at it.
   variable is set, so a "default" launched that way re-onboards into an empty
   config (verified on this machine: `~/.claude.json` exists, `~/.claude/
   .claude.json` does not; every `~/.claude-c<n>/.claude.json` does).
+- **Under a managed slot, slot 1 is still the launching shell's.** An agent on
+  slot 2 runs with both variables naming slot 2, and so do its hooks, the
+  hand-over worker it detaches and any `fleet spawn` it runs. Read as they
+  stand, slot 1 would be slot 2: a hand-over read slot 2's usage as slot 1's
+  and relaunched the limited agent on slot 2 as `--account 1`. So a launch
+  onto a managed slot keeps the shell's own two variables beside the slot's
+  (`AISQUARE_PLAIN_CLAUDE_CONFIG_DIR`, `AISQUARE_PLAIN_CLAUDE_CODE_TMPDIR`),
+  and wherever `CLAUDE_CONFIG_DIR` names one of our slots, slot 1 is read
+  from those copies, or is `~/.claude` when the shell had none
+  (`core.plain_environment`).
 - **Both variables, always.** `CLAUDE_CODE_TMPDIR` goes with the config dir or
   two parallel sessions share one scratch directory (README, "Several
   accounts, one team").
@@ -149,8 +161,187 @@ test censuses (`tests/test_stubs.py`, `tests/test_no_traceback_on_a_damaged_stor
 
 ## 8. Later
 
-- A spawn that picks the account with the most headroom, from the same usage
-  numbers.
-- The Settings tab could bind a default account per role; today that is
-  `team bind coder1 --env …` or `--account` per launch.
+- ~~A spawn that picks the account with the most headroom~~ — done in §10
+  (#146): `[accounts] pick = "headroom"`, and `fleet switch` for the running ones.
+- ~~The Settings tab could bind a default account per role~~ — done in §9
+  (#145): the account select beside each role, `team bind <role> --account`.
 - Reading the macOS Keychain for usage.
+
+## 9. Choosing one: default, order, aliases (#145, 2026-09-13)
+
+**The gap.** Several accounts could be added and seen, and none chosen. Slot 1
+was the default by constant (`DEFAULT_SLOT = 1`), the order was the slot
+number, and a role ran elsewhere only through a `CLAUDE_CONFIG_DIR` buried in
+`team bind --env` — which the UI never showed and one typo of which started an
+unauthenticated Claude.
+
+**The record stays the directories; the arrangement goes to SQLite.** §2's
+argument against a registry file — a second copy of facts the filesystem
+already holds — still stands for *which accounts exist and who is signed in*,
+and that is still read from disk every time. What a directory cannot carry is
+how the operator ARRANGED them: a name, a rank, a choice. Those live in the
+`claude_account` table (`core.store`, v15: `slot, config_dir, alias, position,
+is_default, disabled, created_at`), joined to the directories by `slot`. The
+two are reconciled on every read (`services.claude_accounts._arranged`),
+directories winning: a slot with no row gets one at the end of the order, a
+row whose directory is gone is dropped. That is also the migration: an existing
+machine is the "no rows yet" case, and its first read arranges the slots in
+slot order, which is the order they were always listed in. Two invariants are
+the schema's rather than a caller's — at most one default and no duplicate
+alias, both partial unique indexes — because both had been left to callers
+elsewhere in this repo and both drifted.
+
+**The ladder.** `services.claude_accounts.choose` is the one place a launch's
+account is decided, and `aisquare launch`, `fleet spawn` (and so a manager
+spawning a coder) both ask it: the `--account` flag, else the role's binding
+(`RoleLaunchProfile.account`, written by `team bind <role> --account` and the
+Settings tab), else the project's default (`project_setting` key
+`claude_account`, a slot number), else the machine default (`is_default`), else
+**nothing** — and "nothing" means the launch environment is left exactly as it
+was, byte for byte, so a machine that never arranged anything is unaffected. A
+rung naming an account that does not exist refuses the launch with the rung
+named (a binding to a removed slot must not quietly run somewhere else); a
+rung naming a `disabled` account is skipped with a note and the ladder goes
+on. `tests/test_one_account_resolver.py` pins structurally that neither
+launching module decides an account any other way, with positive and negative
+controls (CONTRIBUTING, "Writing a guard that still guards").
+
+**References.** `--account` takes a slot number, an alias or a signed-in email
+everywhere. The three cannot collide: an alias must start with a letter and
+cannot contain `@` (`core.normalise_alias`, lowercase, ≤ 32). The project
+default is stored as the resolved slot number; the role binding is stored as
+typed, so renaming an alias changes what it means the way the operator expects.
+
+**Removal and reuse.** `remove` drops the row and every project default that
+named the slot, after the rename — the number is free again the moment the
+directory moves, and a default or alias left behind would be inherited by
+whatever `add` puts in that slot next. Role bindings in `config.toml` are not
+edited by a removal (a file people hand-edit is not ours to rewrite as a side
+effect); `doctor` reports them as dangling and the launch refuses with the rung
+named.
+
+**Slot 1 is "plain claude" now.** It was labelled `default`, and once "default"
+meant the chosen account, a slot that was not the default could not keep the
+word. The label is the alias when one is set.
+
+**Failing open.** Readers (`list_accounts`, `resolve`, `choose`) fall back to the
+directories' view with a note when the store cannot be opened — the Accounts
+page and `accounts list` keep working on a wedged `context.db`, and a launch
+starts (on no default) rather than dying; `doctor` reports the cost. Writers
+(`set_default`, `set_alias`, `reorder`, `set_disabled`) refuse with
+`AccountsUnreadable`, which the CLI reports as `store_unreadable`.
+
+**Surface.** `aisquare accounts default [REF] [--project P] [--role R]
+[--clear]`, `alias <slot> <name> [--clear]`, `order <ref>…`, `move <ref>
+up|down|top|bottom`, `disable`/`enable <ref>`; `team bind <role> --account A |
+--clear-account`; `accounts list` stars the default and lists in priority order;
+the Accounts page rows carry ★ *Default*, ↑/↓ and *Disable*; the Settings tab
+binds an account per role; the agent header and `fleet ls` show the resolved
+slot (`fleet_agent.account_slot`, recorded at spawn). `doctor` gains
+`claude-account-default` and `claude-account-bindings`.
+
+## 10. Spending them: headroom, limits, hand-over (#146, 2026-09-13)
+
+**What was measured before anything was built.** Claude Code's own signals,
+read from this machine's transcripts and its hooks reference on 2026-09-13:
+
+- A usage limit ends the turn with an API error the transcript records as
+  `"error":"rate_limit"`, `"apiErrorStatus":429`, and the rendered text
+  `You've hit your session limit · resets 12:30am (America/Toronto)` (the
+  weekly one adds a weekday: `resets Mon 12:00am`). Claude Code fires the
+  **`StopFailure`** hook instead of `Stop` for it, with `error`, an optional
+  `error_details` and `last_assistant_message` (that text); the hook's output
+  is ignored. That is the reliable, in-band signal the issue's design listed as
+  "unverified"; pane text and the proxy lane are not needed.
+- `Notification` types include `quota_auto_resume_fired` (the "Usage limit
+  reset — continuing" notice #153 saw) and its `_stale`/`_disabled` siblings.
+- Since v2.1.234 Claude Code **waits in the open session and continues by
+  itself after the reset** (`autoContinueAtUsageLimit`, on by default for
+  interactive subscription sessions — which fleet windows are — but not when
+  the reset is more than 24 h away, i.e. most weekly limits).
+- `claude --resume <absolute transcript path>` resumes a session by its file
+  and keeps its session id; `--fork-session` mints a new one. The status line
+  receives per-session `rate_limits.five_hour.used_percentage/resets_at`
+  (epoch seconds); hooks do not.
+
+**The three schemes, decided.** The issue compared a threshold hand-over,
+a continuous hand-off packet and post-limit recovery. Shipped: post-limit
+recovery on the `StopFailure` signal, with the threshold as the *spawn-time*
+rule rather than a mid-run switch, and no per-turn packet — `--resume` by
+transcript makes the model's own context the packet, and the board-built
+hand-off prompt is the fallback when the transcript is not there. Mid-run
+proactive switching (stopping a working agent at 85 %) was left out on purpose:
+it interrupts work that may finish before the window does, and Claude Code's
+own wait covers the short resets; `on_limit = "switch"` is the automatic path
+for the long ones.
+
+**The pieces.**
+
+- `[accounts]` in `config.toml` (`core.config.AccountsSettings`): `pick`
+  (`default` | `headroom`), `switch_at` (85), `on_limit` (`wait` | `switch`),
+  `wait_if_reset_within_minutes` (15). On the Settings tab too.
+- `claude_usage` (store v16): every reading made through
+  `services.claude_accounts.sample_usage` — the page's minute tick, `accounts
+  usage`, `list --usage`, a headroom pick, `doctor --live` — kept a week.
+  `usage_trend` rates the latest reading against the oldest of the SAME window
+  (same `resets_at`) within an hour; `describe_trend` is the `≈ 40 min to the
+  limit` on the row (and `resets before the limit` when the window lifts
+  first).
+- `headroom_choice`: enabled, signed-in accounts in priority order, minus the
+  slot a hand-over leaves; usage read once, concurrently; the first under
+  `switch_at`, else the one with the most room; unreadable ones skipped with a
+  note; nothing measurable → `None`, and `choose` falls to the machine default.
+  An account is as full as the fuller of its two windows (`headroom_percent`):
+  one that has spent its week builds no five-hour usage, and ranked on the
+  five-hour window alone it read as the emptiest, so a weekly limit — the case
+  `on_limit = "switch"` exists for — handed the agent to an account that
+  refused its first request (final review of #203).
+  It is the `headroom` rung of `choose` (§9), switched on by `pick` or by
+  `spread=True`, which `fleet switch` passes so a switch goes where the room is
+  whatever `pick` says.
+- `hook stop-failure` → `services.hooks.turn_failed` →
+  `team.hook_stop_failure`: `rate_limit` parks the row `limited` with the reset
+  `core.claude_accounts.parse_limit_notice` read from the message (a clock time
+  in the named zone, resolved to the next such moment, on the named weekday),
+  emits `limited` ON THE TRANSITION only (Claude Code re-fires for the same
+  window), nudges a waiting manager; `limited` and `switched` are wake kinds.
+  Any other error: `waiting` + a `turn_failed` feed line. The turn's metrics
+  row is closed either way. The sixth hook installed by `agents connect`; an
+  older install reads as partial and `doctor` says to reconnect.
+- `services.fleet.switch` / `fleet switch <label> [--to A] [--fresh]
+  [--reason R]`: target through `choose(to, …, exclude={current}, spread=True)`;
+  the agent stopped as `fleet stop` stops it (its `SessionEnd` releases its
+  claims); spawned again with the same label, task and worktree on the target,
+  `--resume <transcript>` when the file exists (the row records the SAME
+  session id up front — `ResumeSpec` — so the board session carries on), else
+  a hand-off prompt: who it is, the task and its contract, the previous
+  session's last board entries, and the instruction to read the board and the
+  tree before continuing. A `switched` event closes the loop.
+- The automatic path lives in the hook (`_hand_over_if_configured`): a limited
+  FLEET agent, `on_limit = "switch"`, reset farther than the wait window →
+  `switch` — performed by a worker in its own session (`aisquare hook
+  hand-over`, started detached), because the hook is a child of the very pane
+  `switch` kills and, run inline, went down with it before the replacement was
+  spawned (review of #205). A refusal (no headroom) is a board note and the
+  agent stays parked with Claude Code's own wait intact. A moved agent keeps
+  its claims — the session is marked `switching` before the `/exit`, so its
+  `SessionEnd` parks them as a `/clear` does: for the same id when the agent
+  resumes, and for the fresh replacement's new id, which its row and the claims
+  are moved onto in one transaction right after the row is recorded
+  (`spawn(takes_over=…)`; the launcher waits for the row, not the move, so a
+  start hook that beats it makes the move itself when it can prove the pane) —
+  a resumed agent is told in one line to continue, and no `agent_exited` goes
+  out for a hand-over of either kind.
+- `_derive` trusts a `limited` row until its reset (+10 min) rather than the
+  30-minute stale window, because a parked agent fires no hook; `⏳ limited`
+  chips in the sidebar, project view and `fleet ls`; `ALIVE_STATES` includes it.
+- `doctor`: `claude-account-limits` (offline, the parked agents and their
+  resets), `claude-account-headroom` (`--live`, every window against
+  `switch_at`; warns when all are over the line or none can be read).
+
+**Unverified, and said so.** Resuming a transcript written under one
+`CLAUDE_CONFIG_DIR` from another. The path form is documented and the id is
+kept, but this machine holds one login, so the cross-account leg has not been
+run; a resume that fails leaves a pane whose error is visible, and `--fresh` is
+the documented way around it. Copying transcripts between config directories
+was not done, per the issue.

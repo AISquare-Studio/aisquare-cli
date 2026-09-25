@@ -35,6 +35,7 @@ from aisquare.cli.app import app
 from aisquare.core import paths
 from aisquare.core.config import AppConfig, save_config
 from aisquare.core.state import RuntimeState, set_state
+from tests.fsperms import can_deny_writes, can_symlink, unwritable
 
 
 def _config_symlinked_into_an_unwritable_directory(tmp_path: Path) -> Path:
@@ -48,16 +49,25 @@ def _config_symlinked_into_an_unwritable_directory(tmp_path: Path) -> Path:
     link.parent.mkdir(parents=True, exist_ok=True)
     link.unlink(missing_ok=True)
     link.symlink_to(real)
-
-    vault.chmod(0o500)
     return vault
 
 
 @pytest.fixture
 def unwritable_vault(tmp_path: Path) -> Iterator[Path]:
+    """The vault, genuinely unwritable — which `chmod` alone does not achieve.
+
+    `vault.chmod(0o500)` is a no-op against a directory on Windows, so the write
+    these tests require to FAIL was succeeding and every assertion here read as
+    "exit 0, expected 1". `unwritable` applies a DENY ace there and the mode
+    bits on POSIX, so the premise actually holds on both.
+    """
+    if not can_symlink():
+        pytest.skip("this machine cannot create symlinks (needs privilege on Windows)")
+    if not can_deny_writes():
+        pytest.skip("writes cannot be denied here (running as root?)")
     vault = _config_symlinked_into_an_unwritable_directory(tmp_path)
-    yield vault
-    vault.chmod(0o700)
+    with unwritable(vault):
+        yield vault
 
 
 def test_config_set_reports_the_convention_not_a_traceback(
@@ -100,7 +110,11 @@ def test_the_json_surface_carries_a_machine_readable_error(
     assert result.exit_code == 1
     payload = json.loads(result.output)
     assert payload["error"]
-    assert str(unwritable_vault) in json.dumps(payload)
+    # Against the DECODED value, not `json.dumps(payload)`: JSON escapes
+    # backslashes, so a Windows path is doubled in the dumped text and never
+    # matches `str(vault)`. `json.loads` above already handed back the real
+    # string; re-dumping it only reintroduced the escaping.
+    assert str(unwritable_vault) in payload["hint"], payload
 
 
 def test_an_unexpected_oserror_still_raises_with_its_traceback(
@@ -288,6 +302,45 @@ def test_the_redaction_command_translates_too(
     assert "✗" in result.output
 
 
+def test_a_windows_path_survives_the_json_surface_unescaped(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A caller must be able to match the payload against a real path object.
+
+    This runs WITHOUT a symlink on purpose, and that is the whole reason it
+    exists. The tests above need one, and creating a symlink on Windows takes a
+    privilege the CI runner has and a developer machine does not — so on a
+    developer box they skip, and the only place this surface met a Windows path
+    was CI. It failed there, on exactly this: `str(directory) in
+    json.dumps(payload)` is False for a Windows path, because JSON doubles
+    every backslash. The path was in the payload the whole time.
+
+    Driving `expected_config_write_errors` through a raised PermissionError
+    reaches the same handler with no filesystem privilege at all, so the
+    contract is now pinned on every platform rather than only where symlinks
+    happen to work.
+    """
+    from aisquare.services import settings as settings_service
+
+    directory = paths.config_path().parent
+    target = directory / "config.toml"
+
+    def _denied(*_args: object, **_kwargs: object) -> None:
+        raise PermissionError(errno.EACCES, "Permission denied", str(target))
+
+    monkeypatch.setattr(settings_service, "save_config", _denied)
+
+    result = runner.invoke(app, ["--json", "config", "set", "explainability.proxy_url", "http://x"])
+
+    assert result.exit_code == 1, result.output
+    payload = json.loads(result.output)
+    assert payload["error"] == "config_not_writable"
+    # The decoded value, matched against a real path. `json.dumps(payload)`
+    # would re-escape it and this would be False on Windows for no reason that
+    # concerns the caller.
+    assert str(directory) in payload["hint"], payload
+
+
 # --- AISQUARE_HOME pointing at a file: the same convention, a wider reach ---------------
 #
 # ``ensure_home`` cannot mkdir over a regular file, and ``core.store.open_store``
@@ -388,10 +441,16 @@ def home_is_a_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path
 def test_home_blocker_names_the_file_in_the_way_and_nothing_else(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Four shapes, because the message names the path the operator has to move.
+    """Three shapes plus both controls, because the message names the path to move.
 
-    The dangling symlink is the one that is easy to miss: ``exists()`` follows the
-    link and says no, but ``mkdir`` still refuses with ``FileExistsError``.
+    The fourth shape, a dangling symlink, is the next test: it needs a privilege
+    an ordinary Windows account does not have, and it used to be guarded by a
+    ``pytest.skip`` in the MIDDLE of this body. That cost twice. The two
+    negative controls sat below the skip, so on such a machine a guard whose
+    name ends "and nothing else" quietly stopped checking the "nothing else"
+    half — and ``-ra`` reported the whole test as skipped, which reads as "not
+    run here" rather than "three quarters run here". Split, so the report says
+    which shapes ran. Same shape 98a4d92 split out of ``test_tmux.py``.
     """
     blocker = tmp_path / "in-the-way"
     blocker.write_text("", encoding="utf-8")
@@ -402,15 +461,33 @@ def test_home_blocker_names_the_file_in_the_way_and_nothing_else(
     monkeypatch.setenv(paths.HOME_ENV_VAR, str(blocker / "nested" / "home"))
     assert common.home_blocker() == blocker, "a file ABOVE the home blocks it too"
 
-    dangling = tmp_path / "dangling"
-    dangling.symlink_to(tmp_path / "nowhere")
-    monkeypatch.setenv(paths.HOME_ENV_VAR, str(dangling))
-    assert common.home_blocker() == dangling
-
     # The negative controls: a directory that exists, and one that does not yet.
+    # Neither needs a symlink, so neither is gated on one any more.
     fine = tmp_path / "fine"
     fine.mkdir()
     monkeypatch.setenv(paths.HOME_ENV_VAR, str(fine))
     assert common.home_blocker() is None
     monkeypatch.setenv(paths.HOME_ENV_VAR, str(fine / "not-created-yet"))
     assert common.home_blocker() is None
+
+
+@pytest.mark.skipif(
+    not can_symlink(), reason="this machine cannot create symlinks (needs privilege on Windows)"
+)
+def test_home_blocker_names_a_dangling_symlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fourth shape, and the one that is easy to miss.
+
+    ``exists()`` follows the link and says no, but ``mkdir`` still refuses with
+    ``FileExistsError`` — so a home pointed at a dangling link is blocked by
+    something ``exists()`` swears is not there.
+
+    Its own test with its own condition, because building it needs a privilege
+    the CI runner holds and an ordinary Windows account does not.
+    ``can_symlink()`` measures that rather than inferring it from the platform.
+    """
+    dangling = tmp_path / "dangling"
+    dangling.symlink_to(tmp_path / "nowhere")
+    monkeypatch.setenv(paths.HOME_ENV_VAR, str(dangling))
+    assert common.home_blocker() == dangling

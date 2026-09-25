@@ -54,6 +54,9 @@ otherwise inherit a live identity:
   * ``services/distill.py::spawn_drain`` — a detached ``aisquare team distill``
     of our own. A background worker of ours is not an agent session and has no
     business wearing one's identity.
+  * ``services/hooks.py::_detach`` — a detached ``aisquare hook hand-over`` of
+    our own, for the same reason; it also outlives the pane whose hook started
+    it, which is the whole point of detaching it.
 
 Excluded, nothing stripped — these are not model processes at all, and
 narrowing their environment would be change without a reason:
@@ -74,6 +77,14 @@ narrowing their environment would be change without a reason:
   * ``core/editor.py::edit_text`` — the operator's ``$EDITOR``. It is theirs,
     and it should get their environment.
   * ``cli/watch.py::action_open_transcript`` — a pager/viewer on a file.
+  * ``core/paths.py::restrict_to_owner`` — ``icacls``, locking the
+    credentials file to this account on Windows. A permissions tool, not a
+    model process; it is also the seam that guards the API key, so an
+    inherited base URL is irrelevant to it either way.
+  * ``core/paths.py::_whoami_sid`` — ``whoami /user``, reading this
+    account's SID so the ``icacls`` above can name a trustee that cannot be
+    spoofed by a stray ``USER`` in the environment. Same argument as its
+    caller.
   * ``services/explainability_ops.py::install_sdk`` — ``pip install``.
   * ``services/explainability_ops.py::sdk_doctor`` — the SDK's own doctor
     script. Not stripped: it needs the ``EXPLAINABILITY_*`` environment to
@@ -190,6 +201,13 @@ SEAMS: dict[str, Seam] = {
         "a detached `aisquare team distill` of ours — a background worker is not an agent session",
         strips_identity=True,
     ),
+    "aisquare/services/hooks.py::_detach": Seam(
+        EXCLUDED,
+        "a detached `aisquare hook hand-over` of ours (#146; review of #205, finding 1) — the "
+        "worker that moves a limited agent is not an agent session, and it outlives the pane "
+        "whose hook started it",
+        strips_identity=True,
+    ),
     "aisquare/cli/accounts.py::_exec": Seam(
         EXCLUDED,
         "`aisquare accounts run` replaces itself with a plain Claude Code session on one "
@@ -227,6 +245,14 @@ SEAMS: dict[str, Seam] = {
     ),
     "aisquare/cli/watch.py::action_open_transcript": Seam(
         EXCLUDED, "a pager/viewer on a transcript file"
+    ),
+    "aisquare/core/paths.py::restrict_to_owner": Seam(
+        EXCLUDED, "`icacls` — locks the credentials file to this account; no model"
+    ),
+    "aisquare/core/paths.py::_whoami_sid": Seam(
+        EXCLUDED,
+        "`whoami /user` — reads THIS account's SID for the icacls trustee above. "
+        "An identity question about the operating system, not the model API",
     ),
     "aisquare/services/explainability_ops.py::install_sdk": Seam(
         EXCLUDED, "`pip install` — reaches PyPI, never the model API"

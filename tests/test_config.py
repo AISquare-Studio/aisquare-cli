@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import codecs
+import tomllib
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from aisquare.cli.app import app
@@ -39,6 +42,77 @@ def test_an_unknown_key_in_the_file_still_loads(tmp_path: Path) -> None:
     config = load_config(target)
     assert config.profile == "work"
     assert config.team.profiles == {}
+
+
+def test_a_config_saved_with_a_utf8_bom_loads_and_a_save_keeps_its_unknown_keys(
+    tmp_path: Path,
+) -> None:
+    """Windows PowerShell 5.1's ``Set-Content -Encoding UTF8`` and Notepad's "UTF-8 with
+    BOM" put U+FEFF in front, which ``tomllib`` refuses: every command raised, and a
+    save could not read the file it merges into, so a section this build does not know
+    was dropped (review of the #203 store fixes, round 1). Read past the BOM, the file
+    loads, a save keeps the section, and the file is written back without the BOM."""
+    target = tmp_path / "config.toml"
+    body = 'profile = "work"\n\n[future_feature]\nsomething = 42\n'
+    target.write_bytes(b"\xef\xbb\xbf" + body.encode("utf-8"))
+
+    config = load_config(target)
+    assert config.profile == "work"
+    save_config(config, target)
+
+    raw = target.read_bytes()
+    assert not raw.startswith(b"\xef\xbb\xbf")
+    written = tomllib.loads(raw.decode("utf-8"))
+    assert written["profile"] == "work"
+    assert written["future_feature"] == {"something": 42}
+
+
+@pytest.mark.parametrize("bom", [codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE], ids=["le", "be"])
+def test_a_config_saved_as_utf16_loads_and_a_save_writes_it_as_utf8(
+    tmp_path: Path, bom: bytes
+) -> None:
+    """Windows PowerShell 5.1's ``>`` and ``Out-File`` write UTF-16 with its byte-order
+    mark. ``load_config`` refused such a file, so every command failed on it, and ``init
+    --reinit`` could not see the explainability section that should have refused the
+    reset (review of the #203 final-review fixes). Read in the encoding its mark names, it
+    loads; a save keeps what this build does not know and writes the file as UTF-8."""
+    target = tmp_path / "config.toml"
+    body = 'profile = "work"\n\n[future_feature]\nsomething = 42\n'
+    codec = "utf-16-le" if bom == codecs.BOM_UTF16_LE else "utf-16-be"
+    target.write_bytes(bom + body.encode(codec))
+
+    config = load_config(target)
+    assert config.profile == "work"
+    save_config(config, target)
+
+    written = tomllib.loads(target.read_bytes().decode("utf-8"))
+    assert written["profile"] == "work"
+    assert written["future_feature"] == {"something": 42}
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [b"this is not [ valid toml\n", 'profile = "work"\n'.encode("utf-16-le")],
+    ids=["invalid-toml", "utf-16-without-a-mark"],
+)
+def test_a_save_never_writes_over_a_config_it_cannot_read_unless_told_to(
+    tmp_path: Path, raw: bytes
+) -> None:
+    """A save keeps what the file holds that the model does not, so a file it cannot read
+    is one whose contents it would lose. It failed open and wrote the model over it, which
+    is how ``init --reinit`` replaced a UTF-16 cutover without its refusal (review of the
+    #203 final-review fixes). The read error is raised and the file left, unless the
+    caller says to discard it, as ``init --reinit --yes`` does."""
+    target = tmp_path / "config.toml"
+    target.write_bytes(raw)
+
+    with pytest.raises((tomllib.TOMLDecodeError, UnicodeDecodeError)):
+        save_config(AppConfig(profile="home"), target)
+    assert target.read_bytes() == raw
+
+    save_config(AppConfig(profile="home"), target, discard_unreadable=True)
+
+    assert load_config(target).profile == "home"
 
 
 def test_round_trip_explicit_path(tmp_path: Path) -> None:

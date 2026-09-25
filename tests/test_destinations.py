@@ -1,0 +1,2842 @@
+"""Where a project's traces land, chosen while signed in (#142).
+
+Every step of ``use`` has its control: the listing goes through the session
+(its host, its token, the workspace header); the deployment follows the
+session's host and fills only what is empty; the key is minted when the API
+allows and the refusal is named when it does not; the roster is bound with the
+key and a refusal is reported per identity; ``logout`` forgets minted keys and
+leaves hand-attached ones; the resolver prefers the destination's deployment
+between the explicit forms and the machine default; ``doctor`` still opens no
+store.
+"""
+
+from __future__ import annotations
+
+import ast
+import json
+import re
+import shlex
+import sqlite3
+import stat
+import sys
+from collections.abc import Callable, Iterator
+from dataclasses import replace
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+import pytest
+from typer.testing import CliRunner
+
+import aisquare
+from aisquare.cli import auth as auth_cli
+from aisquare.cli.app import app
+from aisquare.core import paths
+from aisquare.core.config import AppConfig, ExplainabilityTarget, load_config, save_config
+from aisquare.core.store import ContextStore, SqliteStore, store_session
+from aisquare.core.workspace import pin_project, project_id_for
+from aisquare.models import ProjectInfo, TraceDestination
+from aisquare.services import destinations as dest
+from aisquare.services import explainability as service
+from aisquare.services import explainability_ops as ops
+from aisquare.services import iam
+from tests.idp_stub import IdentityProviderStub
+
+WORKSPACES = [
+    {"id": 42, "uid": "ws-uid-42", "name": "acme", "type": "team", "effective_role": "ADMIN"},
+    {"id": 7, "uid": "ws-uid-7", "name": "Personal", "type": "personal", "effective_role": "OWNER"},
+    {
+        "id": 99,
+        "uid": "ws-uid-99",
+        "name": "guests",
+        "effective_role": None,
+        "invite_status": "pending",
+    },
+]
+STUDIOS = {
+    "42": [
+        {"id": 302, "uid": "st-302", "name": "Unassigned", "is_inbox": True, "workspace_id": 42},
+        {"id": 301, "uid": "st-301", "name": "Frontend", "workspace_id": 42},
+        {"id": 303, "uid": "st-303", "name": "API", "is_default": True, "workspace_id": 42},
+    ],
+    "7": [],
+}
+
+
+@pytest.fixture(autouse=True)
+def no_real_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(auth_cli, "_sleep", lambda _seconds: None)
+
+
+@pytest.fixture
+def idp() -> Iterator[IdentityProviderStub]:
+    stub = IdentityProviderStub()
+    stub.workspaces = [dict(w) for w in WORKSPACES]
+    stub.studios = {k: [dict(s) for s in v] for k, v in STUDIOS.items()}
+    yield stub
+    stub.close()
+
+
+@pytest.fixture
+def signed_in(runner: CliRunner, idp: IdentityProviderStub, isolated_home: Path) -> iam.Session:
+    result = runner.invoke(app, ["login", "--no-browser", "--api-url", idp.url])
+    assert result.exit_code == 0, result.output
+    session = iam.current_session()
+    assert session is not None
+    return session
+
+
+@pytest.fixture(autouse=True)
+def run_from_web(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every command runs from the ``web`` checkout, the project most tests make.
+
+    Without ``--project``, ``use``, ``studios``, ``status`` and ``whoami`` ask
+    about the project a launch here joins — this checkout — and not the
+    ``project switch`` pin, which launches ignore (review of #170). So the
+    working directory, not a pin, is what makes ``web`` the default.
+    """
+    web = tmp_path / "web"
+    web.mkdir()
+    monkeypatch.chdir(web)
+
+
+def _project(root: Path) -> ProjectInfo:
+    root.mkdir(parents=True, exist_ok=True)
+    info = ProjectInfo(id=project_id_for(root.resolve()), root=root.resolve(), linked_repos=[])
+    with store_session() as store:
+        store.onboard_project(info)
+    return info
+
+
+def _json(runner: CliRunner, *argv: str) -> Any:
+    result = runner.invoke(app, ["--json", *argv])
+    assert result.exit_code == 0, result.output
+    return json.loads(result.stdout)
+
+
+# --- the environment table -------------------------------------------------------------------
+
+
+def test_the_session_host_names_the_deployment() -> None:
+    assert dest.environment_name("https://api.aisquare.studio") == "prod"
+    assert dest.environment_name("https://stg-api.aisquare.studio/") == "stg"
+    assert dest.environment_name("https://studio-api-dev.aisquare.com") == "dev"
+    assert dest.environment_name("http://localhost") == "local"
+    assert dest.environment_for("https://api.example.org") is None, "unknown host: nothing"
+    assert dest.environment_name("https://api.example.org:8443") == "api.example.org"
+
+
+def _destination(api_url: str, project_id: str = "p") -> TraceDestination:
+    """A destination as ``choose`` records it from a session on ``api_url``."""
+    return TraceDestination(
+        project_id=project_id,
+        api_url=api_url,
+        environment=dest.environment_name(api_url),
+        workspace_id=42,
+        workspace_name="acme",
+        set_at=datetime(2026, 9, 13, tzinfo=UTC),
+    )
+
+
+def test_each_hosted_deployment_in_the_table_has_the_proxy_beside_its_own_gateway() -> None:
+    """A proxy ships to the one gateway it was started with. ``stg`` had the dev box's
+    proxy, the dotted host that is dev's gateway, so a project ``use``d on staging sent its
+    model traffic and the staging key to dev's gateway, and its proxy lane stayed amber
+    (not on the gateway's host) with a fix naming the proxy beside the gateway, which the
+    table contradicted (final review of #203, EX4). Each hosted deployment's proxy is the
+    one beside its gateway, and no two deployments share one."""
+    for environment in dest.ENVIRONMENTS:
+        if service.is_loopback(environment.gateway_url):
+            continue  # the local stack's proxy is the shipped 9090 sidecar, not 9443
+        assert environment.proxy_url == service.hosted_proxy_for(environment.gateway_url), (
+            environment.name
+        )
+    proxies = [environment.proxy_url for environment in dest.ENVIRONMENTS]
+    assert len(set(proxies)) == len(proxies), proxies
+
+
+def test_the_destinations_deployment_fills_only_what_is_empty_and_is_never_written(
+    isolated_home: Path,
+) -> None:
+    config = AppConfig()
+    stg = dest.deployment_target(
+        config.explainability, _destination("https://stg-api.aisquare.studio")
+    )
+    assert stg.gateway_url == "https://stg-explainability-api.aisquare.studio"
+    assert stg.proxy_url == "https://stg-explainability-api.aisquare.studio:9443"
+    assert config.explainability.targets == {}, "read off the destination, never written"
+    # A hand-set gateway stays, and the entry itself is not filled in. The table's proxy
+    # is its own gateway's, so none is filled in beside another (review of #203, round 3).
+    config.explainability.targets["prod"] = ExplainabilityTarget(gateway_url="https://mine.example")
+    prod = dest.deployment_target(
+        config.explainability, _destination("https://api.aisquare.studio")
+    )
+    assert prod.gateway_url == "https://mine.example"
+    assert prod.proxy_url is None
+    config.explainability.targets["prod"] = ExplainabilityTarget(proxy_url="https://mine.example")
+    prod = dest.deployment_target(
+        config.explainability, _destination("https://api.aisquare.studio")
+    )
+    assert prod.gateway_url == "https://explainability-api.aisquare.studio"
+    assert prod.proxy_url == "https://mine.example"
+    assert config.explainability.targets["prod"].gateway_url == ""
+    # An unknown host: nothing to fill in.
+    unknown = dest.deployment_target(config.explainability, _destination("https://api.example.org"))
+    assert (unknown.gateway_url, unknown.proxy_url) == ("", None)
+
+
+# --- listing through the session ---------------------------------------------------------------
+
+
+def test_workspaces_and_studios_are_listed_through_the_session(
+    runner: CliRunner, idp: IdentityProviderStub, signed_in: iam.Session
+) -> None:
+    idp.page_size = 2  # three workspaces: two pages, followed by number
+    rows = _json(runner, "explainability", "workspaces")
+    assert [r["name"] for r in rows] == ["acme", "Personal", "guests"], "members, then invites"
+    assert rows[2]["member"] is False and rows[2]["invite_status"] == "pending"
+    pages = [r for r in idp.requests if r["path"] == "/api/v2/workspaces/"]
+    assert [r["query"]["page"] for r in pages] == ["1", "2"]
+    assert all(r["headers"]["authorization"].startswith("Bearer aisq_") for r in pages)
+
+    payload = _json(runner, "explainability", "studios", "--workspace", "acme")
+    assert payload["workspace"] == {"id": 42, "uid": "ws-uid-42", "name": "acme"}
+    assert [s["name"] for s in payload["studios"]] == ["API", "Frontend", "Unassigned"]
+    assert payload["studios"][0]["default"] and payload["studios"][2]["inbox"]
+    listing = [r for r in idp.requests if r["path"] == "/api/v2/publications/"]
+    assert listing and all(r["headers"]["x-workspace-id"] == "ws-uid-42" for r in listing), (
+        "the workspace goes out as the header, by uid"
+    )
+    assert all(r["query"]["scope"] == "workspace" for r in listing)
+
+    human = runner.invoke(app, ["explainability", "workspaces"])
+    assert "acme" in human.output and "invited (pending)" in human.output
+    not_there = runner.invoke(app, ["explainability", "studios", "--workspace", "nope"])
+    assert not_there.exit_code == 1 and "no workspace matches 'nope'" in not_there.output
+
+
+def test_listing_needs_a_session(runner: CliRunner, isolated_home: Path) -> None:
+    result = runner.invoke(app, ["--json", "explainability", "workspaces"])
+    assert result.exit_code == 1 and "not_authenticated" in result.output
+
+
+def test_picking_by_name_uid_or_id_and_the_ambiguous_and_missing_cases() -> None:
+    workspaces = [
+        dest.Workspace(id=1, uid="u1", name="Acme", role="OWNER"),
+        dest.Workspace(id=2, uid="u2", name="acme", role="OWNER"),
+        dest.Workspace(id=3, uid="u3", name="Other", role="OWNER"),
+    ]
+    assert dest.pick_workspace("u2", workspaces).id == 2
+    assert dest.pick_workspace("3", workspaces).name == "Other"
+    assert dest.pick_workspace("other", workspaces).id == 3, "names match case-insensitively"
+    with pytest.raises(dest.DestinationError) as ambiguous:
+        dest.pick_workspace("ACME", workspaces)
+    assert ambiguous.value.code == "ambiguous"
+    with pytest.raises(dest.DestinationError) as missing:
+        dest.pick_workspace("nope", workspaces)
+    assert missing.value.code == "not_found" and "Acme, acme, Other" in missing.value.message
+    workspace = workspaces[2]
+    studios = [
+        dest.Studio(id=10, uid="s10", name="Inbox", is_inbox=True),
+        dest.Studio(id=11, uid="s11", name="Web", is_default=True),
+        dest.Studio(id=12, uid="s12", name="Docs"),
+    ]
+    assert dest.pick_studio(None, studios, workspace).id == 11, "no ref: the default studio"
+    assert dest.pick_studio("docs", studios, workspace).id == 12
+    with pytest.raises(dest.DestinationError) as needed:
+        dest.pick_studio(None, [studios[0], studios[2]], workspace)
+    assert needed.value.code == "studio_required" and "Docs" in needed.value.message
+
+
+def test_a_destination_is_picked_among_your_workspaces_before_the_invitations() -> None:
+    """A pending invitation named like a workspace you belong to made that name
+    ``ambiguous`` for ``use``, which could then not choose it by name (review of #172)."""
+    workspaces = [
+        dest.Workspace(id=1, uid="u1", name="acme", role="ADMIN"),
+        dest.Workspace(id=9, uid="u9", name="Acme", invite_status="pending"),
+        dest.Workspace(id=5, uid="u5", name="guests", invite_status="pending"),
+    ]
+    assert dest.pick_workspace("ACME", workspaces, members_only=True).id == 1
+    for invited in ("guests", "u9"):
+        with pytest.raises(dest.DestinationError) as refused:
+            dest.pick_workspace(invited, workspaces, members_only=True)
+        assert refused.value.code == "not_a_member", invited
+    with pytest.raises(dest.DestinationError) as missing:
+        dest.pick_workspace("nope", workspaces, members_only=True)
+    assert missing.value.code == "not_found" and "acme, Acme, guests" in missing.value.message
+    with pytest.raises(dest.DestinationError) as listed:  # the listing's own view: both
+        dest.pick_workspace("acme", workspaces)
+    assert listed.value.code == "ambiguous"
+
+
+# --- use: record, target, key, routing -------------------------------------------------------
+
+
+def test_use_records_the_choice_targets_the_deployment_mints_a_key_and_binds_the_roster(
+    runner: CliRunner, idp: IdentityProviderStub, signed_in: iam.Session, tmp_path: Path
+) -> None:
+    project = _project(tmp_path / "web")
+    payload = _json(runner, "explainability", "use", "acme/Frontend")
+
+    # Recorded per project, from the session.
+    assert payload["destination"]["workspace"]["name"] == "acme"
+    assert payload["destination"]["studio"] == {"id": 301, "uid": "st-301", "name": "Frontend"}
+    assert payload["destination"]["environment"] == "local", "the stub is a loopback host"
+    assert payload["destination"]["set_by"] == "anmol@example.com"
+    with store_session() as store:
+        row = store.project_destination(project.id)
+    assert row is not None and row.api_url == idp.url and row.key_uid == "key-1"
+
+    # The deployment is the project's target, gateway and proxy filled, tracing
+    # untouched — and the machine's config is not written (review of #203).
+    settings = load_config().explainability
+    assert settings.targets == {} and settings.enabled is False
+    assert payload["target"] == {
+        "name": "local",
+        "gateway": "http://localhost:8000",
+        "proxy": "http://127.0.0.1:9090",
+        "enabled": False,
+    }
+
+    # The key: minted with the ingest scope only, stored the #141 way, never in the output.
+    minted = idp.minted[0]
+    assert minted["scopes"] == ["ingest:write"] and minted["workspace_id"] == 42
+    assert minted["name"].startswith("aisquare-cli ") and minted["name"].endswith(" web")
+    key_file = service.project_key_path(project.id)
+    assert key_file.read_text() == minted["api_key"]
+    if sys.platform != "win32":  # NTFS keeps one bit of the mode: 0o666 or 0o444
+        assert stat.S_IMODE(key_file.stat().st_mode) == 0o600
+    assert minted["api_key"] not in json.dumps(payload)
+    assert payload["key"] == {
+        "source": "project",
+        "minted": True,
+        "note": f"minted on your behalf → {key_file} (mode 600)",
+    }
+    with store_session() as store:
+        binding = store.project_explainability(project.id)
+    assert binding is not None and binding.target == "local" and binding.key_path == key_file
+
+    # The roster is bound to the studio, with the key, name by name.
+    target = ops.resolve_target(settings, None, project_id=project.id)
+    assert target.name == "local" and target.key_source == "project"
+    assert target.destination is not None and target.destination.studio_id == 301
+    assert [b["agent"] for b in payload["routing"]] == list(target.agent_names)
+    assert all(b["bound"] and b["studio_id"] == 301 for b in payload["routing"])
+    assert idp.bindings["42"] == dict.fromkeys(target.agent_names, 301)
+    puts = [r for r in idp.requests if r["method"] == "PUT"]
+    assert puts and all(r["headers"]["x-api-key"] == minted["api_key"] for r in puts)
+    assert all("authorization" not in r["headers"] for r in puts), "the key, never the session"
+
+    # The other surfaces say so.
+    status = _json(runner, "explainability", "status")
+    assert status["destination"]["studio"]["name"] == "Frontend" and status["target"] == "local"
+    human = runner.invoke(app, ["explainability", "status"])
+    assert (
+        "destination: acme / Frontend · local · chosen by anmol@example.com — key minted"
+        in human.output
+    )
+    who = runner.invoke(app, ["whoami"])
+    assert "traces: acme / Frontend · local" in who.output
+    assert _json(runner, "whoami")["destination"]["workspace"]["id"] == 42
+
+    # Idempotent: the same choice again changes nothing and mints nothing more.
+    again = _json(runner, "explainability", "use", "acme/Frontend")
+    assert again["key"]["minted"] is False and len(idp.minted) == 1
+
+    # logout forgets the minted key — file, binding, uid — and revokes it first.
+    out = _json(runner, "logout")
+    assert out["minted_keys_cleared"] == 1 and out["signed_out"] is True
+    assert idp.revoked_keys == ["key-1"]
+    assert not key_file.exists()
+    with store_session() as store:
+        assert store.project_explainability(project.id) is None
+        kept = store.project_destination(project.id)
+    assert kept is not None and kept.key_uid is None, "the destination itself survives a logout"
+    revoke_index = idp.paths().index("/api/v2/iam/workspace-api-key/key-1/revoke/")
+    assert revoke_index < idp.paths().index("/o/revoke_token/"), "keys go before the session"
+
+
+def test_use_when_the_api_refuses_the_token_names_the_gap_and_still_records(
+    runner: CliRunner, idp: IdentityProviderStub, signed_in: iam.Session, tmp_path: Path
+) -> None:
+    idp.key_mint = "token_not_valid"  # what the real API says today
+    project = _project(tmp_path / "web")
+    result = runner.invoke(app, ["explainability", "use", "acme"])  # the default studio: API
+    assert result.exit_code == 0, result.output
+    assert "✓ traces from web land in acme / API (local)" in result.output
+    assert "AISquare-Studio-BE#3493" in result.output and "key set --from-env" in result.output
+    assert "routing:  not applied — no key" in result.output
+    assert not service.project_key_path(project.id).exists()
+    with store_session() as store:
+        row = store.project_destination(project.id)
+    assert row is not None and row.studio_id == 303 and row.key_uid is None
+    assert not idp.bindings, "nothing bound without a key"
+    status = runner.invoke(app, ["explainability", "status"])
+    expected = "destination: acme / API · local · chosen by anmol@example.com — no key yet"
+    assert expected in status.output
+
+
+def test_a_hand_attached_key_binds_the_roster_and_outlives_logout(
+    runner: CliRunner,
+    idp: IdentityProviderStub,
+    signed_in: iam.Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    idp.key_mint = "token_not_valid"
+    idp.accepted_keys.append("AIS_handmade_key")
+    project = _project(tmp_path / "web")
+    # The #141 way, bound to the deployment the session belongs to.
+    config = load_config()
+    config.explainability.target = "local"
+    save_config(config)
+    monkeypatch.setenv("WEB_KEY", "AIS_handmade_key")
+    attached = runner.invoke(app, ["explainability", "key", "set", "--from-env", "WEB_KEY"])
+    assert attached.exit_code == 0, attached.output
+
+    payload = _json(runner, "explainability", "use", "acme/Frontend")
+    assert payload["key"] == {"source": "project", "minted": False, "note": "the project's own key"}
+    assert idp.minted == [], "a key at hand is used; none is minted"
+    assert all(b["bound"] for b in payload["routing"]) and idp.bindings["42"]
+    human = runner.invoke(app, ["explainability", "status"])
+    assert "— key attached by hand" in human.output
+
+    out = _json(runner, "logout")
+    assert out["minted_keys_cleared"] == 0
+    assert service.project_key_path(project.id).read_text() == "AIS_handmade_key"
+
+
+def test_a_routing_refusal_is_reported_per_identity_not_raised(
+    runner: CliRunner, idp: IdentityProviderStub, signed_in: iam.Session, tmp_path: Path
+) -> None:
+    idp.routing = "forbidden"
+    _project(tmp_path / "web")
+    payload = _json(runner, "explainability", "use", "acme/Frontend")
+    assert payload["routing"] and all(b["bound"] is False for b in payload["routing"])
+    assert all("OWNER/ADMIN" in b["detail"] for b in payload["routing"])
+    assert payload["destination"]["studio"]["name"] == "Frontend", "recorded all the same"
+
+
+def test_repointing_and_clearing(
+    runner: CliRunner, idp: IdentityProviderStub, signed_in: iam.Session, tmp_path: Path
+) -> None:
+    project = _project(tmp_path / "web")
+    _json(runner, "explainability", "use", "acme/Frontend")
+    key_file = service.project_key_path(project.id)
+    assert key_file.exists() and len(idp.minted) == 1
+    # Another studio in the same workspace keeps the minted key.
+    again = _json(runner, "explainability", "use", "acme/API")
+    assert again["key"]["minted"] is False and key_file.exists()
+    with store_session() as store:
+        row = store.project_destination(project.id)
+    assert row is not None and row.studio_name == "API" and row.key_uid == "key-1"
+    # A workspace with no studios cannot be chosen; the old choice stands.
+    refused = runner.invoke(app, ["explainability", "use", "Personal"])
+    assert refused.exit_code == 1 and "name the studio: Personal has no single default" in (
+        refused.output
+    )
+    with store_session() as store:
+        assert store.project_destination(project.id) == row
+    # A pending invitation is listed but is not somewhere traces can go.
+    invited = runner.invoke(app, ["--json", "explainability", "use", "guests/anything"])
+    assert invited.exit_code == 1 and "not_a_member" in invited.output
+    # Another workspace: the old workspace's minted key is revoked, not just dropped.
+    idp.studios["7"] = [{"id": 701, "uid": "st-701", "name": "Notes", "workspace_id": 7}]
+    moved = _json(runner, "explainability", "use", "Personal/Notes")
+    assert moved["key"]["minted"] is True and idp.revoked_keys == ["key-1"]
+    with store_session() as store:
+        row = store.project_destination(project.id)
+    assert row is not None and row.workspace_name == "Personal" and row.key_uid == "key-2"
+    # Clearing drops the row and the minted key, and revokes it.
+    cleared = _json(runner, "explainability", "use", "--clear")
+    assert cleared["cleared"]["studio"]["name"] == "Notes"
+    assert idp.revoked_keys == ["key-1", "key-2"]
+    assert not key_file.exists()
+    with store_session() as store:
+        assert store.project_destination(project.id) is None
+        assert store.project_explainability(project.id) is None
+    assert runner.invoke(app, ["explainability", "use", "--clear"]).output.strip() == (
+        "web had no destination"
+    )
+    assert "destination: (none chosen" in runner.invoke(app, ["explainability", "status"]).output
+
+
+def test_use_needs_a_destination_argument(
+    runner: CliRunner, isolated_home: Path, tmp_path: Path
+) -> None:
+    _project(tmp_path / "web")
+    result = runner.invoke(app, ["explainability", "use"])
+    assert result.exit_code == 1 and "name a destination" in result.output
+
+
+# --- the resolver ----------------------------------------------------------------------------
+
+
+def test_the_destination_names_the_target_between_the_explicit_forms_and_the_default(
+    isolated_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = _project(tmp_path / "web")
+    config = AppConfig()
+    config.explainability.target = "prod"
+    config.explainability.targets = {
+        "prod": ExplainabilityTarget(gateway_url="https://prod.example"),
+        "stg": ExplainabilityTarget(gateway_url="https://stg.example"),
+    }
+    save_config(config)
+    session = iam.Session(api_url="https://stg-api.aisquare.studio", token="aisq_x", source="env")
+    workspace = dest.Workspace(id=42, uid="ws-uid-42", name="acme", role="ADMIN")
+    studio = dest.Studio(id=301, uid="st-301", name="Frontend")
+    with store_session() as store:
+        dest.choose(store, project, workspace, studio, session)
+
+    settings = config.explainability
+    machine = ops.resolve_target(settings, None)
+    assert machine.name == "prod" and machine.destination is None, "no project: the machine default"
+    projected = ops.resolve_target(settings, None, project_id=project.id)
+    assert projected.name == "stg" and projected.gateway_url == "https://stg.example"
+    assert projected.destination is not None and projected.destination.workspace_name == "acme"
+    assert (machine.target_source, projected.target_source) == ("config", "destination")
+    explicit = ops.resolve_target(settings, "prod", project_id=project.id)
+    assert (explicit.name, explicit.target_source) == ("prod", "argument"), "--target still wins"
+    monkeypatch.setenv(ops.TARGET_ENV_VAR, "prod")
+    by_variable = ops.resolve_target(settings, None, project_id=project.id)
+    assert (by_variable.name, by_variable.target_source) == ("stg", "destination"), (
+        "the variable moves the machine's target, not a project's destination"
+    )
+    assert by_variable.unused_env_target == "prod", "and the resolution says it is not used"
+    assert ops.resolve_target(settings, None).name == "prod", "the machine still follows it"
+
+
+# --- one project's `use` is that project's alone (review of #203) ---------------------------
+
+
+@pytest.mark.parametrize("entry", [False, True], ids=["no-target-entry", "entry-without-gateway"])
+def test_use_for_one_project_leaves_what_every_other_project_resolves(
+    runner: CliRunner,
+    idp: IdentityProviderStub,
+    signed_in: iam.Session,
+    tmp_path: Path,
+    entry: bool,
+) -> None:
+    """The machine ``init --explainability`` writes: a top-level gateway, proxy and key
+    file, and a machine target named like the deployment the session belongs to. ``use``
+    for ONE project created that target (or filled its empty gateway) with the session's
+    deployment and a key variable nothing sets, and saved the config: every project
+    without a destination, the doctor and the shipper moved there with no key (review of
+    #203, measured with ``stg``; the stub is the ``local`` deployment)."""
+    config = load_config()
+    config.explainability.target = "local"
+    config.explainability.gateway_url = "https://explainability-api.aisquare.studio"
+    config.explainability.proxy_url = "https://explainability-api.aisquare.studio:9443"
+    if entry:
+        config.explainability.targets["local"] = ExplainabilityTarget(
+            agent_name_template="m-{role}"
+        )
+    save_config(config)
+    service.store_api_key("AIS_machine_key")
+    lib = _project(tmp_path / "lib")
+    _project(tmp_path / "web")  # the checkout `use` runs from
+
+    def everyone_else() -> list[object]:
+        settings = load_config().explainability
+        other = ops.resolve_target(settings, None, project_id=lib.id)
+        machine = ops.resolve_target(settings, None)
+        shipping = service.shipping_state()
+        rows = {check.name: check.detail for check in ops.checks()}
+        return [
+            (other.name, other.gateway_url, other.proxy_url, other.key_source, other.api_key),
+            (machine.name, machine.gateway_url, machine.proxy_url, machine.key_source),
+            (shipping.gateway_url, shipping.has_key),
+            rows["explainability config"],
+        ]
+
+    before = everyone_else()
+    assert before[0] == (
+        "local",
+        "https://explainability-api.aisquare.studio",
+        "https://explainability-api.aisquare.studio:9443",
+        "file",
+        "AIS_machine_key",
+    )
+    payload = _json(runner, "explainability", "use", "acme/Frontend")
+    assert payload["target"]["gateway"] == "http://localhost:8000", "the project's own deployment"
+    assert payload["key"]["source"] == "project"
+    assert everyone_else() == before, "one project's `use` re-pointed the machine"
+
+
+@pytest.mark.parametrize("api_url", ["https://api.acme-selfhosted.example", "http://[::1]:8000"])
+def test_an_unknown_hosts_key_never_goes_to_the_machines_gateway_or_proxy(
+    runner: CliRunner,
+    isolated_home: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    api_url: str,
+) -> None:
+    """A destination on an API host outside the table (self-hosted, or ``[::1]``, which is
+    loopback to the sign-in but not the ``local`` deployment's) got a target with no
+    gateway, and the resolver fell back to the machine's: the project's key went to the
+    prod gateway and proxy (review of #203). No gateway known is the answer, and said."""
+    config = AppConfig()
+    config.explainability.enabled = True
+    config.explainability.gateway_url = "https://explainability-api.aisquare.studio"
+    config.explainability.proxy_url = "https://explainability-api.aisquare.studio:9443"
+    save_config(config)
+    monkeypatch.setenv(service.GATEWAY_ENV_VAR, "https://from-the-shell.example")
+    monkeypatch.setattr(service, "probe_proxy", lambda _url: service.ProxyProbe(True, "healthy"))
+    project = _project(tmp_path / "web")
+    session = iam.Session(api_url=api_url, token="aisq_x", source="env")
+    with store_session() as store:
+        row = dest.choose(
+            store,
+            project,
+            dest.Workspace(id=42, uid="ws-uid-42", name="acme", role="ADMIN"),
+            dest.Studio(id=301, uid="st-301", name="Frontend"),
+            session,
+        )
+    # As `key set` binds it: to the destination's deployment. A binding to a name the
+    # machine has no target for, and no destination's API, answers for no destination.
+    ops.attach_project_key(project, "AIS_selfhosted_key", target=row.environment)
+
+    settings = load_config().explainability
+    for chosen in (None, row.environment):  # by the destination, and named by --target
+        resolved = ops.resolve_target(settings, chosen, project_id=project.id)
+        assert (resolved.name, resolved.key_source) == (row.environment, "project")
+        assert (resolved.gateway_url, resolved.gateway_source) == ("", "unset")
+        assert (resolved.proxy_url, resolved.proxy_source) == ("", "unset")
+    assert ops.effective_settings(settings, project_id=project.id).proxy_url == ""
+    assert ops.resolve_target(settings, None).gateway_url == "https://from-the-shell.example", (
+        "the machine's own reads keep the shell's gateway"
+    )
+
+    launched = runner.invoke(app, ["explainability", "env", "coder"])
+    assert launched.exit_code != 0 and "no proxy is known" in launched.output
+    assert "AIS_selfhosted_key" not in launched.output
+    status = runner.invoke(app, ["explainability", "status"])
+    where = f'[explainability.targets."{row.environment}"]'
+    assert "gateway:  (unset) [unset]" in status.output and where in status.output
+    doctor = {check.name: check for check in ops.checks(project_id=project.id)}
+    assert where in (doctor["explainability config"].fix or "")
+
+
+def test_a_projects_key_bound_off_the_machines_target_never_takes_the_machines_gateway(
+    isolated_home: Path, tmp_path: Path
+) -> None:
+    """The project-key half of the rule: a key attached for a target that names no
+    gateway of its own answered with the top-level gateway and proxy, the machine's
+    deployment and not the one the key was issued for (review of #203). The machine's
+    own target keeps the top level: on the machine ``init --explainability`` writes, that
+    IS its deployment, and a key bound to it is bound there."""
+    config = AppConfig()
+    config.explainability.gateway_url = "https://explainability-api.aisquare.studio"
+    config.explainability.targets["acme"] = ExplainabilityTarget(api_key_env="ACME_KEY")
+    save_config(config)
+    project = _project(tmp_path / "web")
+    service.store_api_key("AIS_machine_key")
+    for target in ("acme", "stg"):
+        ops.attach_project_key(project, f"AIS_{target}_key", target=target)
+        settings = load_config().explainability
+        resolved = ops.resolve_target(settings, target, project_id=project.id)
+        assert resolved.key_source == "project"
+        if target == "stg":  # the machine's own target
+            assert resolved.gateway_url == "https://explainability-api.aisquare.studio"
+            continue
+        assert (resolved.gateway_url, resolved.proxy_url) == ("", ""), "another deployment's"
+        machine_read = ops.resolve_target(settings, target)
+        assert machine_read.gateway_url == "https://explainability-api.aisquare.studio", (
+            "a machine key's read of the same target is as it was"
+        )
+
+
+def test_a_key_attached_for_the_destinations_deployment_never_answers_as_the_machines(
+    runner: CliRunner, isolated_home: Path, tmp_path: Path
+) -> None:
+    """The destination's ``stg`` is staging; on the machine ``init --explainability``
+    writes, the machine's ``stg`` is the top-level prod gateway. A key bound by name alone
+    answered for both: a staging key attached while the project pointed at staging (``key
+    set`` after a refused mint), then ``use --clear``, went to the prod gateway and proxy
+    as the machine's ``stg``, and so did the same key under ``--target stg`` once the
+    project pointed at prod (review of #203). It is kept, answers again once a destination
+    names its deployment, and says why it is not used meanwhile."""
+    config = AppConfig()
+    config.explainability.enabled = True
+    config.explainability.gateway_url = "https://explainability-api.aisquare.studio"
+    config.explainability.proxy_url = "https://explainability-api.aisquare.studio:9443"
+    save_config(config)
+    service.store_api_key("AIS_machine_prod_key")
+    project = _project(tmp_path / "web")
+    workspace = dest.Workspace(id=42, uid="ws-uid-42", name="acme", role="ADMIN")
+    studio = dest.Studio(id=301, uid="st-301", name="Frontend")
+    staging = iam.Session(api_url="https://stg-api.aisquare.studio", token="aisq_x", source="env")
+    production = iam.Session(api_url="https://api.aisquare.studio", token="aisq_x", source="env")
+    settings = load_config().explainability
+    stg_gateway = "https://stg-explainability-api.aisquare.studio"
+
+    def read(name: str | None = None) -> tuple[str, str, str, str | None]:
+        resolved = ops.resolve_target(settings, name, project_id=project.id)
+        return (resolved.gateway_url, resolved.proxy_url, resolved.key_source, resolved.api_key)
+
+    with store_session() as store:
+        dest.choose(store, project, workspace, studio, staging)
+    ops.attach_project_key(project, "AIS_staging_hand_key", target="stg")
+    assert read()[::2] == (stg_gateway, "project")
+
+    with store_session() as store:
+        dest.forget(store, project)
+    prod = (
+        "https://explainability-api.aisquare.studio",
+        "https://explainability-api.aisquare.studio:9443",
+    )
+    assert read() == (*prod, "file", "AIS_machine_prod_key"), "the staging key went to prod"
+    shown = runner.invoke(app, ["explainability", "key", "show"])
+    assert shown.exit_code == 0, shown.output
+    said = " ".join(shown.output.split())
+    assert "attached for the deployment of https://stg-api.aisquare.studio" in said
+    assert "not used for this machine's target stg" in said
+
+    with store_session() as store:  # pointed at prod: `--target stg` is the machine's stg
+        dest.choose(store, project, workspace, studio, production)
+    assert read("stg") == (*prod, "file", "AIS_machine_prod_key")
+
+    with store_session() as store:  # back on staging: the key it was attached for answers
+        dest.choose(store, project, workspace, studio, staging)
+    assert read() == (
+        stg_gateway,
+        f"{stg_gateway}:9443",
+        "project",
+        "AIS_staging_hand_key",
+    )
+
+
+def test_a_key_bound_to_the_machines_target_never_answers_for_a_destination_elsewhere(
+    runner: CliRunner, isolated_home: Path, tmp_path: Path
+) -> None:
+    """The other way round. On the machine ``init --explainability`` writes, a key attached
+    with ``key set`` before any ``use`` is bound to the machine's ``stg``, which is the
+    top-level prod gateway. ``use`` on a staging workspace took it as the project's own
+    key for the destination's ``stg``, bound the staging roster with it, and launches sent
+    it to the staging gateway and proxy (review of #203, round 2). It is kept and not used
+    there, ``key show`` (words, ``--json``) and the Explainability page say so in one
+    sentence, and it answers again as the machine's ``stg``. On a machine whose own ``stg``
+    is staging, it answers for the destination as before."""
+    from aisquare.cli.ui.views import explainability as view
+
+    config = AppConfig()
+    config.explainability.enabled = True
+    config.explainability.gateway_url = "https://explainability-api.aisquare.studio"
+    config.explainability.proxy_url = "https://explainability-api.aisquare.studio:9443"
+    save_config(config)
+    service.store_api_key("AIS_machine_prod_key")
+    project = _project(tmp_path / "web")
+    workspace = dest.Workspace(id=42, uid="ws-uid-42", name="acme", role="ADMIN")
+    studio = dest.Studio(id=301, uid="st-301", name="Frontend")
+    staging = iam.Session(api_url="https://stg-api.aisquare.studio", token="aisq_x", source="env")
+    stg_gateway = "https://stg-explainability-api.aisquare.studio"
+    prod = (
+        "https://explainability-api.aisquare.studio",
+        "https://explainability-api.aisquare.studio:9443",
+    )
+
+    def resolved() -> ops.ResolvedTarget:
+        return ops.resolve_target(load_config().explainability, None, project_id=project.id)
+
+    def read() -> tuple[str, str, str, str | None]:
+        target = resolved()
+        return (target.gateway_url, target.proxy_url, target.key_source, target.api_key)
+
+    ops.attach_project_key(project, "AIS_hand_key", target="stg")
+    assert read() == (*prod, "project", "AIS_hand_key")
+
+    with store_session() as store:
+        dest.choose(store, project, workspace, studio, staging)
+    staging_proxy = f"{stg_gateway}:9443"
+    assert read() == (stg_gateway, staging_proxy, "unset", None), "the prod key went to staging"
+    kept = (
+        "attached for this machine's own target stg, another deployment than the one this "
+        f"project's destination names ({stg_gateway}): not used for it"
+    )
+    shown = runner.invoke(app, ["explainability", "key", "show"])
+    assert shown.exit_code == 0, shown.output
+    assert kept in " ".join(shown.output.split())
+    row = view._key_origin_row(project, resolved(), load_config().explainability)
+    assert kept in " ".join(row.split())
+    payload = _json(runner, "explainability", "key", "show")
+    assert (payload["target"], payload["api_url"], payload["serves"]) == ("stg", None, False)
+
+    with store_session() as store:
+        dest.forget(store, project)
+    assert read() == (*prod, "project", "AIS_hand_key")
+
+    own = load_config()  # the machine's own stg is staging: the key is that deployment's
+    own.explainability.targets["stg"] = ExplainabilityTarget(gateway_url=stg_gateway)
+    save_config(own)
+    with store_session() as store:
+        dest.choose(store, project, workspace, studio, staging)
+    assert read() == (stg_gateway, staging_proxy, "project", "AIS_hand_key")
+    payload = _json(runner, "explainability", "key", "show")
+    assert (payload["api_url"], payload["serves"], payload["key_source"]) == (
+        None,
+        True,
+        "project",
+    )
+
+
+def test_the_machines_own_target_on_another_gateway_is_never_a_destinations_deployment(
+    runner: CliRunner, isolated_home: Path, tmp_path: Path
+) -> None:
+    """``explainability enable --gateway-url <prod>`` with no ``--target`` writes the prod
+    gateway into the machine's own target's entry: ``targets.stg`` on the machine ``init
+    --explainability`` writes. A destination on staging read that entry as its deployment.
+    It kept the entry's gateway and took the table's proxy, so its launches went to the
+    prod gateway through the staging proxy, with the machine's prod key file or a prod key
+    ``key set`` had bound to the machine's ``stg`` (review of #203, round 3). The entry is
+    the machine's while its target is on another gateway: the destination resolves the
+    gateway and proxy the table gives staging, neither prod key answers there, and a
+    project without a destination resolves what it did."""
+    prod = (
+        "https://explainability-api.aisquare.studio",
+        "https://explainability-api.aisquare.studio:9443",
+    )
+    staging = (
+        "https://stg-explainability-api.aisquare.studio",
+        "https://stg-explainability-api.aisquare.studio:9443",
+    )
+    config = AppConfig()
+    config.explainability.enabled = True
+    config.explainability.gateway_url, config.explainability.proxy_url = prod
+    save_config(config)
+    service.store_api_key("AIS_machine_prod_key")
+    enabled = runner.invoke(app, ["explainability", "enable", "--gateway-url", prod[0]])
+    assert enabled.exit_code == 0, enabled.output
+    assert load_config().explainability.targets["stg"].gateway_url == prod[0]
+    keyed, keyless, other = (_project(tmp_path / name) for name in ("web", "api", "lib"))
+    ops.attach_project_key(keyed, "AIS_hand_prod_key", target="stg")
+
+    def read(project: ProjectInfo) -> tuple[str, str, str, str | None]:
+        resolved = ops.resolve_target(load_config().explainability, None, project_id=project.id)
+        return (resolved.gateway_url, resolved.proxy_url, resolved.key_source, resolved.api_key)
+
+    before = read(other)
+    assert before == (*prod, "file", "AIS_machine_prod_key")
+    session = iam.Session(api_url="https://stg-api.aisquare.studio", token="aisq_x", source="env")
+    for project in (keyed, keyless):
+        with store_session() as store:
+            dest.choose(
+                store,
+                project,
+                dest.Workspace(id=42, uid="ws-uid-42", name="acme", role="ADMIN"),
+                dest.Studio(id=301, uid="st-301", name="Frontend"),
+                session,
+            )
+        assert read(project) == (*staging, "unset", None), "a prod key went to staging"
+    assert read(other) == before
+    settings = load_config().explainability
+    binding = ops.project_key_binding(keyed.id)
+    assert binding is not None
+    resolved = ops.resolve_target(settings, None, project_id=keyed.id)
+    assert not ops.binding_serves(binding, "stg", resolved.destination, settings)
+    assert "attached for this machine's own target stg" in ops.kept_key_note(
+        binding, resolved, settings
+    )
+
+
+def test_the_tables_proxy_goes_with_the_tables_gateway_only(isolated_home: Path) -> None:
+    """An entry's gateway set by hand stays, and the table filled the proxy beside it:
+    ``targets.stg`` on the prod gateway sent a staging destination's traces to prod
+    through the staging proxy (review of #203, round 3). Another deployment's gateway
+    gets no proxy from the table; the table's own gateway, written out, still does."""
+    config = AppConfig()
+    config.explainability.target = "prod"
+    config.explainability.targets["stg"] = ExplainabilityTarget(
+        gateway_url="https://explainability-api.aisquare.studio"
+    )
+    on_staging = _destination("https://stg-api.aisquare.studio")
+    mixed = dest.deployment_target(config.explainability, on_staging)
+    assert (mixed.gateway_url, mixed.proxy_url) == (
+        "https://explainability-api.aisquare.studio",
+        None,
+    )
+    written_out = "https://stg-explainability-api.aisquare.studio/"
+    config.explainability.targets["stg"] = ExplainabilityTarget(gateway_url=written_out)
+    written = dest.deployment_target(config.explainability, on_staging)
+    assert written.proxy_url == "https://stg-explainability-api.aisquare.studio:9443"
+
+
+def test_a_key_set_for_another_machine_target_with_no_gateway_answers_for_its_destination(
+    isolated_home: Path, tmp_path: Path
+) -> None:
+    """``key set --target local`` for an entry with no gateway (the Setup form writes one
+    without making it active) binds a key to a deployment known by name only. The check
+    that a key bound to one of the machine's targets is the destination's deployment read
+    ``local`` as a machine read does, falling back to the top-level prod gateway. So it
+    dropped the key once ``use`` pointed the project at the ``local`` deployment, and
+    called ``local`` the machine's own target, which is ``stg`` (review of #203, round 3).
+    A project key bound off the machine's target never falls back that way, and the
+    destination reads the same entry: the key answers there."""
+    config = AppConfig()
+    config.explainability.enabled = True
+    config.explainability.gateway_url = "https://explainability-api.aisquare.studio"
+    config.explainability.proxy_url = "https://explainability-api.aisquare.studio:9443"
+    config.explainability.targets["local"] = ExplainabilityTarget(proxy_url="http://127.0.0.1:9090")
+    save_config(config)
+    service.store_api_key("AIS_machine_prod_key")
+    project = _project(tmp_path / "web")
+    ops.attach_project_key(project, "AIS_local_key", target="local")
+    settings = load_config().explainability
+    before = ops.resolve_target(settings, "local", project_id=project.id)
+    assert (before.gateway_url, before.proxy_url, before.key_source) == (
+        "",
+        "http://127.0.0.1:9090",
+        "project",
+    )
+
+    with store_session() as store:
+        dest.choose(
+            store,
+            project,
+            dest.Workspace(id=42, uid="ws-uid-42", name="acme", role="ADMIN"),
+            dest.Studio(id=301, uid="st-301", name="Frontend"),
+            iam.Session(api_url="http://localhost:8000", token="aisq_x", source="env"),
+        )
+    after = ops.resolve_target(settings, None, project_id=project.id)
+    assert (after.name, after.gateway_url, after.key_source, after.api_key) == (
+        "local",
+        "http://localhost:8000",
+        "project",
+        "AIS_local_key",
+    )
+    binding = ops.project_key_binding(project.id)
+    assert binding is not None and ops.kept_key_note(binding, after, settings) == ""
+
+
+def test_a_deployment_the_variable_chose_is_not_one_its_fix_moves_the_variable_off(
+    isolated_home: Path, tmp_path: Path
+) -> None:
+    """``entry_shared`` "env" says an exported ``$AISQUARE_EXPLAINABILITY_TARGET`` names
+    the machine's target in this shell, so a fix for a project's deployment of that name
+    says to point the variable elsewhere. It was also set when the variable itself chose
+    this project's deployment (no destination, its key bound to the exported target), and
+    the fix, followed, moved the project off the entry it named (review of #203, round 3).
+    """
+    config = AppConfig()
+    config.explainability.target = "prod"
+    config.explainability.targets["selfhosted"] = ExplainabilityTarget(api_key_env="SELF_KEY")
+    save_config(config)
+    project = _project(tmp_path / "web")
+    ops.attach_project_key(project, "AIS_self_key", target="selfhosted")
+    resolved = ops.resolve_target(
+        load_config().explainability,
+        None,
+        project_id=project.id,
+        env={ops.TARGET_ENV_VAR: "selfhosted"},
+    )
+    assert (resolved.target_source, resolved.key_source, resolved.project_deployment) == (
+        "env",
+        "project",
+        True,
+    )
+    assert resolved.entry_shared is None
+    fix = " ".join(ops.deployment_fix(resolved).split())
+    assert '[explainability.targets."selfhosted"]' in fix
+    assert "names another target" not in fix
+
+
+def test_a_key_bound_to_the_machines_target_answers_for_its_gateway_however_spelled(
+    isolated_home: Path, tmp_path: Path
+) -> None:
+    """Whether the machine's target and the destination's deployment are one gateway was
+    decided by string: a top-level gateway typed with a capital or its default port kept
+    the key attached for the machine's ``stg`` unused on staging, a deployment it is for
+    (review of the #203 final-review fixes, F4). Compared on scheme, host and port, as
+    the proxy lane compares a reported gateway."""
+    config = AppConfig()
+    config.explainability.gateway_url = "https://STG-explainability-api.aisquare.studio:443/"
+    save_config(config)
+    project = _project(tmp_path / "web")
+    ops.attach_project_key(project, "AIS_staging_hand_key", target="stg")
+    with store_session() as store:
+        dest.choose(
+            store,
+            project,
+            dest.Workspace(id=42, uid="ws-uid-42", name="acme", role="ADMIN"),
+            dest.Studio(id=301, uid="st-301", name="Frontend"),
+            iam.Session(api_url="https://stg-api.aisquare.studio", token="aisq_x", source="env"),
+        )
+    resolved = ops.resolve_target(load_config().explainability, None, project_id=project.id)
+    assert (resolved.key_source, resolved.api_key) == ("project", "AIS_staging_hand_key")
+
+
+def test_no_remediation_for_a_projects_deployment_makes_it_the_machines_target(
+    isolated_home: Path, tmp_path: Path
+) -> None:
+    """``deployment_fix`` worded the rows with no gateway, and the other rows that can
+    name a project's own deployment still said ``enable --target <name>``: that makes the
+    target the whole machine's, which moves every project without a destination onto it
+    (review of #203). The most reachable is the doctor's key row for a project ``use``d
+    on staging whose mint was refused. Each names the project's key or its config entry;
+    the machine's own target still gets ``enable --target``. The key row's ``key set``
+    names ``--from-env``: from a terminal, one with nothing on stdin refuses (round 2)."""
+    config = AppConfig()
+    config.explainability.enabled = True
+    config.explainability.gateway_url = "https://explainability-api.aisquare.studio"
+    config.explainability.proxy_url = "https://explainability-api.aisquare.studio:9443"
+    save_config(config)
+    service.store_api_key("AIS_machine_prod_key")
+    project = _project(tmp_path / "web")
+    session = iam.Session(api_url="https://stg-api.aisquare.studio", token="aisq_x", source="env")
+    with store_session() as store:
+        dest.choose(
+            store,
+            project,
+            dest.Workspace(id=42, uid="ws-uid-42", name="acme", role="ADMIN"),
+            dest.Studio(id=301, uid="st-301", name="Frontend"),
+            session,
+        )
+
+    doctor = {check.name: check for check in ops.checks(project_id=project.id)}
+    key_row = " ".join((doctor["explainability config"].fix or "").split())
+    assert "$EXPLAINABILITY_STG_API_KEY" in key_row
+    assert f"aisquare explainability key set --project {project.id} --from-env <VAR>" in key_row
+    assert "enable --target" not in key_row
+
+    target = ops.resolve_target(load_config().explainability, None, project_id=project.id)
+    assert target.project_deployment
+    entry = '[explainability.targets."stg"]'
+    unusable = replace(target, gateway_url="stg.example")
+    remediations = {
+        "config: unusable gateway": ops._check_config(unusable, on=True).fix or "",
+        "proxy: no gateway": ops.proxy_state(
+            replace(target, gateway_url="", gateway_source="unset"),
+            on=True,
+            prober=lambda _url: service.ProxyProbe(True, "healthy"),
+        ).remediation,
+        "proxy: unusable gateway": ops.proxy_state(
+            unusable, on=True, prober=lambda _url: service.ProxyProbe(True, "healthy")
+        ).remediation,
+        "proxy: local sidecar": ops.proxy_state(
+            replace(target, proxy_url="http://127.0.0.1:9090"),
+            on=True,
+            prober=lambda _url: service.ProxyProbe(True, "healthy"),
+        ).remediation,
+        "proxy: another host": ops.proxy_state(
+            replace(target, proxy_url="https://proxy.elsewhere.example:9443"),
+            on=True,
+            prober=lambda _url: service.ProxyProbe(True, "healthy"),
+        ).remediation,
+    }
+    for row, fix in remediations.items():
+        assert entry in fix and "enable --target" not in fix, row
+    machine = replace(target, project_deployment=False, gateway_url="stg.example")
+    assert "enable --target stg --gateway-url https://<host>" in (
+        ops._check_config(machine, on=True).fix or ""
+    )
+
+
+def test_a_fix_for_a_projects_deployment_followed_moves_no_other_project(
+    isolated_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """On the machine ``init --explainability`` writes (prod, and ``target = "stg"`` by
+    default) the destination's ``stg`` entry is also the machine's target's. The proxy
+    row's fix for a project on staging named that entry as the deployment's alone, and
+    followed word for word it moved every project without a destination to the staging
+    proxy, with the prod gateway and key (review of #203, round 2). Followed as it is
+    written now, the other project resolves exactly what it did, and this one takes the
+    proxy it was told to set."""
+    # The table's staging proxy as it was before it became the one beside staging's
+    # gateway (final review of #203, EX4): on another host than the gateway, where a
+    # healthy proxy that does not report its gateway gets the row followed here. With
+    # the table's own proxy, the fix named the one the project already read, and the
+    # proxy it was told to set was never checked (review of the #203 final-review
+    # fixes, M1).
+    monkeypatch.setattr(
+        dest,
+        "ENVIRONMENTS",
+        tuple(
+            replace(e, proxy_url="https://stg-explainability.api.aisquare.studio:9443")
+            if e.name == "stg"
+            else e
+            for e in dest.ENVIRONMENTS
+        ),
+    )
+    config = AppConfig()
+    config.explainability.enabled = True
+    config.explainability.gateway_url = "https://explainability-api.aisquare.studio"
+    config.explainability.proxy_url = "https://explainability-api.aisquare.studio:9443"
+    save_config(config)
+    service.store_api_key("AIS_machine_prod_key")
+    web = _project(tmp_path / "web")
+    other = _project(tmp_path / "api")
+    with store_session() as store:
+        dest.choose(
+            store,
+            web,
+            dest.Workspace(id=42, uid="ws-uid-42", name="acme", role="ADMIN"),
+            dest.Studio(id=301, uid="st-301", name="Frontend"),
+            iam.Session(api_url="https://stg-api.aisquare.studio", token="aisq_x", source="env"),
+        )
+
+    def read(project: ProjectInfo) -> tuple[str, str, str]:
+        resolved = ops.resolve_target(load_config().explainability, None, project_id=project.id)
+        return (resolved.gateway_url, resolved.proxy_url, resolved.key_source)
+
+    before = read(other)
+    target = ops.resolve_target(load_config().explainability, None, project_id=web.id)
+    row = ops.proxy_state(target, on=True, prober=lambda _url: service.ProxyProbe(True, "ok"))
+    fix = " ".join(row.remediation.split())
+    setting = re.search(r'proxy_url = "([^"]+)" under (\[explainability\.targets\."stg"\])', fix)
+    assert setting is not None, fix
+    assert read(web)[1] != setting[1], "the fix names the proxy the project already reads"
+
+    if 'target = "<name>" under [explainability]' in fix:  # the rename, as the operator would
+        renamed = load_config()
+        renamed.explainability.target = "own"
+        save_config(renamed)
+    with paths.config_path().open("a", encoding="utf-8") as config_file:
+        config_file.write(f'\n{setting[2]}\nproxy_url = "{setting[1]}"\n')
+
+    assert read(other) == before, "the fix for one project's deployment moved another"
+    assert read(web)[1] == setting[1]
+    exported = ops.resolve_target(
+        load_config().explainability, None, project_id=web.id, env={ops.TARGET_ENV_VAR: "stg"}
+    )
+    assert "$AISQUARE_EXPLAINABILITY_TARGET names another target" in ops.deployment_fix(
+        exported, what="proxy", value="https://<host>"
+    )
+
+
+def test_a_fix_asks_for_no_rename_when_the_machines_target_is_the_same_deployment(
+    isolated_home: Path, tmp_path: Path
+) -> None:
+    """The rename is for a machine whose target of the deployment's name is another
+    deployment. It was asked whenever the names matched: on a staging machine (``target =
+    "stg"``, the top-level staging gateway) every proxy or gateway fix for a project on
+    staging said to rename the machine's target and ``key set`` again, which only unbound
+    the keys attached for ``stg`` (review of the #203 final-review fixes, F3). The entry is
+    both's there, and the fix names it alone; the prod machine still gets the rename."""
+    stg_gateway = "https://stg-explainability-api.aisquare.studio"
+    config = AppConfig()
+    config.explainability.enabled = True
+    config.explainability.gateway_url = stg_gateway
+    save_config(config)
+    project = _project(tmp_path / "web")
+    with store_session() as store:
+        dest.choose(
+            store,
+            project,
+            dest.Workspace(id=42, uid="ws-uid-42", name="acme", role="ADMIN"),
+            dest.Studio(id=301, uid="st-301", name="Frontend"),
+            iam.Session(api_url="https://stg-api.aisquare.studio", token="aisq_x", source="env"),
+        )
+
+    def fix() -> str:
+        target = ops.resolve_target(load_config().explainability, None, project_id=project.id)
+        assert (target.project_deployment, target.gateway_url) == (True, stg_gateway)
+        return " ".join(ops.deployment_fix(target, what="proxy", value="https://<host>").split())
+
+    entry = 'proxy_url = "https://<host>" under [explainability.targets."stg"]'
+    assert fix().startswith(entry) and "Rename it first" not in fix(), fix()
+    prod = load_config()
+    prod.explainability.gateway_url = "https://explainability-api.aisquare.studio"
+    save_config(prod)
+    assert fix().startswith(entry) and "Rename it first" in fix(), fix()
+
+
+def test_a_fix_asks_for_the_rename_when_only_this_shell_makes_the_machines_target_the_same(
+    isolated_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Whether the machine's target is the project's deployment is decided as every shell
+    reads the entry the fix writes. On the prod machine, a shell that exported staging's
+    gateway (``$EXPLAINABILITY_GATEWAY_URL``) read the machine's ``stg`` as staging, so the
+    proxy fix for a project on staging asked for no rename. Followed there, every project
+    without a destination, read from a shell that exports nothing, moved to that proxy
+    with the prod gateway and key: the move of round 2, back (review of the #203
+    final-review fixes, round 2, F1)."""
+    config = AppConfig()
+    config.explainability.enabled = True
+    config.explainability.gateway_url = "https://explainability-api.aisquare.studio"
+    config.explainability.proxy_url = "https://explainability-api.aisquare.studio:9443"
+    save_config(config)
+    service.store_api_key("AIS_machine_prod_key")
+    web = _project(tmp_path / "web")
+    other = _project(tmp_path / "api")
+    with store_session() as store:
+        dest.choose(
+            store,
+            web,
+            dest.Workspace(id=42, uid="ws-uid-42", name="acme", role="ADMIN"),
+            dest.Studio(id=301, uid="st-301", name="Frontend"),
+            iam.Session(api_url="https://stg-api.aisquare.studio", token="aisq_x", source="env"),
+        )
+
+    def read(project: ProjectInfo) -> tuple[str, str, str]:
+        resolved = ops.resolve_target(
+            load_config().explainability, None, project_id=project.id, env={}
+        )
+        return (resolved.gateway_url, resolved.proxy_url, resolved.key_source)
+
+    before = read(other)
+    monkeypatch.setenv(service.GATEWAY_ENV_VAR, "https://stg-explainability-api.aisquare.studio")
+    target = ops.resolve_target(load_config().explainability, None, project_id=web.id)
+    fix = " ".join(ops.deployment_fix(target, what="proxy", value="https://stg.example").split())
+    setting = re.search(r'proxy_url = "([^"]+)" under (\[explainability\.targets\."stg"\])', fix)
+    assert setting is not None, fix
+
+    if 'target = "<name>" under [explainability]' in fix:  # the rename, as the operator would
+        renamed = load_config()
+        renamed.explainability.target = "own"
+        save_config(renamed)
+    with paths.config_path().open("a", encoding="utf-8") as config_file:
+        config_file.write(f'\n{setting[2]}\nproxy_url = "{setting[1]}"\n')
+    assert read(other) == before, "the fix for one project's deployment moved another"
+
+
+def test_a_key_kept_for_the_machines_target_stays_kept_once_that_target_is_renamed(
+    runner: CliRunner, isolated_home: Path, tmp_path: Path
+) -> None:
+    """On the machine ``init --explainability`` writes (prod, ``target = "stg"``), a prod key
+    attached with ``key set`` before ``use`` is bound to the machine's ``stg``, and once the
+    project points at staging it is kept and not used there. The fixes for that project's
+    deployment say to rename the machine's target first. Renamed, ``stg`` was a name the
+    machine no longer had, which answered by name alone, and the prod key went to
+    staging's gateway and proxy before any ``key set`` again (review of the #203
+    final-review fixes, R1). It stays kept, ``key show`` says why, and ``key set`` for the
+    destination attaches the key that answers."""
+    config = AppConfig()
+    config.explainability.enabled = True
+    config.explainability.gateway_url = "https://explainability-api.aisquare.studio"
+    config.explainability.proxy_url = "https://explainability-api.aisquare.studio:9443"
+    save_config(config)
+    service.store_api_key("AIS_machine_prod_key")
+    project = _project(tmp_path / "web")
+    ops.attach_project_key(project, "AIS_hand_prod_key", target="stg")
+    with store_session() as store:
+        dest.choose(
+            store,
+            project,
+            dest.Workspace(id=42, uid="ws-uid-42", name="acme", role="ADMIN"),
+            dest.Studio(id=301, uid="st-301", name="Frontend"),
+            iam.Session(api_url="https://stg-api.aisquare.studio", token="aisq_x", source="env"),
+        )
+    stg_gateway = "https://stg-explainability-api.aisquare.studio"
+    stg_proxy = "https://stg-explainability-api.aisquare.studio:9443"
+
+    def resolved() -> ops.ResolvedTarget:
+        return ops.resolve_target(load_config().explainability, None, project_id=project.id)
+
+    def read() -> tuple[str, str, str, str | None]:
+        target = resolved()
+        return (target.gateway_url, target.proxy_url, target.key_source, target.api_key)
+
+    assert read() == (stg_gateway, stg_proxy, "unset", None)
+    fix = " ".join(ops.deployment_fix(resolved(), what="proxy", value="https://<host>").split())
+    assert 'Rename it first: target = "<name>" under [explainability]' in fix, fix
+    renamed = load_config()  # the rename, as the operator would
+    renamed.explainability.target = "own"
+    save_config(renamed)
+
+    assert read() == (stg_gateway, stg_proxy, "unset", None), "the prod key went to staging"
+    payload = _json(runner, "explainability", "key", "show", "--project", project.id)
+    assert (payload["target"], payload["serves"], payload["key_source"]) == (
+        "stg",
+        False,
+        "unset",
+    )
+    shown = runner.invoke(app, ["explainability", "key", "show", "--project", project.id])
+    assert shown.exit_code == 0, shown.output
+    assert (
+        "attached for target stg, which this machine no longer has, so not used for the "
+        f"deployment this project's destination names ({stg_gateway}) until `key set` "
+        "attaches it there"
+    ) in " ".join(shown.output.split())
+
+    ops.attach_project_key(project, "AIS_staging_key", target="stg")
+    assert read() == (stg_gateway, stg_proxy, "project", "AIS_staging_key")
+
+
+def test_use_on_a_host_it_does_not_know_says_where_its_gateway_goes(
+    runner: CliRunner,
+    idp: IdentityProviderStub,
+    signed_in: iam.Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``use`` printed "(no gateway known)" only while no top-level gateway existed, and
+    otherwise the machine's; with none known it now says where to set one — the config
+    entry, never ``enable --target``, which would make it the whole machine's target."""
+    monkeypatch.setattr(
+        dest, "ENVIRONMENTS", tuple(e for e in dest.ENVIRONMENTS if e.name != "local")
+    )
+    config = load_config()
+    config.explainability.gateway_url = "https://explainability-api.aisquare.studio"
+    save_config(config)
+    _project(tmp_path / "web")
+    result = runner.invoke(app, ["explainability", "use", "acme/Frontend"])
+    assert result.exit_code == 0, result.output
+    host = dest.environment_name(idp.url)
+    assert f"target:   {host} → (no gateway known)" in result.output
+    said = " ".join(result.output.split())
+    where = f'set gateway_url and proxy_url under [explainability.targets."{host}"]'
+    assert f"{host} is not a deployment this CLI knows — {where}" in said
+    assert "explainability-api.aisquare.studio" not in result.output
+    assert load_config().explainability.targets == {}
+
+
+def test_describe_has_one_voice() -> None:
+    assert dest.describe(None).startswith("(none chosen")
+    session = iam.Session(
+        api_url="https://api.aisquare.studio", token="t", source="env", email="a@b.c"
+    )
+    row = TraceDestination(
+        project_id="p",
+        api_url=session.api_url,
+        environment="prod",
+        workspace_id=1,
+        workspace_name="acme",
+        studio_id=2,
+        studio_name="Web",
+        set_at=__import__("datetime").datetime(2026, 9, 13, tzinfo=__import__("datetime").UTC),
+        set_by="a@b.c",
+    )
+    assert dest.describe(row, key_source="unset") == (
+        "acme / Web · prod · chosen by a@b.c — no key yet"
+    )
+    assert dest.describe(row, key_source="file").endswith("— using the machine key")
+    minted = row.model_copy(update={"key_uid": "k"})
+    assert dest.describe(minted).endswith("— key minted by the CLI")
+
+
+# --- the key never crosses a deployment or a workspace ---------------------------------------
+
+
+def test_the_destinations_deployment_names_its_own_key_variable(isolated_home: Path) -> None:
+    """The unlabelled machine key answers only for the deployment it already served."""
+    settings = AppConfig().explainability
+    prod = dest.deployment_target(settings, _destination("https://api.aisquare.studio"))
+    assert prod.api_key_env == "EXPLAINABILITY_PROD_API_KEY"
+    unknown = dest.deployment_target(settings, _destination("https://api.example.org"))
+    assert unknown.api_key_env == "EXPLAINABILITY_API_EXAMPLE_ORG_API_KEY"
+    # The single-deployment machine `init --explainability` wrote for staging keeps its key.
+    single = AppConfig().explainability
+    single.gateway_url = "https://stg-explainability-api.aisquare.studio/"
+    staging = dest.deployment_target(single, _destination("https://stg-api.aisquare.studio"))
+    assert staging.api_key_env == service.KEY_ENV_VAR
+    # A target the operator wrote keeps the variable it names.
+    mine = AppConfig().explainability
+    mine.targets["prod"] = ExplainabilityTarget(
+        gateway_url="https://mine.example", api_key_env="MY_PROD_KEY"
+    )
+    theirs = dest.deployment_target(mine, _destination("https://api.aisquare.studio"))
+    assert theirs.api_key_env == "MY_PROD_KEY"
+    # One that names none gets its own too: the default is the machine key (review of #203)…
+    mine.targets["prod"] = ExplainabilityTarget(gateway_url="https://mine.example")
+    unnamed = dest.deployment_target(mine, _destination("https://api.aisquare.studio"))
+    assert unnamed.api_key_env == "EXPLAINABILITY_PROD_API_KEY"
+    # …unless the machine key already goes to that gateway, as the machine's own target.
+    mine.target = "prod"
+    mine.targets["prod"].gateway_url = "https://explainability-api.aisquare.studio"
+    own = dest.deployment_target(mine, _destination("https://api.aisquare.studio"))
+    assert own.api_key_env == service.KEY_ENV_VAR
+    # On another gateway, the machine's own target's entry is another deployment's, and
+    # the machine key does not follow the destination to the table's (review of #203,
+    # round 3).
+    mine.targets["prod"].gateway_url = "https://mine.example"
+    elsewhere = dest.deployment_target(mine, _destination("https://api.aisquare.studio"))
+    assert (elsewhere.gateway_url, elsewhere.api_key_env) == (
+        "https://explainability-api.aisquare.studio",
+        "EXPLAINABILITY_PROD_API_KEY",
+    )
+
+
+def test_the_entry_use_names_for_an_unknown_host_takes_no_machine_key(
+    isolated_home: Path, tmp_path: Path
+) -> None:
+    """``use`` on an API host outside the table says to set ``gateway_url`` and
+    ``proxy_url`` under ``[explainability.targets."<host>"]``. That entry names no key
+    variable, so the default one answered: the machine key file, issued for prod by
+    ``init --explainability``, went to the self-hosted gateway and proxy with every
+    launch (review of #203). Followed word for word, the deployment reads a variable of
+    its own, and the machine's own read keeps its key."""
+    config = AppConfig()
+    config.explainability.enabled = True
+    config.explainability.gateway_url = "https://explainability-api.aisquare.studio"
+    config.explainability.proxy_url = "https://explainability-api.aisquare.studio:9443"
+    save_config(config)
+    service.store_api_key("AIS_machine_prod_key")
+    project = _project(tmp_path / "web")
+    session = iam.Session(
+        api_url="https://api.acme-selfhosted.example", token="aisq_x", source="env"
+    )
+    with store_session() as store:
+        row = dest.choose(
+            store,
+            project,
+            dest.Workspace(id=42, uid="ws-uid-42", name="acme", role="ADMIN"),
+            dest.Studio(id=301, uid="st-301", name="Frontend"),
+            session,
+        )
+    unplaced = ops.resolve_target(load_config().explainability, None, project_id=project.id)
+    entry = f'[explainability.targets."{row.environment}"]'
+    assert ops.deployment_fix(unplaced).startswith(f"gateway_url and proxy_url under {entry}")
+
+    with paths.config_path().open("a", encoding="utf-8") as config_file:  # as the operator would
+        config_file.write(
+            f"\n{entry}\n"
+            'gateway_url = "https://gw.acme-selfhosted.example"\n'
+            'proxy_url = "https://proxy.acme-selfhosted.example:9443"\n'
+        )
+
+    settings = load_config().explainability
+    resolved = ops.resolve_target(settings, None, project_id=project.id)
+    assert resolved.gateway_url == "https://gw.acme-selfhosted.example", "the entry is read"
+    assert resolved.api_key_env == "EXPLAINABILITY_API_ACME_SELFHOSTED_EXAMPLE_API_KEY"
+    assert (resolved.key_source, resolved.api_key) == ("unset", None), (
+        "the machine's prod key answered for the self-hosted deployment"
+    )
+    machine = ops.resolve_target(settings, None)
+    assert (machine.key_source, machine.api_key) == ("file", "AIS_machine_prod_key")
+
+
+def test_a_machine_target_that_reads_another_variable_never_sends_it_the_machine_key(
+    isolated_home: Path, tmp_path: Path
+) -> None:
+    """The machine's own target counted as a deployment the machine key already goes to
+    even when it names a variable of its own, so the machine never sent the key file there.
+    A prod machine from ``init`` moved onto a ``staging`` target reading ``MY_STAGING_KEY``,
+    and a destination on staging: the destination kept the default variable, and the prod
+    key file went to the staging gateway and proxy (review of #203, round 2)."""
+    config = AppConfig()
+    config.explainability.enabled = True
+    config.explainability.gateway_url = "https://explainability-api.aisquare.studio"
+    config.explainability.proxy_url = "https://explainability-api.aisquare.studio:9443"
+    config.explainability.target = "staging"
+    config.explainability.targets["staging"] = ExplainabilityTarget(
+        gateway_url="https://stg-explainability-api.aisquare.studio", api_key_env="MY_STAGING_KEY"
+    )
+    save_config(config)
+    service.store_api_key("AIS_machine_prod_key")
+    project = _project(tmp_path / "web")
+    with store_session() as store:
+        dest.choose(
+            store,
+            project,
+            dest.Workspace(id=42, uid="ws-uid-42", name="acme", role="ADMIN"),
+            dest.Studio(id=301, uid="st-301", name="Frontend"),
+            iam.Session(api_url="https://stg-api.aisquare.studio", token="aisq_x", source="env"),
+        )
+
+    settings = load_config().explainability
+    staging = dest.deployment_target(settings, _destination("https://stg-api.aisquare.studio"))
+    assert staging.api_key_env == "EXPLAINABILITY_STG_API_KEY"
+    resolved = ops.resolve_target(settings, None, project_id=project.id)
+    assert resolved.gateway_url == "https://stg-explainability-api.aisquare.studio"
+    assert (resolved.key_source, resolved.api_key) == ("unset", None), (
+        "the machine's prod key went to the staging gateway and proxy"
+    )
+    machine = ops.resolve_target(settings, None)
+    assert (machine.name, machine.api_key_env, machine.key_source) == (
+        "staging",
+        "MY_STAGING_KEY",
+        "unset",
+    )
+
+
+def test_another_deployments_machine_key_is_never_used_for_the_destination(
+    runner: CliRunner,
+    idp: IdentityProviderStub,
+    signed_in: iam.Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The machine key file (and the default variable) belong to the machine's deployment."""
+    foreign = "AIS_other_deployment_key"
+    service.store_api_key(foreign)
+    monkeypatch.setenv(service.KEY_ENV_VAR, foreign)
+    project = _project(tmp_path / "web")
+    payload = _json(runner, "explainability", "use", "acme/Frontend")
+    assert payload["key"]["source"] == "project" and payload["key"]["minted"] is True
+    assert len(idp.minted) == 1, "the project had no key of its own, so one was minted"
+    puts = [r for r in idp.requests if r["method"] == "PUT"]
+    assert puts and all(r["headers"]["x-api-key"] == idp.minted[0]["api_key"] for r in puts)
+    resolved = ops.resolve_target(load_config().explainability, None, project_id=project.id)
+    assert resolved.api_key_env == "EXPLAINABILITY_LOCAL_API_KEY"
+    # Refused mint: the foreign key still does not answer, so nothing is bound with it.
+    idp.key_mint = "token_not_valid"
+    _json(runner, "explainability", "use", "--clear")
+    refused = _json(runner, "explainability", "use", "acme/Frontend")
+    assert refused["key"]["source"] == "unset", "the unlabelled key crossed deployments"
+    assert refused["routing"] == []
+    resolved = ops.resolve_target(load_config().explainability, None, project_id=project.id)
+    assert resolved.api_key is None
+
+
+def test_a_machine_key_named_for_the_deployment_is_used_meanwhile_and_said_unchecked(
+    runner: CliRunner,
+    idp: IdentityProviderStub,
+    signed_in: iam.Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only the PROJECT's key is the destination's credential: a machine key never skips a mint."""
+    idp.accepted_keys.append("AIS_machine_local_key")
+    monkeypatch.setenv("EXPLAINABILITY_LOCAL_API_KEY", "AIS_machine_local_key")
+    _project(tmp_path / "web")
+    minted = _json(runner, "explainability", "use", "acme/Frontend")
+    assert minted["key"]["source"] == "project" and len(idp.minted) == 1
+
+    _json(runner, "explainability", "use", "--clear")
+    idp.key_mint = "token_not_valid"
+    result = runner.invoke(app, ["explainability", "use", "acme/Frontend"])
+    assert result.exit_code == 0, result.output
+    assert "AISquare-Studio-BE#3493" in result.output
+    assert "meanwhile $EXPLAINABILITY_LOCAL_API_KEY from this shell answers" in result.output
+    assert "not checked to be acme's" in result.output
+
+
+def test_a_machine_key_binds_no_roster_for_the_destination(
+    runner: CliRunner,
+    idp: IdentityProviderStub,
+    signed_in: iam.Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``use`` said the machine key was "not checked to be acme's" and bound acme's
+    roster with it all the same (review of #172)."""
+    idp.key_mint = "token_not_valid"
+    idp.accepted_keys.append("AIS_machine_local_key")
+    monkeypatch.setenv("EXPLAINABILITY_LOCAL_API_KEY", "AIS_machine_local_key")
+    _project(tmp_path / "web")
+    payload = _json(runner, "explainability", "use", "acme/Frontend")
+    assert payload["key"]["source"] == "env" and payload["routing"] == []
+    assert not [r for r in idp.requests if r["method"] == "PUT"], "bound with an unchecked key"
+    human = runner.invoke(app, ["explainability", "use", "acme/Frontend"])
+    assert "routing:  not applied — a machine key is not checked to be acme's" in human.output
+
+
+def test_the_projects_own_key_with_nothing_to_bind_is_not_called_a_machine_key(
+    runner: CliRunner, idp: IdentityProviderStub, signed_in: iam.Session, tmp_path: Path
+) -> None:
+    """The routing line said "a machine key is not checked to be acme's" whenever
+    nothing was bound, the project's own freshly minted key included (review of
+    #172's follow-ups, round 1, F4)."""
+    config = load_config()
+    config.explainability.agent_name_template = "aisquare-{team}"  # renders no name
+    save_config(config)
+    _project(tmp_path / "web")
+    result = runner.invoke(app, ["explainability", "use", "acme/Frontend"])
+    assert result.exit_code == 0, result.output
+    assert "key:      minted on your behalf" in result.output
+    assert "machine key" not in result.output
+    assert "routing:  not applied — the identity template renders no agent" in result.output
+    assert not [r for r in idp.requests if r["method"] == "PUT"]
+
+
+def test_a_hand_key_kept_across_a_workspace_change_is_named_as_such(
+    runner: CliRunner,
+    idp: IdentityProviderStub,
+    signed_in: iam.Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    idp.key_mint = "token_not_valid"
+    idp.studios["7"] = [{"id": 701, "uid": "st-701", "name": "Notes", "workspace_id": 7}]
+    _project(tmp_path / "web")
+    _json(runner, "explainability", "use", "acme/Frontend")
+    monkeypatch.setenv("WEB_KEY", "AIS_handmade_key")
+    assert (
+        runner.invoke(app, ["explainability", "key", "set", "--from-env", "WEB_KEY"]).exit_code == 0
+    )
+    moved = _json(runner, "explainability", "use", "Personal/Notes")
+    assert moved["key"]["source"] == "project"
+    assert "attached by hand while it pointed at acme / Frontend" in moved["key"]["note"]
+    assert "if it is not Personal's" in moved["key"]["note"]
+
+
+# --- the documented fallback: `use`, a refused mint, then `key set` -----------------------------
+
+
+def test_key_set_after_a_refused_mint_binds_the_destinations_deployment(
+    runner: CliRunner,
+    idp: IdentityProviderStub,
+    signed_in: iam.Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Out of the box the machine default (`stg`) is not the session's deployment."""
+    idp.key_mint = "token_not_valid"
+    project = _project(tmp_path / "web")
+    assert load_config().explainability.target == "stg"
+    _json(runner, "explainability", "use", "acme/Frontend")
+    monkeypatch.setenv("WEB_KEY", "AIS_handmade_key")
+    attached = _json(runner, "explainability", "key", "set", "--from-env", "WEB_KEY")
+    assert attached["target"] == "local", "the key went to the machine's target, not the project's"
+    resolved = ops.resolve_target(load_config().explainability, None, project_id=project.id)
+    assert (resolved.name, resolved.key_source) == ("local", "project")
+    assert "— key attached by hand" in runner.invoke(app, ["explainability", "status"]).output
+    # An explicit --target still wins.
+    explicit = _json(
+        runner, "explainability", "key", "set", "--from-env", "WEB_KEY", "--target", "stg"
+    )
+    assert explicit["target"] == "stg"
+
+
+# --- the next step `use` names is a check that passes for what it set up ------------------------
+
+
+def _trace_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Tracing enabled, and the destination's proxy answering (nothing listens in a test)."""
+    config = load_config()
+    config.explainability.enabled = True
+    save_config(config)
+    monkeypatch.setattr(ops, "probe_proxy", lambda _url: service.ProxyProbe(True, "proxy healthy"))
+
+
+def _next_step(output: str) -> list[str]:
+    """The command on `use`'s ``next:`` line, as the app's argv: no ``aisquare``, no note."""
+    line = next(ln for ln in output.splitlines() if ln.strip().startswith("next:"))
+    argv = shlex.split(line.split("next:", 1)[1].split("   (", 1)[0])
+    assert argv[0] == "aisquare", line
+    return argv[1:]
+
+
+def _gateway_posts(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str | None, str | None]]:
+    """The gateway as ``doctor --live`` meets it, answering; each span it posts is recorded
+    as the project the key was resolved for and the key it carried."""
+    posted: list[tuple[str | None, str | None]] = []
+
+    def ingest(target: ops.ResolvedTarget, identity: str) -> ops.HttpVerdict:
+        posted.append((target.project_id, target.api_key))
+        return ops.HttpVerdict(ok=True, status=202, detail="accepted")
+
+    monkeypatch.setattr(ops, "probe_ready", lambda *_a, **_k: ops.HttpVerdict(True, 200, "ok"))
+    monkeypatch.setattr(ops, "probe_ingest", ingest)
+    return posted
+
+
+def test_the_next_step_for_the_projects_key_puts_that_key_to_the_gateway(
+    runner: CliRunner,
+    idp: IdentityProviderStub,
+    signed_in: iam.Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`use` named `explainability status`, which resolves the project's key and only
+    probes the proxy: a revoked key or another workspace's passed it (review of #172,
+    D2 round 2). `doctor --live --project` posts a span with the key the project's
+    launches take. The project is named by id whether `use` was given one or not (D7)."""
+    _trace_on(monkeypatch)
+    posted = _gateway_posts(monkeypatch)
+    lib = _project(tmp_path / "lib")
+    web = _project(tmp_path / "web")  # the checkout the commands run from
+    result = runner.invoke(app, ["explainability", "use", "acme/Frontend"])
+    assert result.exit_code == 0, result.output
+    step = _next_step(result.output)
+    assert step == ["doctor", "--live", "--project", web.id]
+    runner.invoke(app, step)
+    minted = service.project_key_path(web.id).read_text(encoding="utf-8")
+    assert posted == [(web.id, minted)], "the span went out with the project's own key"
+
+    # For a project other than this checkout's, the check is about THAT project.
+    other = runner.invoke(app, ["explainability", "use", "--project", "lib", "acme/API"])
+    assert other.exit_code == 0, other.output
+    step = _next_step(other.output)
+    assert step == ["doctor", "--live", "--project", lib.id]
+    posted.clear()
+    runner.invoke(app, step)
+    assert posted == [(lib.id, service.project_key_path(lib.id).read_text(encoding="utf-8"))]
+
+
+def test_the_live_rows_name_the_check_they_are_part_of_when_they_say_re_run(
+    runner: CliRunner,
+    idp: IdentityProviderStub,
+    signed_in: iam.Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`use` names `doctor --live --project <id>`, and the live rows' remedies said
+    "re-run: aisquare doctor --live". That re-run checks the machine's target and key,
+    which for a project whose destination is elsewhere is another gateway and another key
+    (review of #170's follow-ups, round 1, F7). The re-run names what this one checked."""
+    _trace_on(monkeypatch)
+    _gateway_posts(monkeypatch)
+    web = _project(tmp_path / "web")
+    _json(runner, "explainability", "use", "acme/Frontend")
+
+    rows = {check.name: check for check in ops.checks(project_id=web.id, live=True)}
+    governance = rows["explainability governance"].fix or ""
+    assert governance.endswith(shlex.join(["aisquare", "doctor", "--live", "--project", web.id]))
+
+    unready = ops.HttpVerdict(False, 503, "unavailable")
+    monkeypatch.setattr(ops, "probe_ready", lambda *_a, **_k: unready)
+    rows = {c.name: c for c in ops.checks(target_name="local", project_id=web.id, live=True)}
+    rerun = ["aisquare", "doctor", "--live", "--target", "local", "--project", web.id]
+    assert rows["explainability ingest"].fix == (
+        f"Fix the gateway row above, then re-run: {shlex.join(rerun)}"
+    )
+    # The machine's own `local` target, which `use` does not write (review of #203).
+    config = load_config()
+    config.explainability.targets["local"] = ExplainabilityTarget(
+        gateway_url="http://localhost:8000", api_key_env="EXPLAINABILITY_LOCAL_API_KEY"
+    )
+    save_config(config)
+    monkeypatch.setenv("EXPLAINABILITY_LOCAL_API_KEY", "AIS_machine_local_key")
+    machine = {check.name: check for check in ops.checks(target_name="local", live=True)}
+    assert machine["explainability ingest"].fix == (
+        "Fix the gateway row above, then re-run: aisquare doctor --live --target local"
+    ), "without --project, none is named"
+
+
+def test_with_no_key_the_next_step_attaches_one_to_the_destination(
+    runner: CliRunner,
+    idp: IdentityProviderStub,
+    signed_in: iam.Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Not `doctor`: its remedy is a machine key, which never stands in for the project's.
+    The step runs as printed, with the key on stdin: it printed `--from-env VAR`, a
+    placeholder presented as a command (review of #172, D2 round 2, D8)."""
+    _trace_on(monkeypatch)
+    idp.key_mint = "token_not_valid"
+    project = _project(tmp_path / "web")
+    result = runner.invoke(app, ["explainability", "use", "acme/Frontend"])
+    assert result.exit_code == 0, result.output
+    step = _next_step(result.output)
+    assert step == ["explainability", "key", "set", "--project", project.id]
+    assert "VAR" not in next(ln for ln in result.output.splitlines() if "next:" in ln)
+    assert runner.invoke(app, step, input="AIS_handmade_key\n").exit_code == 0
+    resolved = ops.resolve_target(load_config().explainability, None, project_id=project.id)
+    assert (resolved.name, resolved.key_source) == ("local", "project")
+    again = runner.invoke(app, ["explainability", "use", "acme/Frontend"])
+    assert _next_step(again.output) == ["doctor", "--live", "--project", project.id]
+
+
+def test_the_next_step_for_a_machine_key_is_doctor_and_doctor_resolves_it(
+    runner: CliRunner,
+    idp: IdentityProviderStub,
+    signed_in: iam.Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A machine key is doctor's to put to the gateway: it resolves the same key `use` did."""
+    _trace_on(monkeypatch)
+    idp.key_mint = "token_not_valid"
+    monkeypatch.setenv("EXPLAINABILITY_LOCAL_API_KEY", "AIS_machine_local_key")
+    web = _project(tmp_path / "web")
+    result = runner.invoke(app, ["explainability", "use", "acme/Frontend"])
+    assert result.exit_code == 0, result.output
+    step = _next_step(result.output)
+    assert step == ["doctor", "--live", "--project", web.id]
+    # Offline: the rows --live adds dial the gateway. The config row is the one
+    # that failed when this line named doctor for a project's key.
+    rows = {check.name: check for check in ops.checks(project_id=step[-1])}
+    assert rows["explainability config"].status == "ok", rows["explainability config"].detail
+
+
+# --- the proxy comes from the same target as the key ---------------------------------------------
+
+
+def _two_deployments(tmp_path: Path) -> ProjectInfo:
+    """Machine default stg; the project's destination, and its key, on prod."""
+    config = AppConfig()
+    config.explainability.enabled = True
+    config.explainability.target = "stg"
+    config.explainability.targets = {
+        "stg": ExplainabilityTarget(
+            gateway_url="https://stg.example",
+            proxy_url="https://stg-proxy.example:9443",
+            api_key_env="STG_KEY",
+        ),
+        "prod": ExplainabilityTarget(
+            gateway_url="https://prod.example",
+            proxy_url="https://prod-proxy.example:9443",
+            api_key_env="PROD_KEY",
+            agent_name_template="prod-{role}",
+        ),
+    }
+    save_config(config)
+    project = _project(tmp_path / "web")
+    session = iam.Session(api_url="https://api.aisquare.studio", token="aisq_x", source="env")
+    with store_session() as store:
+        dest.choose(
+            store,
+            project,
+            dest.Workspace(id=42, uid="ws-uid-42", name="acme", role="ADMIN"),
+            dest.Studio(id=301, uid="st-301", name="Frontend"),
+            session,
+        )
+        path = service.store_project_api_key(project.id, "AIS_prod_key")
+        store.set_project_explainability(project.id, target="prod", key_path=path, set_by=None)
+    return project
+
+
+def test_the_wiring_takes_the_destinations_proxy_with_its_key(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = _two_deployments(tmp_path)
+    asked: list[str] = []
+
+    def healthy(url: str) -> service.ProxyProbe:
+        asked.append(url)
+        return service.ProxyProbe(True, "proxy healthy")
+
+    monkeypatch.setattr(service, "probe_proxy", healthy)
+    settings = load_config().explainability
+    folded = ops.effective_settings(settings, project_id=project.id)
+    assert (folded.proxy_url, folded.agent_name_template) == (
+        "https://prod-proxy.example:9443",
+        "prod-{role}",
+    )
+    payload = _json(runner, "explainability", "env", "coder")
+    exported = payload["env"]
+    assert exported["ANTHROPIC_BASE_URL"] == "https://prod-proxy.example:9443", (
+        "the prod key was wired to another deployment's proxy"
+    )
+    assert "X-AISquare-Key: AIS_prod_key" in exported["ANTHROPIC_CUSTOM_HEADERS"]
+    assert "X-Agent-Name: prod-coder" in exported["ANTHROPIC_CUSTOM_HEADERS"]
+    assert asked == ["https://prod-proxy.example:9443"]
+
+
+def test_an_untraced_launch_names_the_key_variable_its_target_reads(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A target with a variable of its own — every one ``use`` creates — reads that and
+    never the key file, and the untraced line sent the operator to export
+    EXPLAINABILITY_API_KEY or write the key file: the two places it never reads
+    (review of #172)."""
+    _two_deployments(tmp_path)
+    assert runner.invoke(app, ["explainability", "key", "clear"]).exit_code == 0
+    monkeypatch.setattr(service, "probe_proxy", lambda _url: service.ProxyProbe(True, "healthy"))
+    result = runner.invoke(app, ["explainability", "env", "coder"])
+    assert result.exit_code != 0
+    reason = " ".join(result.output.split())
+    assert "Set the key: export PROD_KEY=…; or attach this project's own" in reason
+    assert service.KEY_ENV_VAR not in reason and "explainability-key" not in reason
+
+
+def test_every_wiring_folds_the_same_project_it_resolves_the_key_for() -> None:
+    """Launch, spawn and `env` each pair `effective_settings` with `resolve_target`.
+
+    A function that resolves the key FOR a project and folds the proxy without
+    it wires one deployment's key to another's proxy (#142). Source-level, so
+    the launch and spawn paths — which exec an agent — are held to it too.
+    """
+    root = Path(aisquare.__file__).parent
+    offences: list[str] = []
+    checked = 0
+    for path in sorted(root.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for func in ast.walk(tree):
+            if not isinstance(func, ast.FunctionDef):
+                continue
+            calls = [c for c in ast.walk(func) if isinstance(c, ast.Call)]
+            for_project = any(
+                _calls(c, "resolve_target") and _passes(c, "project_id") for c in calls
+            )
+            folds = [c for c in calls if _calls(c, "effective_settings")]
+            if not (for_project and folds):
+                continue
+            checked += 1
+            offences.extend(
+                f"{path.relative_to(root)}:{fold.lineno} in {func.name}"
+                for fold in folds
+                if not _passes(fold, "project_id")
+            )
+    assert checked >= 3, "launch, spawn and env should all have been examined"
+    assert not offences, offences
+
+
+def _calls(call: ast.Call, name: str) -> bool:
+    func = call.func
+    return (isinstance(func, ast.Name) and func.id == name) or (
+        isinstance(func, ast.Attribute) and func.attr == name
+    )
+
+
+def _passes(call: ast.Call, keyword: str) -> bool:
+    return any(k.arg == keyword for k in call.keywords)
+
+
+# --- the minted key and the hand key share one file ------------------------------------------
+
+
+def test_a_hand_key_over_a_minted_one_is_the_operators(
+    runner: CliRunner,
+    idp: IdentityProviderStub,
+    signed_in: iam.Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = _project(tmp_path / "web")
+    _json(runner, "explainability", "use", "acme/Frontend")
+    monkeypatch.setenv("WEB_KEY", "AIS_handmade_key")
+    attached = runner.invoke(app, ["explainability", "key", "set", "--from-env", "WEB_KEY"])
+    assert attached.exit_code == 0, attached.output
+    assert idp.revoked_keys == ["key-1"], "the minted key it replaced is revoked"
+    with store_session() as store:
+        row = store.project_destination(project.id)
+    assert row is not None and row.key_uid is None
+    assert "— key attached by hand" in runner.invoke(app, ["explainability", "status"]).output
+
+    out = _json(runner, "logout")
+    assert out["minted_keys_cleared"] == 0
+    assert service.project_key_path(project.id).read_text() == "AIS_handmade_key"
+
+
+def test_a_hand_key_that_does_not_land_leaves_the_minted_one_live_and_minted(
+    runner: CliRunner,
+    idp: IdentityProviderStub,
+    signed_in: iam.Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The minted key is revoked once its replacement is recorded, never before (review of #172).
+
+    ``key set`` revoked it and dropped its uid, then wrote; when the binding
+    could not be recorded, the write put the file back as it was — the key just
+    revoked, no longer called minted. ``use`` then called that dead key "the
+    project's own key" and never minted again, and ``logout`` left it alone.
+    """
+    project = _project(tmp_path / "web")
+    _json(runner, "explainability", "use", "acme/Frontend")
+    minted = service.project_key_path(project.id).read_text()
+
+    def locked(*_args: object, **_kwargs: object) -> None:
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(SqliteStore, "set_project_explainability", locked)
+    monkeypatch.setenv("WEB_KEY", "AIS_handmade_key")
+    failed = runner.invoke(app, ["explainability", "key", "set", "--from-env", "WEB_KEY"])
+    assert failed.exit_code != 0
+    assert idp.revoked_keys == [], "a key revoked before its replacement was in place"
+    with store_session() as store:
+        row = store.project_destination(project.id)
+    assert row is not None and row.key_uid == "key-1", "the key in the file stopped being minted"
+    assert service.project_key_path(project.id).read_text() == minted
+
+
+def test_key_clear_retires_a_minted_key(
+    runner: CliRunner, idp: IdentityProviderStub, signed_in: iam.Session, tmp_path: Path
+) -> None:
+    project = _project(tmp_path / "web")
+    _json(runner, "explainability", "use", "acme/Frontend")
+    assert _json(runner, "explainability", "key", "clear")["cleared"] is True
+    assert idp.revoked_keys == ["key-1"]
+    with store_session() as store:
+        row = store.project_destination(project.id)
+    assert row is not None and row.key_uid is None
+    assert "— no key yet" in runner.invoke(app, ["explainability", "status"]).output
+
+
+def test_a_key_clear_that_does_not_land_leaves_the_minted_key_live_and_minted(
+    runner: CliRunner,
+    idp: IdentityProviderStub,
+    signed_in: iam.Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``key clear`` revokes once the binding is gone: a failed clear keeps a working key.
+
+    Revoked first, a clear whose row would not delete left the binding on a
+    dead key with no uid — the state a failed ``key set`` left (review of #172).
+    """
+    project = _project(tmp_path / "web")
+    _json(runner, "explainability", "use", "acme/Frontend")
+
+    def locked(*_args: object, **_kwargs: object) -> bool:
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(SqliteStore, "clear_project_explainability", locked)
+    assert runner.invoke(app, ["explainability", "key", "clear"]).exit_code != 0
+    assert idp.revoked_keys == []
+    with store_session() as store:
+        row = store.project_destination(project.id)
+    assert row is not None and row.key_uid == "key-1"
+    assert service.project_key_path(project.id).read_text() == idp.minted[0]["api_key"]
+
+
+def test_the_cli_never_mints_over_a_hand_key_bound_to_another_target(
+    runner: CliRunner,
+    idp: IdentityProviderStub,
+    signed_in: iam.Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = _project(tmp_path / "web")
+    monkeypatch.setenv("WEB_KEY", "AIS_stg_handmade_key")
+    attached = runner.invoke(
+        app, ["explainability", "key", "set", "--from-env", "WEB_KEY", "--target", "stg"]
+    )
+    assert attached.exit_code == 0, attached.output
+    payload = _json(runner, "explainability", "use", "acme/Frontend")
+    assert idp.minted == [], "no key is created only to overwrite the operator's"
+    assert "attached by hand for target stg" in payload["key"]["note"]
+    assert service.project_key_path(project.id).read_text() == "AIS_stg_handmade_key"
+    with store_session() as store:
+        binding = store.project_explainability(project.id)
+    assert binding is not None and binding.target == "stg"
+
+
+def test_the_ui_attach_leaves_a_minted_key_to_the_cli(
+    runner: CliRunner, idp: IdentityProviderStub, signed_in: iam.Session, tmp_path: Path
+) -> None:
+    """The tab's one project-key writer never overwrites a key the CLI minted.
+
+    Revoking it is a network call and the tab's handlers run on the UI thread,
+    so the refusal names ``key set``, which revokes it. Which deployment the
+    form binds a key to is the form's question (tests/test_ui_project.py).
+    """
+    from aisquare.cli.ui.views import explainability as view
+
+    idp.key_mint = "token_not_valid"
+    project = _project(tmp_path / "web")
+    _json(runner, "explainability", "use", "acme/Frontend")
+    attached = view.attach_project_key("AIS_pasted_key", project, "local")
+    assert attached.severity == "information" and "for target local" in attached.message
+    with store_session() as store:
+        binding = store.project_explainability(project.id)
+    assert binding is not None and binding.target == "local"
+
+    idp.key_mint = "ok"
+    runner.invoke(app, ["explainability", "key", "clear"])
+    _json(runner, "explainability", "use", "acme/Frontend")
+    assert view.minted_key_refusal(project) is not None
+    refused = view.attach_project_key("AIS_pasted_again", project, "local")
+    assert refused.severity == "warning" and "minted by the CLI" in refused.message
+    assert service.project_key_path(project.id).read_text() == idp.minted[0]["api_key"]
+
+
+def test_the_tabs_minted_key_check_creates_no_store_on_a_fresh_machine(
+    isolated_home: Path, tmp_path: Path
+) -> None:
+    """The Setup form asks before any write; its store session created ``context.db`` on a
+    machine where nothing had been saved yet — a read that creates (review of #172)."""
+    from aisquare.cli.ui.views import explainability as view
+
+    root = tmp_path / "fresh"
+    fresh = ProjectInfo(id=project_id_for(root), root=root, linked_repos=[])
+    assert not paths.db_path().exists()
+    assert view.minted_key_refusal(fresh) is None
+    assert not paths.db_path().exists()
+
+
+def test_the_tabs_attach_asks_about_a_minted_key_inside_the_writers_own_session(
+    runner: CliRunner,
+    idp: IdentityProviderStub,
+    signed_in: iam.Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One store session per attach, on the UI thread: the check opened one of its own
+    before the writer opened another (review of #172). Refused all the same."""
+    from aisquare.cli.ui.views import explainability as view
+    from aisquare.core import store as store_module
+
+    project = _project(tmp_path / "web")
+    # The deployment the key is bound to must be one this machine has (the
+    # writer's known-target rule): `use` creates it, without minting here.
+    _json(runner, "explainability", "use", "acme/Frontend", "--no-key")
+    opened: list[int] = []
+    real_open = store_module.open_store
+
+    def counted() -> ContextStore:
+        opened.append(1)
+        return real_open()
+
+    with monkeypatch.context() as counting:
+        counting.setattr(store_module, "open_store", counted)
+        attached = view.attach_project_key("AIS_pasted_key", project, "local")
+    assert attached.severity == "information", attached.message
+    assert len(opened) == 1, "a store session for the check, and another for the write"
+
+    runner.invoke(app, ["explainability", "key", "clear"])
+    _json(runner, "explainability", "use", "acme/Frontend")
+    opened.clear()
+    with monkeypatch.context() as counting:
+        counting.setattr(store_module, "open_store", counted)
+        refused = view.attach_project_key("AIS_pasted_again", project, "local")
+    assert refused.severity == "warning" and "minted by the CLI" in refused.message
+    assert len(opened) == 1
+    assert service.project_key_path(project.id).read_text() == idp.minted[0]["api_key"]
+
+
+def test_use_status_and_whoami_ask_about_this_checkout_not_the_pin(
+    runner: CliRunner, idp: IdentityProviderStub, signed_in: iam.Session, tmp_path: Path
+) -> None:
+    """Without ``--project`` every surface here names the project a launch from here joins.
+
+    ``use`` and ``status`` default to it through the key commands' resolver
+    (review of #170); ``whoami`` read the ``project switch`` pin, so with
+    another project pinned it reported that one's destination — none — right
+    after ``use`` had recorded this checkout's.
+    """
+    web = _project(tmp_path / "web")
+    lib = _project(tmp_path / "lib")
+    pin_project(lib.id)
+    _json(runner, "explainability", "use", "acme/Frontend", "--no-key")
+    with store_session() as store:
+        assert store.project_destination(web.id) is not None
+        assert store.project_destination(lib.id) is None, "the pin is not where launches go"
+    assert _json(runner, "explainability", "status")["destination"]["studio"]["name"] == "Frontend"
+    assert _json(runner, "whoami")["destination"]["studio"]["name"] == "Frontend"
+    assert "traces: acme / Frontend" in runner.invoke(app, ["whoami"]).output
+
+
+# --- revocation goes where the key was minted ---------------------------------------------------
+
+
+def test_a_repoint_keeps_a_key_only_on_the_same_api(isolated_home: Path, tmp_path: Path) -> None:
+    """Workspace ids are per deployment: staging 42 and production 42 are two workspaces."""
+    project = _project(tmp_path / "web")
+    stg = iam.Session(api_url="https://stg-api.aisquare.studio", token="aisq_x", source="env")
+    prod = iam.Session(api_url="https://api.aisquare.studio", token="aisq_x", source="env")
+    workspace = dest.Workspace(id=42, uid="ws-uid-42", name="acme", role="ADMIN")
+    studio = dest.Studio(id=301, uid="st-301", name="Frontend")
+    with store_session() as store:
+        dest.choose(store, project, workspace, studio, stg)
+        store.set_project_destination_key(project.id, "key-stg")
+        previous = store.project_destination(project.id)
+        moved = dest.choose(store, project, workspace, studio, prod, previous=previous)
+    assert moved.key_uid is None, "a staging key's uid carried onto a production destination"
+
+
+def _minted_by_hand(
+    store: ContextStore, project: ProjectInfo, session: iam.Session, uid: str
+) -> None:
+    """``project`` pointed at acme on ``session``'s API, its file holding the key ``uid`` names."""
+    workspace = dest.Workspace(id=42, uid="ws-uid-42", name="acme", role="ADMIN")
+    dest.choose(
+        store, project, workspace, dest.Studio(id=301, uid="st-301", name="Frontend"), session
+    )
+    path = service.store_project_api_key(project.id, f"AIS_{uid}_{'x' * 20}")
+    store.set_project_explainability(
+        project.id, target="local", key_path=path, set_by=None, minted=uid
+    )
+
+
+def test_logout_revokes_where_each_key_was_minted_and_keeps_owing_the_rest(
+    runner: CliRunner,
+    idp: IdentityProviderStub,
+    signed_in: iam.Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every minted key is detached; one this session cannot revoke is owed, not forgotten.
+
+    A key minted on another host was dropped from the store unrevoked — a live
+    ``ingest:write`` key nothing on this machine remembered (review of #172). It
+    is detached like the others, stays owed, and ``logout`` names it. A key file
+    that will not delete does not keep the other projects' keys, and its own key
+    is revoked all the same: nothing binds the file any more.
+    """
+    here = _project(tmp_path / "here")
+    elsewhere = _project(tmp_path / "elsewhere")
+    stuck = _project(tmp_path / "stuck")
+    other = iam.Session(api_url="https://stg-api.aisquare.studio", token="aisq_y", source="env")
+    with store_session() as store:
+        _minted_by_hand(store, here, signed_in, "key-here")
+        _minted_by_hand(store, elsewhere, other, "key-elsewhere")
+        _minted_by_hand(store, stuck, signed_in, "key-stuck")
+    real_clear = service.clear_project_api_key
+
+    def refuse_one(project_id: str) -> bool:
+        if project_id == stuck.id:
+            raise PermissionError("read-only")
+        return real_clear(project_id)
+
+    monkeypatch.setattr(dest, "clear_project_api_key", refuse_one)
+    out = _json(runner, "logout")
+
+    assert out["minted_keys_cleared"] == 3
+    assert sorted(idp.revoked_keys) == ["key-here", "key-stuck"]
+    assert "key-elsewhere" not in idp.revoked_keys, "a key uid sent to a host that never minted it"
+    [owed] = out["minted_keys_still_live"]
+    assert owed["key_uid"] == "key-elsewhere" and owed["api_url"] == other.api_url
+    assert f"signed in to {idp.url}, not {other.api_url}" in owed["reason"]
+    with store_session() as store:
+        assert [record.key_uid for record in store.pending_revocations()] == ["key-elsewhere"]
+        assert not any(d.key_uid for d in store.project_destinations())
+        assert store.project_explainability_all() == []
+    assert not service.project_key_path(here.id).exists()
+    assert service.project_key_path(stuck.id).exists(), "left on disk, bound to nothing"
+
+
+def test_logout_counts_a_minted_uid_whose_binding_was_already_gone(
+    runner: CliRunner, idp: IdentityProviderStub, signed_in: iam.Session, tmp_path: Path
+) -> None:
+    """``detach`` answered whether a binding existed, not whether a uid was detached:
+    a uid with no binding left was detached, owed and revoked, and ``logout`` said
+    it had forgotten none (review of #172's follow-ups, round 1, F5)."""
+    project = _project(tmp_path / "web")
+    workspace = dest.Workspace(id=42, uid="ws-uid-42", name="acme", role="ADMIN")
+    with store_session() as store:
+        dest.choose(
+            store, project, workspace, dest.Studio(id=301, uid="st-301", name="Frontend"), signed_in
+        )
+        store.set_project_destination_key(project.id, "key-1")  # no binding names it
+    out = _json(runner, "logout")
+    assert out["minted_keys_cleared"] == 1
+    assert idp.revoked_keys == ["key-1"]
+
+
+def test_a_revoke_names_the_workspace_the_key_was_minted_in(
+    runner: CliRunner, idp: IdentityProviderStub, signed_in: iam.Session, tmp_path: Path
+) -> None:
+    """The revoke went out with no ``X-Workspace-Id``: an endpoint that took its
+    context from the header would have answered from the caller's personal workspace,
+    where a 404 settles nothing (review of #172's follow-ups, round 1, F1)."""
+    _project(tmp_path / "web")
+    _json(runner, "explainability", "use", "acme/Frontend")
+    cleared = _json(runner, "explainability", "use", "--clear")
+    assert cleared["revocations"]["revoked"] == ["key-1"]
+    [revoke] = [r for r in idp.requests if r["path"].endswith("/revoke/")]
+    assert revoke["headers"].get("x-workspace-id") == "42"
+
+
+def test_a_revoke_whose_answer_is_cut_short_keeps_that_key_owed_after_logout(
+    idp: IdentityProviderStub,
+    signed_in: iam.Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``_revoke`` tolerates an unreachable server as ``IamError``, and ``http.client``'s
+    own exceptions escaped ``iam._http`` past it: one truncated answer to a revoke ended
+    ``logout``'s loop over the minted keys, and every key after it stayed on disk after
+    the sign-out (review of the accounts stack's fold, round 1, F2). The key whose
+    answer never arrived may or may not be revoked, so it stays owed rather than
+    forgotten (review of #172), and the next pass settles it either way."""
+    import urllib.request
+    from http.client import IncompleteRead
+
+    projects = [_project(tmp_path / name) for name in ("first", "second")]
+    with store_session() as store:
+        for project in projects:
+            _minted_by_hand(store, project, signed_in, f"key-{project.root.name}")
+    real_urlopen = urllib.request.urlopen
+    cut: list[str] = []
+
+    def first_revoke_cut_short(request: urllib.request.Request, timeout: float) -> Any:
+        # Raised where `response.read()` raises it: inside `_http`'s one `try`.
+        if request.full_url.endswith("/revoke/") and not cut:
+            cut.append(request.full_url)
+            raise IncompleteRead(b'{"rev', expected=40)
+        return real_urlopen(request, timeout=timeout)
+
+    monkeypatch.setattr(urllib.request, "urlopen", first_revoke_cut_short)
+    forgotten = dest.forget_minted_keys(signed_in)
+
+    assert len(cut) == 1
+    assert forgotten.detached == 2
+    assert not any(service.project_key_path(project.id).exists() for project in projects)
+    assert len(idp.revoked_keys) == 1, "the other key's revoke reached the server"
+    [owed] = forgotten.revocations.owed
+    assert owed.key_uid != idp.revoked_keys[0] and "IncompleteRead" in (owed.last_error or "")
+    again = dest.revoke_owed(signed_in)
+    assert [record.key_uid for record in again.revoked] == [owed.key_uid]
+    with store_session() as store:
+        assert store.pending_revocations() == []
+
+
+def test_a_key_moved_onto_another_deployment_stays_owed_until_its_own_host_revokes_it(
+    runner: CliRunner, idp: IdentityProviderStub, signed_in: iam.Session, tmp_path: Path
+) -> None:
+    """A move revoked the old key with the NEW deployment's session, which ``_revoke``
+    refuses to send anywhere but the host that minted it — so the key was dropped from
+    the store and left live, while the CHANGELOG said it was revoked (review of #172)."""
+    project = _project(tmp_path / "web")
+    _json(runner, "explainability", "use", "acme/Frontend")
+    prod = iam.Session(api_url="https://api.aisquare.studio", token="aisq_x", source="env")
+    workspace = dest.Workspace(id=42, uid="ws-uid-42", name="acme", role="ADMIN")
+    with store_session() as store:
+        previous = store.project_destination(project.id)
+        dest.choose(
+            store,
+            project,
+            workspace,
+            dest.Studio(id=1, uid=None, name="Web"),
+            prod,
+            previous=previous,
+        )
+        moved = store.project_destination(project.id)
+    assert moved is not None and moved.key_uid is None
+    assert not service.project_key_path(project.id).exists()
+
+    with_prod = dest.revoke_owed(prod)
+    assert idp.revoked_keys == [] and [r.key_uid for r in with_prod.owed] == ["key-1"]
+    assert with_prod.owed[0].last_error == f"signed in to {prod.api_url}, not {idp.url}"
+
+    back_home = dest.revoke_owed(signed_in)
+    assert [record.key_uid for record in back_home.revoked] == ["key-1"]
+    assert idp.revoked_keys == ["key-1"]
+    with store_session() as store:
+        assert store.pending_revocations() == []
+
+
+def test_a_clear_while_signed_out_keeps_the_key_owed_and_the_next_use_revokes_it(
+    runner: CliRunner,
+    idp: IdentityProviderStub,
+    signed_in: iam.Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``use --clear`` with no session to revoke with dropped the uid and kept nothing."""
+    _project(tmp_path / "web")
+    _json(runner, "explainability", "use", "acme/Frontend")
+    with monkeypatch.context() as signed_out:
+        signed_out.setattr(iam, "signed_in_quietly", lambda: None)
+        cleared = _json(runner, "explainability", "use", "--clear")
+    assert idp.revoked_keys == []
+    [owed] = cleared["revocations"]["still_live"]
+    assert (owed["key_uid"], owed["reason"]) == ("key-1", "signed out")
+
+    again = _json(runner, "explainability", "use", "acme/Frontend")
+    assert again["revocations"] == {"revoked": ["key-1"], "still_live": []}
+    assert idp.revoked_keys == ["key-1"] and len(idp.minted) == 2
+
+
+def test_a_refused_revoke_is_said_kept_owed_and_retried_by_doctor_live(
+    runner: CliRunner, idp: IdentityProviderStub, signed_in: iam.Session, tmp_path: Path
+) -> None:
+    """A 4xx to the revoke was tolerated and the uid dropped, silently (review of #172)."""
+    from aisquare.services import diagnostics
+
+    _project(tmp_path / "web")
+    _json(runner, "explainability", "use", "acme/Frontend")
+    idp.key_mint = "token_not_valid"  # the key endpoints answer the sign-in token 401
+    cleared = runner.invoke(app, ["explainability", "key", "clear"])
+    assert cleared.exit_code == 0, cleared.output
+    assert "⚠ 1 key the CLI minted is still live on the server — acme for web" in cleared.output
+    assert "HTTP 401" in cleared.output and "doctor --live" in cleared.output
+    assert idp.revoked_keys == []
+
+    offline = diagnostics._minted_keys_check(live=False)
+    assert offline is not None and offline.status == "warn" and "HTTP 401" in offline.detail
+    idp.key_mint = "ok"
+    live = diagnostics._minted_keys_check(live=True)
+    assert live is not None and live.status == "ok" and idp.revoked_keys == ["key-1"]
+    assert diagnostics._minted_keys_check(live=False) is None, "nothing owed: no row"
+
+
+def test_a_pass_that_could_not_ask_keeps_the_reason_the_server_gave(
+    runner: CliRunner, idp: IdentityProviderStub, signed_in: iam.Session, tmp_path: Path
+) -> None:
+    """Every pass wrote its reason over the last one: a signed-out pass replaced the
+    refusal the server had given, and the ``minted-keys`` row sent the operator to sign
+    in when the blocker was the endpoint (review of #172's follow-ups, round 1, F6).
+    The pass's own report still says why it did not ask."""
+    from aisquare.services import diagnostics
+
+    _project(tmp_path / "web")
+    _json(runner, "explainability", "use", "acme/Frontend")
+    idp.key_mint = "token_not_valid"  # the key endpoints answer the sign-in token 401
+    cleared = _json(runner, "explainability", "key", "clear")
+    [refused] = cleared["revocations"]["still_live"]
+    assert "HTTP 401" in refused["reason"]
+
+    signed_out = dest.revoke_owed(None)
+    assert [record.last_error for record in signed_out.owed] == ["signed out"]
+    offline = diagnostics._minted_keys_check(live=False)
+    assert offline is not None and "HTTP 401" in offline.detail, offline
+    assert "signed out" not in offline.detail
+
+
+def test_a_store_that_cannot_be_read_for_the_revokes_costs_them_not_the_command(
+    runner: CliRunner,
+    idp: IdentityProviderStub,
+    signed_in: iam.Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``revoke_owed`` read the records owed unguarded: a locked store turned a
+    ``key clear`` that had already committed into a traceback (review of #172's
+    follow-ups, round 1, F3). The key stays owed, and the next pass revokes it."""
+    project = _project(tmp_path / "web")
+    _json(runner, "explainability", "use", "acme/Frontend")
+
+    def locked() -> Iterator[ContextStore]:
+        raise sqlite3.OperationalError("database is locked")
+
+    with monkeypatch.context() as patched:
+        patched.setattr(dest, "store_session", locked)
+        cleared = runner.invoke(app, ["explainability", "key", "clear"])
+    assert cleared.exit_code == 0, cleared.output
+    assert "✓ key cleared for web" in cleared.output
+    assert idp.revoked_keys == [] and not service.project_key_path(project.id).exists()
+    again = dest.revoke_owed(signed_in)
+    assert [record.key_uid for record in again.revoked] == ["key-1"]
+    assert idp.revoked_keys == ["key-1"]
+
+
+def test_an_interrupted_key_set_keeps_the_minted_key_minted_and_in_its_file(
+    runner: CliRunner,
+    idp: IdentityProviderStub,
+    signed_in: iam.Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Ctrl-C inside ``key set`` dropped the minted key's uid for good.
+
+    The uid was dropped first and put back only for an ``Exception``, and the file
+    was put back only for one too: interrupted, the hand key sat in the minted key's
+    file, no longer called minted, and the minted key was live and forgotten
+    (review of #172). The binding and the detachment are one commit now.
+    """
+    project = _project(tmp_path / "web")
+    _json(runner, "explainability", "use", "acme/Frontend")
+    minted = service.project_key_path(project.id).read_text()
+
+    def interrupted(*_args: object, **_kwargs: object) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setenv("WEB_KEY", "AIS_handmade_key")
+    with monkeypatch.context() as patched:
+        patched.setattr(SqliteStore, "set_project_explainability", interrupted)
+        runner.invoke(app, ["explainability", "key", "set", "--from-env", "WEB_KEY"])
+    assert service.project_key_path(project.id).read_text() == minted
+    with store_session() as store:
+        row = store.project_destination(project.id)
+        assert store.pending_revocations() == []
+    assert row is not None and row.key_uid == "key-1"
+    assert idp.revoked_keys == []
+
+
+def test_the_minted_keys_own_value_attached_again_stays_minted_and_live(
+    runner: CliRunner,
+    idp: IdentityProviderStub,
+    signed_in: iam.Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``key set`` with the value already in the file revoked the key it had just attached."""
+    project = _project(tmp_path / "web")
+    _json(runner, "explainability", "use", "acme/Frontend")
+    monkeypatch.setenv("SAME_KEY", service.project_key_path(project.id).read_text())
+    attached = _json(runner, "explainability", "key", "set", "--from-env", "SAME_KEY")
+    assert attached["revocations"] == {"revoked": [], "still_live": []}
+    assert idp.revoked_keys == []
+    with store_session() as store:
+        row = store.project_destination(project.id)
+    assert row is not None and row.key_uid == "key-1"
+
+
+def test_a_mint_that_answers_with_the_same_uid_owes_nothing(
+    runner: CliRunner, idp: IdentityProviderStub, signed_in: iam.Session, tmp_path: Path
+) -> None:
+    """An idempotent mint revoked the uid it had just stored: the project's key, dead."""
+    project = _project(tmp_path / "web")
+    _json(runner, "explainability", "use", "acme/Frontend")
+    service.project_key_path(project.id).unlink()  # `use` mints again when the file is gone
+    idp.minted.pop()  # the stub numbers keys by count: the next one is key-1 again
+    again = _json(runner, "explainability", "use", "acme/Frontend")
+    assert again["key"]["minted"] is True and idp.minted[0]["uid"] == "key-1"
+    assert idp.revoked_keys == []
+    with store_session() as store:
+        row = store.project_destination(project.id)
+        assert store.pending_revocations() == []
+    assert row is not None and row.key_uid == "key-1"
+
+
+def test_a_mint_that_answers_with_a_uid_still_owed_takes_it_back_and_revokes_nothing(
+    runner: CliRunner,
+    idp: IdentityProviderStub,
+    signed_in: iam.Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A uid still owed that a mint answers again is the project's key once more.
+
+    Its record stayed owed, so the same ``use`` stored the key and then revoked it:
+    the project's key, dead on the server (review of #172's follow-ups, round 1, F2).
+    """
+    project = _project(tmp_path / "web")
+    _json(runner, "explainability", "use", "acme/Frontend")
+    with monkeypatch.context() as signed_out:
+        signed_out.setattr(iam, "signed_in_quietly", lambda: None)
+        cleared = _json(runner, "explainability", "key", "clear")
+    assert [owed["key_uid"] for owed in cleared["revocations"]["still_live"]] == ["key-1"]
+    idp.minted.pop()  # the stub numbers keys by count: the next one is key-1 again
+    again = _json(runner, "explainability", "use", "acme/Frontend")
+    assert again["key"]["minted"] is True and idp.minted[0]["uid"] == "key-1"
+    assert again["revocations"] == {"revoked": [], "still_live": []}
+    assert idp.revoked_keys == []
+    with store_session() as store:
+        row = store.project_destination(project.id)
+        assert store.pending_revocations() == []
+    assert row is not None and row.key_uid == "key-1"
+
+
+def test_every_write_that_puts_an_owed_uid_back_on_its_row_owes_it_no_more(
+    isolated_home: Path, tmp_path: Path
+) -> None:
+    """The other half of the primitive (``_owe_no_revocation``): a uid a write stores
+    on its row is the project's key, and nothing owed revokes it from under it (review
+    of #172's follow-ups, round 1, F2)."""
+    project = _project(tmp_path / "web")
+    session = iam.Session(api_url="https://api.aisquare.studio", token="aisq_x", source="env")
+
+    def carried_over(store: SqliteStore) -> None:
+        row = store.project_destination(project.id)
+        assert row is not None
+        store.set_project_destination(row.model_copy(update={"key_uid": "key-1"}))
+
+    writes: dict[str, Callable[[SqliteStore], object]] = {
+        "a mint": lambda store: store.set_project_explainability(
+            project.id, target="local", key_path=tmp_path / "key", set_by=None, minted="key-1"
+        ),
+        "a re-point that carries it": carried_over,
+        "the uid set": lambda store: store.set_project_destination_key(project.id, "key-1"),
+    }
+    for name, write in writes.items():
+        with store_session() as store:
+            assert isinstance(store, SqliteStore)
+            _minted_by_hand(store, project, session, "key-1")
+            store.detach_minted_key(project.id)
+            assert [record.key_uid for record in store.pending_revocations()] == ["key-1"], name
+            write(store)
+            owed = store.pending_revocations()
+            row = store.project_destination(project.id)
+        assert owed == [], name
+        assert row is not None and row.key_uid == "key-1", name
+
+
+def test_a_minted_key_the_store_cannot_record_is_revoked_and_leaves_no_file(
+    runner: CliRunner,
+    idp: IdentityProviderStub,
+    signed_in: iam.Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Recorded nowhere, the key it made was live and unknown, and its file unbound."""
+    project = _project(tmp_path / "web")
+
+    def locked(*_args: object, **_kwargs: object) -> None:
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(SqliteStore, "set_project_explainability", locked)
+    failed = runner.invoke(app, ["explainability", "use", "acme/Frontend"])
+    assert failed.exit_code != 0
+    assert [key["uid"] for key in idp.minted] == ["key-1"] and idp.revoked_keys == ["key-1"]
+    assert not service.project_key_path(project.id).exists()
+
+
+def test_a_mint_whose_put_back_fails_leaves_no_revoked_key_under_the_earlier_binding(
+    runner: CliRunner,
+    idp: IdentityProviderStub,
+    signed_in: iam.Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The mint's put-back was suppressed, so when the earlier key could not be written
+    back the file kept the key just minted, revoked a moment later, under the earlier
+    binding, which may be for another deployment. ``key set``'s put-back removes the file
+    and says so (0d79f861); the mint's did not (review of #170's follow-ups, round 1, F4)."""
+    project = _project(tmp_path / "web")
+    _json(runner, "explainability", "use", "acme/Frontend")
+    earlier = service.project_key_path(project.id).read_text()
+    writes = service.store_project_api_key
+
+    def locked(*_args: object, **_kwargs: object) -> None:
+        raise sqlite3.OperationalError("database is locked")
+
+    def full_disk_for_the_put_back(project_id: str, key: str) -> Path:
+        if key == earlier:
+            raise OSError(28, "No space left on device")
+        return writes(project_id, key)
+
+    monkeypatch.setattr(SqliteStore, "set_project_explainability", locked)
+    monkeypatch.setattr(dest, "store_project_api_key", full_disk_for_the_put_back)
+    monkeypatch.setattr(ops, "store_project_api_key", full_disk_for_the_put_back)
+    with store_session() as store:
+        row = store.project_destination(project.id)
+        assert row is not None
+        with pytest.raises(sqlite3.OperationalError, match="database is locked") as refused:
+            dest.mint_key(store, project, row, signed_in)
+
+    assert idp.revoked_keys == ["key-2"], "the key recorded nowhere is revoked"
+    assert any("could not be put back" in note for note in refused.value.__notes__)
+    assert not service.project_key_path(project.id).exists(), "no revoked key under the binding"
+
+
+def test_every_write_that_takes_a_minted_uid_off_its_row_owes_it_in_the_same_commit(
+    isolated_home: Path, tmp_path: Path
+) -> None:
+    """The one primitive (``_owe_revocation``): no store write can detach a minted key
+    without recording it, and one whose transaction fails detaches nothing.
+
+    Each of these took the uid off (or deleted the row) and left the revoke to its
+    caller, which a lock, an interrupt or a missing session skipped — the key live,
+    and nothing here naming it (review of #172). The refusal below fails the write
+    after the uid is off in its transaction: a second write putting it back, as
+    ``retiring_minted_key`` did, lost it when that write failed too.
+    """
+    project = _project(tmp_path / "web")
+    session = iam.Session(api_url="https://api.aisquare.studio", token="aisq_x", source="env")
+    other_path = tmp_path / "hand-key"
+
+    def moved(store: SqliteStore) -> None:
+        row = store.project_destination(project.id)
+        assert row is not None
+        store.set_project_destination(row.model_copy(update={"workspace_id": 7, "key_uid": None}))
+
+    writes: dict[str, Callable[[SqliteStore], object]] = {
+        "a hand key over it": lambda store: store.set_project_explainability(
+            project.id, target="prod", key_path=other_path, set_by=None
+        ),
+        "its binding cleared": lambda store: store.clear_project_explainability(project.id),
+        "a move": moved,
+        "another uid": lambda store: store.set_project_destination_key(project.id, "key-2"),
+        "no uid": lambda store: store.set_project_destination_key(project.id, None),
+        "detached": lambda store: store.detach_minted_key(project.id),
+        "the row cleared": lambda store: store.clear_project_destination(project.id),
+        "a purge": lambda store: store.purge_project(project.id),
+    }
+    for name, write in writes.items():
+        with store_session() as store:
+            assert isinstance(store, SqliteStore)
+            store.ensure_project(project)
+            _minted_by_hand(store, project, session, "key-1")
+            for earlier in store.pending_revocations():  # the previous round's
+                store.settle_revocation(earlier.key_uid)
+            # Refused inside the write's own transaction, as the uid comes off:
+            # nothing may change, the uid least of all.
+            store._conn.execute(
+                "CREATE TEMP TRIGGER refuse BEFORE UPDATE OF key_uid ON project_destination "
+                "BEGIN SELECT RAISE(ABORT, 'refused'); END"
+            )
+            with pytest.raises(sqlite3.IntegrityError):
+                write(store)
+            row = store.project_destination(project.id)
+            assert row is not None and row.key_uid == "key-1", name
+            assert store.pending_revocations() == [], name
+            store._conn.execute("DROP TRIGGER refuse")
+            write(store)
+            owed = store.pending_revocations()
+            row = store.project_destination(project.id)
+        assert [record.key_uid for record in owed] == ["key-1"], name
+        assert owed[0].api_url == session.api_url and owed[0].project_name == "web", name
+        assert row is None or row.key_uid != "key-1", name
+
+
+def test_an_exported_target_neither_makes_use_mint_again_nor_splits_it_from_the_launches(
+    runner: CliRunner,
+    idp: IdentityProviderStub,
+    signed_in: iam.Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Whether the project has this destination's key is asked of the destination's deployment,
+    and so is the key its launches take.
+
+    ``use`` resolved the destination's deployment by name while launches let an
+    exported ``$AISQUARE_EXPLAINABILITY_TARGET`` win over the destination, so
+    ``use`` reported the project's key on ``local`` and every launch went to
+    ``stg`` with the machine key (review of #172, D2 round 2). This test pinned
+    the half ``use`` saw.
+    """
+    monkeypatch.setenv(ops.TARGET_ENV_VAR, "stg")
+    project = _project(tmp_path / "web")
+    first = _json(runner, "explainability", "use", "acme/Frontend")
+    again = _json(runner, "explainability", "use", "acme/Frontend")
+    assert again["key"] == {"source": "project", "minted": False, "note": "the project's own key"}
+    assert len(idp.minted) == 1 and idp.revoked_keys == [], "a second key minted over the first"
+    assert first["target"]["name"] == again["target"]["name"] == "local"
+    assert again["routing"] and all(b["bound"] for b in again["routing"])
+    with store_session() as store:
+        row = store.project_destination(project.id)
+    assert row is not None and row.key_uid == "key-1"
+    # What `launch` and `team spawn` resolve for the project, under the same shell.
+    launched = ops.resolve_target(load_config().explainability, project_id=project.id)
+    assert (launched.name, launched.key_source) == ("local", "project")
+    status = _json(runner, "explainability", "status", "--project", project.id)
+    assert (status["target"], status["target_source"], status["key_source"]) == (
+        "local",
+        "destination",
+        "project",
+    )
+    said = runner.invoke(app, ["explainability", "status", "--project", project.id])
+    assert f"${ops.TARGET_ENV_VAR}=stg applies to projects without one" in said.output
+
+
+def test_under_an_exported_target_the_key_set_use_advises_is_the_one_its_next_run_finds(
+    runner: CliRunner,
+    idp: IdentityProviderStub,
+    signed_in: iam.Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The API refuses the mint, and `use` advises `key set --from-env VAR`. With the
+    variable exported, `key set` bound that key to the exported target, the next `use`
+    did not see it and refused to mint over a hand key, and launches took it to the
+    other deployment (review of #172, D2 round 2, on the PR). One precedence now:
+    the key lands on the destination's deployment, and the next `use` finds it."""
+    monkeypatch.setenv(ops.TARGET_ENV_VAR, "stg")
+    idp.key_mint = "token_not_valid"
+    project = _project(tmp_path / "web")
+    first = _json(runner, "explainability", "use", "acme/Frontend")
+    assert first["key"]["source"] == "unset" and "key set --from-env VAR" in first["key"]["note"]
+
+    monkeypatch.setenv("VAR", "AIS_from_the_dashboard")
+    attached = runner.invoke(app, ["explainability", "key", "set", "--from-env", "VAR"])
+    assert attached.exit_code == 0, attached.output
+    again = _json(runner, "explainability", "use", "acme/Frontend")
+    assert (again["target"]["name"], again["key"]["source"]) == ("local", "project")
+    launched = ops.resolve_target(load_config().explainability, project_id=project.id)
+    assert (launched.name, launched.api_key) == ("local", "AIS_from_the_dashboard")
+
+
+def test_a_mint_over_a_minted_key_revokes_the_one_it_replaces(
+    runner: CliRunner, idp: IdentityProviderStub, signed_in: iam.Session, tmp_path: Path
+) -> None:
+    """Its uid is overwritten, so unrevoked it would be a live key nothing remembers."""
+    project = _project(tmp_path / "web")
+    _json(runner, "explainability", "use", "acme/Frontend")
+    service.project_key_path(project.id).unlink()  # the minted key's file is gone
+    again = _json(runner, "explainability", "use", "acme/Frontend")
+    assert again["key"]["minted"] is True and len(idp.minted) == 2
+    assert idp.revoked_keys == ["key-1"]
+    with store_session() as store:
+        row = store.project_destination(project.id)
+    assert row is not None and row.key_uid == "key-2"
+
+
+def test_a_purge_revokes_the_minted_key_it_leaves_nothing_to_find(
+    runner: CliRunner,
+    idp: IdentityProviderStub,
+    signed_in: iam.Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``forget --purge`` and ``prune --purge`` delete the row ``logout`` finds the key by.
+
+    The row, its ``key_uid`` and the key file went, the key stayed live on the
+    server, and nothing on this machine could revoke it any more (review of
+    #172). Revoked once the purge is done: one that fails keeps a working key.
+    A plain forget keeps the row, hidden, and so keeps it for ``logout``.
+    """
+    web = _project(tmp_path / "web")
+    gone = _project(tmp_path / "gone")
+    kept = _project(tmp_path / "kept")
+    for project in (web, gone, kept):
+        _json(runner, "explainability", "use", "acme/Frontend", "--project", project.id)
+    assert [m["uid"] for m in idp.minted] == ["key-1", "key-2", "key-3"]
+
+    def locked(*_args: object, **_kwargs: object) -> dict[str, int]:
+        raise sqlite3.OperationalError("database is locked")
+
+    purge = SqliteStore.purge_project
+    monkeypatch.setattr(SqliteStore, "purge_project", locked)
+    assert runner.invoke(app, ["project", "forget", str(web.root), "--purge"]).exit_code != 0
+    assert idp.revoked_keys == [], "revoked for a purge that did not happen"
+    monkeypatch.setattr(SqliteStore, "purge_project", purge)
+
+    forgotten = runner.invoke(app, ["project", "forget", str(web.root), "--purge"])
+    assert forgotten.exit_code == 0, forgotten.output
+    assert idp.revoked_keys == ["key-1"]
+
+    gone.root.rmdir()
+    pruned = runner.invoke(app, ["project", "prune", "--missing", "--purge", "--yes"])
+    assert pruned.exit_code == 0, pruned.output
+    assert idp.revoked_keys == ["key-1", "key-2"]
+
+    assert runner.invoke(app, ["project", "forget", str(kept.root)]).exit_code == 0
+    assert idp.revoked_keys == ["key-1", "key-2"], "a forget without --purge keeps the row"
+    assert _json(runner, "logout")["minted_keys_cleared"] == 1
+    assert idp.revoked_keys == ["key-1", "key-2", "key-3"]
+
+
+def test_a_purge_signed_out_keeps_its_keys_owed_says_so_and_revokes_after_the_sweep(
+    runner: CliRunner,
+    idp: IdentityProviderStub,
+    signed_in: iam.Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Signed out, offline or on another host, a purge revoked nothing and deleted the
+    only record of the key, silently; ``prune --purge`` made one blocking revoke per
+    project inside its loop and the store session (review of #172). The keys stay
+    owed and are reported, the sweep revokes once after the store is closed, and the
+    next ``use`` revokes what is still owed.
+    """
+    one, two, three = (_project(tmp_path / name) for name in ("one", "two", "three"))
+    for project in (one, two, three):
+        _json(runner, "explainability", "use", "acme/Frontend", "--project", project.id)
+    passes: list[object] = []
+    real = dest.revoke_owed
+
+    def counted(session: iam.Session | None, **kwargs: Any) -> dest.Revocations:
+        passes.append(kwargs.get("project_ids"))
+        return real(session, **kwargs)
+
+    one.root.rmdir()
+    two.root.rmdir()
+    with monkeypatch.context() as signed_out:
+        signed_out.setattr(iam, "signed_in_quietly", lambda: None)
+        signed_out.setattr(dest, "revoke_owed", counted)
+        pruned = runner.invoke(app, ["--json", "project", "prune", "--missing", "--purge", "--yes"])
+        forgotten = runner.invoke(app, ["project", "forget", str(three.root), "--purge"])
+    assert pruned.exit_code == 0, pruned.output
+    still_live = json.loads(pruned.stdout)["keys_still_live"]
+    assert sorted(key["key_uid"] for key in still_live) == ["key-1", "key-2"]
+    assert {key["last_error"] for key in still_live} == {"signed out"}
+    assert passes[0] == {one.id, two.id}, "one pass after the sweep, not a revoke per project"
+    assert forgotten.exit_code == 0, forgotten.output
+    assert "⚠ 1 key the CLI minted is still live on the server — acme for three" in (
+        forgotten.output
+    )
+    assert idp.revoked_keys == []
+
+    again = _json(runner, "explainability", "use", "acme/Frontend")
+    assert sorted(again["revocations"]["revoked"]) == ["key-1", "key-2", "key-3"]
+    assert sorted(idp.revoked_keys) == ["key-1", "key-2", "key-3"]
+
+
+# --- the store and the directory ----------------------------------------------------------------
+
+
+def test_use_in_a_directory_nothing_registered_captures_it(
+    runner: CliRunner,
+    idp: IdentityProviderStub,
+    signed_in: iam.Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fresh = tmp_path / "fresh"
+    fresh.mkdir()
+    monkeypatch.chdir(fresh)
+    result = runner.invoke(app, ["explainability", "use", "acme/Frontend", "--no-key"])
+    assert result.exit_code == 0, result.output
+    with store_session() as store:
+        row = store.project_destination(project_id_for(fresh.resolve()))
+        registered = store.get_project(project_id_for(fresh.resolve()))
+    assert row is not None and row.studio_name == "Frontend"
+    assert registered is not None and registered.onboarded_at is None, "captured, not onboarded"
+
+
+def test_purging_a_project_takes_its_destination_with_it(
+    runner: CliRunner, isolated_home: Path, tmp_path: Path
+) -> None:
+    project = _project(tmp_path / "web")
+    session = iam.Session(api_url="https://api.aisquare.studio", token="aisq_x", source="env")
+    with store_session() as store:
+        dest.choose(
+            store,
+            project,
+            dest.Workspace(id=42, uid="ws-uid-42", name="acme", role="ADMIN"),
+            dest.Studio(id=301, uid="st-301", name="Frontend"),
+            session,
+        )
+        removed = store.purge_project(project.id)
+        assert store.project_destination(project.id) is None
+    assert removed["project_destination"] == 1 and removed["project"] == 1
+
+
+# --- a workspace the user has not joined -------------------------------------------------------
+
+
+def test_studios_of_another_workspace_are_not_listed_under_this_one(
+    runner: CliRunner, idp: IdentityProviderStub, signed_in: iam.Session
+) -> None:
+    """The API answers an unhonoured header with the personal workspace's studios."""
+    idp.studios["99"] = [{"id": 701, "uid": "st-701", "name": "Notes", "workspace_id": 7}]
+    payload = _json(runner, "explainability", "studios", "--workspace", "guests")
+    assert payload["studios"] == []
+    refused = runner.invoke(app, ["explainability", "use", "guests/Notes"])
+    assert refused.exit_code == 1 and "not a member yet" in refused.output

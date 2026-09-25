@@ -16,11 +16,335 @@ Set ``AISQUARE_HOME`` to relocate the whole tree (tests rely on this).
 
 from __future__ import annotations
 
+import errno
+import functools
 import os
+import stat
+import sys
+import time
+from collections.abc import Callable
 from pathlib import Path
+from typing import TypeVar
+
+_T = TypeVar("_T")
 
 HOME_ENV_VAR = "AISQUARE_HOME"
 """Environment variable that overrides the default ``~/.aisquare`` location."""
+
+
+def restrict_to_owner(path: Path) -> bool:
+    """Make ``path`` readable and writable by its owner only. True when enforced.
+
+    ``chmod(0o600)`` is the whole story on POSIX, and *nothing* on Windows:
+    the group/other bits have no NTFS equivalent, so ``os.chmod`` silently
+    leaves the file readable by every other account on the machine. Since the
+    two callers are an API key and a bearer token, "silently" is the problem.
+
+    ONE icacls call, and each piece of it is load-bearing. ``/inheritance:r``
+    removes only *inherited* entries and ``/grant:r`` replaces the grant only
+    for the principal it names, so an **explicit** ``BUILTIN\\Users`` ACE —
+    inherited from a widened parent at creation time, or set by hand — survives
+    both and leaves the file readable by every account on the box. ``/remove``
+    is what drops an explicit ACE, and it names the three broad principals by
+    SID rather than by display name, which is localised.
+
+    This used to be ``/reset`` followed by a second call, and the pair was not
+    atomic. ``/reset`` discards the explicit entries by RESTORING INHERITANCE
+    FROM THE PARENT — so between the two calls the file sat on the parent's
+    DACL with the secret already written into it, readable by whoever that
+    parent grants, for two ``CreateProcess`` calls' worth of time. Worse, a
+    failure of the second call left the file *wider than before this function
+    was called*, because the first had already thrown away the owner-only DACL
+    a previous call had set: a regression reported as ``False`` rather than a
+    no-op. One call cannot half-apply.
+
+    The trade is stated rather than hidden: ``/remove`` drops the three ACEs it
+    names, where ``/reset`` dropped every explicit ACE. A file carrying an
+    explicit grant to some OTHER principal — a domain group, a service account,
+    a second local user — keeps it. So the DACL the call left is READ BACK, in
+    process, and any principal still granted anything other than this account,
+    SYSTEM, Administrators and the owner placeholders makes the answer False:
+    the file is not what the callers promise, and they say so (review of #65,
+    R3). The read changes nothing, so it cannot widen what the call narrowed.
+    ``tests/test_paths.py`` pins both halves: the fourth principal survives,
+    and it is reported.
+
+    The trustee is a SID from ``whoami``, not ``getpass.getuser()``. CPython
+    returns the first set of ``LOGNAME``, ``USER``, ``LNAME``, ``USERNAME``
+    before asking the OS, and the first three are set by MSYS2, Git Bash and
+    anything sourcing a POSIX profile. With ``USER=alice`` and a Windows
+    account of ``CORP\\a.smith``, ``icacls /grant:r alice:(R,W)`` fails with
+    "No mapping between account names and security IDs was done" — which, in
+    the old two-call shape, failed *after* the reset had stripped the DACL. A
+    SID also sidesteps localised names and domain qualification.
+
+    An ``Administrators`` entry can remain when the parent grants one, which is
+    not worth chasing: an admin can take ownership regardless, exactly as root
+    reads a 0600 file on POSIX.
+
+    Returns False when the restriction could not be applied, so a caller can
+    say so rather than implying a protection that is not there.
+    """
+    if sys.platform != "win32":
+        path.chmod(stat.S_IRUSR | stat.S_IWUSR)
+        return True
+    # Imported HERE, not at module scope: `subprocess` pulls `signal`,
+    # `threading`, `select`, `contextlib` and `warnings`, and this module is a
+    # leaf that almost everything imports on a cold start. That is measurable
+    # cost on `aisquare --version` on BOTH platforms to buy something only
+    # Windows uses. The repo already treats this as a rule worth a test —
+    # tests/test_iam_single_reader.py and test_import_cost_of_the_integration.py.
+    import subprocess
+
+    sid = _current_user_sid()
+    if sid is None:
+        return False
+    argv = [
+        _system32("icacls.exe"),
+        str(path),
+        "/inheritance:r",
+        # Users, Everyone, Authenticated Users — by SID, because the display
+        # names are localised and would not match on a non-English Windows.
+        "/remove",
+        "*S-1-5-32-545",
+        "*S-1-1-0",
+        "*S-1-5-11",
+        "/grant:r",
+        f"*{sid}:(R,W)",
+    ]
+    try:
+        result = subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=15,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    if result.returncode != 0:
+        return False
+    sddl = _dacl_sddl(path)
+    return sddl is not None and _grants_only_owner(sddl, sid, _local_account_domain())
+
+
+def _system32(program: str) -> str:
+    """``program`` in ``%SystemRoot%\\System32``, by its full path.
+
+    Run by bare name, ``CreateProcess`` looks in the application's directory
+    and the CURRENT directory before System32. An ``icacls.exe`` or
+    ``whoami.exe`` planted in a project would run instead, and a fake
+    ``whoami`` could turn the owner's grant into one for Everyone (review of
+    #65, R8).
+    """
+    return str(Path(os.environ.get("SYSTEMROOT", r"C:\Windows")) / "System32" / program)
+
+
+def _current_user_sid() -> str | None:
+    """This account's SID from ``whoami``, or ``None`` when it cannot be read.
+
+    ``tests/winacl.py`` reads SIDs the same way and for the same reason — a
+    name-based check would be the same vacuous pass one level down.
+    """
+    import subprocess  # Windows-only; see restrict_to_owner
+
+    try:
+        return _whoami_sid()
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
+@functools.cache
+def _whoami_sid() -> str:
+    """The SID ``whoami`` names for this account; raises when it names none.
+
+    Cached: the account cannot change under a running process, and every
+    restriction otherwise cost a second subprocess (review of #65, R8). A
+    failure RAISES rather than returning ``None``, because an exception is
+    never cached, so a ``whoami`` that timed out once is asked again next time.
+    """
+    import subprocess  # Windows-only; see restrict_to_owner
+
+    result = subprocess.run(
+        [_system32("whoami.exe"), "/user", "/fo", "csv", "/nh"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=15,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise OSError(f"whoami exited {result.returncode}: {result.stderr.strip()}")
+    # '"domain\\user","S-1-5-21-..."'
+    sid = result.stdout.strip().split(",")[-1].strip().strip('"')
+    if not sid:
+        raise OSError(f"whoami named no SID: {result.stdout.strip()!r}")
+    return sid
+
+
+#: Trustees an owner-only file may still grant, as SDDL writes them (an
+#: abbreviation, or the SID on a host that spells it out): SYSTEM,
+#: Administrators, OWNER RIGHTS and CREATOR OWNER. An administrator can take
+#: ownership of any file regardless, the same deal 0600 offers against root.
+_PRIVILEGED_TRUSTEES = frozenset(
+    {"SY", "S-1-5-18", "BA", "S-1-5-32-544", "OW", "S-1-3-4", "CO", "S-1-3-0"}
+)
+
+#: SDDL abbreviates two ACCOUNT SIDs by their RID, so this account can come
+#: back as one of these instead of spelled out: the built-in Administrator (a
+#: GitHub runner's login) and Guest. Both are THIS MACHINE's accounts: the SID
+#: is the local account domain's, and a domain's own Administrator, whose SID
+#: ends in -500 too, is spelled out.
+_ACCOUNT_ABBREVIATIONS = {"LA": "-500", "LG": "-501"}
+
+#: ACE types that deny. Every other type in a DACL grants something.
+_DENYING_ACES = frozenset({"D", "OD", "XD"})
+
+
+def _grants_only_owner(sddl: str, sid: str, local_domain: str | None) -> bool:
+    """Whether the DACL in ``sddl`` grants nobody but ``sid`` and the privileged trustees.
+
+    Each ACE is ``(type;flags;rights;object;inherited object;trustee)``. A
+    deny ACE narrows and is skipped. An ACE this cannot read (a conditional
+    one carries a nested expression) counts as a grant to someone else: a
+    restriction this cannot vouch for is not reported as one. A NULL DACL
+    grants everyone everything.
+
+    ``LA`` and ``LG`` are this account only when ``sid`` is that account of
+    ``local_domain``, this machine's account domain
+    (:func:`_local_account_domain`). Judged by the RID alone, a DOMAIN
+    Administrator (``S-1-5-21-<domain>-500``) counted a grant to the LOCAL
+    Administrator as its own, and the file was reported owner-only while
+    another account could read the secret (review of the #65 re-fold). With
+    no domain known, they are someone else's.
+    """
+    if "NO_ACCESS_CONTROL" in sddl:
+        return False
+    for ace in sddl.split("(")[1:]:
+        fields = ace.split(")", 1)[0].split(";")
+        if len(fields) != 6:
+            return False
+        kind, trustee = fields[0], fields[5]
+        if kind in _DENYING_ACES or trustee in _PRIVILEGED_TRUSTEES or trustee == sid:
+            continue
+        suffix = _ACCOUNT_ABBREVIATIONS.get(trustee)
+        if suffix is None or local_domain is None or sid != f"{local_domain}{suffix}":
+            return False
+    return True
+
+
+@functools.cache
+def _local_account_domain() -> str | None:
+    """This machine's account domain SID (``S-1-5-21-a-b-c``); ``None`` when it cannot be read.
+
+    What ``LA`` stands for, less its RID: ``ConvertStringSidToSidW`` resolves an
+    SDDL abbreviation as the DACL's own text means it, so there is no second
+    rule to keep in step with SDDL's. Read in process through ``advapi32``, as
+    :func:`_dacl_sddl` reads the DACL. Cached: the machine's domain does not
+    change under a running process.
+    """
+    if sys.platform != "win32":
+        return None
+    import ctypes
+    from ctypes import wintypes
+
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    to_sid = advapi32.ConvertStringSidToSidW
+    to_sid.argtypes = [wintypes.LPCWSTR, ctypes.POINTER(ctypes.c_void_p)]
+    to_sid.restype = wintypes.BOOL
+    to_text = advapi32.ConvertSidToStringSidW
+    to_text.argtypes = [ctypes.c_void_p, ctypes.POINTER(wintypes.LPWSTR)]
+    to_text.restype = wintypes.BOOL
+    local_free = kernel32.LocalFree
+    local_free.argtypes = [ctypes.c_void_p]
+    local_free.restype = ctypes.c_void_p
+
+    binary = ctypes.c_void_p()
+    if not to_sid("LA", ctypes.byref(binary)):
+        return None
+    try:
+        text = wintypes.LPWSTR()
+        if not to_text(binary, ctypes.byref(text)):
+            return None
+        try:
+            administrator = text.value or ""
+        finally:
+            local_free(ctypes.cast(text, ctypes.c_void_p))
+    finally:
+        local_free(binary)
+    domain, _, rid = administrator.rpartition("-")
+    return domain if rid == "500" and domain.startswith("S-1-5-21-") else None
+
+
+def _dacl_sddl(path: Path) -> str | None:
+    """``path``'s DACL as SDDL, read in process; ``None`` when it cannot be read.
+
+    Through ``advapi32`` rather than ``icacls``: ``icacls <path>`` prints
+    display names, which are localised and contain spaces, and a read that
+    costs no subprocess keeps the restriction at one.
+    """
+    if sys.platform != "win32":
+        return None
+    import ctypes
+    from ctypes import wintypes
+
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    get_security = advapi32.GetNamedSecurityInfoW
+    get_security.argtypes = [
+        wintypes.LPCWSTR,  # pObjectName
+        ctypes.c_int,  # ObjectType: SE_FILE_OBJECT
+        wintypes.DWORD,  # SecurityInfo
+        ctypes.POINTER(ctypes.c_void_p),  # ppsidOwner
+        ctypes.POINTER(ctypes.c_void_p),  # ppsidGroup
+        ctypes.POINTER(ctypes.c_void_p),  # ppDacl
+        ctypes.POINTER(ctypes.c_void_p),  # ppSacl
+        ctypes.POINTER(ctypes.c_void_p),  # ppSecurityDescriptor
+    ]
+    get_security.restype = wintypes.DWORD
+    to_sddl = advapi32.ConvertSecurityDescriptorToStringSecurityDescriptorW
+    to_sddl.argtypes = [
+        ctypes.c_void_p,  # SecurityDescriptor
+        wintypes.DWORD,  # RequestedStringSDRevision
+        wintypes.DWORD,  # SecurityInformation
+        ctypes.POINTER(wintypes.LPWSTR),  # StringSecurityDescriptor
+        ctypes.POINTER(wintypes.ULONG),  # StringSecurityDescriptorLen
+    ]
+    to_sddl.restype = wintypes.BOOL
+    local_free = kernel32.LocalFree
+    local_free.argtypes = [ctypes.c_void_p]
+    local_free.restype = ctypes.c_void_p
+
+    se_file_object, dacl_security_information, sddl_revision_1 = 1, 0x4, 1
+    descriptor = ctypes.c_void_p()
+    status = get_security(
+        str(path),
+        se_file_object,
+        dacl_security_information,
+        None,
+        None,
+        None,
+        None,
+        ctypes.byref(descriptor),
+    )
+    if status != 0:
+        return None
+    try:
+        text = wintypes.LPWSTR()
+        if not to_sddl(
+            descriptor, sddl_revision_1, dacl_security_information, ctypes.byref(text), None
+        ):
+            return None
+        try:
+            return text.value
+        finally:
+            local_free(ctypes.cast(text, ctypes.c_void_p))
+    finally:
+        local_free(descriptor)
 
 
 def aisquare_home() -> Path:
@@ -180,3 +504,93 @@ def ensure_home() -> Path:
     for directory in (home, cache_dir(), log_dir()):
         directory.mkdir(parents=True, exist_ok=True)
     return home
+
+
+# --- Windows file contention ---------------------------------------------------
+#
+# Here rather than in `core.config` because it is a FILESYSTEM fact, not a
+# config one, and four modules want it: `config.load_config` and
+# `save_config`'s read of the existing file, `credentials.load_all`,
+# `state_file.read_state`, and `atomic.write_replacing`'s rename, which every
+# replace-by-rename writer shares. All four already import this module, and
+# `paths` imports nothing from `aisquare`, so it is the one place none of them
+# has to reach sideways for. `tests/test_windows_contention.py` holds each call
+# site to it.
+
+
+#: Windows error codes meaning "someone else has this file open right now":
+#: ERROR_ACCESS_DENIED and ERROR_SHARING_VIOLATION.
+_WINDOWS_BUSY = frozenset({5, 32})
+
+
+def _is_contention(exc: PermissionError) -> bool:
+    """Whether ``exc`` is Windows saying "busy" rather than "you may not".
+
+    The two sides report it DIFFERENTLY, which is worth writing down because
+    matching only the obvious one silently disables half the retry:
+
+    * ``os.replace`` raises through the Win32 layer and carries ``winerror``
+      5 or 32.
+    * ``Path.open`` raises through the C runtime, which sets ``errno`` 13 and
+      leaves ``winerror`` as **None** — measured, 122 of 122 racing reads.
+
+    A genuine "you may not read this" is indistinguishable from the second
+    form, so it is retried too and then raised unchanged. That costs ~0.9s on a
+    path that was going to fail anyway, and buys the reader case being covered
+    at all.
+    """
+    winerror = getattr(exc, "winerror", None)
+    if winerror is not None:
+        return winerror in _WINDOWS_BUSY
+    return exc.errno == errno.EACCES
+
+
+#: Backoff for :func:`despite_windows_contention`. Bounded on purpose — these
+#: are operator commands, so a slow failure is nearly as bad as a wrong one.
+#: Ten tries over ~0.9s clears the contention that actually occurs (both the
+#: read and the rename hold the file for microseconds) without turning a
+#: genuine permission problem into a hang.
+_BUSY_ATTEMPTS = 10
+_BUSY_BACKOFF_SECONDS = 0.02
+
+
+def despite_windows_contention(action: Callable[[], _T]) -> _T:
+    """Run ``action``, retrying while Windows reports the file as busy.
+
+    On POSIX this is a plain call: a rename over an existing name always
+    succeeds, and a reader that already has the file open keeps its own inode,
+    so neither side can observe the other.
+
+    NTFS shares no such guarantee, and both sides of a config write hit it:
+
+    * ``MoveFileEx`` refuses to replace a file that any other handle has open —
+      including one opened purely for reading — so a second session merely
+      READING the config failed a write with a bare ``Access is denied``.
+    * and for the width of that rename, opening the destination fails too, so
+      the reader takes an ``Access is denied`` of its own.
+
+    Measured directly, not inferred: a replace over a target held open for read
+    raises WinError 5, and a as-fast-as-possible read/write storm produces both
+    directions. The second one is the more expensive of the two, because
+    ``cli/launch.py`` treats an unreadable config as "launch untraced" by
+    design — so on Windows a config write racing a launch silently cost
+    tracing, with nothing raised anywhere to say so.
+
+    Every window here is microseconds wide, which is what makes retrying the
+    right remedy rather than a papering-over. The last failure is re-raised
+    unchanged once the attempts run out, so a genuine permission problem still
+    surfaces as itself rather than as a timeout, and the caller's
+    symlink-aware wrapping still applies.
+    """
+    if sys.platform != "win32":
+        return action()
+    for attempt in range(_BUSY_ATTEMPTS):
+        try:
+            return action()
+        except PermissionError as exc:
+            if not _is_contention(exc):
+                raise
+            if attempt == _BUSY_ATTEMPTS - 1:
+                raise
+            time.sleep(_BUSY_BACKOFF_SECONDS * (attempt + 1))
+    raise AssertionError("unreachable: the loop either returns or raises")

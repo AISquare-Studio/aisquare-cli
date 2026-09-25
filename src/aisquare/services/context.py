@@ -44,7 +44,7 @@ def add_entry(text: str, pool: Pool | None, tags: list[str]) -> ContextEntry:
         project_id: str | None = None
         if resolved == "project":
             project = active_project(store)
-            store.ensure_project(project)
+            store.onboard_project(project)  # a fact added by hand is a deliberate add (#139)
             project_id = project.id
         return store.add(new_entry(text, resolved, project_id, tags, "cli"))
 
@@ -115,7 +115,7 @@ def import_entries(file: Path) -> int:
             project_id: str | None = None
             if pool == "project":
                 if not project_ready:
-                    store.ensure_project(project)
+                    store.onboard_project(project)  # `context import` is run by hand (#139)
                     project_ready = True
                 project_id = project.id
             store.add(new_entry(item.text, pool, project_id, item.tags, "import"))

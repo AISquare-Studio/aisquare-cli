@@ -15,6 +15,12 @@ docs/plans/claude-accounts.md. Two halves, one page:
   directory and, the moment Claude Code has written a login into it, records
   the account, installs aisquare's hooks and closes the window. Nothing is
   typed for the user and nothing is written into Claude Code's files.
+- **Arranging** (#145) — each row carries *Default*, *↑*/*↓* and
+  *Disable*/*Enable*: the machine default a launch picks when nothing more
+  specific says, the priority order, and whether the slot may be picked at
+  all. They write the registry through ``services.claude_accounts`` exactly as
+  ``aisquare accounts default|move|disable`` do; the page shows the default
+  with a ★ and lists the slots in priority order.
 
 **The view holds no state that matters** (fleet-tui plan §2). The shell hands
 it a fresh ``AccountsOverview`` on every refresh; what the view owns is the
@@ -35,7 +41,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any, ClassVar, NamedTuple
 
 from rich.text import Text
 from textual import on
@@ -46,16 +52,25 @@ from textual.timer import Timer
 from textual.widgets import Button, Static
 from textual.worker import Worker, WorkerState
 
-from aisquare.cli.common import local_time
+from aisquare.cli.common import format_reset, local_time
 from aisquare.cli.ui.terminal import TerminalPane
-from aisquare.core import browser
+from aisquare.core import browser, paths
 from aisquare.core import claude_accounts as core
+from aisquare.core.store import store_session
 from aisquare.core.tmux import TmuxError, TmuxServer
-from aisquare.models import AccountsOverview, ClaudeAccount, ClaudeAccountStatus, ClaudeUsage
+from aisquare.models import (
+    AccountsOverview,
+    ClaudeAccount,
+    ClaudeAccountStatus,
+    ClaudeUsage,
+    UsageTrend,
+)
 from aisquare.services import auth as auth_service
 from aisquare.services import claude_accounts as accounts_service
-from aisquare.services import device_flow, iam
+from aisquare.services import credits as credits_service
+from aisquare.services import destinations, device_flow, iam
 from aisquare.services import fleet as fleet_service
+from aisquare.services.credits import WorkspaceCredits
 
 USAGE_SECONDS = 60.0
 """How often the usage numbers are re-fetched while the page is on screen."""
@@ -63,16 +78,37 @@ LOGIN_POLL_SECONDS = 1.0
 """How often a sign-in window's directory is checked for a landed login."""
 
 USAGE_WORKER = "accounts-usage"
+CREDITS_WORKER = "workspace-credits"
 SIGN_IN_WORKER = "aisquare-sign-in"
 SIGN_OUT_WORKER = "aisquare-sign-out"
 COMPLETE_WORKER = "claude-complete-sign-in"
 REMOVE_WORKER = "claude-remove"
+ARRANGE_WORKER = "claude-arrange"
 
 _BAR_CELLS = 5
 _WARN_AT = 50.0
 _HOT_AT = 80.0
 
 SessionReader = Callable[[], "iam.Session | None"]
+
+
+class SignOutOutcome(NamedTuple):
+    """What *Sign out* did: the keys the CLI had minted (#142), then the session."""
+
+    keys: destinations.MintedKeysForgotten
+    session: auth_service.SignedOut
+
+
+def _sign_out(session: iam.Session) -> SignOutOutcome:
+    """*Sign out*, off the UI thread: ``aisquare logout``'s two steps, in its order.
+
+    The ingest keys the CLI minted go with the sign-in that obtained them, as
+    ``logout`` takes them, and first: their revoke takes the session's Bearer.
+    This button revoked the session alone, so every minted key outlived it —
+    in its file, bound, and live on the server (review of #172).
+    """
+    keys = destinations.forget_minted_keys(session)
+    return SignOutOutcome(keys=keys, session=auth_service.sign_out(session))
 
 
 class AccountsChanged(Message):
@@ -153,15 +189,113 @@ def usage_bar(percent: float) -> Text:
     return text
 
 
-def _resets(when: datetime | None) -> str:
-    return "" if when is None else f" · resets {local_time(when):%H:%M}"
+def credits_text(readings: list[WorkspaceCredits], *, now: datetime | None = None) -> Text:
+    """One line per destination workspace (#143): ``acme [low]  run today ▮▮▮▮▯ 76% · resets …``.
 
-
-def account_line_text(status: ClaudeAccountStatus, usage: ClaudeUsage | None) -> Text:
-    """One slot: ``2  account 2  me@…  max 5x   session ▮▯▯▯▯ 3% · resets 15:29   week 7%``."""
+    The same bars as the Claude rows below — used, not remaining, so the two
+    halves of the page read alike — and ``unlimited`` where the API says ``-1``.
+    The server's band follows the name when it is not ``ok``: FIRST, because
+    the line does not wrap and the page's width cuts what comes last — as a
+    suffix it was the part a 140-column terminal never showed (review of
+    #173, round 1).
+    """
     text = Text(no_wrap=True, overflow="ellipsis")
+    for index, reading in enumerate(readings):
+        if index:
+            text.append("\n")
+        text.append(reading.workspace_name, style="bold")
+        if reading.state and reading.state != "ok":
+            tone = "bold red" if reading.state == "exhausted" else "yellow"
+            text.append(f" [{reading.state}]", style=tone)
+        text.append("  ")
+        if not reading.available:
+            text.append(f"credits: {reading.reason or 'unavailable'}", style="dim")
+            continue
+        spans: list[Text] = []
+        for pool in ("run", "build"):
+            for span, word in (("daily", "today"), ("monthly", "month")):
+                window = reading.window(pool, span)
+                if window is None:
+                    continue
+                # The label is dim, the piece is not: a style handed to
+                # ``Text(...)`` covers everything appended after it, and the
+                # bar would draw faded beside the Claude rows' bars.
+                piece = Text()
+                piece.append(f"{pool} {word} ", style="dim")
+                percent = window.percent
+                if percent is None:  # the API's -1 only; a zero allowance is a full bar
+                    piece.append("unlimited", style="dim")
+                else:
+                    piece.append_text(usage_bar(percent))
+                    piece.append(_resets(window.resets_at, now=now), style="dim")
+                spans.append(piece)
+        if spans:
+            text.append_text(Text("  ").join(spans))
+        else:
+            text.append("no pools reported", style="dim")
+    return text
+
+
+def _read_credits(session: iam.Session) -> list[WorkspaceCredits]:
+    """Off the UI thread: every destination workspace of this session's host, one reading each.
+
+    Distinct by workspace — two projects pointed at the same workspace share a
+    balance and a request. A forgotten project's destination is read too, as
+    ``doctor --live`` reads it: a launch in that root still traces into its
+    workspace. Fails open: a store that cannot be read shows no credits line,
+    and the rest of the page is untouched.
+    """
+    if not paths.db_path().exists():
+        return []
+    try:
+        with store_session() as store:
+            destinations = store.project_destinations()
+    except Exception:
+        return []
+    readings: list[WorkspaceCredits] = []
+    seen: set[int] = set()
+    for destination in destinations:
+        if destination.workspace_id in seen:
+            continue
+        reading = credits_service.for_destination(session, destination)
+        if reading is None:
+            continue  # another host than the session's: not this session's to ask
+        seen.add(destination.workspace_id)
+        readings.append(reading)
+    return readings
+
+
+def _resets(when: datetime | None, *, now: datetime | None = None) -> str:
+    """`` · resets in 3h 10m (18:00)`` — ``cli.common.format_reset``, the one formatter (#152)."""
+    return "" if when is None else f" · resets {format_reset(when, now=now)}"
+
+
+DEFAULT_BADGE = "★"
+"""Marks the machine default (#145) — the account a launch picks when nothing more specific says."""
+
+
+def account_line_text(
+    status: ClaudeAccountStatus,
+    usage: ClaudeUsage | None,
+    trend: UsageTrend | None = None,
+    *,
+    now: datetime | None = None,
+) -> Text:
+    """One slot: ``★ 2  work  me@…  max 5x   session ▮▯▯▯▯ 3% · resets 15:29   week 7%``.
+
+    The star is the default; a disabled slot says so after its label. The label
+    is the alias when there is one (``core.label``), so the row reads the way
+    the operator named it.
+    """
+    text = Text(no_wrap=True, overflow="ellipsis")
+    text.append(f"{DEFAULT_BADGE} " if status.account.is_default else "  ", style="bold green")
     text.append(f"{status.account.slot}  ", style="bold")
-    text.append(f"{status.label:<10}", style="cyan")
+    # Padded to the longest built-in label ("plain claude") plus one, so a row
+    # never runs its label into the email; an alias longer than that simply
+    # pushes the rest of the row right.
+    text.append(f"{status.label:<12} ", style="cyan")
+    if status.account.disabled:
+        text.append(" disabled ", style="dim italic")
     if status.identity is None:
         text.append("not signed in", style="dim")
         return text
@@ -181,11 +315,16 @@ def account_line_text(status: ClaudeAccountStatus, usage: ClaudeUsage | None) ->
         if usage.session_percent is not None:
             text.append("  session ", style="dim")
             text.append_text(usage_bar(usage.session_percent))
-            text.append(_resets(usage.session_resets_at), style="dim")
+            text.append(_resets(usage.session_resets_at, now=now), style="dim")
+            pace = accounts_service.describe_trend(trend)
+            if pace:
+                # Where the window is heading at the current rate (#146), from the
+                # readings this page has taken; dim, because it is a projection.
+                text.append(f" · {pace}", style="dim italic")
         if usage.week_percent is not None:
             text.append("  week ", style="dim")
             text.append_text(usage_bar(usage.week_percent))
-            text.append(_resets(usage.week_resets_at), style="dim")
+            text.append(_resets(usage.week_resets_at, now=now), style="dim")
     return text
 
 
@@ -249,18 +388,30 @@ class _ClaudeLogin:
 
 
 class AccountRow(Horizontal):
-    """One slot: its line, a *Sign in* when it has no login, a *Remove* when it is ours."""
+    """One slot: its line, then the buttons that arrange it and the two that change the machine.
+
+    *Default* makes it the machine default (hidden once it is); *↑*/*↓* move it
+    in the priority order (the end stops are disabled); *Disable*/*Enable*
+    take it out of or back into automatic selection; *Sign in* appears when it
+    has no login; *Remove* when the CLI owns the directory. Every button is a
+    command (``aisquare accounts default|move|disable|enable|run|remove``),
+    and the row shows what the shell's next frame says rather than guessing.
+    """
 
     DEFAULT_CSS = """
     AccountRow { height: auto; margin: 0 0 1 0; }
     AccountRow .account-line { width: 1fr; height: auto; padding: 1 0 0 0; }
     AccountRow Button { min-width: 10; margin: 0 0 0 1; }
+    AccountRow .arrow { min-width: 5; }
     """
 
     def __init__(self, status: ClaudeAccountStatus, *, id: str | None = None) -> None:
         super().__init__(id=id)
         self.status = status
         self.usage: ClaudeUsage | None = None
+        self.trend: UsageTrend | None = None
+        self.first = True
+        self.last = True
 
     @property
     def slot(self) -> int:
@@ -268,22 +419,48 @@ class AccountRow(Horizontal):
 
     def compose(self) -> ComposeResult:
         yield Static(account_line_text(self.status, self.usage), classes="account-line")
+        yield Button("Default", id=f"account-default-{self.slot}", variant="success")
+        yield Button("↑", id=f"account-up-{self.slot}", classes="arrow")
+        yield Button("↓", id=f"account-down-{self.slot}", classes="arrow")
+        yield Button("Disable", id=f"account-toggle-{self.slot}")
         yield Button("Sign in", id=f"account-sign-in-{self.slot}", variant="primary")
         yield Button("Remove", id=f"account-remove-{self.slot}", variant="default")
 
     def on_mount(self) -> None:
         self._paint()
 
-    def show(self, status: ClaudeAccountStatus, usage: ClaudeUsage | None) -> None:
+    def show(
+        self,
+        status: ClaudeAccountStatus,
+        usage: ClaudeUsage | None,
+        *,
+        first: bool | None = None,
+        last: bool | None = None,
+        trend: UsageTrend | None = None,
+    ) -> None:
         self.status = status
         self.usage = usage
+        self.trend = trend
+        if first is not None:
+            self.first = first
+        if last is not None:
+            self.last = last
         if self.is_mounted:
             self._paint()
 
     def _paint(self) -> None:
-        self.query_one(".account-line", Static).update(account_line_text(self.status, self.usage))
+        account = self.status.account
+        self.query_one(".account-line", Static).update(
+            account_line_text(self.status, self.usage, self.trend)
+        )
+        self.query_one(f"#account-default-{self.slot}", Button).display = not account.is_default
+        self.query_one(f"#account-up-{self.slot}", Button).disabled = self.first
+        self.query_one(f"#account-down-{self.slot}", Button).disabled = self.last
+        toggle = self.query_one(f"#account-toggle-{self.slot}", Button)
+        toggle.label = "Enable" if account.disabled else "Disable"
+        toggle.variant = "warning" if account.disabled else "default"
         self.query_one(f"#account-sign-in-{self.slot}", Button).display = not self.status.signed_in
-        self.query_one(f"#account-remove-{self.slot}", Button).display = self.status.account.managed
+        self.query_one(f"#account-remove-{self.slot}", Button).display = account.managed
 
 
 class AccountsView(Vertical):
@@ -323,11 +500,15 @@ class AccountsView(Vertical):
         self.sign_in_cwd = sign_in_cwd
         self.overview: AccountsOverview | None = None
         self.session: iam.Session | None = None
+        self._credits_for: iam.Session | None = None
+        """The session the credits line was drawn (or emptied) for."""
         self.usage: dict[int, ClaudeUsage] = {}
+        self.trends: dict[int, UsageTrend | None] = {}
         self.login: _ClaudeLogin | None = None
         self._login_timer: Timer | None = None
         self._usage_timer: Timer | None = None
         self._cancel_sign_in: threading.Event | None = None
+        self._arranging = threading.Lock()  # one registry write at a time (arrange_accounts)
         self._on_screen = False
 
     # --- layout ------------------------------------------------------------------------
@@ -336,6 +517,7 @@ class AccountsView(Vertical):
         with VerticalScroll(id="accounts-body"):
             yield Static(Text("AISquare", style="bold"), classes="section-title")
             yield Static(aisquare_status_text(None), id="aisquare-status")
+            yield Static("", id="aisquare-credits")
             yield Static("", id="aisquare-code")
             with Horizontal(classes="actions", id="aisquare-actions"):
                 yield Button("Sign in", id="aisquare-sign-in", variant="primary")
@@ -361,11 +543,11 @@ class AccountsView(Vertical):
         self._paint_aisquare()
         if self.overview is not None:
             self._paint_claude(self.overview)
-        self._usage_timer = self.set_interval(USAGE_SECONDS, self.refresh_usage)
+        self._usage_timer = self.set_interval(USAGE_SECONDS, self.refresh_readings)
 
     def on_show(self) -> None:
         self._on_screen = True
-        self.refresh_usage()
+        self.refresh_readings()
 
     def on_hide(self) -> None:
         self._on_screen = False
@@ -408,13 +590,20 @@ class AccountsView(Vertical):
     # --- data in ----------------------------------------------------------------------------
 
     def show(self, overview: AccountsOverview) -> None:
-        """A fresh frame from the shell: paint it, and re-read the AISquare session beside it."""
+        """A fresh frame from the shell: paint it, and re-read the AISquare session beside it.
+
+        A session that changed since the last frame — a ``login`` or ``logout``
+        in another terminal — re-reads the credits under the card at once
+        rather than on the next minute tick: they are that session's.
+        """
         self.overview = overview
-        self.session = self._read_session()
+        previous, self.session = self.session, self._read_session()
         if not self.is_mounted:
             return
         self._paint_aisquare()
         self._paint_claude(overview)
+        if self.session != previous:
+            self.refresh_credits()
 
     def _env_token(self) -> bool:
         """Whether ``AISQUARE_TOKEN`` is what aisquare is using — not a session this page owns."""
@@ -444,22 +633,33 @@ class AccountsView(Vertical):
         self.query_one("#claude-add", Button).disabled = not overview.claude.installed
         holder = self.query_one("#claude-rows", Vertical)
         existing = {row.slot: row for row in holder.query(AccountRow)}
+        count = len(overview.accounts)
         for index, status in enumerate(overview.accounts):
             slot = status.account.slot
             row = existing.pop(slot, None)
+            first, last = index == 0, index == count - 1
             if row is None:
                 row = AccountRow(status, id=f"account-row-{slot}")
                 row.usage = self.usage.get(slot)
+                row.trend = self.trends.get(slot)
+                row.first, row.last = first, last
                 if index < len(holder.children):
                     holder.mount(row, before=index)
                 else:
                     holder.mount(row)
             else:
-                row.show(status, self.usage.get(slot))
+                row.show(
+                    status,
+                    self.usage.get(slot),
+                    first=first,
+                    last=last,
+                    trend=self.trends.get(slot),
+                )
                 if index < len(holder.children) and holder.children[index] is not row:
                     holder.move_child(row, before=index)
         for stale in existing.values():
             self.usage.pop(stale.slot, None)
+            self.trends.pop(stale.slot, None)  # a re-used slot must not inherit a projection
             stale.remove()
 
     def rows(self) -> list[AccountRow]:
@@ -470,6 +670,18 @@ class AccountsView(Vertical):
         self.query_one("#accounts-notice", Static).update(Text(text, style=style))
 
     # --- usage (the one thing here that costs a request) ---------------------------------------
+
+    def refresh_readings(self) -> None:
+        """The page's minute tick: the Claude slots' usage and the workspaces' credits.
+
+        Two refreshes side by side, not one riding the other's tail: each has
+        its own reason to stop short (no signed-in Claude slot; no AISquare
+        session), and the credits used to inherit the usage refresh's — a
+        user signed in to AISquare with no Claude slot signed in never saw
+        them (review of #173, round 1).
+        """
+        self.refresh_usage()
+        self.refresh_credits()
 
     def refresh_usage(self) -> None:
         """Ask about every signed-in slot off the UI thread, if the page is on screen.
@@ -484,8 +696,13 @@ class AccountsView(Vertical):
         accounts = [status.account for status in self.overview.accounts if status.signed_in]
         if not accounts:
             return
+        # Each reading RECORDED (#146) with the trend it implies, so the minute
+        # tick is what builds the history the trend line reads: one concurrent
+        # round trip and one store open for every account (review of #205,
+        # finding 11 and third round). A store that cannot be written costs the
+        # trends; the readings still paint.
         self.run_worker(
-            lambda: {account.slot: accounts_service.usage(account) for account in accounts},
+            lambda: accounts_service.read_usage_with_trends(accounts),
             name=USAGE_WORKER,
             group=USAGE_WORKER,
             exclusive=True,
@@ -493,11 +710,47 @@ class AccountsView(Vertical):
             exit_on_error=False,
         )
 
-    def _show_usage(self, fetched: dict[int, ClaudeUsage]) -> None:
-        self.usage.update(fetched)
+    def refresh_credits(self) -> None:
+        """The destination workspaces' credits (#143), off the UI thread, for this session.
+
+        Called on the minute tick and whenever the session changes (a sign-in
+        or sign-out here, or a frame that read a different one). A session
+        other than the one the line was drawn for — none, or another sign-in —
+        empties the line at once and cancels a reading still in flight for the
+        previous one, on screen or not: the page keeps its line while hidden,
+        and showing it again must not put the last session's bars under this
+        session's card (review of #173, round 2). The new session's are read
+        when the page is on screen.
+        """
+        session = self.session
+        if session != self._credits_for:
+            self.workers.cancel_group(self, CREDITS_WORKER)
+            self.query_one("#aisquare-credits", Static).update("")
+            self._credits_for = session
+        if session is None or not self._on_screen:
+            return
+        self.run_worker(
+            lambda: (session, _read_credits(session)),
+            name=CREDITS_WORKER,
+            group=CREDITS_WORKER,
+            exclusive=True,
+            thread=True,
+            exit_on_error=False,
+        )
+
+    def _show_credits(self, session: iam.Session, readings: list[WorkspaceCredits]) -> None:
+        if session != self.session:
+            return  # read for a session that has since gone or changed; not this card's
+        self.query_one("#aisquare-credits", Static).update(credits_text(readings))
+
+    def _show_usage(self, fetched: dict[int, tuple[ClaudeUsage, UsageTrend | None]]) -> None:
+        for slot, (usage, trend) in fetched.items():
+            self.usage[slot] = usage
+            self.trends[slot] = trend
         for row in self.rows():
             if row.slot in fetched:
-                row.show(row.status, fetched[row.slot])
+                usage, trend = fetched[row.slot]
+                row.show(row.status, usage, trend=trend)
 
     # --- AISquare: the device flow as a card ------------------------------------------------------
 
@@ -560,8 +813,15 @@ class AccountsView(Vertical):
         if state is WorkerState.SUCCESS and isinstance(worker.result, iam.Session):
             self.session = worker.result
             who = self.session.email or self.session.sub or "you"
-            self._notice(f"✓ Signed in to AISquare as {who}", "ok")
+            if self.session.unrestricted:
+                # The service warns on stderr, which Textual captures while it runs.
+                self._notice(
+                    f"✓ Signed in to AISquare as {who}, but {iam.unrestricted_warning()}", "warn"
+                )
+            else:
+                self._notice(f"✓ Signed in to AISquare as {who}", "ok")
             self.post_message(AccountsChanged())
+            self.refresh_credits()  # the new session's workspaces, not a minute from now
         elif state is WorkerState.ERROR:
             error = worker.error
             if isinstance(error, iam.IamError) and error.code == "cancelled":
@@ -579,7 +839,7 @@ class AccountsView(Vertical):
             return
         self.query_one("#aisquare-sign-out", Button).disabled = True
         self.run_worker(
-            lambda: auth_service.sign_out(session),
+            lambda: _sign_out(session),
             name=SIGN_OUT_WORKER,
             group=SIGN_OUT_WORKER,
             exclusive=True,
@@ -589,17 +849,25 @@ class AccountsView(Vertical):
 
     def _sign_out_finished(self, worker: Worker[Any], state: WorkerState) -> None:
         self.session = self._read_session()
-        if state is WorkerState.SUCCESS:
-            revoked = bool(worker.result)
-            self._notice(
-                "✓ Signed out of AISquare"
-                + ("" if revoked else " (locally — the server could not be reached to revoke)"),
-                "ok",
+        if state is WorkerState.SUCCESS and isinstance(worker.result, SignOutOutcome):
+            outcome = worker.result.session
+            said = "✓ Signed out of AISquare" + (
+                "" if outcome.revoked else " (locally — the server could not be reached to revoke)"
             )
+            tone = "ok"
+            if not outcome.restricted:
+                # As for a sign-in: the service warns on stderr, which Textual captures.
+                said, tone = f"{said}, but {iam.unrestricted_warning(signed_out=True)}", "warn"
+            owed = worker.result.keys.revocations.owed
+            if owed:
+                said = f"{said}; {destinations.describe_owed(owed)} — {destinations.REVOKE_RETRY}"
+                tone = "warn"
+            self._notice(said, tone)
             self.post_message(AccountsChanged())
         elif state is WorkerState.ERROR:
             self._notice(f"✗ sign-out failed: {worker.error}", "error")
         self._paint_aisquare()
+        self.refresh_credits()
 
     # --- Claude Code: a sign-in window, watched --------------------------------------------------
 
@@ -615,6 +883,77 @@ class AccountsView(Vertical):
         elif button_id.startswith("account-remove-"):
             event.stop()
             self.remove_claude_account(int(button_id.rsplit("-", 1)[1]))
+        elif button_id.startswith("account-default-"):
+            event.stop()
+            slot = int(button_id.rsplit("-", 1)[1])
+            self.arrange_accounts(
+                lambda: accounts_service.set_default(str(slot)),
+                done=f"✓ slot {slot} is the machine default",
+            )
+        elif button_id.startswith("account-up-") or button_id.startswith("account-down-"):
+            event.stop()
+            slot = int(button_id.rsplit("-", 1)[1])
+            direction: accounts_service.Direction = (
+                "up" if button_id.startswith("account-up-") else "down"
+            )
+            self.arrange_accounts(
+                lambda: accounts_service.move(str(slot), direction),
+                done=f"✓ slot {slot} moved {direction} in the priority order",
+            )
+        elif button_id.startswith("account-toggle-"):
+            event.stop()
+            slot = int(button_id.rsplit("-", 1)[1])
+            current = next((r for r in self.rows() if r.slot == slot), None)
+            disabling = current is None or not current.status.account.disabled
+            outcome = "disabled — never picked automatically" if disabling else "enabled"
+            self.arrange_accounts(
+                lambda: accounts_service.set_disabled(str(slot), disabling),
+                done=f"✓ slot {slot} {outcome}",
+            )
+
+    # --- arranging (#145): default, order, disabled ----------------------------------------------
+
+    def arrange_accounts(self, change: Callable[[], object], *, done: str) -> None:
+        """Run one registry write off the UI thread, then let the shell re-read the page.
+
+        The write is a local SQLite statement, but the store's busy timeout is
+        seconds, not milliseconds, and a wedged ``context.db`` must not freeze
+        the UI — so it runs as a thread worker like *Remove* does. The row is
+        NOT updated optimistically: the shell's next frame (``AccountsChanged``)
+        is what the page shows, so what the operator sees is what was written.
+
+        ``done`` travels WITH the work, as the worker's result: kept on the page,
+        a second click overwrote it before the first worker reported — a thread
+        worker ``exclusive`` cancels still finishes — and the notice named the
+        wrong action (review of #205, fourth round).
+
+        One write at a time, and every one reported. ``exclusive`` cancelled the
+        earlier worker on paper only, since a thread cannot be stopped: two
+        quick ▲ clicks ran two read-then-write ``move`` calls at once and one
+        step was lost, and the cancelled worker's notice never showed (review of
+        the #205 fold, round 1). The lock takes the writes in turn instead, and
+        each worker reports its own ``done``.
+        """
+
+        def work() -> str:
+            with self._arranging:
+                change()
+            return done
+
+        self.run_worker(
+            work,
+            name=ARRANGE_WORKER,
+            group=ARRANGE_WORKER,
+            thread=True,
+            exit_on_error=False,
+        )
+
+    def _arrange_finished(self, worker: Worker[Any], state: WorkerState) -> None:
+        if state is WorkerState.SUCCESS and isinstance(worker.result, str):
+            self._notice(worker.result, "ok")
+        elif state is WorkerState.ERROR:
+            self._notice(f"✗ {worker.error}", "error")
+        self.post_message(AccountsChanged())
 
     def begin_claude_sign_in(self, slot: int | None) -> None:
         """Open Claude Code on ``slot`` (a fresh slot when ``None``) in a pane, watched."""
@@ -738,8 +1077,13 @@ class AccountsView(Vertical):
         if self.login is not None and self.login.account.slot == slot:
             self._notice("✗ finish or cancel the sign-in below first", "error")
             return
+
+        def remove_with_notes() -> tuple[Path, list[str]]:
+            notes: list[str] = []  # what happened to bindings that named the slot
+            return accounts_service.remove(account, notes=notes), notes
+
         self.run_worker(
-            lambda: accounts_service.remove(account),
+            remove_with_notes,
             name=REMOVE_WORKER,
             group=REMOVE_WORKER,
             thread=True,
@@ -747,11 +1091,14 @@ class AccountsView(Vertical):
         )
 
     def _remove_finished(self, worker: Worker[Any], state: WorkerState) -> None:
-        if state is WorkerState.SUCCESS and isinstance(worker.result, Path):
-            self._notice(
-                f"✓ removed — its directory is kept at {worker.result}; delete it when sure",
-                "ok",
-            )
+        if state is WorkerState.SUCCESS and isinstance(worker.result, tuple):
+            moved, notes = worker.result
+            line = f"✓ removed — its directory is kept at {moved}; delete it when sure"
+            if (
+                notes
+            ):  # a role binding re-pointed or cleared: the operator must hear it (third round)
+                line += " · " + " · ".join(notes)
+            self._notice(line, "warn" if notes else "ok")
         elif state is WorkerState.ERROR:
             self._notice(f"✗ {worker.error}", "error")
         self.post_message(AccountsChanged())
@@ -765,6 +1112,9 @@ class AccountsView(Vertical):
         if worker.name == USAGE_WORKER:
             if state is WorkerState.SUCCESS and isinstance(worker.result, dict):
                 self._show_usage(worker.result)
+        elif worker.name == CREDITS_WORKER:
+            if state is WorkerState.SUCCESS and isinstance(worker.result, tuple):
+                self._show_credits(*worker.result)
         elif worker.name == SIGN_IN_WORKER:
             self._sign_in_finished(worker, state)
         elif worker.name == SIGN_OUT_WORKER:
@@ -773,3 +1123,5 @@ class AccountsView(Vertical):
             self._complete_finished(worker, state)
         elif worker.name == REMOVE_WORKER:
             self._remove_finished(worker, state)
+        elif worker.name == ARRANGE_WORKER:
+            self._arrange_finished(worker, state)

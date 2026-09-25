@@ -42,8 +42,10 @@ import pytest
 from typer.testing import CliRunner
 
 from aisquare.cli.app import app
+from aisquare.core.config import AppConfig, load_config, save_config
 from aisquare.services import explainability as service
 from aisquare.services import explainability_ops as ops
+from tests.fsperms import can_deny_reads
 
 SOURCE = Path(service.__file__)
 OPS_SOURCE = Path(ops.__file__)
@@ -129,6 +131,86 @@ def test_the_default_variable_still_counts_when_no_target_names_another(
     monkeypatch.setenv(service.KEY_ENV_VAR, "-".join(["not", "a", "real", "env", "key"]))
 
     assert service.shipping_offer().has_key is True
+
+
+def test_a_key_file_that_is_not_utf8_is_no_key_and_crashes_nothing(
+    isolated_home: Path, monkeypatch: pytest.MonkeyPatch, runner: CliRunner
+) -> None:
+    """The machine key file's readers caught ``OSError`` alone, and ``UnicodeDecodeError``
+    is a ``ValueError``. A key file written as UTF-16 (PowerShell 5.1's ``>``; the docs
+    say to write it by hand) rose out of ``resolve_target``, and ``doctor``,
+    ``explainability status`` and the shipper, which never raises, all ended in a
+    traceback (final review of #203, EX5). It holds no key, as a project's key file that
+    is not UTF-8 does not."""
+    runner.invoke(app, ["init", "--yes"], catch_exceptions=False)
+    monkeypatch.delenv(service.KEY_ENV_VAR, raising=False)
+    service.key_path().write_bytes(_FAKE_FILE_KEY.encode("utf-16"))
+
+    assert (service.stored_api_key(), service.resolve_api_key()) == (None, None)
+    resolved = ops.resolve_target(load_config().explainability)
+    assert (resolved.api_key, resolved.key_source) == (None, "unset")
+    assert service.shipping_state().has_key is False
+    for argv in (["doctor"], ["explainability", "status"]):
+        result = runner.invoke(app, argv)
+        assert result.exception is None or isinstance(result.exception, SystemExit), (
+            argv,
+            repr(result.exception),
+        )
+
+
+def test_a_key_file_that_holds_no_key_is_named_where_the_key_is_said_missing(
+    isolated_home: Path, monkeypatch: pytest.MonkeyPatch, runner: CliRunner
+) -> None:
+    """Read as no key, the file went unmentioned. The doctor told the operator who wrote it
+    to export ``$EXPLAINABILITY_API_KEY`` ("the CLI reads it from the environment and
+    never stores it"), and ``status`` said only that the variable is not set (review of
+    the #203 final-review fixes, EX5a). Both name the file and what is wrong with it."""
+    config = AppConfig()
+    config.explainability.enabled = True
+    config.explainability.gateway_url = "https://explainability-api.aisquare.studio"
+    save_config(config)
+    monkeypatch.delenv(service.KEY_ENV_VAR, raising=False)
+    service.key_path().write_bytes(_FAKE_FILE_KEY.encode("utf-16"))
+    said = f"{service.key_path()} (holds no key: blank, not UTF-8, or unreadable)"
+
+    row = {check.name: check for check in ops.checks()}["explainability config"]
+    assert f"{service.key_path()} holds no key (blank, not UTF-8, or unreadable)" in row.detail
+    assert f"Write the workspace key into {service.key_path()} again" in (row.fix or ""), row
+    assert "never stores it" not in (row.fix or ""), row
+    status = runner.invoke(app, ["explainability", "status"])
+    assert f"key:      {said} is NOT set" in status.output, status.output
+
+    service.key_path().unlink()  # no file: the variable is the thing to set, as before
+    assert ops.resolve_target(load_config().explainability).key_origin == "$EXPLAINABILITY_API_KEY"
+
+
+@pytest.mark.skipif(
+    not can_deny_reads(), reason="chmod(0) denies nothing here (root, or NTFS where it is advice)"
+)
+def test_a_key_file_this_user_cannot_read_is_said_to_be_unreadable(
+    isolated_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``stored_api_key`` reads a file it cannot open as no key, as it reads one that is not
+    UTF-8, and the doctor said only "blank, or not UTF-8" and to write it again as UTF-8
+    text: a key file left by ``sudo`` with ``HOME`` kept, or by a ``chmod``, holds a good
+    key its owner would rewrite for nothing (review of the #203 final-review fixes, round
+    2, F5). Unreadable is named, and the fix says the file must be one this user can
+    read."""
+    config = AppConfig()
+    config.explainability.enabled = True
+    config.explainability.gateway_url = "https://explainability-api.aisquare.studio"
+    save_config(config)
+    monkeypatch.delenv(service.KEY_ENV_VAR, raising=False)
+    service.store_api_key(_FAKE_FILE_KEY)
+    service.key_path().chmod(0)
+    try:
+        resolved = ops.resolve_target(load_config().explainability)
+        row = {check.name: check for check in ops.checks()}["explainability config"]
+    finally:
+        service.key_path().chmod(0o600)
+    assert resolved.key_origin.endswith("or unreadable)"), resolved.key_origin
+    assert "or unreadable)" in row.detail, row
+    assert "as UTF-8 text this user can read" in (row.fix or ""), row
 
 
 #: Allowed to resolve a key. ``resolve_target`` (in ``explainability_ops``, and
@@ -293,7 +375,7 @@ def test_the_guard_actually_inspects_something() -> None:
 #: ``probe_ingest``, ``register_roster`` and ``_check_config`` all do it and are
 #: correct. Accusing them would be the too-broad rule this file already
 #: committed once, when it conflated NAMING the key file with READING it.
-_OPS_MAY_RESOLVE_KEY = {"resolve_target"}
+_OPS_MAY_RESOLVE_KEY = {"resolve_target", "_project_api_key"}
 
 
 def _resolves_from_a_named_variable(node: ast.FunctionDef) -> bool:
@@ -313,6 +395,25 @@ def _resolves_from_a_named_variable(node: ast.FunctionDef) -> bool:
             and any(
                 isinstance(arg, ast.Attribute) and arg.attr == "api_key_env" for arg in inner.args
             )
+        ):
+            return True
+        # The project's key (#141): its file is read by `_project_api_key`, which only
+        # `resolve_target` may call; reading `key_path` off a binding anywhere else, or
+        # calling the reader, is a second resolver.
+        if (
+            isinstance(inner, ast.Call)
+            and isinstance(inner.func, ast.Name)
+            and inner.func.id == "_project_api_key"
+            and node.name != "resolve_target"
+        ):
+            return True
+        if (
+            isinstance(inner, ast.Call)
+            and isinstance(inner.func, ast.Attribute)
+            and inner.func.attr in ("read_text", "read_bytes", "open")
+            and isinstance(inner.func.value, ast.Attribute)
+            and inner.func.value.attr == "key_path"
+            and node.name != "_project_api_key"
         ):
             return True
     return False
@@ -380,3 +481,42 @@ def test_the_ops_walk_inspects_something_and_the_rule_can_match() -> None:
     assert _resolves_from_a_named_variable(
         next(n for n in functions if n.name == "resolve_target")
     ), "the ops rule no longer matches the resolver itself, so it matches nothing"
+
+
+#: The project key's two shapes (#141), each written where the rule must accuse
+#: it and where it must not. Parsed, never imported.
+_PROJECT_KEY_SHAPES = """
+def calls_the_reader(project_id):
+    return _project_api_key(project_id, "stg")
+
+def reads_a_bindings_file(binding):
+    return binding.key_path.read_text(encoding="utf-8")
+
+def resolve_target(settings, name=None, *, project_id=None):
+    return _project_api_key(project_id, name)
+
+def _project_api_key(project_id, target_name):
+    return project_key_binding(project_id).key_path.read_text(encoding="utf-8")
+"""
+
+
+def test_the_project_key_shapes_are_matched_outside_the_resolver_and_only_there() -> None:
+    """Guard the guard for the project's key (review of #170).
+
+    The rule gained two branches — a call to ``_project_api_key`` outside
+    ``resolve_target``, and a read of a binding's ``key_path`` outside the
+    reader — and the only positive control above still matched through the old
+    ``environ.get`` shape, so a typo in either branch (``"keypath"``) passed
+    silently. Each shape is accused where it is a second resolver and excused
+    in the one function allowed to do it.
+    """
+    functions = {
+        node.name: node
+        for node in ast.parse(_PROJECT_KEY_SHAPES).body
+        if isinstance(node, ast.FunctionDef)
+    }
+
+    assert _resolves_from_a_named_variable(functions["calls_the_reader"])
+    assert _resolves_from_a_named_variable(functions["reads_a_bindings_file"])
+    assert not _resolves_from_a_named_variable(functions["resolve_target"])
+    assert not _resolves_from_a_named_variable(functions["_project_api_key"])

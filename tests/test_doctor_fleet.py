@@ -21,7 +21,7 @@ import os
 import re
 import shutil
 from collections.abc import Iterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -43,6 +43,7 @@ from aisquare.services import diagnostics
 from aisquare.services import fleet as fleet_service
 from aisquare.services import team as team_service
 from aisquare.services.onboarding import fix_commands
+from tests.fsperms import can_symlink
 
 # --- fakes and seeds -------------------------------------------------------------------
 
@@ -77,22 +78,30 @@ class FakeServer(TmuxServer):
         *,
         present: bool = True,
         version: tuple[int, int] | None = (3, 7),
+        running: tuple[int, int] | None = None,
         sessions: tuple[str, ...] = (),
         panes: dict[str, PaneFacts | None] | None = None,
         socket: str = "asq",
         version_raises: bool = False,
         facts_raise: bool = False,
         absent: bool = False,
+        started: datetime | None = None,
     ) -> None:
         super().__init__(socket, conf=Path("/nonexistent/fleet-tmux.conf"))
         self._present = present
+        self._started = started
+        """What ``#{start_time}`` answers; ``None`` — tmux did not say — judges nothing."""
         self._absent = absent
         self._version = version
+        self._running = running
+        """The running server's own version; ``None``: the binary's (no upgrade under it)."""
         self._sessions = sessions
         self._panes = panes or {}
         self._version_raises = version_raises
         self._facts_raise = facts_raise
         self.asked: list[str] = []
+        self.scripted: dict[tuple[str, ...], str] = {}
+        """Scripted ``run`` output by argv — the fleet-terminal row's server questions (#147)."""
 
     def binary(self) -> str:
         if not self._present:
@@ -108,6 +117,10 @@ class FakeServer(TmuxServer):
             raise RuntimeError("tmux -V hung")
         return self._version
 
+    def server_version(self) -> tuple[int, int] | None:
+        self.asked.append("server_version")
+        return self._running if self._running is not None else self._version
+
     def list_sessions(self) -> list[str]:
         self.asked.append("list_sessions")
         return list(self._sessions)
@@ -121,6 +134,16 @@ class FakeServer(TmuxServer):
         if self._facts_raise:
             raise TmuxError("unexpected display-message output")
         return self._panes.get(pane_id)
+
+    def started_at(self) -> datetime | None:
+        self.asked.append("started_at")
+        return self._started
+
+    def run(self, *args: str, stdin: bytes | None = None) -> str:
+        self.asked.append(" ".join(args))
+        if args in self.scripted:
+            return self.scripted[args]
+        raise TmuxError(f"unscripted: {' '.join(args)}")
 
 
 def _agent(
@@ -256,11 +279,16 @@ def test_tmux_too_old_warns_with_the_minimum_and_an_install_hint() -> None:
 
 
 def test_tmux_below_the_recommended_version_is_ok_but_says_what_is_missing() -> None:
+    """What is missing below 3.5 is the shifted chords, not shift+enter: that one
+    travels as ctrl+j there (#147). The row said "3.5+ adds Shift+Enter", beside
+    the fleet terminal row saying the opposite (review of #203, round 1 of the
+    terminal-ux fold)."""
     older = diagnostics._check_tmux(FakeServer(version=(3, 3)))
     current = diagnostics._check_tmux(FakeServer(version=(3, 7)))
 
-    assert older.status is CheckStatus.ok and "Shift+Enter" in older.detail
-    assert current.status is CheckStatus.ok and "Shift+Enter" not in current.detail
+    assert older.status is CheckStatus.ok and "3.5+ carries the shifted chords" in older.detail
+    assert "shift+enter travels as ctrl+j" in older.detail, older.detail
+    assert current.status is CheckStatus.ok and "ctrl+j" not in current.detail
 
 
 def test_tmux_with_an_unreadable_version_fails_open_and_says_so() -> None:
@@ -492,6 +520,33 @@ def test_fleet_check_warns_when_a_live_row_has_no_pane(home: Path, tmp_path: Pat
     assert check.fix and "aisquare fleet reap" in check.fix
 
 
+def test_fleet_check_counts_a_row_older_than_its_server_as_gone(home: Path, tmp_path: Path) -> None:
+    """Review of the #203 final-round fixes, F4: the check asked tmux about a row's pane
+    by id alone. After a reboot the next server hands the same ids out again, so a row
+    that outlived its server counted as a healthy pane (another agent's) while
+    ``fleet ls`` read it ``✗ lost``, and the ``reap`` that records it was never
+    prescribed. A row written after the server started is the control."""
+    project = _seed(tmp_path / "repo")
+    now = datetime.now(tz=UTC)
+    stale = _agent(project.id, "manager", "%1").model_copy(
+        update={"created_at": now - timedelta(hours=1)}
+    )
+    _seed(tmp_path / "repo", stale, _agent(project.id, "coder-1", "%2"))
+    server = FakeServer(
+        sessions=("asq-amber-otter",),
+        panes={"%1": _facts("%1"), "%2": _facts("%2")},
+        started=now - timedelta(minutes=10),
+    )
+
+    check = diagnostics._check_fleet(lambda socket: server)
+
+    assert check.status is CheckStatus.warn
+    assert "1 recorded live but the tmux pane is gone" in check.detail
+    assert "manager" in check.detail and "coder-1" not in check.detail
+    assert check.fix and "aisquare fleet reap --all" in check.fix
+    assert server.asked.count("started_at") == 1  # once per socket, not per row
+
+
 def test_fleet_check_reads_empty_facts_as_a_gone_pane(home: Path, tmp_path: Path) -> None:
     """tmux 3.7c answers a vanished target with exit 0 and every field empty (measured)."""
     project = _seed(tmp_path / "repo")
@@ -618,7 +673,15 @@ def test_fleet_check_caps_the_labels_it_lists(home: Path, tmp_path: Path) -> Non
     assert check.status is CheckStatus.warn
     assert "9 recorded live" in check.detail
     assert "+3 more" in check.detail
-    assert "coder-9" not in check.detail
+    # HOW MANY are listed, not WHICH. All nine rows are written inside the same
+    # millisecond, and an id is a millisecond stamp plus random bits, so the
+    # order among them is undefined — `coder-9` lands inside the cap about as
+    # often as any other, and Windows shows it most because its clock is
+    # coarsest. Naming one label asserted the tie-break, not the cap; the cap is
+    # what this test is about, and `+3 more` above already pins the remainder.
+    listed = re.findall(r"coder-\d+", check.detail)
+    assert len(listed) == 6, check.detail
+    assert len(set(listed)) == 6, f"a label was listed twice: {check.detail}"
 
 
 def test_fleet_check_fails_open_on_a_damaged_store(home: Path) -> None:
@@ -857,6 +920,8 @@ def test_doctor_without_cwd_means_the_process_cwd(
 
 
 def test_claude_version_from_the_native_installer_layout(tmp_path: Path) -> None:
+    if not can_symlink():  # pragma: no cover - a privilege CI holds, a laptop does not
+        pytest.skip("this machine cannot create symlinks (needs privilege on Windows)")
     target = tmp_path / "share" / "claude" / "versions" / "2.1.250"
     target.parent.mkdir(parents=True)
     target.write_bytes(b"\x7fELF")
@@ -868,6 +933,8 @@ def test_claude_version_from_the_native_installer_layout(tmp_path: Path) -> None
 
 
 def test_claude_version_from_an_npm_layout(tmp_path: Path) -> None:
+    if not can_symlink():  # pragma: no cover - a privilege CI holds, a laptop does not
+        pytest.skip("this machine cannot create symlinks (needs privilege on Windows)")
     package = tmp_path / "lib" / "node_modules" / "@anthropic-ai" / "claude-code"
     package.mkdir(parents=True)
     (package / "cli.js").write_text("#!/usr/bin/env node\n", encoding="utf-8")
@@ -1066,6 +1133,8 @@ def test_a_symlinked_home_is_a_directory_home(
 ) -> None:
     """The shape the ``is_dir()`` test must NOT accuse: ``ensure_home`` follows a
     link to a directory and everything works, so the check has to agree."""
+    if not can_symlink():  # pragma: no cover - a privilege CI holds, a laptop does not
+        pytest.skip("this machine cannot create symlinks (needs privilege on Windows)")
     target = tmp_path / "real-home"
     target.mkdir()
     link = tmp_path / "linked-home"
@@ -1076,3 +1145,291 @@ def test_a_symlinked_home_is_a_directory_home(
 
     assert rows["home"].status is CheckStatus.ok, rows["home"]
     assert rows["database"].status is CheckStatus.ok, rows["database"]
+
+
+# --- the fleet terminal row (#147) -------------------------------------------------------------
+
+
+def _terminal_row(server: FakeServer, env: dict[str, str]) -> DoctorCheck:
+    return diagnostics._check_fleet_terminal(server, env)
+
+
+def test_the_fleet_terminal_row_names_the_outer_terminal_tmux_and_the_server() -> None:
+    server = FakeServer(version=(3, 7), absent=False)
+    server.scripted = {
+        ("show-options", "-gv", "prefix"): "None\n",
+        ("show-environment", "-g"): "DISPLAY=:1\nWAYLAND_DISPLAY=wayland-0\n-SSH_AUTH_SOCK\n",
+    }
+    env = {"KITTY_WINDOW_ID": "3", "DISPLAY": ":1", "WAYLAND_DISPLAY": "wayland-0"}
+
+    check = _terminal_row(server, env)
+
+    assert check.name == "fleet terminal" and check.status is CheckStatus.ok
+    assert "outer terminal kitty (kitty keyboard protocol" in check.detail
+    assert "tmux 3.7 carries extended keys" in check.detail
+    assert "server prefix None" in check.detail and "stale" not in check.detail
+
+
+def test_the_fleet_terminal_row_names_the_running_servers_tmux_not_the_binary_on_path() -> None:
+    """Final review of #203, F2. The keys cross the running server, which parses them,
+    and after an in-place upgrade it still runs the binary it started with. The row
+    read ``tmux -V`` and said "tmux 3.7 carries extended keys" over a 3.4 server,
+    which types ``S-Enter`` out and to which the pane now sends ctrl+j."""
+    server = FakeServer(version=(3, 7), running=(3, 4), absent=False)
+    server.scripted = {
+        ("show-options", "-gv", "prefix"): "None\n",
+        ("show-environment", "-g"): "",
+    }
+
+    check = _terminal_row(server, {"KITTY_WINDOW_ID": "3"})
+
+    assert check.status is CheckStatus.ok
+    assert "tmux 3.4 has no extended keys" in check.detail and "ctrl+j" in check.detail
+    assert "carries extended keys" not in check.detail
+    assert "this shell's tmux is 3.7; the running server keeps 3.4 until it restarts" in (
+        check.detail
+    )
+
+
+def test_the_fleet_terminal_row_warns_about_a_kept_prefix_and_lists_stale_vars() -> None:
+    server = FakeServer(version=(3, 4), absent=False)
+    server.scripted = {
+        ("show-options", "-gv", "prefix"): "C-b\n",
+        ("show-environment", "-g"): "DISPLAY=:0\n-WAYLAND_DISPLAY\nSSH_AUTH_SOCK=/old\n",
+    }
+    env = {
+        "VTE_VERSION": "7800",
+        "DISPLAY": ":1",
+        "WAYLAND_DISPLAY": "wayland-1",
+        "SSH_AUTH_SOCK": "/old",
+        "COLORTERM": "truecolor",
+    }
+
+    check = _terminal_row(server, env)
+
+    assert check.status is CheckStatus.warn
+    assert "a VTE terminal" in check.detail and "no kitty keyboard protocol" in check.detail
+    assert "tmux 3.4 has no extended keys" in check.detail and "ctrl+j" in check.detail
+    assert "stale on the running server: DISPLAY, WAYLAND_DISPLAY, COLORTERM" in check.detail
+    assert "SSH_AUTH_SOCK" not in check.detail.split("stale on the running server:")[1]
+    assert "still has prefix C-b" in check.detail
+    assert check.fix and "kill-server" in check.fix and "background-tasks" in check.fix
+
+
+def test_the_fleet_terminal_row_never_starts_a_server_and_survives_an_unknown_terminal() -> None:
+    server = FakeServer(version=(3, 7), absent=True)  # no server: nothing is asked of one
+
+    check = _terminal_row(server, {"TERM": "xterm-256color"})
+
+    assert check.status is CheckStatus.ok
+    assert "outer terminal unknown (TERM=xterm-256color) (protocol unknown" in check.detail
+    assert "fleet server not running" in check.detail
+    assert not any(q.startswith("show-") for q in server.asked), server.asked
+
+    missing = FakeServer(present=False)
+    assert "tmux not installed" in _terminal_row(missing, {}).detail
+    broken = FakeServer(version_raises=True, absent=False)
+    assert _terminal_row(broken, {}).status is CheckStatus.ok  # fails open, named
+    assert "not evaluated" in _terminal_row(broken, {}).detail
+    inside = _terminal_row(FakeServer(absent=True), {"TMUX": "/tmp/tmux-1000/default,1,0"})
+    assert "inside tmux" in inside.detail
+    assert "fleet terminal" in _by_name(diagnostics.doctor()), "it reaches the real doctor"
+
+
+def test_the_fleet_terminal_row_comes_after_the_actionable_checks() -> None:
+    """It can warn (a server's kept prefix), and the fleet sidebar shows only the
+    first three not-ok rows in doctor order (``DOCTOR_LINES``): inserted beside
+    tmux, as #147 had it, that warning evicted one of brain / snapshot / a
+    logged-out gh — the rows an operator can act on — from the one doctor
+    surface visible without a click. So it waits with browser tools."""
+    names = [check.name for check in diagnostics.doctor()]
+    terminal = names.index("fleet terminal")
+    for actionable in ("gh", "snapshot", "brain", "fleet"):
+        assert names.index(actionable) < terminal, (actionable, names)
+    assert names.index("browser tools") < terminal, names
+
+
+@pytest.mark.parametrize(
+    ("env", "name", "kitty"),
+    [
+        ({"KITTY_WINDOW_ID": "1"}, "kitty", True),
+        ({"GHOSTTY_RESOURCES_DIR": "/x"}, "ghostty", True),
+        ({"WEZTERM_EXECUTABLE": "/x"}, "wezterm", True),
+        ({"WT_SESSION": "x"}, "Windows Terminal", False),
+        ({"TERM_PROGRAM": "iTerm.app"}, "iTerm2", False),
+        ({"TERM_PROGRAM": "vscode"}, "the VS Code terminal", False),
+        ({"TERM_PROGRAM": "Apple_Terminal"}, "Terminal.app", False),
+        ({"VTE_VERSION": "7800"}, "a VTE terminal (GNOME Terminal, Tilix, …)", False),
+        ({"TERM": "xterm-kitty"}, "kitty", True),
+        ({"TERM": "foot"}, "foot", True),
+        ({"TERM": "alacritty"}, "alacritty", True),
+        ({}, "unknown", None),
+    ],
+)
+def test_outer_terminal_recognition(env: dict[str, str], name: str, kitty: bool | None) -> None:
+    assert diagnostics.outer_terminal(env) == (name, kitty)
+
+
+# --- the dead-manager line (#138) --------------------------------------------------------
+
+
+def test_doctor_names_a_project_whose_manager_exited_while_its_agents_run(
+    home: Path, tmp_path: Path
+) -> None:
+    """The wake-ups coders send target that manager and land nowhere; one warning
+    names the project and the command that brings it back with its session."""
+    project = _seed(tmp_path / "repo")
+    manager = _agent(project.id, "manager", "%1", ended=True).model_copy(update={"role": "manager"})
+    _seed(tmp_path / "repo", manager, _agent(project.id, "coder-1", "%2"))
+
+    [check] = diagnostics._check_dead_managers()
+
+    assert check.name == "fleet-manager" and check.status is CheckStatus.warn
+    assert "the manager exited while agents are still running in: repo" in check.detail
+    assert "1 agent(s) still running" in check.detail
+    assert check.fix and "aisquare fleet restart manager --project <name>" in check.fix
+    assert "Restart on its row" in check.fix
+    assert "fleet-manager" in _by_name(diagnostics.doctor()), "it reaches the real doctor"
+
+
+def test_the_dead_manager_line_is_silent_for_every_other_shape(home: Path, tmp_path: Path) -> None:
+    """Negative controls: a live manager, a whole fleet that ended, a project that never
+    had a manager, and no fleet at all. Only "manager gone, agents left" is the shape."""
+    alive = _seed(tmp_path / "alive")
+    _seed(
+        tmp_path / "alive",
+        _agent(alive.id, "manager", "%1").model_copy(update={"role": "manager"}),
+        _agent(alive.id, "coder-1", "%2"),
+    )
+    finished = _seed(tmp_path / "finished")
+    _seed(
+        tmp_path / "finished",
+        _agent(finished.id, "manager", "%3", ended=True).model_copy(update={"role": "manager"}),
+        _agent(finished.id, "coder-1", "%4", ended=True),
+    )
+    headless_by_design = _seed(tmp_path / "solo")
+    _seed(tmp_path / "solo", _agent(headless_by_design.id, "coder-1", "%5"))
+    _seed(tmp_path / "empty")
+
+    assert diagnostics._check_dead_managers() == []
+
+
+def test_the_dead_manager_line_never_creates_the_home(isolated_home: Path) -> None:
+    assert not isolated_home.exists()
+    assert diagnostics._check_dead_managers() == []
+    assert not isolated_home.exists(), "doctor must not create the home it reports on"
+
+
+# --- the projects line (#139) -------------------------------------------------------------------
+
+
+def test_doctor_counts_the_captured_directories_it_hides(home: Path, tmp_path: Path) -> None:
+    from aisquare.models import ProjectInfo
+
+    assert diagnostics._check_captured_projects() == []  # nothing captured: silent
+    with store_session() as store:
+        store.onboard_project(ProjectInfo(id="prj_shown", root=tmp_path / "shown"))
+        store.ensure_project(ProjectInfo(id="prj_one", root=tmp_path / "one"))
+        store.ensure_project(ProjectInfo(id="prj_two", root=tmp_path / "two"))
+
+    [check] = diagnostics._check_captured_projects()
+
+    assert check.name == "projects" and check.status is CheckStatus.ok
+    assert check.detail.startswith("2 captured directories hidden")
+    assert "project list --all" in check.detail and "prune --captured-only" in check.detail
+    assert "projects" in _by_name(diagnostics.doctor()), "it reaches the real doctor"
+
+
+def test_the_projects_line_never_creates_the_home(isolated_home: Path) -> None:
+    assert not isolated_home.exists()
+    assert diagnostics._check_captured_projects() == []
+    assert not isolated_home.exists()
+
+
+# --- resumable exited agents (#144) -------------------------------------------------------------
+
+
+def test_doctor_counts_the_exited_agents_a_restart_would_resume(home: Path, tmp_path: Path) -> None:
+    from aisquare.models import TeamSession
+
+    project = _seed(tmp_path / "repo")
+    now = datetime.now(tz=UTC)
+    on_disk = tmp_path / "t1.jsonl"
+    on_disk.write_text("{}\n", encoding="utf-8")
+    resumable = _agent(project.id, "coder-1", "%1", ended=True).model_copy(
+        update={"session_id": "ses_resumable"}
+    )
+    no_transcript = _agent(project.id, "coder-2", "%2", ended=True).model_copy(
+        update={"session_id": "ses_bare"}
+    )
+    still_live = _agent(project.id, "coder-3", "%3").model_copy(update={"session_id": "ses_live"})
+    _seed(tmp_path / "repo", resumable, no_transcript, still_live)
+    transcripts = {"ses_resumable": str(on_disk), "ses_bare": None, "ses_live": str(on_disk)}
+    with store_session() as store:
+        for sid, path in transcripts.items():
+            session = TeamSession(
+                id=sid,
+                project_id=project.id,
+                role="coder",
+                started_at=now,
+                last_seen_at=now,
+                transcript_path=path,
+            )
+            store.upsert_session(session)
+
+    [check] = diagnostics._check_resumable_agents()
+
+    assert check.name == "fleet-resume" and check.status is CheckStatus.ok
+    assert check.detail.startswith("1 exited agent can be resumed")
+    assert "coder-1 (repo)" in check.detail
+    assert "coder-2" not in check.detail and "coder-3" not in check.detail
+    assert "fleet restart <label>" in check.detail
+    assert "fleet-resume" in _by_name(diagnostics.doctor()), "it reaches the real doctor"
+    on_disk.unlink()
+    assert diagnostics._check_resumable_agents() == [], "no transcript, nothing to resume"
+
+
+def test_the_resume_line_reads_only_the_newest_row_under_each_label(
+    home: Path, tmp_path: Path
+) -> None:
+    """Review of #169: a resumed restart keeps the session id, so the row it
+    replaced still has a transcript on disk. Counting every row listed a label that
+    was live again — whose `fleet restart <label>` stops the live agent — and
+    listed a label once per restart."""
+    from aisquare.models import TeamSession
+
+    project = _seed(tmp_path / "repo")
+    now = datetime.now(tz=UTC)
+    on_disk = tmp_path / "t.jsonl"
+    on_disk.write_text("{}\n", encoding="utf-8")
+
+    def row(label: str, pane: str, session_id: str, *, ended: bool, age: int) -> FleetAgent:
+        return _agent(project.id, label, pane, ended=ended).model_copy(
+            update={"session_id": session_id, "created_at": now - timedelta(minutes=age)}
+        )
+
+    _seed(
+        tmp_path / "repo",
+        row("coder-1", "%1", "ses_back", ended=True, age=10),
+        row("coder-1", "%2", "ses_back", ended=False, age=5),  # restarted, resumed, live
+        row("coder-2", "%3", "ses_twice", ended=True, age=10),
+        row("coder-2", "%4", "ses_twice", ended=True, age=5),  # restarted, exited again
+    )
+    with store_session() as store:
+        for sid in ("ses_back", "ses_twice"):
+            store.upsert_session(
+                TeamSession(
+                    id=sid,
+                    project_id=project.id,
+                    role="coder",
+                    started_at=now,
+                    last_seen_at=now,
+                    transcript_path=str(on_disk),
+                )
+            )
+
+    [check] = diagnostics._check_resumable_agents()
+
+    assert check.detail.startswith("1 exited agent can be resumed"), check.detail
+    assert "coder-2 (repo)" in check.detail and check.detail.count("coder-2") == 1
+    assert "coder-1" not in check.detail, "live again: nothing to resume"

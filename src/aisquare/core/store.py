@@ -720,6 +720,21 @@ CREATE TABLE IF NOT EXISTS pending_revocation (
     last_error     TEXT
 );
 """
+# v23 (#139 and #140, review of #168 at the fold): the one-time repair of the
+# tombstones two early cuts left holding what a revival must not bring back. The
+# first cut of the v17 backfill (c716094) had no ``forgotten_at`` guard and
+# stamped forgotten rows with history as onboarded, and a forget written before
+# #171's first round kept the group, the position and the pin. Each was answered
+# per write instead: a CASE in the capture every prompt runs, and in the
+# onboarding, for a state only stores that met those cuts hold. Cleared here
+# once, as ``forget_project`` clears them now, a tombstone carries none of the
+# four, and nothing writes them onto one (``update_project_layout`` refuses a
+# forgotten row), so a revival keeps a live row's values and has no tombstone
+# left to reason about. A plain UPDATE: a store that meets it twice converges.
+_SCHEMA_V23 = """
+UPDATE project SET onboarded_at = NULL, group_id = NULL, position = NULL, pinned_at = NULL
+WHERE forgotten_at IS NOT NULL;
+"""
 # Ordered migrations; index i upgrades the db from user_version i to i+1.
 _MIGRATIONS = (
     _SCHEMA_V1,
@@ -744,6 +759,7 @@ _MIGRATIONS = (
     _SCHEMA_V20,
     _SCHEMA_V21,
     _SCHEMA_V22,
+    _SCHEMA_V23,
 )
 SCHEMA_VERSION = len(_MIGRATIONS)
 
@@ -752,11 +768,6 @@ _GROUP_COLUMNS = "id, name, position, pinned_at, collapsed, created_at"
 _DESTINATION_COLUMNS = (
     "project_id, api_url, environment, workspace_id, workspace_uid, workspace_name, "
     "studio_id, studio_uid, studio_name, key_uid, set_at, set_by"
-)
-_LAYOUT_KEPT_BY_A_LIVE_ROW = (
-    "group_id = CASE WHEN project.forgotten_at IS NULL THEN project.group_id END, "
-    "position = CASE WHEN project.forgotten_at IS NULL THEN project.position END, "
-    "pinned_at = CASE WHEN project.forgotten_at IS NULL THEN project.pinned_at END"
 )
 """A revival's SET for the arrangement (#140): a live row keeps its place, a tombstone
 comes back loose and unpinned (:meth:`SqliteStore.ensure_project` says why)."""
@@ -1455,23 +1466,16 @@ class SqliteStore:
         directory again. Before #139 this revival also re-listed the project,
         which is how ``project forget`` came undone on the next prompt.
 
-        The revival clears ``onboarded_at`` itself rather than trusting the
-        tombstone to carry none. ``forget`` clears it, but the first cut of the
-        v17 backfill had no ``forgotten_at`` guard and stamped forgotten rows
-        with history as onboarded, and stores already past v17 keep them. A
-        live row keeps its mark: the SET reads the row as it was before the
-        update. The same goes for its place in the arrangement (#140): a forget
-        clears the group, the position and the pin, but a tombstone written
-        before it did keeps all three, and revived as it was, the project came
-        back pinned and grouped at a number its scope had since given away
-        (review of #171, round 2).
+        Nothing else is written. A forget clears the mark and the place in the
+        arrangement (#140), so a revived row comes back captured, loose and
+        unpinned, and a live one keeps its own. The tombstones that older cuts
+        left holding either were repaired once, by v23, rather than on every
+        prompt (review of #168 at the fold).
         """
         self._conn.execute(
             "INSERT INTO project (id, root, name, linked_repos, created_at) "
             "VALUES (?, ?, ?, ?, ?) "
-            "ON CONFLICT (id) DO UPDATE SET forgotten_at = NULL, onboarded_at = "
-            "CASE WHEN project.forgotten_at IS NULL THEN project.onboarded_at END, "
-            f"{_LAYOUT_KEPT_BY_A_LIVE_ROW}",
+            "ON CONFLICT (id) DO UPDATE SET forgotten_at = NULL",
             (
                 project.id,
                 str(project.root),
@@ -1491,15 +1495,15 @@ class SqliteStore:
         ``onboarded_at`` is set once and kept; ``forgotten_at`` is cleared, so
         the row comes back with whatever history it still carries (see v14).
         A revived row comes back loose and unpinned, as :meth:`ensure_project`
-        says; a live one keeps its place.
+        says, and marked now: a tombstone holds no mark to keep (v23). A live
+        one keeps its place.
         """
         now = _now_iso()
         self._conn.execute(
             "INSERT INTO project (id, root, name, linked_repos, created_at, onboarded_at) "
             "VALUES (?, ?, ?, ?, ?, ?) "
             "ON CONFLICT (id) DO UPDATE SET forgotten_at = NULL, "
-            "onboarded_at = COALESCE(project.onboarded_at, excluded.onboarded_at), "
-            f"{_LAYOUT_KEPT_BY_A_LIVE_ROW}",
+            "onboarded_at = COALESCE(project.onboarded_at, excluded.onboarded_at)",
             (
                 project.id,
                 str(project.root),

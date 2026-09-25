@@ -872,7 +872,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   empty `project list` and `status` say how many are hidden. The migration
   adopts the rows already used on purpose (context entries, a codename,
   linked repos, board activity, a fleet agent, a snapshot on disk; a
-  forgotten row never) and hides the rest.
+  forgotten row never) and hides the rest; schema v23 clears, once, the mark
+  and the place in the arrangement that early cuts left on forgotten rows.
 - **The snapshot token budget is a config knob, and the failure names its
   numbers (#82).** `aisquare project onboard` on a large repo printed only
   "codebase too large to pack within the token budget" against a hardcoded

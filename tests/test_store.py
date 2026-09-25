@@ -292,8 +292,9 @@ def test_migrations_reach_the_current_schema_version() -> None:
     # (#145), v16 usage readings and the limited state (#146), v17 onboarded_at (#139),
     # v18 the launch spec and ui_state (#144), v19 the project explainability key (#141),
     # v20 project groups, pins and manual order (#140), v21 project destinations (#142),
-    # v22 the revocations owed for keys the CLI minted (#142)
-    assert version == SCHEMA_VERSION == 22
+    # v22 the revocations owed for keys the CLI minted (#142), v23 the one-time repair of
+    # old tombstones (#139, #140)
+    assert version == SCHEMA_VERSION == 23
 
 
 def test_the_metric_check_constraints_mirror_the_python_vocabularies() -> None:
@@ -914,36 +915,57 @@ def test_ensure_project_captures_and_only_onboard_project_shows() -> None:
         store.close()
 
 
-def test_a_capture_revives_a_tombstone_captured_even_one_that_kept_its_mark() -> None:
+def test_v23_repairs_the_tombstones_older_cuts_left_holding_a_mark_or_a_place() -> None:
     """The first cut of the v17 backfill (c716094) had no ``forgotten_at`` guard, so a
-    store migrated by it holds forgotten rows stamped onboarded. The revival kept the
-    mark, and the next prompt in such a directory put it back on the list — the bug
-    #139 is about — until a second forget cleared it. A live row keeps its mark."""
+    store migrated by it holds forgotten rows stamped onboarded, and a forget written
+    before #171's first round left the group, the position and the pin on its tombstone.
+    Revived as they were, the next prompt there put the project back on the list, pinned
+    and grouped (the bug #139 is about), and an onboarding kept the stale mark. Both were
+    answered by a CASE on every capture; v23 clears them once, as a forget does now (review
+    of #168 at the fold). A live row keeps its mark and its place."""
+    legacy = "'2026-09-01T00:00:00+00:00'"
+    _at_version(
+        22,
+        after=f"""
+        INSERT INTO project_group (id, name, position, created_at)
+            VALUES ('grp_1', 'tools', 0, {legacy});
+        INSERT INTO project (id, root, name, linked_repos, created_at, onboarded_at,
+                             forgotten_at, group_id, position, pinned_at)
+        VALUES
+            ('prj_old', '/w/old', 'old', '[]', {legacy}, {legacy},
+             '2026-09-02T00:00:00+00:00', 'grp_1', 0, {legacy}),
+            ('prj_gone', '/w/gone', 'gone', '[]', {legacy}, {legacy},
+             '2026-09-02T00:00:00+00:00', NULL, NULL, {legacy}),
+            ('prj_live', '/w/live', 'live', '[]', {legacy}, {legacy}, NULL, 'grp_1', 1, {legacy});
+    """,
+    )
+
     store = open_store()
     try:
-        old = ProjectInfo(id="prj_old", root=Path("/w/old"))
-        live = ProjectInfo(id="prj_live", root=Path("/w/live"))
-        store.onboard_project(old)
-        store.onboard_project(live)
         raw = sqlite3.connect(str(_db_path()))
-        try:  # the state the unguarded backfill left: forgotten AND onboarded
-            raw.execute(
-                "UPDATE project SET forgotten_at = ? WHERE id = ?",
-                ("2026-09-02T00:00:00+00:00", old.id),
-            )
-            raw.commit()
+        try:
+            tombstones = raw.execute(
+                "SELECT onboarded_at, group_id, position, pinned_at FROM project "
+                "WHERE forgotten_at IS NOT NULL"
+            ).fetchall()
         finally:
             raw.close()
-        assert [p.id for p in store.list_projects()] == ["prj_live"]
+        assert tombstones == [(None, None, None, None)] * 2, "repaired as a forget clears them"
 
-        store.ensure_project(old)  # the next prompt there
-        store.ensure_project(live)  # and one in a project that is listed
+        store.ensure_project(ProjectInfo(id="prj_old", root=Path("/w/old")))  # a prompt there
+        store.ensure_project(ProjectInfo(id="prj_live", root=Path("/w/live")))  # one here
+        onboarded = store.onboard_project(ProjectInfo(id="prj_gone", root=Path("/w/gone")))
 
-        assert [p.id for p in store.list_projects()] == ["prj_live"], "forget sticks"
+        assert {p.id for p in store.list_projects()} == {"prj_live", "prj_gone"}
         revived = store.get_project("prj_old")
-        assert revived is not None and revived.onboarded_at is None, "captured, not a tombstone"
+        assert revived is not None, "captured, not a tombstone"
+        assert (revived.onboarded_at, revived.group_id, revived.position) == (None, None, None)
+        assert revived.pinned_at is None
+        assert onboarded.onboarded_at is not None
+        assert onboarded.onboarded_at.isoformat() > "2026-09-02", "marked now, not the old mark"
         kept = store.get_project("prj_live")
         assert kept is not None and kept.onboarded_at is not None
+        assert (kept.group_id, kept.position) == ("grp_1", 1) and kept.pinned_at is not None
     finally:
         store.close()
 

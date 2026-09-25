@@ -326,15 +326,18 @@ def test_a_forgotten_project_cannot_be_arranged_and_an_old_tombstone_comes_back_
     groups.pin(store, "prj_cli")
     groups.create_group(store, "site", ["prj_web", "prj_docs"])
     raw = sqlite3.connect(str(paths.db_path()))
-    try:  # the forget as it was before round 1: the tombstone kept its place
+    try:  # the forget as it was before round 1, the tombstone keeping its place, before v23
         raw.execute(
             "UPDATE project SET forgotten_at = ?, onboarded_at = NULL "
             "WHERE id IN ('prj_cli', 'prj_web')",
             (datetime.now(tz=UTC).isoformat(),),
         )
+        raw.execute("PRAGMA user_version = 22")
         raw.commit()
     finally:
         raw.close()
+    with store_session():
+        pass  # the next open repairs such a tombstone, once (v23)
     store.ensure_project(ProjectInfo(id="prj_cli", root=Path("/w/cli")))  # a prompt there
     store.onboard_project(ProjectInfo(id="prj_web", root=Path("/w/web")))  # added on purpose
     for project_id in ("prj_cli", "prj_web"):

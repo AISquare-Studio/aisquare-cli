@@ -23,8 +23,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   waiting, review, pull request, stale), deduplicated and resolved one item at a
   time — `aisquare captain attention | next | resolve | snooze`, with `since`,
   `log`, `actions`, and the easter eggs `uav`, `wololo`, `bt`. The **voice page**
-  (`aisquare captain --voice`, `[voice]` extra): hold to talk or always
-  listening, interim transcripts, the thinking signal, the reply spoken back
+  (`aisquare captain --voice`, `[voice]` extra): hold to talk, or always
+  listening behind the wake word — only "Captain, …" reaches the captain, the
+  rest is never delivered, spoken or shown (`[captain] wake_word`, `""` turns it
+  off) — interim transcripts, the thinking signal, the reply spoken back
   through a Speaker adapter per platform; one spool drainer in the captain's
   server plays the captain's own `speak()` lines. A fresh captain is started
   bare and never typed into at Claude Code's trust dialog; after a reboot a

@@ -153,7 +153,7 @@ One agent above every project: the **captain** runs every fleet for you, and you
 talk to it — typed or spoken. `aisquare captain` starts it (or attaches to it);
 `aisquare captain say "what is up"` asks it what needs you, across every board,
 and prints the reply; `aisquare captain --voice` serves the voice page (hold to
-talk, or always listening) with the reply spoken back. Every effect is one of the
+talk, or always listening for "Captain, …") with the reply spoken back. Every effect is one of the
 captain's 24 tools, each leaving one audit event with your words and a receipt;
 `stop`, `spawn` and `restart` happen only on your own words; a refusal is said,
 never faked. The guide is [`docs/captain.md`](docs/captain.md).

@@ -100,12 +100,31 @@ Two modes, on the page and on the command line:
 - **Focus** (`--mode focus`, the default): hold the button or the space bar to
   talk; release sends. The burst is one request.
 - **Listen** (`--mode listen`): the microphone stays open and the server cuts
-  your speech into requests on silence — 900 ms of quiet, or 60 seconds, ends
-  one. A mute toggle; the stop word **"stop listening"**, spoken or typed,
-  turns the mic off instead of being delivered.
+  what it hears into utterances on silence — 900 ms of quiet, or 60 seconds,
+  ends one. Only an utterance that begins with the **wake word** reaches the
+  captain, stripped of it: "Captain, find me this" delivers "find me this".
+  - **"Captain" alone** opens a five-second window, marked by a short tone and
+    the chip's **listening**. The next utterance goes through without the wake
+    word.
+  - **Anything else is dropped.** It is never delivered, never spoken and not
+    kept, and the page shows none of its words. Listen mode's idle chip says
+    **say Captain**, so a meeting you are sharing your screen in stays off the
+    page.
+  - **The stop word "stop listening"** turns the mic off, spoken bare, after
+    "Captain", or typed. A mute or a mode switch closes an open window.
+  - **Typed text needs no wake word.** The gate is on what the mic hears.
 
-The page shows the interim transcript as you speak (so a misheard request is
-caught before it lands), what was delivered, and a **thinking** chip while the
+The wake word is `captain` unless `[captain] wake_word` in `config.toml` says
+otherwise: one word or a few, a to z and spaces (`wake_word = "hey captain"`).
+`wake_word = ""` switches it off, and listen mode then delivers everything it
+hears. The match forgives case, punctuation and one misspelling ("Kaptain",
+"Captian"), never the plural or the possessive ("Captains", "Captain's"). The
+start line of `aisquare captain voice` names the wake word, and a value that
+is not words is refused there in one line, never read as "off".
+
+In focus mode, and in listen mode once the wake word is heard, the page shows
+the interim transcript as you speak (so a misheard request is caught before it
+lands). It also shows what was delivered, and a **thinking** chip while the
 captain works — while your request is in flight, while the captain's own
 `thinking` flag is on, or while its pane is busy. The same signal prints in the
 terminal that serves the page. A reply slower than three seconds earns one

@@ -99,21 +99,30 @@ aisquare captain since alpha --agent coder-1
 ⟨PASTE: the spoken summary as the page logged it; the since result with from_seq/to_seq⟩
 ```
 
-## 5. Always listening: two sentences in a row land as two requests
+## 5. Always listening: only "Captain, …" lands, and two land as two requests
 
 ```sh
 aisquare captain voice --mode listen
 ```
 
-Say **"what is up"**, pause a second, say **"snooze the first one for an hour"**.
+The start line names the wake word (`wake word: captain`), and the idle chip
+reads **say Captain**.
 
-Expect: two utterances, two deliveries, `thinking` shown between them, two
-replies; the stop word **"stop listening"** turns the mic off and is not
-delivered. The page's mode toggle and the terminal's `--mode` agree
+1. Say **"we should ship the fold today"**. Expect no words on the page, live or
+   after, nothing delivered, nothing spoken.
+2. Say **"Captain, what is up"**, pause a second, then say **"Captain, snooze
+   the first one for an hour"**. Expect two deliveries without the wake word
+   ("what is up", "snooze the first one for an hour"), `thinking` between them,
+   and two replies.
+3. Say **"Captain"** alone. Expect a short tone and the chip's **listening**.
+   Within five seconds say **"what is up"**; it is delivered as it is.
+4. Say **"stop listening"**. The mic turns off and nothing is delivered.
+
+The page's mode toggle and the terminal's `--mode` agree
 (`captain_voice_mode` in `state.json`).
 
 ```text
-⟨PASTE: the page's log panel — two utterances, two replies, the stop word⟩
+⟨PASTE: the page's log panel — the dropped sentence (no words), two deliveries, the window, the stop word⟩
 ```
 
 ## 6. Every action a board event; a refusal said, never faked

@@ -1155,13 +1155,18 @@ def test_configure_target_refuses_an_identity_whose_names_no_header_carries(
     renders: ``arbind kumar-{role}`` (a full name in the form's prefix field) was stored,
     every surface listed its identities, and ``wire_session`` launched every session
     untraced as not header-safe (final review of #203, EX3). Refused at the writer,
-    naming a name it renders."""
+    naming a name it renders, and a template to try that ``--identity`` takes: it named a
+    rendered name, ``arbind.kumar-planner``, which ``--identity`` refuses for having no
+    ``{role}`` (review of the #203 final-review fixes, round 2, F3)."""
     config = AppConfig()
     with pytest.raises(ValueError, match="cannot travel in a header") as refused:
         explainability.configure_target(config, identity=identity)
     assert repr(identity.format(role="planner")) in str(refused.value)
     assert config.explainability.targets == {}
     assert explainability.identity_problem("arbind.kumar_2-{role}") is None, "what a header takes"
+    example = str(refused.value).rpartition(", as in ")[2].strip("'")
+    assert example.endswith("-{role}"), str(refused.value)
+    explainability.configure_target(config, identity=example)
 
 
 def test_configure_target_can_write_a_target_without_moving_the_machine_to_it() -> None:

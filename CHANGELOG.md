@@ -49,8 +49,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   refused with the reason and nothing is stored, and the writer refuses any
   template that cannot render, renders every role to one name, or renders a
   name the launch cannot put in a header (`arbind kumar-{role}`, an `@`),
-  naming one it can (`arbind.kumar-planner`) rather than a template the field
-  would refuse.
+  naming what each door takes instead: the prefix `arbind.kumar` in the form,
+  whose field refuses a template, and the template `arbind.kumar-{role}` for
+  `--identity`, which refuses a name without `{role}`.
 - **The hosted-proxy suggestion respects a deliberate top-level `proxy_url`.**
   The form read the per-target value only, so a chosen `[explainability]
   proxy_url` — which `_proxy_source` already reports as `config` rather than

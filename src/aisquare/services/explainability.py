@@ -69,6 +69,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from http.client import HTTPException
 from pathlib import Path
+from string import Formatter
 from typing import Any
 from urllib.error import URLError
 from urllib.parse import SplitResult, urlsplit
@@ -1164,6 +1165,16 @@ def hosted_proxy_for(gateway_url: str) -> str | None:
     return f"{split.scheme}://{host}:{HOSTED_PROXY_PORT}"
 
 
+def header_safe(name: str) -> str:
+    """``name`` with every run of characters a header refuses made one ``.``.
+
+    ``arbind kumar`` is ``arbind.kumar``. The one spelling both doors suggest
+    for an identity :data:`_SAFE_ROLE` refuses: :func:`identity_problem` for a
+    template, the Setup form for its prefix.
+    """
+    return re.sub(r"[^A-Za-z0-9._-]+", ".", name)
+
+
 def identity_problem(template: str) -> str | None:
     """Why ``template`` cannot name agents, or ``None``.
 
@@ -1192,10 +1203,17 @@ def identity_problem(template: str) -> str | None:
         )
     unsafe = next((name for name in (one, two) if not _SAFE_ROLE.match(name)), None)
     if unsafe is not None:
-        # The example is a NAME, not a template: the Setup form shows this sentence as
-        # it is, and its prefix field refuses braces, so "try 'name-{role}'" could not be
-        # followed there (review of the #203 final-review fixes, F5).
-        example = re.sub(r"[^A-Za-z0-9._-]+", ".", unsafe)
+        # The example is the TEMPLATE made header-safe, its text and not its {role}: a
+        # rendered name (`arbind.kumar-planner`) typed back as `--identity` was refused
+        # for having no {role}, and as the Setup form's prefix named every agent
+        # `arbind.kumar-planner-<role>`. The form, whose field takes a name, says the
+        # prefix to type before this runs (`save_setup`; review of the #203
+        # final-review fixes, round 2, F3). Every field left is the role's: any other
+        # raised above.
+        example = "".join(
+            header_safe(text) + ("{role}" if field_name is not None else "")
+            for text, field_name, _spec, _conversion in Formatter().parse(template)
+        )
         return (
             f"identity template {template!r} names agents like {unsafe!r}, which cannot "
             "travel in a header, so every launch would go untraced — letters, digits, '.', "

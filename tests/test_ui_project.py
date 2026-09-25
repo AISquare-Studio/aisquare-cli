@@ -1544,21 +1544,28 @@ def test_a_prefix_no_header_carries_is_refused_with_advice_the_form_can_follow(
     isolated_home: Path,
 ) -> None:
     """A full name in the prefix field (``arbind kumar``) is refused by the writer, whose
-    sentence the form shows as it is. It ended "try 'name-{role}'", and the prefix field
+    sentence the form showed as it is. It ended "try 'name-{role}'", and the prefix field
     refuses braces, so the advice could not be followed there (review of the #203
-    final-review fixes, F5). It names a name that works instead."""
+    final-review fixes, F5). Then it named a rendered agent name, ``arbind.kumar-planner``,
+    which typed as the prefix named every agent ``arbind.kumar-planner-<role>`` (round 2,
+    F3). It names the prefix to type, and typed, the agents are named as meant."""
     from aisquare.cli.ui.views import explainability as explainability_view
 
-    form = explainability_view.SetupForm(
-        target="", switch=False, gateway="", proxy="", prefix="arbind kumar", key_env="",
-        key="", own=False,
-    )  # fmt: skip
-    outcome = explainability_view.save_setup(form, None)
-    (notice,) = outcome.notices
+    def save(prefix: str) -> explainability_view.SetupOutcome:
+        form = explainability_view.SetupForm(
+            target="", switch=False, gateway="", proxy="", prefix=prefix, key_env="",
+            key="", own=False,
+        )  # fmt: skip
+        return explainability_view.save_setup(form, None)
+
+    (notice,) = save("arbind kumar").notices
     assert notice.severity == "warning" and "cannot travel in a header" in notice.message
-    assert "'arbind.kumar-planner'" in notice.message, notice.message
-    assert "{" not in notice.message.split("names agents like")[1], notice.message
-    assert load_config().explainability.agent_name_template != "arbind kumar-{role}"
+    assert "{" not in notice.message, notice.message
+    assert notice.message.endswith("try 'arbind.kumar'"), notice.message
+    assert load_config().explainability.targets == {}
+    assert save("arbind.kumar").began
+    identity = ops.resolve_target(load_config().explainability).agent_name_template
+    assert identity == "arbind.kumar-{role}"
 
 
 def test_a_key_the_projects_launches_do_not_resolve_is_not_called_the_one_they_use(

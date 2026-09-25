@@ -8213,8 +8213,9 @@ def test_restarting_a_running_agent_hands_its_claims_to_the_replacement_and_anno
     assert held.status == "doing" and held.claimed_by == new
     assert nudges == []
     assert _events(project, "agent_exited") == [] and _events(project, "task_released") == []
+    # The replacement never came up in the fake, so its hand-off prompt was not typed.
     assert _events(project, "restarted") == [
-        f"{agent.label} restarted — started fresh with a hand-off prompt"
+        f"{agent.label} restarted — started fresh, but its hand-off prompt was NOT typed"
     ]
 
     # The replacement runs and holds the task. Restarted again, its spawn is refused
@@ -10121,3 +10122,35 @@ def test_a_replacement_whose_prompt_poll_tmux_will_not_answer_keeps_the_claims(
     assert _events(project, "task_released") == [] and _events(project, "agent_exited") == []
     live = fleet_service.list_agents(project)
     assert [status.agent.id for status in live] == [receipt.started.id]
+
+
+def test_the_automatic_hand_over_puts_what_its_switch_did_not_do_on_the_board(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Review of #203, final round, FLEET-5: ``hooks.hand_over`` threw away the
+    ``SwitchReceipt``, and the worker has no terminal, so every note about what the
+    switch did NOT do reached no one. And ``switched`` was worded from ``resumed``
+    alone. A fresh replacement too slow to come up for its multi-line hand-off prompt
+    sat idle at an empty prompt while the board said it "started fresh with a hand-off
+    prompt". The line now says what reached the pane, and the notes go on the board."""
+    from aisquare.services import hooks as hooks_service
+
+    _two_slots_with_usage(monkeypatch, work=95, personal=10)
+    agent = fleet_service.spawn(project, "coder", worktree=False, account="2").agent
+    _with_transcript(agent, tmp_path / "missing.jsonl")  # named, not on disk: a fresh start
+    # The fake's new pane never comes up, so the hand-off prompt is past its wait.
+
+    hooks_service.hand_over(agent.session_id or "", reason="session limit")
+
+    assert [text for _pane, kind, text in tmux.typed if kind == "paste"] == []
+    [switched] = _events(project, "switched")
+    assert switched.endswith(
+        "(session limit) — started fresh, but its hand-off prompt was NOT typed"
+    )
+    [said] = [note for note in _events(project, "note") if note.startswith(f"{agent.label}: ")]
+    assert said.startswith(f"{agent.label}: switched — ")
+    assert "the prompt has several lines — NOT typed" in said

@@ -212,6 +212,9 @@ class SpawnReceipt:
     branch it was put on), a prompt that could not be typed, an agent that will not
     join the board. NOT a permission-mode fallback — there is none: the mode is the
     flag, then the role's config, then ``auto``, and nothing here rewrites it."""
+    prompt_typed: bool | None = None
+    """Whether the ``prompt`` asked for reached the pane: ``None`` when none was
+    asked for, ``False`` when it was not typed — the notes say why."""
 
 
 @dataclass(frozen=True)
@@ -1638,9 +1641,14 @@ def spawn(
     if takes_over is not None and identity.session_id is not None:
         stored = _take_over(stored, takes_over, identity.session_id, notes)
     _supersede(rows, views, stored, config)
-    if prompt:
-        _type_prompt(srv, stored.pane_id, prompt, notes)
-    return SpawnReceipt(agent=stored, asked_label=label, tmux_session=tmux_session, notes=notes)
+    typed = _type_prompt(srv, stored.pane_id, prompt, notes) if prompt else None
+    return SpawnReceipt(
+        agent=stored,
+        asked_label=label,
+        tmux_session=tmux_session,
+        notes=notes,
+        prompt_typed=typed,
+    )
 
 
 def _launch_binary(
@@ -2024,8 +2032,10 @@ def _verify_cap(store: ContextStore, stored: FleetAgent, cap: int) -> None:
     )
 
 
-def _type_prompt(srv: TmuxServer, pane_id: str, prompt: str, notes: list[str]) -> None:
+def _type_prompt(srv: TmuxServer, pane_id: str, prompt: str, notes: list[str]) -> bool:
     """Wait (bounded) for the agent to come up, then paste the prompt and press Enter.
+
+    Returns whether it was typed; when it was not, a note says why.
 
     Ready means the pane's foreground process is no longer our launcher (or it
     has produced scrollback). Past :data:`PROMPT_TIMEOUT` a SINGLE-LINE prompt
@@ -2058,10 +2068,10 @@ def _type_prompt(srv: TmuxServer, pane_id: str, prompt: str, notes: list[str]) -
                 "NOT typed. Send it once the agent is up: `aisquare fleet tell <label> …`, "
                 "or `aisquare fleet attach`"
             )
-            return
+            return False
         if facts is None or facts.dead:
             notes.append("the agent exited before the prompt could be typed")
-            return
+            return False
         if _agent_running(facts.current_command) or facts.history_size > 0:
             ready = True
             break
@@ -2078,7 +2088,7 @@ def _type_prompt(srv: TmuxServer, pane_id: str, prompt: str, notes: list[str]) -
             "as its own message. Send it once the agent is up: `aisquare fleet tell "
             "<label> …`, or `aisquare fleet attach`"
         )
-        return
+        return False
     else:
         notes.append(
             f"the agent did not come up within {PROMPT_TIMEOUT:.0f} s — prompt typed anyway"
@@ -2088,6 +2098,8 @@ def _type_prompt(srv: TmuxServer, pane_id: str, prompt: str, notes: list[str]) -
         srv.send_keys(pane_id, "Enter")
     except TmuxError as exc:
         notes.append(f"could not type the prompt: {exc}")
+        return False
+    return True
 
 
 #: How long after its end an agent whose window is still on the tmux server stays in
@@ -3885,7 +3897,7 @@ def switch(
         raise
     notes.extend(more)
     from_name = f"slot {current}" if current is not None else "its shell's claude"
-    how = "resumed its session" if resumed else "started fresh with a hand-off prompt"
+    how = _how_started(resumed, typed=bool(receipt.prompt_typed))
     why = f" ({reason})" if reason else ""
     # The suppression is entered FIRST: a store that cannot be opened is the courtesy
     # lost too, never a moved agent reported as not moved (review of #205, fourth round).
@@ -4242,7 +4254,7 @@ def restart(
             nudge_manager(project.id, reason=f"{label} exited")
         raise
     notes.extend(more)
-    how = "resumed its session" if resumed else "started fresh with a hand-off prompt"
+    how = _how_started(resumed, typed=bool(receipt.prompt_typed))
     # The suppression is entered FIRST, as in `switch`: a store that cannot be opened
     # costs the courtesy, never a restarted agent reported as not restarted.
     with contextlib.suppress(Exception), store_session() as store:  # the courtesy, not the record
@@ -4348,6 +4360,25 @@ def _abandon_handover(stopped: FleetAgent) -> None:
         _team().release_agent_claims(store, stopped, why="hand-over failed")
         _emit_exit(store, stopped)
     nudge_manager(stopped.project_id, reason=f"{stopped.label} exited")
+
+
+def _how_started(resumed: bool, *, typed: bool) -> str:
+    """How a replacement began, for the board's ``switched`` and ``restarted`` lines.
+
+    Worded from what reached its pane as well as from how it was launched. A
+    replacement whose first line was not typed — up too slowly for a multi-line
+    paste, gone before it, refused by tmux — sits idle at an empty prompt, and
+    the line said "started fresh with a hand-off prompt" over it. On the
+    automatic hand-over that line was the only account anyone got (review of
+    #203, final round, FLEET-5); the receipt's notes say why it was not typed.
+    """
+    if resumed:
+        if typed:
+            return "resumed its session"
+        return "resumed its session, but the line telling it to continue was NOT typed"
+    if typed:
+        return "started fresh with a hand-off prompt"
+    return "started fresh, but its hand-off prompt was NOT typed"
 
 
 def _restart_prompt(agent: FleetAgent) -> str:

@@ -351,7 +351,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   than `wait_if_reset_within_minutes` (15) away — in a worker detached from
   the agent's own hook, so the window kill cannot take the hand-over down; a
   hand-over that finds no headroom leaves the agent parked with Claude Code's
-  own wait-and-continue intact. A moved agent keeps its task claims (its
+  own wait-and-continue intact, and one that goes ahead puts what it could not
+  do (a hand-off prompt not typed, claims not moved) on the board beside
+  `switched`, whose wording, like `restarted`'s, says whether the
+  replacement's first line was typed. A moved agent keeps its task claims (its
   session parks them, as a `/clear` does, for the same id when it resumes and
   for the new one when it starts fresh), a resumed one is told in one line to
   continue, and no `agent_exited` goes out for either; every reset a surface

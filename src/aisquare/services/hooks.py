@@ -326,6 +326,14 @@ def hand_over(session_id: str, *, reason: str | None = None) -> None:
     :data:`HANDOVER_COOLDOWN`, and — inside ``switch(automatic=True)`` — no
     account actually under the line. In every case the agent stays parked with
     Claude Code's own wait intact.
+
+    A switch that goes ahead returns its receipt, and its notes are what the
+    move cost: a hand-off prompt not typed, claims not moved, an old session
+    not marked ended, a mark not taken back. By hand the CLI prints them; this
+    worker has no terminal (:func:`_detach`), so they go on the board as one
+    note beside ``switched``. Dropped, the replacement sat idle at an empty
+    prompt while the board said it had been given one (review of #203, final
+    round, FLEET-5).
     """
     with store_session() as store:
         session = store.get_session(session_id)
@@ -358,12 +366,19 @@ def hand_over(session_id: str, *, reason: str | None = None) -> None:
     from aisquare.services import fleet as fleet_service
 
     try:
-        fleet_service.switch(
+        receipt = fleet_service.switch(
             project, agent.label, reason=reason, spawned_by=HANDOVER_SPAWNER, automatic=True
         )
     except fleet_service.FleetError as exc:
         team_service.hook_note(
             session.project_id, f"{agent.label}: not switched — {exc}", session_id=session.id
+        )
+        return
+    if receipt.notes:
+        team_service.hook_note(
+            session.project_id,
+            f"{agent.label}: switched — {'; '.join(receipt.notes)}",
+            session_id=receipt.started.session_id,
         )
 
 

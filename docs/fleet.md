@@ -543,7 +543,10 @@ c1/c2/c3 shell aliases people write by hand, owned by the tool instead.
   does this by itself when the limit lifts more than
   `wait_if_reset_within_minutes` away, in a worker detached from the agent's
   own hook; a hand-over that finds no headroom leaves the agent parked, its
-  own wait intact, and says so on the board. `doctor` lists parked agents; `doctor --live` warns when every account
+  own wait intact, and says so on the board. One that goes ahead says on the
+  board what it could not do (a first line it could not type, claims it could
+  not move) in a note beside `switched`, and `switched` itself says whether
+  the replacement's first line reached it. `doctor` lists parked agents; `doctor --live` warns when every account
   is over the line.
 
 Nothing on this page writes into Claude Code's own files: the email and plan

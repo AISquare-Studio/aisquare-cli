@@ -29,6 +29,7 @@ import time
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -744,7 +745,12 @@ def test_the_worker_refuses_a_hand_over_in_flight_or_one_that_just_happened(
     # Past the cooldown a replacement is handed over again (the switch is reached); a row
     # of its own, because an upsert keeps the original row's created_at.
     reached: list[str] = []
-    monkeypatch.setattr(fleet_service, "switch", lambda project, label, **kw: reached.append(label))
+
+    def reach(project: ProjectInfo, label: str, **kwargs: Any) -> Any:
+        reached.append(label)
+        return SimpleNamespace(notes=[])  # a receipt with nothing the board must hear
+
+    monkeypatch.setattr(fleet_service, "switch", reach)
     _session(work, "sess-moved-long-ago")
     with store_session() as store:
         store.upsert_fleet_agent(

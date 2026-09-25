@@ -1653,6 +1653,33 @@ def test_an_exported_target_neither_makes_use_mint_again_nor_splits_it_from_the_
     assert f"${ops.TARGET_ENV_VAR}=stg applies to projects without one" in said.output
 
 
+def test_under_an_exported_target_the_key_set_use_advises_is_the_one_its_next_run_finds(
+    runner: CliRunner,
+    idp: IdentityProviderStub,
+    signed_in: iam.Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The API refuses the mint, and `use` advises `key set --from-env VAR`. With the
+    variable exported, `key set` bound that key to the exported target, the next `use`
+    did not see it and refused to mint over a hand key, and launches took it to the
+    other deployment (review of #172, D2 round 2, on the PR). One precedence now:
+    the key lands on the destination's deployment, and the next `use` finds it."""
+    monkeypatch.setenv(ops.TARGET_ENV_VAR, "stg")
+    idp.key_mint = "token_not_valid"
+    project = _project(tmp_path / "web")
+    first = _json(runner, "explainability", "use", "acme/Frontend")
+    assert first["key"]["source"] == "unset" and "key set --from-env VAR" in first["key"]["note"]
+
+    monkeypatch.setenv("VAR", "AIS_from_the_dashboard")
+    attached = runner.invoke(app, ["explainability", "key", "set", "--from-env", "VAR"])
+    assert attached.exit_code == 0, attached.output
+    again = _json(runner, "explainability", "use", "acme/Frontend")
+    assert (again["target"]["name"], again["key"]["source"]) == ("local", "project")
+    launched = ops.resolve_target(load_config().explainability, project_id=project.id)
+    assert (launched.name, launched.api_key) == ("local", "AIS_from_the_dashboard")
+
+
 def test_a_mint_over_a_minted_key_revokes_the_one_it_replaces(
     runner: CliRunner, idp: IdentityProviderStub, signed_in: iam.Session, tmp_path: Path
 ) -> None:

@@ -382,13 +382,26 @@ def _keep_unknown(existing: Any, dumped: Any, model: Any) -> Any:
     the harm actually took, all five lost keys being sub-keys of a section both
     builds knew about.
 
-    A field whose value is a plain container (``targets: dict[str, Target]``)
-    has no sub-model to recurse into, so the model owns that subtree entirely
-    and it is replaced wholesale. That is correct: its keys are data, and a
-    stale entry there is a stale deployment, not an unknown field.
+    A field whose value is a MAPPING of sub-models (``targets: dict[str,
+    Target]``, ``[team.profiles.<role>]``, ``[fleet.roles.<role>]``) keeps two
+    rules apart. Its keys are data, so the model owns WHICH entries exist: a
+    removed target or role stays removed, and a stale entry is a stale
+    deployment, not an unknown field. But every entry the model kept is still a
+    model, and an unknown field INSIDE it survives like any other. The mapping
+    used to be replaced wholesale, so any save from this build erased what
+    other builds keep in those entries — ``[team.profiles.coder].agent`` (#113),
+    ``[fleet.roles.coder].persona`` (#201) — while an unknown top-level section
+    beside them survived (final review of #203, store F2). The recursion is
+    #201's, so the two builds agree on it. A mapping of plain values has
+    nothing to recurse into and is the model's.
     """
     if not isinstance(existing, dict) or not isinstance(dumped, dict):
         return dumped
+    if isinstance(model, dict):
+        return {
+            key: _keep_unknown(existing.get(key), value, model.get(key))
+            for key, value in dumped.items()
+        }
     fields = getattr(type(model), "model_fields", None)
     if not fields:
         return dumped

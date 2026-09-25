@@ -165,6 +165,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     trailing slash or an explicitly written default port is not a misroute.
   - `explainability.is_loopback` is public for the second module that needs the
     same discriminator, on the precedent `stored_api_key` set.
+- **A save keeps what another build stores inside a role's entry.**
+  `[team.profiles.<role>]` and `[fleet.roles.<role>]` are maps of settings, and
+  a save from this build replaced each map whole: a field it has no name for
+  inside an entry — `agent` from the coding-agent adapters, `persona` from
+  spawn personas — was erased by any `config set`, Settings save or `team
+  bind`, while an unknown top-level section beside them survived. Each entry
+  is now merged like a section. The model still decides which entries exist,
+  so a role removed on purpose stays removed.
 - **A store another line stamped 15 or 17 converges instead of failing.** Schema
   v15-v17 were claimed by other lines of development too: #136 stamps 15 for
   `work_brief`, #201 stamps 15 for persona columns, #113 stamps 15-17 for its

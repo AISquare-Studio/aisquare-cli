@@ -357,7 +357,9 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         self.accounts_overview: AccountsOverview | None = None
         """The last Accounts frame that was read; ``None`` before the first or when disabled."""
         self._accounts_worker: Worker[AccountsOverview] | None = None
-        """The newest accounts read; an older one's frame is not ours to paint."""
+        """The accounts read in flight, or the last one; only one runs at a time."""
+        self._accounts_owed = False
+        """A frame was asked for while a read was in flight: read once more after it."""
         self.escape_key = escape_key or fleet_service.settings().escape_key
         self.snapshot: FleetSnapshot | None = None
         """The last frame that was read successfully; ``None`` before the first."""
@@ -574,28 +576,42 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         long as a writer held the lock. The board, the agent header and the
         Settings tab moved this same call into thread workers (review of #205,
         fourth round); the shell's tick was the caller they missed (final
-        review of #203, accounts F2). :meth:`_accounts_read` paints the answer,
-        the newest read's only: ``exclusive`` means a tick that finds the last
-        read still waiting replaces it rather than queueing behind it. The
-        usage numbers are the view's own, slower business
+        review of #203, accounts F2). :meth:`_accounts_read` paints the answer.
+
+        One read at a time. It was an ``exclusive`` worker, so each tick
+        cancelled the read still waiting and started another; a thread cannot be
+        stopped, so the cancelled read kept its thread and its answer was
+        dropped. While the store stayed busy every read outlived the tick,
+        nothing was painted, and a thread piled up per tick (review of that fix,
+        round 1). A call that finds a read waiting now leaves it be and marks one
+        more read owed, which :meth:`_accounts_read` starts once it has painted:
+        however many ticks a wait outlives, they cost one read after it, and
+        what the page asked for meanwhile (``AccountsChanged`` after a write it
+        does not show optimistically) is still read after that write. The usage
+        numbers are the view's own, slower business
         (``AccountsView.refresh_usage``).
         """
         if self._accounts is None:
             return
+        reading = self._accounts_worker
+        if reading is not None and not reading.is_finished:
+            self._accounts_owed = True
+            return
+        self._accounts_owed = False
         self._accounts_worker = self.run_worker(
             self._accounts,
             name=ACCOUNTS_WORKER,
             group=ACCOUNTS_WORKER,
-            exclusive=True,
             thread=True,
             exit_on_error=False,
         )
 
     def _accounts_read(self, event: Worker.StateChanged) -> None:
-        """Paint the frame the newest accounts read answered, and the AISquare session beside it.
+        """Paint the frame the accounts read answered, and the AISquare session beside it.
 
         The session is a file read, as it always was here; only the registry
-        went to the worker.
+        went to the worker. Then the read that was owed while this one waited,
+        if one was (:meth:`refresh_accounts`).
         """
         if event.state is WorkerState.SUCCESS:
             result = event.worker.result
@@ -603,7 +619,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         elif event.state is WorkerState.ERROR:
             overview = None  # a directory we cannot read costs the line, never the frame
         else:
-            return
+            return  # still running, or cancelled with the app: nothing to paint or owe
         sidebar = self.sidebar
         self.accounts_overview = overview
         session_known = True
@@ -616,6 +632,8 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         if overview is not None:
             for view in self.query(AccountsView):
                 view.show(overview)
+        if self._accounts_owed:
+            self.refresh_accounts()  # the ticks this read outlived: one read, after it
 
     def _feed_open_views(self, snapshot: FleetSnapshot) -> None:
         """Hand every open Project/Agent view its row from the new frame.

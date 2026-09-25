@@ -430,6 +430,76 @@ def test_the_shells_tick_reads_the_accounts_off_the_ui_thread_and_paints_the_ans
     assert after == "2 Claude · me@example.com"  # the answer, painted when it came
 
 
+def test_ticks_while_the_accounts_read_waits_let_it_answer_and_read_once_more_after_it(
+    no_network: dict[str, Any],
+) -> None:
+    """Review of the fix above, round 1: the read was an ``exclusive`` worker, so every
+    tick cancelled the one still waiting and started another. A thread cannot be
+    stopped: the cancelled read kept its thread and its answer was dropped, so while
+    ``context.db`` stayed busy a read slower than the tick (a 5 s busy timeout against a
+    2 s tick) was never painted, and a thread piled up per tick. A tick that finds a read
+    waiting now leaves it be: its answer is painted, and the ticks it outlived come to ONE
+    more read, started after it, so a change made meanwhile (a ▲ click's write) is still
+    what the page shows next."""
+    no_network["session"] = _session()
+    hold = threading.Event()
+    asked = {n: threading.Event() for n in range(1, 6)}
+    gates = {n: threading.Event() for n in range(1, 6)}
+    held: list[int] = []  # the reads that ran while the registry was held, numbered
+    running, peak = [0], [0]
+    counting = threading.Lock()
+
+    def reader() -> AccountsOverview:
+        with counting:
+            n = 0
+            if hold.is_set():
+                held.append(len(held) + 1)
+                n = held[-1]
+            running[0] += 1
+            peak[0] = max(peak[0], running[0])
+        try:
+            if n:
+                asked[n].set()
+                gates[n].wait(10)  # as a writer holds the lock
+            emails = ["me@example.com", *(f"{i}@example.com" for i in range(2, n + 2))]
+            return _overview(*(_status(i, email) for i, email in enumerate(emails, 1)))
+        finally:
+            with counting:
+                running[0] -= 1
+
+    async def run() -> tuple[str, str, str]:
+        app = FleetApp(refresh_seconds=3600, doctor=lambda: [], accounts=reader)
+        async with app.run_test(size=SIZE) as pilot:
+            await accounts_read(app)
+            detail = app.query_one(AccountsSection).query_one(".accounts-line", Static)
+            hold.set()
+            try:
+                app.refresh_data()  # a tick: the first held read waits on the registry
+                assert await asyncio.to_thread(asked[1].wait, 5), "the tick asked"
+                app.refresh_data()  # two more ticks while it waits
+                app.refresh_data()
+                await pilot.pause()
+                while_held = shown(detail)
+                gates[1].set()  # the writer lets go
+                # The read the ticks were owed starts once the first one's answer is painted.
+                assert await asyncio.to_thread(asked[2].wait, 5), "a read after the wait"
+                await pilot.pause()
+                answered = shown(detail)
+                gates[2].set()
+                await accounts_read(app)
+            finally:
+                for gate in gates.values():
+                    gate.set()
+            return while_held, answered, shown(detail)
+
+    while_held, answered, after = asyncio.run(run())
+    assert while_held == "1 Claude · me@example.com"  # the last frame, kept
+    assert answered == "2 Claude · me@example.com"  # the waiting read's answer, painted
+    assert after == "3 Claude · me@example.com"  # and the one read after it
+    assert peak[0] == 1, f"{peak[0]} reads at once"
+    assert held == [1, 2], held  # three ticks during one wait cost one more read
+
+
 def test_buttons_follow_each_slots_state() -> None:
     overview = _overview(
         _status(1, "me@example.com"), _status(2, "two@example.com"), _status(3, None)

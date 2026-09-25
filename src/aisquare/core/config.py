@@ -11,7 +11,7 @@ import errno
 import os
 import tomllib
 from pathlib import Path
-from typing import Any, Literal
+from typing import IO, Any, Literal
 
 import tomli_w
 from pydantic import BaseModel, Field
@@ -414,6 +414,23 @@ def _keep_unknown(existing: Any, dumped: Any, model: Any) -> Any:
     return merged
 
 
+def _parse_toml(handle: IO[bytes]) -> dict[str, Any]:
+    """The TOML document in ``handle``, read past a UTF-8 BOM if it starts with one.
+
+    ``tomllib`` refuses a leading U+FEFF ("Invalid statement (at line 1,
+    column 1)"), so a config saved by Windows PowerShell 5.1's ``Set-Content
+    -Encoding UTF8`` or Notepad's "UTF-8 with BOM" made ``load_config`` raise
+    for every command, and ``save_config``'s merge read failed open and
+    dropped the unknown keys it exists to keep. Decoded as ``utf-8-sig``, as
+    ``core.credentials`` and ``core.state_file`` read theirs; a file without
+    a BOM reads exactly as before, and one that is not UTF-8 still raises
+    ``UnicodeDecodeError`` as ``tomllib.load`` did (review of the #203 store
+    fixes, round 1).
+    """
+    loaded: dict[str, Any] = tomllib.loads(handle.read().decode("utf-8-sig"))
+    return loaded
+
+
 def load_config(path: Path | None = None) -> AppConfig:
     """Load configuration from ``path`` (default: the standard location).
 
@@ -425,8 +442,7 @@ def load_config(path: Path | None = None) -> AppConfig:
 
     def _read() -> dict[str, Any]:
         with target.open("rb") as fh:
-            loaded: dict[str, Any] = tomllib.load(fh)
-            return loaded
+            return _parse_toml(fh)
 
     data = despite_windows_contention(_read)
     return AppConfig.model_validate(data)
@@ -525,8 +541,7 @@ def save_config(config: AppConfig, path: Path | None = None) -> Path:
         # one that is busy for 40 microseconds.
         def _read_existing() -> dict[str, Any]:
             with written.open("rb") as handle:
-                loaded: dict[str, Any] = tomllib.load(handle)
-                return loaded
+                return _parse_toml(handle)
 
         with contextlib.suppress(OSError, tomllib.TOMLDecodeError):
             dumped = _keep_unknown(despite_windows_contention(_read_existing), dumped, config)

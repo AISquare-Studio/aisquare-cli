@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import tomllib
 from pathlib import Path
 
 from typer.testing import CliRunner
@@ -39,6 +40,29 @@ def test_an_unknown_key_in_the_file_still_loads(tmp_path: Path) -> None:
     config = load_config(target)
     assert config.profile == "work"
     assert config.team.profiles == {}
+
+
+def test_a_config_saved_with_a_utf8_bom_loads_and_a_save_keeps_its_unknown_keys(
+    tmp_path: Path,
+) -> None:
+    """Windows PowerShell 5.1's ``Set-Content -Encoding UTF8`` and Notepad's "UTF-8 with
+    BOM" put U+FEFF in front, which ``tomllib`` refuses: every command raised, and a
+    save could not read the file it merges into, so a section this build does not know
+    was dropped (review of the #203 store fixes, round 1). Read past the BOM, the file
+    loads, a save keeps the section, and the file is written back without the BOM."""
+    target = tmp_path / "config.toml"
+    body = 'profile = "work"\n\n[future_feature]\nsomething = 42\n'
+    target.write_bytes(b"\xef\xbb\xbf" + body.encode("utf-8"))
+
+    config = load_config(target)
+    assert config.profile == "work"
+    save_config(config, target)
+
+    raw = target.read_bytes()
+    assert not raw.startswith(b"\xef\xbb\xbf")
+    written = tomllib.loads(raw.decode("utf-8"))
+    assert written["profile"] == "work"
+    assert written["future_feature"] == {"something": 42}
 
 
 def test_round_trip_explicit_path(tmp_path: Path) -> None:

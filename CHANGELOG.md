@@ -181,6 +181,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   serve token minted, a sign-in) replaced the API key and the IAM session with
   its own key; a one-line file came back whole as the API key. The BOM is now
   decoded away, as `state.json`'s reader already did.
+- **A `config.toml` saved with a UTF-8 BOM loads.** The same editors put one in
+  front of `~/.aisquare/config.toml`, which the TOML parser refuses: commands
+  that read the config failed on it, a launch went untraced, and a save could
+  not read the file it merges into and dropped the sections this build does
+  not know. It is decoded past the BOM like the credentials file, and written
+  back without it.
 - **A store another line stamped 15 or 17 converges instead of failing.** Schema
   v15-v17 were claimed by other lines of development too: #136 stamps 15 for
   `work_brief`, #201 stamps 15 for persona columns, #113 stamps 15-17 for its

@@ -199,6 +199,19 @@ def test_version_asks_dash_V_without_a_server(fake_bin: Path, conf: Path) -> Non
     assert _server(failing, fake_bin, conf).version() is None
 
 
+def test_server_version_asks_the_running_server_not_the_binary(fake_bin: Path, conf: Path) -> None:
+    """Final review of #203, F2: after an in-place upgrade ``tmux -V`` names the new
+    binary while the private server runs the old one, and the server is what parses
+    flags and key names. tmux prints ``#{version}`` bare (``3.4``); a server that
+    refuses the question answers nothing."""
+    fake = FakeTmux(Completed(0, "3.4\n", ""))
+    assert _server(fake, fake_bin, conf).server_version() == (3, 4)
+    assert fake.calls == [([*_prefix(fake_bin, conf), "display-message", "-p", "#{version}"], None)]
+
+    absent = FakeTmux(Completed(1, "", "no server running on /tmp/tmux-1000/sock\n"))
+    assert _server(absent, fake_bin, conf).server_version() is None
+
+
 def test_require_rejects_old_accepts_new_and_fails_open_on_unparseable(
     fake_bin: Path, conf: Path
 ) -> None:

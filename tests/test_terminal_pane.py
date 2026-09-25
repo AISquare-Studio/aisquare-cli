@@ -2980,9 +2980,9 @@ def test_a_pane_detached_but_still_registered_is_skipped_not_logged_as_failing(
 
 def test_the_servers_version_is_asked_once_across_attaches(tmp_path: Path) -> None:
     """Round 8 of #203. ``_wrap_flags`` needs the version for the FIRST frame, and
-    it was read once per ATTACH — a blocking ``tmux -V`` subprocess on the UI
-    thread at every project switch, tab activation and re-mounted view. Cached
-    by socket, which is what the answer is about."""
+    it was read once per ATTACH — a blocking subprocess on the UI thread at every
+    project switch, tab activation and re-mounted view. Cached by socket, which
+    is what the answer is about."""
     record: list[tuple[str, ...]] = []
     fake = FakeTmux(record=record)
     fake.panes["%1"] = FakePane(screen=["first"])
@@ -2997,9 +2997,9 @@ def test_the_servers_version_is_asked_once_across_attaches(tmp_path: Path) -> No
             await wait_until(pilot, lambda: screen_text(pane)[0] == "other")
             pane.attach("%1")
             await wait_until(pilot, lambda: screen_text(pane)[0] == "first")
-            return sum(1 for argv in record if list(argv)[1:] == ["-V"])
+            return sum(1 for argv in record if "#{version}" in argv)
 
-    assert run(drive()) == 1, "three attaches, one tmux -V"
+    assert run(drive()) == 1, "three attaches, one version question"
 
 
 def test_the_copy_key_outside_the_pane_copies_the_panes_highlight_and_nothing_empty(
@@ -3797,6 +3797,40 @@ def test_attach_re_reads_the_version_for_a_new_server(fake: FakeTmux, tmp_path: 
     modern_sent, old_sent = run(drive())
     assert modern_sent == [("S-Enter",)]  # the 3.7c server got the chord…
     assert old_sent == [("C-j",)], "…and the 3.4 one its older spelling: the version was re-read"
+
+
+def test_the_version_is_the_running_servers_not_the_binary_on_path(
+    fake: FakeTmux, tmp_path: Path
+) -> None:
+    """Final review of #203, F2. tmux parses flags and key names in the SERVER, and the
+    pane read ``tmux -V``: the binary on PATH. Upgraded in place under a running fleet
+    (the package at 3.7, the private server still on the 3.4 it started with, which a
+    3.7 client talks to without complaint), every frame asked for ``capture-pane -F``
+    and the server refused it, so a live agent read ``(pane gone)``, and shift+enter
+    went out as ``S-Enter``, which a 3.4 server types into the agent. The server is
+    asked for its own version, and the binary's is never read here."""
+    record: list[tuple[str, ...]] = []
+    fake.record = record
+    fake.version = "tmux 3.4"
+    fake.client_version = "tmux 3.7c"
+
+    async def drive() -> tuple[str | None, str, list[tuple[str, ...]]]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 6)) as pilot:
+            pane = host.pane
+            await wait_until(pilot, lambda: synced(pane) or pane.notice is not None)
+            notice, first = pane.notice, screen_text(pane)[0]
+            pane.focus()
+            await pilot.pause()
+            await pilot.press("shift+enter")
+            await pilot.pause()
+            return notice, first, fake.sent()
+
+    notice, first, sent = run(drive())
+    assert notice is None and first == "red plain", "a live agent's frames render"
+    assert fake.flag_captures == 0, "no frame asked the 3.4 server for -F"
+    assert sent == [("C-j",)], "shift+enter by the spelling the 3.4 server knows"
+    assert not [argv for argv in record if list(argv)[1:] == ["-V"]], "the binary is not asked"
 
 
 # --- placeholder and failure states -----------------------------------------------------------

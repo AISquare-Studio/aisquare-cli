@@ -530,8 +530,32 @@ class TmuxServer:
         return True
 
     def version(self) -> tuple[int, int] | None:
-        """The server binary's version, or ``None`` when it cannot be read."""
+        """The version of the tmux binary on PATH, or ``None`` when it cannot be read.
+
+        That is the version a server started NOW would run, which is what
+        :meth:`require` gates. It is not the running server's
+        (:meth:`server_version`) once the package was upgraded in place.
+        """
         completed = self._runner([self.binary(), "-V"], None)
+        return parse_version(completed.stdout) if completed.returncode == 0 else None
+
+    def server_version(self) -> tuple[int, int] | None:
+        """The RUNNING server's version, asked of the socket; ``None`` when it will not say.
+
+        tmux parses a command's flags in the server, not in the client, so a
+        flag or a key name the server does not know is refused (or typed out)
+        whatever the binary on PATH knows. Upgraded in place (brew, dnf, apt)
+        while the private server keeps running the old binary — the case
+        :meth:`server_absent` names — ``tmux -V`` said 3.7 to a 3.4 server:
+        ``capture-pane -F`` failed every frame and ``S-Enter`` was typed into
+        the agent (final review of #203, F2; measured with a 3.7c client on a
+        3.4 server, which talk without complaint). ``display-message -p
+        '#{version}'`` is the question :meth:`reachable` already puts, and the
+        server answers it with its own version. A refusal (no server, a denied
+        socket) is ``None``; a question that could not be put (no binary, a
+        timeout) raises :class:`TmuxError`, as :meth:`version` does.
+        """
+        completed = self._runner(self.argv("display-message", "-p", "#{version}"), None)
         return parse_version(completed.stdout) if completed.returncode == 0 else None
 
     def require(self) -> None:

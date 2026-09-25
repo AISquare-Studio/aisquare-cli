@@ -206,7 +206,7 @@ class ScriptedServer(TmuxServer):
         self.captures: list[tuple[str, int, int | None]] = []
         self.resizes: list[tuple[str, int, int]] = []
 
-    def version(self) -> tuple[int, int] | None:
+    def server_version(self) -> tuple[int, int] | None:
         return (3, 7)
 
     def capture(

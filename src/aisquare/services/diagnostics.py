@@ -984,12 +984,16 @@ def _claude_account_limit_checks() -> list[DoctorCheck]:
 
 
 def _claude_account_headroom_check() -> DoctorCheck | None:
-    """``--live`` only: every enabled, signed-in account's five-hour window, against ``switch_at``.
+    """``--live`` only: every enabled, signed-in account's windows, against ``switch_at``.
 
     Leaves the machine (the usage endpoint, one request per account), which is
     why it runs only on ``doctor --live``. Warns when EVERY account is over the
     line — a fleet about to stall with nowhere to switch to — and reports the
     numbers otherwise so the operator can see them without opening the page.
+    An account is as full as the fuller of its two windows, the rule the pick
+    itself applies (``claude_accounts.headroom_percent``): an account that has
+    spent its week read "ok" here on an empty five-hour window, beside a pick
+    that could not use it (final review of #203, accounts F1).
     ``None`` when there is nothing to measure (no signed-in account) — and
     ``None`` before ``context.db`` exists, like its two siblings: the arranged
     list is read through the store, and a doctor run must not create the home
@@ -1007,10 +1011,11 @@ def _claude_account_headroom_check() -> DoctorCheck | None:
         return None
     settings = claude_accounts_service.accounts_settings()
     readings = claude_accounts_service.read_usage(accounts)
+    fullness = claude_accounts_service.headroom_percent
     measured = [
-        (account, reading.session_percent)
+        (account, percent)
         for account in accounts
-        if (reading := readings[account.slot]).available and reading.session_percent is not None
+        if (percent := fullness(readings[account.slot])) is not None
     ]
     unreadable = [
         f"{claude_accounts_core.label(account)}: {readings[account.slot].reason or 'no reading'}"
@@ -1018,14 +1023,16 @@ def _claude_account_headroom_check() -> DoctorCheck | None:
         if account.slot not in {a.slot for a, _ in measured}
     ]
     summary = " · ".join(
-        f"{claude_accounts_core.label(account)} {pct:.0f}%" for account, pct in measured
+        claude_accounts_service.describe_headroom(account, readings[account.slot])
+        for account, _pct in measured
     )
     if unreadable:
         summary = (summary + " · " if summary else "") + "unreadable: " + "; ".join(unreadable)
     if measured and all(pct >= settings.switch_at for _, pct in measured):
         return _warn(
             "claude-account-headroom",
-            f"every account is at or over {settings.switch_at}% of its five-hour window: {summary}",
+            f"every account is at or over {settings.switch_at}% of its five-hour or weekly "
+            f"window: {summary}",
             "Add or sign in another account (aisquare accounts add), or wait for a reset — "
             "a fleet spawned now has nowhere to switch to",
         )
@@ -1037,7 +1044,7 @@ def _claude_account_headroom_check() -> DoctorCheck | None:
         )
     return _ok(
         "claude-account-headroom",
-        f"five-hour windows ({settings.switch_at}% is the line): {summary}",
+        f"five-hour and weekly windows ({settings.switch_at}% is the line): {summary}",
     )
 
 

@@ -277,7 +277,7 @@ class SettingsView(VerticalScroll):
                 PICK_MODES, value=self.accounts.pick, allow_blank=False, id="accounts-pick"
             )
         with Horizontal(classes="row"):
-            yield Label("switch at (% of 5 h)")
+            yield Label("switch at (% used)")
             yield Input(value=str(self.accounts.switch_at), type="integer", id="accounts-switch-at")
         with Horizontal(classes="row"):
             yield Label("on a usage limit")
@@ -399,7 +399,7 @@ class SettingsView(VerticalScroll):
         except ValueError:
             return "switch at and wait-if-reset-within must be whole numbers"
         if not 1 <= switch_at <= 100:
-            return "switch at must be between 1 and 100 (a percentage of the five-hour window)"
+            return "switch at must be between 1 and 100 (a percentage of a usage window)"
         if wait_minutes < 0:
             return "wait if reset within cannot be negative"
         pick = self.query_one("#accounts-pick", Select).value

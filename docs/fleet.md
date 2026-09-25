@@ -516,9 +516,11 @@ c1/c2/c3 shell aliases people write by hand, owned by the tool instead.
 - **Headroom.** With `[accounts] pick = "headroom"` (the Settings tab's
   *launches pick*, or `aisquare config set accounts.pick headroom`) the machine
   default gives way to the account with room: every enabled, signed-in account's
-  five-hour window is read once, and the first one in priority order under
-  `switch_at` (85 % by default) is taken — or, when all are over it, the one
-  with the most left. Usage is the same best-effort endpoint as the bars, so an
+  usage is read once, and the first one in priority order under `switch_at`
+  (85 % by default) is taken — or, when all are over it, the one with the most
+  left. An account counts as full as the fuller of its two windows, so one
+  that has spent its week is not taken for an empty five hours. Usage is the
+  same best-effort endpoint as the bars, so an
   account that does not answer is skipped with a note and, when none answers,
   the machine default decides as before. Each reading is kept: the row's bar
   gains *≈ 40 min to the limit* once two readings of the same window exist.

@@ -81,10 +81,18 @@ class _Usage:
         return 200, json.dumps(answer).encode()
 
 
-def _payload(percent: float, *, resets_at: datetime = NOW + timedelta(hours=3)) -> dict[str, Any]:
+def _payload(
+    percent: float,
+    *,
+    resets_at: datetime = NOW + timedelta(hours=3),
+    week: float | None = None,
+) -> dict[str, Any]:
+    """The live payload with the five-hour window at ``percent`` (and the week at ``week``)."""
     payload: dict[str, Any] = json.loads(json.dumps(LIVE_USAGE))
     payload["five_hour"]["utilization"] = percent
     payload["five_hour"]["resets_at"] = resets_at.isoformat()
+    if week is not None:
+        payload["seven_day"]["utilization"] = week
     return payload
 
 
@@ -869,6 +877,61 @@ def test_headroom_takes_the_most_room_when_every_account_is_over_the_line(
     assert any("every account is over 85%" in note and "12% left" in note for note in notes)
 
 
+def test_an_account_that_has_spent_its_week_has_no_headroom_however_empty_its_five_hours(
+    fake_home: Path, work: ProjectInfo
+) -> None:
+    """Final review of #203, accounts F1: the pick read the five-hour window alone.
+
+    An account that has spent its week builds no five-hour usage, so that window
+    reads near 0 % once it rolls over and the account ranked first. The weekly
+    limit is the case the automatic hand-over exists for, and it moved the agent
+    onto an account that refused its first request; the cooldown then kept it
+    parked until a reset days away. Each account is now as full as the fuller of
+    its two windows, in the pick, the hand-over and the note that explains them.
+    """
+    _slot("left@example.com", "tok-left")  # slot 2: the account being left
+    _slot("spent@example.com", "tok-spent")  # slot 3: first in order, its week gone
+    _slot("room@example.com", "tok-room")  # slot 4: room in both windows
+    fetch = _Usage(
+        {
+            "tok-left": _payload(95, week=100),
+            "tok-spent": _payload(0, week=100),
+            "tok-room": _payload(40, week=10),
+        }
+    )
+
+    picked, notes = service.headroom_choice(
+        service.list_accounts(), switch_at=85, exclude=[2], fetch=fetch, least_bad=False
+    )
+    assert picked is not None and picked.slot == 4
+    assert any(
+        "account 3 0% (week 100%)" in note and "account 4 is first under 85%" in note
+        for note in notes
+    ), notes
+
+    handed = service.choose_for_handover(
+        role="coder", project=work, exclude=(2,), automatic=True, fetch=fetch
+    )
+    assert handed.account is not None and handed.account.slot == 4
+
+    # Every week spent: the hook's hand-over refuses rather than bounce the agent…
+    spent = _Usage(
+        {
+            "tok-left": _payload(95, week=100),
+            "tok-spent": _payload(0, week=100),
+            "tok-room": _payload(40, week=99),
+        }
+    )
+    refused = service.choose_for_handover(
+        role="coder", project=work, exclude=(2,), automatic=True, fetch=spent
+    )
+    assert refused.account is None
+    # …and by hand the least bad is judged on the fuller window too.
+    by_hand = service.choose_for_handover(role="coder", project=work, exclude=(2,), fetch=spent)
+    assert by_hand.account is not None and by_hand.account.slot == 4
+    assert any("account 4 has the most room (1% left)" in note for note in by_hand.notes)
+
+
 def test_headroom_skips_what_it_cannot_read_and_honours_disabled_and_exclude(
     fake_home: Path,
 ) -> None:
@@ -1526,6 +1589,27 @@ def test_doctor_live_headroom_warns_only_when_every_account_is_over_the_line(
     # Offline doctor never reaches it; --live does (the wiring, not just the function).
     offline = [c.name for c in diagnostics.doctor(live=False)]
     assert "claude-account-headroom" not in offline
+
+
+def test_doctor_live_headroom_counts_a_spent_week_as_over_the_line(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The doctor's row applies the pick's rule (final review of #203, accounts F1): an
+    account whose week is spent read "ok" on its empty five-hour window."""
+    _slot("work@example.com", "tok-work")
+    _slot("personal@example.com", "tok-personal")
+    monkeypatch.setattr(
+        service,
+        "_http_get",
+        _Usage({"tok-work": _payload(90), "tok-personal": _payload(0, week=100)}),
+    )
+    service.list_accounts()  # the registry exists: doctor may read it
+
+    check = diagnostics._claude_account_headroom_check()
+
+    assert check is not None and check.status.value == "warn", check
+    assert "every account is at or over 85%" in check.detail
+    assert "account 3 0% (week 100%)" in check.detail
 
 
 def test_doctor_live_and_the_page_read_every_account_in_one_round(

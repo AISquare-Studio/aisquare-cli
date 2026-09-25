@@ -314,8 +314,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   when its limit hits** (#146). A new `[accounts]` section (Settings tab, or
   `aisquare config set accounts.<key>`): `pick = headroom` makes every launch
   that nothing names an account for read each enabled, signed-in account's
-  five-hour window and take, in priority order, the first under `switch_at`
-  (85 %) — or the one with the most room when all are over it; usage that
+  usage and take, in priority order, the first under `switch_at` (85 %) — or
+  the one with the most room when all are over it. An account is as full as
+  the fuller of its five-hour and weekly windows, so one that has spent its
+  week is never taken for an empty five hours. Usage that
   cannot be read is skipped with a note, and when none can, the machine
   default decides as before. Every reading is kept (`claude_usage`, schema
   v16), so `accounts usage`, `list --usage` and the Accounts page say

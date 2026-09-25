@@ -320,9 +320,10 @@ class AccountsSettings(BaseModel):
     ``pick`` is how a launch chooses an account when nothing names one (no
     ``--account``, no role binding, no project default): ``default`` takes the
     machine default (#145); ``headroom`` reads each enabled, signed-in account's
-    five-hour usage and takes, in priority order, the first one under
-    ``switch_at`` percent — or, when every account is over it, the one with the
-    most room left. Usage is the undocumented endpoint Claude Code's own
+    usage and takes, in priority order, the first one under ``switch_at``
+    percent of the fuller of its two windows (five-hour and weekly) — or, when
+    every account is over it, the one with the most room left. Usage is the
+    undocumented endpoint Claude Code's own
     ``/usage`` reads (docs/plans/claude-accounts.md §5), so ``headroom`` is best
     effort: an account whose usage cannot be read is skipped with a note, and
     when none can be read the machine default decides as before.

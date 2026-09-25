@@ -775,6 +775,7 @@ def wire_session(
     gateway_url: str | None = None,
     root_opener: RootOpener | None = None,
     post_root: bool = True,
+    key_env: str | None = None,
 ) -> SessionWiring:
     """Build the env delta that traces one session, or explain why not.
 
@@ -816,6 +817,8 @@ def wire_session(
     by the caller because only the caller knows which variable the target names;
     it becomes the ``X-AISquare-Key`` header a hosted proxy authenticates on, and
     is omitted entirely when absent so a loopback sidecar is unaffected.
+    ``key_env`` is the variable that target names (``None``: the default), so
+    the reason an untraced launch gives names the one the resolver reads.
 
     ``prober`` resolves HERE rather than as a default argument. A default binds
     the function object at def time, so patching ``probe_proxy`` on this module
@@ -920,12 +923,21 @@ def wire_session(
         )
 
     if not api_key and not is_loopback(settings.proxy_url):
+        # The target's own variable, and the key file only when the target
+        # names the default one — the resolver reads nothing else. A target
+        # `explainability use` creates names its own (EXPLAINABILITY_PROD_API_KEY),
+        # and this line sent the operator to the two places it never reads
+        # (review of #172).
+        variable = key_env or KEY_ENV_VAR
+        where = f"export {variable}=…"
+        if variable == KEY_ENV_VAR:
+            where += f" or write {key_path()}"
         return SessionWiring(
             traced=False,
             reason=(
                 f"{settings.proxy_url} is not a local proxy and no workspace key resolved, "
-                "so every model call would be denied — launching untraced. Set the key: "
-                f"export {KEY_ENV_VAR}=… or write {key_path()}"
+                f"so every model call would be denied — launching untraced. Set the key: "
+                f"{where}; or attach this project's own: aisquare explainability key set"
             ),
         )
 

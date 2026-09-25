@@ -1220,6 +1220,7 @@ def env(
         api_key=target.api_key,
         gateway_url=target.gateway_url if post_root else None,
         post_root=post_root,
+        key_env=target.api_key_env,
     )
     if not wiring.traced:
         fail(wiring.reason, error="untraced")

@@ -789,6 +789,23 @@ def test_the_wiring_takes_the_destinations_proxy_with_its_key(
     assert asked == ["https://prod-proxy.example:9443"]
 
 
+def test_an_untraced_launch_names_the_key_variable_its_target_reads(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A target with a variable of its own — every one ``use`` creates — reads that and
+    never the key file, and the untraced line sent the operator to export
+    EXPLAINABILITY_API_KEY or write the key file: the two places it never reads
+    (review of #172)."""
+    _two_deployments(tmp_path)
+    assert runner.invoke(app, ["explainability", "key", "clear"]).exit_code == 0
+    monkeypatch.setattr(service, "probe_proxy", lambda _url: service.ProxyProbe(True, "healthy"))
+    result = runner.invoke(app, ["explainability", "env", "coder"])
+    assert result.exit_code != 0
+    reason = " ".join(result.output.split())
+    assert "Set the key: export PROD_KEY=…; or attach this project's own" in reason
+    assert service.KEY_ENV_VAR not in reason and "explainability-key" not in reason
+
+
 def test_every_wiring_folds_the_same_project_it_resolves_the_key_for() -> None:
     """Launch, spawn and `env` each pair `effective_settings` with `resolve_target`.
 

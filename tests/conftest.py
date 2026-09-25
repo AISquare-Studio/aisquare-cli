@@ -575,7 +575,14 @@ def private_ui_socket_root(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     so the test of where the short path lives (it must not follow the environment,
     tests/test_captain_state.py) still sees the product's own answer move: measured,
     a ``_short_root`` that followed ``XDG_RUNTIME_DIR`` still fails it under this fixture.
+
+    Off on Windows: there are no unix sockets there, so nothing binds or dials, and the
+    temp dir it would map beneath is already long — #223's Windows leg failed T1's
+    short-path test at 133 bytes against the 100 cap under this mapping.
     """
+    if sys.platform == "win32":
+        yield
+        return
     from aisquare.services.captain import state as captain_state
 
     real = captain_state._short_root
@@ -594,7 +601,9 @@ def private_ui_socket_root(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setattr(captain_state, "_short_root", private)
     yield
     for folder in made:
-        shutil.rmtree(folder, ignore_errors=True)
+        # Under the test's own patches (see no_real_fleet): never let them error the test.
+        with contextlib.suppress(Exception):
+            shutil.rmtree(folder, ignore_errors=True)
 
 
 @pytest.fixture(autouse=True)

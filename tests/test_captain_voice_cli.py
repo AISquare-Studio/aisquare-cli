@@ -12,8 +12,33 @@ from typer.testing import CliRunner
 
 from aisquare.cli import captain_voice
 from aisquare.cli.app import app
+from aisquare.services import fleet as fleet_service
+from aisquare.services.captain import brain
 from aisquare.services.captain import speaker as speaker_mod
 from tests.test_stubs import IMPLEMENTED
+
+
+@pytest.fixture(autouse=True)
+def no_real_captain_spawn(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No test here may start a captain: the bare group path spawns the REAL claude on the
+    fleet's REAL tmux socket, and only ``AISQUARE_HOME`` would be isolated.
+
+    A bite check that mutated the ``--voice`` routing away did exactly that on
+    2026-09-25 (board 13220): the alias test fell through to the bare command,
+    which found no captain and started one — a real ``claude`` parked at the trust
+    dialog on the owner's socket ``asq``. Now a test that reaches the spawn fails
+    LOUDLY with the argv it got there with, and nothing runs. (The suite-wide twin,
+    a private socket and a stand-in binary for every test, lives in conftest on T2.)
+    """
+
+    def refuse(*args: object, **kwargs: object) -> object:
+        raise AssertionError(
+            "a voice CLI test reached the real captain spawn — the routing broke: "
+            f"args={args!r} kwargs={sorted(kwargs)!r}"
+        )
+
+    monkeypatch.setattr(brain, "start", refuse)
+    monkeypatch.setattr(fleet_service, "spawn", refuse)
 
 
 def test_show_token_prints_the_url_the_qr_and_the_adb_line_without_serving(
@@ -120,6 +145,17 @@ def test_a_non_loopback_host_and_a_bad_mode_are_refused(
     assert result.exit_code == 1 and "focus, listen" in result.output
     result = runner.invoke(app, ["captain", "voice", "--speaker", "loud", "--show-token"])
     assert result.exit_code == 1 and "on or off" in result.output
+
+
+def test_a_test_that_reaches_the_bare_captain_fails_loudly_instead_of_spawning(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The belt for this module (board 13220): the bare command's spawn path is refused."""
+    monkeypatch.setattr(brain, "find", lambda: None)  # no captain: the bare command would start one
+    result = runner.invoke(app, ["captain"])
+    assert result.exit_code != 0
+    assert isinstance(result.exception, AssertionError)
+    assert "reached the real captain spawn" in str(result.exception)
 
 
 def test_the_leaf_is_implemented_and_left_uninvoked_by_the_sweeps() -> None:

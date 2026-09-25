@@ -190,7 +190,9 @@ class ResolvedTarget:
     ``$AISQUARE_EXPLAINABILITY_TARGET``, when it is not what chose this deployment).
     Its ``[explainability.targets."<name>"]`` is then also the entry every project
     without a destination reads, so a fix written there moves them too
-    (:func:`deployment_fix`); ``None`` otherwise."""
+    (:func:`deployment_fix`); ``None`` otherwise, and when the machine's target of that
+    name resolves this same deployment, whose entry it is too: in every shell, so not by
+    an exported ``$EXPLAINABILITY_GATEWAY_URL``."""
 
     @property
     def configured(self) -> bool:
@@ -207,20 +209,30 @@ class ResolvedTarget:
         mid-incident. The file case names the PATH rather than saying "a file",
         because the next thing anyone does with this line is go and look.
 
-        Names the SOURCE only. Whether a key is present is each surface's own
-        sentence — they already word it differently ("is NOT set", "(NOT set)")
-        and those phrasings are pinned — so folding presence in here would churn
-        three renderers to fix a provenance bug in one of them.
+        Names the SOURCE, with one exception. Whether a key is present is each
+        surface's own sentence — they already word it differently ("is NOT set",
+        "(NOT set)") and those phrasings are pinned — so folding presence in here
+        would churn three renderers to fix a provenance bug in one of them. The
+        exception is the key file that is there and reads as no key, below: it
+        is named with what is wrong with it, and each surface's own sentence
+        still follows.
 
         With nothing set anywhere there is no winning source, so it falls back
         to the variable the target NAMES: that is the thing an operator would
         populate next, and it is what every remediation line already tells them
-        to export.
+        to export. Unless that is the default variable and the key file is
+        there, holding no key (blank, not UTF-8 — PowerShell 5.1's ``>`` writes
+        UTF-16 — or unreadable: another owner's, or its mode). Then the file is
+        what its writer fixes next, and naming the variable alone left every
+        surface silent about it (review of the #203 final-review fixes, EX5a;
+        unreadable, round 2, F5).
         """
         if self.key_source == "project":
             return f"the project's own key ({project_key_path(self.project_id or '?')})"
         if self.key_source == "file":
             return str(key_path())
+        if self.key_source == "unset" and self.api_key_env == KEY_ENV_VAR and key_path().is_file():
+            return f"{key_path()} (holds no key: blank, not UTF-8, or unreadable)"
         return f"${self.api_key_env}"
 
     @property
@@ -445,12 +457,21 @@ def resolve_target(
     # The project's deployment, named like the machine's own target: one config entry
     # for both, which `deployment_fix` must not name as this deployment's alone. Not
     # when the variable chose this deployment itself: pointing it elsewhere moved the
-    # project off the entry the fix named (review of #203, round 3).
+    # project off the entry the fix named (review of #203, round 3). And not when the
+    # machine resolves this same deployment by that name: the entry is rightly both's
+    # then, and the rename only unbound the keys attached for the name (review of the
+    # #203 final-review fixes, F3). The machine's read is the one resolver's, as in
+    # `binding_serves`, and without the gateway this shell exports: the entry is read by
+    # every shell, and a staging gateway exported here dropped the rename on the prod
+    # machine, so the fix moved every other shell's projects to the staging proxy (review
+    # of the #203 final-review fixes, round 2, F1).
     entry_shared = None
-    if not machine and chosen == settings.target:
-        entry_shared = "config"
-    elif not machine and chosen == exported and target_source != "env":
-        entry_shared = "env"
+    named = chosen == settings.target or (chosen == exported and target_source != "env")
+    if not machine and named:
+        every_shell = {k: v for k, v in environ.items() if k != GATEWAY_ENV_VAR}
+        own = resolve_target(settings, chosen, env=every_shell).gateway_url
+        if not (own and _same_deployment(own, gateway_url)):
+            entry_shared = "config" if chosen == settings.target else "env"
 
     roles = target.roles if target.roles is not None else settings.roles
     return ResolvedTarget(
@@ -491,14 +512,18 @@ def deployment_fix(
     gateway rows, which named ``enable --target`` for a project's deployment
     too).
 
-    UNLESS THE MACHINE'S OWN TARGET HAS THE SAME NAME
+    UNLESS THE MACHINE'S OWN TARGET HAS THE SAME NAME AND IS ANOTHER DEPLOYMENT
     (:attr:`ResolvedTarget.entry_shared`): then the entry is its too, and every
     project without a destination reads it. The machine ``init
     --explainability`` writes is on prod and named ``stg`` by default, so for a
     project on staging the proxy row's fix, followed word for word, moved every
     other project's proxy to staging, with the prod gateway and key (review of
     #203, round 2). The entry is still where the setting goes, and the fix says
-    the machine's target needs a name of its own first.
+    the machine's target needs a name of its own first. A machine whose target
+    of that name resolves this same deployment gets the entry alone: the fix
+    moves both to where both belong, and the rename only unbound the keys
+    attached for the name. Resolves it in every shell, since every shell reads
+    the entry: a gateway exported in this one does not count.
     """
     if target.project_deployment:
         entry = f'[explainability.targets."{target.name}"] in {paths.config_path()}'
@@ -585,21 +610,25 @@ def binding_serves(
     of that name is that deployment, and is kept and not used otherwise:
 
     * **The machine's own target**, while the machine's read of it resolves the
-      destination's gateway, or none at all (a deployment by name only: ``key
-      set`` on a machine whose target was set to ``local`` before ``use``,
-      #141). That read falls back to ``$EXPLAINABILITY_GATEWAY_URL`` and the
-      top-level gateway, as a key bound to that target does.
+      destination's gateway (by scheme, host and port, so one typed with a
+      capital or its default port is still that gateway), or none at all (a
+      deployment by name only: ``key set`` on a machine whose target was set to
+      ``local`` before ``use``, #141). That read falls back to
+      ``$EXPLAINABILITY_GATEWAY_URL`` and the top-level gateway, as a key bound
+      to that target does.
     * **Another of the machine's entries**, always. A key bound to it takes the
       entry's own gateway and never the top-level one, and the destination
       reads the same entry, a gateway set by hand included. Compared with the
       machine's read of it, which does fall back, a key ``key set --target
       local`` bound to an entry with no gateway stopped answering for the
       ``local`` deployment (review of #203, round 3).
-    * **Never a name the machine no longer has.** The binding records the name
-      and not which deployment it had: once the doctor's fix had the machine's
-      ``stg`` (on prod) renamed, a prod key bound to it answered for the
-      destination's ``stg`` and went to staging (same review). It answers for
-      the destination once ``key set`` attaches it there.
+    * **Never a name the machine no longer has** (not in :func:`known_targets`,
+      the rule ``key set`` binds by). The binding records the name and not
+      which deployment it had: once the doctor's fix had the machine's ``stg``
+      (on prod) renamed, a prod key bound to it answered for the destination's
+      ``stg`` and went to staging (same review, and the #203 final-review
+      fixes, R1). It answers for the destination once ``key set`` attaches it
+      there.
 
     ONE rule, for the resolver and for the surfaces that say whether the key is
     in use (``key show``, the Explainability page's key row, through
@@ -612,14 +641,19 @@ def binding_serves(
         return binding.api_url is None
     if binding.api_url is not None:
         return True
+    if target_name not in known_targets(settings):
+        return False
     if target_name != settings.target:
-        return target_name in settings.targets
+        return True
     from aisquare.services.destinations import deployment_target  # lazy: it imports this
 
     # Both resolved, the machine's by the one resolver: neither is read off the config.
+    # Compared on scheme, host and port: the same gateway typed with a capital or its
+    # default port written out kept the key unused (review of the #203 final-review
+    # fixes, F4).
     machine = resolve_target(settings, target_name, env=env)
     theirs = deployment_target(settings, destination)
-    return not machine.gateway_url or machine.gateway_url == theirs.gateway_url.rstrip("/")
+    return not machine.gateway_url or _same_deployment(machine.gateway_url, theirs.gateway_url)
 
 
 def kept_key_note(
@@ -641,7 +675,7 @@ def kept_key_note(
             f"attached for the deployment of {binding.api_url}, which no destination of this "
             f"project names now: not used for this machine's target {target.name}"
         )
-    if binding.target != settings.target:  # not one of its entries either (binding_serves)
+    if binding.target not in known_targets(settings):  # `binding_serves`' rule, as it reads it
         return (
             f"attached for target {binding.target}, which this machine no longer has, so not "
             "used for the deployment this project's destination names "
@@ -1615,6 +1649,20 @@ def _check_config(target: ResolvedTarget, *, on: bool) -> DoctorCheck:
             else "point the target at another variable: aisquare explainability enable "
             f"--target {target.name} --key-env <VAR>"
         )
+        if target.api_key_env == KEY_ENV_VAR and key_path().is_file():
+            # The key file is there and reads as no key. Its writer was told to export
+            # the variable "the CLI never stores" (review of the #203 final-review
+            # fixes, EX5a). `stored_api_key` reads a file it cannot open as no key too,
+            # which "not UTF-8" did not name (round 2, F5).
+            return degrade(
+                name,
+                f"target '{target.name}' -> {target.gateway_url} ({target.gateway_source}), "
+                f"but ${target.api_key_env} is not set in this shell and {key_path()} holds no "
+                "key (blank, not UTF-8, or unreadable)",
+                f"Write the workspace key into {key_path()} again, as UTF-8 text this user can "
+                f"read (PowerShell 5.1's `>` writes UTF-16), export it as "
+                f"${target.api_key_env}, or {other}",
+            )
         return degrade(
             name,
             f"target '{target.name}' -> {target.gateway_url} ({target.gateway_source}), "

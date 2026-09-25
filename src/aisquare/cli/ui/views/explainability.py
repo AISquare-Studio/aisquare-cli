@@ -533,6 +533,21 @@ def save_setup(form: SetupForm, page: ProjectInfo | None) -> SetupOutcome:
         if suggested is not None:
             proxy = suggested
     identity = f"{prefix}-{{role}}" if prefix else None
+    # A prefix whose names no header carries: the writer refuses it naming a template to
+    # try, which `enable --identity` takes and this field refuses (braces). The rule is
+    # the writer's, the name to type is said here: a rendered name typed back named every
+    # agent `arbind.kumar-planner-<role>` (review of the #203 final-review fixes, round
+    # 2, F3). A prefix with a brace is the handler's to word, and the writer's below.
+    if (
+        identity
+        and not {"{", "}"} & set(prefix)
+        and explainability_service.identity_problem(identity)
+    ):
+        return _refused(
+            f"prefix {prefix!r} names agents like {identity.format(role='planner')!r}, which "
+            "cannot travel in a header, so every launch would go untraced — letters, digits, "
+            f"'.', '_' and '-' only: try {explainability_service.header_safe(prefix)!r}"
+        )
     # The deployments a key may be bound to, judged on the config AS IT WAS:
     # `configure_target` below makes a typed name the machine's target when
     # 'make active' is ticked, and judged after it, a typo passed as known
@@ -568,8 +583,11 @@ def save_setup(form: SetupForm, page: ProjectInfo | None) -> SetupOutcome:
         key_target = resolved.name
         if resolved.destination is not None:
             # Its destination's deployment is read off the destination, not the
-            # config (review of #203), so it is known without an entry.
-            known = sorted({*known, *ops.known_targets(settings, resolved.destination)})
+            # config (review of #203), so it is known without an entry. That name
+            # alone: `known_targets(settings, …)` read the machine's target off
+            # the config `configure_target` had just changed, and with 'make
+            # active' ticked the typo was known again (final review of #203, EX2).
+            known = sorted({*known, resolved.destination.environment})
         if key_target not in known:
             named = f", named by ${ops.TARGET_ENV_VAR}" if resolved.target_source == "env" else ""
             return _refused(
@@ -874,8 +892,9 @@ class ExplainabilityView(VerticalScroll):
         # became `nishil`) while the CLI's `--identity` refused the same input
         # through `identity_problem`. Two doors, two answers again (review of
         # #132). The writer's own check still runs on the composed template
-        # below, so this is guidance for the one shape it cannot word: a name
-        # with the template's braces in it.
+        # below, so this is guidance for a shape it cannot word for this field:
+        # a name with the template's braces in it (`save_setup` words the
+        # other, a name no header carries).
         if prefix and ("{" in prefix or "}" in prefix):
             self.notify(
                 f"prefix {prefix!r} is a name, not a template — the agent's role is added "

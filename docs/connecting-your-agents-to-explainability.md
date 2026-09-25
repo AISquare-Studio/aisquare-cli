@@ -164,7 +164,10 @@ Two ways not to get it wrong:
     reads first, whatever variable it names.
   - The **prefix** is a name: `nishil` becomes `nishil-{role}`. A prefix with a
     brace in it (`nishil-{role}`, `nishil}`) is refused with the reason, and
-    nothing is stored; the role is added for you.
+    nothing is stored; the role is added for you. So is one a header cannot
+    carry — letters, digits, `.`, `_` and `-` only, so `arbind.kumar`, not
+    `arbind kumar` — and `--identity` is held to the same rule: a name with a
+    space or an `@` in it would launch every session untraced.
 - **On the command line** — pass it explicitly, as the examples above do.
 
 Either way, a gateway or proxy without a scheme (`stg.example`) is **refused**,
@@ -412,9 +415,11 @@ reported on its own line:
   `status`'s other fixes for a project's deployment name that entry, or `key set
   --project … --from-env <VAR>`, for the same reason. When the machine's own
   target has the deployment's name (its default name is `stg`, whatever gateway
-  `init --explainability` gave the machine), that entry is its too and every
-  project without a destination reads it, so the fix says to give the machine's
-  target a name of its own first. Launches, `fleet spawn` and
+  `init --explainability` gave the machine) and resolves another gateway (as
+  every shell reads it: a `$EXPLAINABILITY_GATEWAY_URL` exported in one does not
+  count), that entry is its too and every project without a destination reads
+  it, so the fix says to give the machine's target a name of its own first.
+  Launches, `fleet spawn` and
   `explainability env` in the project take the proxy **and** the key from this
   target, whatever `AISQUARE_EXPLAINABILITY_TARGET` says: a project's
   destination comes before that variable, which moves only the projects without

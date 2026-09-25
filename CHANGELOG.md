@@ -47,7 +47,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (`team-{env}-{role}` became `team-{role}`) while the CLI's `--identity`
   refused the same input. The field asks for a name: a brace of either kind is
   refused with the reason and nothing is stored, and the writer refuses any
-  template that cannot render or renders every role to one name.
+  template that cannot render, renders every role to one name, or renders a
+  name the launch cannot put in a header (`arbind kumar-{role}`, an `@`),
+  naming what each door takes instead: the prefix `arbind.kumar` in the form,
+  whose field refuses a template, and the template `arbind.kumar-{role}` for
+  `--identity`, which refuses a name without `{role}`.
 - **The hosted-proxy suggestion respects a deliberate top-level `proxy_url`.**
   The form read the per-target value only, so a chosen `[explainability]
   proxy_url` — which `_proxy_source` already reports as `config` rather than
@@ -212,6 +216,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   makes on an empty database. For anything still missing after the open, it
   fails and names each table, index, trigger or column. Its remedy keeps the
   file, whose history is intact, instead of offering the corrupt-store move.
+- **A machine key file that is not UTF-8 holds no key instead of crashing.**
+  `~/.aisquare/explainability-key` written as UTF-16 — what PowerShell 5.1's
+  `>` produces — raised `UnicodeDecodeError` out of the resolver, and
+  `aisquare doctor`, `explainability status` and `ship` ended in a traceback.
+  It now reads as no key, as a project's key file already did, and `doctor`,
+  `status` and `key show` name the file and say it holds no key (blank, not
+  UTF-8, or unreadable by this user), where they said only that
+  `$EXPLAINABILITY_API_KEY` is not set.
 
 ### Added
 - **The navigator is resizable** (#137). The line between the sidebar and the
@@ -274,7 +286,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   target ever falls back to the machine's gateway or proxy (no gateway known
   is said, the launch goes untraced, and the doctor's and `status`'s fixes
   name the config entry or `key set --from-env`, never `enable --target`, and
-  say to rename the machine's own target first when it has the same name),
+  say to rename the machine's own target first when it has the same name and
+  another gateway, as every shell reads it),
   `key set` binds to the destination's deployment and a key bound there
   answers only while a destination names it, never as the machine's target of
   the same name, and a key bound to the machine's target never answers for a

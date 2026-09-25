@@ -1540,6 +1540,74 @@ def test_make_active_does_not_make_a_typo_a_known_deployment_for_the_key(
     assert not explainability_service.project_key_path(project.id).exists()
 
 
+def test_make_active_does_not_make_a_typo_known_beside_a_destination(
+    project: ProjectInfo, quiet_explainability: dict[str, int]
+) -> None:
+    """G1 again, on the path a destination (#142) adds: its deployment joined the known
+    names through ``known_targets`` on the config ``configure_target`` had just changed,
+    so with 'make active' ticked the typed name was the machine's target and passed. The
+    machine moved to ``prdo``, which has no entry, and the key was bound to it under two
+    success toasts (final review of #203, EX2)."""
+    from aisquare.services import destinations, iam
+
+    config = load_config()
+    config.explainability.targets = {"prod": ExplainabilityTarget(gateway_url="https://p.example")}
+    save_config(config)
+    session = iam.Session(api_url="https://api.aisquare.studio", token="aisq_x", source="env")
+    with store_session() as store:
+        destinations.choose(
+            store,
+            project,
+            destinations.Workspace(id=42, uid="ws-uid-42", name="acme", role="ADMIN"),
+            destinations.Studio(id=301, uid="st-301", name="Frontend"),
+            session,
+        )
+
+    async def scenario(pilot: Pilot[None], host: Host) -> list[tuple[str, str]]:
+        host.query_one(ProjectView).active = "tab-explainability"
+        await settle(pilot)
+        host.query_one("#explainability-switch", Checkbox).value = True
+        _attach_in_setup(host, "pk-typo-0123456789", target="prdo")
+        await settle(pilot)
+        return list(host.notices)
+
+    notices = drive(project, scenario)
+    assert any(m.startswith("no target 'prdo' on this machine") for m, _ in notices), notices
+    assert not any("setup saved" in m for m, _ in notices), notices
+    assert load_config().explainability.target == "stg", "the machine did not move to the typo"
+    with store_session() as store:
+        assert store.project_explainability(project.id) is None
+    assert not explainability_service.project_key_path(project.id).exists()
+
+
+def test_a_prefix_no_header_carries_is_refused_with_advice_the_form_can_follow(
+    isolated_home: Path,
+) -> None:
+    """A full name in the prefix field (``arbind kumar``) is refused by the writer, whose
+    sentence the form showed as it is. It ended "try 'name-{role}'", and the prefix field
+    refuses braces, so the advice could not be followed there (review of the #203
+    final-review fixes, F5). Then it named a rendered agent name, ``arbind.kumar-planner``,
+    which typed as the prefix named every agent ``arbind.kumar-planner-<role>`` (round 2,
+    F3). It names the prefix to type, and typed, the agents are named as meant."""
+    from aisquare.cli.ui.views import explainability as explainability_view
+
+    def save(prefix: str) -> explainability_view.SetupOutcome:
+        form = explainability_view.SetupForm(
+            target="", switch=False, gateway="", proxy="", prefix=prefix, key_env="",
+            key="", own=False,
+        )  # fmt: skip
+        return explainability_view.save_setup(form, None)
+
+    (notice,) = save("arbind kumar").notices
+    assert notice.severity == "warning" and "cannot travel in a header" in notice.message
+    assert "{" not in notice.message, notice.message
+    assert notice.message.endswith("try 'arbind.kumar'"), notice.message
+    assert load_config().explainability.targets == {}
+    assert save("arbind.kumar").began
+    identity = ops.resolve_target(load_config().explainability).agent_name_template
+    assert identity == "arbind.kumar-{role}"
+
+
 def test_a_key_the_projects_launches_do_not_resolve_is_not_called_the_one_they_use(
     project: ProjectInfo, quiet_explainability: dict[str, int]
 ) -> None:

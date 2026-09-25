@@ -138,6 +138,23 @@ def _destination(api_url: str, project_id: str = "p") -> TraceDestination:
     )
 
 
+def test_each_hosted_deployment_in_the_table_has_the_proxy_beside_its_own_gateway() -> None:
+    """A proxy ships to the one gateway it was started with. ``stg`` had the dev box's
+    proxy, the dotted host that is dev's gateway, so a project ``use``d on staging sent its
+    model traffic and the staging key to dev's gateway, and its proxy lane stayed amber
+    (not on the gateway's host) with a fix naming the proxy beside the gateway, which the
+    table contradicted (final review of #203, EX4). Each hosted deployment's proxy is the
+    one beside its gateway, and no two deployments share one."""
+    for environment in dest.ENVIRONMENTS:
+        if service.is_loopback(environment.gateway_url):
+            continue  # the local stack's proxy is the shipped 9090 sidecar, not 9443
+        assert environment.proxy_url == service.hosted_proxy_for(environment.gateway_url), (
+            environment.name
+        )
+    proxies = [environment.proxy_url for environment in dest.ENVIRONMENTS]
+    assert len(set(proxies)) == len(proxies), proxies
+
+
 def test_the_destinations_deployment_fills_only_what_is_empty_and_is_never_written(
     isolated_home: Path,
 ) -> None:
@@ -146,7 +163,7 @@ def test_the_destinations_deployment_fills_only_what_is_empty_and_is_never_writt
         config.explainability, _destination("https://stg-api.aisquare.studio")
     )
     assert stg.gateway_url == "https://stg-explainability-api.aisquare.studio"
-    assert stg.proxy_url == "https://stg-explainability.api.aisquare.studio:9443"
+    assert stg.proxy_url == "https://stg-explainability-api.aisquare.studio:9443"
     assert config.explainability.targets == {}, "read off the destination, never written"
     # A hand-set gateway stays, and the entry itself is not filled in. The table's proxy
     # is its own gateway's, so none is filled in beside another (review of #203, round 3).
@@ -684,7 +701,7 @@ def test_a_key_attached_for_the_destinations_deployment_never_answers_as_the_mac
         dest.choose(store, project, workspace, studio, staging)
     assert read() == (
         stg_gateway,
-        "https://stg-explainability.api.aisquare.studio:9443",
+        f"{stg_gateway}:9443",
         "project",
         "AIS_staging_hand_key",
     )
@@ -731,7 +748,7 @@ def test_a_key_bound_to_the_machines_target_never_answers_for_a_destination_else
 
     with store_session() as store:
         dest.choose(store, project, workspace, studio, staging)
-    staging_proxy = "https://stg-explainability.api.aisquare.studio:9443"
+    staging_proxy = f"{stg_gateway}:9443"
     assert read() == (stg_gateway, staging_proxy, "unset", None), "the prod key went to staging"
     kept = (
         "attached for this machine's own target stg, another deployment than the one this "
@@ -781,7 +798,7 @@ def test_the_machines_own_target_on_another_gateway_is_never_a_destinations_depl
     )
     staging = (
         "https://stg-explainability-api.aisquare.studio",
-        "https://stg-explainability.api.aisquare.studio:9443",
+        "https://stg-explainability-api.aisquare.studio:9443",
     )
     config = AppConfig()
     config.explainability.enabled = True
@@ -841,59 +858,7 @@ def test_the_tables_proxy_goes_with_the_tables_gateway_only(isolated_home: Path)
     written_out = "https://stg-explainability-api.aisquare.studio/"
     config.explainability.targets["stg"] = ExplainabilityTarget(gateway_url=written_out)
     written = dest.deployment_target(config.explainability, on_staging)
-    assert written.proxy_url == "https://stg-explainability.api.aisquare.studio:9443"
-
-
-def test_a_key_bound_to_a_target_renamed_away_answers_for_no_destination(
-    runner: CliRunner, isolated_home: Path, tmp_path: Path
-) -> None:
-    """The doctor's fix for a project on staging, on the machine ``init --explainability``
-    writes, says to give the machine's own target (``stg``, on prod) a name of its own
-    first. Once it had, a prod key ``key set`` had bound to the machine's ``stg`` before
-    any ``use`` was bound to a name no target has, and such a name answered for the
-    destination's ``stg``: the prod key went to the staging gateway and proxy, and ``key
-    show`` called it in use (review of #203, round 3). Which deployment it was attached
-    for is not recorded, so it answers for no destination until ``key set`` attaches it
-    there, and ``key show`` says so."""
-    config = AppConfig()
-    config.explainability.enabled = True
-    config.explainability.gateway_url = "https://explainability-api.aisquare.studio"
-    config.explainability.proxy_url = "https://explainability-api.aisquare.studio:9443"
-    save_config(config)
-    service.store_api_key("AIS_machine_prod_key")
-    project = _project(tmp_path / "web")
-    ops.attach_project_key(project, "AIS_hand_prod_key", target="stg")
-    with store_session() as store:
-        dest.choose(
-            store,
-            project,
-            dest.Workspace(id=42, uid="ws-uid-42", name="acme", role="ADMIN"),
-            dest.Studio(id=301, uid="st-301", name="Frontend"),
-            iam.Session(api_url="https://stg-api.aisquare.studio", token="aisq_x", source="env"),
-        )
-    staging = (
-        "https://stg-explainability-api.aisquare.studio",
-        "https://stg-explainability.api.aisquare.studio:9443",
-    )
-
-    def read() -> tuple[str, str, str, str | None]:
-        resolved = ops.resolve_target(load_config().explainability, None, project_id=project.id)
-        return (resolved.gateway_url, resolved.proxy_url, resolved.key_source, resolved.api_key)
-
-    assert read() == (*staging, "unset", None)
-    renamed = load_config()
-    renamed.explainability.target = "own"
-    save_config(renamed)
-    assert read() == (*staging, "unset", None), "the prod key went to staging"
-    shown = runner.invoke(app, ["explainability", "key", "show"])
-    assert shown.exit_code == 0, shown.output
-    assert "attached for target stg, which this machine no longer has" in " ".join(
-        shown.output.split()
-    )
-    assert _json(runner, "explainability", "key", "show")["serves"] is False
-
-    ops.attach_project_key(project, "AIS_staging_key", target="stg")
-    assert read() == (*staging, "project", "AIS_staging_key")
+    assert written.proxy_url == "https://stg-explainability-api.aisquare.studio:9443"
 
 
 def test_a_key_set_for_another_machine_target_with_no_gateway_answers_for_its_destination(
@@ -975,6 +940,31 @@ def test_a_deployment_the_variable_chose_is_not_one_its_fix_moves_the_variable_o
     assert "names another target" not in fix
 
 
+def test_a_key_bound_to_the_machines_target_answers_for_its_gateway_however_spelled(
+    isolated_home: Path, tmp_path: Path
+) -> None:
+    """Whether the machine's target and the destination's deployment are one gateway was
+    decided by string: a top-level gateway typed with a capital or its default port kept
+    the key attached for the machine's ``stg`` unused on staging, a deployment it is for
+    (review of the #203 final-review fixes, F4). Compared on scheme, host and port, as
+    the proxy lane compares a reported gateway."""
+    config = AppConfig()
+    config.explainability.gateway_url = "https://STG-explainability-api.aisquare.studio:443/"
+    save_config(config)
+    project = _project(tmp_path / "web")
+    ops.attach_project_key(project, "AIS_staging_hand_key", target="stg")
+    with store_session() as store:
+        dest.choose(
+            store,
+            project,
+            dest.Workspace(id=42, uid="ws-uid-42", name="acme", role="ADMIN"),
+            dest.Studio(id=301, uid="st-301", name="Frontend"),
+            iam.Session(api_url="https://stg-api.aisquare.studio", token="aisq_x", source="env"),
+        )
+    resolved = ops.resolve_target(load_config().explainability, None, project_id=project.id)
+    assert (resolved.key_source, resolved.api_key) == ("project", "AIS_staging_hand_key")
+
+
 def test_no_remediation_for_a_projects_deployment_makes_it_the_machines_target(
     isolated_home: Path, tmp_path: Path
 ) -> None:
@@ -1042,7 +1032,7 @@ def test_no_remediation_for_a_projects_deployment_makes_it_the_machines_target(
 
 
 def test_a_fix_for_a_projects_deployment_followed_moves_no_other_project(
-    isolated_home: Path, tmp_path: Path
+    isolated_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """On the machine ``init --explainability`` writes (prod, and ``target = "stg"`` by
     default) the destination's ``stg`` entry is also the machine's target's. The proxy
@@ -1051,6 +1041,22 @@ def test_a_fix_for_a_projects_deployment_followed_moves_no_other_project(
     proxy, with the prod gateway and key (review of #203, round 2). Followed as it is
     written now, the other project resolves exactly what it did, and this one takes the
     proxy it was told to set."""
+    # The table's staging proxy as it was before it became the one beside staging's
+    # gateway (final review of #203, EX4): on another host than the gateway, where a
+    # healthy proxy that does not report its gateway gets the row followed here. With
+    # the table's own proxy, the fix named the one the project already read, and the
+    # proxy it was told to set was never checked (review of the #203 final-review
+    # fixes, M1).
+    monkeypatch.setattr(
+        dest,
+        "ENVIRONMENTS",
+        tuple(
+            replace(e, proxy_url="https://stg-explainability.api.aisquare.studio:9443")
+            if e.name == "stg"
+            else e
+            for e in dest.ENVIRONMENTS
+        ),
+    )
     config = AppConfig()
     config.explainability.enabled = True
     config.explainability.gateway_url = "https://explainability-api.aisquare.studio"
@@ -1074,12 +1080,11 @@ def test_a_fix_for_a_projects_deployment_followed_moves_no_other_project(
 
     before = read(other)
     target = ops.resolve_target(load_config().explainability, None, project_id=web.id)
-    # The table's staging proxy is not on its gateway's host, so this row is the one a
-    # healthy staging proxy that does not report its gateway gets.
     row = ops.proxy_state(target, on=True, prober=lambda _url: service.ProxyProbe(True, "ok"))
     fix = " ".join(row.remediation.split())
     setting = re.search(r'proxy_url = "([^"]+)" under (\[explainability\.targets\."stg"\])', fix)
     assert setting is not None, fix
+    assert read(web)[1] != setting[1], "the fix names the proxy the project already reads"
 
     if 'target = "<name>" under [explainability]' in fix:  # the rename, as the operator would
         renamed = load_config()
@@ -1096,6 +1101,154 @@ def test_a_fix_for_a_projects_deployment_followed_moves_no_other_project(
     assert "$AISQUARE_EXPLAINABILITY_TARGET names another target" in ops.deployment_fix(
         exported, what="proxy", value="https://<host>"
     )
+
+
+def test_a_fix_asks_for_no_rename_when_the_machines_target_is_the_same_deployment(
+    isolated_home: Path, tmp_path: Path
+) -> None:
+    """The rename is for a machine whose target of the deployment's name is another
+    deployment. It was asked whenever the names matched: on a staging machine (``target =
+    "stg"``, the top-level staging gateway) every proxy or gateway fix for a project on
+    staging said to rename the machine's target and ``key set`` again, which only unbound
+    the keys attached for ``stg`` (review of the #203 final-review fixes, F3). The entry is
+    both's there, and the fix names it alone; the prod machine still gets the rename."""
+    stg_gateway = "https://stg-explainability-api.aisquare.studio"
+    config = AppConfig()
+    config.explainability.enabled = True
+    config.explainability.gateway_url = stg_gateway
+    save_config(config)
+    project = _project(tmp_path / "web")
+    with store_session() as store:
+        dest.choose(
+            store,
+            project,
+            dest.Workspace(id=42, uid="ws-uid-42", name="acme", role="ADMIN"),
+            dest.Studio(id=301, uid="st-301", name="Frontend"),
+            iam.Session(api_url="https://stg-api.aisquare.studio", token="aisq_x", source="env"),
+        )
+
+    def fix() -> str:
+        target = ops.resolve_target(load_config().explainability, None, project_id=project.id)
+        assert (target.project_deployment, target.gateway_url) == (True, stg_gateway)
+        return " ".join(ops.deployment_fix(target, what="proxy", value="https://<host>").split())
+
+    entry = 'proxy_url = "https://<host>" under [explainability.targets."stg"]'
+    assert fix().startswith(entry) and "Rename it first" not in fix(), fix()
+    prod = load_config()
+    prod.explainability.gateway_url = "https://explainability-api.aisquare.studio"
+    save_config(prod)
+    assert fix().startswith(entry) and "Rename it first" in fix(), fix()
+
+
+def test_a_fix_asks_for_the_rename_when_only_this_shell_makes_the_machines_target_the_same(
+    isolated_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Whether the machine's target is the project's deployment is decided as every shell
+    reads the entry the fix writes. On the prod machine, a shell that exported staging's
+    gateway (``$EXPLAINABILITY_GATEWAY_URL``) read the machine's ``stg`` as staging, so the
+    proxy fix for a project on staging asked for no rename. Followed there, every project
+    without a destination, read from a shell that exports nothing, moved to that proxy
+    with the prod gateway and key: the move of round 2, back (review of the #203
+    final-review fixes, round 2, F1)."""
+    config = AppConfig()
+    config.explainability.enabled = True
+    config.explainability.gateway_url = "https://explainability-api.aisquare.studio"
+    config.explainability.proxy_url = "https://explainability-api.aisquare.studio:9443"
+    save_config(config)
+    service.store_api_key("AIS_machine_prod_key")
+    web = _project(tmp_path / "web")
+    other = _project(tmp_path / "api")
+    with store_session() as store:
+        dest.choose(
+            store,
+            web,
+            dest.Workspace(id=42, uid="ws-uid-42", name="acme", role="ADMIN"),
+            dest.Studio(id=301, uid="st-301", name="Frontend"),
+            iam.Session(api_url="https://stg-api.aisquare.studio", token="aisq_x", source="env"),
+        )
+
+    def read(project: ProjectInfo) -> tuple[str, str, str]:
+        resolved = ops.resolve_target(
+            load_config().explainability, None, project_id=project.id, env={}
+        )
+        return (resolved.gateway_url, resolved.proxy_url, resolved.key_source)
+
+    before = read(other)
+    monkeypatch.setenv(service.GATEWAY_ENV_VAR, "https://stg-explainability-api.aisquare.studio")
+    target = ops.resolve_target(load_config().explainability, None, project_id=web.id)
+    fix = " ".join(ops.deployment_fix(target, what="proxy", value="https://stg.example").split())
+    setting = re.search(r'proxy_url = "([^"]+)" under (\[explainability\.targets\."stg"\])', fix)
+    assert setting is not None, fix
+
+    if 'target = "<name>" under [explainability]' in fix:  # the rename, as the operator would
+        renamed = load_config()
+        renamed.explainability.target = "own"
+        save_config(renamed)
+    with paths.config_path().open("a", encoding="utf-8") as config_file:
+        config_file.write(f'\n{setting[2]}\nproxy_url = "{setting[1]}"\n')
+    assert read(other) == before, "the fix for one project's deployment moved another"
+
+
+def test_a_key_kept_for_the_machines_target_stays_kept_once_that_target_is_renamed(
+    runner: CliRunner, isolated_home: Path, tmp_path: Path
+) -> None:
+    """On the machine ``init --explainability`` writes (prod, ``target = "stg"``), a prod key
+    attached with ``key set`` before ``use`` is bound to the machine's ``stg``, and once the
+    project points at staging it is kept and not used there. The fixes for that project's
+    deployment say to rename the machine's target first. Renamed, ``stg`` was a name the
+    machine no longer had, which answered by name alone, and the prod key went to
+    staging's gateway and proxy before any ``key set`` again (review of the #203
+    final-review fixes, R1). It stays kept, ``key show`` says why, and ``key set`` for the
+    destination attaches the key that answers."""
+    config = AppConfig()
+    config.explainability.enabled = True
+    config.explainability.gateway_url = "https://explainability-api.aisquare.studio"
+    config.explainability.proxy_url = "https://explainability-api.aisquare.studio:9443"
+    save_config(config)
+    service.store_api_key("AIS_machine_prod_key")
+    project = _project(tmp_path / "web")
+    ops.attach_project_key(project, "AIS_hand_prod_key", target="stg")
+    with store_session() as store:
+        dest.choose(
+            store,
+            project,
+            dest.Workspace(id=42, uid="ws-uid-42", name="acme", role="ADMIN"),
+            dest.Studio(id=301, uid="st-301", name="Frontend"),
+            iam.Session(api_url="https://stg-api.aisquare.studio", token="aisq_x", source="env"),
+        )
+    stg_gateway = "https://stg-explainability-api.aisquare.studio"
+
+    def resolved() -> ops.ResolvedTarget:
+        return ops.resolve_target(load_config().explainability, None, project_id=project.id)
+
+    def read() -> tuple[str, str, str | None]:
+        target = resolved()
+        return (target.gateway_url, target.key_source, target.api_key)
+
+    assert read() == (stg_gateway, "unset", None)
+    fix = " ".join(ops.deployment_fix(resolved(), what="proxy", value="https://<host>").split())
+    assert 'Rename it first: target = "<name>" under [explainability]' in fix, fix
+    renamed = load_config()  # the rename, as the operator would
+    renamed.explainability.target = "own"
+    save_config(renamed)
+
+    assert read() == (stg_gateway, "unset", None), "the prod key went to staging"
+    payload = _json(runner, "explainability", "key", "show", "--project", project.id)
+    assert (payload["target"], payload["serves"], payload["key_source"]) == (
+        "stg",
+        False,
+        "unset",
+    )
+    shown = runner.invoke(app, ["explainability", "key", "show", "--project", project.id])
+    assert shown.exit_code == 0, shown.output
+    assert (
+        "attached for target stg, which this machine no longer has, so not used for the "
+        f"deployment this project's destination names ({stg_gateway}) until `key set` "
+        "attaches it there"
+    ) in " ".join(shown.output.split())
+
+    ops.attach_project_key(project, "AIS_staging_key", target="stg")
+    assert read() == (stg_gateway, "project", "AIS_staging_key")
 
 
 def test_use_on_a_host_it_does_not_know_says_where_its_gateway_goes(

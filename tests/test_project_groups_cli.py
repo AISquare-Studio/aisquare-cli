@@ -175,6 +175,8 @@ def test_onboard_into_a_group_named_with_spaces_joins_the_group_of_that_name(
     result = runner.invoke(app, ["--json", "project", "onboard", str(fresh), "--group", " team "])
     assert result.exit_code == 0, result.output
     assert _names(runner, "--group", "team") == ["fresh"]
+    listing = json.loads(runner.invoke(app, ["--json", "project", "group", "list"]).stdout)
+    assert [g["name"] for g in listing["groups"]] == ["team"], "a second group was made"
 
     def made_meanwhile(_store: object, ref: str) -> None:
         raise KeyError(ref)

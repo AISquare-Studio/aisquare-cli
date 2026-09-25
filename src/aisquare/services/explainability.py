@@ -69,6 +69,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from http.client import HTTPException
 from pathlib import Path
+from string import Formatter
 from typing import Any
 from urllib.error import URLError
 from urllib.parse import SplitResult, urlsplit
@@ -1097,10 +1098,16 @@ def stored_api_key() -> str | None:
     and ``explainability_ops.resolve_target``, which is where the fallback
     belongs — see that function for why the operational surfaces used to
     disagree with the shipping path about whether a key exists.
+
+    A file that is not UTF-8 holds no key, as a project's key file does not
+    (``read_project_key``). ``UnicodeDecodeError`` is a ``ValueError``, not an
+    ``OSError``, and it rose out of the resolver: a key file written by
+    PowerShell 5.1's ``>`` (UTF-16) crashed ``doctor`` and ``explainability
+    status``, and the shipper, which never raises (final review of #203, EX5).
     """
     try:
         stored = key_path().read_text(encoding="utf-8").strip()
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         return None
     return stored or None
 
@@ -1115,11 +1122,7 @@ def resolve_api_key() -> str | None:
     from_env = os.environ.get(KEY_ENV_VAR, "").strip()
     if from_env:
         return from_env
-    try:
-        stored = key_path().read_text(encoding="utf-8").strip()
-    except OSError:
-        return None
-    return stored or None
+    return stored_api_key()
 
 
 #: Port the deployment convention puts the hosted claude_code proxy on, beside
@@ -1162,6 +1165,16 @@ def hosted_proxy_for(gateway_url: str) -> str | None:
     return f"{split.scheme}://{host}:{HOSTED_PROXY_PORT}"
 
 
+def header_safe(name: str) -> str:
+    """``name`` with every run of characters a header refuses made one ``.``.
+
+    ``arbind kumar`` is ``arbind.kumar``. The one spelling both doors suggest
+    for an identity :data:`_SAFE_ROLE` refuses: :func:`identity_problem` for a
+    template, the Setup form for its prefix.
+    """
+    return re.sub(r"[^A-Za-z0-9._-]+", ".", name)
+
+
 def identity_problem(template: str) -> str | None:
     """Why ``template`` cannot name agents, or ``None``.
 
@@ -1171,6 +1184,13 @@ def identity_problem(template: str) -> str | None:
     ``ValueError: Single '}'``), and one that renders every role to the same
     name because ``{role}`` is not in it. Rendered twice with different roles
     rather than searched for the literal, so ``{role!s}`` and friends count.
+
+    And a third that ends the same way with the identities listed: a name
+    :data:`_SAFE_ROLE` refuses, which ``wire_session`` will not put in a header.
+    ``arbind kumar-{role}`` — a full name in the form's prefix field — was
+    stored, ``status``, the tab and the doctor listed ``arbind kumar-planner``
+    and the rest, and every launch went untraced as not header-safe (final
+    review of #203, EX3).
     """
     try:
         one, two = template.format(role="planner"), template.format(role="coder")
@@ -1180,6 +1200,24 @@ def identity_problem(template: str) -> str | None:
         return (
             f"identity template {template!r} has no {{role}} in it, so every agent would "
             "share one name — try 'name-{role}'"
+        )
+    unsafe = next((name for name in (one, two) if not _SAFE_ROLE.match(name)), None)
+    if unsafe is not None:
+        # The example is the TEMPLATE made header-safe, its text and not its {role}: a
+        # rendered name (`arbind.kumar-planner`) typed back as `--identity` was refused
+        # for having no {role}, and as the Setup form's prefix named every agent
+        # `arbind.kumar-planner-<role>`. The form, whose field takes a name, says the
+        # prefix to type before this runs (`save_setup`; review of the #203
+        # final-review fixes, round 2, F3). Every field left is the role's: any other
+        # raised above.
+        example = "".join(
+            header_safe(text) + ("{role}" if field_name is not None else "")
+            for text, field_name, _spec, _conversion in Formatter().parse(template)
+        )
+        return (
+            f"identity template {template!r} names agents like {unsafe!r}, which cannot "
+            "travel in a header, so every launch would go untraced — letters, digits, '.', "
+            f"'_' and '-' only, as in {example!r}"
         )
     return None
 

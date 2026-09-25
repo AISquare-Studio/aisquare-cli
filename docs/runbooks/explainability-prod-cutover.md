@@ -891,8 +891,14 @@ hosted proxy is deployed for both deployments and answers as `claude_code`:
 
 ```
 https://explainability-api.aisquare.studio:9443/health        (prod)
-https://stg-explainability.api.aisquare.studio:9443/health    (staging)
+https://stg-explainability-api.aisquare.studio:9443/health    (staging)
 ```
+
+Each ships to the gateway on its own host. The dotted
+`stg-explainability.api.aisquare.studio:9443`, listed here as staging's until
+2026-09-25, is the dev box's (the SDK's `deploy-dev.yml`) and ships to dev's
+gateway: a staging key sent through it is checked there, and is refused or
+traced where staging cannot see it.
 
 Since 0.5.0 the CLI sends `X-AISquare-Key` alongside the identity headers, which
 is what a hosted proxy authenticates on. Pointing at one needs no local process:
@@ -1483,7 +1489,9 @@ before anything is read, where a red lane exits **1**.)
 > target NAMES, set or not; `key_source` is where the key actually came from
 > (`project`, `env`, `file`, or `unset`) and `key_origin` renders it — the
 > project's own key file, `$VAR` or the path of
-> `~/.aisquare/explainability-key`. `key_project` is the project the key was
+> `~/.aisquare/explainability-key`, which, when the file is there and holds no key
+> (`key_source` `unset`), says so: `… (holds no key: blank, not UTF-8, or
+> unreadable)`. `key_project` is the project the key was
 > resolved for: the one a launch from this directory joins (#141). Run the
 > cutover checks from a directory whose project has no key of its own, or that
 > key answers (`key_source` `project`) instead of the machine's. On the

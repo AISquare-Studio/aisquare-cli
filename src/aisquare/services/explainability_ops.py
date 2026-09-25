@@ -244,9 +244,14 @@ def spool_key_note(target: ResolvedTarget, shipping: ShippingState) -> str:
     ``status`` for a project with its own key printed "key: the project's own
     key … is set" and, right under it, "but no workspace key: set $…" (review
     of #172, D2 round 2, D3). Both are true, of two keys. The note says which is
-    which, rather than dropping either line. Empty otherwise.
+    which, rather than dropping either line. Empty otherwise, and so when the
+    lane is off or has no gateway: its line then names no key, and the note
+    said the spool ships while it does not (review of #170's follow-ups,
+    round 1, F5).
     """
     if target.key_source != "project" or shipping.has_key:
+        return ""
+    if not (shipping.configured and shipping.gateway_url):
         return ""
     return (
         " (the spool is the machine's: it ships every project's insights with the "

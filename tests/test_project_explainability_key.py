@@ -588,6 +588,25 @@ def test_status_says_the_spool_is_the_machines_when_the_key_above_it_is_the_proj
     assert "the spool is the machine's" in line and "the project's own key above" in line
 
 
+def test_status_says_nothing_about_the_spools_key_while_shipping_is_off(
+    home: Path, tmp_path: Path, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The note was said whenever the project had its own key and the machine none, so
+    with shipping off the line read "off — nothing is captured … (the spool is the
+    machine's: it ships every project's insights …)" (review of #170's follow-ups,
+    round 1, F5). Off, or on with no gateway, the line names no key to tell apart."""
+    _settings()
+    monkeypatch.setattr(service, "probe_proxy", lambda url: service.ProxyProbe(True, "healthy"))
+    api = _project(tmp_path / "api")
+    _attach(api)
+    monkeypatch.chdir(api.root)
+
+    status = runner.invoke(app, ["explainability", "status"])
+    assert "key:      the project's own key" in status.stdout
+    [line] = [ln for ln in status.stdout.splitlines() if ln.startswith("shipping:")]
+    assert line.startswith("shipping: off") and "the spool is the machine's" not in line
+
+
 def test_key_set_records_the_signed_in_email_as_who_attached_it(
     home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

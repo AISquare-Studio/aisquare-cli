@@ -914,6 +914,8 @@ def _undo(entry: captain_state.Undo) -> tuple[dict[str, Any], _Found]:
         return {**undid, "how": "skipped: the task or its board is gone"}, _Found(None)
     actor = captain_state.ensure_session(project)
     before = _seq_now(project.id)
+    if entry.kind == "wololo":
+        return _undo_wololo(entry, project, card, undid, before)
     if entry.kind == "claim":
         if card.status != "doing" or card.claimed_by != actor:
             how = f"skipped: it is {card.status} and no longer the captain's claim"
@@ -927,6 +929,50 @@ def _undo(entry: captain_state.Undo) -> tuple[dict[str, Any], _Found]:
         kind, how = "task_reopened", "reopened"
     found = _effect_seq(project.id, before, (kind,), lambda event: event.task_id == card.id)
     return {**undid, "how": how}, found
+
+
+def _undo_wololo(
+    entry: captain_state.Undo,
+    project: ProjectInfo,
+    card: TeamTask,
+    undid: dict[str, Any],
+    before: int,
+) -> tuple[dict[str, Any], _Found]:
+    """Give both sides of a conversion back (13242): release the agent's new claim, re-claim
+    its released cards for it while they are still free, and say what cannot be undone."""
+    session = entry.agent_session or ""
+    label = entry.label or "the agent"
+    said: list[str] = []
+    if card.status == "doing" and card.claimed_by == session:
+        team_service.release_task(card.id, session_ref=session)
+        said.append(f"released {card.id} from {label}")
+        kinds: tuple[str, ...] = ("task_released",)
+    else:
+        said.append(f"{card.id} is {card.status} and no longer {label}'s claim, left as it is")
+        kinds = ()
+    restored: list[str] = []
+    for old_id in entry.released:
+        with store_session() as store:
+            old = store.get_task(old_id)
+        if old is None:
+            said.append(f"{old_id} is gone")
+        elif old.status == "todo" and old.claimed_by is None:
+            team_service.claim_task(old.id, session_ref=session)
+            restored.append(old.id)
+        elif old.status == "doing" and old.claimed_by == session:
+            restored.append(old.id)  # already back with the agent
+        else:
+            holder = f" by {old.claimed_by}" if old.claimed_by else ""
+            said.append(f"{old_id} was taken meanwhile{holder} ({old.status}), not stolen back")
+    if restored:
+        said.append(f"re-claimed {', '.join(restored)} for {label}")
+    said.append(f"the instruction typed into {label}'s pane cannot be taken back")
+    found = (
+        _effect_seq(project.id, before, kinds, lambda event: event.task_id == card.id)
+        if kinds
+        else _Found(None)
+    )
+    return {**undid, "how": "; ".join(said), "restored": restored}, found
 
 
 def _bt() -> Outcome:
@@ -945,7 +991,7 @@ def _bt() -> Outcome:
         except Exception as exc:
             # The entry goes back on the list, and the owner hears what DID happen: a
             # retried bt would otherwise undo an older action nobody asked to undo.
-            captain_state.record_undo(entry.kind, entry.task_id, entry.project_id)
+            captain_state.record_undo_entry(entry)
             reason = _failure(exc)
             if reason is None:
                 raise
@@ -1003,6 +1049,15 @@ def _wololo(target: ProjectInfo, label: str, task: str) -> Outcome:
     )
     claimed = _effect_seq(
         target.id, before, ("task_claimed",), lambda event: event.task_id == card.id
+    )
+    # One compound undo entry (13242): bt gives both sides back.
+    captain_state.record_undo(
+        "wololo",
+        card.id,
+        target.id,
+        agent_session=agent.session_id,
+        label=label,
+        released=tuple(released),
     )
     said = f"Wololo! {label} converts to {card.id}"
     return Outcome(

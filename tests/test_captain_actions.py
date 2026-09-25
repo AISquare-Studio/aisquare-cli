@@ -2013,6 +2013,42 @@ def test_wololo_converts_an_idle_agent_to_a_new_task(
     assert audit(alpha.id)[-1]["receipt"] == claimed[-1].seq
 
 
+def test_bt_undoes_a_wololo_restoring_both_claims_and_naming_the_untakeable_tell(
+    alpha: ProjectInfo, agents: dict[str, FleetAgent], fleet_rec: Fleet
+) -> None:
+    """13242: a wrong reassignment is exactly what the owner would brake. bt releases the
+    agent's new claim, re-claims its released cards for it while they are still free, and
+    says the one thing it cannot take back — the instruction typed into the pane."""
+    old = add_task(alpha, "the old job")
+    new = add_task(alpha, "the new job")
+    team_service.claim_task(old.id, session_ref="sess-coder-1")
+    ok(actions.wololo("alpha", "coder-1", new.id))
+    result = ok(actions.bt())
+    assert result["undid"]["kind"] == "wololo" and result["undid"]["task"] == new.id
+    assert task_now(new.id).status == "todo", "the agent's new claim is released"
+    restored = task_now(old.id)
+    assert (restored.status, restored.claimed_by) == ("doing", "sess-coder-1"), "its old claim back"
+    assert "the instruction typed into coder-1's pane cannot be taken back" in result["said"]
+    released = [e for e in _events_of(alpha, "task_released") if e.task_id == new.id]
+    assert result["action_seq"] > released[-1].seq and audit(alpha.id)[-1]["ok"] is True
+
+
+def test_bt_after_a_wololo_says_an_old_card_taken_meanwhile_is_not_stolen(
+    alpha: ProjectInfo, agents: dict[str, FleetAgent], fleet_rec: Fleet
+) -> None:
+    old = add_task(alpha, "the old job")
+    new = add_task(alpha, "the new job")
+    team_service.claim_task(old.id, session_ref="sess-coder-1")
+    ok(actions.wololo("alpha", "coder-1", new.id))
+    team_service.claim_task(old.id, session_ref="sess-coder-2")  # someone took it meanwhile
+    result = ok(actions.bt())
+    assert task_now(new.id).status == "todo", "the new claim is still released"
+    taken = task_now(old.id)
+    assert (taken.status, taken.claimed_by) == ("doing", "sess-coder-2"), "not stolen back"
+    assert f"{old.id} was taken meanwhile" in result["said"]
+    assert "cannot be taken back" in result["said"]
+
+
 def test_wololo_refuses_a_working_agent_and_changes_nothing(
     alpha: ProjectInfo, agents: dict[str, FleetAgent], fleet_rec: Fleet
 ) -> None:

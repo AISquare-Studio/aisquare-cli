@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import contextlib
 import shutil
+import sqlite3
 import uuid
+from collections.abc import Iterator
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -13,7 +17,8 @@ from typer.testing import CliRunner
 from aisquare.cli import launch as launch_cli
 from aisquare.cli.app import app
 from aisquare.core.orchestrator import team_project
-from aisquare.core.store import store_session
+from aisquare.core.store import ContextStore, store_session
+from aisquare.models import FleetAgent
 from aisquare.services.explainability import join_records
 
 
@@ -36,6 +41,206 @@ def spy(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     monkeypatch.setattr(launch_cli, "_exec", fake_exec)
     monkeypatch.setattr(shutil, "which", lambda cmd: f"/usr/local/bin/{cmd}")
     return captured
+
+
+class _Clock:
+    """``_sleep`` / ``_monotonic`` for the launcher: time passes only when slept."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+        self.slept = 0
+
+    def sleep(self, seconds: float) -> None:
+        self.now += seconds
+        self.slept += 1
+
+    def monotonic(self) -> float:
+        return self.now
+
+
+@pytest.fixture
+def clock(monkeypatch: pytest.MonkeyPatch) -> _Clock:
+    fake = _Clock()
+    monkeypatch.setattr(launch_cli, "_sleep", fake.sleep)
+    monkeypatch.setattr(launch_cli, "_monotonic", fake.monotonic)
+    return fake
+
+
+def _fleet_row(agent_id: str, cwd: Path) -> None:
+    with store_session() as store:
+        store.upsert_fleet_agent(
+            FleetAgent(
+                id=agent_id,
+                project_id="prj_launch",
+                label="coder-1",
+                role="coder",
+                pane_id="%9",
+                cwd=cwd,
+                created_at=datetime.now(tz=UTC),
+            )
+        )
+
+
+def test_a_fleet_launch_waits_for_its_row_before_starting_the_agent(
+    runner: CliRunner,
+    work_dir: Path,
+    spy: dict[str, Any],
+    clock: _Clock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cut item of the #135 review, reconsidered in its second round. ``fleet
+    spawn`` starts the window and writes the row after, so the agent's first
+    ``SessionStart`` hook could run before the insert committed and brief it on
+    nothing — the very bug the assignment exists to fix. The launcher runs in
+    the window before the agent, so it holds the door: the row lands on the
+    third look here, and the agent starts right after."""
+    monkeypatch.setenv("AISQUARE_FLEET_AGENT", "agt_late")
+    real_sleep = clock.sleep
+
+    def sleep_then_record(seconds: float) -> None:
+        real_sleep(seconds)
+        if clock.slept == 3:
+            _fleet_row("agt_late", work_dir)
+
+    monkeypatch.setattr(launch_cli, "_sleep", sleep_then_record)
+
+    result = runner.invoke(app, ["launch", "coder"])
+
+    assert result.exit_code == 0, result.output
+    assert spy["argv"][0] == "claude", "the agent started"
+    assert clock.slept == 3, "after exactly the looks it took for the row to land"
+    assert "not recorded" not in result.output
+
+
+def test_a_fleet_launch_starts_anyway_when_its_row_never_lands(
+    runner: CliRunner,
+    work_dir: Path,
+    spy: dict[str, Any],
+    clock: _Clock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fail-open at the timeout, with one line saying what it cost: a store the
+    spawn could not write is a window the spawn will kill, and a wait past the
+    timeout is one that was never going to be answered."""
+    monkeypatch.setenv("AISQUARE_FLEET_AGENT", "agt_never")
+
+    result = runner.invoke(app, ["launch", "coder"])
+
+    assert result.exit_code == 0, result.output
+    assert spy["argv"][0] == "claude", "the agent still started"
+    assert clock.now >= launch_cli.FLEET_ROW_TIMEOUT
+    assert "agt_never not recorded after 10s" in result.output, "the time actually spent"
+
+
+def test_a_fleet_launch_opens_the_store_once_for_the_whole_wait(
+    runner: CliRunner,
+    work_dir: Path,
+    spy: dict[str, Any],
+    clock: _Clock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #203. Every 50 ms look used to open a store of its own —
+    connect, WAL switch, migrations — up to two hundred times, all contending
+    on ``context.db`` with the very insert the loop waits for. One connection
+    now, held for the whole wait; the looks re-read through it."""
+    monkeypatch.setenv("AISQUARE_FLEET_AGENT", "agt_slow")
+    opens = 0
+    real_session = store_session
+
+    @contextlib.contextmanager
+    def counting_session() -> Iterator[ContextStore]:
+        nonlocal opens
+        opens += 1
+        with real_session() as store:
+            yield store
+
+    monkeypatch.setattr(launch_cli, "store_session", counting_session)
+    real_sleep = clock.sleep
+
+    def sleep_then_record(seconds: float) -> None:
+        real_sleep(seconds)
+        if clock.slept == 5:
+            _fleet_row("agt_slow", work_dir)
+
+    monkeypatch.setattr(launch_cli, "_sleep", sleep_then_record)
+
+    result = runner.invoke(app, ["launch", "coder"])
+
+    assert result.exit_code == 0, result.output
+    assert spy["argv"][0] == "claude" and clock.slept == 5
+    assert opens == 1, f"six looks, one connection — not {opens}"
+
+
+def test_a_locked_store_is_looked_past_until_the_row_lands(
+    runner: CliRunner,
+    work_dir: Path,
+    spy: dict[str, Any],
+    clock: _Clock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #203. "database is locked" is the condition this wait exists
+    for — the spawn's insert holding the store — and the first cut answered it
+    by giving up on the first occurrence. Looked past until the deadline: the
+    first open is refused as locked, the second answers, the row is there."""
+    monkeypatch.setenv("AISQUARE_FLEET_AGENT", "agt_locked")
+    _fleet_row("agt_locked", work_dir)
+    real_session = store_session
+    refusals = 0
+
+    @contextlib.contextmanager
+    def locked_once() -> Iterator[ContextStore]:
+        nonlocal refusals
+        if refusals == 0:
+            refusals += 1
+            raise sqlite3.OperationalError("database is locked")
+        with real_session() as store:
+            yield store
+
+    monkeypatch.setattr(launch_cli, "store_session", locked_once)
+
+    result = runner.invoke(app, ["launch", "coder"])
+
+    assert result.exit_code == 0, result.output
+    assert spy["argv"][0] == "claude", "the agent started"
+    assert refusals == 1 and clock.slept == 1, "one lock, one look later the row was read"
+    assert "not recorded" not in result.output, "the row was found, so nothing was given up"
+
+    # The control: a store that is broken rather than busy still costs the
+    # wait and never the launch — no retry loop over a fault that will not clear.
+    monkeypatch.setenv("AISQUARE_FLEET_AGENT", "agt_broken")
+    clock.slept = 0
+
+    @contextlib.contextmanager
+    def broken() -> Iterator[ContextStore]:
+        raise sqlite3.OperationalError("no such table: fleet_agent")
+        yield  # pragma: no cover — unreachable, keeps the generator shape
+
+    monkeypatch.setattr(launch_cli, "store_session", broken)
+    result = runner.invoke(app, ["launch", "coder"])
+    assert result.exit_code == 0
+    assert clock.slept == 0, "an unreadable store ends the wait at once"
+    assert "agt_broken the store could not be read (no such table" in result.output, (
+        "and says so — an agent starting un-briefed over a broken store with nothing "
+        "on stderr is the state the line exists to explain (review of #203, round 4)"
+    )
+
+
+def test_a_launch_outside_the_fleet_never_looks_for_a_row(
+    runner: CliRunner,
+    work_dir: Path,
+    spy: dict[str, Any],
+    clock: _Clock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No window variable, no wait — and a row already there costs one look."""
+    monkeypatch.delenv("AISQUARE_FLEET_AGENT", raising=False)
+    assert runner.invoke(app, ["launch", "coder"]).exit_code == 0
+    assert clock.slept == 0 and spy["argv"][0] == "claude"
+
+    _fleet_row("agt_ready", work_dir)
+    monkeypatch.setenv("AISQUARE_FLEET_AGENT", "agt_ready")
+    assert runner.invoke(app, ["launch", "coder"]).exit_code == 0
+    assert clock.slept == 0, "the row was there on the first look"
 
 
 def test_launch_execs_the_agent_with_the_role_in_env(

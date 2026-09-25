@@ -276,6 +276,38 @@ def test_the_ambient_environment_variables_are_set(ambient: str) -> None:
         )
 
 
+def test_the_ambient_job_exports_what_an_account_launch_does(ambient: str) -> None:
+    """Both of ``claude_accounts.LAUNCH_VARS`` and both ``PLAIN_VARS`` copies.
+
+    ``tests/conftest.py`` clears all four: a developer who runs the suite from a
+    fleet pane on one of their slots has them exported, and with the copies left
+    set the account tests resolved slot 1 to THAT developer's directory (review
+    of #205, seventh round). The same escape hatch as the names above — a
+    module- or session-scoped fixture reads them straight out of ``os.environ``
+    — and this job exported only ``CLAUDE_CONFIG_DIR`` of the four (review of
+    the #205 fold, A4). Read from the product's constants, so a third account
+    variable is reproduced here or this fails.
+
+    Matched as an ASSIGNMENT with a boundary before the name:
+    ``CLAUDE_CONFIG_DIR=`` is a substring of ``AISQUARE_PLAIN_CLAUDE_CONFIG_DIR=``,
+    so a plain search is satisfied by either line alone.
+    """
+    from aisquare.core import claude_accounts
+
+    exported = "\n".join(_commands(ambient))
+    missing = [
+        name
+        for name in (*claude_accounts.LAUNCH_VARS, *claude_accounts.PLAIN_VARS.values())
+        if not re.search(rf"(?<![A-Z_]){re.escape(name)}\s*[:=]", exported)
+    ]
+
+    assert not missing, (
+        f"the ambient job does not set {missing}, which conftest clears because a "
+        "launch onto a Claude account exports them — so a fixture that reads them "
+        "out of os.environ passes here and fails from a developer's fleet pane"
+    )
+
+
 def test_the_premise_is_read_from_the_config_not_hardcoded(suite_step: str) -> None:
     """A literal port re-creates leak #2 inside the job written to prevent it.
 

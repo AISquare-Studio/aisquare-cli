@@ -21,6 +21,7 @@ import pytest
 
 from aisquare.core import paths
 from aisquare.core.config import AppConfig, ExplainabilitySettings, load_config, save_config
+from aisquare.services import explainability
 from aisquare.services.explainability import (
     ProxyProbe,
     disown_inherited_trace,
@@ -61,7 +62,9 @@ class _HealthHandler(BaseHTTPRequestHandler):
         return
 
 
-def _serve(payload: dict[str, str]) -> tuple[HTTPServer, str]:
+def _serve(payload: object) -> tuple[HTTPServer, str]:
+    """Any JSON-serialisable body, not only an object: a health endpoint can
+    answer ``[]`` or ``"ok"``, and the probe has to survive both."""
     handler = type("Handler", (_HealthHandler,), {"payload": payload})
     server = HTTPServer(("127.0.0.1", 0), handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
@@ -252,6 +255,19 @@ def test_plan_reads_the_session_being_resumed() -> None:
     plan = plan_session_identity("claude", ["--resume", "sess-9", "--model", "opus"])
     assert plan.session_id == "sess-9"
     assert plan.inject_args == ()
+
+
+def test_plan_reads_the_session_id_out_of_a_resumed_transcript_path() -> None:
+    """``--resume`` also takes the transcript's path — the form a fleet hand-over passes —
+    and the id is its stem, not the path (review of #205, finding 4)."""
+    path = "/home/u/.claude/projects/-home-u-repo/0f3c2b1a-5d6e-4f70-8a9b-1c2d3e4f5a6b.jsonl"
+    for args in (["--resume", path], ["-r", path], [f"--resume={path}"]):
+        plan = plan_session_identity("claude", args)
+        assert plan.session_id == "0f3c2b1a-5d6e-4f70-8a9b-1c2d3e4f5a6b", args
+        assert plan.inject_args == (), args
+    # A bare id, and a name that merely ends in the suffix, are taken as given.
+    assert plan_session_identity("claude", ["--resume", "sess-9"]).session_id == "sess-9"
+    assert plan_session_identity("claude", ["--resume", ".jsonl"]).session_id == ".jsonl"
 
 
 def test_plan_leaves_a_run_time_session_choice_unjoined() -> None:
@@ -540,6 +556,119 @@ def test_header_unsafe_role_fails_open() -> None:
 # ── the probe itself, against real listeners ─────────────────────────────────
 
 
+def test_a_base_url_the_agents_client_refuses_is_not_usable() -> None:
+    """#132 follow-up 2. ``_usable_base_url`` parsed on its own and accepted
+    ``https://proxy.example:99999`` — a port ``urlsplit`` takes and ``.port``
+    then refuses, so the agent's first request died on it — while ``url_problem``
+    refused the same value. One validator now."""
+    assert explainability._usable_base_url("https://proxy.example:99999") is False
+    assert explainability._usable_base_url("https://proxy.example:9443") is True
+    assert explainability._usable_base_url("proxy.example") is False
+
+
+def test_configure_target_stores_what_it_validated() -> None:
+    """#132 follow-up 6. The proxy URL was validated stripped and slash-less and
+    stored raw, so a pasted ``https://g.example:9443/`` kept its slash — and every
+    downstream comparison is a string comparison: ``_proxy_source`` read a
+    top-level default with a slash as a CHOSEN proxy."""
+    config = AppConfig()
+    explainability.configure_target(
+        config,
+        target_name="stg",
+        gateway_url="  https://g.example/  ",
+        proxy_url="https://g.example:9443/",
+        key_env=" MY_KEY ",
+        enable=False,
+    )
+    target = config.explainability.targets["stg"]
+    assert target.gateway_url == "https://g.example"
+    assert target.proxy_url == "https://g.example:9443"
+    assert target.api_key_env == "MY_KEY"
+
+
+@pytest.mark.parametrize(
+    ("key_env", "said"),
+    [
+        ("MY VAR", "not a variable name"),
+        ("$EXPLAINABILITY_API_KEY", r"without the \$"),
+        ("1KEY", "not a variable name"),
+        ("MY\nVAR", "not a variable name"),
+        ("  ", "is empty"),
+    ],
+)
+def test_configure_target_refuses_a_key_variable_no_shell_can_export(
+    key_env: str, said: str
+) -> None:
+    """Round 6. Four of the five settings were judged before they were stored;
+    the key variable was not, so ``--key-env 'MY VAR'`` was accepted and nothing
+    could ever export it — every surface read "the key is NOT set" with nothing
+    naming the cause. A POSIX name, judged at the same door as the other four."""
+    config = AppConfig()
+    with pytest.raises(ValueError, match=said):
+        explainability.configure_target(config, target_name="stg", key_env=key_env, enable=False)
+    assert "stg" not in config.explainability.targets, "refused: nothing stored"
+    explainability.configure_target(config, target_name="stg", key_env=" MY_KEY_2 ", enable=False)
+    assert config.explainability.targets["stg"].api_key_env == "MY_KEY_2"
+
+
+def test_configure_target_judges_the_name_and_the_identity_as_it_stores_them() -> None:
+    """Round 5: three of the five human-supplied values were stored as validated
+    and two were not. ``--target 'stg '`` created a second config key beside the
+    tab's ``stg``; ``--identity 'nishil-{role} '`` gave every agent a trailing
+    space. Stripped before they are judged, and stored as judged; a name with a
+    line break in it is refused, while ``prod west`` stays a name people use."""
+    config = AppConfig()
+    name = explainability.configure_target(
+        config, target_name=" stg ", identity=" nishil-{role} ", enable=False
+    )
+    assert name == "stg" and set(config.explainability.targets) == {"stg"}
+    assert config.explainability.targets["stg"].agent_name_template == "nishil-{role}"
+    assert config.explainability.target == "stg"
+
+    explainability.configure_target(
+        config, target_name="prod west", gateway_url="https://west.example", enable=False
+    )
+    assert "prod west" in config.explainability.targets
+
+    with pytest.raises(ValueError, match="line break or tab"):
+        explainability.configure_target(config, target_name="stg\nprod", enable=False)
+    with pytest.raises(ValueError, match="is empty"):
+        explainability.configure_target(config, target_name="   ", gateway_url="https://g.example")
+    assert set(config.explainability.targets) == {"stg", "prod west"}, "refused: nothing stored"
+
+
+def test_the_workspace_key_goes_into_a_file_already_restricted_to_this_account(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``store_api_key`` wrote the key in place and restricted the file afterwards, so a first
+    key sat under the umask mode (0644) or the DACL the home hands down until the restriction
+    ran, and for good when it failed (review of the #65 fold, round 2, F5). The spy records
+    what each restriction was applied to: a temp, still empty, for a new file and over an
+    existing one. A restriction that fails is still said out loud, and the key still lands."""
+    real = paths.restrict_to_owner
+    applied: list[tuple[str, int]] = []
+    holds = True
+
+    def spy(path: Path) -> bool:
+        applied.append((path.name, path.stat().st_size))
+        real(path)
+        return holds
+
+    monkeypatch.setattr(paths, "restrict_to_owner", spy)
+    target = explainability.store_api_key(" first-workspace-key\n")
+    explainability.store_api_key("second-workspace-key")
+    assert capsys.readouterr().err == ""
+    holds = False
+    explainability.store_api_key("third-workspace-key")
+    assert len(applied) == 3, applied
+    for name, size in applied:
+        assert name.startswith(".explainability-key.") and name.endswith(".tmp"), applied
+        assert size == 0, f"restricted with the key already in it: {applied}"
+    assert target.read_text(encoding="utf-8") == "third-workspace-key"
+    assert "warning: could not restrict" in capsys.readouterr().err
+    assert not list(target.parent.glob(".explainability-key.*")), "a temp was left behind"
+
+
 def test_probe_accepts_the_claude_code_proxy() -> None:
     server, url = _serve({"status": "ok", "service": "aisquare-proxy", "mode": "claude_code"})
     try:
@@ -568,6 +697,109 @@ def test_probe_rejects_a_foreign_service() -> None:
     finally:
         server.shutdown()
     assert verdict.healthy is False
+
+
+@pytest.mark.parametrize("payload", [[], "ok", 3], ids=["list", "string", "number"])
+def test_probe_survives_valid_json_that_is_not_an_object(payload: object) -> None:
+    """Review #13. ``[]`` and ``"ok"`` are valid JSON and have no ``.get``.
+
+    The decode SUCCEEDS, so the handler around ``json.loads`` is already past,
+    and four ``payload.get`` reads follow — this branch added the fourth. Any
+    server on the port can produce it, and the wrong service answering is the
+    case this function exists to catch: it must SAY so rather than raise.
+    """
+    server, url = _serve(payload)
+    try:
+        verdict = probe_proxy(url)
+    finally:
+        server.shutdown()
+    assert verdict.healthy is False
+    assert "not a health object" in verdict.reason
+
+
+@pytest.mark.parametrize(
+    "proxy_url",
+    ["http://127.0.0.1:ab", "http://exa mple.com"],
+    ids=["nonnumeric-port", "space-in-host"],
+)
+def test_probe_answers_a_url_urllib_refuses_instead_of_raising(proxy_url: str) -> None:
+    """Review of #203. ``urlopen`` raises ``http.client.InvalidURL`` for these
+    before any network call, and ``InvalidURL`` is an ``HTTPException``, not an
+    ``OSError`` — so it escaped the probe's handler, and through
+    ``wire_session``, which calls the probe unguarded, stopped the agent from
+    starting over a proxy URL a hand-edited config carried."""
+    verdict = probe_proxy(proxy_url)
+    assert verdict.healthy is False
+    assert "proxy unreachable" in verdict.reason
+
+
+class _TruncatedHandler(BaseHTTPRequestHandler):
+    """Headers that promise 400 bytes, a body of 12: ``read()`` raises ``IncompleteRead``."""
+
+    def do_GET(self) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", "400")
+        self.end_headers()
+        self.wfile.write(b'{"status": "')
+        self.wfile.flush()
+        self.close_connection = True
+
+    def log_message(self, *args: object) -> None:
+        return
+
+
+def test_probe_answers_a_truncated_health_body_instead_of_raising() -> None:
+    """Review of #203, the other ``HTTPException``: a body shorter than its
+    Content-Length raises ``IncompleteRead`` from ``read()``, inside the same
+    handler that only listed ``OSError``."""
+    server = HTTPServer(("127.0.0.1", 0), _TruncatedHandler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        verdict = probe_proxy(f"http://127.0.0.1:{server.server_address[1]}")
+    finally:
+        server.shutdown()
+    assert verdict.healthy is False
+    assert "proxy unreachable" in verdict.reason
+
+
+def test_a_proxy_url_urllib_refuses_launches_untraced() -> None:
+    """The blast radius the probe's hole had: ``wire_session`` asks the real
+    probe unguarded, so this used to be a traceback out of ``aisquare launch``
+    rather than an untraced session with a reason (review of #203)."""
+    wiring = wire_session(_settings(proxy_url="http://127.0.0.1:ab"), "coder")
+    assert wiring.traced is False
+    assert "launching untraced" in wiring.reason
+    assert wiring.env == {}
+
+
+def test_probe_reads_the_gateway_a_proxy_reports() -> None:
+    """The field the whole destination check rests on, end to end."""
+    server, url = _serve(
+        {
+            "status": "ok",
+            "service": "aisquare-proxy",
+            "mode": "claude_code",
+            "gateway": "https://g.example",
+        }
+    )
+    try:
+        verdict = probe_proxy(url)
+    finally:
+        server.shutdown()
+    assert verdict.healthy is True
+    assert verdict.gateway == "https://g.example"
+
+
+def test_a_proxy_that_reports_no_gateway_is_unverifiable_not_broken() -> None:
+    """Backward compatibility, stated: today's proxies send no ``gateway``."""
+    server, url = _serve({"status": "ok", "service": "aisquare-proxy", "mode": "claude_code"})
+    try:
+        verdict = probe_proxy(url)
+    finally:
+        server.shutdown()
+    assert verdict.healthy is True
+    assert verdict.gateway is None
 
 
 def test_probe_reports_a_silent_port() -> None:
@@ -646,7 +878,15 @@ def test_env_exports_survive_a_posix_shell(runner, monkeypatch) -> None:  # type
     command exists to prevent, which is why the assertion is the round trip
     through a real shell and not the quoting style.
     """
+    import shutil
     import subprocess
+
+    # `/bin/sh` does not exist on Windows, where the POSIX shell is Git Bash
+    # under Program Files — the hardcoded path raised FileNotFoundError, which
+    # read as the exports failing rather than as the shell being absent.
+    shell = shutil.which("sh") or shutil.which("bash")
+    if shell is None:  # pragma: no cover - platform-dependent
+        pytest.skip("no POSIX shell on PATH; these exports are a sh construct")
 
     monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
     monkeypatch.delenv("ANTHROPIC_CUSTOM_HEADERS", raising=False)
@@ -664,10 +904,261 @@ def test_env_exports_survive_a_posix_shell(runner, monkeypatch) -> None:  # type
     assert result.exit_code == 0, result.output
     read_back = 'printf "%s" "$ANTHROPIC_BASE_URL|$ANTHROPIC_CUSTOM_HEADERS|$AISQUARE_PIPELINE_ID"'
     echoed = subprocess.run(
-        ["/bin/sh", "-c", f"{result.output}\n{read_back}"],
+        [shell, "-c", f"{result.output}\n{read_back}"],
         capture_output=True,
         text=True,
         timeout=60,
     )
     assert echoed.returncode == 0, echoed.stderr
     assert echoed.stdout == f"{url}|X-Agent-Name: aisquare-coder\nX-Pipeline-Id: sess-9|sess-9"
+
+
+# ── the hosted proxy convention, and the one writer both surfaces use ────────
+
+
+@pytest.mark.parametrize(
+    ("gateway", "expected"),
+    [
+        ("https://stg-x.example", "https://stg-x.example:9443"),
+        ("https://stg-x.example/", "https://stg-x.example:9443"),
+        ("https://stg-x.example:8443", "https://stg-x.example:9443"),
+        ("http://stg-x.example", "http://stg-x.example:9443"),
+        ("https://[2001:db8::1]:8000", "https://[2001:db8::1]:9443"),
+    ],
+    ids=["plain", "trailing-slash", "other-port-replaced", "scheme-kept", "ipv6-rebracketed"],
+)
+def test_the_hosted_proxy_sits_beside_the_gateway(gateway: str, expected: str) -> None:
+    """The one fact an operator cannot guess, and the one that decides whether
+    their Runs arrive: the shipped proxy default is loopback, which this CLI
+    does not manage.
+
+    IPv6 is not decoration. ``urlsplit().hostname`` strips the brackets, and
+    ``https://2001:db8::1:9443`` is not a URL any client can reach -- a
+    suggestion that cannot be dialled is worse than none, because it is stored.
+    """
+    assert explainability.hosted_proxy_for(gateway) == expected
+
+
+@pytest.mark.parametrize(
+    "gateway",
+    [
+        "",
+        "   ",
+        "not-a-url",
+        "://missing-scheme",
+        "stg-x.example",
+        "http://[::1",
+        "http://127.0.0.1:8000",
+        "http://localhost:8000",
+        "https://[::1]:8000",
+    ],
+    ids=[
+        "empty",
+        "blank",
+        "bare-word",
+        "no-scheme",
+        "schemeless-host",
+        "malformed-ipv6",
+        "loopback-ip",
+        "localhost",
+        "loopback-ipv6",
+    ],
+)
+def test_no_suggestion_where_one_would_be_wrong(gateway: str) -> None:
+    """Silence for half an answer AND for a confidently wrong one.
+
+    Unparseable or schemeless is half an answer -- a bare host parses with the
+    whole string as the PATH, so a suggestion built from it names no host.
+
+    A LOOPBACK gateway is the wrong answer, not the missing one, and it is the
+    case the review caught: ``HOSTED_PROXY_PORT`` is the hosted deployments'
+    convention, while the wholly-local topology's own port is the shipped
+    ``proxy_url`` default. Suggesting 9443 there repoints a self-hosted adopter
+    -- the very topology in this PR's measured repro -- at a port with nothing
+    on it. Silence leaves their configured value alone.
+    """
+    assert explainability.hosted_proxy_for(gateway) is None
+
+
+def test_the_loopback_suggestion_would_have_contradicted_the_shipped_default() -> None:
+    """Why the loopback case is silent, stated as the contradiction it was."""
+    from aisquare.core.config import ExplainabilitySettings
+
+    shipped = ExplainabilitySettings().proxy_url
+    assert shipped == "http://127.0.0.1:9090"
+    assert explainability.hosted_proxy_for("http://127.0.0.1:8000") != shipped.replace(
+        "9090", str(explainability.HOSTED_PROXY_PORT)
+    )
+
+
+@pytest.mark.parametrize("url", ["http://[::1", "https://[not-an-address]"])
+def test_a_malformed_url_never_raises_out_of_a_parser(url: str) -> None:
+    """The two crashes the review reproduced, at their shared root.
+
+    ``urlsplit`` raises ``ValueError`` on a malformed authority, and both
+    callers took it from a human: ``is_loopback`` off a config value, so
+    ``aisquare doctor`` tracebacked, and ``hosted_proxy_for`` off a form field,
+    so a Textual button handler took the UI down. Neither has anything to do
+    with URL syntax.
+    """
+    assert explainability.split_url(url) is None
+    assert explainability.is_loopback(url) is False
+    assert explainability.hosted_proxy_for(url) is None
+
+
+def test_a_bad_PORT_is_not_a_bad_HOST() -> None:
+    """``urlsplit`` defers the port's range check to ``.port``, so an authority
+    with a good host and a nonsense port SPLITS. The host is what
+    ``is_loopback`` answers about, and it is genuinely local here -- the port is
+    only read where it matters, inside `_same_deployment`'s own guard."""
+    assert explainability.split_url("http://[::1]:99999x") is not None
+    assert explainability.is_loopback("http://[::1]:99999x") is True
+
+
+def test_an_unparseable_url_is_not_treated_as_local() -> None:
+    """``is_loopback`` decides whether a workspace key may be omitted, so an
+    unestablished host must not read as 'this machine'. An EMPTY host still
+    does: that is the shipped default and a bare path."""
+    assert explainability.is_loopback("http://[::1") is False
+    assert explainability.is_loopback("") is True
+
+
+def test_configure_target_applies_only_what_was_given() -> None:
+    """A blank form field must not erase what is configured — the property the
+    UI's "blank leaves it alone" promise rests on."""
+    config = AppConfig()
+    explainability.configure_target(
+        config, target_name="stg", gateway_url="https://g.example", identity="me-{role}"
+    )
+    explainability.configure_target(config, proxy_url="https://g.example:9443")
+
+    target = config.explainability.targets["stg"]
+    assert target.gateway_url == "https://g.example", "untouched by the second call"
+    assert target.agent_name_template == "me-{role}"
+    assert target.proxy_url == "https://g.example:9443"
+
+
+def test_configure_target_can_write_settings_without_turning_tracing_on() -> None:
+    """Consent stays a separate press: the setup form saves, Enable enables."""
+    config = AppConfig()
+    explainability.configure_target(
+        config, target_name="stg", gateway_url="https://g.example", enable=False
+    )
+    assert config.explainability.enabled is False
+    assert config.explainability.targets["stg"].gateway_url == "https://g.example"
+
+    explainability.configure_target(config)
+    assert config.explainability.enabled is True
+
+
+def test_a_trailing_slash_is_stripped_from_the_stored_gateway() -> None:
+    config = AppConfig()
+    explainability.configure_target(config, target_name="stg", gateway_url="https://g.example/")
+    assert config.explainability.targets["stg"].gateway_url == "https://g.example"
+
+
+# ── the writer validates, so both doors are guarded ──────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("url", "fragment", "not_fragment"),
+    [
+        ("stg.example", "try https://stg.example", None),
+        ("stg.example:8000", "try https://stg.example:8000", "not stg.example://"),
+        ("http://[::1", "cannot be parsed", "https://http://"),
+        ("ftp://stg.example", "not ftp://", None),
+        ("https://", "names no host", None),
+        ("https://g.example:99999", "port", None),
+    ],
+    ids=["schemeless", "schemeless-with-port", "malformed-ipv6", "ftp", "no-host", "bad-port"],
+)
+def test_url_problem_says_which_thing_is_wrong(
+    url: str, fragment: str, not_fragment: str | None
+) -> None:
+    """Review follow-up I. The form answered every failure with "needs a scheme
+    — try https://…" and prefixed ``https://`` onto ``http://[::1``. One
+    validator, each diagnosis with the fix that applies to it — and
+    ``stg.example:8000`` is a missing scheme, not an unknown one, even though
+    ``urlsplit`` reads ``stg.example`` as the scheme."""
+    problem = explainability.url_problem(url, what="gateway")
+
+    assert problem is not None and problem.startswith("gateway")
+    assert fragment in problem
+    if not_fragment:
+        assert not_fragment not in problem
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://g.example",
+        "http://127.0.0.1:9090",
+        "https://[::1]:8000/",
+        "https://g.example:443/path",
+    ],
+)
+def test_a_usable_url_has_no_problem(url: str) -> None:
+    assert explainability.url_problem(url, what="gateway") is None
+
+
+def test_configure_target_refuses_a_schemeless_gateway_and_changes_nothing() -> None:
+    """Review blocker A: the form refused what this writer stored.
+
+    ``enable --gateway-url stg.example`` — the runbook command, four characters
+    short — went into config, after which a host-less gateway read as loopback,
+    the proxy lane's pair-exemption fired, and the machine was configured, green
+    and stranded. A check in one caller guards one door; this is the writer
+    both go through. Nothing is mutated when it refuses — not even the switch.
+    """
+    config = AppConfig()
+    with pytest.raises(ValueError, match="scheme") as caught:
+        explainability.configure_target(config, target_name="prod", gateway_url="stg.example")
+
+    assert "https://stg.example" in str(caught.value)
+    assert config.explainability.targets == {}
+    assert config.explainability.target == ExplainabilitySettings().target
+    assert config.explainability.enabled is False
+
+
+def test_configure_target_refuses_a_schemeless_proxy() -> None:
+    config = AppConfig()
+    with pytest.raises(ValueError, match="proxy needs a scheme"):
+        explainability.configure_target(config, proxy_url="stg.example:9443")
+    assert config.explainability.targets == {}
+
+
+@pytest.mark.parametrize(
+    "identity",
+    ["nishil}-{role}", "nishil-{role", "nishil", "{rol}-x"],
+    ids=["stray-close", "stray-open", "no-role", "wrong-field"],
+)
+def test_configure_target_refuses_an_identity_that_cannot_name_agents(identity: str) -> None:
+    """Review blocker B, at the writer: the template that empties ``agent_names``
+    — every launch untraced, the tab reading ``agents: (none)``, Register
+    pointing at the wrong setting — is refused wherever it is typed, the
+    ``--identity`` flag included."""
+    config = AppConfig()
+    with pytest.raises(ValueError, match="identity template"):
+        explainability.configure_target(config, identity=identity)
+    assert config.explainability.targets == {}
+
+
+def test_configure_target_can_write_a_target_without_moving_the_machine_to_it() -> None:
+    """Review blocker D: the form's deployment field was a switch nobody announced.
+
+    ``enable --target prod`` moves the machine on purpose and keeps doing so;
+    the form passes ``make_active=False`` unless its box is ticked.
+    """
+    config = AppConfig()
+    config.explainability.target = "stg"
+
+    name = explainability.configure_target(
+        config, target_name="prod", gateway_url="https://prod.example", make_active=False
+    )
+
+    assert name == "prod"
+    assert config.explainability.targets["prod"].gateway_url == "https://prod.example"
+    assert config.explainability.target == "stg", "the machine stays where it was"
+
+    explainability.configure_target(config, target_name="prod", make_active=True)
+    assert config.explainability.target == "prod", "the switch is still there, explicitly"

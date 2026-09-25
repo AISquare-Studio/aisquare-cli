@@ -95,7 +95,7 @@ def initialize(
 
     project = current_project(path)
     with store_session() as store:
-        store.ensure_project(project)
+        store.onboard_project(project)  # init is the deliberate add (#139)
 
     notes: list[str] = []
     if discarded:
@@ -105,9 +105,22 @@ def initialize(
     if api_key:
         # Merged rather than replaced: `serve` keeps its bearer token in the same
         # file, and a whole-file write erased it (and, in the other order, this
-        # key). One helper owns the format so the two cannot diverge again.
-        credentials_store.store(**{credentials_store.API_KEY: api_key})
-        notes.append("Stored API key in ~/.aisquare/credentials.")
+        # key). One helper owns the format so the two cannot diverge again --
+        # and reports whether the file could really be locked to this account,
+        # because on NTFS the 0600 that guarded it is a no-op.
+        _, restricted = credentials_store.store(**{credentials_store.API_KEY: api_key})
+        # One string with one branch, rather than two near-copies sharing a
+        # prefix: the two paths cannot drift into saying different things about
+        # where the key landed.
+        notes.append(
+            "Stored API key in ~/.aisquare/credentials"
+            + (
+                "."
+                if restricted
+                else " — but could NOT restrict it to your account; other users on this "
+                "machine may be able to read it."
+            )
+        )
     elif not local:
         notes.append(
             "No API key given — running local-only; re-run with --api-key to connect later."

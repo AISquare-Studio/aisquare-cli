@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Iterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, tzinfo
 from pathlib import Path
 
 import pytest
 
+from aisquare.core import store as store_module
 from aisquare.core.ids import new_entry_id
 from aisquare.core.store import (
     SCHEMA_VERSION,
@@ -184,10 +185,43 @@ def test_schema_rejects_inconsistent_pool(store: ContextStore) -> None:
 def test_list_and_get_projects(store: ContextStore) -> None:
     other = ProjectInfo(id="prj_other", root=Path("/tmp/another-app"), linked_repos=[])
     store.ensure_project(other)  # PROJECT is already registered by the fixture
-    ids = {project.id for project in store.list_projects()}
-    assert ids == {PROJECT.id, "prj_other"}
-    assert store.get_project("prj_other") == other
+    # A captured registration is reachable by id and in the full list, but not LISTED
+    # until something adds it on purpose (#139).
+    assert {project.id for project in store.list_projects(all=True)} == {PROJECT.id, "prj_other"}
+    assert "prj_other" not in {project.id for project in store.list_projects()}
+    stored = store.get_project("prj_other")
+    assert stored is not None and stored.model_copy(update={"onboarded_at": None}) == other
     assert store.get_project("prj_missing") is None
+    store.onboard_project(other)
+    ids = {project.id for project in store.list_projects()}
+    assert ids >= {"prj_other"}
+
+
+def test_list_projects_hides_a_forgotten_registration_unless_asked(store: ContextStore) -> None:
+    """``include_forgotten`` is for the one question a tombstone must not hide: a
+    forgotten registration can still hold LIVE ``fleet_agent`` rows, whose panes are
+    real processes. ``fleet shutdown`` asks this way so it cannot take a pane down
+    while leaving its row live with nothing able to reconcile it.
+
+    It is not ``all`` (#139), which adds the captured rows and still hides a
+    tombstone. A forget clears ``onboarded_at``, so ``include_forgotten`` alone
+    reads past the onboarded filter too — kept, that filter would drop the very
+    tombstone the flag exists to find."""
+    store.onboard_project(PROJECT)  # the fixture only captured it
+    captured = ProjectInfo(id="prj_captured", root=Path("/tmp/captured-app"), linked_repos=[])
+    store.ensure_project(captured)
+    gone = ProjectInfo(id="prj_gone", root=Path("/tmp/gone-app"), linked_repos=[])
+    store.onboard_project(gone)
+    store.forget_project("prj_gone")
+
+    assert [p.id for p in store.list_projects()] == [PROJECT.id], "the default still hides it"
+    assert {p.id for p in store.list_projects(all=True)} == {PROJECT.id, "prj_captured"}, (
+        "so does all"
+    )
+    everything = {PROJECT.id, "prj_captured", "prj_gone"}
+    assert {p.id for p in store.list_projects(include_forgotten=True)} == everything
+    assert {p.id for p in store.list_projects(all=True, include_forgotten=True)} == everything
+    assert store.get_project("prj_gone") is None, "every OTHER read keeps the promise"
 
 
 def test_find_projects_by_name_and_id_prefix(store: ContextStore) -> None:
@@ -208,10 +242,33 @@ def test_add_linked_repo_unknown_project_raises(store: ContextStore) -> None:
         store.add_linked_repo("prj_missing", "repo")
 
 
-def test_add_and_list_prompts(store: ContextStore) -> None:
+def test_add_and_list_prompts(store: ContextStore, monkeypatch: pytest.MonkeyPatch) -> None:
+    # NO SLEEP. Both prompts are written inside one clock tick on purpose —
+    # which is the case that used to sort by coin flip, because the tie-break
+    # was an id whose tail is 128 random bits. `recent_prompts` breaks ties on
+    # `rowid` now, so "written second" is what "sorts first" means, and this
+    # asserts that rather than sleeping until the clock disambiguates it.
+    #
+    # The tick and the coin are both FIXED here rather than hoped for. On Linux
+    # `created_at` has microsecond resolution and two inserts almost never
+    # share it, so the tie never happened, and an `id DESC` tie-break passed
+    # too. The clock is frozen, and the ids come out in the REVERSE of
+    # insertion order, so only `rowid` puts the second prompt first (review of
+    # #65, R5).
+    frozen = datetime(2026, 9, 24, 12, 0, tzinfo=UTC)
+
+    class _Frozen(datetime):
+        @classmethod
+        def now(cls, tz: tzinfo | None = None) -> _Frozen:
+            return cls.fromtimestamp(frozen.timestamp(), tz)
+
+    ids = iter(["prm_zzz_written_first", "prm_aaa_written_second"])
+    monkeypatch.setattr(store_module, "datetime", _Frozen)
+    monkeypatch.setattr(store_module, "new_prompt_id", lambda: next(ids))
     store.add_prompt("first prompt", PROJECT.id)
     store.add_prompt("second prompt", PROJECT.id)
     prompts = store.recent_prompts(PROJECT.id)
+    assert [p.created_at for p in prompts] == [frozen, frozen], "the tick was not shared"
     assert [p.text for p in prompts] == ["second prompt", "first prompt"]  # newest first
 
 
@@ -231,13 +288,19 @@ def test_migrations_reach_the_current_schema_version() -> None:
         version = raw.execute("PRAGMA user_version").fetchone()[0]
     finally:
         raw.close()
-    # v11 fleet, v12 metric, v13 converges, v14 forgotten_at, v15 persona
-    assert version == SCHEMA_VERSION == 15
+    # v11 fleet, v12 metric, v13 converges, v14 forgotten_at, v15 the account registry
+    # (#145), v16 usage readings and the limited state (#146), v17 onboarded_at (#139),
+    # v18 the launch spec and ui_state (#144), v19 the project explainability key (#141),
+    # v20 project groups, pins and manual order (#140), v21 project destinations (#142).
+    # The persona columns (#201) are no step of their own: `_PREPARE[15]` converges them
+    # onto every store passing 15, and `_converge_v15_shape` onto one already past it.
+    assert version == SCHEMA_VERSION == 21
 
 
-def test_a_v14_store_upgrades_to_v15_with_nullable_persona_columns() -> None:
-    """P2's step (docs/plans/spawn-personas.md §7): rows that existed at v14 survive,
-    both tables gain a ``persona`` that reads NULL, and a start that names no
+def test_a_v14_store_gains_nullable_persona_columns_through_the_v15_converge() -> None:
+    """P2's step (docs/plans/spawn-personas.md §7) as it lands after the v15 fork: rows
+    that existed at v14 survive, both tables gain a ``persona`` that reads NULL — from
+    ``_converge_v15_fork``, not a numbered step of its own — and a start that names no
     persona keeps the one a row already records."""
     from datetime import UTC, datetime
 
@@ -792,3 +855,362 @@ def test_every_shape_of_user_version_11_converges_on_one_schema(
         assert any(t.startswith("metric_v1_orphaned") for t in tables), label
     if shape == "V1ORPHAN":
         assert "metric_v1_orphaned_2" in tables, "a taken orphan name must not wedge the rename"
+
+
+# --- the Claude account registry and per-project settings (v15, #145) ----------------------
+
+
+def test_claude_account_registry_keeps_one_default_unique_aliases_and_a_dense_order(
+    store: ContextStore,
+) -> None:
+    """The two invariants are the schema's: a second default and a reused alias are refused
+    by an index, not by a caller remembering to check."""
+    first = store.upsert_claude_account(1, Path("/h/.claude"))
+    second = store.upsert_claude_account(2, Path("/h/.aisquare/claude-accounts/2"))
+    assert (first.position, second.position) == (1, 2)  # queued at the end, in order
+    assert not first.is_default and not second.is_default and first.alias is None
+
+    store.set_claude_account_default(2)
+    store.set_claude_account_default(1)
+    assert [r.slot for r in store.claude_accounts() if r.is_default] == [1]  # moved, never two
+    with pytest.raises(KeyError):
+        store.set_claude_account_default(9)
+    assert [r.slot for r in store.claude_accounts() if r.is_default] == [1]  # refused, unchanged
+    store.set_claude_account_default(None)
+    assert not any(r.is_default for r in store.claude_accounts())
+
+    store.set_claude_account_alias(2, "work")
+    with pytest.raises(sqlite3.IntegrityError):
+        store.set_claude_account_alias(1, "work")
+    assert [r.alias for r in store.claude_accounts()] == [None, "work"]
+    store.set_claude_account_alias(2, None)
+    store.set_claude_account_alias(1, "work")  # free again once released
+    assert [r.alias for r in store.claude_accounts()] == ["work", None]
+
+    store.set_claude_account_disabled(2, True)
+    assert [r.disabled for r in store.claude_accounts()] == [False, True]
+
+    # An upsert of a known slot refreshes the directory and touches nothing else.
+    refreshed = store.upsert_claude_account(1, Path("/elsewhere/.claude"))
+    assert refreshed.config_dir == Path("/elsewhere/.claude")
+    assert refreshed.alias == "work" and refreshed.position == 1
+
+    store.upsert_claude_account(3, Path("/h/.aisquare/claude-accounts/3"))
+    store.order_claude_accounts([3, 9])  # 9 does not exist and is ignored
+    assert [(r.slot, r.position) for r in store.claude_accounts()] == [(3, 1), (1, 2), (2, 3)]
+    store.order_claude_accounts([2, 2, 3])  # a repeated reference left position 1 unused
+    assert [(r.slot, r.position) for r in store.claude_accounts()] == [(2, 1), (3, 2), (1, 3)]
+    store.order_claude_accounts([3, 1, 2])  # back to the order the rest of the test reads
+    assert store.delete_claude_account(1) is True
+    assert store.delete_claude_account(1) is False
+    assert [(r.slot, r.position) for r in store.claude_accounts()] == [(3, 1), (2, 2)]  # dense
+
+
+def test_project_settings_round_trip_per_project_and_clear(store: ContextStore) -> None:
+    other = ProjectInfo(id="prj_other", root=Path("/tmp/other"), linked_repos=[])
+    store.ensure_project(other)
+
+    assert store.project_setting(PROJECT.id, "claude_account") is None
+    store.set_project_setting(PROJECT.id, "claude_account", "2")
+    store.set_project_setting(other.id, "claude_account", "3")
+    store.set_project_setting(PROJECT.id, "claude_account", "4")  # an update, not a second row
+    assert store.project_setting(PROJECT.id, "claude_account") == "4"
+    assert store.project_setting(other.id, "claude_account") == "3"
+    assert store.project_settings("claude_account") == {PROJECT.id: "4", other.id: "3"}
+    assert store.project_setting(PROJECT.id, "something_else") is None
+
+    assert store.clear_project_setting(PROJECT.id, "claude_account") is True
+    assert store.clear_project_setting(PROJECT.id, "claude_account") is False
+    assert store.project_settings("claude_account") == {other.id: "3"}
+    with pytest.raises(sqlite3.IntegrityError):  # a foreign key: no setting for a ghost project
+        store.set_project_setting("prj_ghost", "claude_account", "1")
+
+
+# --- captured versus onboarded (#139) ------------------------------------------------------
+
+
+def test_ensure_project_captures_and_only_onboard_project_shows() -> None:
+    from aisquare.models import ProjectInfo
+
+    store = open_store()
+    try:
+        quiet = ProjectInfo(id="prj_quiet", root=Path("/w/quiet"))
+        store.ensure_project(quiet)  # what a hook does
+        assert store.list_projects() == []  # captured, not shown
+        [captured] = store.list_projects(all=True)
+        assert captured.id == "prj_quiet" and captured.onboarded_at is None
+        assert [p.id for p in store.captured_projects()] == ["prj_quiet"]
+        assert store.get_project("prj_quiet") is not None  # reachable by id, as before
+        store.ensure_project(quiet)  # again: still nothing changes
+        assert store.list_projects() == []
+
+        shown = store.onboard_project(quiet)  # what init / onboard / link / + / team on do
+        assert shown.onboarded_at is not None
+        assert [p.id for p in store.list_projects()] == ["prj_quiet"]
+        assert store.captured_projects() == []
+        first = shown.onboarded_at
+        assert store.onboard_project(quiet).onboarded_at == first  # set once, kept
+
+        # forget clears the mark and hides; a hook's capture afterwards brings the row
+        # back CAPTURED — reachable, with its history, but not listed…
+        store.forget_project("prj_quiet")
+        assert store.list_projects(all=True) == [] and store.get_project("prj_quiet") is None
+        store.ensure_project(quiet)
+        assert store.list_projects() == [], "forget sticks against a capture"
+        [back] = store.list_projects(all=True)
+        assert back.id == "prj_quiet" and back.onboarded_at is None
+        assert store.get_project("prj_quiet") is not None, "not a tombstone prompts vanish into"
+        # …and a deliberate add lists it again, with a fresh mark.
+        again = store.onboard_project(quiet)
+        assert again.onboarded_at is not None and again.onboarded_at >= first
+        assert [p.id for p in store.list_projects()] == ["prj_quiet"]
+    finally:
+        store.close()
+
+
+def test_a_capture_revives_a_tombstone_captured_even_one_that_kept_its_mark() -> None:
+    """The first cut of the v17 backfill (c716094) had no ``forgotten_at`` guard, so a
+    store migrated by it holds forgotten rows stamped onboarded. The revival kept the
+    mark, and the next prompt in such a directory put it back on the list — the bug
+    #139 is about — until a second forget cleared it. A live row keeps its mark."""
+    store = open_store()
+    try:
+        old = ProjectInfo(id="prj_old", root=Path("/w/old"))
+        live = ProjectInfo(id="prj_live", root=Path("/w/live"))
+        store.onboard_project(old)
+        store.onboard_project(live)
+        raw = sqlite3.connect(str(_db_path()))
+        try:  # the state the unguarded backfill left: forgotten AND onboarded
+            raw.execute(
+                "UPDATE project SET forgotten_at = ? WHERE id = ?",
+                ("2026-09-02T00:00:00+00:00", old.id),
+            )
+            raw.commit()
+        finally:
+            raw.close()
+        assert [p.id for p in store.list_projects()] == ["prj_live"]
+
+        store.ensure_project(old)  # the next prompt there
+        store.ensure_project(live)  # and one in a project that is listed
+
+        assert [p.id for p in store.list_projects()] == ["prj_live"], "forget sticks"
+        revived = store.get_project("prj_old")
+        assert revived is not None and revived.onboarded_at is None, "captured, not a tombstone"
+        kept = store.get_project("prj_live")
+        assert kept is not None and kept.onboarded_at is not None
+    finally:
+        store.close()
+
+
+def test_the_v17_migration_adopts_the_rows_already_used_on_purpose(
+    isolated_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Rows with context entries, a codename, linked repos, board activity, a fleet
+    agent or a snapshot on disk become onboarded; captured-only rows stay hidden."""
+    from aisquare.core import snapshot as snapshot_core
+
+    rows = [
+        ("prj_entries", "/w/entries"),
+        ("prj_named", "/w/named"),
+        ("prj_linked", "/w/linked"),
+        ("prj_board", "/w/board"),
+        ("prj_agent", "/w/agent"),
+        ("prj_snap", "/w/snap"),
+        ("prj_quiet", "/w/quiet"),
+        ("prj_gone", "/w/gone"),
+        ("prj_gone_used", "/w/gone-used"),
+    ]
+
+    def insert(pid: str, root: str) -> str:
+        repos = '["git@x:y.git"]' if pid == "prj_linked" else "[]"
+        name = root.rsplit("/", 1)[1]
+        return (
+            "INSERT INTO project (id, root, name, linked_repos, created_at) VALUES "
+            f"('{pid}', '{root}', '{name}', '{repos}', '2026-09-01T00:00:00+00:00');\n"
+        )
+
+    inserts = "".join(insert(pid, root) for pid, root in rows)
+    after = (
+        inserts
+        + """
+        UPDATE project SET codename = 'amber-otter' WHERE id = 'prj_named';
+        UPDATE project SET forgotten_at = '2026-09-02T00:00:00+00:00'
+            WHERE id IN ('prj_gone', 'prj_gone_used');
+        INSERT INTO entry (id, pool, project_id, text, tags, source, created_at, updated_at)
+            VALUES ('ent_1', 'project', 'prj_entries', 'a fact', '[]', 'cli',
+                    '2026-09-01T00:00:00+00:00', '2026-09-01T00:00:00+00:00');
+        INSERT INTO entry (id, pool, project_id, text, tags, source, created_at, updated_at)
+            VALUES ('ent_2', 'project', 'prj_gone_used', 'kept by forget', '[]', 'cli',
+                    '2026-09-01T00:00:00+00:00', '2026-09-01T00:00:00+00:00');
+        INSERT INTO team_event (id, project_id, session_id, kind, text, created_at)
+            VALUES ('evt_1', 'prj_board', NULL, 'activate', 'on', '2026-09-01T00:00:00+00:00');
+        INSERT INTO fleet_agent (id, project_id, label, role, tmux_socket, pane_id, cwd,
+                                 worktree, created_at)
+            VALUES ('agt_1', 'prj_agent', 'coder-1', 'coder', 'asq', '%1', '/w/agent', 0,
+                    '2026-09-01T00:00:00+00:00');
+        INSERT INTO prompt (id, project_id, text, source, created_at)
+            VALUES ('prm_1', 'prj_quiet', 'hello', 'claude-code', '2026-09-01T00:00:00+00:00');
+    """
+    )
+    _at_version(16, after=after)
+    for with_snapshot in ("prj_snap", "prj_gone_used"):  # forget keeps the snapshot
+        snapshot_core.meta_path(with_snapshot).parent.mkdir(parents=True, exist_ok=True)
+        snapshot_core.meta_path(with_snapshot).write_text("{}", encoding="utf-8")
+
+    store = open_store()
+    try:
+        shown = {p.id for p in store.list_projects()}
+        everything = {p.id for p in store.list_projects(all=True)}
+        # The next prompt in a directory forgotten before v17 captures it; it must
+        # not be re-listed by the entries and snapshot its forget left behind.
+        store.ensure_project(ProjectInfo(id="prj_gone_used", root=Path("/w/gone-used")))
+        revived = store.get_project("prj_gone_used")
+        listed_after_prompt = {p.id for p in store.list_projects()}
+    finally:
+        store.close()
+    assert shown == {"prj_entries", "prj_named", "prj_linked", "prj_board", "prj_agent", "prj_snap"}
+    assert everything == shown | {"prj_quiet"}, "the prompt-only row is captured, not shown"
+    assert "prj_gone" not in everything, "forgotten stays forgotten"
+    assert "prj_gone_used" not in everything
+    assert revived is not None and revived.onboarded_at is None, "a forgotten row is not adopted"
+    assert "prj_gone_used" not in listed_after_prompt
+
+
+# --- the launch spec and ui_state (#144) ----------------------------------------------------
+
+
+def test_a_fleet_agents_launch_spec_round_trips_and_an_old_row_has_none(
+    store: ContextStore,
+) -> None:
+    from aisquare.models import FleetAgent, LaunchSpec
+
+    spec = LaunchSpec(
+        binary="claude",
+        permission_mode="auto",
+        extra_args=["--chrome", "--effort", "high"],
+        account_slot=2,
+        worktree=True,
+        command=["python", "-P", "-m", "aisquare", "launch", "coder"],
+    )
+    row = FleetAgent(
+        id="agt_spec", project_id=PROJECT.id, label="coder-1", role="coder", pane_id="%1",
+        cwd=Path("/w"), created_at=datetime.now(tz=UTC), launch_spec=spec,
+    )  # fmt: skip
+    stored = store.upsert_fleet_agent(row)
+    assert stored.launch_spec == spec
+    bare = store.upsert_fleet_agent(
+        row.model_copy(update={"id": "agt_old", "label": "coder-2", "launch_spec": None})
+    )
+    assert bare.launch_spec is None
+    # A spec that no longer parses (a future field renamed) costs the replay, not the row.
+    with sqlite3.connect(str(_db_path())) as raw:
+        raw.execute("UPDATE fleet_agent SET launch_spec = '{not json' WHERE id = 'agt_spec'")
+    broken = store.get_fleet_agent("agt_spec")
+    assert broken is not None and broken.launch_spec is None
+
+
+def test_ui_state_is_a_key_value_memory(store: ContextStore) -> None:
+    assert store.ui_state("fleet.selected") is None
+    store.set_ui_state("fleet.selected", "project:prj_test")
+    assert store.ui_state("fleet.selected") == "project:prj_test"
+    store.set_ui_state("fleet.selected", "agent:prj_test/agt_1")  # every change is the save
+    assert store.ui_state("fleet.selected") == "agent:prj_test/agt_1"
+    store.set_ui_state("fleet.selected", None)
+    assert store.ui_state("fleet.selected") is None
+
+
+# #201's v15 as its ladder writes it, copied line for line from _SCHEMA_V15 at
+# its head 87526ceff8d9 (2026-09-24): the two persona columns and nothing else.
+PERSONA_V15_DDL = """
+ALTER TABLE team_session ADD COLUMN persona TEXT;
+ALTER TABLE fleet_agent ADD COLUMN persona TEXT;
+"""
+
+
+def test_the_if_absent_twin_of_v15_names_every_table_and_index_v15_creates() -> None:
+    """``_SCHEMA_V15_IF_ABSENT`` is derived from ``_SCHEMA_V15``; this pins that the
+    derivation covers all of it, so a table added to v15 later is converged too."""
+    import re
+
+    from aisquare.core.store import _SCHEMA_V15, _SCHEMA_V15_IF_ABSENT
+
+    creates = re.findall(r"CREATE (?:UNIQUE )?(?:TABLE|INDEX) (\w+)", _SCHEMA_V15)
+    guarded = re.findall(
+        r"CREATE (?:UNIQUE )?(?:TABLE|INDEX) IF NOT EXISTS (\w+)", _SCHEMA_V15_IF_ABSENT
+    )
+    assert creates and guarded == creates
+    # the one column goes through _add_column_if_absent, never a bare ALTER
+    assert "ALTER TABLE" not in _SCHEMA_V15_IF_ABSENT
+
+
+@pytest.mark.parametrize(
+    ("label", "cohort"),
+    [
+        ("main's v14, passing through this branch's v15", "V14"),
+        ("the hackathon branch's persona v15 (#201)", "PERSONA15"),
+        ("this branch's own v15, stamped before v16 existed", "ACCOUNTS15"),
+        ("the persona v15 run through v16 by a build without the step (this box)", "THISBOX16"),
+        ("the persona v15 run to 21 by a build without the step", "RANTO21"),
+    ],
+)
+def test_every_shape_of_user_version_15_converges_on_one_schema(label: str, cohort: str) -> None:
+    """The v15 fork (#201 persona against #203 accounts): whichever route a store
+    took to 15, it reaches the current version with the account registry, the
+    account slot AND the persona columns present.
+
+    As with the v11 cohorts, the end state is asserted by WRITING to the halves a
+    cohort could silently lack: a persona-15 store opened by this ladder without
+    the converge step stamps 21 with no ``claude_account`` and no
+    ``fleet_agent.account_slot``, and nothing raises until the first fleet read.
+    The last two cohorts are stores that ALREADY went past 15 that way, stamped
+    16 (the crew's own board store, 2026-09-24) and 21: no migration will ever
+    run on them again, so only the open-time shape convergence can reach them.
+    """
+    from pathlib import Path
+
+    from aisquare.core.store import _MIGRATIONS
+
+    if cohort == "V14":
+        db = _at_version(14)
+    elif cohort == "PERSONA15":
+        db = _at_version(14, after=PERSONA_V15_DDL, stamp=15)
+    elif cohort == "THISBOX16":
+        db = _at_version(14, after=PERSONA_V15_DDL + _MIGRATIONS[15], stamp=16)
+    elif cohort == "RANTO21":
+        db = _at_version(14, after=PERSONA_V15_DDL + "".join(_MIGRATIONS[15:]), stamp=21)
+    else:
+        db = _at_version(15)
+
+    store = open_store()  # migrates on open; a wedge raises out of here
+    try:
+        account = store.upsert_claude_account(1, Path("/tmp/claude-accounts/1"))
+        assert account.slot == 1, label
+    finally:
+        store.close()
+
+    raw = sqlite3.connect(str(db))
+    try:
+        assert raw.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION, label
+        tables = {r[0] for r in raw.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+        assert {"claude_account", "project_setting", "claude_usage"} <= tables, label
+        fleet = {r[1] for r in raw.execute("PRAGMA table_info(fleet_agent)")}
+        session = {r[1] for r in raw.execute("PRAGMA table_info(team_session)")}
+        assert {"account_slot", "launch_spec", "persona"} <= fleet, label
+        assert {"limit_resets_at", "persona"} <= session, label
+        # and both halves take a row, whichever way in
+        raw.execute(
+            "INSERT INTO project (id, name, root, linked_repos, created_at, codename) "
+            "VALUES ('prj_f', 'f', '/tmp/f', '[]', '2026-01-01T00:00:00+00:00', 'kestrel')"
+        )
+        raw.execute(
+            "INSERT INTO fleet_agent (id, project_id, label, role, pane_id, cwd, created_at, "
+            "account_slot, persona) VALUES ('agt_1', 'prj_f', 'a', 'dev', '%1', '/tmp/f', "
+            "'2026-01-01T00:00:00+00:00', 1, 'skeptic')"
+        )
+        raw.commit()
+        (slot, persona) = raw.execute(
+            "SELECT account_slot, persona FROM fleet_agent WHERE id = 'agt_1'"
+        ).fetchone()
+        assert (slot, persona) == (1, "skeptic"), label
+    finally:
+        raw.close()

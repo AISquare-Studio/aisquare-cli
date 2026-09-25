@@ -28,7 +28,7 @@ From the owner's brief. Each line is something the finished feature must do.
    UI with mouse support. Scripts and `--help` see exactly what they see today
    (usage, exit 2); `--json` gets a JSON usage object with the same exit code
    (§3.8) — a non-TTY never gets a TUI.
-2. Two panes: a narrow **navigator** on the left, a wide **content area** on the
+2. Two panes (the partition is a draggable divider since #137, remembered across launches): a narrow **navigator** on the left, a wide **content area** on the
    right.
 3. Left: a **Fleet** heading with a `+`. Clicking it opens onboarding on the
    right — browse or type a directory; if it resolves, the UI runs the
@@ -72,7 +72,7 @@ process substrate.
 
 | Capability | Where | How the fleet uses it |
 | --- | --- | --- |
-| Project registry and identity; worktrees resolve to the principal repo | `core/workspace.py` (`find_project_root`, `git_common_root`), `store.project` | The left pane **is** `store.list_projects()`. A coder in a worktree shares its project's board for free. |
+| Project registry and identity; worktrees resolve to the principal repo | `core/workspace.py` (`find_project_root`, `git_common_root`), `store.project` | The left pane **is** `store.list_projects()` — the projects added on purpose; directories a hooked session merely ran in are captured but hidden until `init`, `project onboard`/`link`, the `+`, `team on` or a spawn adds them (#139; `a` shows them, `project list --all` too). A coder in a worktree shares its project's board for free. |
 | Setup and onboarding | `services/lifecycle.initialize()`, `services/project.onboard()` (Repomix snapshot) | Run from the Onboard view, in the background (§5.6). |
 | Doctor | `services/diagnostics.doctor()` → `DoctorCheck(name, status, detail, fix)`; `explainability_ops.apply_fixes` | Doctor section + view render these; fix buttons run known fixes. Note: several checks resolve the project from the **cwd**, so per-project runs need care (§5.6). |
 | Session lifecycle | Five Claude Code hooks (`core/agents._HOOKS`) → `team_session.state ∈ {working, waiting, attention}`, `transcript_path`, `model`, `effort` | Agent rows' state chips come from here, unchanged. The manager wake-up rides on `Stop` (§7.3). |
@@ -313,7 +313,7 @@ reasonably want otherwise.
 ### 4.1 Left pane — `Sidebar` (26–34 columns, collapsible)
 
 - **Fleet** header with `+` → opens the Onboard view.
-- One `ProjectCard` per registered project (`store.list_projects()`), with
+- One `ProjectCard` per onboarded project (`store.list_projects()`; captured-only directories are hidden, #139), arranged by `services.project_groups.arrange` — a Pinned section, group headers with indented members, then the loose projects in manual order (#140) — with
   alternating `.odd` / `.even` background. Header row: disclosure ▾/▸, name
   (root basename), the fleet codename as a dim badge (§5.7), chips (agents alive
   · tasks open · 🔔 count); when two projects share a basename, the parent path
@@ -636,8 +636,12 @@ this with Claude Code's own status glyphs.
 window, debounced 100 ms. Windows not currently shown keep the size they last
 had; Claude Code redraws on `SIGWINCH` when shown again.
 
-**Keys** (`core/keys.py`). `Key.character` printable → `send-keys -l`;
-otherwise map `Key.key`:
+**Keys** (`core/keys.py`). `Key.character` printable → `send-keys -l`, except
+alt on an ASCII letter: there the chord is the meaning and the character only
+how a legacy terminal spelt `ESC p`, so it goes as `M-p`, Claude Code's
+switch-model chord. Otherwise map `Key.key`. A key the table has no safe name for is never
+sent under a guessed one — the text the terminal reported with it is typed
+instead (a Cmd chord aside, which is a command), and with none nothing is sent:
 
 | Textual | tmux | Textual | tmux |
 | --- | --- | --- | --- |
@@ -648,7 +652,9 @@ otherwise map `Key.key`:
 | `home` `end` | `Home` `End` | `pageup` `pagedown` | `PPage` `NPage` |
 | `f1` … `f12` | `F1` … `F12` | `ctrl+<x>` | `C-<x>` |
 | `alt+<x>` | `M-<x>` | `ctrl+shift+<x>` | `C-S-<x>` |
-| `shift+enter` | `S-Enter` (tmux ≥ 3.5; dropped below — 3.3/3.4 mistype it) | anything else | dropped, one-line notice |
+| `shift+enter` | `S-Enter` (tmux ≥ 3.5; below, `C-j` — Claude Code's same newline, since 3.3/3.4 would type `S-Enter` out) | any other chord tmux < 3.5 would type out | its text; with none, refused with a warning naming the version you have and the one it needs |
+| a key named after its character, no text | that character | anything else unspellable | its text; with none, one quiet line |
+| a modifier, a lock, Menu… (a closed set) | dropped in silence — nothing to type (#151) | a Cmd chord (`super`/`hyper`) | dropped in silence — a command, not text |
 
 The escape hatch key is consumed by us and never forwarded. Textual 8.2.7 /
 8.2.8 speak the kitty keyboard protocol, so modifier-rich chords arrive **when
@@ -744,7 +750,9 @@ Two moments that already exist carry the wake-up.
    waiting and prints nothing. For `role == manager` it first asks the store for
    events since the session cursor authored by *others*, of kinds
    `task_review`, `task_done`, `task_blocked`, `task_reopened`, `result`,
-   `question`, and the new `agent_exited`. If there are any, it emits the
+   `question`, the new `agent_exited`, and — since #146 — `limited` (an agent
+   parked on a Claude usage limit) and `switched` (one the fleet moved to
+   another account). If there are any, it emits the
    Stop **block** decision with the rendered delta as the reason → Claude Code
    continues the turn with that context, and the cursor advances. If none →
    exit 0, waiting, exactly as today.
@@ -785,7 +793,7 @@ continuation cap.
 
 | Situation | What the user sees | What the system does |
 | --- | --- | --- |
-| Agent process dies | 💤 exited(N) on the row; the last screen stays readable (`remain-on-exit`) | manager nudged once with `agent_exited`; restart keeps the label, mints a new session id |
+| Agent process dies | 💤 exited(N) on the row; the last screen stays readable (`remain-on-exit`); the row offers **Restart** and **Stop** (#138) | the row is ended the moment a listing sees the dead pane; manager nudged once with `agent_exited`; restart keeps the label and RESUMES the session from its transcript when it is on disk (a new id only with `--fresh` or no transcript); the replacement is launched from the row's recorded `launch_spec` — binary, permission mode, arguments, account — not from today's config (#144) |
 | Agent stuck on a permission prompt | 🔔 + bell | nothing nudges it; the user clicks in and answers |
 | Manager needs the human | 🔔 on the project | same |
 | `context.db` locked or corrupt | UI keeps the last frame; Doctor shows the failure | agents are unaffected — hooks fail open |

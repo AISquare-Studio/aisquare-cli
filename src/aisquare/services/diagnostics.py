@@ -8,10 +8,12 @@ import json
 import os
 import re
 import shutil
+import string
 import sys
-from collections.abc import Callable, Container, Sequence
+from collections.abc import Callable, Container, Mapping, Sequence
+from datetime import UTC, datetime
 from importlib import metadata
-from pathlib import Path
+from pathlib import Path, PurePath
 from urllib.parse import urlsplit
 
 from aisquare.core import agents as agent_core
@@ -22,6 +24,7 @@ from aisquare.core import snapshot as snapshot_core
 from aisquare.core import tmux as tmux_core
 from aisquare.core.config import load_config
 from aisquare.core.injection import load_last
+from aisquare.core.keys import EXTENDED_MINIMUM
 from aisquare.core.store import damaged_store_recovery, store_session
 from aisquare.core.stubs import stub
 from aisquare.core.version import DISTRIBUTION, __version__
@@ -35,11 +38,20 @@ from aisquare.models import (
     ShippingStatus,
     StatusReport,
 )
-from aisquare.services import ci_client, ci_descriptor, ci_override, explainability_ops
+from aisquare.services import (
+    auto_mode,
+    ci_client,
+    ci_descriptor,
+    ci_override,
+    explainability_ops,
+    iam,
+)
 from aisquare.services import claude_accounts as claude_accounts_service
+from aisquare.services import credits as credits_service
 from aisquare.services import distill as distill_service
 from aisquare.services import explainability as explainability_service
 from aisquare.services import fleet as fleet_service
+from aisquare.services import settings as settings_service
 from aisquare.services import team as team_service
 from aisquare.services.ci_contract import DeliveryDescriptor
 
@@ -58,6 +70,7 @@ def status() -> StatusReport:
             project_entries=len(store.entries("project", project_id=project.id)),
             active_project=project,
             project_count=len(store.list_projects()),
+            captured_count=len(store.captured_projects()),
             agents_detected=[agent.name for agent in agents if agent.detected],
             agents_connected=[agent.name for agent in agents if agent.connected],
             shipping=_shipping_status(),
@@ -124,15 +137,39 @@ def doctor(
         _check_harness(cwd),
         _check_self_invocation(cwd),
         _check_fleet(),
+        *_check_dead_managers(),
+        *_check_resumable_agents(),
+        *_check_captured_projects(),
         # After the actionable machine checks on purpose. The fleet UI's sidebar
         # shows the first three not-ok rows (`DOCTOR_LINES == 3`, a stable sort
         # within the warn group), so a row inserted at position 12 evicted one
         # of `brain` / `snapshot` / a logged-out `gh` — the ones an operator can
-        # act on — from the only doctor surface visible without a click.
+        # act on — from the only doctor surface visible without a click. The
+        # fleet terminal row (#147) can warn too, about a running server's kept
+        # prefix, so it waits here with them rather than beside tmux.
         _check_browser_tools(cwd),
+        _check_fleet_terminal(),
         *_experiment_checks(),
         *explainability_ops.checks(live=live, target_name=target),
+        # Only when a fleet role runs `auto` behind a configured proxy (#150);
+        # offline — config, the store, the head of a few transcripts.
+        *_optional(auto_mode.doctor_check()),
+        # Leaves the machine (one usage request per account), so --live only (#146).
+        *_live_only(live, _claude_account_headroom_check),
+        # One balance request per destination workspace (#143), so --live only.
+        *_live_only(live, _workspace_credits_check),
     ]
+
+
+def _optional(check: DoctorCheck | None) -> list[DoctorCheck]:
+    return [check] if check is not None else []
+
+
+def _live_only(live: bool, check: Callable[[], DoctorCheck | None]) -> list[DoctorCheck]:
+    if not live:
+        return []
+    found = check()
+    return [found] if found is not None else []
 
 
 def _ok(name: str, detail: str) -> DoctorCheck:
@@ -707,17 +744,30 @@ def _claude_accounts_checks() -> list[DoctorCheck]:
     The default account is the ``claude-code`` line's business above. Reads
     only: ``managed_accounts`` lists directories and ``describe`` reads the
     files Claude Code left in them, so a machine that never added an account
-    is left exactly as it was (``tests/test_doctor_does_not_create_state.py``).
+    is left exactly as it was (``tests/test_doctor_does_not_create_state.py``)
+    — unless it arranged one anyway, which the default checks then read.
     """
     managed = claude_accounts_core.managed_accounts()
     if not managed:
-        return []
+        # No added accounts, so no `claude-accounts` line — but a plain-claude
+        # session can still be parked on a usage limit (#146), and removing the
+        # last added account leaves a role binding naming its email, which
+        # `_retarget_bindings` says this flags (review of the #205 fold, round 1).
+        # Only when something was arranged: the default checks read the registry
+        # through `list_accounts`, which reconciles as it reads, and warn when the
+        # store cannot be opened — a write and a line a machine that arranged nothing
+        # never had (round 2). A binding alone missed the project default, which is a
+        # project setting: `forget_arrangement` drops it best effort and a slot
+        # directory deleted by hand drops none, so `choose` refused every launch in
+        # that project while this said nothing (round 3).
+        defaults = _claude_account_default_checks() if _arranges_an_account() else []
+        return [*defaults, *_claude_account_limit_checks()]
     statuses = [claude_accounts_service.describe(account) for account in managed]
     parts = [
         f"{status.account.slot} {status.identity.email if status.identity else 'not signed in'}"
         for status in statuses
     ]
-    detail = f"{len(statuses)} added beside the default: " + " · ".join(parts)
+    detail = f"{len(statuses)} added beside the plain claude: " + " · ".join(parts)
     unsigned = [status.account.slot for status in statuses if not status.signed_in]
     if unsigned:
         return [
@@ -726,9 +776,403 @@ def _claude_accounts_checks() -> list[DoctorCheck]:
                 detail,
                 "Sign in from asq → Accounts, or: "
                 + "; ".join(f"aisquare accounts run {slot}" for slot in unsigned),
+            ),
+            *_claude_account_default_checks(),
+            *_claude_account_limit_checks(),
+        ]
+    return [
+        _ok("claude-accounts", detail),
+        *_claude_account_default_checks(),
+        *_claude_account_limit_checks(),
+    ]
+
+
+def _arranges_an_account() -> bool:
+    """Whether anything the default checks report on was set: a binding or a default.
+
+    A role binding (``config.toml``), a project default (a project setting) or a
+    machine default (a registry row, slot 1's included). The store is read raw
+    and only when ``context.db`` exists: ``store.claude_accounts`` does not
+    reconcile, so deciding writes nothing. A file or a store that cannot be read
+    is the ``config`` or ``database`` line's to report, so it arranges nothing here.
+    """
+    try:
+        if settings_service.role_account_bindings():
+            return True
+        if not paths.db_path().exists():
+            return False
+        with store_session() as store:
+            if store.project_settings(claude_accounts_service.PROJECT_ACCOUNT_KEY):
+                return True
+            return any(record.is_default for record in store.claude_accounts())
+    except Exception:
+        return False
+
+
+def _check_resumable_agents() -> list[DoctorCheck]:
+    """How many exited agents a restart would CONTINUE rather than reset (#144).
+
+    A label whose newest fleet row has ended, with its session transcript still
+    on disk, resumes with ``fleet restart <label>`` (or the row's Restart); one
+    without starts fresh from a hand-off prompt. A label that is live again, or
+    was reused, is not an exited agent. Counted over the last day's rows,
+    machine-wide; silent when there are none. Gated on the store existing.
+    """
+    if _uncreated_home("fleet-resume") is not None:
+        return []
+    try:
+        cutoff = datetime.now(tz=UTC) - fleet_service.RECENTLY_ENDED
+        resumable: list[str] = []
+        with store_session() as store:
+            for project in store.list_projects(all=True):
+                name = project.codename or project.root.name or project.id
+                # The NEWEST row under each label only, the one `fleet restart
+                # <label>` acts on: a resumed restart keeps the session id, so the
+                # row it replaced still has its transcript on disk, and counting it
+                # listed a label that is live again — whose "restart" stops it.
+                newest: dict[str, FleetAgent] = {}
+                for agent in store.fleet_agents(project.id, live_only=False):
+                    newest[agent.label] = agent  # oldest first: the last one stands
+                for agent in newest.values():
+                    if agent.ended_at is None or agent.ended_at < cutoff or not agent.session_id:
+                        continue
+                    session = store.get_session(agent.session_id)
+                    if session is None or not session.transcript_path:
+                        continue
+                    if Path(session.transcript_path).is_file():
+                        resumable.append(f"{agent.label} ({name})")
+    except Exception:  # the database line reports a broken store
+        return []
+    if not resumable:
+        return []
+    shown = ", ".join(resumable[:6])
+    if len(resumable) > 6:
+        shown += f", +{len(resumable) - 6} more"
+    noun = "agent" if len(resumable) == 1 else "agents"
+    return [
+        _ok(
+            "fleet-resume",
+            f"{len(resumable)} exited {noun} can be resumed — the transcript is on disk, so "
+            f"Restart continues the session instead of starting over: {shown} "
+            "(aisquare fleet restart <label>)",
+        )
+    ]
+
+
+def _check_captured_projects() -> list[DoctorCheck]:
+    """How many directories are registered but hidden (#139) — and how to see or drop them.
+
+    Silent when there are none; gated on the store existing (doctor creates
+    nothing). ``ok``: a hidden capture is the design working, not a fault.
+    """
+    if _uncreated_home("projects") is not None:
+        return []
+    try:
+        with store_session() as store:
+            captured = len(store.captured_projects())
+    except Exception:  # the database line reports a broken store
+        return []
+    if not captured:
+        return []
+    noun = "directory" if captured == 1 else "directories"
+    return [
+        _ok(
+            "projects",
+            f"{captured} captured {noun} hidden from the sidebar and `project list` (a hooked "
+            "session ran there; nothing added it on purpose) — see them: aisquare project "
+            "list --all; drop the stale ones: aisquare project prune --captured-only",
+        )
+    ]
+
+
+def _check_dead_managers() -> list[DoctorCheck]:
+    """A project whose manager has exited while its fleet is still up (#138).
+
+    The wake-ups other agents send target that manager and land nowhere; the
+    sidebar showed 💤 and the way back was known to nobody. One line per
+    machine naming each such project and the command that brings the manager
+    back with its session. Gated on ``context.db`` existing: doctor creates
+    nothing. Silent when no fleet is in that state.
+    """
+    if not paths.db_path().exists():
+        return []
+    try:
+        with store_session() as store:
+            projects = store.list_projects(all=True)
+            headless = []
+            for project in projects:
+                live = store.fleet_agents(project.id, live_only=True)
+                if not live or any(agent.role == "manager" for agent in live):
+                    continue
+                last = store.fleet_agent_by_label(project.id, "manager", live_only=False)
+                if last is not None and last.ended_at is not None:
+                    headless.append(
+                        f"{project.codename or project.root.name or project.id} "
+                        f"({len(live)} agent(s) still running)"
+                    )
+    except Exception:  # the database line reports a broken store
+        return []
+    if not headless:
+        return []
+    return [
+        _warn(
+            "fleet-manager",
+            "the manager exited while agents are still running in: " + "; ".join(headless),
+            "Bring it back with its session: aisquare fleet restart manager --project <name> "
+            "(or Restart on its row in asq)",
+        )
+    ]
+
+
+def _claude_account_limit_checks() -> list[DoctorCheck]:
+    """Agents parked on a usage limit (#146) — offline, from the board rows alone.
+
+    Gated on ``context.db`` existing like the default check: a doctor run
+    creates nothing. One line for the whole machine, naming each limited agent
+    and when its limit lifts, with the one command that moves it. Nothing when
+    no session is limited, so an idle machine's doctor output is unchanged.
+    """
+    if not paths.db_path().exists():
+        return []
+    try:
+        with store_session() as store:
+            projects = store.list_projects(all=True)  # a session can sit in a captured dir
+            names = {p.id: p.codename or p.root.name or p.id for p in projects}
+            limited = [
+                (session, names[p.id])
+                for p in projects
+                for session in store.team_sessions(p.id)
+                if session.ended_at is None and session.state == "limited"
+            ]
+            labels = {}
+            for session, _project_name in limited:
+                agent = store.fleet_agent_for_session(session.project_id, session.id)
+                labels[session.id] = agent.label if agent is not None else session.id[:8]
+    except Exception:  # the database line reports a broken store
+        return []
+    if not limited:
+        return []
+    now = datetime.now(tz=UTC)
+    parts = []
+    for session, project_name in limited:
+        when = (
+            f"resets {claude_accounts_core.format_reset(session.limit_resets_at, now=now)}"
+            if session.limit_resets_at is not None
+            else "reset time unknown"
+        )
+        parts.append(f"{labels[session.id]} ({project_name}, {when})")
+    return [
+        _warn(
+            "claude-account-limits",
+            f"{len(limited)} agent(s) parked on a Claude usage limit: " + " · ".join(parts),
+            "Move one to an account with headroom: aisquare fleet switch <label>; or wait — "
+            "Claude Code continues by itself at the reset",
+        )
+    ]
+
+
+def _claude_account_headroom_check() -> DoctorCheck | None:
+    """``--live`` only: every enabled, signed-in account's five-hour window, against ``switch_at``.
+
+    Leaves the machine (the usage endpoint, one request per account), which is
+    why it runs only on ``doctor --live``. Warns when EVERY account is over the
+    line — a fleet about to stall with nowhere to switch to — and reports the
+    numbers otherwise so the operator can see them without opening the page.
+    ``None`` when there is nothing to measure (no signed-in account) — and
+    ``None`` before ``context.db`` exists, like its two siblings: the arranged
+    list is read through the store, and a doctor run must not create the home
+    it is diagnosing (``tests/test_doctor_does_not_create_state.py``; review
+    of #205, second round).
+    """
+    if not paths.db_path().exists():
+        return None
+    accounts = [
+        account
+        for account in claude_accounts_service.list_accounts()
+        if not account.disabled and claude_accounts_core.signed_in(account)
+    ]
+    if not accounts:
+        return None
+    settings = claude_accounts_service.accounts_settings()
+    readings = claude_accounts_service.read_usage(accounts)
+    measured = [
+        (account, reading.session_percent)
+        for account in accounts
+        if (reading := readings[account.slot]).available and reading.session_percent is not None
+    ]
+    unreadable = [
+        f"{claude_accounts_core.label(account)}: {readings[account.slot].reason or 'no reading'}"
+        for account in accounts
+        if account.slot not in {a.slot for a, _ in measured}
+    ]
+    summary = " · ".join(
+        f"{claude_accounts_core.label(account)} {pct:.0f}%" for account, pct in measured
+    )
+    if unreadable:
+        summary = (summary + " · " if summary else "") + "unreadable: " + "; ".join(unreadable)
+    if measured and all(pct >= settings.switch_at for _, pct in measured):
+        return _warn(
+            "claude-account-headroom",
+            f"every account is at or over {settings.switch_at}% of its five-hour window: {summary}",
+            "Add or sign in another account (aisquare accounts add), or wait for a reset — "
+            "a fleet spawned now has nowhere to switch to",
+        )
+    if not measured:
+        return _warn(
+            "claude-account-headroom",
+            f"no account's usage could be read: {summary}",
+            "Open a session on the account to refresh its token, then: aisquare accounts usage",
+        )
+    return _ok(
+        "claude-account-headroom",
+        f"five-hour windows ({settings.switch_at}% is the line): {summary}",
+    )
+
+
+def _workspace_credits_check() -> DoctorCheck | None:
+    """``--live`` only: the credits of every workspace a project points at (#143).
+
+    Reads the destinations only when ``context.db`` exists (a doctor run must not
+    create the store) and asks only with a session for the destination's host.
+    Only a project a launch can join counts: a forgotten one keeps its
+    destination row for ``logout`` (the minted key it may name), but no fleet
+    is spawned into its workspace, so it is neither asked about nor warned on
+    (review of #173, round 1). Warns on the server's own band — ``low`` or
+    ``exhausted`` — and when a balance could not be read at all, because a
+    fleet spawned into an exhausted workspace traces nothing. ``None`` when
+    there is nothing to ask.
+    """
+    if not paths.db_path().exists():
+        return None
+    try:
+        session = iam.current_session()
+    except iam.IamError:
+        session = None
+    if session is None:
+        return None
+    try:
+        with store_session() as store:
+            visible = {p.id for p in store.list_projects(all=True)}  # captured ones launch too
+            destinations = [d for d in store.project_destinations() if d.project_id in visible]
+    except Exception:
+        return None
+    readings: list[credits_service.WorkspaceCredits] = []
+    seen: set[int] = set()
+    for destination in destinations:
+        if destination.workspace_id in seen:
+            continue
+        reading = credits_service.for_destination(session, destination, use_cache=False)
+        if reading is None:
+            continue
+        seen.add(destination.workspace_id)
+        readings.append(reading)
+    if not readings:
+        return None
+    summary = " · ".join(credits_service.describe(reading) for reading in readings)
+    short = [r for r in readings if r.available and r.state in ("low", "exhausted")]
+    unread = [r for r in readings if not r.available]
+    if short:
+        bands = ", ".join(sorted({r.state or "" for r in short}))
+        return _warn(
+            "workspace-credits",
+            f"{', '.join(r.workspace_name for r in short)}: the server says {bands} — {summary}",
+            "Top up the workspace in the dashboard before spawning a fleet into it; "
+            "an exhausted workspace traces nothing",
+        )
+    if unread:
+        names = ", ".join(r.workspace_name for r in unread)
+        return _warn(
+            "workspace-credits",
+            f"could not read the balance of {names} — {summary}",
+            "Sign in again (aisquare login) or check the API; the row reads once it answers",
+        )
+    return _ok("workspace-credits", summary)
+
+
+def _claude_account_default_checks() -> list[DoctorCheck]:
+    """The arrangement (#145): is the account a launch will pick one that can launch?
+
+    Reads the registry only when ``context.db`` already exists — a doctor run
+    must not create the store (``tests/test_doctor_does_not_create_state.py``)
+    — and says nothing at all when no default, project default or role binding
+    has ever been set, so a machine that never arranged its accounts keeps the
+    doctor output it had. What it warns about is the class #145 exists for: a
+    default that is not signed in or is disabled launches Claude Code's login
+    screen (or the next rung down) instead of the account the operator meant,
+    and a binding or project default naming a removed slot refuses every
+    launch of that role or project with `unknown_account`.
+    """
+    if not paths.db_path().exists():
+        return []
+    try:
+        accounts = claude_accounts_service.list_accounts()
+        bindings = settings_service.role_account_bindings()
+        with store_session() as store:
+            per_project = store.project_settings(claude_accounts_service.PROJECT_ACCOUNT_KEY)
+            names = {
+                project_id: (project.root.name or project.id)
+                for project_id in per_project
+                if (project := store.get_project(project_id)) is not None
+            }
+    except Exception as exc:  # the database line says WHY the store is broken; this says the cost
+        return [
+            _warn(
+                "claude-account-default",
+                f"the accounts registry could not be read ({exc}) — launches run without a "
+                "default account",
+                "aisquare doctor  (the database line above says what is wrong with context.db)",
             )
         ]
-    return [_ok("claude-accounts", detail)]
+    by_slot = {account.slot: account for account in accounts}
+    default = next((account for account in accounts if account.is_default), None)
+    if default is None and not per_project and not bindings:
+        return []
+    checks: list[DoctorCheck] = []
+    if default is not None:
+        label = f"slot {default.slot} ({claude_accounts_core.label(default)})"
+        if default.disabled:
+            checks.append(
+                _warn(
+                    "claude-account-default",
+                    f"the machine default is {label} and it is disabled — launches skip it",
+                    f"aisquare accounts enable {default.slot}, or pick another: "
+                    "aisquare accounts default <slot>",
+                )
+            )
+        elif not claude_accounts_core.signed_in(default):
+            checks.append(
+                _warn(
+                    "claude-account-default",
+                    f"the machine default is {label} but it is not signed in — a launch "
+                    "would open Claude Code's login instead of the account you meant",
+                    f"aisquare accounts run {default.slot} and sign in, or pick another: "
+                    "aisquare accounts default <slot>",
+                )
+            )
+        else:
+            checks.append(_ok("claude-account-default", f"machine default: {label}"))
+    dangling: list[str] = []
+    for project_id, raw in per_project.items():
+        if not raw.isdigit() or int(raw) not in by_slot:
+            dangling.append(f"project {names.get(project_id, project_id)} → slot {raw}")
+    for role, ref in bindings.items():
+        try:
+            # Against the list in hand: `resolve` re-opened the store and rescanned
+            # the directories once per binding (review of #205, fourth round).
+            claude_accounts_service._resolve_in(accounts, ref)
+        except claude_accounts_service.AccountsError:
+            dangling.append(f"role {role} → {ref}")
+    if dangling:
+        checks.append(
+            _warn(
+                "claude-account-bindings",
+                "these name an account this machine does not have, so their launches are "
+                "refused: " + "; ".join(dangling),
+                "aisquare accounts default --clear --project <project>, or "
+                "aisquare team bind <role> --clear-account",
+            )
+        )
+    return checks
 
 
 # --- system tools the fleet needs (docs/plans/fleet-tui.md §5 "Doctor", §8.2) ---------
@@ -736,10 +1180,12 @@ def _claude_accounts_checks() -> list[DoctorCheck]:
 _OS_RELEASE = Path("/etc/os-release")
 _APT_FAMILY = frozenset({"debian", "ubuntu", "linuxmint", "pop", "raspbian", "kali", "elementary"})
 _DNF_FAMILY = frozenset({"fedora", "rhel", "centos", "rocky", "almalinux", "amzn", "nobara", "ol"})
-_RECOMMENDED_TMUX = (3, 5)
-"""``S-Enter`` (and the other extended chords) reach an agent pane from 3.5 —
-measured: 3.3/3.4 type their names literally, so the key table drops them there —
-below it the fleet works without them."""
+_RECOMMENDED_TMUX = EXTENDED_MINIMUM
+"""The extended chords reach an agent pane from here — measured: 3.3/3.4 type
+their names literally, so the key table drops them there, and sends shift+enter
+as ``C-j`` (``core.keys.LEGACY_FALLBACK``) — below it the fleet works without
+them. The key table's own gate, not a copy of it: the doctor's advice and what
+the pane does cannot disagree."""
 
 
 def install_hint(
@@ -811,13 +1257,152 @@ def _check_tmux(server: tmux_core.TmuxServer | None = None) -> DoctorCheck:
         if version < _RECOMMENDED_TMUX:
             wanted = f"{_RECOMMENDED_TMUX[0]}.{_RECOMMENDED_TMUX[1]}"
             return _ok(
-                name, f"tmux {found} — fleet available ({wanted}+ adds Shift+Enter in agent panes)"
+                name,
+                f"tmux {found} — fleet available ({wanted}+ carries the shifted chords to agent "
+                "panes; below it shift+enter travels as ctrl+j and the rest are dropped)",
             )
         return _ok(name, f"tmux {found} — fleet available")
     except Exception as exc:  # diagnostics must never crash
         # Failing open costs this line its verdict, not the operator anything
         # else: the fleet re-checks tmux on its first spawn and says so then.
         return _ok(name, f"not evaluated ({exc}) — the fleet checks again on its first spawn")
+
+
+#: How the outer terminal is recognised, from its environment: (variable, value
+#: prefix or ``None`` for "any"), the name, and whether it speaks the kitty
+#: keyboard protocol — which is what decides whether shift+enter and the other
+#: shifted chords reach an agent at all (docs/fleet.md, Keys). First match wins;
+#: ``TERM_PROGRAM`` is checked after the terminal-specific variables because a
+#: multiplexer or an IDE can leave an outer one behind.
+_TERMINAL_SIGNS: tuple[tuple[str, str | None, str, bool], ...] = (
+    ("KITTY_WINDOW_ID", None, "kitty", True),
+    ("GHOSTTY_RESOURCES_DIR", None, "ghostty", True),
+    ("WEZTERM_EXECUTABLE", None, "wezterm", True),
+    ("WT_SESSION", None, "Windows Terminal", False),
+    ("TERM_PROGRAM", "iTerm", "iTerm2", False),
+    ("TERM_PROGRAM", "WezTerm", "wezterm", True),
+    ("TERM_PROGRAM", "ghostty", "ghostty", True),
+    ("TERM_PROGRAM", "vscode", "the VS Code terminal", False),
+    ("TERM_PROGRAM", "Apple_Terminal", "Terminal.app", False),
+    ("VTE_VERSION", None, "a VTE terminal (GNOME Terminal, Tilix, …)", False),
+    ("TERM", "xterm-kitty", "kitty", True),
+    ("TERM", "foot", "foot", True),
+    ("TERM", "alacritty", "alacritty", True),
+)
+
+
+def outer_terminal(environ: Mapping[str, str] | None = None) -> tuple[str, bool | None]:
+    """``(name, speaks the kitty keyboard protocol)`` for the terminal this shell runs in.
+
+    ``None`` for the protocol when the terminal is not recognised — a guess in
+    either direction would send the operator chasing the wrong fix.
+    """
+    env = os.environ if environ is None else environ
+    for variable, prefix, name, kitty in _TERMINAL_SIGNS:
+        value = env.get(variable, "")
+        if value and (prefix is None or value.startswith(prefix)):
+            return name, kitty
+    term = env.get("TERM", "").strip()
+    return (f"unknown (TERM={term})" if term else "unknown"), None
+
+
+def _check_fleet_terminal(
+    server: tmux_core.TmuxServer | None = None, environ: Mapping[str, str] | None = None
+) -> DoctorCheck:
+    """What an agent pane's keys have to cross (#147): the outer terminal, tmux, the server.
+
+    Three facts an operator otherwise learns one broken chord at a time: whether
+    the terminal this shell runs in speaks the kitty keyboard protocol (without
+    it shift+enter arrives as enter and the UI never fakes it), whether the tmux
+    here carries extended keys (3.5+; below it shift+enter travels as ``C-j``,
+    the same newline to Claude Code), and — only when the private server is
+    already running, never started for this — whether that server still has a
+    prefix key (a server started with the pre-#147 conf keeps ``C-b``, Claude
+    Code's background-tasks chord, in ``fleet attach``) and which of the desktop
+    variables it holds stale (each new spawn carries this shell's, agents
+    already running keep the server's).
+
+    ``ok`` for everything but the stale prefix, which only a server restart
+    fixes and which eats a documented Claude Code key.
+    """
+    name = "fleet terminal"
+    env = os.environ if environ is None else environ
+    try:
+        terminal, kitty = outer_terminal(env)
+        if kitty is True:
+            outer = (
+                f"outer terminal {terminal} (kitty keyboard protocol: shift+enter reaches agents)"
+            )
+        elif kitty is False:
+            outer = (
+                f"outer terminal {terminal} (no kitty keyboard protocol: shift+enter arrives as "
+                "enter — `\\` then Enter, or ctrl+j, is the newline)"
+            )
+        else:
+            outer = f"outer terminal {terminal} (protocol unknown: try shift+enter in a pane)"
+        if env.get("TMUX"):
+            outer += "; this shell is itself inside tmux, which adds its own translation"
+        if server is None and _uncreated_home(name) is not None:
+            # No home yet: nothing may be created here (the conf path is under it),
+            # and there is no fleet server to ask about.
+            probe = tmux_core.TmuxServer()
+            if not probe.available():
+                return _ok(name, f"{outer}; tmux not installed (see the tmux check)")
+            return _ok(name, f"{outer}; {_extended_keys_note(probe.version())}; no fleet home yet")
+        srv = server or _fleet_server(fleet_service.settings().tmux_socket)
+        if not srv.available():
+            return _ok(name, f"{outer}; tmux not installed (see the tmux check)")
+        parts = [outer, _extended_keys_note(srv.version())]
+        if srv.server_absent():
+            parts.append("fleet server not running (nothing to compare)")
+            return _ok(name, "; ".join(parts))
+        prefix = srv.run("show-options", "-gv", "prefix").strip()
+        stale = _stale_server_environment(srv, env)
+        if stale:
+            parts.append(
+                f"stale on the running server: {', '.join(stale)} (each new spawn carries this "
+                "shell's values; agents already running keep the server's)"
+            )
+        if prefix and prefix != "None":
+            parts.append(f"the running server still has prefix {prefix}")
+            return _warn(
+                name,
+                "; ".join(parts),
+                f"The server started with an older config, so in `fleet attach` {prefix} is "
+                "tmux's and never reaches Claude Code (its background-tasks key). Restart the "
+                f"private server when no agent is running: tmux -L "
+                f"{fleet_service.settings().tmux_socket} kill-server",
+            )
+        parts.append(
+            "server prefix None (every key reaches the agent in fleet attach; F12 detaches)"
+        )
+        return _ok(name, "; ".join(parts))
+    except Exception as exc:  # diagnostics must never crash
+        return _ok(name, f"not evaluated ({exc})")
+
+
+def _extended_keys_note(version: tuple[int, int] | None) -> str:
+    if version is None:
+        return "tmux version not readable"
+    if version >= _RECOMMENDED_TMUX:
+        return f"tmux {version[0]}.{version[1]} carries extended keys"
+    wanted = f"{_RECOMMENDED_TMUX[0]}.{_RECOMMENDED_TMUX[1]}"
+    return (
+        f"tmux {version[0]}.{version[1]} has no extended keys ({wanted}+): shift+enter travels "
+        "as ctrl+j, the other shifted chords are dropped"
+    )
+
+
+def _stale_server_environment(srv: tmux_core.TmuxServer, env: Mapping[str, str]) -> list[str]:
+    """The desktop variables whose value on the running server differs from this shell's."""
+    held: dict[str, str] = {}
+    for line in srv.run("show-environment", "-g").splitlines():
+        if line.startswith("-") or "=" not in line:
+            continue  # `-NAME` is an unset marker
+        key, _, value = line.partition("=")
+        held[key] = value
+    current = tmux_core.desktop_environment(env)
+    return [var for var, value in current.items() if held.get(var) != value]
 
 
 def _gh_config_dir() -> Path:
@@ -885,20 +1470,99 @@ _BROWSER_PROVIDERS: tuple[str, ...] = (
 )
 
 #: Each identifier bounded by non-alphanumerics, so it matches as an identifier
-#: rather than as a substring: `@playwright/mcp@latest` and `npx
-#: chrome-devtools-mcp` hit, `browserslist-mcp` and `file-browser` do not.
+#: rather than as a substring: `@playwright/mcp@latest`, `npx chrome-devtools-mcp`,
+#: `@modelcontextprotocol/server-puppeteer`, `mcp-server-playwright` and
+#: `selenium-webdriver` all hit; `browserslist-mcp` and `file-browser` do not. A
+#: hyphen is deliberately NOT part of the identifier: the real package ids join
+#: the provider to `server`, `mcp` and a scope with hyphens, and a boundary that
+#: kept them out missed every one of those (review of the fold). What the rest of
+#: the identifier may be is `_names_browser_tool`'s question.
 _BROWSER_PROVIDER_RE = re.compile(
     "|".join(rf"(?<![A-Za-z0-9]){re.escape(name)}(?![A-Za-z0-9])" for name in _BROWSER_PROVIDERS),
     re.IGNORECASE,
 )
 
+#: Words that make an identifier ABOUT a browser tool rather than the tool:
+#: `playwright-report`, `playwright_report`, `playwright-reporter`,
+#: `selenium-grid-docs`, `selenium-docs-site`, `puppeteer-recorder`,
+#: `puppeteer-examples-repo`, `browser-use-examples`, `chrome-devtools-mcp-docs`.
+#: A small table of ENGLISH, deliberately — the alternative, a table of every
+#: word a real package id may carry beside its provider (`core`, `chromium`,
+#: `standalone`, `extra`, `manager`, `side`, `runner`, …), is the npm registry,
+#: and a closed one rejected seven of twelve real ids that `main` found
+#: (`puppeteer-core`, `selenium-server-standalone`, `webdriver-manager`; round 6
+#: of #203). The row's worst failure is telling an operator to install what
+#: they have, so an identifier that names a provider counts unless a word here
+#: says it is merely about one (rounds 4 to 6).
+_ABOUT_TOKENS: frozenset[str] = frozenset(
+    {
+        "doc",
+        "docs",
+        "documentation",
+        "example",
+        "examples",
+        "sample",
+        "samples",
+        "demo",
+        "demos",
+        "tutorial",
+        "tutorials",
+        "guide",
+        "guides",
+        "report",
+        "reports",
+        "reporter",
+        "recorder",
+        "site",
+        "repo",
+        "blog",
+        "notes",
+        "readme",
+        "template",
+        "templates",
+        # A test tree is ABOUT the tool too: `/home/me/playwright-tests/run.js`
+        # in a filesystem server's args, `selenium-e2e`, `puppeteer-fixtures`,
+        # `--dir=/srv/playwright-spec` (round 8). No npm id joins a provider to
+        # these words.
+        "test",
+        "tests",
+        "testing",
+        "spec",
+        "specs",
+        "e2e",
+        "fixture",
+        "fixtures",
+    }
+)
 
-def _read_json(path: Path) -> dict[str, object]:
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
-    return data if isinstance(data, dict) else {}
+#: The characters of an identifier — a set, not a regex: this walk runs once per
+#: character of every `command` and `args` string of every server in every
+#: `.claude.json`, the file this row's whole cost lives in (round 5).
+_IDENTIFIER_CHARS = frozenset(string.ascii_letters + string.digits + "_-")
+#: What joins the tokens of a package id: `-` and `_`. A scope (`@playwright/mcp`)
+#: and a version tail (`…@latest`) never reach this — `_IDENTIFIER_CHARS` stops
+#: the walk at `@` and `/`, so the split only ever sees one identifier's own
+#: tokens (round 7 of #203).
+_TOKEN_SPLIT_RE = re.compile(r"[-_]+")
+
+
+def _names_browser_tool(text: str) -> bool:
+    """Whether ``text`` names a browser-tooling provider, as a whole identifier."""
+    for match in _BROWSER_PROVIDER_RE.finditer(text):
+        # The identifier around the match: `mcp-server-playwright` for a match on
+        # `playwright`, `playwright-report` for the same match. `_` counts as a
+        # joiner exactly as `-` does, so the two spellings are one case. A scoped
+        # match (`@playwright/mcp`) is bounded by its own `@` and `/`: the walk
+        # hands the split `playwright` alone.
+        start, end = match.span()
+        while start > 0 and text[start - 1] in _IDENTIFIER_CHARS:
+            start -= 1
+        while end < len(text) and text[end] in _IDENTIFIER_CHARS:
+            end += 1
+        tokens = {t.lower() for t in _TOKEN_SPLIT_RE.split(text[start:end]) if t}
+        if not tokens & _ABOUT_TOKENS:
+            return True
+    return False
 
 
 def _mcp_servers(source: dict[str, object]) -> dict[str, object]:
@@ -925,12 +1589,12 @@ def _browser_servers(servers: dict[str, object], *, declined: Container[str] = (
             args = spec.get("args")
             if isinstance(args, list):
                 candidates.extend(str(arg) for arg in args)
-        if any(_BROWSER_PROVIDER_RE.search(text) for text in candidates):
+        if any(_names_browser_tool(text) for text in candidates):
             found.append(f"mcp {name}")
     return found
 
 
-def _browser_tools_in(config_dir: Path) -> list[str]:
+def _browser_tools_in(config_dir: Path, parsed: Mapping[Path, dict[str, object]]) -> list[str]:
     """Browser tooling ONE Claude Code config directory declares, as short labels.
 
     ``settings.json`` is read for ``enabledPlugins`` only. Claude Code never
@@ -945,10 +1609,14 @@ def _browser_tools_in(config_dir: Path) -> list[str]:
     the directory at ``~/.claude.json``, so probing only inside it left this
     whole layer — including the ``projects`` fan-out — dead on the common
     layout, and told an operator who had just run ``claude mcp add`` to install
-    what they already had.
+    what they already had. ``parsed`` is every such file already read
+    (:func:`_claude_jsons`): the same files feed :func:`_declined_project_servers`,
+    and ``~/.claude.json`` is routinely tens of megabytes (the ``projects``
+    fan-out grows without bound), so parsing it twice per directory per
+    ``doctor`` run was the row's whole cost (review of #203).
     """
     found: list[str] = []
-    settings = _read_json(config_dir / "settings.json")
+    settings = agent_core.read_json(config_dir / "settings.json")
     plugins = settings.get("enabledPlugins")
     if isinstance(plugins, dict):
         for key, enabled in plugins.items():
@@ -957,10 +1625,10 @@ def _browser_tools_in(config_dir: Path) -> list[str]:
             # to the market's name while labelling only `my-linter`. Match and
             # label the same string.
             plugin = str(key).rsplit("@", 1)[0]
-            if enabled and _BROWSER_PROVIDER_RE.search(plugin):
+            if enabled and _names_browser_tool(plugin):
                 found.append(f"plugin {plugin}")
     for path in agent_core.claude_json_paths(config_dir):
-        claude_json = _read_json(path)
+        claude_json = parsed.get(path, {})
         found.extend(_browser_servers(_mcp_servers(claude_json)))
         projects = claude_json.get("projects")
         if isinstance(projects, dict):
@@ -971,7 +1639,7 @@ def _browser_tools_in(config_dir: Path) -> list[str]:
     return list(dict.fromkeys(found))
 
 
-def _declined_project_servers(cwd: Path, dirs: Sequence[Path]) -> set[str]:
+def _declined_project_servers(cwd: Path, parsed: Mapping[Path, dict[str, object]]) -> set[str]:
     """``.mcp.json`` servers this machine's operator has explicitly declined.
 
     An unapproved project server never starts, and the record of that decision
@@ -984,30 +1652,44 @@ def _declined_project_servers(cwd: Path, dirs: Sequence[Path]) -> set[str]:
     telling an operator to install what they have — and a name in neither is
     not declined: Claude Code asks at the next start rather than refusing.
     The project block is keyed by absolute path, so both spellings of ``cwd``
-    are tried (``/tmp`` vs ``/private/tmp``).
+    are tried (``/tmp`` vs ``/private/tmp``). ``parsed`` is every ``.claude.json``
+    of every config dir, already read once (:func:`_claude_jsons`).
     """
     keys = {str(cwd)}
     with contextlib.suppress(OSError):
         keys.add(str(cwd.resolve()))
     declined: set[str] = set()
     approved: set[str] = set()
+    for claude_json in parsed.values():
+        projects = claude_json.get("projects")
+        if not isinstance(projects, dict):
+            continue
+        for key in keys:
+            block = projects.get(key)
+            if not isinstance(block, dict):
+                continue
+            for field, sink in (
+                ("disabledMcpjsonServers", declined),
+                ("enabledMcpjsonServers", approved),
+            ):
+                listed = block.get(field)
+                if isinstance(listed, list):
+                    sink.update(str(item) for item in listed)
+    return declined - approved
+
+
+def _claude_jsons(dirs: Sequence[Path]) -> dict[Path, dict[str, object]]:
+    """Every ``.claude.json`` of every config dir, parsed ONCE, keyed by path.
+
+    The default install keeps it beside ``~/.claude``, so two directories can
+    name the same file; a path is read once whatever names it.
+    """
+    parsed: dict[Path, dict[str, object]] = {}
     for directory in dirs:
         for path in agent_core.claude_json_paths(directory):
-            projects = _read_json(path).get("projects")
-            if not isinstance(projects, dict):
-                continue
-            for key in keys:
-                block = projects.get(key)
-                if not isinstance(block, dict):
-                    continue
-                for field, sink in (
-                    ("disabledMcpjsonServers", declined),
-                    ("enabledMcpjsonServers", approved),
-                ):
-                    listed = block.get(field)
-                    if isinstance(listed, list):
-                        sink.update(str(item) for item in listed)
-    return declined - approved
+            if path not in parsed:
+                parsed[path] = agent_core.read_json(path)
+    return parsed
 
 
 def _check_browser_tools(cwd: Path | None = None) -> DoctorCheck:
@@ -1034,18 +1716,21 @@ def _check_browser_tools(cwd: Path | None = None) -> DoctorCheck:
     # disagree with itself between the CLI and the fleet UI, and the CLI was
     # the surface telling operators to install what their repo declares.
     cwd = Path.cwd() if cwd is None else cwd
-    dirs = _claude_config_dirs()
+    dirs = agent_core.claude_config_dirs()
+    # Every `.claude.json` parsed ONCE for both scans below; see `_browser_tools_in`.
+    parsed = _claude_jsons(dirs)
     declared: list[str] = []
     for directory in dirs:
         declared.extend(
-            f"{tool} ({_short_path(directory)})" for tool in _browser_tools_in(directory)
+            f"{tool} ({_short_path(directory)})" for tool in _browser_tools_in(directory, parsed)
         )
     mcp_json = cwd / ".mcp.json"
     # Parsed ONCE, outside the per-directory loop: its content cannot vary by
     # config dir, so reading it per dir opened and parsed one file four times
     # on a four-directory machine and deduped three of the results away.
     project_servers = _browser_servers(
-        _mcp_servers(_read_json(mcp_json)), declined=_declined_project_servers(cwd, dirs)
+        _mcp_servers(agent_core.read_json(mcp_json)),
+        declined=_declined_project_servers(cwd, parsed),
     )
     declared.extend(f"{tool} ({_short_path(mcp_json)})" for tool in project_servers)
     chrome_note = (
@@ -1071,43 +1756,15 @@ def _check_browser_tools(cwd: Path | None = None) -> DoctorCheck:
     )
 
 
-def _claude_config_dirs() -> list[Path]:
-    """The Claude Code directories a ui-tester of THIS home could start in.
+def _short_path(path: PurePath, home: PurePath | None = None) -> str:
+    """``path`` with the user's home as ``~`` — a detail line is read, not parsed.
 
-    The dirs this home connected plus the ambient one, and deliberately NOT
-    :func:`agent_core.hook_sites`, for two measured reasons.
-
-    It GRADES every site: ``hook_site_health`` runs ``classify_hook_binary``,
-    which runs a real ``<that install's aisquare> --version`` subprocess with a
-    10 s timeout, and its dedupe cache is built fresh per call. ``_check_claude_code``
-    already called it earlier in this same ``doctor()`` run, so a second call
-    re-ran every probe: 1 → 2 scans, 3 → 6 subprocesses, 683 ms → 1246 ms on a
-    four-directory machine (+82% on the whole run) for grading this row never
-    reads — on a path the fleet UI re-runs on every project switch, every
-    Doctor-tab activation and every one-click fix.
-
-    And it includes directories this home never connected
-    (``_claude_dirs_on_disk``, the #84 gap), which answers a different question:
-    "does ANY Claude install on this box declare a browser tool" rather than
-    "will the ui-tester's window find one". A playwright MCP in ``~/.claude4``
-    made the row green while the fleet spawned its ui-tester on ``~/.claude``,
-    where nothing answered.
+    Forward slashes after the ``~``, as ``cli.ui.sidebar.short_path`` writes it.
+    ``~/`` is a POSIX spelling, and on Windows the rest came out in the
+    platform's own: ``~/AppData\\Local\\Temp\\…``.
     """
-    dirs = [*agent_core.connected_dirs("claude-code"), agent_core._claude_home()]
-    seen: set[Path] = set()
-    unique: list[Path] = []
-    for directory in dirs:
-        key = agent_core._dir_key(directory)
-        if key not in seen:
-            seen.add(key)
-            unique.append(directory)
-    return unique
-
-
-def _short_path(path: Path) -> str:
-    """``path`` with the user's home as ``~`` — a detail line is read, not parsed."""
     try:
-        return f"~/{path.relative_to(Path.home())}"
+        return "~/" + path.relative_to(Path.home() if home is None else home).as_posix()
     except ValueError:
         return str(path)
 
@@ -1624,7 +2281,7 @@ def _check_fleet(
             # that matters when nothing can run, and the tmux check has the verdict.
             return _ok(name, "not evaluated — tmux is not installed (see the tmux check)")
         with store_session() as store:
-            projects = store.list_projects()
+            projects = store.list_projects(all=True)  # rows live wherever they were spawned
             names = {p.id: p.codename or p.root.name or p.id for p in projects}
             live = [a for p in projects for a in store.fleet_agents(p.id, live_only=True)]
         gone: list[FleetAgent] = []

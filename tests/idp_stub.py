@@ -56,6 +56,26 @@ class IdentityProviderStub:
         self.token_lifetime = 90 * 24 * 3600
         self.retry_after = 1
         self._polls = 0
+        # The API behind the session (#142): what a signed-in caller can list and do.
+        # ``workspaces`` rows follow /api/v2/workspaces/; ``studios`` maps a workspace
+        # id (as a string) to its /api/v2/publications/ rows; ``credits`` is the
+        # /api/v2/credits/balance/ payload for whichever workspace the header names.
+        self.workspaces: list[dict[str, Any]] = []
+        self.studios: dict[str, list[dict[str, Any]]] = {}
+        self.credits: dict[str, Any] | None = None
+        self.page_size = 50
+        #: "ok" mints keys; "token_not_valid" is what the API says TODAY to a sign-in
+        #: token on the key endpoints (their authentication class predates OAuth).
+        self.key_mint = "ok"
+        self.minted: list[dict[str, Any]] = []
+        self.revoked_keys: list[str] = []
+        #: Workspace keys the API knows besides the minted ones (a key attached by hand).
+        self.accepted_keys: list[str] = []
+        #: Agent-name → studio bindings written through the routing endpoint, per workspace.
+        self.bindings: dict[str, dict[str, int]] = {}
+        #: "ok" binds; "forbidden" is what a key whose owner is neither OWNER/ADMIN
+        #: nor the studio's owner gets (403, per name).
+        self.routing = "ok"
         stub = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -66,11 +86,16 @@ class IdentityProviderStub:
                 length = int(self.headers.get("Content-Length") or 0)
                 raw = self.rfile.read(length).decode("utf-8") if length else ""
                 form = {k: v[0] for k, v in parse_qs(raw).items()}
+                content_type = self.headers.get("Content-Type") or ""
+                body = json.loads(raw) if raw and "json" in content_type else None
+                parsed = urlparse(self.path)
                 record = {
                     "method": self.command,
-                    "path": urlparse(self.path).path,
+                    "path": parsed.path,
+                    "query": {k: v[0] for k, v in parse_qs(parsed.query).items()},
                     "headers": {k.lower(): v for k, v in self.headers.items()},
                     "form": form,
+                    "json": body,
                 }
                 stub.requests.append(record)
                 return record
@@ -92,6 +117,10 @@ class IdentityProviderStub:
                 stub.route(self, record)
 
             def do_POST(self) -> None:
+                record = self._record()
+                stub.route(self, record)
+
+            def do_PUT(self) -> None:
                 record = self._record()
                 stub.route(self, record)
 
@@ -165,6 +194,149 @@ class IdentityProviderStub:
                 )
             else:
                 handler._send(401, {"detail": "Given token not valid", "code": "token_not_valid"})
+            return
+        if path.startswith("/api/v2/"):
+            self._api(handler, record, path)
+            return
+        handler._send(404, {"detail": "no route"})
+
+    # ---- the API behind the session (#142) -----------------------------------
+
+    def _signed_in(self, record: dict[str, Any]) -> bool:
+        bearer = record["headers"].get("authorization", "").removeprefix("Bearer ").strip()
+        return bearer in self.issued and bearer not in self.revoked
+
+    def _page(self, record: dict[str, Any], rows: list[dict[str, Any]]) -> dict[str, Any]:
+        """The API's envelope: ``count/next/previous/page/page_size/total/results``."""
+        page = int(record["query"].get("page", "1"))
+        # ``page_size`` is the server's MAXIMUM, as the real API's is (100): a
+        # client may ask for less, never for more — which is how a test makes a
+        # three-row listing span two pages.
+        size = min(int(record["query"].get("page_size", self.page_size)), self.page_size)
+        start = (page - 1) * size
+        chunk = rows[start : start + size]
+        more = start + size < len(rows)
+        here = f"{self.url}{record['path']}"
+        return {
+            "count": len(rows),
+            "next": f"{here}?page={page + 1}&page_size={size}" if more else None,
+            "previous": None if page == 1 else f"{here}?page={page - 1}",
+            "page": page,
+            "page_size": size,
+            "total": len(rows),
+            "results": chunk,
+        }
+
+    def _workspace_rows(self, record: dict[str, Any]) -> list[dict[str, Any]] | None:
+        """The studios of the workspace ``X-Workspace-Id`` names (id or uid); ``None`` if none."""
+        header = record["headers"].get("x-workspace-id")
+        if not header:
+            return None
+        for workspace in self.workspaces:
+            if header in (str(workspace.get("id")), str(workspace.get("uid"))):
+                return self.studios.get(str(workspace["id"]), [])
+        return None
+
+    def _api_key_ok(self, record: dict[str, Any]) -> bool:
+        key = record["headers"].get("x-api-key", "")
+        return bool(key) and (
+            key in self.accepted_keys or any(k["api_key"] == key for k in self.minted)
+        )
+
+    def _api(self, handler: Any, record: dict[str, Any], path: str) -> None:
+        # The routing endpoints take an API KEY (the gateway calls them with the
+        # ingest key); like the real ones they do not take a sign-in token.
+        if "/agents/" in path and path.startswith("/api/v2/iam/workspaces/"):
+            if not self._api_key_ok(record):
+                handler._send(401, {"detail": "Given token not valid", "code": "token_not_valid"})
+                return
+            # /api/v2/iam/workspaces/<id>/agents/[<name>/]
+            segments = [s for s in path.split("/") if s]
+            workspace_id = segments[4]
+            if record["method"] == "PUT" and len(segments) == 7:
+                agent = segments[6]
+                if self.routing == "forbidden":
+                    handler._send(403, {"detail": "You must be a workspace OWNER/ADMIN …"})
+                    return
+                body = record["json"] or {}
+                studio = int(body.get("publication_id", 0))
+                known = {s["id"] for s in self.studios.get(workspace_id, [])}
+                if studio not in known:
+                    handler._send(404, {"detail": "Publication not found."})
+                    return
+                self.bindings.setdefault(workspace_id, {})[agent] = studio
+                handler._send(
+                    200,
+                    {
+                        "name": agent,
+                        "workspace_id": int(workspace_id),
+                        "publication_id": studio,
+                        "publication_name": next(
+                            s["name"] for s in self.studios[workspace_id] if s["id"] == studio
+                        ),
+                    },
+                )
+                return
+            if record["method"] == "GET" and len(segments) == 6:
+                rows = [
+                    {"name": agent, "workspace_id": int(workspace_id), "publication_id": studio}
+                    for agent, studio in self.bindings.get(workspace_id, {}).items()
+                ]
+                handler._send(200, rows)
+                return
+            handler._send(404, {"detail": "no route"})
+            return
+        if not self._signed_in(record):
+            handler._send(
+                401, {"detail": "Authentication credentials were not provided.", "code": "na"}
+            )
+            return
+        if path == "/api/v2/workspaces/":
+            needle = record["query"].get("q", "").lower()
+            rows = [w for w in self.workspaces if needle in str(w.get("name", "")).lower()]
+            handler._send(200, self._page(record, rows))
+            return
+        if path == "/api/v2/publications/":
+            # The real API falls back to the caller's personal workspace when the
+            # header names nothing it knows, rather than failing; the stub has no
+            # personal workspace, so a wrong header buys an empty page.
+            studios = self._workspace_rows(record) or []
+            handler._send(200, self._page(record, studios))
+            return
+        if path == "/api/v2/credits/balance/":
+            if self._workspace_rows(record) is None:
+                handler._send(
+                    400, {"error": "Workspace context required. Please select a workspace."}
+                )
+            elif self.credits is None:
+                handler._send(404, {"detail": "Not found."})
+            else:
+                handler._send(200, self.credits)
+            return
+        if path == "/api/v2/iam/workspace-api-key/" and record["method"] == "POST":
+            if self.key_mint == "token_not_valid":
+                handler._send(401, {"detail": "Given token not valid", "code": "token_not_valid"})
+                return
+            body = record["json"] or {}
+            key = {
+                "uid": f"key-{len(self.minted) + 1}",
+                "name": body.get("name", ""),
+                "api_key": f"AIS_minted{len(self.minted) + 1}_{'x' * 20}",
+                "workspace_id": body.get("workspace_id"),
+                "scopes": body.get("scopes", ["*"]),
+                "is_active": True,
+                "last_used_at": None,
+                "created_at": "2026-09-13T10:00:00Z",
+            }
+            self.minted.append(key)
+            handler._send(201, key)
+            return
+        if path.startswith("/api/v2/iam/workspace-api-key/") and path.endswith("/revoke/"):
+            if self.key_mint == "token_not_valid":
+                handler._send(401, {"detail": "Given token not valid", "code": "token_not_valid"})
+                return
+            self.revoked_keys.append(path.split("/")[-3])
+            handler._send(204)
             return
         handler._send(404, {"detail": "no route"})
 

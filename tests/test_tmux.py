@@ -39,6 +39,8 @@ from aisquare.core.tmux import (
     BUNDLED_CONF,
     CHECK_SOCKET_SUFFIX,
     CONF_NAME,
+    DEFAULT_WINDOW_HEIGHT,
+    DEFAULT_WINDOW_WIDTH,
     MIN_VERSION,
     PASTE_BUFFER,
     Capture,
@@ -51,6 +53,8 @@ from aisquare.core.tmux import (
     _tmux,
     parse_version,
 )
+from tests import fakebin
+from tests.fsperms import can_deny_reads, can_deny_writes
 
 OK = Completed(0, "", "")
 FACTS_FIELDS = len(tmux_module._FACTS_FIELDS)  # what display-message is asked for
@@ -98,6 +102,8 @@ def _facts_line(**overrides: str) -> str:
         "pane_current_command": "claude",
         "mouse_any_flag": "0",
         "mouse_sgr_flag": "0",
+        "mouse_button_flag": "0",
+        "mouse_all_flag": "0",
         "pane_title": "fedora",
     }
     values.update(overrides)
@@ -106,12 +112,12 @@ def _facts_line(**overrides: str) -> str:
 
 @pytest.fixture
 def fake_bin(tmp_path: Path) -> Path:
-    """An executable that exists, so ``binary()`` resolves without real tmux."""
-    path = tmp_path / "bin" / "tmux"
-    path.parent.mkdir()
-    path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-    path.chmod(0o755)
-    return path
+    """An executable that exists, so ``binary()`` resolves without real tmux.
+
+    `TmuxServer.binary` is `shutil.which(...)`, which on Windows resolves
+    through PATHEXT — see `tests/fakebin.py`, which owns that lesson now.
+    """
+    return fakebin.executable_fake(tmp_path / "bin", "tmux", posix="", windows="")
 
 
 @pytest.fixture
@@ -133,11 +139,23 @@ def _completes(call: Callable[[], None]) -> bool:
     return True
 
 
-#: The permission bits below are advice to root, not a refusal, so a suite run
-#: as root would prove the opposite of what the test claims.
-not_root = pytest.mark.skipif(
-    hasattr(os, "getuid") and os.getuid() == 0,
-    reason="root writes an unwritable file anyway — the fail-open branch is unreachable",
+#: Mode 000 is a refusal for an ordinary POSIX user and ADVICE otherwise:
+#: root reads anything, and on NTFS the owner reads its own file whatever
+#: the bits say. Measured the same way `can_deny` is — by asking the
+#: platform rather than by naming the two cases we know about.
+can_read_zero_mode = pytest.mark.skipif(
+    not can_deny_reads(),
+    reason="mode 000 does not stop this user from reading",
+)
+
+#: The permission bits below are ADVICE on two machines, not a refusal: to root,
+#: and on NTFS, where `chmod(0o444)` returns cleanly and the owner writes anyway.
+#: Either way the rewrite succeeds and the fail-open branch is never reached, so
+#: the test would assert the opposite of what it claims. `can_deny_writes`
+#: measures it by trying, rather than naming the two platforms it knows about.
+can_deny = pytest.mark.skipif(
+    not can_deny_writes(),
+    reason="writes cannot be denied here — the fail-open branch is unreachable",
 )
 
 
@@ -255,7 +273,7 @@ def test_an_explicit_conf_is_used_verbatim_and_never_written(fake_bin: Path, con
     assert server.conf_fallback is None
 
 
-@not_root
+@can_deny
 def test_a_conf_that_cannot_be_rewritten_fails_open_instead_of_raising(
     fake_bin: Path, isolated_home: Path
 ) -> None:
@@ -284,9 +302,29 @@ def test_a_conf_that_cannot_be_rewritten_fails_open_instead_of_raising(
     fresh = TmuxServer("s", binary=str(fake_bin), runner=FakeTmux())
     assert fresh.has_session("x") is True, "an unwritable conf does not cost the command"
 
-    # Unreadable AND unwritable: measured on 3.7c, handing tmux an unreadable
-    # -f file kills the server at startup ("server exited unexpectedly"), while
-    # a missing one is fine — so this branch must NOT hand over the path.
+
+@can_read_zero_mode
+@can_deny
+def test_a_conf_that_cannot_be_READ_is_replaced_by_devnull(
+    fake_bin: Path, isolated_home: Path
+) -> None:
+    """The other half, as its own test so the report says which one ran.
+
+    Measured on 3.7c: handing tmux an UNREADABLE ``-f`` file kills the server at
+    startup ("server exited unexpectedly"), while a MISSING one is fine — so
+    this branch must not hand over the path at all, where the readable-but-
+    unwritable branch above must.
+
+    Split out because it needs a condition its sibling does not: mode 000 has to
+    be a refusal, which it is not for root and not on NTFS, where the owner
+    reads its own file whatever the bits say. As one test with a mid-body skip,
+    both halves reported `passed` on a machine that had only run the first, and
+    nothing in `-ra` said so.
+    """
+    isolated_home.mkdir(parents=True, exist_ok=True)
+    path = isolated_home / CONF_NAME
+    path.write_text("set -g status on  # what the last version wrote\n", encoding="utf-8")
+
     path.chmod(0o000)
     blind = TmuxServer("s", binary=str(fake_bin), runner=FakeTmux())
     assert blind.conf_path() == Path(os.devnull)
@@ -413,6 +451,54 @@ def test_spawn_window_creates_the_session_when_it_is_absent(
     )
 
 
+def test_spawn_window_takes_the_env_pairs_back_out_of_a_new_sessions_environment(
+    fake_bin: Path, conf: Path, tmp_path: Path
+) -> None:
+    """``new-session -e`` writes the pair into the SESSION environment, which every
+    window opened later in that session inherits (measured on 3.7c; the live
+    test below repeats the measurement). Every pair is one agent's — the row id
+    is an identity, the account pins are one agent's slot and home, the
+    native-teams opt-out is for the sessions the fleet starts and not a window
+    the operator opens by hand (§7.6) — so every pair goes, one
+    ``set-environment -u`` each, after the window is up; a refusal there is
+    swallowed, because the window is up (review of #135; review of #203, round 4,
+    which found a later ``fleet spawn`` with no ``--account`` inheriting the
+    first spawn's slot when only the identity was taken back)."""
+    fake = FakeTmux(
+        Completed(1, "", "can't find session: asq-amber-fox"),  # has-session
+        Completed(0, f"@4{_SEP}%9\n", ""),  # new-session -P
+        Completed(1, "", "unknown variable: AISQUARE_FLEET_AGENT"),  # a refusal
+    )
+    info = _server(fake, fake_bin, conf).spawn_window(
+        "asq-amber-fox",
+        name="coder-1",
+        cwd=tmp_path,
+        command=["claude"],
+        env={"AISQUARE_FLEET_AGENT": "agt_1", "CLAUDE_CONFIG_DIR": "/home/a/.claude-2"},
+    )
+    assert fake.commands()[2:] == [
+        ["set-environment", "-u", "-t", "=asq-amber-fox", "AISQUARE_FLEET_AGENT"],
+        ["set-environment", "-u", "-t", "=asq-amber-fox", "CLAUDE_CONFIG_DIR"],
+    ]
+    assert info.pane_id == "%9", "the refusal cost nothing: the window is up and reported"
+
+
+def test_server_absent_reads_a_question_it_could_not_put_as_no_evidence(
+    fake_bin: Path, conf: Path
+) -> None:
+    """Round 7 of #203. ``server_absent`` caught the missing client alone, so a
+    wedged server's timeout — a plain ``TmuxError`` from the runner — raised
+    straight through ``reap --server-down``, the very command ``doctor``
+    prescribes for a silent server: a traceback where the report belongs.
+    Like ``answers``, positive evidence or nothing."""
+
+    def times_out(argv: Sequence[str], stdin: bytes | None) -> Completed:
+        raise TmuxError("tmux display-message timed out after 30 s")
+
+    server = TmuxServer("asq-test", runner=times_out, binary=str(fake_bin), conf=conf)
+    assert server.server_absent() is False
+
+
 def test_spawn_window_adds_a_window_when_the_session_exists(
     fake_bin: Path, conf: Path, tmp_path: Path
 ) -> None:
@@ -426,8 +512,41 @@ def test_spawn_window_adds_a_window_when_the_session_exists(
         "-t", "=asq-amber-fox:", "-n", "reviewer", "-c", str(tmp_path),
         "--", "sh", "-c", "exit 3",
     ]  # fmt: skip
-    assert "-x" not in new_window, "an existing session's size is the session's"
+    assert "-x" not in new_window, "new-window takes no geometry: the session's applies…"
+    # …so the window is resized right after, to the requested (here: default) geometry —
+    # a coder spawned into a running manager's session was otherwise born at the
+    # session's 200x50 and grew Claude Code's diff panel on its own (#149).
+    assert fake.commands()[2] == ["resize-window", "-t", "%10", "-x", "120", "-y", "40"]
     assert (info.window_id, info.pane_id, info.current_command) == ("@5", "%10", "sh")
+    assert info.resize_refused is None  # it landed: nothing for the receipt to say
+    # The resize is the only command after new-window: no set-environment -u follows.
+    assert len(fake.commands()) == 3, "new-window -e is per window: nothing to take back"
+
+
+def test_spawn_window_keeps_a_window_whose_resize_tmux_refuses(
+    fake_bin: Path, conf: Path, tmp_path: Path
+) -> None:
+    """The resize after ``new-window`` fails open: the window runs, so it is returned.
+
+    Raised instead, it would reach ``fleet.spawn`` as a failed spawn AFTER the
+    window exists — a running agent with no row to show, stop or find it by. A
+    refused size costs geometry only: the window keeps the session's size until
+    a pane shows it and the UI's own sync corrects it — for a headless window,
+    one nobody opens, possibly never. So the refusal comes back with the window,
+    in tmux's words, for the spawn's receipt (review of #162, round 1).
+    """
+    fake = FakeTmux(
+        OK,  # has-session
+        Completed(0, f"@6{_SEP}%11\n", ""),  # new-window -P
+        Completed(1, "", "width too large"),  # resize-window
+    )
+    info = _server(fake, fake_bin, conf).spawn_window(
+        "asq-amber-fox", name="coder-2", cwd=tmp_path, command=["claude"], width=97, height=31
+    )
+    # The caller's size, not the default, on the existing-session branch too.
+    assert fake.commands()[2] == ["resize-window", "-t", "%11", "-x", "97", "-y", "31"]
+    assert (info.window_id, info.pane_id, info.current_command) == ("@6", "%11", "claude")
+    assert info.resize_refused == "width too large"
 
 
 def test_spawn_window_without_env_passes_no_dash_e(
@@ -459,9 +578,14 @@ def test_spawn_window_escapes_the_separator_in_every_argument_it_carries(
         command=["claude", "--flag", "a;b", ";", "kill-server", "trailing;"],
         env={"K": "v;"},
     )
+    # Built from `directory`, not `f"{tmp_path}/dir"`: the separator between the
+    # two is the platform's, and a hardcoded "/" asserted the POSIX spelling of a
+    # path tmux is handed on both. The `;` escaping is what this test is about
+    # and is applied here exactly as the code applies it.
+    escaped_cwd = str(directory).replace(";", "\\;")
     assert fake.commands()[1] == [
         "new-window", "-d", "-P", "-F", f"#{{window_id}}{_SEP}#{{pane_id}}",
-        "-t", "=asq-amber-fox:", "-n", "coder\\;", "-c", f"{tmp_path}/dir\\;",
+        "-t", "=asq-amber-fox:", "-n", "coder\\;", "-c", escaped_cwd,
         "-e", "K=v\\;",
         # "a;b" is data to tmux already: only a LAST ";" separates commands.
         "--", "claude", "--flag", "a;b", "\\;", "kill-server", "trailing\\;",
@@ -538,6 +662,23 @@ def test_list_windows_parses_each_pane_and_skips_a_malformed_line(
     assert _server(gone, fake_bin, conf).list_windows("asq-amber-fox") == []
 
 
+def test_pane_pid_is_the_pid_tmux_started_in_the_pane(fake_bin: Path, conf: Path) -> None:
+    """One question, asked of the pane by id, and the answer checked to be about
+    that pane: an attached client's current pane may answer for a target
+    display-message could not find, exactly as ``pane_facts`` guards against."""
+    fake = FakeTmux(Completed(0, f"%3{_SEP}4242\n", ""))
+    assert _server(fake, fake_bin, conf).pane_pid("%3") == 4242
+    assert fake.commands() == [
+        ["display-message", "-p", "-t", "%3", f"#{{pane_id}}{_SEP}#{{pane_pid}}"]
+    ]
+    gone = FakeTmux(Completed(0, f"{_SEP}\n", ""))  # 3.7c: status 0, every field empty
+    assert _server(gone, fake_bin, conf).pane_pid("%3") is None
+    other = FakeTmux(Completed(0, f"%7{_SEP}4242\n", ""))  # somebody else's pane answered
+    assert _server(other, fake_bin, conf).pane_pid("%3") is None
+    down = FakeTmux(Completed(1, "", "no server running on /tmp/tmux-1000/sock"))
+    assert _server(down, fake_bin, conf).pane_pid("%3") is None
+
+
 def test_pane_facts_parses_a_live_pane(fake_bin: Path, conf: Path) -> None:
     fake = FakeTmux(Completed(0, _facts_line() + "\n", ""))
     facts = _server(fake, fake_bin, conf).pane_facts("%3")
@@ -557,6 +698,22 @@ def test_pane_facts_parses_a_live_pane(fake_bin: Path, conf: Path) -> None:
         current_command="claude",
         title="fedora",
     )
+
+
+def test_pane_facts_reads_which_mouse_reports_the_program_asked_for(
+    fake_bin: Path, conf: Path
+) -> None:
+    """``?1000`` alone is presses and releases; ``?1002`` (button-event) or ``?1003``
+    (any-event) is what makes a forwarded drag a report the program asked for (#148)."""
+
+    def facts(**flags: str) -> PaneFacts:
+        fake = FakeTmux(Completed(0, _facts_line(mouse_any_flag="1", **flags) + "\n", ""))
+        return _server(fake, fake_bin, conf).pane_facts("%3")  # type: ignore[return-value]
+
+    assert facts().mouse_on is True and facts().mouse_drag is False
+    assert facts(mouse_button_flag="1").mouse_drag is True
+    assert facts(mouse_all_flag="1").mouse_drag is True
+    assert facts(mouse_sgr_flag="1").mouse_sgr is True and facts().mouse_sgr is False
 
 
 def test_pane_facts_reads_a_dead_pane_and_the_flags(fake_bin: Path, conf: Path) -> None:
@@ -605,6 +762,13 @@ def test_numeric_fields_never_raise_on_junk() -> None:
 
 @pytest.mark.skipif(not hasattr(os, "getuid"), reason="no uid, no tmux socket (see the next test)")
 def test_socket_path_follows_tmux_tmpdir_then_tmp(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The decorator is the runtime guard; this is the one MYPY reads, which now
+    # matters because the suite is type-checked under Windows too. `os.getuid`
+    # is POSIX-only and typeshed says so, a decorator narrows nothing, and an
+    # `assert` does not prune the branch either — mypy's platform reachability
+    # keys on `if`. `pytest.skip` is `NoReturn`, so this narrows and never runs.
+    if sys.platform == "win32":  # pragma: no cover - the skipif above got here first
+        pytest.skip("no uid on Windows")
     uid = os.getuid()
     monkeypatch.delenv("TMUX_TMPDIR", raising=False)
     assert TmuxServer("asq").socket_path() == Path("/tmp") / f"tmux-{uid}" / "asq"
@@ -661,6 +825,28 @@ def test_capture_is_one_process_and_keeps_blank_rows(fake_bin: Path, conf: Path)
     ]  # fmt: skip
     assert capture == Capture(lines=rows, facts=tmux_module._facts(_facts_line()), scrollback=0)
     assert len(capture.lines) == 24
+
+
+def test_capture_with_flags_reads_each_rows_wrap_mark_and_strips_the_column(
+    fake_bin: Path, conf: Path
+) -> None:
+    """``-F`` puts a flags column before every row — ``W`` wrapped into the next,
+    ``X`` extended cells, ``-`` none — one space, then the row, escapes and all
+    (measured on 3.7c). The frame carries the marks and the rows come back
+    clean; without ``flags`` the argv is what it always was and ``wrapped`` is
+    ``None`` (review of #135, second round, finding 9)."""
+    rows = ["W \x1b[31mwrapped\x1b[39m ", "- plain", "X tab\tbed", "- ", *["- "] * 20]
+    fake = FakeTmux(_frame(rows, _facts_line()))
+    capture = _server(fake, fake_bin, conf).capture("%3", flags=True)
+    assert fake.commands()[0][:7] == ["capture-pane", "-p", "-e", "-N", "-F", "-S", "0"]
+    assert capture.lines[:4] == ["\x1b[31mwrapped\x1b[39m ", "plain", "tab\tbed", ""]
+    assert capture.wrapped is not None
+    assert capture.wrapped[:4] == [True, False, False, False]
+    assert len(capture.wrapped) == len(capture.lines) == 24
+
+    plain = FakeTmux(_frame([""] * 24, _facts_line()))
+    assert _server(plain, fake_bin, conf).capture("%3").wrapped is None
+    assert "-F" not in plain.commands()[0]
 
 
 def test_capture_slices_a_scrolled_frame_to_the_screen_height(fake_bin: Path, conf: Path) -> None:
@@ -930,6 +1116,62 @@ def test_live_spawn_creates_the_session_then_adds_a_window(live: TmuxServer) -> 
 
 
 @requires_tmux
+def test_live_pane_pid_is_the_process_in_the_pane(live: TmuxServer, tmp_path: Path) -> None:
+    """The process tmux starts in the pane writes its own pid; ``pane_pid`` must
+    read the same number. That equality is what lets the session-start hook tell
+    the pane's agent (``CLAUDE_PID`` == this) from a nested child (it is not)."""
+    marker = tmp_path / "pid"
+    window = _spawn(live, "asq-test-fox", "w0", ["sh", "-c", f"echo $$ > {marker}; exec sleep 30"])
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline and not marker.exists():
+        time.sleep(0.05)
+    assert marker.exists(), "the pane's shell never ran"
+    assert live.pane_pid(window.pane_id) == int(marker.read_text(encoding="utf-8").strip())
+    assert live.pane_pid("%999") is None
+
+
+@requires_tmux
+def test_live_new_session_env_does_not_reach_a_window_opened_by_hand(live: TmuxServer) -> None:
+    """The measurement behind ``_forget_session_environment``: with the unset,
+    a second window opened WITHOUT ``-e`` (the operator's ``prefix c``) sees
+    none of the first window's variables — the identity or the pins and
+    opt-out beside it — while the first window's process still has them all.
+    A window opened by hand is the operator's own session, and "a user's own
+    ``claude`` sessions keep whatever they had" (§7.6; review of #203, round 4)."""
+    first = live.spawn_window(
+        "asq-test-fox",
+        name="w0",
+        cwd=Path("/tmp"),
+        command=[
+            "sh",
+            "-c",
+            'echo "first=${AISQUARE_FLEET_AGENT:-unset} teams=${TEAMS_OPT_OUT:-unset}"; '
+            "exec sleep 30",
+        ],
+        env={"AISQUARE_FLEET_AGENT": "agt_first", "TEAMS_OPT_OUT": "0"},
+        width=80,
+        height=24,
+    )
+    by_hand_says = 'echo "hand=${AISQUARE_FLEET_AGENT:-unset} teams=${TEAMS_OPT_OUT:-unset}"'
+    by_hand = live.run(
+        "new-window", "-d", "-P", "-F", "#{pane_id}", "-t", "=asq-test-fox:", "--",
+        "sh", "-c", f"{by_hand_says}; exec sleep 30",
+    ).strip()  # fmt: skip
+    deadline = time.monotonic() + 10
+    screens = ("", "")
+    while time.monotonic() < deadline:
+        screens = (_screen(live, first.pane_id), _screen(live, by_hand))
+        if "first=" in screens[0] and "hand=" in screens[1]:
+            break
+        time.sleep(0.05)
+    assert "first=agt_first teams=0" in screens[0], screens
+    assert "hand=unset teams=unset" in screens[1], screens
+    for key in ("AISQUARE_FLEET_AGENT", "TEAMS_OPT_OUT"):
+        with pytest.raises(TmuxError, match="unknown variable"):
+            live.run("show-environment", "-t", "=asq-test-fox", key)
+
+
+@requires_tmux
 def test_live_has_session_is_exact_because_of_the_equals(live: TmuxServer) -> None:
     _spawn(live, "asq-test-fox", "w0", CAT)
     assert live.has_session("asq-test-fox") is True
@@ -954,6 +1196,25 @@ def test_live_capture_returns_the_screen_with_colours_and_consumes_the_facts_lin
     assert capture.facts.dead is False and capture.facts.dead_status is None
     assert capture.scrollback == 0
     assert _wait(lambda: live.capture(window.pane_id).facts.current_command == "cat")
+
+
+@requires_tmux
+def test_live_capture_flags_mark_the_rows_tmux_wrapped(live: TmuxServer) -> None:
+    version = live.version()
+    if version is None or version < tmux_module.WRAP_FLAGS_MINIMUM:
+        pytest.skip("capture-pane -F needs tmux 3.7 or newer")
+    long_line = "x" * 100 + " tail"
+    window = _spawn(
+        live, "asq-test-fox", "w0", ["sh", "-c", f'printf "%s\\n" "{long_line}"; exec cat']
+    )
+    assert _wait(lambda: "tail" in _screen(live, window.pane_id))
+
+    capture = live.capture(window.pane_id, flags=True)
+    assert capture.wrapped is not None
+    assert len(capture.wrapped) == len(capture.lines) == 24
+    assert capture.wrapped[:3] == [True, False, False], capture.wrapped[:3]
+    assert capture.lines[0] == "x" * 80, "the flags column is not part of the row"
+    assert capture.lines[1].startswith("x" * 20 + " tail")
 
 
 @requires_tmux
@@ -1196,8 +1457,18 @@ def test_live_spawn_cannot_be_talked_into_running_a_second_tmux_command(
     window = live.spawn_window(
         "asq-test-fox", name="w0", cwd=tmp_path, command=command, width=80, height=24
     )
-    assert _wait(lambda: argv_file.exists())
-    assert argv_file.read_text(encoding="utf-8").splitlines() == [f"[{arg}]" for arg in injection]
+    expected = [f"[{arg}]" for arg in injection]
+    # The file exists from the shell's `>` on, before printf has finished with
+    # it: waiting for `exists()` alone read three of the five lines once. So
+    # wait for a newline per expected line. Not asserted: on a timeout the
+    # comparison below says what the pane DID receive.
+    _wait(
+        lambda: (
+            argv_file.exists()
+            and argv_file.read_text(encoding="utf-8").count("\n") >= len(expected)
+        )
+    )
+    assert argv_file.read_text(encoding="utf-8").splitlines() == expected
     assert live.pane_facts(window.pane_id) is not None, "the window is alive, not a parse error"
     assert live.run("show", "-g", "history-limit").strip() == "history-limit 50000"
 
@@ -1276,6 +1547,7 @@ def test_live_check_conf_accepts_the_bundled_conf_and_rejects_a_bad_one(
 
 
 _SET = re.compile(r"^set (-g|-s|-ga) (\S+) (.+)$")
+_BIND = re.compile(r"^bind-key -n (\S+) (.+)$")
 
 
 @requires_tmux
@@ -1289,8 +1561,19 @@ def test_live_every_bundled_option_is_applied_with_its_value(live: TmuxServer) -
     """
     _spawn(live, "asq-test-fox", "w0", CAT)
     lines = [line for line in BUNDLED_CONF.splitlines() if line and not line.startswith("#")]
-    rules = [_SET.match(line) for line in lines]
-    assert rules and all(rules), f"every line is a `set`: {lines}"
+    binds = [_BIND.match(line) for line in lines if line.startswith("bind-key")]
+    rules = [_SET.match(line) for line in lines if not line.startswith("bind-key")]
+    assert rules and all(rules), f"every other line is a `set`: {lines}"
+    assert binds and all(binds), "every bind-key line is `bind-key -n <key> <command>`"
+
+    for bind in binds:
+        assert bind is not None
+        pressed, command = bind.groups()
+        # The root table (`-n`): a key that needs no prefix — there is none (#147).
+        # The whole table: `list-keys -T root <key>` answers nothing on 3.7 (measured).
+        table = live.run("list-keys", "-T", "root")
+        rows = [row for row in table.splitlines() if f" {pressed} " in f"{row} "]
+        assert rows and all(command in row for row in rows), f"{pressed}: {table!r}"
 
     for rule in rules:
         assert rule is not None
@@ -1343,3 +1626,62 @@ def test_live_a_frame_fits_the_render_budget(live: TmuxServer, width: int, heigh
     print(f"\ncapture {width}x{height}: median {median:.1f} ms, max {max(samples):.1f} ms")
     assert len(capture.lines) == height and capture.facts.width == width
     assert median < 200, f"a {width}x{height} frame took {median:.0f} ms (median of 20)"
+
+
+# --- the desktop a window is given (#147) ------------------------------------------------------
+
+
+def test_desktop_environment_carries_only_the_variables_this_process_has() -> None:
+    """A window inherits the SERVER's environment, frozen at its first start; these
+    travel per window from the spawner instead. Unset here says nothing about the
+    server's copy, so it is not blanked — `-e` can only set anyway."""
+    from aisquare.core.tmux import DESKTOP_ENV_VARS, desktop_environment
+
+    shell = {
+        "DISPLAY": ":1",
+        "WAYLAND_DISPLAY": "wayland-0",
+        "SSH_AUTH_SOCK": "/run/user/1000/keyring/ssh",
+        "COLORTERM": "truecolor",
+        "DBUS_SESSION_BUS_ADDRESS": "  ",  # blank counts as unset
+        "HOME": "/home/me",  # not a desktop fact
+    }
+    assert desktop_environment(shell) == {
+        "DISPLAY": ":1",
+        "WAYLAND_DISPLAY": "wayland-0",
+        "SSH_AUTH_SOCK": "/run/user/1000/keyring/ssh",
+        "COLORTERM": "truecolor",
+    }
+    assert desktop_environment({}) == {}
+    assert set(desktop_environment(dict.fromkeys(DESKTOP_ENV_VARS, "x"))) == set(DESKTOP_ENV_VARS)
+    # The conf's update-environment names are the same list, minus what tmux carries by default.
+    listed = {
+        line.split()[-1] for line in BUNDLED_CONF.splitlines() if "update-environment" in line
+    }
+    assert listed == set(DESKTOP_ENV_VARS) - {"DISPLAY", "SSH_AUTH_SOCK"}
+    assert "set -g prefix None" in BUNDLED_CONF and "bind-key -n F12 detach-client" in BUNDLED_CONF
+
+
+def test_the_default_geometry_stays_under_claude_codes_diff_panel_line(
+    fake_bin: Path, conf: Path, tmp_path: Path
+) -> None:
+    """#149: a window nobody sized must not be wide enough to open the diff panel by itself.
+
+    Claude Code's fullscreen renderer opens it "once Claude starts editing files, if
+    your terminal is at least 144 columns wide" and remembers that; the panel opens
+    on demand from 110 columns. Both numbers are pinned where the default is
+    defined and where it is consumed (a new session's ``-x``/``-y``).
+    """
+    assert 110 <= DEFAULT_WINDOW_WIDTH < 144
+    assert DEFAULT_WINDOW_HEIGHT >= 24
+    fake = FakeTmux(
+        Completed(1, "", "can't find session: asq-quiet-lark"),  # has-session
+        Completed(0, f"@1{_SEP}%1\n", ""),  # new-session -P
+    )
+    _server(fake, fake_bin, conf).spawn_window(
+        "asq-quiet-lark", name="coder-1", cwd=tmp_path, command=["claude"]
+    )
+    new_session = fake.commands()[1]
+    x, y = new_session.index("-x"), new_session.index("-y")
+    assert new_session[x + 1] == str(DEFAULT_WINDOW_WIDTH) == "120"
+    assert new_session[y + 1] == str(DEFAULT_WINDOW_HEIGHT) == "40"
+    assert len(fake.commands()) == 2  # a new session's first window needs no second step

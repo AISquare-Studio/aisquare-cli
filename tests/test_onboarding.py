@@ -15,7 +15,7 @@ import ast
 import inspect
 import json
 import os
-import pty
+import shutil
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -41,6 +41,7 @@ from aisquare.services.onboarding import (
     summary_line,
     validate_path,
 )
+from tests import fakebin
 
 # --------------------------------------------------------------------------- fakes
 
@@ -373,7 +374,7 @@ def test_validate_path_reports_an_already_registered_root(tmp_path: Path) -> Non
     unknown = tmp_path / "unknown"
     unknown.mkdir()
     with store_session() as store:
-        store.ensure_project(ProjectInfo(id=project_id_for(known.resolve()), root=known.resolve()))
+        store.onboard_project(ProjectInfo(id=project_id_for(known.resolve()), root=known.resolve()))
 
     registered = validate_path(str(known))
     assert registered.ok and registered.registered is not None
@@ -383,6 +384,21 @@ def test_validate_path_reports_an_already_registered_root(tmp_path: Path) -> Non
     fresh = validate_path(str(unknown))
     assert fresh.ok and fresh.registered is None and fresh.store_error is None
     assert "already registered" not in fresh.describe()
+
+
+def test_validate_path_says_a_captured_root_is_not_listed_yet(tmp_path: Path) -> None:
+    """A directory a hooked session ran in has a row, but onboarding is what lists it
+    (#139) — "already registered; init is idempotent" told the user there was
+    nothing to do."""
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    project_id = project_id_for(scratch.resolve())
+    with store_session() as store:
+        store.ensure_project(ProjectInfo(id=project_id, root=scratch.resolve()))  # a hook
+
+    line = validate_path(str(scratch)).describe()
+    assert f"captured as {project_id} (not listed yet); onboarding adds it" in line
+    assert "already registered" not in line
 
 
 def test_validate_path_fails_open_when_the_store_will_not_answer(tmp_path: Path) -> None:
@@ -406,7 +422,12 @@ def test_validate_path_fails_open_when_the_store_will_not_answer(tmp_path: Path)
 def test_validate_path_expands_tilde_and_variables(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # Both, because `expanduser` reads a different variable per platform: HOME
+    # on POSIX, USERPROFILE on Windows (where HOME is ignored outright). Setting
+    # only HOME asserts the POSIX half of a call the product makes on both — the
+    # same shape as #56, and the same fix as `test_role_profile.py::test_tilde_expands`.
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
     monkeypatch.setenv("ASQ_TEST_ROOT", str(tmp_path))
     (tmp_path / "proj").mkdir()
     for typed in ("~/proj", "$ASQ_TEST_ROOT/proj", f"  {tmp_path}/proj  "):
@@ -567,18 +588,82 @@ class Live:
         return selfcli.run(args, cwd=cwd, env=self.env, timeout=120.0)
 
 
-def _hermetic_env(**overrides: str) -> dict[str, str]:
+def _hermetic_env(tmp_path: Path, **overrides: str) -> dict[str, str]:
     """This process's environment (the suite's isolated ``AISQUARE_HOME`` included).
 
     ``CLAUDE_CONFIG_DIR`` is always one of ``overrides``: the developer's real
-    one must not be read. On POSIX the PATH is the bare default, so a machine
-    with Node does not pack the directory with its repomix — CI has none, and
-    the answer must be the same on both.
+    one must not be read. The PATH is cut so a machine with Node does not pack
+    the directory with its repomix, and the answer is the same on every machine.
+
+    This is ``conftest.no_repomix`` carried across a process boundary. That
+    autouse fixture says the policy in one line — "disable the repomix
+    subprocess by default so tests never shell out" — and enforces it with
+    ``monkeypatch``, which reaches every test in this process and NO child of
+    one. For a test that spawns the real CLI, the PATH is the only enforcement
+    there is.
+
+    THAT LAST CLAUSE USED TO BE A CLAIM RATHER THAN A FACT. The cut was guarded
+    by ``if os.name == "posix"``, so the Windows child inherited the whole PATH,
+    found Node, and ran the pack the POSIX child is spared. ``init`` onboards
+    unless told ``--no-onboard``, and ``snapshot._repomix_base`` falls back to
+    ``npx --yes repomix`` — which is an npm-registry DOWNLOAD, on a runner with
+    a cold npx cache, inside a test that believed it was hermetic. Measured here
+    with Node on PATH: ``init`` costs 31.1s, of which 7.5s is repomix and 3.3s
+    is import; on windows-latest it exceeded the 120s budget outright and took
+    the lane from 18/18 to 17/18. Stripping the PATH is what the docstring
+    always said happened, so it now happens.
+
+    On POSIX the PATH is one EMPTY directory under ``tmp_path``, not the bare
+    default ``os.defpath``. ``/usr/bin`` is where Debian's ``npm`` and Fedora's
+    ``nodejs-npm`` put ``npx``, so the default hid Node only from machines that
+    installed it somewhere else, like the CI runner's ``/usr/local/bin`` (review
+    of #65, R1). The child needs nothing by name: ``selfcli`` runs it by the
+    interpreter's own path, and without ``git`` a directory that is not a
+    repository resolves by its markers, which is what these plain directories do
+    anyway.
+
+    System32 stays on the Windows PATH. It is the OS's own directory, and no
+    Node installer writes to it.
     """
     env = {**os.environ, **overrides, "NO_COLOR": "1"}
     if os.name == "posix":
-        env["PATH"] = os.defpath
+        empty = tmp_path / "hermetic-path"
+        empty.mkdir(exist_ok=True)
+        env["PATH"] = str(empty)
+    else:
+        env["PATH"] = str(Path(os.environ.get("SYSTEMROOT", r"C:\Windows")) / "System32")
     return env
+
+
+@pytest.mark.parametrize("tool", ["npx", "repomix"])
+def test_the_hermetic_env_hides_node_from_the_child_on_every_platform(
+    tool: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The child must not be able to resolve a packer, whatever this machine has.
+
+    The latch on :func:`_hermetic_env`. Asserting "npx is not on the cut PATH" on
+    a machine that has no npx passes for the wrong reason — the vacuity that let
+    the POSIX-only cut sit unnoticed until a Windows runner ran it. So the fake
+    is MANUFACTURED onto the real PATH first, and the control below asserts it is
+    genuinely findable there; only then does the absence mean the cut did it.
+
+    Both names, because ``snapshot._repomix_base`` tries ``repomix`` first and
+    falls back to ``npx --yes repomix``, and hiding only one leaves the other.
+
+    The fake is also in the platform's DEFAULT search path, as a distro's Node is
+    in ``/usr/bin``: a cut back to ``os.defpath`` hid only a Node installed
+    somewhere else.
+    """
+    installed = tmp_path / "installed"
+    fakebin.executable_fake(installed, tool, posix="echo packed", windows="echo packed")
+    fakebin.prepend_to_path(installed, monkeypatch)
+    monkeypatch.setattr(os, "defpath", f"{installed}{os.pathsep}{os.defpath}")
+
+    # The control: without the cut, this machine CAN see it.
+    assert shutil.which(tool) is not None, "the fake is not on PATH; the assertion below is vacuous"
+    assert shutil.which(tool, path=os.defpath) is not None, "the fake is not on the default path"
+
+    assert shutil.which(tool, path=_hermetic_env(tmp_path)["PATH"]) is None
 
 
 def test_onboard_runs_the_real_cli_in_a_throwaway_home(tmp_path: Path) -> None:
@@ -595,7 +680,7 @@ def test_onboard_runs_the_real_cli_in_a_throwaway_home(tmp_path: Path) -> None:
     (proj / "README.md").write_text("hello\n", encoding="utf-8")
     claude_dir = tmp_path / "claude"
     claude_dir.mkdir()
-    run = Live(_hermetic_env(CLAUDE_CONFIG_DIR=str(claude_dir)))
+    run = Live(_hermetic_env(tmp_path, CLAUDE_CONFIG_DIR=str(claude_dir)))
 
     outcome = onboard(proj, run=run)
 
@@ -639,7 +724,9 @@ def test_onboard_reports_the_real_cli_failing_in_its_own_words(tmp_path: Path) -
     not_a_dir = tmp_path / "not-a-dir"
     not_a_dir.write_text("", encoding="utf-8")
     run = Live(
-        _hermetic_env(**{HOME_ENV_VAR: str(not_a_dir), "CLAUDE_CONFIG_DIR": str(tmp_path / "c")})
+        _hermetic_env(
+            tmp_path, **{HOME_ENV_VAR: str(not_a_dir), "CLAUDE_CONFIG_DIR": str(tmp_path / "c")}
+        )
     )
 
     outcome = onboard(proj, run=run)
@@ -731,6 +818,16 @@ def test_the_child_that_runs_init_never_has_a_terminal_on_stdin() -> None:
     Putting a real terminal on fd 0 for the duration is what makes the two answers
     different, and the control below proves the terminal is actually there.
     """
+    # `pty` is POSIX-only and used to be imported at MODULE scope, which on
+    # Windows aborted collection of this whole file — 30-odd tests that have
+    # nothing to do with terminals never ran, and the error arrived as a
+    # collection failure rather than as a skip. Skipping HERE keeps the rest of
+    # the module running, and `pytest.skip` is typed `NoReturn`, so it also
+    # narrows the platform for mypy and the import below type-checks on Windows.
+    if sys.platform == "win32":
+        pytest.skip("no pty on Windows; this asserts a POSIX terminal on fd 0")
+
+    import pty
     import subprocess
 
     probe = [sys.executable, "-c", _TTY_PROBE]

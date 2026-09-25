@@ -69,7 +69,8 @@ MIN_TMUX_MAJOR=3
 MIN_TMUX_MINOR=2
 # core/tmux.py MIN_VERSION — `new-window -e` and `extended-keys` arrived in 3.2.
 RECOMMENDED_TMUX_MINOR=5
-# 3.5 is where S-Enter reaches an agent pane; below it the fleet works without.
+# 3.5 is where the shifted chords reach an agent pane (core/keys.py
+# EXTENDED_MINIMUM); below it shift+enter travels as ctrl+J and the fleet works.
 
 MIN_NODE_MAJOR=22
 # THE SAME NUMBER AS `core/snapshot.py`'s MIN_NODE, which is the source of truth
@@ -1181,7 +1182,7 @@ install_tmux() {
     [ "$WANT_SYSTEM_DEPS" = 1 ] || return 0
     if [ "$TMUX_ACTION" = current ]; then
         if version_lt "$TMUX_VERSION" "$MIN_TMUX_MAJOR.$RECOMMENDED_TMUX_MINOR"; then
-            note "tmux $TMUX_VERSION — fleet available ($MIN_TMUX_MAJOR.$RECOMMENDED_TMUX_MINOR+ adds Shift+Enter in agent panes)"
+            note "tmux $TMUX_VERSION — fleet available ($MIN_TMUX_MAJOR.$RECOMMENDED_TMUX_MINOR+ carries the shifted chords to agent panes; below it shift+enter travels as ctrl+j)"
         else
             note "tmux $TMUX_VERSION — current"
         fi

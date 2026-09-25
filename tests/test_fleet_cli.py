@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import io
 import json
-import re
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -35,27 +34,32 @@ from typer.testing import CliRunner
 
 from aisquare.cli import fleet as fleet_cli
 from aisquare.cli.app import app
-from aisquare.models import FleetAgent, FleetAgentStatus, ProjectInfo, TeamSession
+from aisquare.models import FleetAgent, FleetAgentStatus, ProjectInfo, TeamSession, TeamTask
+from aisquare.services import fleet as fleet_service
 from aisquare.services.fleet import (
     FleetError,
     FleetUnavailable,
     NoSuchAgent,
     NoSuchProject,
     ReapReport,
+    ShutdownPlan,
+    ShutdownReport,
+    ShutdownRow,
     SpawnReceipt,
+    StopReceipt,
     TellResult,
 )
-
-_ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+from tests.rendered import plain as _plain
 
 NOW = datetime(2026, 8, 28, 12, 0, tzinfo=UTC)
 PROJECT = ProjectInfo(id="prj_01abc", root=Path("/home/me/work/api"), codename="amber-otter")
+#: Built once and compared through `str()`/`.name`, never against a hardcoded
+#: "/a/b" literal: `str(Path(...))` renders with the platform's separator, so a
+#: forward-slash expectation asserts the POSIX half of a contract the CLI keeps
+#: on both. Same class as the escaped-path assertions ported earlier.
+WORKTREE = Path("/home/me/work/api/.aisquare-worktrees/coder-auth")
 UNNAMED = ProjectInfo(id="prj_02def", root=Path("/home/me/oss/tool"), codename=None)
 SESSION = "asq-amber-otter"
-
-
-def _plain(text: str) -> str:
-    return " ".join(_ANSI.sub("", text).split())
 
 
 @pytest.fixture(autouse=True)
@@ -619,10 +623,102 @@ def test_tell_an_unknown_label_is_no_such_agent(
 # ── stop ─────────────────────────────────────────────────────────────────────
 
 
+def _released_task() -> TeamTask:
+    """A task a stop returned to the pool, as ``StopReceipt.released`` carries it."""
+    now = datetime.now(tz=UTC)
+    return TeamTask(
+        id="tsk_01x",
+        project_id=PROJECT.id,
+        key="k",
+        title="the task it held",
+        status="todo",
+        created_at=now,
+        updated_at=now,
+    )
+
+
+@pytest.mark.parametrize("command", ["shutdown", "reap"])
+def test_all_and_project_together_are_refused(
+    command: str, runner: CliRunner, resolved: Seen, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of the fold. ``--all`` won silently: ``fleet shutdown --project alpha
+    --all --yes``, meant as alpha, took every project's fleet down with nothing
+    saying the project flag had been discarded. The two name different scopes;
+    both at once is refused before the service is asked anything."""
+    service = _install(monkeypatch, command, RuntimeError("the service must not be called"))
+
+    confirm = ["--yes"] if command == "shutdown" else []  # reap asks nothing
+    result = runner.invoke(app, ["fleet", command, "--project", "alpha", "--all", *confirm])
+
+    assert result.exit_code != 0
+    assert "--all and --project conflict" in _plain(result.output)
+    assert service.calls == [], "refused before the service was asked"
+
+
+def test_shutdown_with_stuck_claims_says_so_in_the_header_and_the_exit_code(
+    runner: CliRunner, resolved: Seen, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of the fold. ``release_failures`` was printed as a ⚠ line under a
+    ``✓ fleet shut down`` header and exit 0, so a cutover script gating on the
+    code proceeded while two tasks stayed claimed by dead sessions. Every row
+    is down — not PARTLY — but the header counts the refusals and the code
+    is non-zero."""
+    report = ShutdownReport(
+        stopped=[_agent("coder-auth", ended=True, exit_status=0)],
+        sessions_killed=[f"asq:{SESSION}"],
+        release_failures=[
+            "coder-auth: could not be released (OperationalError: database is locked)"
+        ],
+    )
+    _install(monkeypatch, "shutdown", report)
+
+    result = runner.invoke(app, ["fleet", "shutdown", "--yes", "--force"])
+
+    assert result.exit_code == 1
+    out = _plain(result.stdout)
+    assert (
+        "⚠ fleet shut down: 1 stopped, 0 recorded lost, 0 left live, 1 claim release(s) refused"
+        in out
+    )
+    assert "PARTLY" not in out, "every row is down; the claims are what is stuck"
+    assert (
+        "⚠ claims of coder-auth: could not be released (OperationalError: database is locked)"
+        in out
+    )
+
+
+def test_an_interrupted_shutdown_prints_how_far_it_got_and_exits_130(
+    runner: CliRunner, resolved: Seen, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 5. Ctrl-C used to propagate past the report to Click's `Aborted!`:
+    rows already ended and claims already released, and the operator told
+    nothing. The interrupt carries the report; the code says it was not the
+    whole fleet."""
+    report = ShutdownReport(
+        stopped=[_agent("manager", "manager", ended=True, exit_status=0)],
+        claims_released=["tsk_01x"],
+        interrupted=(
+            "interrupted while stopping coder-auth; the rest of the fleet was left as it was"
+        ),
+    )
+    _install(monkeypatch, "shutdown", fleet_service.FleetInterrupted(report))
+
+    result = runner.invoke(app, ["fleet", "shutdown", "--yes", "--force"])
+
+    assert result.exit_code == 130
+    out = _plain(result.stdout)
+    assert "⚠ fleet PARTLY shut down: 1 stopped" in out
+    assert "💤 manager (exit 0)" in out, "the row already down is named"
+    assert "🔓 1 claimed task(s) released back to the board" in out
+    assert "interrupted while stopping coder-auth" in out and "fleet ls --all" in out
+
+
 def test_stop_confirms_and_passes_force_through(
     runner: CliRunner, resolved: Seen, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    stop = _install(monkeypatch, "stop", _agent("coder-auth", ended=True, exit_status=0))
+    stop = _install(
+        monkeypatch, "stop", StopReceipt(_agent("coder-auth", ended=True, exit_status=0), [])
+    )
 
     gentle = runner.invoke(app, ["fleet", "stop", "coder-auth"])
     assert gentle.exit_code == 0, gentle.output
@@ -637,16 +733,329 @@ def test_stop_confirms_and_passes_force_through(
 def test_stop_json_returns_the_agent_row(
     runner: CliRunner, resolved: Seen, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _install(monkeypatch, "stop", _agent("coder-auth", ended=True, exit_status=0))
+    released = _released_task()
+    _install(
+        monkeypatch,
+        "stop",
+        StopReceipt(_agent("coder-auth", ended=True, exit_status=0), [released]),
+    )
 
     result = runner.invoke(app, ["--json", "fleet", "stop", "coder-auth"])
 
     assert result.exit_code == 0, result.output
     payload = json.loads(result.stdout)
-    assert set(payload) == {"agent"}
+    assert set(payload) == {"agent", "claims_released", "release_failed"}
     assert payload["agent"]["label"] == "coder-auth"
     assert payload["agent"]["ended_at"] is not None
     assert payload["agent"]["exit_status"] == 0
+    assert payload["claims_released"] == ["tsk_01x"], "what the stop returned to the pool"
+    assert payload["release_failed"] is None
+
+
+def test_stop_names_the_claims_it_released(
+    runner: CliRunner, resolved: Seen, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The work a stop returns to the pool is the one thing the next agent
+    inherits from this one, so it is named, not counted (review of #203)."""
+    released = _released_task()
+    _install(
+        monkeypatch,
+        "stop",
+        StopReceipt(_agent("coder-auth", ended=True, exit_status=0), [released]),
+    )
+
+    result = runner.invoke(app, ["fleet", "stop", "coder-auth"])
+
+    assert result.exit_code == 0, result.output
+    out = _plain(result.stdout)
+    assert "🔓 1 claimed task(s) released back to the board" in out, (
+        "the one line every command uses"
+    )
+    assert "· the task it held (tsk_01x)" in out, "and the receipt's tasks named under it"
+
+
+def test_stop_says_when_the_release_was_refused(
+    runner: CliRunner, resolved: Seen, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The row is down; the claims that stayed with the ended session are the
+    operator's to know about, not a swallowed exception's (review of the fold)."""
+    refused = (
+        "could not be released (OperationalError: database is locked) — they stay with the "
+        "ended session until the lease lapses"
+    )
+    _install(
+        monkeypatch,
+        "stop",
+        StopReceipt(_agent("coder-auth", ended=True, exit_status=0), [], release_failed=refused),
+    )
+
+    result = runner.invoke(app, ["fleet", "stop", "coder-auth"])
+
+    assert result.exit_code == 1, "one contract with shutdown: a stuck claim is not a clean stop"
+    out = _plain(result.stdout)
+    assert "✓ stopped coder-auth" in out
+    assert f"⚠ claims: {refused}" in out
+
+    as_json = runner.invoke(app, ["--json", "fleet", "stop", "coder-auth"])
+    assert as_json.exit_code == 1, "and the two output modes agree"
+    assert json.loads(as_json.stdout)["release_failed"] == refused
+
+
+# ── shutdown ─────────────────────────────────────────────────────────────────
+
+
+def _plan(**overrides: object) -> ShutdownPlan:
+    base: dict[str, object] = {
+        "projects": [PROJECT],
+        "agents": [_agent("coder-auth"), _agent("manager", "manager", pane="%9")],
+        "sessions": [f"asq:{SESSION}"],
+        "absent_sockets": [],
+    }
+    return ShutdownPlan(**{**base, **overrides})  # type: ignore[arg-type]
+
+
+def _report(**overrides: object) -> ShutdownReport:
+    """A report whose groups can COEXIST — the shape the service actually produces.
+
+    The first draft's fixture could not: it put ``manager`` in ``recorded`` while
+    ``servers_killed`` named the very socket that row's ``tmux_socket`` points at,
+    so the CLI's "its server was not running" was pinned against a state the
+    service cannot reach. Reasons come from the service now, so a fixture cannot
+    invent a cause.
+    """
+    return ShutdownReport(**overrides)  # type: ignore[arg-type]
+
+
+def test_shutdown_prints_the_plan_and_is_a_dry_run_off_a_terminal(
+    runner: CliRunner, resolved: Seen, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """It ends running work, so it is confirmable the way ``project prune`` is."""
+    plan = _install(monkeypatch, "shutdown_plan", _plan())
+    shutdown = _install(monkeypatch, "shutdown", _report())
+
+    result = runner.invoke(app, ["fleet", "shutdown"])
+
+    assert result.exit_code == 0, result.output
+    out = _plain(result.stdout)
+    assert "about to shut down 2 agent(s) and kill 1 fleet session(s)" in out
+    assert "💤 coder-auth · amber-otter — stopped (%7)" in out
+    assert f"⌧ tmux session asq:{SESSION}" in out
+    assert "dry run: nothing stopped" in out and "--yes" in out
+    assert shutdown.calls == [], "the plan must not shut anything down"
+    assert plan.args == (PROJECT,)
+
+
+def test_shutdown_asks_at_a_terminal_and_stops_nothing_when_the_answer_is_no(
+    runner: CliRunner, resolved: Seen, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _install(monkeypatch, "shutdown_plan", _plan())
+    shutdown = _install(monkeypatch, "shutdown", _report())
+    monkeypatch.setattr("aisquare.cli.fleet._stdin_is_a_terminal", lambda: True)
+    asked: list[tuple[str, bool]] = []
+
+    def confirm(text: str, *, default: bool = True, **kwargs: object) -> bool:
+        asked.append((text, default))
+        return False
+
+    monkeypatch.setattr("aisquare.cli.fleet.typer.confirm", confirm)
+
+    refused = runner.invoke(app, ["fleet", "shutdown"])
+
+    assert refused.exit_code == 0, refused.output
+    assert asked == [("Shut down 2 agents and 1 tmux session?", False)], (
+        "both numbers, and the default is NOT to do it"
+    )
+    assert "nothing stopped" in _plain(refused.stdout)
+    assert shutdown.calls == []
+
+    monkeypatch.setattr("aisquare.cli.fleet.typer.confirm", lambda *a, **k: True)
+    agreed = runner.invoke(app, ["fleet", "shutdown"])
+
+    assert agreed.exit_code == 0, agreed.output
+    assert shutdown.calls[-1] == ((PROJECT,), {"force": False})
+
+
+def test_shutdown_asks_about_the_sessions_when_no_agent_is_live(
+    runner: CliRunner, resolved: Seen, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 8 of #203. A plan with no live agent and one leftover session — the
+    ordinary shape after a clean stop pass — asked "Shut down 0 agents?" while
+    the real effect, killing the session, sat only in the lines above. The
+    destructive prompt names what the run is about to do."""
+    plan = _plan()
+    plan = type(plan)(
+        projects=plan.projects, agents=[], sessions=["asq:asq-ruby-fox"], absent_sockets=[]
+    )
+    _install(monkeypatch, "shutdown_plan", plan)
+    _install(monkeypatch, "shutdown", _report())
+    monkeypatch.setattr("aisquare.cli.fleet._stdin_is_a_terminal", lambda: True)
+    asked: list[str] = []
+
+    def confirm(text: str, *, default: bool = True, **kwargs: object) -> bool:
+        asked.append(text)
+        return False
+
+    monkeypatch.setattr("aisquare.cli.fleet.typer.confirm", confirm)
+    runner.invoke(app, ["fleet", "shutdown"])
+    assert asked == ["Shut down 1 tmux session?"]
+
+
+def test_shutdown_reports_each_row_with_the_reason_the_service_gave(
+    runner: CliRunner, resolved: Seen, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Three groups at once, which is reachable: a row stopped on an answering
+    socket, a row recorded because ITS socket did not answer, and a row LEFT LIVE
+    because ``stop`` saw its pane alive. The CLI prints the service's reason and
+    asserts no cause of its own."""
+    report = _report(
+        stopped=[_agent("coder-auth", ended=True, exit_status=0)],
+        recorded=[
+            ShutdownRow(
+                _agent("manager", "manager", pane="%9", ended=True),
+                "no server answered on socket 'asq-old'",
+            )
+        ],
+        failed=[
+            ShutdownRow(
+                _agent("tester-py311", "tester", pane="%11"),
+                "could not stop 'tester-py311' (send-keys failed) — its pane is still alive",
+            )
+        ],
+        sessions_killed=[f"asq:{SESSION}"],
+        sessions_left_up=["asq:asq-ruby-fox"],
+        servers_absent=["asq-old"],
+        claims_released=["tsk_01x"],
+        paused_cleared=["api"],
+    )
+    shutdown = _install(monkeypatch, "shutdown", report)
+
+    result = runner.invoke(app, ["fleet", "shutdown", "--yes", "--force"])
+
+    assert result.exit_code == 1, "the fleet is NOT down — said in the code as well as the report"
+    out = _plain(result.stdout)
+    assert "⚠ fleet PARTLY shut down: 1 stopped, 1 recorded lost, 1 left live" in out
+    assert f"sessions killed: asq:{SESSION}" in out
+    assert "💤 coder-auth (exit 0)" in out
+    assert "✗ manager recorded lost — no server answered on socket 'asq-old'" in out
+    assert "⚠ tester-py311 LEFT LIVE — could not stop 'tester-py311'" in out
+    assert "its pane is still alive" in out
+    assert "session asq:asq-ruby-fox left up" in out
+    assert "1 claimed task(s) released" in out
+    assert "fleet-paused signal on api was cleared" in out
+    assert "were NOT ended" in out, "the operator is told which rows they still own"
+    assert "was not running" not in out, "the CLI never asserts a cause the service did not give"
+    assert shutdown.calls[-1] == ((PROJECT,), {"force": True})
+
+
+def test_shutdown_all_never_resolves_a_project_and_a_clean_run_exits_zero(
+    runner: CliRunner, resolved: Seen, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    report = _report(
+        stopped=[_agent("coder-auth", ended=True)],
+        sessions_absent=[f"asq:{SESSION}"],
+    )
+    shutdown = _install(monkeypatch, "shutdown", report)
+
+    result = runner.invoke(app, ["fleet", "shutdown", "--all", "--yes"])
+
+    assert result.exit_code == 0, result.output
+    out = _plain(result.stdout)
+    assert "✓ fleet shut down: 1 stopped, 0 recorded lost, 0 left live" in out
+    assert "sessions killed: none" in out
+    assert f"session asq:{SESSION} was already gone with its last window" in out, (
+        "the ordinary shape: killing a session's last window takes the session with it"
+    )
+    assert "💤 coder-auth" in out and "(exit" not in out, "--force records no exit status"
+    assert shutdown.args == (None,) and resolved.calls == []
+
+
+def test_shutdown_json_carries_every_group_and_the_reasons(
+    runner: CliRunner, resolved: Seen, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    report = _report(
+        stopped=[_agent("coder-auth", ended=True, exit_status=0)],
+        recorded=[ShutdownRow(_agent("manager", "manager", ended=True), "no server answered")],
+        sessions_absent=[f"asq:{SESSION}"],
+    )
+    _install(monkeypatch, "shutdown", report)
+
+    result = runner.invoke(app, ["--json", "fleet", "shutdown", "--yes"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert set(payload) == {
+        "stopped",
+        "recorded",
+        "failed",
+        "sessions_killed",
+        "sessions_absent",
+        "sessions_failed",
+        "sessions_left_up",
+        "servers_absent",
+        "claims_released",
+        "release_failures",
+        "interrupted",
+        "paused_cleared",
+        "paused_kept",
+        "incomplete_projects",
+        "late_scan_failed",
+        "pause_scan_failed",
+    }
+    assert payload["stopped"][0]["label"] == "coder-auth"
+    assert payload["recorded"] == [
+        {"agent": report.recorded[0].agent.model_dump(mode="json"), "reason": "no server answered"}
+    ], "a machine gets the reason too — the causes are not interchangeable"
+    assert payload["failed"] == [] and payload["sessions_absent"] == [f"asq:{SESSION}"]
+
+
+def test_shutdown_json_without_yes_is_the_plan_and_changes_nothing(
+    runner: CliRunner, resolved: Seen, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _install(monkeypatch, "shutdown_plan", _plan(absent_sockets=["asq-old"], sessions=[]))
+    shutdown = _install(monkeypatch, "shutdown", _report())
+
+    result = runner.invoke(app, ["--json", "fleet", "shutdown"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["dry_run"] is True
+    assert [a["label"] for a in payload["agents"]] == ["coder-auth", "manager"]
+    assert payload["absent_sockets"] == ["asq-old"] and payload["sessions"] == []
+    assert shutdown.calls == []
+
+
+def test_shutdown_says_so_when_there_is_nothing_to_shut_down(
+    runner: CliRunner, resolved: Seen, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _install(monkeypatch, "shutdown_plan", ShutdownPlan())
+    shutdown = _install(monkeypatch, "shutdown", _report())
+
+    result = runner.invoke(app, ["fleet", "shutdown"])
+
+    assert result.exit_code == 0, result.output
+    assert "nothing to shut down" in _plain(result.stdout)
+    assert "dry run" not in result.stdout, "nothing to confirm is not a dry run"
+    assert shutdown.calls == []
+
+
+def test_shutdown_maps_a_refusal_onto_the_fail_contract(
+    runner: CliRunner, resolved: Seen, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The refusals are the point of the command: run from inside the fleet's own
+    server, or with a tmux that cannot be asked, it must say so — never a traceback,
+    and ``--json`` must still emit."""
+    _install(monkeypatch, "shutdown_plan", FleetError("fleet shutdown is running INSIDE …"))
+    _install(monkeypatch, "shutdown", _report())
+
+    human = runner.invoke(app, ["fleet", "shutdown"])
+    assert human.exit_code == 1
+    assert "INSIDE" in _plain(human.output)
+
+    _install(monkeypatch, "shutdown", FleetUnavailable("tmux is not installed"))
+    as_json = runner.invoke(app, ["--json", "fleet", "shutdown", "--yes"])
+    assert as_json.exit_code == 1
+    payload = json.loads(as_json.stdout)
+    assert payload["error"] == "fleet_unavailable" and "tmux" in payload["detail"]
 
 
 # ── attach ───────────────────────────────────────────────────────────────────
@@ -759,7 +1168,7 @@ def test_reap_names_what_it_found(
     report = ReapReport(
         ended=[_agent("coder-auth", ended=True, exit_status=0)],
         lost=[_agent("tester-py311", "tester", pane="%9", ended=True)],
-        worktrees_removed=[Path("/home/me/work/api/.aisquare-worktrees/coder-auth")],
+        worktrees_removed=[WORKTREE],
     )
     reap = _install(monkeypatch, "reap", report)
 
@@ -770,7 +1179,7 @@ def test_reap_names_what_it_found(
     assert "✓ reaped: 1 ended, 1 lost, 1 worktrees removed" in out
     assert "💤 coder-auth (exit 0)" in out
     assert "✗ tester-py311 pane %9 gone" in out
-    assert ".aisquare-worktrees/coder-auth" in out
+    assert str(WORKTREE) in out
     assert reap.args == (PROJECT,)
 
 
@@ -806,7 +1215,7 @@ def test_reap_json(runner: CliRunner, resolved: Seen, monkeypatch: pytest.Monkey
     report = ReapReport(
         ended=[_agent("coder-auth", ended=True, exit_status=0)],
         lost=[],
-        worktrees_removed=[Path("/home/me/work/api/.aisquare-worktrees/coder-auth")],
+        worktrees_removed=[WORKTREE],
     )
     _install(monkeypatch, "reap", report)
 
@@ -814,10 +1223,35 @@ def test_reap_json(runner: CliRunner, resolved: Seen, monkeypatch: pytest.Monkey
 
     assert result.exit_code == 0, result.output
     payload = json.loads(result.stdout)
-    assert set(payload) == {"ended", "lost", "worktrees_removed"}
+    assert set(payload) == {
+        "ended",
+        "lost",
+        "worktrees_removed",
+        "claims_released",
+        "release_failures",
+    }
     assert [a["label"] for a in payload["ended"]] == ["coder-auth"]
+    assert payload["claims_released"] == []
     assert payload["lost"] == []
-    assert payload["worktrees_removed"] == ["/home/me/work/api/.aisquare-worktrees/coder-auth"]
+    assert payload["worktrees_removed"] == [str(WORKTREE)]
+
+
+def test_reap_names_a_refused_release_and_exits_1(
+    runner: CliRunner, resolved: Seen, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 5: the same contract as `stop` and `shutdown` for the same fact."""
+    report = ReapReport(
+        ended=[_agent("coder-auth", ended=True, exit_status=0)],
+        release_failures=["coder-auth: could not be released (OperationalError: locked)"],
+    )
+    _install(monkeypatch, "reap", report)
+
+    result = runner.invoke(app, ["fleet", "reap"])
+
+    assert result.exit_code == 1
+    assert "⚠ claims of coder-auth: could not be released (OperationalError: locked)" in _plain(
+        result.stdout
+    )
 
 
 # ── rename ───────────────────────────────────────────────────────────────────
@@ -933,7 +1367,7 @@ def test_pause_of_an_unknown_project_is_not_found(
         (["fleet", "ls"], {"list_agents": [_status(_agent())]}),
         (["fleet", "status"], {"list_agents": []}),
         (["fleet", "tell", "coder-auth", "hi"], {"tell": TellResult(True, "typed")}),
-        (["fleet", "stop", "coder-auth"], {"stop": _agent()}),
+        (["fleet", "stop", "coder-auth"], {"stop": StopReceipt(_agent(), [])}),
         (["fleet", "attach"], {"attach_argv": list(ATTACH_ARGV)}),
         (["fleet", "reap"], {"reap": ReapReport()}),
         (["fleet", "rename", "ruby-fox"], {"rename": PROJECT}),

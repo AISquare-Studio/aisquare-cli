@@ -140,7 +140,52 @@ set -g visual-activity off
 set -g allow-rename off
 set -g automatic-rename off
 set -g renumber-windows off
+# No prefix key (#147). `fleet attach` is a raw tmux client, and tmux's default
+# C-b is Claude Code's "background running tasks": every key goes to the agent,
+# and F12 detaches the client — the same key that hands focus back to the
+# sidebar in the UI. The UI's own path (`send-keys`) never met the prefix.
+set -g prefix None
+set -g prefix2 None
+bind-key -n F12 detach-client
+# A new client's desktop lands in the session's environment (tmux's default
+# list has DISPLAY and the SSH agent; these are the rest of what a re-login
+# changes), so windows made after `fleet attach` see the current display, bus
+# and colour facts. The UI's spawns carry them per window as well (#147,
+# services.fleet — a window inherits the SERVER's environment otherwise).
+set -ga update-environment WAYLAND_DISPLAY
+set -ga update-environment XDG_RUNTIME_DIR
+set -ga update-environment DBUS_SESSION_BUS_ADDRESS
+set -ga update-environment COLORTERM
+set -ga update-environment TERM_PROGRAM
 """
+
+#: What a re-login changes and a window inherits stale from the server it was
+#: spawned on (#147): the display (image paste, notifications, `xdg-open`), the
+#: user bus, the runtime dir, the SSH agent socket, and the two facts Claude Code
+#: reads about the terminal's colour and make. Set on each window at spawn
+#: (``new-window -e``) from the SPAWNER's environment; also the names the
+#: bundled conf adds to ``update-environment`` for ``fleet attach``.
+DESKTOP_ENV_VARS: tuple[str, ...] = (
+    "DISPLAY",
+    "WAYLAND_DISPLAY",
+    "XDG_RUNTIME_DIR",
+    "DBUS_SESSION_BUS_ADDRESS",
+    "SSH_AUTH_SOCK",
+    "COLORTERM",
+    "TERM_PROGRAM",
+)
+
+
+def desktop_environment(environ: Mapping[str, str] | None = None) -> dict[str, str]:
+    """The :data:`DESKTOP_ENV_VARS` this process has, to set on a window it spawns.
+
+    Only the variables that ARE set travel: an unset one here says nothing about
+    the server's copy (a headless spawn from a cron job must not blank the
+    display of an agent started from a desktop), and ``-e`` can only set.
+    """
+    source = os.environ if environ is None else environ
+    return {name: source[name] for name in DESKTOP_ENV_VARS if source.get(name, "").strip()}
+
 
 #: Separator for multi-field ``display-message`` output. Never appears in a pane
 #: id, a size or a flag; a command name or title containing it would be perverse.
@@ -162,6 +207,8 @@ _FACTS_FIELDS = (
     "pane_current_command",
     "mouse_any_flag",
     "mouse_sgr_flag",
+    "mouse_button_flag",
+    "mouse_all_flag",
     "pane_title",
 )
 _FACTS_FORMAT = _SEP.join(f"#{{{name}}}" for name in _FACTS_FIELDS)
@@ -176,6 +223,14 @@ _WINDOW_FIELDS = (
 )
 _WINDOW_FORMAT = _SEP.join(f"#{{{name}}}" for name in _WINDOW_FIELDS)
 _VERSION = re.compile(r"(\d+)\.(\d+)")
+#: The first tmux whose ``capture-pane`` takes ``-F`` (a flags column before each
+#: line: ``-`` none, ``W`` wrapped into the next, ``X`` extended cells, …).
+#: Measured on 3.7c, where ``-p -e -N -F`` prints ``W <escapes><text>`` per row;
+#: 3.4 and 3.5 document no such flag, and tmux's CHANGES file does not date it,
+#: so the gate is the version it was measured on. A server below it is asked
+#: for plain frames: an unknown flag fails the whole capture, and a frame is
+#: worth more than a wrap mark.
+WRAP_FLAGS_MINIMUM: tuple[int, int] = (3, 7)
 _ABSENT = re.compile(r"no server running on |error connecting to .*\(No such file or directory\)")
 """tmux's two ways of saying there is no server behind a socket (see ``server_absent``)."""
 #: Characters tmux reads as target separators; a session named with one can be
@@ -199,6 +254,14 @@ class TmuxError(RuntimeError):
 
 class TmuxUnavailable(TmuxError):
     """No usable tmux: missing from PATH, or older than :data:`MIN_VERSION`."""
+
+
+#: How tmux says a LIVE server has no such session/window/pane — a benign
+#: "not there", distinct from the server being GONE (:data:`_ABSENT`) and from a
+#: socket that refused the probe. Measured on 3.7c: ``can't find session: NAME``
+#: (``has-session``) and ``can't find window: NAME`` (``list-panes``); a refusal
+#: reads ``(Permission denied)`` and matches neither, so a strict query raises.
+_NO_TARGET = re.compile(r"can't find ")
 
 
 @dataclass(frozen=True)
@@ -277,6 +340,11 @@ class PaneFacts:
     ``?1003``) — it wants the wheel itself. Claude Code's fullscreen TUI does."""
     mouse_sgr: bool = False
     """…and asked for SGR encoding (``?1006``), the form every modern program uses."""
+    mouse_drag: bool = False
+    """…and asked for motion while a button is held (``?1002``, button-event
+    tracking) or for every motion (``?1003``). Without either, a program gets
+    presses and releases only, and a drag forwarded to it would be a report it
+    never asked for (#148)."""
 
 
 @dataclass(frozen=True)
@@ -290,6 +358,13 @@ class Capture:
 
     The EFFECTIVE offset: tmux clamps a request deeper than ``facts.history_size``
     to the top of history, and this reports where the frame really starts.
+    """
+    wrapped: list[bool] | None = None
+    """Per row of ``lines``, whether tmux soft-wrapped it into the row below —
+    the ``W`` of ``capture-pane -F`` — or ``None`` when the flags were not asked
+    for (:meth:`TmuxServer.capture` with ``flags=False``, the default). Read
+    with the frame they describe, so a copy that joins wrapped rows joins the
+    rows it shows and never rows a later screen would have shown.
     """
 
 
@@ -310,6 +385,13 @@ class WindowInfo:
     NOT "is printing now"; compare ``PaneFacts.history_size`` and the cursor
     between frames for that (see the module docstring). Kept because it is what
     tmux says and an attached client does clear it."""
+    resize_refused: str | None = None
+    """Set by :meth:`TmuxServer.spawn_window` alone: tmux's words when it refused
+    the resize that gives a window added to an existing session its geometry, so
+    the window runs at the session's size (#149). ``None`` when that resize
+    landed, when there was none to make, and on every window a listing reports.
+    The spawn fails open on it; this is how the refusal still reaches the
+    caller's receipt (review of #162, round 1)."""
 
 
 def _int(value: str, default: int = 0) -> int:
@@ -348,6 +430,7 @@ def _facts(line: str) -> PaneFacts:
         title=values["pane_title"],
         mouse_on=values["mouse_any_flag"] == "1",
         mouse_sgr=values["mouse_sgr_flag"] == "1",
+        mouse_drag=values["mouse_button_flag"] == "1" or values["mouse_all_flag"] == "1",
     )
 
 
@@ -380,6 +463,24 @@ def _data_arg(value: str) -> str:
     if value.endswith(_ARGV_SEPARATOR):
         return value[:-1] + "\\" + _ARGV_SEPARATOR
     return value
+
+
+DEFAULT_WINDOW_WIDTH = 120
+DEFAULT_WINDOW_HEIGHT = 40
+"""The geometry a window is born with when nobody says (#149).
+
+It was 200x50, and the number that matters is 144: Claude Code's fullscreen
+renderer opens its diff panel BY ITSELF "once Claude starts editing files, if
+your terminal is at least 144 columns wide" (interactive-mode reference, "Diff
+panel"), and remembers "opened once → open on every edit" for the session and
+later ones. Every headless spawn — a manager starting coders, a `fleet spawn`
+with no UI open — therefore ran wide enough to grow a panel the UI could
+neither close (clicks are not forwarded, #148) nor reach with `/diff` while
+Claude was busy (typed input is queued). 120 keeps a headless window under that
+line and above 110, the width Claude Code needs to open the panel ON DEMAND
+(`/diff`), so nothing is lost; a window the UI shows adopts the pane's real
+size on first attach (``TerminalPane._sync_size``), as before.
+"""
 
 
 class TmuxServer:
@@ -576,9 +677,44 @@ class TmuxServer:
             return []
         return [line for line in completed.stdout.splitlines() if line]
 
+    def sessions_or_raise(self) -> list[str]:
+        """:meth:`list_sessions`, except a server that could not be ASKED raises.
+
+        The lenient twin returns ``[]`` for EVERY non-zero exit, so its caller
+        cannot tell an empty or absent server from one it failed to reach — the
+        class of bug the review kept finding at one more shutdown call site
+        (review of #121, round 8). Here ``[]`` means only what tmux confirmed: a
+        server that is gone (:data:`_ABSENT`) holds no sessions. Anything else
+        non-zero is a :class:`TmuxError` carrying tmux's own words, so the
+        ``--all`` sweep cannot read a denied socket as "no sessions to kill".
+        """
+        completed = self._runner(self.argv("list-sessions", "-F", "#{session_name}"), None)
+        if completed.returncode == 0:
+            return [line for line in completed.stdout.splitlines() if line]
+        if _ABSENT.search(completed.stderr):
+            return []
+        raise TmuxError(completed.stderr.strip() or "tmux list-sessions could not be reached")
+
     def has_session(self, name: str) -> bool:
         completed = self._runner(self.argv("has-session", "-t", f"={name}"), None)
         return completed.returncode == 0
+
+    def has_session_or_raise(self, name: str) -> bool:
+        """:meth:`has_session`, except a server that could not be ASKED raises.
+
+        ``False`` is the answer for a session tmux SAYS is not there — its server
+        gone (:data:`_ABSENT`), or a live server that holds no such session
+        (:data:`_NO_TARGET`) — never for a probe that could not run. The lenient
+        twin returns ``False`` on ANY non-zero exit, which let a denied socket
+        report an existing session as absent and clear its pause while the
+        session survived (review of #121, round 8).
+        """
+        completed = self._runner(self.argv("has-session", "-t", f"={name}"), None)
+        if completed.returncode == 0:
+            return True
+        if _ABSENT.search(completed.stderr) or _NO_TARGET.search(completed.stderr):
+            return False
+        raise TmuxError(completed.stderr.strip() or "tmux has-session could not be reached")
 
     def answers(self) -> bool:
         """Whether a server is listening on this socket at all — not what it holds.
@@ -597,13 +733,37 @@ class TmuxServer:
         set) also exits 0 with the version — where ``list-sessions`` exits 0
         with no output and is therefore indistinguishable from absence.
 
-        Never raises: an unavailable binary is not a server that answered.
+        Never raises: an unavailable binary is not a server that answered. A
+        caller that must tell "could not ask" from "no server" — the one place
+        that ends rows on that distinction is ``fleet shutdown``'s final pass —
+        uses :meth:`reachable`, which propagates :class:`TmuxUnavailable`.
         """
         try:
-            completed = self._runner(self.argv("display-message", "-p", "#{version}"), None)
-        except TmuxUnavailable:
+            return self.reachable()
+        except TmuxError:  # unavailable client, denied socket, timeout: not an answer
             return False
-        return completed.returncode == 0
+
+    def reachable(self) -> bool:
+        """:meth:`answers`, except that "could not ask" is raised, not swallowed.
+
+        :class:`TmuxUnavailable` covers both a binary ``which`` cannot find and
+        one that fails at EXECUTION — deleted between the check and the exec, or
+        a shim whose interpreter is gone — because ``_tmux`` maps the
+        ``FileNotFoundError`` from ``subprocess.run`` to the same class (review of
+        #121, round 5). And a non-zero exit is NOT proof of absence: an
+        inaccessible LIVE socket also exits 1, with ``Permission denied`` where
+        an absent server says ``No such file or directory`` (round 7). So
+        ``False`` means exactly one thing — the client ran and tmux said there is
+        no server on this socket — and every other failed probe is a
+        :class:`TmuxError` carrying tmux's own words.
+        """
+        completed = self._runner(self.argv("display-message", "-p", "#{version}"), None)
+        if completed.returncode == 0:
+            return True
+        detail = completed.stderr.strip()
+        if _ABSENT.search(detail):
+            return False
+        raise TmuxError(detail or f"tmux display-message exited {completed.returncode}")
 
     def server_absent(self) -> bool:
         """Whether tmux itself says NO SERVER is behind this socket — positive evidence.
@@ -624,10 +784,16 @@ class TmuxServer:
         gets the second message for a fleet that is alive elsewhere. That is why
         ``fleet reap --server-down`` stays the operator's word — this predicate
         narrows what the word may act on, it does not replace it.
+
+        A question that could not be put — no client, a wedged server's 30 s
+        timeout, an OS refusal — is no evidence either, like :meth:`answers`.
+        Catching the missing client alone let a timeout raise straight through
+        ``reap --server-down``, the command ``doctor`` prescribes for exactly
+        the silent server that times out (round 7 of #203).
         """
         try:
             completed = self._runner(self.argv("display-message", "-p", "#{version}"), None)
-        except TmuxUnavailable:
+        except TmuxError:  # TmuxUnavailable included
             return False
         if completed.returncode == 0:
             return False
@@ -641,12 +807,18 @@ class TmuxServer:
         cwd: Path,
         command: Sequence[str],
         env: Mapping[str, str] | None = None,
-        width: int = 200,
-        height: int = 50,
+        width: int = DEFAULT_WINDOW_WIDTH,
+        height: int = DEFAULT_WINDOW_HEIGHT,
     ) -> WindowInfo:
         """A new window named ``name`` running ``command`` — creating the session if needed.
 
-        ``env`` pairs are set for the new window only (``-e``); the command is
+        ``env`` pairs are set for the new window (``-e``) and are THIS WINDOW'S
+        ALONE. When the window opens a new session tmux also writes them into
+        the session environment, which every window opened later in that
+        session inherits; they are taken back out
+        (:meth:`_forget_session_environment`), so a window opened by hand in
+        the session inherits the server's environment and nothing of any
+        agent's. The command is
         passed as separate arguments and executed directly, never through a
         shell, so no shell re-interprets it. TMUX still would: an argument that
         ends in ``;`` ends the tmux command even after ``--`` and runs the rest
@@ -654,10 +826,36 @@ class TmuxServer:
         would kill every agent), so ``name``, ``cwd``, ``env`` and every element
         of ``command`` go through :func:`_data_arg` and arrive verbatim.
 
-        ``width``/``height`` size a NEW session's first window; a window added
-        to an existing session takes the session's default size until
-        :meth:`resize`, which also pins that window to manual sizing (the global
-        ``window-size manual`` crashes tmux 3.4 — see :data:`BUNDLED_CONF`).
+        ``width``/``height`` size the window either way. A NEW session's first
+        window takes them on ``new-session -x -y``; a window added to an
+        EXISTING session is born at the session's size — 200x50 for every
+        session made before #149, or whatever its first window was — or, while
+        a ``fleet attach`` client is attached, at that client's size, and is
+        therefore resized right after ``new-window`` through :meth:`resize`,
+        which also pins it to manual sizing (the global ``window-size manual``
+        crashes tmux 3.4 — see :data:`BUNDLED_CONF`). Without that second
+        step a coder spawned into a running manager's session was wide enough
+        for Claude Code to open its diff panel on its own (#149).
+
+        The pin is kept on purpose. Under tmux's default ``window-size latest``
+        an unpinned window follows an attached terminal and keeps that width
+        after the terminal detaches, and a window born while one is attached
+        takes its size whatever the session's ``default-size`` says (both
+        measured on 3.7c, at 230 columns with ``default-size 120x40``) — so
+        neither leaving the window unpinned nor sizing the session instead
+        keeps a coder under 144 columns across a wide ``fleet attach`` (review
+        of #162, round 1). The cost: under ``fleet attach`` such a window keeps
+        its own size, panned in a smaller terminal and padded in a larger one.
+        The session's first window gets no resize, so it follows an attached
+        terminal until a pane has shown it.
+
+        The resize fails open: a window tmux refuses to resize is still
+        returned, at the session's size, with tmux's words in
+        :attr:`WindowInfo.resize_refused` so the caller can say why. A pane's
+        first attach corrects that size (``TerminalPane._sync_size``); a
+        headless window keeps it until a pane shows it — nothing sizes a
+        window nobody opens.
+
         Refuses a ``session`` no other method here could target afterwards and
         a ``cwd`` that is not a directory (tmux would use ``$HOME`` silently).
         """
@@ -670,7 +868,8 @@ class TmuxServer:
         ]
         args = [_data_arg(arg) for arg in command]
         fmt = f"#{{window_id}}{_SEP}#{{pane_id}}"
-        if self.has_session(session):
+        existing = self.has_session(session)
+        if existing:
             out = self.run(
                 "new-window", "-d", "-P", "-F", fmt, "-t", f"={session}:", "-n", _data_arg(name),
                 "-c", _data_arg(str(cwd)), *env_flags, "--", *args,
@@ -682,7 +881,22 @@ class TmuxServer:
                 "-x", str(width), "-y", str(height), *env_flags,
                 "--", *args,
             )  # fmt: skip
+            self._forget_session_environment(session, env)
         window_id, _, pane_id = out.strip().partition(_SEP)
+        refused: str | None = None
+        if existing and pane_id:
+            # Born at the session's size, not the caller's (see the docstring);
+            # the resize is what makes the geometry argument mean the same
+            # thing on both branches. Fail-open: the window exists and is
+            # recorded whatever tmux says about its size — a refused resize
+            # costs geometry, never the agent. The geometry is the session's:
+            # a pane that shows the window resizes it (the UI's own sync, which
+            # retries); a headless window keeps it until a pane shows it, so the
+            # refusal is handed back rather than swallowed.
+            try:
+                self.resize(pane_id, width, height)
+            except TmuxError as exc:
+                refused = str(exc)
         return WindowInfo(
             session=session,
             window_id=window_id,
@@ -692,17 +906,39 @@ class TmuxServer:
             dead_status=None,
             current_command=command[0] if command else "",
             activity=False,
+            resize_refused=refused,
         )
 
-    def list_windows(self, session: str) -> list[WindowInfo]:
-        """Every window (one pane each) of ``session``; empty when it does not exist."""
-        completed = self._runner(
-            self.argv("list-panes", "-s", "-t", f"={session}", "-F", _WINDOW_FORMAT), None
-        )
-        if completed.returncode != 0:
-            return []
+    def _forget_session_environment(self, session: str, env: Mapping[str, str] | None) -> None:
+        """Take the first window's ``-e`` pairs back out of the SESSION environment.
+
+        ``new-window -e`` sets a variable for that window alone, but
+        ``new-session -e`` writes it into the session environment, which every
+        later window of the session inherits — measured on 3.7c:
+        ``show-environment`` listed it, a window opened by hand read it, and
+        after ``set-environment -u`` a third window did not. Every pair goes,
+        because every pair is one agent's: ``AISQUARE_FLEET_AGENT`` is an
+        identity, so a window the operator opens by hand in the fleet's session
+        (``prefix c``, ``fleet attach``) would have called itself the first
+        agent (review of #135); the account pins are one agent's slot and
+        aisquare home, so a later ``fleet spawn`` with no ``--account`` — which
+        sets none of its own — ran under whichever account the FIRST spawn of
+        the session happened to use, wrong slot and wrong ``context.db``; and
+        the native-teams opt-out is for "the sessions the fleet starts — a
+        user's own ``claude`` sessions keep whatever they had" (§7.6), which a
+        hand-opened window is (review of #203, rounds 3 and 4). What a later
+        window needs, its own spawn sets. The process in the first window
+        already has its copy; only the session's is removed. Best effort,
+        because the window is up either way: a failed unset costs exactly the
+        leak it was closing.
+        """
+        for key in env or {}:
+            with contextlib.suppress(TmuxError):
+                self.run("set-environment", "-u", "-t", f"={session}", _data_arg(key))
+
+    def _parse_windows(self, session: str, stdout: str) -> list[WindowInfo]:
         windows: list[WindowInfo] = []
-        for line in completed.stdout.splitlines():
+        for line in stdout.splitlines():
             fields = line.split(_SEP)
             if len(fields) != len(_WINDOW_FIELDS):
                 continue
@@ -721,6 +957,35 @@ class TmuxServer:
             )
         return windows
 
+    def list_windows(self, session: str) -> list[WindowInfo]:
+        """Every window (one pane each) of ``session``; empty when it does not exist."""
+        completed = self._runner(
+            self.argv("list-panes", "-s", "-t", f"={session}", "-F", _WINDOW_FORMAT), None
+        )
+        if completed.returncode != 0:
+            return []
+        return self._parse_windows(session, completed.stdout)
+
+    def windows_or_raise(self, session: str) -> list[WindowInfo]:
+        """:meth:`list_windows`, except a server that could not be ASKED raises.
+
+        ``[]`` is the answer only for a session tmux CONFIRMS is not there — its
+        server gone (:data:`_ABSENT`) or the session itself (:data:`_NO_TARGET`).
+        The lenient twin's ``[]`` on any non-zero exit let a transient socket
+        failure read as "this session holds no left-live pane", and a session
+        whose agent was verified alive was killed anyway (review of #121, round
+        8). So the spare rule fails closed: it never kills on an enumeration
+        that did not answer.
+        """
+        completed = self._runner(
+            self.argv("list-panes", "-s", "-t", f"={session}", "-F", _WINDOW_FORMAT), None
+        )
+        if completed.returncode != 0:
+            if _ABSENT.search(completed.stderr) or _NO_TARGET.search(completed.stderr):
+                return []
+            raise TmuxError(completed.stderr.strip() or "tmux list-panes could not be reached")
+        return self._parse_windows(session, completed.stdout)
+
     def pane_facts(self, pane_id: str) -> PaneFacts | None:
         """The pane's facts, or ``None`` when the pane is gone.
 
@@ -735,6 +1000,51 @@ class TmuxServer:
         )
         if completed.returncode != 0:
             return None
+        facts = _facts(completed.stdout.rstrip("\n"))
+        if not facts.pane_id or (pane_id.startswith("%") and facts.pane_id != pane_id):
+            return None
+        return facts
+
+    def pane_pid(self, pane_id: str) -> int | None:
+        """The pid of the process tmux started in the pane, or ``None`` when it is gone.
+
+        Asked on its own rather than as one more :class:`PaneFacts` field: the
+        facts are polled for every frame of the UI, and this is read once per
+        session start by the hook that has to decide whether the process asking
+        is the pane's own (``services.team``). ``aisquare launch`` execs the
+        agent, so the pid tmux started IS the agent's — the number Claude Code
+        hands its hooks as ``CLAUDE_PID``. The same two shapes of "gone" as
+        :meth:`pane_facts` — a non-zero exit, and 3.7c's empty answer for a
+        target it could not find — and the same guard against an attached
+        client's current pane answering for the one that was asked about.
+        """
+        fmt = f"#{{pane_id}}{_SEP}#{{pane_pid}}"
+        completed = self._runner(self.argv("display-message", "-p", "-t", pane_id, fmt), None)
+        if completed.returncode != 0:
+            return None
+        answered, _, pid = completed.stdout.strip().partition(_SEP)
+        if not answered or (pane_id.startswith("%") and answered != pane_id):
+            return None
+        return _optional_int(pid)
+
+    def pane_facts_or_raise(self, pane_id: str) -> PaneFacts | None:
+        """:meth:`pane_facts`, except a server that could not be ASKED raises.
+
+        ``None`` means the pane is gone as tmux CONFIRMED it: an empty answer
+        from a live server (``display-message`` may miss its target and still
+        exit 0) or a server that is gone (:data:`_ABSENT`). A non-zero exit that
+        is neither — ``Permission denied`` on a live socket — is a
+        :class:`TmuxError`, not a dead pane. The lenient twin's ``None`` there
+        ended a still-running late agent's row and released its claims (review
+        of #121, round 8).
+        """
+        completed = self._runner(
+            self.argv("display-message", "-p", "-t", pane_id, _FACTS_FORMAT), None
+        )
+        if completed.returncode != 0:
+            if _ABSENT.search(completed.stderr):
+                return None
+            raise TmuxError(completed.stderr.strip() or "tmux display-message could not be reached")
         facts = _facts(completed.stdout.rstrip("\n"))
         if not facts.pane_id or (pane_id.startswith("%") and facts.pane_id != pane_id):
             return None
@@ -784,7 +1094,14 @@ class TmuxServer:
 
     # --- the screen -------------------------------------------------------------------
 
-    def capture(self, pane_id: str, *, scrollback: int = 0, height: int | None = None) -> Capture:
+    def capture(
+        self,
+        pane_id: str,
+        *,
+        scrollback: int = 0,
+        height: int | None = None,
+        flags: bool = False,
+    ) -> Capture:
         """One frame of ``pane_id`` — the rows with SGR escapes, plus the pane's facts.
 
         ``scrollback`` is how many history lines above the live screen the
@@ -798,25 +1115,53 @@ class TmuxServer:
         user is reading the top of a long run. A stale hint (the pane grew,
         or history shrank under a clear) yields a short frame, which is
         detected and refetched unbounded — one extra process, only then.
+
+        ``flags`` asks for ``-F`` as well, and the frame then carries which of
+        its rows tmux soft-wrapped (:attr:`Capture.wrapped`) — in the SAME
+        process, so a copy that joins wrapped rows never has to ask a second
+        time and compare two screens (review of #135). Only for a server that
+        knows the flag (:data:`WRAP_FLAGS_MINIMUM`): the caller checks the
+        version, because an unknown flag fails the whole frame.
         """
         scrollback = max(0, scrollback)
         bound = height if scrollback and height is not None and height > 0 else None
-        rows, facts = self._frame(pane_id, scrollback, bound)
+        rows, wrapped, facts = self._frame(pane_id, scrollback, bound, flags)
         if bound is not None and len(rows) < facts.height:
-            rows, facts = self._frame(pane_id, scrollback, None)
+            rows, wrapped, facts = self._frame(pane_id, scrollback, None, flags)
         effective = min(scrollback, facts.history_size)
-        return Capture(lines=rows[: facts.height], facts=facts, scrollback=effective)
+        return Capture(
+            lines=rows[: facts.height],
+            facts=facts,
+            scrollback=effective,
+            wrapped=None if wrapped is None else wrapped[: facts.height],
+        )
 
     def _frame(
-        self, pane_id: str, scrollback: int, height: int | None
-    ) -> tuple[list[str], PaneFacts]:
+        self, pane_id: str, scrollback: int, height: int | None, flags: bool
+    ) -> tuple[list[str], list[bool] | None, PaneFacts]:
         window = ["-E", str(height - 1 - scrollback)] if height is not None else []
+        marks = ["-F"] if flags else []
         out = self.run(
-            "capture-pane", "-p", "-e", "-N", "-S", str(-scrollback), *window, "-t", pane_id,
+            "capture-pane", "-p", "-e", "-N", *marks, "-S", str(-scrollback), *window,
+            "-t", pane_id,
             ";", "display-message", "-p", "-t", pane_id, _FACTS_FORMAT,
         )  # fmt: skip
         body = out.rstrip("\n").split("\n")
-        return body[:-1], _facts(body[-1])
+        rows, facts = body[:-1], _facts(body[-1])
+        if not flags:
+            return rows, None, facts
+        # ``-F`` puts the line's flags, then one space, before the line — before
+        # its escapes too (measured on 3.7c: ``W \x1b[31m…``). A blank row is
+        # ``- `` and an empty flags column never happens, so ``partition`` is
+        # exact; a flag other than ``W`` (``X`` extended cells, ``H`` hyperlinks)
+        # rides in the same column and is ignored here.
+        lines: list[str] = []
+        wrapped: list[bool] = []
+        for row in rows:
+            mark, _, text = row.partition(" ")
+            lines.append(text)
+            wrapped.append("W" in mark)
+        return lines, wrapped, facts
 
     # --- input --------------------------------------------------------------------------
 
@@ -869,6 +1214,20 @@ class TmuxServer:
             # paste's, never the tidy-up's.
             with contextlib.suppress(TmuxError):
                 self.run("delete-buffer", "-b", buffer_name)
+            raise
+
+    def show_buffer(self) -> str | None:
+        """The newest paste buffer's text, or ``None`` when the server holds none.
+
+        ``show-buffer`` without ``-b`` prints the most recently used buffer, as
+        the program wrote it. A server with no buffers answers ``no buffers`` and
+        exits 1 — an answer, not a failure; every other error is raised.
+        """
+        try:
+            return self.run("show-buffer")
+        except TmuxError as exc:
+            if "no buffer" in str(exc).lower():
+                return None
             raise
 
     def resize(self, pane_id: str, width: int, height: int) -> None:

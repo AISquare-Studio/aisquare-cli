@@ -16,8 +16,9 @@ the slot that must not be discarded.
 from __future__ import annotations
 
 import asyncio
-import contextlib
+import dataclasses
 import os
+import sys
 import threading
 import time
 from collections.abc import Awaitable, Callable, Iterator, Sequence
@@ -29,7 +30,7 @@ import pytest
 from textual.containers import Vertical
 from textual.pilot import Pilot
 from textual.widgets import Button, Static
-from textual.worker import WorkerError
+from textual.worker import Worker, WorkerState
 
 from aisquare.cli.ui.app import FleetApp
 from aisquare.cli.ui.sidebar import AccountsSection, AccountsTitle
@@ -44,9 +45,10 @@ from aisquare.cli.ui.views.accounts import (
     summarise,
     usage_bar,
 )
-from aisquare.core import browser
+from aisquare.core import browser, credentials, paths
 from aisquare.core import claude_accounts as core
 from aisquare.core import tmux as tmux_core
+from aisquare.core.store import store_session
 from aisquare.core.tmux import Completed, TmuxServer, WindowInfo
 from aisquare.models import (
     AccountsOverview,
@@ -60,6 +62,8 @@ from aisquare.services import auth as auth_service
 from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import device_flow, iam
 from aisquare.services import fleet as fleet_service
+from tests.pane_harness import asks_a_server, socket_of
+from tests.ui_workers import settle_workers
 
 T = TypeVar("T")
 SIZE = (140, 40)
@@ -117,11 +121,6 @@ def _session(email: str = "me@aisquare.studio", source: str = "file") -> iam.Ses
     )
 
 
-def _socket_of(argv: Sequence[str]) -> str | None:
-    args = list(argv)
-    return args[args.index("-L") + 1] if "-L" in args else None
-
-
 @pytest.fixture(autouse=True)
 def no_real_tmux(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[tuple[str, ...]]]:
     """Every tmux command here addresses the test's socket; the server never answers."""
@@ -132,9 +131,17 @@ def no_real_tmux(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[tuple[str, ..
         return Completed(1, "", "no server running (a UI test addresses no real fleet)\n")
 
     monkeypatch.setattr(tmux_core, "_tmux", record)
-    monkeypatch.setattr(fleet_service, "server", lambda config=None: TmuxServer(PRIVATE_SOCKET))
+    # `binary=sys.executable`: the runner above is what answers, but the calls
+    # still go through `TmuxServer.binary()`, which is `shutil.which("tmux")` —
+    # so on a machine with no tmux these tests raised TmuxUnavailable before
+    # reaching the UI they are about. A binary that exists and is never run.
+    monkeypatch.setattr(
+        fleet_service,
+        "server",
+        lambda config=None: TmuxServer(PRIVATE_SOCKET, binary=sys.executable),
+    )
     yield ran
-    wrong = [argv for argv in ran if _socket_of(argv) != PRIVATE_SOCKET]
+    wrong = [argv for argv in ran if asks_a_server(argv) and socket_of(argv) != PRIVATE_SOCKET]
     assert not wrong, f"a UI test addressed a tmux socket that is not the test's: {wrong[:2]}"
 
 
@@ -193,19 +200,8 @@ def shown(widget: Static) -> str:
 
 
 async def settle(app: FleetApp) -> None:
-    """Wait for every worker of ours to reach a terminal state, whatever that state is.
-
-    ``wait_for_complete`` raises for a worker that ERRORED — and a scripted
-    ``IamError`` is exactly the outcome several tests here go on to read off
-    the page, so that raise would fail the test before its assertion, and only
-    when the worker was still registered when sampled (a race). Each worker is
-    awaited on its own and its failure swallowed; the page shows the result.
-    """
-    for worker in list(app.workers):
-        if worker.group == "_loader":
-            continue
-        with contextlib.suppress(WorkerError):
-            await worker.wait()
+    """Wait for every worker of ours to reach a terminal state; see ``settle_workers``."""
+    await settle_workers(app)
 
 
 def fleet_app(pilot: Pilot[None]) -> FleetApp:
@@ -259,7 +255,7 @@ def test_account_line_says_who_what_plan_and_how_much() -> None:
         week_resets_at=NOW,
     )
     signed = account_line_text(_status(2, "two@example.com"), usage).plain
-    assert signed.startswith("2  account 2")
+    assert signed.startswith("  2  account 2")  # two blanks: no default badge
     assert "two@example.com" in signed and "max 5x" in signed
     assert "session ▮▯▯▯▯ 12%" in signed and "week ▮▮▯▯▯ 40%" in signed
     assert "resets" in signed
@@ -271,7 +267,7 @@ def test_account_line_says_who_what_plan_and_how_much() -> None:
     assert "usage: HTTP 503" in account_line_text(_status(2, "two@example.com"), unavailable).plain
 
     absent = account_line_text(_status(3, None), usage).plain
-    assert absent.startswith("3  account 3") and "not signed in" in absent
+    assert absent.startswith("  3  account 3") and "not signed in" in absent
     assert "▮" not in absent and "max" not in absent  # nothing about a login that is not there
 
     expired = _status(1, "me@example.com", token_state="expired")
@@ -352,8 +348,8 @@ def test_the_section_summarises_and_opens_the_page(no_network: dict[str, Any]) -
     assert title == "Accounts  ✓ AISquare"
     assert detail == "2 Claude · me@example.com"
     assert before == "welcome"
-    assert rows[0].startswith("1  default") and "me@example.com" in rows[0]
-    assert rows[1].startswith("2  account 2") and "two@example.com" in rows[1]
+    assert rows[0].startswith("  1  plain claude") and "me@example.com" in rows[0]
+    assert rows[1].startswith("  2  account 2") and "two@example.com" in rows[1]
     assert "Signed in as me@aisquare.studio" in status
     assert claude.startswith("Claude Code 2.1.266")
 
@@ -468,12 +464,14 @@ def _script_device_flow(
     script: dict[str, Any],
     *,
     outcome: dict[str, Any] | Exception,
+    unrestricted: bool = False,
 ) -> list[str]:
     """Discovery, the grant and the wait, scripted; what the card asked for is recorded.
 
     A completed sign-in STORES the session, and the page re-reads the store on
     every frame — so the scripted completion sets what ``current_session`` will
-    answer next, as the real one does.
+    answer next, as the real one does. ``unrestricted`` is the store's answer
+    that the credentials file could not be restricted to this account.
     """
     seen: list[str] = []
     endpoints = iam.Endpoints(
@@ -507,7 +505,7 @@ def _script_device_flow(
         api_url: str, e: iam.Endpoints, token: dict[str, Any], *, cancelled: Any
     ) -> iam.Session:
         seen.append(f"complete:{token['access_token']}")
-        session = _session("new@aisquare.studio")
+        session = dataclasses.replace(_session("new@aisquare.studio"), unrestricted=unrestricted)
         script["session"] = session
         return session
 
@@ -546,6 +544,33 @@ def test_sign_in_shows_the_code_then_the_new_session(
     assert said == "✓ Signed in to AISquare as new@aisquare.studio"
     assert not code_shown  # the card folds away once the session is stored
     assert "✓ AISquare" in title  # the section was re-read from the stored session
+
+
+def test_a_sign_in_whose_token_could_not_be_restricted_says_so_on_the_page(
+    monkeypatch: pytest.MonkeyPatch, no_network: dict[str, Any]
+) -> None:
+    """The service's warning is a line on stderr, and Textual captures stderr while it runs,
+    so a Windows sign-in from this page looked clean with the token readable by other
+    accounts (review of #65, R7). The page reads the flag the stored session carries."""
+    _script_device_flow(
+        monkeypatch,
+        no_network,
+        outcome={"access_token": "aisq_new", "expires_in": 1},
+        unrestricted=True,
+    )
+
+    async def go(pilot: Pilot[None]) -> str:
+        app = fleet_app(pilot)
+        view = await open_accounts(pilot)
+        await pilot.click("#aisquare-sign-in")
+        await pilot.pause()
+        await settle(app)
+        await pilot.pause()
+        return notice(view)
+
+    said = drive(go)
+    assert said.startswith("✓ Signed in to AISquare as new@aisquare.studio, but could not"), said
+    assert "other users on this machine may be able to read your session token" in said
 
 
 def test_a_cancelled_or_denied_sign_in_stores_nothing_and_says_so(
@@ -601,10 +626,10 @@ def test_sign_out_revokes_and_forgets(
     no_network["session"] = _session()
     revoked: list[str] = []
 
-    def sign_out(session: iam.Session) -> bool:
+    def sign_out(session: iam.Session) -> auth_service.SignedOut:
         revoked.append(session.email)
         no_network["session"] = None
-        return True
+        return auth_service.SignedOut(revoked=True, restricted=True)
 
     monkeypatch.setattr(auth_service, "sign_out", sign_out)
 
@@ -624,6 +649,49 @@ def test_sign_out_revokes_and_forgets(
     assert revoked == ["me@aisquare.studio"]
     assert said == "✓ Signed out of AISquare"
     assert status.startswith("Not signed in") and not sign_out_shown
+
+
+def test_a_sign_out_whose_rewrite_could_not_be_restricted_says_so_on_the_page(
+    monkeypatch: pytest.MonkeyPatch, no_network: dict[str, Any]
+) -> None:
+    """Signing out rewrites the credentials file that still holds the API key and the serve
+    token, as a new file. One that could not be restricted was reported on stderr only, which
+    Textual captures, so the page said "✓ Signed out" as ok (review of the #65 fold, round 2,
+    F3). The real sign-out runs here, with the server out of reach and the restriction refused,
+    and the page reads the stored session back from the file."""
+    api_key = "-".join(["not", "a", "real", "key"])
+    credentials.store(api_key=api_key)
+    iam.store_session(
+        api_url="https://api.aisquare.studio",
+        token="aisq_secret",
+        expires_in=3600,
+        scope="",
+        claims={"email": "me@aisquare.studio", "sub": "usr_1"},
+    )
+    monkeypatch.setattr(iam, "current_session", lambda api_url=None: iam.stored_session())
+
+    def unreachable(api_url: str) -> iam.Endpoints:
+        raise iam.IamError("unreachable", "The identity provider could not be reached.")
+
+    monkeypatch.setattr(iam, "discover", unreachable)
+    monkeypatch.setattr(paths, "restrict_to_owner", lambda path: False)
+
+    async def go(pilot: Pilot[None]) -> tuple[str, str]:
+        app = fleet_app(pilot)
+        view = await open_accounts(pilot)
+        await pilot.click("#aisquare-sign-out")
+        await settle(app)
+        await pilot.pause()
+        return notice(view), shown(view.query_one("#aisquare-status", Static))
+
+    said, status = drive(go)
+    assert said.startswith(
+        "✓ Signed out of AISquare (locally — the server could not be reached to revoke), "
+        "but could not restrict"
+    ), said
+    assert "other users on this machine may be able to read the credentials left in it" in said
+    assert status.startswith("Not signed in")
+    assert credentials.load_all() == {"api_key": api_key}
 
 
 def test_an_environment_token_can_neither_sign_out_nor_start_a_browser_sign_in(
@@ -865,8 +933,10 @@ def test_remove_runs_the_service_and_reports_where_the_directory_went(
 ) -> None:
     removed: list[int] = []
 
-    def remove(account: ClaudeAccount) -> Path:
+    def remove(account: ClaudeAccount, *, notes: list[str] | None = None) -> Path:
         removed.append(account.slot)
+        if notes is not None:  # what the service says about a binding that named the slot
+            notes.append("role coder was bound to slot 2; it now names two@example.com — …")
         return tmp_path / "2.removed-20260909T120000Z"
 
     monkeypatch.setattr(accounts_service, "remove", remove)
@@ -884,3 +954,299 @@ def test_remove_runs_the_service_and_reports_where_the_directory_went(
     said = drive(go, overview=overview)
     assert removed == [2]
     assert said.startswith("✓ removed") and "2.removed-20260909T120000Z" in said
+    assert "role coder was bound to slot 2; it now names two@example.com" in said  # third round
+
+
+# --- arranging (#145): the default badge, the order arrows, disable -----------------------------
+
+
+def _arranged(
+    status: ClaudeAccountStatus,
+    *,
+    is_default: bool = False,
+    disabled: bool = False,
+    alias: str | None = None,
+    position: int | None = None,
+) -> ClaudeAccountStatus:
+    """``status`` with its registry arrangement set, as ``services.claude_accounts`` folds it."""
+    account = status.account.model_copy(
+        update={
+            "is_default": is_default,
+            "disabled": disabled,
+            "alias": alias,
+            "position": position,
+        }
+    )
+    return status.model_copy(update={"account": account, "label": core.label(account)})
+
+
+def test_the_default_is_starred_named_by_its_alias_and_its_row_hides_the_default_button() -> None:
+    overview = _overview(
+        _arranged(_status(2, "two@example.com"), is_default=True, alias="work", position=1),
+        _arranged(_status(1, "me@example.com"), position=2),
+        _arranged(_status(3, "three@example.com"), disabled=True, position=3),
+    )
+
+    async def go(pilot: Pilot[None]) -> tuple[list[str], dict[int, tuple[bool, bool, bool, str]]]:
+        view = await open_accounts(pilot)
+        order = [r.slot for r in view.rows()]
+        buttons = {
+            slot: (
+                row(view, slot).query_one(f"#account-default-{slot}", Button).display,
+                row(view, slot).query_one(f"#account-up-{slot}", Button).disabled,
+                row(view, slot).query_one(f"#account-down-{slot}", Button).disabled,
+                str(row(view, slot).query_one(f"#account-toggle-{slot}", Button).label),
+            )
+            for slot in (2, 1, 3)
+        }
+        return [line(view, slot) for slot in order], buttons
+
+    lines, buttons = drive(go, overview=overview)
+    assert lines[0].startswith("★ 2  work") and "two@example.com" in lines[0]  # the default, first
+    assert lines[1].startswith("  1  plain claude")  # no star: not the default
+    assert lines[2].startswith("  3  account 3") and "disabled" in lines[2]
+    assert buttons[2] == (False, True, False, "Disable")  # default hidden; first: ↑ disabled
+    assert buttons[1] == (True, False, False, "Disable")  # middle: both arrows live
+    assert buttons[3] == (True, False, True, "Enable")  # last: ↓ disabled; disabled → Enable
+
+
+def test_default_move_and_disable_buttons_write_through_the_service_and_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The row never paints optimistically: the service is called, the shell re-reads."""
+    calls: list[tuple[str, ...]] = []
+    frames: list[AccountsOverview] = [
+        _overview(_status(1, "me@example.com"), _status(2, "two@example.com")),
+        _overview(
+            _arranged(_status(2, "two@example.com"), is_default=True, position=1),
+            _arranged(_status(1, "me@example.com"), position=2),
+        ),
+    ]
+
+    def set_default(ref: str | None, *, project: Any = None) -> Any:
+        calls.append(("default", str(ref)))
+        return None
+
+    def move(ref: str, direction: str) -> list[Any]:
+        calls.append(("move", ref, direction))
+        return []
+
+    def set_disabled(ref: str, disabled: bool) -> Any:
+        calls.append(("disable", ref, str(disabled)))
+        raise accounts_service.AccountsUnreadable("the accounts registry cannot be written (x)")
+
+    monkeypatch.setattr(accounts_service, "set_default", set_default)
+    monkeypatch.setattr(accounts_service, "move", move)
+    monkeypatch.setattr(accounts_service, "set_disabled", set_disabled)
+
+    async def go(pilot: Pilot[None]) -> tuple[str, list[int], str]:
+        app = fleet_app(pilot)
+        view = await open_accounts(pilot)
+        await pilot.click("#account-default-2")
+        await settle(app)
+        await pilot.pause()
+        after_default = notice(view)
+        # The shell's next frame is the arranged one; the page follows it.
+        frames.pop(0)
+        app.refresh_accounts()
+        await pilot.pause()
+        order = [r.slot for r in view.rows()]
+        await pilot.click("#account-down-2")
+        await settle(app)
+        await pilot.click("#account-toggle-1")
+        await settle(app)
+        await pilot.pause()
+        return after_default, order, notice(view)
+
+    async def run() -> tuple[str, list[int], str]:
+        app = FleetApp(refresh_seconds=3600, doctor=lambda: [], accounts=lambda: frames[0])
+        async with app.run_test(size=SIZE) as pilot:
+            await pilot.pause()
+            return await go(pilot)
+
+    after_default, order, last = asyncio.run(run())
+    assert after_default == "✓ slot 2 is the machine default"
+    assert order == [2, 1]  # the page re-read the shell's frame: the default moved up
+    assert ("default", "2") in calls
+    assert ("move", "2", "down") in calls
+    assert ("disable", "1", "True") in calls
+    assert last.startswith("✗ the accounts registry cannot be written")  # the error, not a crash
+
+
+def test_an_arrange_notice_names_the_action_its_own_worker_finished(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The notice was a field on the page, so a second click overwrote it before the first
+    worker's report was handled — a thread worker ``exclusive`` cancels still finishes —
+    and the first one's success was announced as the second action (review of #205,
+    fourth round). The text now travels with the work, as the worker's result."""
+    release = threading.Event()
+
+    async def go(pilot: Pilot[None]) -> tuple[str, str]:
+        app = fleet_app(pilot)
+        view = await open_accounts(pilot)
+        workers: list[Worker[Any]] = []
+        real_run = view.run_worker
+
+        def spy(*args: Any, **kwargs: Any) -> Worker[Any]:
+            worker = real_run(*args, **kwargs)
+            workers.append(worker)
+            return worker
+
+        monkeypatch.setattr(view, "run_worker", spy)
+        view.arrange_accounts(lambda: None, done="✓ slot 2 moved down in the priority order")
+        await settle(app)
+        await pilot.pause()
+        first = notice(view)
+        # The second click, still running when the first worker's report is handled.
+        view.arrange_accounts(release.wait, done="✓ slot 1 disabled — never picked automatically")
+        view._arrange_finished(workers[0], WorkerState.SUCCESS)
+        late = notice(view)
+        release.set()
+        await settle(app)
+        return first, late
+
+    first, late = drive(go)
+    assert first == "✓ slot 2 moved down in the priority order"
+    assert late == first  # the first worker's own action, not the click that came after
+
+
+def test_two_quick_arrange_clicks_write_in_turn_and_both_report(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``exclusive`` cancelled the earlier thread worker on paper only — a thread runs to its
+    end — so two quick ▲ clicks ran two read-then-write ``move`` calls at once, one step was
+    lost, and the cancelled worker's notice never showed (review of the #205 fold, round 1).
+    The writes now take their turn, and each worker reports its own action."""
+    first_in = threading.Event()
+    release = threading.Event()
+    inside: list[str] = []
+    overlapped: list[bool] = []
+
+    def write(name: str, *, hold: bool) -> Callable[[], None]:
+        def run() -> None:
+            overlapped.append(bool(inside))
+            inside.append(name)
+            if hold:
+                first_in.set()
+                release.wait(timeout=5)
+            inside.remove(name)
+
+        return run
+
+    async def go(pilot: Pilot[None]) -> list[str]:
+        app = fleet_app(pilot)
+        view = await open_accounts(pilot)
+        said: list[str] = []
+        real_notice = view._notice
+
+        def spy(text: str, tone: str = "dim") -> None:
+            said.append(text)
+            real_notice(text, tone)
+
+        monkeypatch.setattr(view, "_notice", spy)
+        view.arrange_accounts(write("first", hold=True), done="✓ slot 3 moved up once")
+        assert await asyncio.to_thread(first_in.wait, 5)  # the first write is under way…
+        view.arrange_accounts(write("second", hold=False), done="✓ slot 3 moved up twice")
+        await asyncio.sleep(0.2)  # …and the second click's thread has had its chance to start
+        release.set()
+        await settle(app)
+        await pilot.pause()
+        return said
+
+    said = drive(go)
+    assert overlapped == [False, False]  # never two writes at once
+    assert [text for text in said if text.startswith("✓")] == [
+        "✓ slot 3 moved up once",
+        "✓ slot 3 moved up twice",
+    ]
+
+
+# --- the pace of the five-hour window (#146) ------------------------------------------------------
+
+
+def test_the_row_says_how_long_the_window_has_at_the_current_pace(
+    no_network: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The page's minute tick RECORDS each reading; the trend it computes is painted dim."""
+    from aisquare.models import UsageTrend
+
+    usage = ClaudeUsage(
+        available=True,
+        session_percent=60,
+        session_resets_at=NOW + timedelta(hours=3),
+        week_percent=20,
+        week_resets_at=NOW + timedelta(days=3),
+        fetched_at=NOW,
+    )
+    no_network["usage"] = usage
+    recorded: list[int] = []
+    trends: dict[int, UsageTrend | None] = {
+        1: UsageTrend(percent=60, per_hour=30.0, minutes_to_limit=80.0, span_minutes=20.0),
+        2: None,
+    }
+
+    real_usage = accounts_service.usage
+
+    def usage_spy(account: ClaudeAccount, **kwargs: Any) -> ClaudeUsage:
+        recorded.append(account.slot)
+        return real_usage(account, **kwargs)
+
+    # The tick fetches through `read_usage(record=False)` and records in one store
+    # session of its own (third round): the reading is spied, the sample is checked below.
+    monkeypatch.setattr(accounts_service, "usage", usage_spy)
+    monkeypatch.setattr(
+        accounts_service, "usage_trend", lambda slot, latest, **kwargs: trends.get(slot)
+    )
+    monkeypatch.setattr(accounts_service, "_now", lambda: NOW)
+    overview = _overview(_status(1, "me@example.com"), _status(2, "two@example.com"))
+
+    async def go(pilot: Pilot[None]) -> tuple[str, str]:
+        app = fleet_app(pilot)
+        view = await open_accounts(pilot)
+        await settle(app)
+        await pilot.pause()
+        return line(view, 1), line(view, 2)
+
+    one, two = drive(go, overview=overview)
+    assert sorted(recorded) == [1, 2]  # every signed-in slot was read…
+    with store_session() as store:  # …and SAMPLED, in the page's one store open
+        assert len(store.usage_samples(1, since=NOW - timedelta(days=1))) == 1
+        assert len(store.usage_samples(2, since=NOW - timedelta(days=1))) == 1
+    assert "session ▮▮▮▯▯ 60%" in one and "≈ 1.3 h to the limit" in one
+    assert "session ▮▮▮▯▯ 60%" in two and "to the limit" not in two  # no trend yet: no claim
+
+
+def test_a_row_that_leaves_takes_its_projection_with_it(
+    no_network: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``self.trends`` was not pruned beside ``self.usage`` (review of #205, second round):
+    after a remove-then-add the newcomer in the re-used slot painted the old projection."""
+    from aisquare.models import UsageTrend
+
+    no_network["usage"] = ClaudeUsage(
+        available=True, session_percent=60, session_resets_at=NOW + timedelta(hours=3)
+    )
+    monkeypatch.setattr(
+        accounts_service,
+        "usage_trend",
+        lambda slot, latest, **kwargs: UsageTrend(
+            percent=60, per_hour=30.0, minutes_to_limit=80.0, span_minutes=20.0
+        ),
+    )
+    monkeypatch.setattr(accounts_service, "_now", lambda: NOW)
+    both = _overview(_status(1, "me@example.com"), _status(2, "two@example.com"))
+
+    async def go(pilot: Pilot[None]) -> tuple[set[int], set[int], set[int], set[int]]:
+        app = fleet_app(pilot)
+        view = await open_accounts(pilot)
+        await settle(app)
+        await pilot.pause()
+        before = (set(view.usage), set(view.trends))
+        view.show(_overview(_status(1, "me@example.com")))  # slot 2 removed
+        await pilot.pause()
+        return before[0], before[1], set(view.usage), set(view.trends)
+
+    usage_before, trends_before, usage_after, trends_after = drive(go, overview=both)
+    assert usage_before == trends_before == {1, 2}
+    assert usage_after == trends_after == {1}

@@ -32,6 +32,7 @@ from aisquare.core.store import (
     is_corrupt_error,
     is_locked_error,
 )
+from aisquare.services import claude_accounts as claude_accounts_service
 from aisquare.services import explainability as explainability_service
 from aisquare.services import explainability_ops
 from aisquare.services import settings as settings_service
@@ -560,8 +561,10 @@ def spawn(
             # the two launch paths do not differ on a question a reader has to
             # re-prove.
             try:
-                effective = explainability_ops.effective_settings(tracing)
-                spawn_target = explainability_ops.resolve_target(tracing)
+                # One project for both: its destination may name another target (#142).
+                spawn_project = orchestrator.team_project(None).id
+                effective = explainability_ops.effective_settings(tracing, project_id=spawn_project)
+                spawn_target = explainability_ops.resolve_target(tracing, project_id=spawn_project)
                 spawn_key, spawn_gateway = spawn_target.api_key, spawn_target.gateway_url
             except Exception as exc:
                 effective, spawn_key, spawn_gateway = tracing, None, None
@@ -712,8 +715,21 @@ def bind(
         bool,
         typer.Option("--clear", help="Remove this role's binding entirely."),
     ] = False,
+    account: Annotated[
+        str | None,
+        typer.Option(
+            "--account",
+            help="Claude account this role launches under: a slot, alias or email "
+            "(see `aisquare accounts`). Wins over a CLAUDE_CONFIG_DIR in --env.",
+            metavar="ACCOUNT",
+        ),
+    ] = None,
+    clear_account: Annotated[
+        bool,
+        typer.Option("--clear-account", help="Remove the role's account, keep the rest."),
+    ] = False,
 ) -> None:
-    """Pin a role's launch spec — binary, env and extra args — persistently.
+    """Pin a role's launch spec — binary, env, extra args and account — persistently.
 
     The one-time setup behind ``team.profiles``: bind a seat once, and every
     later ``aisquare launch <role>`` and ``aisquare team spawn <role>`` carries
@@ -732,6 +748,13 @@ def bind(
     expansion happens at launch, which is what lets one binding follow you
     across machines with different homes.
 
+    ``--account`` is the one binding the CLI DOES interpret: it names a Claude
+    account the CLI owns (``aisquare accounts``), resolved at every launch by
+    the same resolver ``launch --account`` and ``fleet spawn`` use, and it
+    wins over a ``CLAUDE_CONFIG_DIR`` in ``--env``. It is the role rung of
+    ``aisquare accounts default`` — role binding, then project default, then
+    machine default.
+
     Called with no role it prints the bindings.
     """
     if role_name is None:
@@ -742,11 +765,21 @@ def bind(
             settings_service.clear_role_binding(role_name)
         bound = None
     else:
-        if not any((agent_bin, env_pairs, extra_args, unset)):
+        if account is not None and clear_account:
+            fail("--account and --clear-account are mutually exclusive", error="usage")
+        if not any((agent_bin, env_pairs, extra_args, unset, account, clear_account)):
             fail(
-                "nothing to bind — pass --bin, --env, --arg, --unset or --clear",
+                "nothing to bind — pass --bin, --env, --arg, --unset, --account, "
+                "--clear-account or --clear",
                 error="nothing_to_bind",
             )
+        if account is not None:
+            # Resolved NOW, so a typo is a usage error rather than a binding
+            # that refuses every later launch of the role.
+            try:
+                claude_accounts_service.resolve(account)
+            except claude_accounts_service.AccountsError as exc:
+                fail(str(exc), error="unknown_account", ref=account)
         with expected_config_write_errors():
             bound = settings_service.bind_role(
                 role_name,
@@ -754,6 +787,8 @@ def bind(
                 env=_parse_env(env_pairs or []),
                 unset=unset or [],
                 args=extra_args or [],
+                account=account,
+                clear_account=clear_account,
             )
     path = settings_service.config_path()
     if get_state().json_output:
@@ -782,6 +817,7 @@ def _describe(profile: RoleLaunchProfile) -> str:
         f"bin={profile.bin}" if profile.bin else "",
         "  ".join(f"{key}={value}" for key, value in sorted(profile.env.items())),
         f"args={shlex.join(profile.args)}" if profile.args else "",
+        f"account={profile.account}" if profile.account else "",
     ]
     return "  ".join(part for part in parts if part)
 

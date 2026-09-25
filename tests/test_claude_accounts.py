@@ -22,7 +22,7 @@ import signal
 import stat
 import subprocess
 import sys
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -72,8 +72,6 @@ def fake_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     (home / ".claude").mkdir(parents=True)
     monkeypatch.setattr(core, "_home", lambda: home)
     monkeypatch.setattr("aisquare.core.agents._home", lambda: home)
-    monkeypatch.delenv(core.CONFIG_DIR_VAR, raising=False)
-    monkeypatch.delenv(core.TMPDIR_VAR, raising=False)
     monkeypatch.setattr(core, "keychain_platform", lambda: False)
     # The clock the production code reads is the clock the fixtures write
     # credentials against: tokens here expire at NOW + 7 h, and a command that
@@ -215,6 +213,102 @@ def test_apply_launch_env_sets_a_managed_slot_and_restores_the_shell_for_the_def
     assert core.TMPDIR_VAR not in own  # blank in the shell counts as unset, as the README warns
 
 
+def test_under_a_managed_slot_slot_1_is_the_plain_claude_not_the_slot(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #205, sixth round. A process under one of our slots (an agent's hooks,
+    the hand-over worker it detaches, a manager's ``fleet spawn``) has both variables
+    naming the slot. Read as they stood, slot 1 WAS the slot: its login and usage came
+    from the slot's files, and ``launch --account 1`` there kept the slot's variables."""
+    second = core.create_account()
+    under = core.apply_launch_env({"PATH": "/bin"}, second, shell={"PATH": "/bin"})
+    assert not set(core.PLAIN_VARS.values()) & set(under)  # the shell had none to keep
+    for var in core.LAUNCH_VARS:
+        monkeypatch.setenv(var, under[var])
+
+    assert core.plain_environment() == {}
+    plain = core.default_account()
+    assert plain.config_dir == fake_home / ".claude"
+    assert core.claude_json_path(plain) == fake_home / ".claude.json"
+    back = core.apply_launch_env(dict(under), plain)
+    assert core.CONFIG_DIR_VAR not in back and core.TMPDIR_VAR not in back
+    command, carried = service.carry_environment(["x"])
+    assert core.CONFIG_DIR_VAR not in carried and core.TMPDIR_VAR not in carried
+    assert command[1:5] == ["-u", core.CONFIG_DIR_VAR, "-u", core.TMPDIR_VAR]
+
+
+def test_under_a_managed_slot_slot_1_is_the_launching_shells_own_claude(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same, from a shell that points the plain claude at a directory of its own. The
+    launch onto the slot keeps the shell's two variables beside the slot's, and everything
+    started under the slot finds them, a launch onto another slot included (review of
+    #205, sixth round). Without the copies, slot 1 there could only be ``~/.claude``."""
+    second = core.create_account()
+    third = core.create_account()
+    mine = fake_home / ".claude-c1"
+    shell = {core.CONFIG_DIR_VAR: str(mine), core.TMPDIR_VAR: str(fake_home / "c1-tmp")}
+    under = core.apply_launch_env(dict(shell), second, shell=shell)
+    assert under[core.CONFIG_DIR_VAR] == str(second.config_dir)
+    assert {var: under[kept] for var, kept in core.PLAIN_VARS.items()} == shell
+    for var, value in under.items():
+        monkeypatch.setenv(var, value)
+
+    assert core.plain_environment() == shell
+    plain = core.default_account()
+    assert plain.config_dir == mine
+    assert core.claude_json_path(plain) == mine / ".claude.json"
+    assert service.slot_of(mine) == 1 and service.slot_of(fake_home / ".claude") is None
+    onward = core.apply_launch_env(dict(under), third)  # handed on, never the slot left
+    assert {var: onward[kept] for var, kept in core.PLAIN_VARS.items()} == shell
+    back = core.apply_launch_env(dict(under), plain)
+    assert {var: back[var] for var in core.LAUNCH_VARS} == shell
+    assert not set(core.PLAIN_VARS.values()) & set(back)  # restored in place: no stale copy
+    _, carried = service.carry_environment(["x"])
+    assert {var: carried[var] for var in core.LAUNCH_VARS} == shell
+    # The control: the copies count only where the variable names one of our slots.
+    monkeypatch.setenv(core.CONFIG_DIR_VAR, str(fake_home / ".claude-c3"))
+    assert core.default_account().config_dir == fake_home / ".claude-c3"
+
+
+@pytest.fixture(scope="class")
+def operators_shell(tmp_path_factory: pytest.TempPathFactory) -> Iterator[None]:
+    """What a launch onto a managed slot exports, set before any function fixture runs.
+
+    CLASS-scoped because it has to be there before the function-scoped
+    ``isolated_home`` runs, the way the operator's shell is there before pytest.
+    """
+    theirs = tmp_path_factory.mktemp("operator")
+    with pytest.MonkeyPatch.context() as shell:
+        for var in (*core.LAUNCH_VARS, *core.PLAIN_VARS.values()):
+            shell.setenv(var, str(theirs / var))
+        yield
+
+
+@pytest.mark.usefixtures("operators_shell")
+class TestASuiteRunUnderAManagedSlot:
+    """Review of #205, seventh round. An agent this build launches onto a managed
+    slot has the slot's two variables AND the shell's own copies under ``PLAIN_VARS``,
+    and so does a suite it runs. ``plain_environment`` reads the copies whenever
+    ``CLAUDE_CONFIG_DIR`` names a managed slot, which the tests above set up: with only
+    ``CLAUDE_CONFIG_DIR`` cleared by conftest, slot 1 resolved to the developer's real
+    directory, and four tests went red on their machine and green on CI.
+    """
+
+    def test_no_test_starts_with_the_accounts_variables(self) -> None:
+        exported = (*core.LAUNCH_VARS, *core.PLAIN_VARS.values())
+        assert [var for var in exported if var in os.environ] == []
+
+    def test_under_a_managed_slot_slot_1_is_still_the_tests_own(
+        self, fake_home: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        for var, value in core.launch_env(core.create_account()).items():
+            monkeypatch.setenv(var, value)
+
+        assert core.plain_environment() == {}
+        assert core.default_account().config_dir == fake_home / ".claude"
+
+
 def test_remove_renames_the_directory_beside_itself_and_frees_the_number(
     fake_home: Path,
 ) -> None:
@@ -269,7 +363,11 @@ def test_the_board_labels_a_managed_slot_by_number_and_anything_else_by_name(
     assert team_service.account_label(str(second.config_dir)) == "account 2"
     assert team_service.account_label(str(fake_home / ".claude-c2")) == ".claude-c2"
     assert team_service.account_label(None) is None
-    assert core.label(second) == "account 2" and core.label(core.default_account()) == "default"
+    assert core.label(second) == "account 2"
+    assert (
+        core.label(core.default_account()) == "plain claude"
+    )  # "default" now means something else
+    assert core.label(second.model_copy(update={"alias": "work"})) == "work"
 
 
 # --------------------------------------------------------------------- core: what Claude wrote
@@ -339,7 +437,7 @@ def test_describe_and_overview_read_offline_facts(
     assert not overview.claude.installed and overview.claude.binary is None
     assert [s.account.slot for s in overview.accounts] == [1, 2]
     first, described = overview.accounts
-    assert not first.signed_in and first.identity is None and first.label == "default"
+    assert not first.signed_in and first.identity is None and first.label == "plain claude"
     assert described.signed_in and described.identity is not None
     assert described.identity.email == "two@example.com"
     assert described.subscription == "max 5x" and described.token_state == "ok"
@@ -352,10 +450,13 @@ def test_describe_and_overview_read_offline_facts(
 def test_resolve_finds_a_slot_by_number_or_by_email(fake_home: Path) -> None:
     second = core.create_account()
     _sign_in(second, "Two@Example.com")
-    assert service.resolve("2") == second
-    assert service.resolve(2) == second
-    assert service.resolve("two@example.com") == second  # case does not matter for an email
-    assert service.resolve("1") == core.default_account()
+    # Compared by slot: a resolved account carries its registry arrangement
+    # (position, alias, default) on top of what the directory alone knows.
+    assert service.resolve("2").slot == second.slot
+    assert service.resolve("2").config_dir == second.config_dir
+    assert service.resolve(2).slot == 2
+    assert service.resolve("two@example.com").slot == 2  # case does not matter for an email
+    assert service.resolve("1").slot == core.default_account().slot
     with pytest.raises(service.NoSuchAccount, match="slot 9"):
         service.resolve("9")
     with pytest.raises(service.NoSuchAccount, match=r"nobody@example\.com"):
@@ -537,7 +638,11 @@ def test_the_sign_in_window_runs_our_own_run_command_with_this_processs_environm
             return Completed(0, f"@3{tmux_core._SEP}%9\n", "")
         return Completed(0, "", "")
 
-    server = TmuxServer("asq-test-accounts", runner=runner)
+    # A binary that EXISTS, because `spawn_window` goes through `binary()` and
+    # that is `shutil.which(...)`: with no tmux on the machine this raised
+    # TmuxUnavailable before reaching the thing under test. The runner is fake,
+    # so nothing is ever executed — this test is about the command that would be.
+    server = TmuxServer("asq-test-accounts", binary=sys.executable, runner=runner)
     window = service.open_sign_in_window(account, server, cwd=fake_home)
 
     assert window.pane_id == "%9" and window.session == service.SIGN_IN_SESSION
@@ -552,24 +657,43 @@ def test_the_sign_in_window_runs_our_own_run_command_with_this_processs_environm
     # child, so the server's retained values cannot decide what slot 1 means.
     tail = new_session[new_session.index("--") + 1 :]
     assert tail[1:5] == ["-u", core.CONFIG_DIR_VAR, "-u", core.TMPDIR_VAR]
-    assert tail[0].endswith("env")
+    # The STEM, not the spelling: `carry_environment` resolves this through
+    # `shutil.which("env")`, which on Windows finds Git's `env.EXE` — an
+    # `endswith("env")` asserts the POSIX spelling of a program the product
+    # looks up on both.
+    assert Path(tail[0]).stem.lower() == "env"
     assert tail[5:] == service.sign_in_command(account)
     assert tail[5:] == [sys.executable, "-m", "aisquare", "accounts", "run", "2"]
 
 
-def test_the_window_command_carries_set_variables_and_unsets_the_others() -> None:
+def test_the_window_command_carries_set_variables_and_unsets_the_others(tmp_path: Path) -> None:
+    # Values that are ALREADY absolute on both platforms, so what comes back is
+    # what went in. `"/h"` is rooted but driveless on Windows, which is not
+    # absolute there: `carry_environment` anchors it to the current drive and
+    # returns `N:\h`, so the literal asserted the POSIX half of a path the
+    # product resolves on both. tmp_path is absolute wherever the suite runs.
+    home, config, tmpdir = tmp_path / "h", tmp_path / "c2", tmp_path / "t"
     account = core.default_account()
     command, env = service.sign_in_window_command(
-        account, {"AISQUARE_HOME": "/h", core.CONFIG_DIR_VAR: "/c2", core.TMPDIR_VAR: " "}
+        account,
+        {"AISQUARE_HOME": str(home), core.CONFIG_DIR_VAR: str(config), core.TMPDIR_VAR: " "},
     )
-    assert env == {"AISQUARE_HOME": "/h", core.CONFIG_DIR_VAR: "/c2"}  # blank is unset
+    assert env == {  # blank is unset
+        "AISQUARE_HOME": str(home),
+        core.CONFIG_DIR_VAR: str(config),
+    }
     assert command[1:3] == ["-u", core.TMPDIR_VAR]
     assert command[3:] == service.sign_in_command(account)
     plain, env = service.sign_in_window_command(
-        account, {"AISQUARE_HOME": "/h", core.CONFIG_DIR_VAR: "/c2", core.TMPDIR_VAR: "/t"}
+        account,
+        {
+            "AISQUARE_HOME": str(home),
+            core.CONFIG_DIR_VAR: str(config),
+            core.TMPDIR_VAR: str(tmpdir),
+        },
     )
     assert plain == service.sign_in_command(account)  # nothing to unset: no env wrapper
-    assert env[core.TMPDIR_VAR] == "/t"
+    assert env[core.TMPDIR_VAR] == str(tmpdir)
 
 
 def test_carried_directories_are_resolved_against_the_callers_cwd_not_the_windows(
@@ -905,7 +1029,7 @@ def test_launch_account_sets_the_slots_variables_over_the_binding(
     default = runner.invoke(app, ["launch", "coder", "--account", "1", *bound])
     assert default.exit_code == 0, default.output
     assert core.CONFIG_DIR_VAR not in captured["env"] and core.TMPDIR_VAR not in captured["env"]
-    assert "[default]" in default.stderr
+    assert "[plain claude]" in default.stderr
     # …and replaced by the shell's own when it has them.
     captured.clear()
     monkeypatch.setenv(core.CONFIG_DIR_VAR, str(fake_home / ".claude-c2"))

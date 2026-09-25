@@ -6,7 +6,7 @@ from typing import Annotated
 
 import typer
 
-from aisquare.cli.common import emit_metrics_summary, emit_turn_metrics
+from aisquare.cli.common import emit_metrics_summary, emit_turn_metrics, refuse_conflicting_scope
 from aisquare.services import metrics as metrics_service
 
 app = typer.Typer(
@@ -22,6 +22,7 @@ _ALL_HELP = "Every project on this machine, not just the current one."
 def _scope(project: str | None, all_projects: bool, session: str | None) -> str | None:
     """Which project's turns to read. A session already names a scope, so
     ``--session`` alone is not narrowed to the current project."""
+    refuse_conflicting_scope(all_projects, project)
     if session is not None and project is None and not all_projects:
         return None
     try:

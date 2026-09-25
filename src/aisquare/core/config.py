@@ -6,17 +6,19 @@ stubbed. Unknown keys in the file are ignored so old configs keep loading.
 
 from __future__ import annotations
 
+import contextlib
 import errno
 import os
 import tomllib
 from pathlib import Path
 from typing import Any, Literal
-from uuid import uuid4
 
 import tomli_w
 from pydantic import BaseModel, ConfigDict, Field
 
 from aisquare.core import paths
+from aisquare.core.atomic import write_replacing
+from aisquare.core.paths import despite_windows_contention
 from aisquare.models import Pool, RedactionLevel
 
 
@@ -170,11 +172,22 @@ class RoleLaunchProfile(BaseModel):
     business knowing it, unusable by anyone laid out differently and liable to
     break for its author the day they reorganised. The operator states the
     spec; we carry it.
+
+    ``account`` is the ONE exception, and it is not that cut coming back: it
+    names a Claude account the CLI itself owns — a slot number, an alias or the
+    email it is signed in as (``aisquare accounts``) — never a path. It is
+    resolved at launch by the one account resolver
+    (``services.claude_accounts.choose``), after ``env``, so a binding that
+    carries both a hand-written ``CLAUDE_CONFIG_DIR`` and an ``account`` runs on
+    the account. Written by ``team bind <role> --account`` and the Settings tab;
+    ``None`` means the role expresses no preference and the project or machine
+    default applies (#145).
     """
 
     bin: str | None = None
     env: dict[str, str] = Field(default_factory=dict)
     args: list[str] = Field(default_factory=list)
+    account: str | None = None
 
 
 class TeamSettings(BaseModel):
@@ -318,6 +331,38 @@ class PersonaSettings(BaseModel):
     import_: PersonaImportSettings = Field(default_factory=PersonaImportSettings, alias="import")
 
 
+class AccountsSettings(BaseModel):
+    """How the fleet spends several Claude accounts (#146); every field is a changeable default.
+
+    ``pick`` is how a launch chooses an account when nothing names one (no
+    ``--account``, no role binding, no project default): ``default`` takes the
+    machine default (#145); ``headroom`` reads each enabled, signed-in account's
+    five-hour usage and takes, in priority order, the first one under
+    ``switch_at`` percent — or, when every account is over it, the one with the
+    most room left. Usage is the undocumented endpoint Claude Code's own
+    ``/usage`` reads (docs/plans/claude-accounts.md §5), so ``headroom`` is best
+    effort: an account whose usage cannot be read is skipped with a note, and
+    when none can be read the machine default decides as before.
+
+    ``on_limit`` is what the fleet does when an agent's turn ends on a usage
+    limit (Claude Code's ``StopFailure`` hook, error ``rate_limit``): ``wait``
+    marks the row ``limited`` and wakes the manager, and leaves Claude Code's own
+    wait-and-continue-at-reset in place; ``switch`` also hands the agent over —
+    ``aisquare fleet switch`` — to the account with the most headroom, unless
+    the limit resets within ``wait_if_reset_within_minutes`` (a reset ten minutes
+    away is cheaper than a cold start elsewhere). ``switch_at`` doubles as the
+    line the Accounts page colours red and ``doctor --live`` warns at.
+
+    Read from the config file alone, like ``[fleet]``: there is no
+    ``AISQUARE_ACCOUNTS_*`` variable, for the same reason that section gives.
+    """
+
+    pick: Literal["default", "headroom"] = "default"
+    switch_at: int = Field(default=85, ge=1, le=100)
+    on_limit: Literal["wait", "switch"] = "wait"
+    wait_if_reset_within_minutes: int = Field(default=15, ge=0)
+
+
 class AppConfig(BaseModel):
     """Root configuration object persisted at ``~/.aisquare/config.toml``."""
 
@@ -329,6 +374,7 @@ class AppConfig(BaseModel):
     explainability: ExplainabilitySettings = Field(default_factory=ExplainabilitySettings)
     team: TeamSettings = Field(default_factory=TeamSettings)
     fleet: FleetSettings = Field(default_factory=FleetSettings)
+    accounts: AccountsSettings = Field(default_factory=AccountsSettings)
     snapshot: SnapshotSettings = Field(default_factory=SnapshotSettings)
     experiment: ExperimentSettings = Field(default_factory=ExperimentSettings)
     persona: PersonaSettings = Field(default_factory=PersonaSettings)
@@ -393,8 +439,13 @@ def load_config(path: Path | None = None) -> AppConfig:
     target = path or paths.config_path()
     if not target.exists():
         return AppConfig()
-    with target.open("rb") as fh:
-        data: dict[str, Any] = tomllib.load(fh)
+
+    def _read() -> dict[str, Any]:
+        with target.open("rb") as fh:
+            loaded: dict[str, Any] = tomllib.load(fh)
+            return loaded
+
+    data = despite_windows_contention(_read)
     return AppConfig.model_validate(data)
 
 
@@ -480,37 +531,49 @@ def save_config(config: AppConfig, path: Path | None = None) -> Path:
         # _keep_unknown. Reading fails open on purpose — a config we cannot parse
         # is exactly the state a write is most likely trying to repair, and
         # refusing to write would strand the operator with the broken file.
-        try:
+        #
+        # THROUGH THE RETRY, like the rename in `write_replacing` below and
+        # `load_config` above. A `PermissionError` IS an `OSError`, so under the
+        # NTFS contention this module measures, the fail-open silently skipped
+        # the unknown-key preservation — and `_keep_unknown`'s own docstring says
+        # what that costs: "exit 0, no warning, and because the tracing seam is
+        # fail-open the result is a green-looking machine with no tracing".
+        # Failing open is right for a config we cannot PARSE; it is not right for
+        # one that is busy for 40 microseconds.
+        def _read_existing() -> dict[str, Any]:
             with written.open("rb") as handle:
-                dumped = _keep_unknown(tomllib.load(handle), dumped, config)
-        except (OSError, tomllib.TOMLDecodeError):
-            pass
+                loaded: dict[str, Any] = tomllib.load(handle)
+                return loaded
+
+        with contextlib.suppress(OSError, tomllib.TOMLDecodeError):
+            dumped = _keep_unknown(despite_windows_contention(_read_existing), dumped, config)
     payload = tomli_w.dumps(dumped)
 
     # Written BESIDE the target and renamed over it, never into the target
-    # itself. ``os.replace`` is atomic within a filesystem, so a concurrent
-    # reader sees either the whole old file or the whole new one; writing in
-    # place truncates first, and anyone reading in that window gets a partial
-    # TOML document. Not theoretical on a multi-seat machine — several sessions
-    # reach this function, and the caller that suffers most is the QUIETEST one:
-    # ``cli/launch.py`` treats an unreadable config as "launching untraced" by
-    # design, so a torn write costs tracing silently instead of raising.
-    #
-    # The temp file is a SIBLING because ``os.replace`` is only atomic within
-    # one filesystem — a name under /tmp would reintroduce a copy step. It
-    # carries pid plus a random suffix so two writers cannot collide on it, and
-    # it is removed on any failure rather than left next to the file an operator
-    # reads. ``fsync`` before the rename so a crash cannot publish a file whose
-    # contents never reached the disk.
-    temp = written.parent / f".{written.name}.{os.getpid()}.{uuid4().hex[:8]}.tmp"
+    # itself — ``core.atomic.write_replacing``, the durable-replace recipe this
+    # function first wrote down and measured: a sibling temp (``os.replace`` is
+    # only atomic within one filesystem; a name under /tmp would reintroduce a
+    # copy step), fsynced so a crash cannot publish a file whose contents never
+    # reached the disk, renamed over the target, then the parent directory
+    # synced so the rename itself is durable (fail-open; +2.15 ms median per
+    # write on a native disk, affordable because every call site is a typed
+    # operator command and none is on the launch, session or heartbeat path).
+    # A concurrent reader sees either the whole old file or the whole new one —
+    # and the QUIETEST caller is the one a torn write hurt: ``cli/launch.py``
+    # treats an unreadable config as "launching untraced" by design. The temp
+    # is removed on any failure rather than left next to the file an operator
+    # reads. POSIX rename semantics hold because ~/.aisquare is a native disk;
+    # on a DrvFs /mnt/c or \\wsl.localhost path the guarantee softens, and
+    # nothing in this code can tell which kind of path it is on. On NTFS the
+    # rename is refused while another process has the config open, even only
+    # to read it; ``write_replacing`` retries it through
+    # ``paths.despite_windows_contention``, so every file written with that
+    # recipe gets the retry, not only this one.
     try:
-        with temp.open("w", encoding="utf-8") as handle:
-            handle.write(payload)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temp, written)
+        # keep_mode: a config the operator tightened to 0600 stays 0600 — the
+        # rewrite used to reset it to the umask default.
+        write_replacing(written, payload, keep_mode=True)
     except OSError as exc:
-        temp.unlink(missing_ok=True)
         if written == target:
             raise
         # A symlink was followed, so the path that failed is NOT the one the
@@ -527,41 +590,4 @@ def save_config(config: AppConfig, path: Path | None = None) -> Path:
             raise type(exc)(exc.errno, detail, str(written)) from exc
         except TypeError:  # an OSError subclass with an unusual signature
             raise OSError(exc.errno, detail, str(written)) from exc
-    except BaseException:
-        temp.unlink(missing_ok=True)
-        raise
-
-    # The rename is atomic the instant it returns, but not yet DURABLE: the new
-    # directory entry can still be in cache, so a hard kill or power loss here
-    # reverts the file to its previous contents. That is a different property
-    # from the one above — a reader never sees a partial file either way — and
-    # the cost of skipping it is "your last `explainability enable` did not
-    # stick", which `explainability status` reports immediately. It is the last
-    # step of the standard durable-replace recipe, and it was missing.
-    #
-    # MEASURED before adding it rather than assumed cheap: +2.15 ms median per
-    # write on this box (2.695 -> 4.845 ms, 200 samples interleaved, ext4 on a
-    # native WSL2 disk). Affordable because all ten call sites are explicit
-    # operator commands — enable/disable, config set, bind/clear, init — and
-    # none is on the launch, session or heartbeat path, so this is paid once per
-    # typed command and never in a loop. If that ever stops being true, this is
-    # the line to reconsider, and the number above is what to compare against.
-    #
-    # FAIL-OPEN, deliberately: the write has already succeeded and the caller's
-    # change is on disk. A parent we cannot open or sync (read-only mount, an
-    # exotic filesystem) must cost durability, never the write itself.
-    #
-    # Worth knowing: POSIX rename semantics hold here because ~/.aisquare is a
-    # native ext4 disk. On a DrvFs//mnt/c or \\wsl.localhost path the guarantee
-    # softens, and nothing in this code can tell which kind of path it is on.
-    try:
-        directory = os.open(written.parent, os.O_RDONLY)
-    except OSError:
-        return target
-    try:
-        os.fsync(directory)
-    except OSError:
-        pass
-    finally:
-        os.close(directory)
     return target

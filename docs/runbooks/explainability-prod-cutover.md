@@ -1203,6 +1203,17 @@ aisquare explainability register --target prod
 Prints each agent name with its `publication_id`, and is **idempotent** — a
 second run returns the same ids rather than creating duplicates.
 
+**Run it from a directory whose project has no key of its own.** Since #141,
+`register` uses the key a launch from the current directory would use — the
+project's own key when that project (or `$AISQUARE_TEAM_HUB`'s) has one bound
+to prod, else the machine's — and registers the roster in the workspace that
+key names. From a checkout with its own prod key it registers there, and every
+machine-keyed launch still gets 409 `agent_not_registered`. The success line
+ends `under the project's own key (…)` when that happened;
+`aisquare --json explainability status --target prod` shows `key_source` and
+`key_project` before you run it. `--project <name>` registers a project's own
+workspace on purpose.
+
 > **[verified-stg by coder1, NOT re-run by me]** Against staging this returned
 > `aisquare-planner` / `aisquare-coder` / `aisquare-runner`, all
 > `publication_id 169`, idempotent on a second run. I did **not** execute it
@@ -1452,14 +1463,21 @@ is what makes it the right single check.
 
 > **[verified-train]** `status` honours `--json` now (it used to print human
 > text under the flag). `aisquare --json explainability status` returns a real
-> payload — `enabled`, `target`, `gateway`/`gateway_source`,
-> `key_env`/`key_set`/`key_source`/`key_origin` (never the key itself),
-> `proxy`, `identity`, `agents`, `probe`, `shipping`,
+> payload — `enabled`, `target`, `gateway`/`gateway_source`, `destination`
+> (where `key_project`'s traces land, #142; `null` until chosen), `credits`
+> (that workspace's balance, #143; `null` until a destination is chosen),
+> `key_env`/`key_set`/`key_source`/`key_origin`/`key_project` (never the key
+> itself), `proxy`, `identity`, `agents`, `probe`, `shipping`,
 > `redaction` — so the cutover can be scripted rather than eyeballed.
 > **Branch on `key_source`, not on `key_env`.** `key_env` is the variable the
 > target NAMES, set or not; `key_source` is where the key actually came from
-> (`env`, `file`, or `unset`) and `key_origin` renders it — `$VAR` or the path
-> of `~/.aisquare/explainability-key`. On the single-deployment machine §1
+> (`project`, `env`, `file`, or `unset`) and `key_origin` renders it — the
+> project's own key file, `$VAR` or the path of
+> `~/.aisquare/explainability-key`. `key_project` is the project the key was
+> resolved for: the one a launch from this directory joins (#141). Run the
+> cutover checks from a directory whose project has no key of its own, or that
+> key answers (`key_source` `project`) instead of the machine's. On the
+> single-deployment machine §1
 > produces, the key comes from the FILE while `key_env` still reads
 > `EXPLAINABILITY_API_KEY`, so a check that rotated or debugged the named
 > variable would be working on a credential that is not in play. The spool
@@ -2222,9 +2240,11 @@ dies.
    Governance needs a credential class we do not hold, not a config edit.
 3. **[CLOSED]** `explainability status` honours `--json`. It used to print
    human text under the flag; it now returns a real payload — `enabled`,
-   `target`, `gateway`/`gateway_source`,
-   `key_env`/`key_set`/`key_source`/`key_origin` (never the key itself),
-   `proxy`, `identity`, `agents`, `probe`, `shipping`,
+   `target`, `gateway`/`gateway_source`, `destination` (#142, `null` until chosen),
+   `credits` (#143, `null` until a destination is chosen),
+   `key_env`/`key_set`/`key_source`/`key_origin`/`key_project` (never the key
+   itself), `proxy`, `identity`, `agents`, `probe`/`probe_severity`/`probe_fix`,
+   `shipping`,
    `redaction` — the spool counters are inside `.shipping`, and this list once
    claimed a top-level `.spool` that never existed.
    This matters more than it looks: §5b's split-brain assertion

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import re
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +14,7 @@ from aisquare.cli.global_flags import INJECTED_MARK, SHARED_FLAG_DECLARATIONS
 from aisquare.core.state import get_state
 from aisquare.services import team as team_service
 from tests.cli_tree import all_nodes
+from tests.rendered import plain as _plain
 
 
 @pytest.fixture(autouse=True)
@@ -40,20 +40,6 @@ def deterministic_rendering(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("NO_COLOR", "1")
     monkeypatch.setenv("COLUMNS", "200")
     monkeypatch.setenv("TERMINAL_WIDTH", "200")
-
-
-_ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
-
-
-def _plain(text: str) -> str:
-    """Rendered output flattened for content asserts: no ANSI, no wrapping.
-
-    ``NO_COLOR`` alone is not enough — rich keeps non-color attributes
-    (bold/dim) under it, and typer's highlighter styles the leading ``-`` of
-    an option as its own span, so escape codes land INSIDE tokens like
-    ``--json`` on forced-color environments (GitHub Actions).
-    """
-    return " ".join(_ANSI.sub("", text).split())
 
 
 def _declarations(command: Any) -> set[str]:

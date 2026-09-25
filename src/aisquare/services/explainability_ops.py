@@ -184,6 +184,12 @@ class ResolvedTarget:
     """The deployment is the PROJECT's — its destination's, or the one its own key is
     bound to off the machine's target — so the machine's top-level gateway and proxy
     never stand in for it, and its fix is its own entry (:func:`deployment_fix`)."""
+    entry_shared: str | None = None
+    """For a project's own deployment that has the machine's own target's name, what
+    names that target: "config" (``settings.target``) or "env" (an exported
+    ``$AISQUARE_EXPLAINABILITY_TARGET``). Its ``[explainability.targets."<name>"]`` is
+    then also the entry every project without a destination reads, so a fix written
+    there moves them too (:func:`deployment_fix`); ``None`` otherwise."""
 
     @property
     def configured(self) -> bool:
@@ -433,6 +439,13 @@ def resolve_target(
     if not gateway_url:
         source = "unset"
     proxy_url = target.proxy_url or (settings.proxy_url if machine else "")
+    # The project's deployment, named like the machine's own target: one config entry
+    # for both, which `deployment_fix` must not name as this deployment's alone.
+    entry_shared = None
+    if not machine and chosen == settings.target:
+        entry_shared = "config"
+    elif not machine and chosen == exported:
+        entry_shared = "env"
 
     roles = target.roles if target.roles is not None else settings.roles
     return ResolvedTarget(
@@ -452,6 +465,7 @@ def resolve_target(
         target_source=target_source,
         unused_env_target=unused_env_target,
         project_deployment=not machine,
+        entry_shared=entry_shared,
     )
 
 
@@ -471,12 +485,35 @@ def deployment_fix(
     for a remediation that corrects it (the doctor's and ``status``'s proxy and
     gateway rows, which named ``enable --target`` for a project's deployment
     too).
+
+    UNLESS THE MACHINE'S OWN TARGET HAS THE SAME NAME
+    (:attr:`ResolvedTarget.entry_shared`): then the entry is its too, and every
+    project without a destination reads it. The machine ``init
+    --explainability`` writes is on prod and named ``stg`` by default, so for a
+    project on staging the proxy row's fix, followed word for word, moved every
+    other project's proxy to staging, with the prod gateway and key (review of
+    #203, round 2). The entry is still where the setting goes, and the fix says
+    the machine's target needs a name of its own first.
     """
     if target.project_deployment:
         entry = f'[explainability.targets."{target.name}"] in {paths.config_path()}'
-        if value is None:
-            return f"gateway_url and proxy_url under {entry}"
-        return f'{what}_url = "{value}" under {entry}'
+        setting = "gateway_url and proxy_url" if value is None else f'{what}_url = "{value}"'
+        fix = f"{setting} under {entry}"
+        if target.entry_shared == "config":
+            return (
+                f"{fix}, once this machine's own target has a name of its own: it is "
+                f'"{target.name}" too, so every project without a destination reads that '
+                f'entry. Rename it first: target = "<name>" under [explainability], its own '
+                "entry moved with it if it has one, and `key set` again for a project whose "
+                f'key was attached for "{target.name}"'
+            )
+        if target.entry_shared == "env":
+            return (
+                f"{fix}, once ${TARGET_ENV_VAR} names another target: it names "
+                f'"{target.name}" in this shell, so every project without a destination here '
+                "reads that entry too"
+            )
+        return fix
     return f"aisquare explainability enable --target {target.name} --{what}-url {value or '<url>'}"
 
 
@@ -1484,10 +1521,11 @@ def _check_config(target: ResolvedTarget, *, on: bool) -> DoctorCheck:
     if not target.api_key:
         # For a project's own deployment, `enable --target … --key-env` would make it the
         # machine's target, re-pointing every project without a destination (review of #203):
-        # the project's own key is the way in, as `use` says.
+        # the project's own key is the way in, as `use` says. With `--from-env`: from a
+        # terminal, `key set` with nothing on stdin refuses (review of #203, round 2).
         other = (
             "attach it to the project: aisquare explainability key set --project "
-            f"{shlex.quote(target.project_id or '<project>')}"
+            f"{shlex.quote(target.project_id or '<project>')} --from-env <VAR>"
             if target.project_deployment
             else "point the target at another variable: aisquare explainability enable "
             f"--target {target.name} --key-env <VAR>"

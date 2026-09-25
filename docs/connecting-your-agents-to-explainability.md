@@ -406,7 +406,11 @@ reported on its own line:
   `EXPLAINABILITY_<HOST>_API_KEY` unless it names another variable — and until
   then the project's launches go untraced, saying why. The doctor's and
   `status`'s other fixes for a project's deployment name that entry, or `key set
-  --project`, for the same reason. Launches, `fleet spawn` and
+  --project … --from-env <VAR>`, for the same reason. When the machine's own
+  target has the deployment's name (its default name is `stg`, whatever gateway
+  `init --explainability` gave the machine), that entry is its too and every
+  project without a destination reads it, so the fix says to give the machine's
+  target a name of its own first. Launches, `fleet spawn` and
   `explainability env` in the project take the proxy **and** the key from this
   target, whatever `AISQUARE_EXPLAINABILITY_TARGET` says: a project's
   destination comes before that variable, which moves only the projects without

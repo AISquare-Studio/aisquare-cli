@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import ast
 import json
+import re
 import shlex
 import sqlite3
 import stat
@@ -691,7 +692,8 @@ def test_no_remediation_for_a_projects_deployment_makes_it_the_machines_target(
     target the whole machine's, which moves every project without a destination onto it
     (review of #203). The most reachable is the doctor's key row for a project ``use``d
     on staging whose mint was refused. Each names the project's key or its config entry;
-    the machine's own target still gets ``enable --target``."""
+    the machine's own target still gets ``enable --target``. The key row's ``key set``
+    names ``--from-env``: from a terminal, one with nothing on stdin refuses (round 2)."""
     config = AppConfig()
     config.explainability.enabled = True
     config.explainability.gateway_url = "https://explainability-api.aisquare.studio"
@@ -712,7 +714,7 @@ def test_no_remediation_for_a_projects_deployment_makes_it_the_machines_target(
     doctor = {check.name: check for check in ops.checks(project_id=project.id)}
     key_row = " ".join((doctor["explainability config"].fix or "").split())
     assert "$EXPLAINABILITY_STG_API_KEY" in key_row
-    assert f"aisquare explainability key set --project {project.id}" in key_row
+    assert f"aisquare explainability key set --project {project.id} --from-env <VAR>" in key_row
     assert "enable --target" not in key_row
 
     target = ops.resolve_target(load_config().explainability, None, project_id=project.id)
@@ -745,6 +747,63 @@ def test_no_remediation_for_a_projects_deployment_makes_it_the_machines_target(
     machine = replace(target, project_deployment=False, gateway_url="stg.example")
     assert "enable --target stg --gateway-url https://<host>" in (
         ops._check_config(machine, on=True).fix or ""
+    )
+
+
+def test_a_fix_for_a_projects_deployment_followed_moves_no_other_project(
+    isolated_home: Path, tmp_path: Path
+) -> None:
+    """On the machine ``init --explainability`` writes (prod, and ``target = "stg"`` by
+    default) the destination's ``stg`` entry is also the machine's target's. The proxy
+    row's fix for a project on staging named that entry as the deployment's alone, and
+    followed word for word it moved every project without a destination to the staging
+    proxy, with the prod gateway and key (review of #203, round 2). Followed as it is
+    written now, the other project resolves exactly what it did, and this one takes the
+    proxy it was told to set."""
+    config = AppConfig()
+    config.explainability.enabled = True
+    config.explainability.gateway_url = "https://explainability-api.aisquare.studio"
+    config.explainability.proxy_url = "https://explainability-api.aisquare.studio:9443"
+    save_config(config)
+    service.store_api_key("AIS_machine_prod_key")
+    web = _project(tmp_path / "web")
+    other = _project(tmp_path / "api")
+    with store_session() as store:
+        dest.choose(
+            store,
+            web,
+            dest.Workspace(id=42, uid="ws-uid-42", name="acme", role="ADMIN"),
+            dest.Studio(id=301, uid="st-301", name="Frontend"),
+            iam.Session(api_url="https://stg-api.aisquare.studio", token="aisq_x", source="env"),
+        )
+
+    def read(project: ProjectInfo) -> tuple[str, str, str]:
+        resolved = ops.resolve_target(load_config().explainability, None, project_id=project.id)
+        return (resolved.gateway_url, resolved.proxy_url, resolved.key_source)
+
+    before = read(other)
+    target = ops.resolve_target(load_config().explainability, None, project_id=web.id)
+    # The table's staging proxy is not on its gateway's host, so this row is the one a
+    # healthy staging proxy that does not report its gateway gets.
+    row = ops.proxy_state(target, on=True, prober=lambda _url: service.ProxyProbe(True, "ok"))
+    fix = " ".join(row.remediation.split())
+    setting = re.search(r'proxy_url = "([^"]+)" under (\[explainability\.targets\."stg"\])', fix)
+    assert setting is not None, fix
+
+    if 'target = "<name>" under [explainability]' in fix:  # the rename, as the operator would
+        renamed = load_config()
+        renamed.explainability.target = "own"
+        save_config(renamed)
+    with paths.config_path().open("a", encoding="utf-8") as config_file:
+        config_file.write(f'\n{setting[2]}\nproxy_url = "{setting[1]}"\n')
+
+    assert read(other) == before, "the fix for one project's deployment moved another"
+    assert read(web)[1] == setting[1]
+    exported = ops.resolve_target(
+        load_config().explainability, None, project_id=web.id, env={ops.TARGET_ENV_VAR: "stg"}
+    )
+    assert "$AISQUARE_EXPLAINABILITY_TARGET names another target" in ops.deployment_fix(
+        exported, what="proxy", value="https://<host>"
     )
 
 

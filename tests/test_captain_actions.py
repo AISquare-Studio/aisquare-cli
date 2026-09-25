@@ -591,6 +591,7 @@ def _home_seqs() -> list[int]:
 
 def test_the_server_tells_the_captain_every_tool_that_needs_confirm() -> None:
     assert "stop, spawn and restart need confirm=true" in actions.INSTRUCTIONS
+    assert "naming the agent, its role or its project" in actions.INSTRUCTIONS  # T1d
 
 
 def test_a_call_through_the_protocol_reaches_the_tool_and_a_refusal_is_an_error_result(
@@ -1213,7 +1214,13 @@ def test_spawn_goes_through_fleet_spawn_marked_as_the_captains(
 ) -> None:
     result = ok(
         actions.spawn(
-            "alpha", "coder", label="coder-7", task="tsk_1", persona="skeptic", confirm=True
+            "alpha",
+            "coder",
+            label="coder-7",
+            task="tsk_1",
+            persona="skeptic",
+            confirm=True,
+            utterance="spawn a coder for tsk_1",
         )
     )
     assert fleet_rec.calls == [
@@ -1244,7 +1251,9 @@ def test_stop_refuses_without_confirm_and_never_reaches_the_fleet(
     assert message.startswith("refused: stopping coder-1 ends its session")
     assert "confirm=true" in message
     assert fleet_rec.calls == []
-    result = ok(actions.stop("alpha", "coder-1", force=True, confirm=True))
+    result = ok(
+        actions.stop("alpha", "coder-1", force=True, confirm=True, utterance="force-stop coder-1")
+    )
     assert fleet_rec.calls == [("stop", {"project": alpha.id, "label": "coder-1", "force": True})]
     assert result["label"] == "coder-1"
     assert result["released"] == []
@@ -1260,11 +1269,96 @@ def test_restart_refuses_without_confirm_and_never_reaches_the_fleet(
 
 
 def test_restart_goes_through_fleet_restart(alpha: ProjectInfo, fleet_rec: Fleet) -> None:
-    result = ok(actions.restart("alpha", "coder-1", confirm=True))
+    result = ok(actions.restart("alpha", "coder-1", confirm=True, utterance="restart coder-1"))
     assert fleet_rec.calls == [
         ("restart", {"project": alpha.id, "label": "coder-1", "spawned_by": "captain"})
     ]
     assert result["resumed"] is True
+
+
+# --- confirm needs named words (T1d, 13545, 13548) ----------------------------------------------
+
+
+@pytest.mark.parametrize("force", [False, True])
+def test_stop_it_names_nothing_so_confirm_is_not_taken_and_nothing_stops(
+    alpha: ProjectInfo, agents: dict[str, FleetAgent], fleet_rec: Fleet, force: bool
+) -> None:
+    """runner2-1's third dry run (13545): the owner said "Stop it.", naming nothing; the captain
+    resolved it to the only coder and set confirm itself, and the coder was stopped. The server
+    takes confirm=true only on words that name what it acts on: here it asks first."""
+    message = refused(
+        lambda: actions.stop("alpha", "coder-1", force=force, confirm=True, utterance="Stop it.")
+    )
+    ask = "force-stop coder-1 in alpha?" if force else "stop coder-1 in alpha?"
+    assert "'Stop it.' name no agent, role or project" in message, message
+    assert f'ask first: "{ask}"' in message, message
+    assert fleet_rec.calls == [], "nothing stopped"
+    last = audit(alpha.id)[-1]
+    assert (last["tool"], last["ok"], last["utterance"]) == ("stop", False, "Stop it.")
+
+
+@pytest.mark.parametrize(
+    "utterance",
+    [
+        "stop the coding agent in alpha",  # a role word and the project
+        "stop coder-01",  # the role, as a label is often said
+        "Stop coder-1.",  # the label
+        "stop the one in alpha",  # the project alone
+        "yes, stop the coders",  # a plural role
+        "stop the coding agent",  # the role as the owner says it, alone
+    ],
+)
+def test_stop_takes_confirm_when_the_words_name_the_agent_its_role_or_its_project(
+    alpha: ProjectInfo, agents: dict[str, FleetAgent], fleet_rec: Fleet, utterance: str
+) -> None:
+    ok(actions.stop("alpha", "coder-1", confirm=True, utterance=utterance))
+    assert fleet_rec.names() == ["stop"]
+
+
+def test_a_label_alone_names_the_agent_whatever_its_role(
+    alpha: ProjectInfo, agents: dict[str, FleetAgent], fleet_rec: Fleet
+) -> None:
+    with store_session() as store:
+        store.upsert_fleet_agent(_row(alpha, "atlas", "coder", "%5"))
+    ok(actions.stop("alpha", "atlas", force=True, confirm=True, utterance="force stop atlas"))
+    assert fleet_rec.names() == ["stop"]
+
+
+@pytest.mark.parametrize("utterance", ["stop the manager", "stop the encoder", "Stop it."])
+def test_words_that_name_another_role_or_nothing_are_no_confirmation_for_this_agent(
+    alpha: ProjectInfo, agents: dict[str, FleetAgent], fleet_rec: Fleet, utterance: str
+) -> None:
+    """Another role is not this agent's; and words, not substrings: "encoder" is no coder."""
+    refused(lambda: actions.stop("alpha", "coder-1", confirm=True, utterance=utterance))
+    assert fleet_rec.calls == []
+
+
+def test_spawn_takes_confirm_on_its_role_and_asks_first_on_words_that_name_nothing(
+    alpha: ProjectInfo, fleet_rec: Fleet
+) -> None:
+    """The plan's one-utterance delegation line holds: "spawn a coder for it" names the role."""
+    message = refused(lambda: actions.spawn("alpha", "coder", confirm=True, utterance="Do it."))
+    assert 'ask first: "spawn a coder in alpha?"' in message, message
+    assert fleet_rec.calls == []
+    ok(
+        actions.spawn(
+            "alpha", "coder", task="tsk_1", confirm=True, utterance="spawn a coder for it"
+        )
+    )
+    ok(actions.spawn("alpha", "tester", confirm=True, utterance="start one in alpha"))
+    assert fleet_rec.names() == ["spawn", "spawn"]
+
+
+def test_restart_takes_confirm_on_named_words_and_asks_first_otherwise(
+    alpha: ProjectInfo, agents: dict[str, FleetAgent], fleet_rec: Fleet
+) -> None:
+    message = refused(
+        lambda: actions.restart("alpha", "coder-1", confirm=True, utterance="Restart it.")
+    )
+    assert 'ask first: "restart coder-1 in alpha?"' in message, message
+    assert fleet_rec.calls == []
+    ok(actions.restart("alpha", "coder-1", confirm=True, utterance="restart coder-1"))
+    assert fleet_rec.names() == ["restart"]
 
 
 def test_attach_persona_goes_through_the_fleet_as_the_captain(
@@ -1288,8 +1382,19 @@ def test_attach_persona_goes_through_the_fleet_as_the_captain(
 @pytest.mark.parametrize(
     ("tool", "kwargs"),
     [
-        ("stop", {"project": "alpha", "label": "coder-1", "confirm": True}),
-        ("restart", {"project": "alpha", "label": "coder-1", "confirm": True}),
+        (
+            "stop",
+            {"project": "alpha", "label": "coder-1", "confirm": True, "utterance": "stop coder-1"},
+        ),
+        (
+            "restart",
+            {
+                "project": "alpha",
+                "label": "coder-1",
+                "confirm": True,
+                "utterance": "restart coder-1",
+            },
+        ),
         ("attach_persona", {"project": "alpha", "label": "coder-1", "name": "skeptic"}),
     ],
     ids=["stop", "restart", "attach_persona"],
@@ -1327,7 +1432,7 @@ def test_a_receipt_that_cannot_be_read_never_turns_a_done_stop_into_an_error(
         return real(self, project_id, **kwargs)
 
     monkeypatch.setattr(SqliteStore, "filtered_events", busy)
-    result = ok(actions.stop("alpha", "coder-1", confirm=True))
+    result = ok(actions.stop("alpha", "coder-1", confirm=True, utterance="stop coder-1"))
     assert result["label"] == "coder-1"
     event = audit(alpha.id)[-1]
     assert (event["ok"], event["receipt"]) == (True, None)
@@ -1341,7 +1446,7 @@ def test_a_restart_whose_replacement_re_picked_its_label_still_gets_its_receipt(
     the label it was ASKED to restart, so that is what the receipt matches."""
     fleet_rec.crowd = True
     fleet_rec.relabel = "coder-4"
-    ok(actions.restart("alpha", "coder-3", confirm=True))
+    ok(actions.restart("alpha", "coder-3", confirm=True, utterance="restart coder-3"))
     (effect,) = fleet_rec.effects
     assert effect.text.startswith("coder-3 restarted")
     assert audit(alpha.id)[-1]["receipt"] == effect.seq
@@ -1354,7 +1459,9 @@ def test_a_fleet_refusal_is_said_never_faked(
         raise fleet.FleetError("alpha already runs 6 agents (max_agents_per_project = 6)")
 
     monkeypatch.setattr(fleet, "spawn", no_room)
-    message = refused(lambda: actions.spawn("alpha", "coder", confirm=True))
+    message = refused(
+        lambda: actions.spawn("alpha", "coder", confirm=True, utterance="spawn a coder")
+    )
     assert message.startswith("refused: alpha already runs 6 agents")
     assert audit(alpha.id)[-1]["ok"] is False
 

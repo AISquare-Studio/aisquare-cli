@@ -427,6 +427,7 @@ def test_the_bundled_captain_persona_carries_the_cards_rules() -> None:
         "thinking",
         "speak",
         "confirm=true",
+        "name the agent, its role or its project",  # T1d: "stop it" names nothing
     ):
         assert rule in body, rule
 

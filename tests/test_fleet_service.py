@@ -8746,6 +8746,40 @@ def test_restarting_an_agent_whose_pane_vanished_announces_it_but_wakes_no_manag
     assert [typed for typed in tmux.typed if typed[0] == manager.pane_id] == []
 
 
+@pytest.mark.parametrize("gone", ["dead", "vanished"])
+def test_a_restart_whose_replacement_never_starts_wakes_the_manager_it_held_back(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    gone: str,
+) -> None:
+    """The two twins above hold the manager's wake-up back because a replacement is
+    coming. When ``_respawn`` then fails, none is: the exit stood announced, the claims
+    were back in the pool, and nothing woke the manager waiting on the board — the
+    running agent's hand-over wakes it through ``_abandon_handover``, these did not
+    (review of the accounts stack's fold, round 2, F1). The restart still fails."""
+    manager = _waiting_manager(tmux, project)
+    coder = _coder(project, label="coder-1")
+    if gone == "dead":
+        tmux.die(coder.pane_id, 1)
+    else:
+        tmux.vanish(coder.pane_id)
+
+    def refused(*args: Any, **kwargs: Any) -> fleet_service.SpawnReceipt:
+        raise FleetError("tmux refused the window (fake)")
+
+    monkeypatch.setattr(fleet_service, "spawn", refused)
+    with pytest.raises(FleetError, match="refused the window"):
+        fleet_service.restart(project, "coder-1")
+
+    assert len(_events(project, "agent_exited")) == 1
+    assert [typed for typed in tmux.typed if typed[0] == manager.pane_id] == [
+        (manager.pane_id, "literal", NUDGE_TEXT),
+        (manager.pane_id, "key", "Enter"),
+    ]
+
+
 def test_a_switch_whose_agent_a_restart_resumed_meanwhile_leaves_that_session_s_state_alone(
     tmux: FakeTmux,
     claude_on_path: Path,

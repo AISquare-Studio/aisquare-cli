@@ -35,6 +35,7 @@ from textual.worker import Worker, WorkerState
 from aisquare.cli.ui.app import FleetApp
 from aisquare.cli.ui.sidebar import AccountsSection, AccountsTitle
 from aisquare.cli.ui.terminal import TerminalPane
+from aisquare.cli.ui.views import accounts as accounts_view
 from aisquare.cli.ui.views.accounts import (
     SIGN_IN_WORKER,
     AccountRow,
@@ -848,7 +849,15 @@ def test_quitting_mid_sign_in_cancels_the_device_flow(
 def _script_claude_sign_in(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, lands: bool
 ) -> dict[str, Any]:
-    """A fresh slot whose sign-in either lands on the first poll or never does."""
+    """A fresh slot whose sign-in either lands on the first poll or never does.
+
+    The page's own poll is pushed out of reach: every test takes its ticks by hand. The
+    real tick came every second, and the recorder answers its pane check with "no server",
+    which is a window that closed. A test that took longer than that between its click and
+    its cancel read "Claude Code closed before a sign-in landed" instead of the cancel
+    (with every message held 15 ms).
+    """
+    monkeypatch.setattr(accounts_view, "LOGIN_POLL_SECONDS", 3600.0)
     seen: dict[str, Any] = {"opened": [], "completed": [], "abandoned": [], "landed_polls": 0}
     account = ClaudeAccount(
         slot=2,

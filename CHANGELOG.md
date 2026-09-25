@@ -1283,8 +1283,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (#149). Every window started at 200x50 and only shrank to its pane when the
   UI attached it; past 144 columns Claude Code's fullscreen renderer opens the
   diff panel by itself as soon as a file is edited, remembers that for later
-  sessions, and inside the fleet nothing could close it — clicks are not
-  forwarded (#148) and a `/diff` typed while Claude works is queued. The
+  sessions, and inside the fleet nothing could close it — clicks were not
+  forwarded yet (#148 now forwards them, so the panel's `✕` works) and a
+  `/diff` typed while Claude works is queued. The
   default is now 120x40 (`core.tmux.DEFAULT_WINDOW_WIDTH/HEIGHT`, under 144
   and above the 110 `/diff` needs on demand), and a spawn from the UI's
   *Start manager* is born at the size its pane will have — a pane that is
@@ -1292,7 +1293,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   running session keeps its size under `fleet attach` instead of following the
   attached terminal, which would leave it that wide after the detach; the
   session's first window follows it until the UI has shown it. `docs/fleet.md`
-  says how to close a panel that did open: `/diff` once the agent is idle.
+  says how to close a panel that did open: `/diff` once the agent is idle, or
+  a click on its `✕`.
 - **The sidebar bell rings for a real prompt, not for every notification**
   (#153). Every Claude Code `Notification` flipped a session to 🔔 `attention`,
   and 164 of the 183 bells on the reporting machine were the routine idle notice

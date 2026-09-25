@@ -1157,16 +1157,14 @@ gone — you rebooted, or ran `kill-server` — say so:
 aisquare fleet reap --all --server-down
 ```
 
-To stop everything the fleet ever started, on every project, kill the private
-server — this ends every agent at once, so prefer `fleet stop` per agent:
 **The server was stopped outside the CLI.** Rows read `unknown (tmux
 unavailable)` and `reap` reaps nothing — correctly: it cannot ask. Once any
 project spawns again, a new server is up on the socket and hands the old pane
 ids out afresh; the old rows then read `✗ lost` — never the state of the agent
 that got their id, whose pane the UI does not show under them either — a plain
 `reap` records them, and stopping, restarting or shutting one down ends its row
-without touching that agent. `shutdown`
-records them as lost on your word, scoped to one project or over all of them:
+without touching that agent. `shutdown` records them as lost on your word, at
+any point, scoped to one project or over all of them:
 
 ```sh
 aisquare fleet shutdown --project amber-otter --yes
@@ -1224,8 +1222,9 @@ terminal's size unless the UI has shown it, and keeps that width after you
 detach; every other window keeps its own size, panned in a smaller terminal and
 padded in a larger one. To close one: wait until the agent is idle
 (`⏸ waiting`) and type `/diff` into the pane — typed while Claude is working it
-is queued as a message, which is why it seemed to do nothing. The `✕` in the
-panel's header needs a forwarded click, which the pane does not do yet (#148).
+is queued as a message, which is why it seemed to do nothing. Or click the `✕`
+in the panel's header: the pane forwards the click to Claude Code (#148; see
+*The mouse in a Claude Code pane*).
 
 **An agent is stuck on a permission prompt.** Its row shows **🔔 NEEDS YOU**
 and the terminal rings. Nothing nudges it and nothing answers for it: click the

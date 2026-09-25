@@ -720,6 +720,40 @@ def test_the_next_step_for_the_projects_key_puts_that_key_to_the_gateway(
     assert posted == [(lib.id, service.project_key_path(lib.id).read_text(encoding="utf-8"))]
 
 
+def test_the_live_rows_name_the_check_they_are_part_of_when_they_say_re_run(
+    runner: CliRunner,
+    idp: IdentityProviderStub,
+    signed_in: iam.Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`use` names `doctor --live --project <id>`, and the live rows' remedies said
+    "re-run: aisquare doctor --live". That re-run checks the machine's target and key,
+    which for a project whose destination is elsewhere is another gateway and another key
+    (review of #170's follow-ups, round 1, F7). The re-run names what this one checked."""
+    _trace_on(monkeypatch)
+    _gateway_posts(monkeypatch)
+    web = _project(tmp_path / "web")
+    _json(runner, "explainability", "use", "acme/Frontend")
+
+    rows = {check.name: check for check in ops.checks(project_id=web.id, live=True)}
+    governance = rows["explainability governance"].fix or ""
+    assert governance.endswith(shlex.join(["aisquare", "doctor", "--live", "--project", web.id]))
+
+    unready = ops.HttpVerdict(False, 503, "unavailable")
+    monkeypatch.setattr(ops, "probe_ready", lambda *_a, **_k: unready)
+    rows = {c.name: c for c in ops.checks(target_name="local", project_id=web.id, live=True)}
+    rerun = ["aisquare", "doctor", "--live", "--target", "local", "--project", web.id]
+    assert rows["explainability ingest"].fix == (
+        f"Fix the gateway row above, then re-run: {shlex.join(rerun)}"
+    )
+    monkeypatch.setenv("EXPLAINABILITY_LOCAL_API_KEY", "AIS_machine_local_key")
+    machine = {check.name: check for check in ops.checks(target_name="local", live=True)}
+    assert machine["explainability ingest"].fix == (
+        "Fix the gateway row above, then re-run: aisquare doctor --live --target local"
+    ), "without --project, none is named"
+
+
 def test_with_no_key_the_next_step_attaches_one_to_the_destination(
     runner: CliRunner,
     idp: IdentityProviderStub,

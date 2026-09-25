@@ -1911,7 +1911,7 @@ def _live_checks(target: ResolvedTarget, *, on: bool) -> list[DoctorCheck]:
                 "explainability ingest",
                 "skipped — the gateway did not answer /ready, so no span was posted; "
                 "this is not a verdict on ingest",
-                "Fix the gateway row above, then re-run: aisquare doctor --live",
+                f"Fix the gateway row above, then re-run: {_rerun_live(target)}",
             )
         )
         # `_sdk_checks` asks the SDK's own doctor and never touches the gateway,
@@ -1944,11 +1944,27 @@ def _live_checks(target: ResolvedTarget, *, on: bool) -> list[DoctorCheck]:
                 "traces land, but runs stay UNGOVERNED until a rule book is attached "
                 "to the studio (an ingest key cannot verify this from here)",
                 "Attach a rule book to the studio in the dashboard, then re-run "
-                "aisquare doctor --live",
+                f"{_rerun_live(target)}",
             )
         )
     results.extend(_sdk_checks(degrade=degrade))
     return results
+
+
+def _rerun_live(target: ResolvedTarget) -> str:
+    """``doctor --live`` for what this run checked, as the live rows' remedies name it.
+
+    Bare, the re-run checked the machine's target and key. For a project
+    (``doctor --live --project``, the check ``use`` names) whose destination is
+    on another deployment, that is another gateway and another key, and after
+    ``--target`` another deployment (review of #170's follow-ups, round 1, F7).
+    """
+    argv = ["aisquare", "doctor", "--live"]
+    if target.target_source == "argument":
+        argv += ["--target", target.name]
+    if target.project_id is not None:
+        argv += ["--project", target.project_id]
+    return shlex.join(argv)
 
 
 #: ``_fail`` when the operator has switched tracing on (broken now means

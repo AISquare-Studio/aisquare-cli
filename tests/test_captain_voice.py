@@ -142,7 +142,7 @@ class Harness:
             return sum(
                 1
                 for seq, at in self.speak_seqs
-                if seq > since and (typed_at is None or at >= typed_at)
+                if seq > since and (typed_at is None or at > typed_at)  # voice.spoke_since's rule
             )
 
         def set_mode_key(mode: voice.Mode) -> None:
@@ -355,6 +355,32 @@ def test_the_thinking_signal_shows_while_a_delivery_runs_and_follows_the_captain
     assert harness.thinking_flips == [True, False, True, False], (
         "the terminal hook saw every flip the page did, and nothing else"
     )
+
+
+def test_thinking_goes_off_only_after_the_reply_frame_even_when_the_speak_read_is_slow() -> None:
+    """13307: on Windows the page waited 10 s for thinking-off after the reply. At 88b3bea0 the
+    turn's count dropped BEFORE the speak read that precedes the reply; the one-second poll
+    ran during that read and sent thinking-off ahead of the reply, and nothing came after
+    it. The count drops once the reply is out, so off always follows the reply."""
+    harness = Harness()
+    count = harness.hooks.spoke_since
+
+    def slow_count(since: int, typed_at: datetime | None) -> int:
+        time.sleep(0.2)  # ten polls (poll_s is 0.02) run during it
+        return count(since, typed_at)
+
+    harness.hooks = voice.Hooks(**{**harness.hooks.__dict__, "spoke_since": slow_count})
+    harness.app = voice.build_app(token=TOKEN, hooks=harness.hooks, mode="focus")
+    with TestClient(harness.app) as client:
+        for connection in _authed(client):
+            connection.send_text(json.dumps({"t": "text", "text": "how is the fold"}))
+            seen: list[dict[str, Any]] = []
+            while not seen or seen[-1]["t"] != "reply":
+                seen.append(json.loads(_text(connection)))
+            after = _until(connection, "thinking")
+    flips = [f["on"] for f in seen if f["t"] == "thinking"]
+    assert flips == [True], f"thinking went off before the reply: {seen}"
+    assert after["on"] is False
 
 
 @pytest.mark.parametrize("captain_spoke", [False, True])
@@ -738,6 +764,51 @@ def test_a_mute_or_a_mode_switch_closes_an_open_window_too(
     assert harness.deliveries.texts == []
 
 
+def _frames_until_final(connection: Any) -> list[dict[str, Any]]:
+    frames: list[dict[str, Any]] = []
+    while not (frames and frames[-1]["t"] == "stt" and frames[-1]["final"]):
+        frames.append(json.loads(_text(connection)))
+    return frames
+
+
+def test_listen_meeting_speech_shows_no_words_live_or_after() -> None:
+    """13321: the owner may share their screen in a meeting; the page shows 'say Captain' and
+    no word of what the mic hears without the wake word."""
+    harness = Harness(canned=["we should ship the fold today"], mode="listen", wake_word="captain")
+    with TestClient(harness.app) as client:
+        for connection in _authed(client):
+            _say(connection)
+            frames = _frames_until_final(connection)
+    shown = [f["text"] for f in frames if f["t"] == "stt" and f["text"]]
+    assert shown == [], f"meeting speech reached the page: {frames}"
+    heard = len(harness.transcribers[0].fed)
+    assert heard >= voice.INTERIM_BYTES, "an interim was due: the mic heard it, the page did not"
+
+
+def test_listen_an_interim_that_begins_with_the_wake_word_shows_what_follows_it_live() -> None:
+    harness = Harness(canned=["Captain, find me this"], mode="listen", wake_word="captain")
+    with TestClient(harness.app) as client:
+        for connection in _authed(client):
+            _say(connection)
+            frames = _frames_until_final(connection)
+    interims = [f["text"] for f in frames if f["t"] == "stt" and not f["final"]]
+    assert interims == ["find me this"]
+
+
+def test_listen_in_the_window_the_next_utterance_shows_live() -> None:
+    harness = Harness(
+        canned=["Captain", "find me this"], mode="listen", wake_word="captain", wake_window_s=30.0
+    )
+    with TestClient(harness.app) as client:
+        for connection in _authed(client):
+            _say(connection)
+            assert _until(connection, "awake")["on"] is True
+            _say(connection)
+            frames = _frames_until_final(connection)
+    interims = [f["text"] for f in frames if f["t"] == "stt" and not f["final"]]
+    assert interims == ["find me this"]
+
+
 def test_typed_text_in_listen_mode_needs_no_wake_word() -> None:
     """The wake word gates what the mic hears; a typed line is the owner's on purpose."""
     harness = Harness(mode="listen", wake_word="captain")
@@ -1044,6 +1115,15 @@ def test_spoke_since_counts_only_ok_speak_audits_on_the_home_board(isolated_home
     later = datetime.now(tz=UTC) + timedelta(seconds=5)
     assert voice.spoke_since(before, later) == 0, "spoken before the text went in"
     assert voice.spoke_since(before, later - timedelta(minutes=1)) == 1
+    # A speak() stamped at the very instant of the typing (one clock tick on Windows) is
+    # the turn before's: it cannot answer the text just typed.
+    from aisquare.core.store import store_session
+
+    with store_session() as store:
+        spoke = store.filtered_events(home.id, since_seq=before, kind="captain_action", limit=5)
+    stamp = voice._event_time(spoke[0].created_at)
+    assert voice.spoke_since(before, stamp) == 0, "a tie is the turn before's"
+    assert voice.spoke_since(before, stamp - timedelta(microseconds=1)) == 1
 
 
 def test_an_unavailable_backend_is_said_with_its_fix_not_a_dead_socket() -> None:

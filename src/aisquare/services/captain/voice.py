@@ -557,7 +557,10 @@ def spoke_since(seq: int, typed_at: datetime | None = None) -> int:
             continue
         if not (isinstance(record, dict) and record.get("tool") == "speak" and record.get("ok")):
             continue
-        if typed_at is not None and _event_time(event.created_at) < typed_at:
+        # Strictly after: a speak() stamped at the very instant of the typing cannot answer
+        # the text just typed, so an equal stamp (one clock tick on Windows) is the turn
+        # before's — counting it muted this reply on CI's Windows leg.
+        if typed_at is not None and _event_time(event.created_at) <= typed_at:
             continue
         spoken += 1
     return spoken
@@ -668,6 +671,8 @@ class _Connection:
         self._awake_until: float | None = None
         """When the window the wake word alone opened closes (``hooks.clock``), or None."""
         self._window_timer: asyncio.Task[None] | None = None
+        self._interim_shown = False
+        """Whether the page's live line shows words of this utterance (see _show_interim)."""
         self._shown_thinking: bool | None = None
         self._send_lock = asyncio.Lock()
 
@@ -921,9 +926,30 @@ class _Connection:
                 return
         interim, final = await asyncio.to_thread(self._segmenter.feed, chunk)
         if interim:
-            await self._send("stt", text=interim, final=False)
+            await self._show_interim(interim)
         if final is not None:
+            self._interim_shown = False
             await self._final(final)
+
+    async def _show_interim(self, interim: str) -> None:
+        """The live line while listen mode hears someone (13321). With the wake word on it
+        shows NO words of what the mic hears — the owner may be sharing their screen in a
+        meeting — until an interim begins with the wake word; then the words after it,
+        live. Inside the window a bare 'Captain' opened, the whole line, as before."""
+        if not self._wake or self._window_open():
+            await self._send("stt", text=interim, final=False)
+            return
+        woke, rest = self._wake.match(interim)
+        if woke:
+            self._interim_shown = bool(rest)
+            await self._send("stt", text=rest, final=False)
+        elif self._interim_shown:
+            # whisper took the wake word back: the line clears rather than show the rest
+            self._interim_shown = False
+            await self._send("stt", text="", final=False)
+
+    def _window_open(self) -> bool:
+        return self._awake_until is not None and self._hooks.clock() < self._awake_until
 
     async def _final(self, text: str) -> None:
         """A finished utterance: shown, then delivered — or, as the stop word, the mic off.
@@ -950,7 +976,7 @@ class _Connection:
         not kept: its text never leaves this function, the page only clears its interim.
         """
         woke, rest = self._wake.match(text)
-        in_window = self._awake_until is not None and self._hooks.clock() < self._awake_until
+        in_window = self._window_open()
         if not woke and not in_window:
             if self._awake_until is not None:
                 await self._close_window()

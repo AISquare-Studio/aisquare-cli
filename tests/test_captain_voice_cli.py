@@ -15,6 +15,7 @@ from aisquare.cli.app import app
 from aisquare.services import fleet as fleet_service
 from aisquare.services.captain import brain
 from aisquare.services.captain import speaker as speaker_mod
+from tests.rendered import plain
 from tests.test_stubs import IMPLEMENTED
 
 
@@ -171,7 +172,7 @@ def test_a_bad_wake_word_in_config_is_refused_with_a_line_before_anything_is_wri
         app, ["captain", "voice", "--show-token", "--mode", "listen", "--speaker", "on"]
     )
     assert result.exit_code == 1, result.output
-    assert "c@ptain" in result.output and "Traceback" not in result.output
+    assert "c@ptain" in plain(result.output) and "Traceback" not in result.output
     assert wrote == [], "refused before the mode or the speaker was written"
 
 
@@ -186,7 +187,7 @@ def test_serving_hands_the_wake_word_to_the_server(
     monkeypatch.setattr(voice, "serve", lambda **kw: served.append(kw))
     result = runner.invoke(app, ["captain", "voice"])
     assert result.exit_code == 0, result.output
-    assert "wake word: skipper" in result.output
+    assert "wake word: skipper" in plain(result.output)
     assert served[0]["hooks"].wake_word == "skipper"
 
 
@@ -250,7 +251,8 @@ def test_the_groups_help_names_the_dash_dash_voice_spelling(runner: CliRunner) -
     guard both know it — the routing itself is the group's parse_args rewrite."""
     result = runner.invoke(app, ["captain", "--help"])
     assert result.exit_code == 0, result.output
-    assert "--voice" in result.output and "voice page" in result.output
+    # plain(): CI forces a styled terminal and the highlighter splits "--voice" (tests/rendered.py)
+    assert "--voice" in plain(result.output) and "voice page" in plain(result.output)
 
 
 def test_the_leaf_is_implemented_and_left_uninvoked_by_the_sweeps() -> None:

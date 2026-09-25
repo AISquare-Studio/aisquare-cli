@@ -437,6 +437,43 @@ def server_for(socket: str, config: FleetSettings | None = None) -> TmuxServer:
     return server(config)
 
 
+ServerState = Literal["up", "gone", "silent"]
+"""An agent's tmux server: answering, provably gone (no socket file), or not answering."""
+
+
+def server_state(agent: FleetAgent) -> tuple[ServerState, str]:
+    """Whether an agent's tmux server is up, provably gone, or merely not answering.
+
+    One answer for every caller that must not act on a pane nobody hosts: the
+    captain's delivery (T2's reboot rule, 13189) and ``bt``'s re-claim for a
+    converted agent (T5, 13371) — a row that reads ``waiting`` after a reboot is
+    not an agent that can work.
+
+    ``reachable`` is the one question that separates every state: True is a server
+    that answered; False is tmux's own word that no server is behind the socket;
+    a client that could not run, a denied socket or a wedged server RAISE, and
+    that is no evidence either way. "No server" is ``gone`` only when the socket
+    file is absent where the fleet resolves it (13189: a swept ``/tmp``); a file
+    with nothing behind it is ``silent`` — a kill-server leaves the file, and so
+    does a server alive under another ``TMUX_TMPDIR``.
+    """
+    srv = server_for(agent.tmux_socket)
+    try:
+        if srv.reachable():
+            return "up", ""
+    except TmuxUnavailable as exc:
+        return "silent", f"tmux could not be run ({exc})"
+    except TmuxError as exc:
+        return "silent", f"tmux could not be asked ({exc})"
+    try:
+        path = srv.socket_path()
+    except TmuxError as exc:
+        return "silent", str(exc)
+    if not path.exists():
+        return "gone", f"no socket file at {path}"
+    return "silent", f"nothing answers on {path}"
+
+
 def _team() -> ModuleType:
     """``services.team``, imported on first use (see the module docstring)."""
     from aisquare.services import team

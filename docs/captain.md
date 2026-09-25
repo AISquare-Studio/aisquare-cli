@@ -275,6 +275,13 @@ Two follow-ups are open, each on its own card:
   switch or a hold-to-talk press in those seconds is answered late. Speak once
   and wait for the first transcript before you switch.
 
+The captain reads Claude Code's own screens: the input box, the trust dialog
+and the permission chooser. Every capture it was built and tested on is from
+Claude Code 2.1.282, and the input box and the trust dialog read the same on
+2.1.283. A later Claude Code that redraws them can be misread. If the captain
+refuses an agent you can see is ready, or says no prompt is showing when one
+is, compare `claude --version` with these.
+
 ## Phase 2
 
 Named here so nobody re-derives them:

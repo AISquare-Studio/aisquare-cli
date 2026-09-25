@@ -10,10 +10,11 @@ under the header:
   the row's state does not, and the shell feeds a view only on a changed status,
   so the view reads the flag on its own interval (:data:`THINKING_TICK_S`).
 - **What's up** — the quick action: it types :data:`WHAT_IS_UP` into the pane
-  through ``fleet.tell``, the one delivery the fleet has. Offered only while the
-  captain waits at its prompt: ``tell`` files anything else as a board note, and
-  the captain has no shell to read one (T2's delivery rule) — so the button is
-  greyed while it works, never a note it would not see.
+  through T2's one guarded door, ``brain.send`` — never ``fleet.tell``, which reads
+  no screen: its Enter at a fresh captain's trust dialog picks "No, exit" (13227,
+  T4 gate B1). ``send`` reads the pane by structure and refuses any dialog by name,
+  and that refusal is the notification. Offered only while the captain waits at
+  its prompt, so the button is greyed while it works.
 
 - **the voice controls**, over T3's page (``services.captain.voice`` and
   ``speaker``), each writing the one key in state.json the page and the CLI write
@@ -35,6 +36,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, ClassVar
 
 from rich.text import Text
@@ -49,7 +51,6 @@ from textual.worker import Worker, WorkerState
 
 from aisquare.cli.ui.views.agent import AgentView
 from aisquare.models import FleetAgentStatus
-from aisquare.services import fleet as fleet_service
 
 _log = logging.getLogger(__name__)
 
@@ -196,6 +197,14 @@ class MicScreen(ModalScreen[None]):
         self.dismiss(None)
 
 
+def _send_whats_up() -> datetime:
+    """Type the quick action through T2's one guarded door; on a worker (it may wait for a
+    busy captain, and reads the pane)."""
+    from aisquare.services.captain import brain
+
+    return brain.send(WHAT_IS_UP)
+
+
 @dataclass(frozen=True)
 class Bar:
     """What the bar shows from state.json, read in one go off the UI thread.
@@ -332,9 +341,8 @@ class CaptainView(AgentView):
     @on(Button.Pressed, "#captain-whats-up")
     def _whats_up(self, event: Button.Pressed) -> None:
         event.stop()
-        agent = self.status.agent
         self.run_worker(
-            lambda: fleet_service.tell(fleet_service.project_of(agent), agent.label, WHAT_IS_UP),
+            _send_whats_up,
             name=TELL_WORKER,
             group=TELL_WORKER,
             exclusive=True,
@@ -422,24 +430,18 @@ class CaptainView(AgentView):
             return
         if event.state not in (WorkerState.SUCCESS, WorkerState.ERROR, WorkerState.CANCELLED):
             return
-        if event.state is WorkerState.ERROR:
+        from aisquare.services.captain import brain
+
+        error = event.worker.error
+        if event.state is WorkerState.ERROR and isinstance(error, brain.NoReply):
+            # The guard's own words: a dialog named, how to answer it, a captain not running.
+            self.notify(f"nothing typed — {error}", severity="warning", timeout=10, markup=False)
+        elif event.state is WorkerState.ERROR:
             self.notify(
-                f"could not ask the captain: {event.worker.error}",
-                severity="error",
-                timeout=8,
-                markup=False,
+                f"could not ask the captain: {error}", severity="error", timeout=8, markup=False
             )
-        else:
-            result = event.worker.result
-            if isinstance(result, fleet_service.TellResult) and not result.delivered:
-                self.notify(
-                    f"the captain did not get it — {result.how}",
-                    severity="warning",
-                    timeout=8,
-                    markup=False,
-                )
-            elif isinstance(result, fleet_service.TellResult):
-                self.notify(f"asked the captain: {WHAT_IS_UP}", timeout=4, markup=False)
+        elif event.state is WorkerState.SUCCESS:
+            self.notify(f"asked the captain: {WHAT_IS_UP}", timeout=4, markup=False)
         self._paint_quick_action()
 
     def _voice_answered(self, event: Worker.StateChanged) -> None:

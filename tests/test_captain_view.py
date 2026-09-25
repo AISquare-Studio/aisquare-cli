@@ -27,7 +27,10 @@ from aisquare.models import FleetAgentStatus, ProjectInfo
 from aisquare.services import fleet as fleet_service
 from aisquare.services.captain import brain
 from aisquare.services.captain import state as captain_state
+from tests import test_captain_say as say_suite
 from tests import test_ui_shell as ui_suite
+from tests.captain_screens import REAL_TRUST
+from tests.test_captain_say import Captain, Clock
 from tests.test_captain_sidebar import agent_opened, quiet, until
 from tests.test_ui_shell import Script, fleet_app, row_for, seed, shown, status
 
@@ -281,33 +284,55 @@ def _record_tell(monkeypatch: pytest.MonkeyPatch) -> Told:
     return told
 
 
-def test_the_quick_action_tells_the_captain_what_is_up(
-    tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch
+captain_door = say_suite.captain
+"""T2's say/send stand-in (the captain's row, pane and tmux), as the fixture ``captain``."""
+
+
+async def _whats_up(pilot: Pilot[None]) -> list[str]:
+    """Click What's up, let its worker answer, and return what the shell said."""
+    app = fleet_app(pilot)
+    app.refresh_data()
+    await pilot.pause()
+    await _open_view(pilot)
+    await pilot.click("#captain-whats-up")
+    await pilot.pause()
+    await app.workers.wait_for_complete()
+    await pilot.pause()
+    return [str(note.message) for note in app._notifications]
+
+
+def test_the_quick_action_types_through_the_guarded_door_never_fleet_tell(
+    tmp_path: Path, script: Script, captain_door: tuple[Captain, Clock]
 ) -> None:
-    told = _record_tell(monkeypatch)
-    home = captain_state.home_project()
-    captain = _captain("waiting")
-    script[home.id] = [captain]
+    """13325 B1: T2's brain.send, which reads the pane first — a drawn input box, typed."""
+    fake, _ = captain_door
+    fake.present()  # type: ignore[attr-defined]
+    script[captain_state.home_project().id] = [_captain("waiting")]
+    said = drive(_whats_up)
+    assert fake.typed == [("paste", WHAT_IS_UP), ("keys", "Enter")]
+    assert fake.told == [], "never fleet.tell"
+    assert any(f"asked the captain: {WHAT_IS_UP}" in line for line in said), said
 
-    async def body(pilot: Pilot[None]) -> None:
-        app = fleet_app(pilot)
-        app.refresh_data()
-        await pilot.pause()
-        await _open_view(pilot)
-        await pilot.click("#captain-whats-up")
-        await pilot.pause()
-        await app.workers.wait_for_complete()
-        await pilot.pause()
 
-    drive(body)
-    assert told.calls == [(home.id, "captain", WHAT_IS_UP)]
+def test_the_quick_action_types_nothing_into_a_fresh_captains_trust_dialog(
+    tmp_path: Path, script: Script, captain_door: tuple[Captain, Clock]
+) -> None:
+    """The trap B1 names: a fresh captain at Claude Code's trust dialog reads waiting, so the
+    button is on — and an Enter there picks "No, exit". The real capture, refused by name."""
+    fake, _ = captain_door
+    fake.present()  # type: ignore[attr-defined]
+    fake.screen = list(REAL_TRUST)
+    script[captain_state.home_project().id] = [_captain("waiting")]
+    said = drive(_whats_up)
+    assert fake.typed == [] and fake.told == []
+    assert any("nothing typed" in line and "trust its folder" in line for line in said), said
+    assert any("choose Yes, I trust this folder (once)" in line for line in said), said
 
 
 def test_the_quick_action_waits_for_a_captain_at_its_prompt(
     tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Typed only into a WAITING captain: ``tell`` files anything else as a board note,
-    and the captain has no shell to read one (T2's delivery rule)."""
+    """Offered only to a WAITING captain; a working one is greyed, never queued."""
     told = _record_tell(monkeypatch)
     home = captain_state.home_project()
     script[home.id] = [_captain("working")]

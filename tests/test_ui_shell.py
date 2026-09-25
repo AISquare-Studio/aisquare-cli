@@ -87,6 +87,7 @@ from aisquare.services import explainability as explainability_service
 from aisquare.services import fleet as fleet_service
 from aisquare.services import project_groups as groups_service
 from tests.pane_harness import FakePane, FakeTmux, asks_a_server, move, press, release, socket_of
+from tests.ui_workers import settle_page
 
 T = TypeVar("T")
 SIZE = (140, 40)
@@ -189,12 +190,19 @@ def drive(
     ``notifications`` opts the screen's ``ToastRack`` in — ``run_test`` leaves it
     out by default, and without it a ``notify`` goes nowhere to be read.
     ``size`` is the terminal's; a test about a laptop passes a narrow one.
+
+    The start-up doctor run has been painted before ``fn`` starts. It is a thread
+    worker, and a test that ended before its result was handled had that result
+    handled while ``run_test`` tore the app down (``run_test`` shuts the app down
+    beside its running message loop): ``show_doctor`` then queried a screen that
+    was already gone, and the test failed on a ``NoMatches`` it never asked about.
     """
 
     async def run() -> T:
         app = FleetApp(refresh_seconds=3600, doctor=doctor or (lambda: []))
         async with app.run_test(size=size, notifications=notifications) as pilot:
             await pilot.pause()
+            await settle(app)
             return await fn(pilot)
 
     return asyncio.run(run())
@@ -219,16 +227,46 @@ def composited(widget: Static) -> str:
 
 
 async def settle(app: FleetApp) -> None:
-    """Wait for the app's own workers — not Textual's ``_loader``.
+    """Let the app go quiet: every message queued on it handled, every worker of ours done.
 
-    ``DirectoryTree`` (the Onboard view) keeps a ``_loader`` worker running for
-    its whole life, so ``workers.wait_for_complete()`` would never return once
-    that view exists. The doctor worker and any fix/spawn worker are what a test
-    actually waits for.
+    This was ``workers.wait_for_complete()`` over the workers that existed when it
+    was called, and that lost to three things a loaded runner does:
+
+    - after ``Button.press()`` the Save handler may not have run yet, so there was
+      no worker to wait for and the test read the form before the save began;
+    - a worker's result reaches the page as a ``StateChanged`` the view handles
+      later, and its toast is further off still: ``notify`` posts to the app, the
+      app queues the toast rack's ``show``, and ``show`` mounts the toast. The
+      wait returned when the worker did, and on windows-latest
+      ``test_a_malformed_gateway_does_not_take_the_ui_down`` found no toast
+      (pull_request run 36118978773, first attempt);
+    - it RAISES for a worker that errored while still registered, and a crashing
+      doctor is an outcome a test reads.
+
+    ``settle_page`` goes round until a pause ends with nothing queued and no worker
+    of ours running, which covers all three. It leaves Textual's ``_loader`` alone,
+    as this did: the Onboard view's ``DirectoryTree`` keeps one for its whole life.
     """
-    ours = [worker for worker in app.workers if worker.group != "_loader"]
-    if ours:
-        await app.workers.wait_for_complete(ours)
+    await settle_page(app)
+
+
+async def _toast_list(app: FleetApp) -> list[str]:
+    """Every toast on screen once the app has gone quiet, oldest first.
+
+    A toast is the last hop of a chain, so it is read after ``settle``, never
+    after a pause: whatever raised it (a handler, a worker's result, a saver's
+    refusal) calls ``notify``, which posts to the app; the app queues the toast
+    rack's ``show``; and ``show`` mounts the toast. A read after one pause, or
+    after a wait for the worker alone, found no toast on windows-latest.
+    """
+    await settle(app)
+    return [toast.render().plain for toast in app.screen.query(Toast)]
+
+
+async def _toasts(app: FleetApp) -> str:
+    """Every toast on screen once the app has gone quiet, oldest first, as one string —
+    one save can raise more than one."""
+    return " | ".join(await _toast_list(app))
 
 
 def fleet_app(pilot: Pilot[None]) -> FleetApp:
@@ -261,7 +299,7 @@ def test_the_no_tmux_guard_is_reachable(
     async def go(pilot: Pilot[None]) -> None:
         app = fleet_app(pilot)
         await pilot.click(row_for(app, "agt_a_coder-1"))
-        await pilot.pause()
+        await settle(app)
 
     drive(go)
 
@@ -426,7 +464,7 @@ def test_a_long_project_name_is_cut_with_an_ellipsis_not_wrapped_out_of_sight(
         app = fleet_app(pilot)
         title = card_for(app, "prj_l").query_one(ProjectTitle)
         await pilot.click(title)  # the selected, highlighted row the report was about
-        await pilot.pause()
+        await settle(app)
         return (
             shown(title),
             composited(title),
@@ -483,15 +521,15 @@ def test_clicking_a_project_opens_its_project_view_once(tmp_path: Path, script: 
         app = fleet_app(pilot)
         before = app.content.current
         await pilot.click(card_for(app, "prj_b").query_one(ProjectTitle))
-        await pilot.pause()
+        await settle(app)
         shown_ids = [app.content.current or ""]
         view = app.current_view()
         assert isinstance(view, ProjectView) and view.project.id == "prj_b"
         await pilot.click(card_for(app, "prj_a").query_one(ProjectTitle))
-        await pilot.pause()
+        await settle(app)
         shown_ids.append(app.content.current or "")
         await pilot.click(card_for(app, "prj_b").query_one(ProjectTitle))  # back again
-        await pilot.pause()
+        await settle(app)
         shown_ids.append(app.content.current or "")
         selected = card_for(app, "prj_b").query_one(ProjectTitle).has_class("selected")
         other = card_for(app, "prj_a").query_one(ProjectTitle).has_class("selected")
@@ -525,7 +563,7 @@ async def _agent_pane(pilot: Pilot[None]) -> tuple[TerminalPane, Static]:
     """Open the scripted agent and wait until its pane has painted a frame."""
     app = fleet_app(pilot)
     await pilot.click(row_for(app, "agt_a_coder-auth"))
-    await pilot.pause()
+    await settle(app)
     view = app.current_view()
     assert isinstance(view, AgentView)
     pane = view.query_one(TerminalPane)
@@ -654,7 +692,7 @@ def test_one_panes_failure_does_not_stop_the_others_being_told(
     async def go(pilot: Pilot[None]) -> tuple[int, str, int, list[str], list[str]]:
         app = fleet_app(pilot)
         await pilot.click(row_for(app, "agt_a_coder-two"))
-        await pilot.pause()
+        await settle(app)
         pane, header = await _agent_pane(pilot)  # opens coder-auth, leaves both mounted
         panes = list(app.screen.query(TerminalPane))
         assert len(panes) >= 2, "the app keeps a view per opened agent mounted"
@@ -807,7 +845,7 @@ def test_clicking_an_agent_opens_its_agent_view(tmp_path: Path, script: Script) 
         app = fleet_app(pilot)
         before = app.content.current
         await pilot.click(row_for(app, "agt_a_coder-auth"))
-        await pilot.pause()
+        await settle(app)
         view = app.current_view()
         assert isinstance(view, AgentView)
         pane = view.query_one(TerminalPane)
@@ -832,7 +870,7 @@ def test_plus_opens_onboarding(tmp_path: Path, script: Script) -> None:
         app = fleet_app(pilot)
         before = app.content.current
         await pilot.click("#add-project")
-        await pilot.pause()
+        await settle(app)
         return before, app.content.current
 
     assert drive(go) == ("welcome", "onboard")
@@ -1121,9 +1159,7 @@ def test_a_doctor_report_is_painted_only_in_the_scope_it_ran_for(
     async def go(pilot: Pilot[None]) -> str:
         app = fleet_app(pilot)
         app.post_message(OnboardFailed(path, "init failed: store_unopenable"))
-        await pilot.pause()
-        await pilot.pause()
-        return app.screen.query_one(Toast).render().plain
+        return await _toasts(app)
 
     rendered = drive(go, notifications=True)
     assert rendered == f"{path}: init failed: store_unopenable"
@@ -1259,7 +1295,7 @@ def test_a_malformed_gateway_does_not_take_the_ui_down(tmp_path: Path, script: S
         app.screen.query_one("#explainability-save", Button).press()
         await pilot.pause()
         await settle(app)
-        return app.screen.query_one(Toast).render().plain
+        return await _toasts(app)
 
     assert drive(go, notifications=True)  # the app is alive to be read at all
 
@@ -1284,7 +1320,7 @@ def test_a_schemeless_gateway_is_refused_rather_than_stored(tmp_path: Path, scri
         app.screen.query_one("#explainability-save", Button).press()
         await pilot.pause()
         await settle(app)
-        return app.screen.query_one(Toast).render().plain
+        return await _toasts(app)
 
     rendered = drive(go, notifications=True)
     assert "scheme" in rendered and "https://stg-x.aisquare.studio" in rendered
@@ -1314,7 +1350,7 @@ def test_a_prefix_with_braces_is_refused_not_repaired(
         app.screen.query_one("#explainability-save", Button).press()
         await pilot.pause()
         await settle(app)
-        return _toasts(app)
+        return await _toasts(app)
 
     rendered = drive(go, notifications=True)
     assert "is a name, not a template" in rendered
@@ -1388,16 +1424,10 @@ def test_a_blank_form_changes_nothing_and_says_so(tmp_path: Path, script: Script
         await pilot.pause()
         await settle(app)
         app.screen.query_one("#explainability-save", Button).press()
-        await pilot.pause()
-        return app.screen.query_one(Toast).render().plain
+        return await _toasts(app)
 
     assert "nothing to save" in drive(go, notifications=True)
     assert load_config().explainability.targets == {}
-
-
-def _toasts(app: Any) -> str:
-    """Every toast on screen, oldest first — one save can raise more than one."""
-    return " | ".join(toast.render().plain for toast in app.screen.query(Toast))
 
 
 def test_the_form_diagnoses_a_key_variable_no_shell_can_export_by_name(
@@ -1419,7 +1449,7 @@ def test_the_form_diagnoses_a_key_variable_no_shell_can_export_by_name(
         app.screen.query_one("#explainability-save", Button).press()
         await pilot.pause()
         await settle(app)
-        return _toasts(app)
+        return await _toasts(app)
 
     rendered = drive(go, notifications=True)
     assert "without the $" in rendered and "EXPLAINABILITY_API_KEY" in rendered
@@ -1445,7 +1475,7 @@ def test_a_key_typed_for_a_target_that_names_its_own_variable_is_refused(
         app.screen.query_one("#explainability-save", Button).press()
         await pilot.pause()
         await settle(app)
-        return _toasts(app)
+        return await _toasts(app)
 
     rendered = drive(go, notifications=True)
     assert "MY_WORKSPACE_KEY" in rendered and "never be used" in rendered
@@ -1479,7 +1509,7 @@ def test_a_key_typed_for_a_target_that_already_names_its_own_variable_is_refused
         app.screen.query_one("#explainability-save", Button).press()
         await pilot.pause()
         await settle(app)
-        return _toasts(app)
+        return await _toasts(app)
 
     rendered = drive(go, notifications=True)
     assert "PROD_KEY" in rendered
@@ -1521,7 +1551,7 @@ def test_the_deployment_field_does_not_move_the_machine(tmp_path: Path, script: 
         app.screen.query_one("#explainability-save", Button).press()
         await pilot.pause()
         await settle(app)
-        return _toasts(app)
+        return await _toasts(app)
 
     rendered = drive(go, notifications=True)
     settings = load_config().explainability
@@ -1563,8 +1593,7 @@ def test_a_deployment_name_alone_writes_nothing_and_says_so(tmp_path: Path, scri
         await settle(app)
         _setup(app, target="prod")
         app.screen.query_one("#explainability-save", Button).press()
-        await pilot.pause()
-        return _toasts(app)
+        return await _toasts(app)
 
     rendered = drive(go, notifications=True)
     settings = load_config().explainability
@@ -1617,7 +1646,7 @@ def test_a_malformed_gateway_is_told_apart_from_a_schemeless_one(
         app.screen.query_one("#explainability-save", Button).press()
         await pilot.pause()
         await settle(app)
-        return _toasts(app)
+        return await _toasts(app)
 
     rendered = drive(go, notifications=True)
     assert "cannot be parsed" in rendered
@@ -1648,7 +1677,7 @@ def test_the_key_field_is_cleared_even_when_the_key_write_fails(
         app.screen.query_one("#explainability-save", Button).press()
         await pilot.pause()
         await settle(app)
-        return app.screen.query_one("#explainability-key", Input).value, _toasts(app)
+        return app.screen.query_one("#explainability-key", Input).value, await _toasts(app)
 
     value, rendered = drive(go, notifications=True)
     assert value == ""
@@ -1682,9 +1711,7 @@ def test_the_explainability_views_toasts_keep_bracketed_data(
         await pilot.pause()
         await settle(app)  # the mount's status worker (tracing off: nothing is dialled)
         await pilot.click("#explainability-enable")
-        await pilot.pause()
-        await pilot.pause()
-        return app.screen.query_one(Toast).render().plain
+        return await _toasts(app)
 
     rendered = drive(go, notifications=True)
     # The message carries the OSError, and `OSError.__str__` renders its filename
@@ -1716,8 +1743,7 @@ def test_project_onboarded_refreshes_and_selects_the_project(
         cards_before = len(app.query(ProjectCard))
         seed(tmp_path, ("prj_n", "newcomer", None))  # what the onboard worker's `init` did
         app.post_message(ProjectOnboarded("prj_n", tmp_path / "newcomer"))
-        await pilot.pause()
-        await pilot.pause()
+        await settle(app)
         return cards_before, len(app.query(ProjectCard)), app.content.current
 
     before, after, current = drive(go)
@@ -1853,7 +1879,7 @@ def test_escape_hatch_focuses_the_sidebar(tmp_path: Path, script: Script) -> Non
         await pilot.pause()
         before = type(app.focused).__name__
         pane.post_message(EscapeToSidebar())
-        await pilot.pause()
+        await settle(app)
         return before, type(app.focused).__name__
 
     assert drive(go) == ("RecordingPane", "Sidebar")
@@ -1900,7 +1926,7 @@ def test_keyboard_cursor_walks_the_rows_and_enter_activates(tmp_path: Path, scri
         await pilot.press("up")
         walk.append(type(app.query_one(".cursor")).__name__)
         await pilot.press("enter")
-        await pilot.pause()
+        await settle(app)
         return cursors_before, walk, app.content.current
 
     before, walk, current = drive(go)
@@ -1931,7 +1957,7 @@ def test_clicking_a_row_leaves_focus_on_the_sidebar_so_the_arrows_keep_working(
         holder = app.sidebar.query_one("#projects", VerticalScroll)
         overflow = holder.max_scroll_y  # the precondition of the bug: the list scrolls
         await pilot.click(card_for(app, "prj_00").query_one(ProjectTitle))
-        await pilot.pause()
+        await settle(app)
         focused = type(app.focused).__name__
         walk: list[str] = []
         scrolls: list[float] = []
@@ -2106,7 +2132,7 @@ def test_rebuilds_update_in_place_and_keep_the_selection(tmp_path: Path, script:
         app = fleet_app(pilot)
         card = card_for(app, "prj_a")
         await pilot.click(row_for(app, "agt_a_coder-auth"))
-        await pilot.pause()
+        await settle(app)
         row = row_for(app, "agt_a_coder-auth")
         assert row.has_class("selected")
         # Tick 1: the coder changes state; the manager leaves; a tester arrives.
@@ -2227,7 +2253,7 @@ def test_a_fleet_read_that_failed_open_keeps_the_live_manager_pane(
     async def go(pilot: Pilot[None]) -> tuple[State, State, str, State]:
         app = fleet_app(pilot)
         await pilot.click(card_for(app, "prj_a").query_one(ProjectTitle))
-        await pilot.pause()
+        await settle(app)
         view = app.current_view()
         assert isinstance(view, ProjectView)
         tab = view.query_one(ManagerTab)
@@ -2275,7 +2301,7 @@ def test_open_views_are_fed_each_frame_and_survive_a_vanished_row(
     async def go(pilot: Pilot[None]) -> tuple[str, str, str, str | None, str | None, int | None]:
         app = fleet_app(pilot)
         await pilot.click(row_for(app, "agt_a_coder-auth"))
-        await pilot.pause()
+        await settle(app)
         view = app.current_view()
         assert isinstance(view, AgentView)
         opened_with = view.status.state
@@ -2290,7 +2316,7 @@ def test_open_views_are_fed_each_frame_and_survive_a_vanished_row(
         # Negative control: the manager's row changed too, but no view is open for it —
         # and the project's codename arrives, which the project view (once opened) shows.
         await pilot.click(card_for(app, "prj_a").query_one(ProjectTitle))
-        await pilot.pause()
+        await settle(app)
         project_view = app.current_view()
         assert isinstance(project_view, ProjectView)
         codename_before = project_view.project.codename
@@ -2329,7 +2355,7 @@ def test_r_refreshes_from_the_sidebar_but_is_forwarded_from_a_pane(
         script["prj_a"] = [status("prj_a", "manager", "manager", "working")]
         app.sidebar.focus()
         await pilot.press("r")
-        await pilot.pause()
+        await settle(app)
         from_sidebar = shown(row)
         # The same key with a pane focused reaches the pane and refreshes nothing.
         pane = RecordingPane()
@@ -2438,10 +2464,15 @@ async def _through_the_app(pilot: Pilot[None]) -> None:
     be waiting there when the pause returned. On the Windows leg that read a held-key burst
     (run 36042754454) and a resize (run 36047190212) before the app had handed either on. A
     callback the app queues behind the event runs only once the app has handed it to the
-    screen, and the pause after it waits for the screen to handle it and lay the result out.
+    screen.
+
+    What the screen does with it can be a message too: a key the sidebar binds posts
+    ``ResizeSidebar``, which bubbles to the partition, and a pause after the hand-on did not
+    wait for that (the burst read 46 for 50 with every message held 5 ms). So the app is
+    then let go quiet, and the last pause of that lays the result out.
     """
     await pilot.app.wait_for_refresh()
-    await pilot.pause()
+    await settle_page(pilot.app)
 
 
 async def _mouse(
@@ -2467,12 +2498,19 @@ async def _drag(pilot: Pilot[None], from_x: int, to_x: int, y: int = 5) -> None:
 
 async def _settled(pilot: Pilot[None]) -> None:
     """Let every save land — by the savers' own state, never the clock: the debounce fires and
-    the drain finishes (or a refusal stands) before this returns."""
+    the drain finishes (or a refusal stands) before this returns.
+
+    The app goes quiet first. A saver that has not been asked yet is settled, and a key's
+    width reaches the saver through a message that bubbles to the partition, so read too
+    early the savers were idle and the file had no width (``(34, None)`` with every message
+    held 5 ms). It goes quiet again after, so a refusal's toast is on screen.
+    """
     app = fleet_app(pilot)
+    await settle(app)
     for saver in (app._theme_autosave, app.query_one(Divider)._autosave):
         if saver is not None:
             assert await asyncio.to_thread(saver.settled, 5.0), "a save never settled"
-    await pilot.pause()
+    await settle(app)
 
 
 async def _restored(pilot: Pilot[None]) -> None:
@@ -2604,7 +2642,7 @@ def test_a_terminal_that_shrinks_re_clamps_the_navigator_and_keeps_the_divider_o
         await _through_the_app(pilot)
         app.sidebar.focus()
         await pilot.press("less_than_sign")
-        await pilot.pause()
+        await settle(app)
         seen["stepped"] = app.sidebar.outer_size.width
         await _settled(pilot)
         seen["saved"] = _state(isolated_home).get(SIDEBAR_WIDTH_KEY)
@@ -2740,7 +2778,7 @@ def test_the_keyboard_steps_the_partition_from_the_sidebar_and_a_held_key_is_one
         widths: list[int] = []
         for key in ("greater_than_sign", "greater_than_sign", "less_than_sign", "equals_sign"):
             await pilot.press(key)
-            await pilot.pause()
+            await settle(app)
             widths.append(app.sidebar.outer_size.width)
         seen["widths"] = widths
         await _settled(pilot)
@@ -2759,7 +2797,7 @@ def test_the_keyboard_steps_the_partition_from_the_sidebar_and_a_held_key_is_one
         pane.focus()
         await pilot.pause()
         await pilot.press("greater_than_sign")
-        await pilot.pause()
+        await settle(app)
         seen["with_pane"] = (app.sidebar.outer_size.width, list(pane.keys))
         # The fallback exists for terminals without mouse reporting; ? is where they look.
         app.sidebar.focus()
@@ -2854,7 +2892,7 @@ def test_a_state_file_that_is_not_an_object_is_left_alone_and_said_so_once(
         await _settled(pilot)
         return {
             "width": app.sidebar.outer_size.width,
-            "toasts": [toast.render().plain for toast in app.screen.query(Toast)],
+            "toasts": await _toast_list(app),
             "file": path.read_text(),
             "leftovers": sorted(
                 p.name
@@ -3024,7 +3062,7 @@ def test_a_double_click_with_a_one_row_drift_is_still_a_double_click(
         declared = _declared(app)
         app.sidebar.focus()
         await pilot.press("greater_than_sign")
-        await pilot.pause()
+        await settle(app)
         x = app.sidebar.outer_size.width
         await _mouse(pilot, events.MouseDown, x, 5)
         await _mouse(pilot, events.MouseMove, x, 6)  # a row down, the same column: nothing moves
@@ -3055,7 +3093,7 @@ def test_a_refused_theme_save_is_said_once(
         await _settled(pilot)
         app.theme = "dracula"
         await _settled(pilot)
-        return [toast.render().plain for toast in app.screen.query(Toast)], path.read_text()
+        return await _toast_list(app), path.read_text()
 
     toasts, file = drive(go, notifications=True)
     assert len(toasts) == 1, "said once, not once per pick"
@@ -3438,7 +3476,7 @@ def test_selecting_an_agent_focuses_its_pane_so_typing_reaches_the_agent_not_the
     async def go(pilot: Pilot[None]) -> tuple[bool, int | None, bool]:
         app = fleet_app(pilot)
         await pilot.click(row_for(app, "agt_a_coder-auth"))
-        await pilot.pause()
+        await settle(app)
         await pilot.pause()
         view = app.current_view()
         assert isinstance(view, AgentView)
@@ -3491,7 +3529,7 @@ def test_restart_from_the_agent_view_selects_the_new_row_in_the_shell(
     ) -> tuple[str | None, str | None, list[str], list[str], bool]:
         app = fleet_app(pilot)
         await pilot.click(row_for(app, "agt_a_manager"))
-        await pilot.pause()
+        await settle(app)
         view = app.current_view()
         assert isinstance(view, AgentView)
         stop_shown = view.query_one("#agent-stop", Button).display
@@ -3501,7 +3539,7 @@ def test_restart_from_the_agent_view_selects_the_new_row_in_the_shell(
         await pilot.pause()
         current = app.current_view()
         # The pane's own "(pane gone)" toast is there too: read them all.
-        toasts = [toast.render().plain for toast in app.screen.query(Toast)]
+        toasts = await _toast_list(app)
         rows = [shown(row) for row in card_for(app, "prj_a").query(AgentRow)]
         typing_reaches = isinstance(current, AgentView) and app.focused is current.pane
         assert stop_shown is True  # the 💤 row's Stop removes its dead window
@@ -3568,7 +3606,7 @@ def test_the_shell_reopens_what_was_open_when_its_row_is_still_there(
     async def open_agent(pilot: Pilot[None]) -> str | None:
         app = fleet_app(pilot)
         await pilot.click(row_for(app, "agt_a_coder-auth"))
-        await pilot.pause()
+        await settle(app)
         view = app.current_view()
         return view.id if view else None
 
@@ -3669,22 +3707,22 @@ def test_the_sidebar_shows_groups_pins_and_manual_order_and_the_keys_move_them(
         app.sidebar.focus()
         app.sidebar.select("project:prj_c")  # the cursor's anchor
         await pilot.press("shift+up")
-        await pilot.pause()
+        await settle(app)
         moved = _cards(app)
         await pilot.press("p")
-        await pilot.pause()
+        await settle(app)
         pinned = _cards(app)
         await pilot.press("u")
-        await pilot.pause()
+        await settle(app)
         undone = _cards(app)
         app.sidebar.select("group:" + store_group_id("tools"))
         await pilot.press("space")
-        await pilot.pause()
+        await settle(app)
         folded = _cards(app)
         header = app.sidebar.query_one(GroupHeader)
         rollup = shown(header)
         await pilot.press("space")
-        await pilot.pause()
+        await settle(app)
         return initial, moved, pinned, undone, rollup, folded, _cards(app)
 
     def store_group_id(name: str) -> str:
@@ -3745,27 +3783,33 @@ async def _as_the_terminal_sends(
     screen, pausing between events), so a sidebar that held the mouse from the
     press swallowed every real click on a title while the suite stayed green
     (review of #171, round 1).
+
+    Posted to the app, so it is waited for through the app, as ``_mouse`` is: a
+    bare pause does not wait for the app's own queue.
     """
     x, y = widget.region.offset + offset
     app = pilot.app
     app.post_message(kind(None, x, y, 0, 0, button, shift, False, False, screen_x=x, screen_y=y))
-    await pilot.pause()
+    await _through_the_app(pilot)
 
 
 async def _click(pilot: Pilot[None], widget: Widget, *, shift: bool = False) -> None:
+    """A real click and what it set off: a title's click is a message the sidebar posts
+    to the app, whose handler opens the view, so it is over once the app is quiet."""
     await _as_the_terminal_sends(pilot, events.MouseDown, widget, shift=shift)
     await _as_the_terminal_sends(pilot, events.MouseUp, widget, shift=shift)
-    await pilot.pause()
+    await settle(fleet_app(pilot))
 
 
 async def _drag_onto(
     pilot: Pilot[None], source: Widget, target: Widget, offset: tuple[int, int] = (1, 0)
 ) -> None:
-    """Press on ``source``, move onto ``target`` with the button held, release there."""
+    """Press on ``source``, move onto ``target`` with the button held, release there, and
+    wait for the app to go quiet: the drop is a message the sidebar posts, as a click is."""
     await _as_the_terminal_sends(pilot, events.MouseDown, source)
     await _as_the_terminal_sends(pilot, events.MouseMove, target, offset)
     await _as_the_terminal_sends(pilot, events.MouseUp, target, offset)
-    await pilot.pause()
+    await settle(fleet_app(pilot))
 
 
 def test_dragging_a_card_onto_a_group_header_groups_it_and_the_picker_groups_a_selection(
@@ -3799,16 +3843,15 @@ def test_dragging_a_card_onto_a_group_header_groups_it_and_the_picker_groups_a_s
         # shift+g groups them into a NEW group through the picker.
         app.sidebar.focus()
         await pilot.press("shift+g")
-        await pilot.pause()
+        await settle(app)
         assert isinstance(app.screen, GroupPicker), type(app.screen).__name__
         await pilot.press("end")  # … the last option is Ungroup; New group… is just above it
         await pilot.press("up")
         await pilot.press("enter")
-        await pilot.pause()
+        await settle(app)
         await pilot.press(*"web")
         await pilot.press("enter")
-        await pilot.pause()
-        await pilot.pause()
+        await settle(app)
         return before, dragged, opened, marked, after_marks, _cards(app)
 
     before, dragged, opened, marked, after_marks, grouped = drive(go)
@@ -3880,15 +3923,15 @@ def test_an_undo_the_store_refuses_keeps_its_entry_for_the_next_u(
         app.sidebar.focus()
         app.sidebar.select("project:prj_b")
         await pilot.press("shift+up")
-        await pilot.pause()
+        await settle(app)
         moved = _cards(app)
         with monkeypatch.context() as patched:  # scoped: the isolated home stays in place
             patched.setattr(groups_service, "undo", refused_once)
             await pilot.press("u")
-            await pilot.pause()
+            await settle(app)
             refused = _cards(app)
             await pilot.press("u")
-            await pilot.pause()
+            await settle(app)
         return moved, refused, _cards(app)
 
     moved, refused, undone = drive(go)
@@ -3913,15 +3956,14 @@ def test_a_group_named_like_markup_is_listed_as_typed_and_can_be_picked(
         app.sidebar.focus()
         app.sidebar.select("project:prj_a")
         await pilot.press("g")
-        await pilot.pause()
+        await settle(app)
         assert isinstance(app.screen, GroupPicker), type(app.screen).__name__
         picker = app.screen.query_one("#grouplist", OptionList)
         listed = [
             str(picker.get_option_at_index(index).prompt) for index in range(picker.option_count)
         ]
         await pilot.press("enter")  # the group, first in the list
-        await pilot.pause()
-        await pilot.pause()
+        await settle(app)
         return listed, shown(app.sidebar.query_one(GroupHeader)), _cards(app)
 
     listed, header, grouped = drive(go)
@@ -4267,15 +4309,15 @@ def test_a_step_with_nowhere_to_go_leaves_nothing_to_undo(
         app.sidebar.focus()
         app.sidebar.select("project:prj_b")
         await pilot.press("shift+up")  # a real step: cli above api
-        await pilot.pause()
+        await settle(app)
         stepped = _cards(app)
         await pilot.press("shift+up")  # already first
         app.sidebar.select("project:prj_c")
         await pilot.press("shift+down")  # pinned: no place in a scope
-        await pilot.pause()
+        await settle(app)
         depth = len(app._undo)
         await pilot.press("u")
-        await pilot.pause()
+        await settle(app)
         return stepped, depth, _cards(app)
 
     stepped, depth, undone = drive(go)

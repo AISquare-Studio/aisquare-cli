@@ -42,7 +42,7 @@ import socket
 import sqlite3
 import time
 import tomllib
-from collections.abc import Callable, Collection, Mapping
+from collections.abc import Callable, Collection, Mapping, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, TypeVar
@@ -574,6 +574,7 @@ def _since(target: ProjectInfo, agent: str | None, advance: bool) -> Outcome:
 def _tell(target: ProjectInfo, label: str, text: str) -> Outcome:
     if not text.strip():
         raise Refused("nothing to tell")
+    _before_telling(target, label, "told")
     before = team_service.last_delivery()
     result = fleet.tell(target, label, text, sender=captain_state.ensure_session(target))
     return Outcome(
@@ -591,6 +592,7 @@ def _ask_manager(target: ProjectInfo, text: str, timeout: int) -> Outcome:
     sender = captain_state.ensure_session(target)
     with store_session() as store:
         cursor = store.latest_seq(target.id)
+    _before_telling(target, fleet.MANAGER_LABEL, "asked")
     fleet.tell(target, fleet.MANAGER_LABEL, f"{text}\n\n{REPLY_LINE}", sender=sender)
     captain_state.set_waiting(target.id)
     try:
@@ -699,7 +701,9 @@ def _note(target: ProjectInfo, text: str, kind: str) -> Outcome:
     return Outcome({"seq": event.seq}, said=f"{kind} on {_name(target)}", receipt=event.seq)
 
 
-def _ready(target: ProjectInfo, label: str) -> tuple[FleetAgent, FleetAgentStatus, TmuxServer]:
+def _ready(
+    target: ProjectInfo, label: str, *, verb: str
+) -> tuple[FleetAgent, FleetAgentStatus, TmuxServer, list[str]]:
     """The agent, if its pane may be typed into — the readiness rule ``tell`` keeps.
 
     ``tell`` types only into a waiting agent whose pane runs the agent; ``press``
@@ -711,12 +715,18 @@ def _ready(target: ProjectInfo, label: str) -> tuple[FleetAgent, FleetAgentStatu
     window holds for seconds after a chooser draws. There a prompt showing, or the
     input box drawn and idle, is the evidence; anything else stays refused. The screen
     overrides the activity window, never a stop: limited, exited and lost are refused.
+
+    The trust dialog is refused for every caller (T1c, 13505): :func:`_no_trust_dialog`.
+    Returns what the pane showed, so a caller reads it once.
     """
     agent = _live(target, label)
     status = fleet.status_of(agent)
     srv = fleet.server_for(agent.tmux_socket)
+    lines: list[str] = []
+    if status.state in READY_STATES or status.state == "working":
+        lines = _no_trust_dialog(srv, agent, label, verb)
     if status.state not in READY_STATES and not (
-        status.state == "working" and _asking_or_idle(srv, agent.pane_id)
+        status.state == "working" and _asking_or_idle(lines)
     ):
         raise Refused(
             f"{label} is {status.state} — the captain types only into an agent that is "
@@ -727,44 +737,61 @@ def _ready(target: ProjectInfo, label: str) -> tuple[FleetAgent, FleetAgentStatu
             f"{label}'s pane is not running the agent (a shell or the launcher is in front) — "
             "nothing typed"
         )
-    return agent, status, srv
+    return agent, status, srv, lines
 
 
 def _screen(srv: TmuxServer, pane_id: str) -> list[str]:
     return list(srv.capture(pane_id).lines)
 
 
-def _asking_or_idle(srv: TmuxServer, pane_id: str) -> bool:
-    """Whether the pane is ready by its screen: a prompt showing, or the box drawn and idle
-    (13313). A pane that cannot be read is not: the fleet's word, working, stands."""
+def _no_trust_dialog(srv: TmuxServer, agent: FleetAgent, label: str, verb: str) -> list[str]:
+    """Read the agent's pane and refuse Claude Code's trust dialog by name (T1c, 13505).
+
+    An agent spawned into a folder Claude Code has never trusted parks at its own trust
+    dialog, and anything typed there answers it: Enter picks "No, exit" and the agent dies
+    (the dry run's paste, 13504, which said success as it did). Every door that types into
+    an agent asks here first: press and paste through :func:`_ready`, and tell, ask_manager
+    and wololo before ``fleet.tell``. A pane that cannot be read is refused too: nothing is
+    typed blind. Returns what the pane shows, for the caller that reads it next.
+    """
     try:
-        lines = _screen(srv, pane_id)
-    except TmuxError:
-        return False
+        lines = _screen(srv, agent.pane_id)
+    except TmuxError as exc:
+        raise Refused(
+            f"{label}'s pane could not be read to see what is showing ({exc}) — nothing {verb}"
+        ) from exc
+    showing = screen.prompt_showing(lines)
+    if showing is not None and showing.shape == "trust":
+        raise Refused(
+            f"the trust dialog is showing on {label}: trust this folder first — trusting a "
+            f"folder is the owner's to answer (aisquare fleet attach) — nothing {verb}"
+        )
+    return lines
+
+
+def _before_telling(target: ProjectInfo, label: str, verb: str) -> None:
+    """``fleet.tell`` types into a waiting agent's pane without reading it: its trust dialog
+    is refused here first. An agent with no live row is ``fleet.tell``'s to answer."""
+    with store_session() as store:
+        agent = store.fleet_agent_by_label(target.id, label, live_only=True)
+    if agent is not None:
+        _no_trust_dialog(fleet.server_for(agent.tmux_socket), agent, label, verb)
+
+
+def _asking_or_idle(lines: Sequence[str]) -> bool:
+    """Whether the pane is ready by its screen: a prompt showing, or the box drawn and idle
+    (13313)."""
     return screen.prompt_showing(lines) is not None or screen.box_idle(lines)
 
 
 def _press(target: ProjectInfo, label: str, key: str) -> Outcome:
     if key not in KEYS and key not in ANSWERS:
         raise Refused(f"key {key!r} is not one of {', '.join((*ANSWERS, *KEYS))}")
-    agent, status, srv = _ready(target, label)
-    try:
-        before = screen.prompt_showing(_screen(srv, agent.pane_id))
-    except TmuxError as exc:
-        if key in ANSWERS:
-            raise Refused(
-                f"{label}'s pane could not be read to see what {key} means ({exc}) — nothing "
-                "pressed"
-            ) from exc
-        before = None
+    agent, status, srv, lines = _ready(target, label, verb="pressed")
+    before = screen.prompt_showing(lines)  # never the trust dialog: _ready refused it
     if key in ANSWERS:
         if before is None:
             raise Refused(f"no prompt is showing on {label} — nothing pressed")
-        if before.shape == "trust":
-            raise Refused(
-                f"the trust dialog is showing on {label}: trusting a folder is the owner's to "
-                "answer (aisquare fleet attach) — nothing pressed"
-            )
         sent = before.yes_key if key == "yes" else before.no_key
         if sent is None:
             raise Refused(f"the prompt on {label} offers no {key}: {before.question}")
@@ -802,7 +829,7 @@ def _press(target: ProjectInfo, label: str, key: str) -> Outcome:
 def _paste(target: ProjectInfo, label: str, text: str, submit: bool = False) -> Outcome:
     if not text:
         raise Refused("nothing to paste")
-    agent, _, srv = _ready(target, label)
+    agent, _, srv, _ = _ready(target, label, verb="pasted")
     srv.paste(agent.pane_id, text)  # one bracketed paste: its newlines submit nothing
     if submit:
         try:
@@ -1221,6 +1248,8 @@ def _wololo(target: ProjectInfo, label: str, task: str) -> Outcome:
     status = fleet.status_of(agent)
     if status.state != "waiting":
         raise Refused(f"{label} is {status.state} — wololo converts an idle agent only")
+    # Before any claim moves: the reassignment is typed into its pane (T1c, 13503).
+    _no_trust_dialog(fleet.server_for(agent.tmux_socket), agent, label, "converted")
     card = _card(target, task)
     if card.status != "todo":
         raise Refused(f"{card.id} is {card.status} — wololo takes a card from the pool")

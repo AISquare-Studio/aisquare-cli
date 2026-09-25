@@ -1613,6 +1613,120 @@ def _working(fleet_rec: Fleet, lines: list[str], **answers: list[str]) -> Pane:
     return pane
 
 
+# --- T1c: no door types into Claude Code's trust dialog (13498, 13504, 13505) ---------------
+
+
+def _at_trust(
+    fleet_rec: Fleet,
+    pane_id: str = "%1",
+    label: str = "coder-1",
+    state: FleetAgentState = "waiting",
+) -> Pane:
+    """An agent spawned into a folder Claude Code has never trusted, parked at its own trust
+    dialog: the real capture."""
+    pane = fleet_rec.panes[pane_id]
+    pane.screen = list(TRUST)
+    fleet_rec.states[label] = state
+    return pane
+
+
+def _told(fleet_rec: Fleet) -> list[Any]:
+    return [call for call in fleet_rec.calls if call[0] == "tell"]
+
+
+@pytest.mark.parametrize("state", ["working", "waiting", "attention"])
+def test_a_paste_never_types_into_the_trust_dialog_and_names_the_step(
+    alpha: ProjectInfo, agents: dict[str, FleetAgent], fleet_rec: Fleet, state: FleetAgentState
+) -> None:
+    """coderp-1's pin from c5f12332 (#226, closed into T1c), with the dry run's said line.
+
+    The dry run's seq 17 (13504): the captain's paste typed 383 characters and an Enter into
+    a fresh coder's trust dialog, whose highlighted "No, exit" ended the coder, and the audit
+    said "pasted … and submitted". A fresh coder reads working, and waiting and attention
+    passed _ready with no screen read, so the refusal sits inside _ready (13516). Refused by
+    name whatever the fleet reads, audited as the refusal it is, and the dialog untouched,
+    so the coder lives."""
+    pane = _at_trust(fleet_rec, state=state)
+    message = refused(
+        lambda: actions.paste("alpha", "coder-1", "run the fold's tests", submit=True)
+    )
+    assert message.startswith(
+        "refused: the trust dialog is showing on coder-1: trust this folder first"
+    )
+    assert "nothing pasted" in message
+    assert pane.typed == [], "nothing reached the dialog"
+    last = audit(alpha.id)[-1]
+    assert last["tool"] == "paste" and last["ok"] is False
+    assert "trust this folder first" in last["said"]
+
+
+@pytest.mark.parametrize("state", ["waiting", "working"])
+def test_tell_never_types_into_the_trust_dialog(
+    alpha: ProjectInfo, agents: dict[str, FleetAgent], fleet_rec: Fleet, state: FleetAgentState
+) -> None:
+    """fleet.tell types into a waiting pane without reading it, and files a note for a working
+    one; at the trust dialog both are refused by name (13505: paste and tell alike). A fresh
+    coder reads working: runner2-1's red-before run filed a note there (13510)."""
+    pane = _at_trust(fleet_rec, state=state)
+    message = refused(lambda: actions.tell("alpha", "coder-1", "start on the fold"))
+    assert "the trust dialog is showing on coder-1: trust this folder first" in message
+    assert _told(fleet_rec) == [] and pane.typed == []
+
+
+def test_ask_manager_never_types_into_the_managers_trust_dialog(
+    alpha: ProjectInfo, agents: dict[str, FleetAgent], fleet_rec: Fleet
+) -> None:
+    _at_trust(fleet_rec, pane_id="%0", label="manager")
+    message = refused(lambda: actions.ask_manager("alpha", "what is blocking the deploy"))
+    assert "the trust dialog is showing on manager: trust this folder first" in message
+    assert _told(fleet_rec) == []
+
+
+def test_wololo_converts_nothing_when_the_agent_sits_at_its_trust_dialog(
+    alpha: ProjectInfo, agents: dict[str, FleetAgent], fleet_rec: Fleet
+) -> None:
+    """Checked before any claim moves: nothing to undo, and nothing typed into the dialog."""
+    old = add_task(alpha, "the old job")
+    new = add_task(alpha, "the new job")
+    team_service.claim_task(old.id, session_ref="sess-coder-1")
+    _at_trust(fleet_rec)
+    message = refused(lambda: actions.wololo("alpha", "coder-1", new.id))
+    assert "the trust dialog is showing on coder-1: trust this folder first" in message
+    assert (task_now(new.id).status, task_now(old.id).claimed_by) == ("todo", "sess-coder-1")
+    assert _told(fleet_rec) == []
+
+
+def test_press_leans_on_the_same_refusal_at_the_trust_dialog(
+    alpha: ProjectInfo, agents: dict[str, FleetAgent], fleet_rec: Fleet
+) -> None:
+    pane = _at_trust(fleet_rec, state="attention")
+    message = refused(lambda: actions.press("alpha", "coder-1", "down"))
+    assert "the trust dialog is showing on coder-1: trust this folder first" in message
+    assert pane.keys == [], "not even an arrow: the trust dialog is the owner's"
+
+
+@pytest.mark.parametrize("state", ["waiting", "attention"])
+def test_a_pane_that_cannot_be_read_is_never_typed_into_blind(
+    alpha: ProjectInfo,
+    agents: dict[str, FleetAgent],
+    fleet_rec: Fleet,
+    monkeypatch: pytest.MonkeyPatch,
+    state: FleetAgentState,
+) -> None:
+    """The fleet's word alone passed a waiting or attention pane before T1c. The trust dialog
+    can be ruled out only by reading the pane, so a pane that cannot be read is refused."""
+    pane = fleet_rec.panes["%1"]
+    fleet_rec.states["coder-1"] = state
+
+    def unreadable(*args: object, **kwargs: object) -> Capture:
+        raise TmuxError("tmux capture-pane failed: no such pane")
+
+    monkeypatch.setattr(FakeServer, "capture", unreadable)
+    message = refused(lambda: actions.paste("alpha", "coder-1", "run the tests"))
+    assert "could not be read" in message and "nothing pasted" in message
+    assert pane.typed == []
+
+
 def test_a_fresh_coder_takes_a_paste_when_its_box_is_drawn_and_idle(
     alpha: ProjectInfo, agents: dict[str, FleetAgent], fleet_rec: Fleet
 ) -> None:
@@ -1665,12 +1779,14 @@ def test_only_working_is_read_past_an_idle_screen(
     assert pane.typed == []
 
 
-def test_a_working_pane_that_cannot_be_read_stays_refused_as_working(
+def test_a_working_pane_that_cannot_be_read_stays_refused(
     alpha: ProjectInfo,
     agents: dict[str, FleetAgent],
     fleet_rec: Fleet,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """An unreadable pane never counts as ready by its screen: refused, and since T1c the line
+    names the read that failed (nothing is typed blind), not only the fleet's word."""
     pane = _working(fleet_rec, shots.REAL_IDLE_AFTER_STOP)
 
     def unreadable(*args: object, **kwargs: object) -> Capture:
@@ -1678,7 +1794,7 @@ def test_a_working_pane_that_cannot_be_read_stays_refused_as_working(
 
     monkeypatch.setattr(FakeServer, "capture", unreadable)
     message = refused(lambda: actions.paste("alpha", "coder-1", "next"))
-    assert "coder-1 is working" in message and pane.typed == []
+    assert "coder-1's pane could not be read" in message and pane.typed == []
 
 
 def test_the_captains_persona_says_yes_through_approve_prompt_and_its_result() -> None:

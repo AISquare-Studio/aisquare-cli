@@ -3936,6 +3936,50 @@ def test_a_card_released_over_an_agents_pane_copies_nothing_and_ctrl_c_still_int
     assert sent == [("C-c",)], "so ctrl+c in the pane is the agent's interrupt"
 
 
+def test_a_mark_on_a_card_that_leaves_the_list_goes_with_it(
+    tmp_path: Path, script: Script, isolated_home: Path
+) -> None:
+    """Final review of #203, F5. A mark's highlight goes with its card, and the mark
+    stayed: a project forgotten from a shell refused the next drag of the selection
+    as a whole ("nothing to do: 'prj_c' is gone"), and a captured directory hidden
+    again with `a` was moved into the group with the card the user dragged, without
+    a word. The frame keeps only the marks on projects it lists."""
+    seed(tmp_path, ("prj_a", "api", None), ("prj_b", "cli", None), ("prj_c", "docs", None))
+    with store_session() as store:
+        store.ensure_project(ProjectInfo(id="prj_scratch", root=tmp_path / "scratch"))  # a hook
+        tools, _ = groups_service.create_group(store, "tools", ["prj_b"])
+
+    async def go(pilot: Pilot[None]) -> tuple[list[str], list[str]]:
+        app = fleet_app(pilot)
+        app.sidebar.focus()
+        await pilot.press("a")  # the captured directory is a card now
+        await pilot.pause()
+        for project_id in ("prj_a", "prj_c", "prj_scratch"):
+            await _click(pilot, card_for(app, project_id).query_one(ProjectTitle), shift=True)
+        marked = app.sidebar.marked_ids()
+        with store_session() as store:
+            store.forget_project("prj_c")
+        app.sidebar.focus()
+        await pilot.press("a")  # hidden again; the refresh also drops the forgotten docs
+        await pilot.pause()
+        kept = app.sidebar.marked_ids()
+        header = app.sidebar.query_one(GroupHeader)
+        await _drag_onto(pilot, card_for(app, "prj_a").query_one(ProjectTitle), header, (3, 0))
+        await pilot.pause()
+        toasts = [str(n.message) for n in app._notifications]
+        return marked, kept, toasts
+
+    marked, kept, toasts = drive(go, notifications=True)
+    assert marked == ["prj_a", "prj_c", "prj_scratch"], "the premise: three marks"
+    assert kept == ["prj_a"], "only the mark on a card still listed"
+    assert not [t for t in toasts if "is gone" in t], toasts
+    with store_session() as store:
+        layout = {p.id: p.group_id for p in store.list_projects(all=True)}
+    assert layout == {"prj_a": tools.id, "prj_b": tools.id, "prj_scratch": None}, (
+        "the drag moved the card the user saw, and nothing hidden with it"
+    )
+
+
 def test_a_drop_the_store_refuses_part_way_lands_none_of_its_moves(
     tmp_path: Path, script: Script, isolated_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

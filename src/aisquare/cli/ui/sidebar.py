@@ -866,6 +866,14 @@ class Sidebar(Vertical):
         reconciled into that order by id, so a frame costs moves, not rebuilds.
         """
         notices = notices or {}
+        # A mark is on a card the user can see. One whose project left the list
+        # (forgotten from a shell, a captured directory hidden again with `a`)
+        # lost its highlight with its card, and the next drag, `g` or shift+g
+        # still carried it: a forgotten id refused the whole drop, and a hidden
+        # directory was moved into the group without a word (final review of
+        # #203, F5). A card folded away in its group is still listed, and keeps it.
+        listed = {project.id for project in projects}
+        self._marked = [pid for pid in self._marked if pid in listed]
         arrangement = arrange(projects, groups or [])
         self.arrangement = arrangement
         holder = self.query_one("#projects", VerticalScroll)

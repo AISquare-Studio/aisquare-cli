@@ -91,6 +91,22 @@ def ui_path(monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
         shutil.rmtree(folder, ignore_errors=True)
 
 
+LAND_S_AS_SHIPPED = receiver.LAND_S
+
+
+@pytest.fixture(autouse=True)
+def patient_landing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These pins are about WHAT lands and in what order, not about the time budget: a
+    project page's first mount took past 1 s on a loaded box (#223's gate at 0a24e78d),
+    and the answer then said so, as it should. The budget has its own pins (the land
+    timeout, the cut-off, and the sum under T1's 2 s); they set their own values."""
+    monkeypatch.setattr(receiver, "LAND_S", 10.0)
+
+
+def test_a_silent_client_plus_a_landing_fit_t1s_two_seconds() -> None:
+    assert receiver.READ_S + LAND_S_AS_SHIPPED < actions.UI_TIMEOUT_S
+
+
 def fleet(tmp_path: Path, script: Script) -> ProjectInfo:
     """alpha (coder-1) and beta (coder-2, and a lost row), plus the captain on the home board.
 
@@ -880,13 +896,14 @@ def test_a_long_answer_is_cut_to_fit_the_clients_read(
 def test_a_client_that_says_nothing_is_cut_off_in_time_for_the_next(
     tmp_path: Path, script: Script, ui_path: Path
 ) -> None:
-    """One connection at a time: a silent one may hold the next up, but not past T1's 2 s."""
+    """One connection at a time: a silent one may hold the next up, but not past T1's 2 s.
+    The action is one that lands at once, so this times the read window, not a page mount."""
     fleet(tmp_path, script)
 
     def timed() -> tuple[dict[str, Any], float]:
         """The client's own wait, from its connect to its answer — what T1's 2 s bounds."""
         began = time.monotonic()
-        reply = ask(ui_path, request("select_project", "alpha"))
+        reply = ask(ui_path, request("copy_row", "alpha/coder-1"))  # lands at once
         return reply, time.monotonic() - began
 
     async def body(pilot: Pilot[None]) -> tuple[dict[str, Any], float, dict[str, Any]]:
@@ -899,7 +916,7 @@ def test_a_client_that_says_nothing_is_cut_off_in_time_for_the_next(
         return reply, took, told
 
     reply, took, told = drive(body)
-    assert reply == {"ok": True, "said": "selected alpha"}
+    assert reply == {"ok": True, "said": "copied coder-1's row"}
     assert took < actions.UI_TIMEOUT_S
     assert told == {"ok": False, "said": f"not a request: no line within {receiver.READ_S:g}s"}
 

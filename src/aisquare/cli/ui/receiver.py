@@ -104,10 +104,13 @@ client that dials and says nothing holds the next one up for at most this long â
 the client's two seconds (``actions.UI_TIMEOUT_S``) the next one still has its read, its
 landing (:data:`LAND_S`) and its answer. T1's client writes its line as it connects."""
 
-LAND_S = 1.0
+LAND_S = 1.25
 """How long an answer waits for its action to land (a project page mounting, a dialog
 pushed). Past it, the answer says the action was sent but not yet shown â€” never a false
-``ok``: the step after it would read the old state."""
+``ok``: the step after it would read the old state. The budget: a silent client ahead
+(:data:`READ_S`) plus a landing stays under T1's two seconds, 0.5 + 1.25, leaving a
+quarter second for the answer to leave. A project page's first mount on a loaded box
+was measured past 1 s."""
 
 WRITE_S = 1.0
 """How long an answer may take to leave; a client that has gone costs no more than this."""

@@ -256,11 +256,16 @@ def test_bulk_concurrent_writes_never_lose_a_confirmed_write(tmp_path: Path) -> 
                 reader.wait(timeout=60)
         finally:
             # A reader loop still running a minute after the writers fails the
-            # test (the `TimeoutExpired` above) but must not outlive it: it would
-            # keep hammering this store and, on Windows, hold open the temp
-            # directory it runs in against pytest's cleanup. Readers make 40
+            # test (the `TimeoutExpired` above), and is killed so that it starts
+            # no more calls against this store and, on Windows, stops holding the
+            # temp directory it runs in against pytest's cleanup. Readers make 40
             # calls to a writer's 25, and the storm's first windows-latest runs
             # are this release's (review of the #203 tests-ci fixes, round 1).
+            # The one CLI call a loop has in flight is its own process and is
+            # NOT killed with it: it runs until that call ends, with nothing left
+            # to enforce the call's 5 s limit. Killing the tree would need the
+            # readers in a process group of their own, which would also keep a
+            # Ctrl-C at the terminal from reaching them (round 2).
             for reader in readers:
                 if reader.poll() is None:
                     reader.kill()

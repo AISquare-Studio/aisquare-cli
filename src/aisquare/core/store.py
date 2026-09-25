@@ -3672,9 +3672,10 @@ class SqliteStore:
         The open has already converged what it can (:func:`_migrate`), so this is
         what it could not: an object no step from v15 on produces, missing from a
         store another build or a hand edit changed. Each is named for the operator,
-        ``table claude_account`` or ``column fleet_agent.account_slot``. Empty for a
-        store that holds this build's whole schema; tables and columns of another
-        line's are not this build's and are never reported.
+        ``table claude_account``, ``column fleet_agent.account_slot`` or ``unique index
+        project_codename``. Empty for a store that holds this build's whole schema;
+        tables and columns of another line's are not this build's and are never
+        reported.
         """
         return _missing_from(self._conn, _ladder_schema())
 
@@ -3975,7 +3976,8 @@ class _Schema(NamedTuple):
     tables: dict[str, frozenset[str]]
     """Each table, ordinary or virtual, with its columns."""
     objects: dict[str, tuple[str, str]]
-    """Each index and trigger: its kind and the table it belongs to."""
+    """Each index and trigger: its kind (``index``, ``unique index`` or ``trigger``) and
+    the table it belongs to."""
 
 
 def _ladder_schema() -> _Schema:
@@ -3998,7 +4000,14 @@ def _ladder_schema() -> _Schema:
             if kind == "table":
                 columns = connection.execute(f"PRAGMA table_info({name})").fetchall()
                 tables[name] = frozenset(column[1] for column in columns)
-            elif kind in ("index", "trigger"):
+            elif kind == "index":
+                # Told apart because their absence costs different things: a missing
+                # unique index lets in the duplicates it refused, any other only slows
+                # the reads it served, and doctor's database row says which.
+                listed = connection.execute(f"PRAGMA index_list({table})").fetchall()
+                unique = any(row[1] == name and row[2] for row in listed)
+                objects[name] = ("unique index" if unique else kind, table)
+            elif kind == "trigger":
                 objects[name] = (kind, table)
         return _Schema(tables, objects)
     finally:

@@ -1088,7 +1088,8 @@ def test_doctor_fails_on_what_no_step_of_this_build_puts_back() -> None:
     """The open restores only what a step from v15 on makes. A table or an index from
     before that, gone from a store another build or a hand edit changed, stays gone
     whatever the open does, and doctor's database row is where it shows. It names six
-    and counts the rest, so the row stays one line an operator can read."""
+    and counts the rest, so the row stays one line an operator can read. It says what
+    each kind it names costs, and it still counts the notes, whose table is whole."""
     from aisquare.services import diagnostics
 
     indexes = (
@@ -1099,7 +1100,8 @@ def test_doctor_fails_on_what_no_step_of_this_build_puts_back() -> None:
         "team_session_project",
         "team_task_project_status",
     )
-    open_store().close()
+    with store_session() as store:
+        store.add(_entry())
     raw = sqlite3.connect(str(_db_path()))
     try:
         raw.executescript("DROP TABLE prompt;" + "".join(f"DROP INDEX {i};" for i in indexes))
@@ -1114,6 +1116,11 @@ def test_doctor_fails_on_what_no_step_of_this_build_puts_back() -> None:
     assert sorted(missing[1:]) == [f"index {i}" for i in indexes], missing
     assert row.status is CheckStatus.fail, row
     assert f"schema: {', '.join(missing[:6])} and 1 more;" in row.detail, row.detail
+    assert row.detail.startswith("context.db opens (1 user entries) but"), row.detail
+    assert row.detail.endswith(
+        "; a command that reads a missing table or column fails with 'no such table' or "
+        "'no such column'; a missing index that is not unique only slows the reads it served"
+    ), row.detail
 
 
 @pytest.mark.parametrize(
@@ -1153,13 +1160,45 @@ def test_doctor_names_a_store_without_its_notes_table_instead_of_calling_it_unre
     assert row.fix is not None and "mv " not in row.fix, row.fix
 
 
-@pytest.mark.parametrize("script", ["DROP TRIGGER entry_ai;", "DROP INDEX fleet_agent_live_label;"])
-def test_doctor_says_a_missing_index_or_trigger_fails_nothing(script: str) -> None:
+@pytest.mark.parametrize(
+    ("script", "said", "not_said"),
+    [
+        (
+            "DROP TRIGGER entry_ai;",
+            "schema: trigger entry_ai; a missing note trigger raises nothing itself but puts "
+            "`aisquare context search` out of step with the notes: a note it did not index is "
+            "not found, and a later edit or removal of that note can fail as 'database disk "
+            "image is malformed', which the CLI calls a damaged store though the notes are "
+            "intact",
+            ("duplicates", "slows"),
+        ),
+        (
+            "DROP INDEX fleet_agent_live_label;",
+            "schema: unique index fleet_agent_live_label; a missing unique index raises "
+            "nothing and lets in the duplicates it refused",
+            ("context search", "slows"),
+        ),
+        (
+            "DROP INDEX prompt_project;",
+            "schema: index prompt_project; a missing index that is not unique only slows the "
+            "reads it served",
+            ("context search", "duplicates"),
+        ),
+    ],
+    ids=["note trigger", "unique index", "index"],
+)
+def test_doctor_says_what_a_missing_index_or_trigger_costs(
+    script: str, said: str, not_said: tuple[str, ...]
+) -> None:
     """A missing table or column fails its readers with "no such table" or "no such
-    column", and the row said that of every gap. Nothing raises on a missing index or
-    trigger: a unique index stops refusing duplicates, a note trigger stops keeping
-    search in step with the notes. Said of those alone, the row warned of a failure
-    the operator would never see and not of the one they had."""
+    column"; nothing raises on a missing index or trigger, so the row says what each
+    costs, and only of the kinds it names. It once said a missing index or trigger
+    "fails nothing". A note trigger that did not index a note hands FTS5 a 'delete'
+    for text it never held when that note is edited or removed, and SQLite answers
+    "database disk image is malformed", which the CLI calls a damaged store and answers
+    with the corrupt-store move: measured with `entry_ai` dropped, `context add` and
+    then `context remove`. The row now warns of that, so the operator who meets it
+    knows the notes are intact."""
     from aisquare.services import diagnostics
 
     open_store().close()
@@ -1172,8 +1211,29 @@ def test_doctor_says_a_missing_index_or_trigger_fails_nothing(script: str) -> No
     row = diagnostics._check_database()
 
     assert row.status is CheckStatus.fail, row
-    assert "a missing index or trigger fails nothing" in row.detail, row.detail
-    assert "no such" not in row.detail, row.detail
+    assert row.detail.endswith(said), row.detail
+    assert "fails nothing" not in row.detail and "no such" not in row.detail, row.detail
+    assert not [cost for cost in not_said if cost in row.detail], row.detail
+
+
+def test_every_trigger_of_this_build_keeps_the_notes_search_index() -> None:
+    """Doctor's database row calls any missing trigger a note trigger and tells what
+    its absence does to `aisquare context search`. That holds while every trigger the
+    ladder makes is on ``entry`` and writes ``entry_fts``; a trigger for anything else
+    needs its own sentence in the row."""
+    connection = sqlite3.connect(":memory:")
+    try:
+        store_module._migrate(connection)
+        triggers = connection.execute(
+            "SELECT name, tbl_name, sql FROM sqlite_master WHERE type = 'trigger'"
+        ).fetchall()
+    finally:
+        connection.close()
+
+    assert triggers, "the ladder makes the note triggers"
+    assert [
+        name for name, table, sql in triggers if table != "entry" or "entry_fts" not in sql
+    ] == [], triggers
 
 
 def test_each_step_from_v15_on_declares_what_it_builds_and_builds_nothing_twice() -> None:

@@ -505,26 +505,42 @@ def _check_database() -> DoctorCheck:
         shown = ", ".join(missing[:_MISSING_SHOWN])
         if len(missing) > _MISSING_SHOWN:
             shown += f" and {len(missing) - _MISSING_SHOWN} more"
-        # What the gap costs depends on what is missing. A table or column fails its
-        # readers loudly; an index or trigger fails nothing, and what it did just stops.
+        # What the gap costs depends on what is missing, so the row says it only of
+        # the kinds it names. A table or column fails its readers loudly. A missing
+        # index or trigger raises nothing itself, but a note trigger's absence surfaces
+        # later: a note it did not index, once edited or removed, hands FTS5 a
+        # 'delete' for text it never held, and SQLite answers "database disk image is
+        # malformed", which the CLI reports as a damaged store with the corrupt-store
+        # move (measured with `entry_ai` dropped: `context add`, then `context
+        # remove`). Warned here, the operator who meets it knows the notes are intact.
+        # Every trigger of this build is a note trigger (pinned by the tests).
+        kinds = {item.rsplit(" ", 1)[0] for item in missing}
         costs: list[str] = []
-        if any(item.startswith(("table ", "column ")) for item in missing):
+        if kinds & {"table", "column"}:
             costs.append(
                 "a command that reads a missing table or column fails with 'no such "
                 "table' or 'no such column'"
             )
-        if any(item.startswith(("index ", "trigger ")) for item in missing):
+        if "trigger" in kinds:
             costs.append(
-                "a missing index or trigger fails nothing, so what it did stops unseen: "
-                "a unique index refusing duplicates, a note trigger keeping `aisquare "
-                "context search` in step with the notes, any index keeping reads fast"
+                "a missing note trigger raises nothing itself but puts `aisquare context "
+                "search` out of step with the notes: a note it did not index is not found, "
+                "and a later edit or removal of that note can fail as 'database disk image "
+                "is malformed', which the CLI calls a damaged store though the notes are "
+                "intact"
             )
+        if "unique index" in kinds:
+            costs.append(
+                "a missing unique index raises nothing and lets in the duplicates it refused"
+            )
+        if "index" in kinds:
+            costs.append("a missing index that is not unique only slows the reads it served")
         counted = "" if count is None else f" ({count} user entries)"
+        lacks = f"context.db opens{counted} but lacks part of this build's schema: {shown}"
         database = paths.db_path()
         return _fail(
             "database",
-            f"context.db opens{counted} but lacks part of this build's schema: {shown}; "
-            + "; ".join(costs),
+            "; ".join([lacks, *costs]),
             "The open that just ran adds back the tables and columns this build knows "
             "another line can skip, and these are not among them: another build or a "
             "hand edit changed the store in a way this build does not know. The history "

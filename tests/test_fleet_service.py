@@ -9682,6 +9682,34 @@ def test_a_replay_that_cannot_start_leaves_a_running_agent_running(
     assert live is not None and live.id == agent.id
 
 
+def test_a_replay_refused_inside_the_replacements_spawn_names_no_bin_either(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Review of #169, round 2: the check before the stop gave ``bin_flag=False``, and
+    the replacement's own ``spawn`` did not. A binary that left the PATH after that
+    check (a relink during the stop's grace, a binding edited meanwhile) was refused
+    there with "pass --bin", which neither ``restart`` nor ``switch`` takes."""
+    agent = _coder(project)
+    with store_session() as store:
+        store.upsert_fleet_agent(agent.model_copy(update={"launch_spec": None}))
+    tmux.die(agent.pane_id, 1)
+    # The binary goes after the check before the stop has passed.
+    monkeypatch.setattr(
+        fleet_service, "_refuse_a_replay_that_cannot_start", lambda agent, session: None
+    )
+    monkeypatch.setenv("AISQUARE_BIN_CODER", str(tmp_path / "gone" / "claude"))
+
+    with pytest.raises(FleetError, match="is not on your PATH") as refused:
+        fleet_service.restart(project, agent.label)
+
+    assert "--bin" not in str(refused.value), str(refused.value)
+    assert "install it, or change the role's binding" in str(refused.value)
+
+
 def test_a_row_spawned_before_the_launch_spec_is_refused_its_replay_before_the_stop(
     tmux: FakeTmux,
     claude_on_path: Path,

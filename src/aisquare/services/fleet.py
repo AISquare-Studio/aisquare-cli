@@ -1201,6 +1201,7 @@ def spawn(
     claude_code: bool = False,
     takes_over: str | None = None,
     onboard: bool = True,
+    bin_flag: bool = True,
 ) -> SpawnReceipt:
     """Start an agent for ``project`` in the fleet's tmux server and record it.
 
@@ -1215,7 +1216,10 @@ def spawn(
     the row. ``claude_code`` says the replayed agent is Claude Code whatever its
     binary is called — its hook joined its row to a board session, which only
     Claude Code does (a ``resume`` says so too) — so the spec's session flags
-    are not replayed and that fallback may land on ``claude``.
+    are not replayed and that fallback may land on ``claude``. ``bin_flag`` is
+    whether the caller takes ``--bin``: a replacement :func:`_respawn` starts
+    for ``restart`` or ``switch`` does not, so a refusal of its binary names
+    ways out those commands have (:func:`_launch_binary`).
 
     Every ``None`` means "the role's default" (config, then built-in). Refuses
     past ``max_agents_per_project``, a second manager, a worktree in a non-git
@@ -1303,7 +1307,7 @@ def spawn(
     _require_tmux(srv)
     notes: list[str] = []
     resolution = _launch_binary(
-        role, binary=binary, spec=spec, claude_code=claude_code, notes=notes
+        role, binary=binary, spec=spec, claude_code=claude_code, notes=notes, bin_flag=bin_flag
     )
     role_config = role_settings(role, config)
     # Nothing up to the codename below writes the project's registration: every
@@ -3876,6 +3880,9 @@ def _respawn(
         claude_code=session is not None,
         takes_over=session.id if takes_over and resume is None and session is not None else None,
         onboard=onboard,
+        # Asked again here, after a stop that can outlast the binary (a relink in the
+        # grace): the refusal names no `--bin`, which no command that gets here takes.
+        bin_flag=False,
     )
     if agent.launch_spec is not None:
         # Said once the replacement is up, for what it really took from the row: a

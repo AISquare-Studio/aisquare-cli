@@ -56,6 +56,7 @@ from aisquare.services import team as team_service
 from aisquare.services.captain import actions, errors
 from aisquare.services.captain import queue as captain_queue
 from aisquare.services.captain import state as captain_state
+from tests.rendered import plain
 
 CONTRACT_TOOLS = frozenset(
     {
@@ -773,7 +774,9 @@ def test_a_client_that_hangs_up_mid_call_still_gets_the_call_audited(
 def test_captain_serve_speaks_stdio_only(runner: CliRunner) -> None:
     result = runner.invoke(app, ["captain", "serve"])
     assert result.exit_code == 2
-    assert "--stdio" in result.output
+    # plain(): on GitHub Actions typer forces a styled terminal, and the highlighter puts
+    # an escape code INSIDE "--stdio" (tests/rendered.py says why).
+    assert "--stdio" in plain(result.output)
 
 
 # --- one event per call -----------------------------------------------------------------

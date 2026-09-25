@@ -8,6 +8,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`aisquare serve --stdio` no longer exits in the middle of a tool call.** Its
+  idle deadline (`--close-after`, `AISQUARE_SERVE_CLOSE_AFTER`) counted inbound
+  client messages only, while a tool runs on a worker thread and the client sends
+  nothing, so a call longer than the deadline was killed mid-flight and its answer
+  lost. The clock now stands still while a call runs and counts from the end of
+  the last one; an abandoned server still closes itself. Found gating the captain's
+  Actions server (#217), which shares the runner.
 - **`explainability use` for one project no longer re-points every project
   without a destination** (crew gate on #203, finding 1). On the machine
   `init --explainability` produces — a top-level gateway and the key file, no

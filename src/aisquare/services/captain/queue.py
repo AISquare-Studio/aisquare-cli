@@ -7,14 +7,20 @@ the ``attention``, ``next``, ``resolve`` and ``snooze`` tools turn that into a
 refusal the owner hears — never an empty queue that reads as "nothing needs you".
 
 T7 replaces these bodies and keeps the signatures: an item is a JSON-able dict
-with at least ``id``, ``project``, ``agent``, ``kind``, ``text`` and ``status``.
+(the field list at 13013: id, project, agent, kind, text, first_seen, last_seen,
+count, source_seq, status). Anything the owner should hear as a refusal — an
+unknown item, an item already resolved — is raised as
+:class:`aisquare.services.captain.errors.Refused` (or a subclass): the Actions
+server names only that class, never one this stub defines.
 """
 
 from __future__ import annotations
 
+from aisquare.services.captain.errors import Refused
 
-class QueueUnavailable(RuntimeError):
-    """The attention queue is not built yet."""
+
+class QueueUnavailable(Refused):
+    """The attention queue is not built yet — a refusal the owner hears, like any other."""
 
 
 _NOT_YET = (

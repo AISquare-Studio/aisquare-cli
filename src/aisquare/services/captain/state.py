@@ -19,16 +19,21 @@ where all of them can reach it:
   (the last :data:`UNDO_KEEP` reversible actions).
 - **The speech spool** — ``$AISQUARE_HOME/captain/speech/<id>.txt``, one file
   per line to say, ids time-sortable, taken oldest first by the Speaker.
-- **The ui socket** — ``$AISQUARE_HOME/captain/ui.sock``, where a running
-  ``asq`` listens for ``ui`` actions.
+- **The ui socket** — :func:`ui_socket_path`, where a running ``asq`` listens
+  for ``ui`` actions: ``$AISQUARE_HOME/captain/ui.sock`` when that fits a unix
+  socket's path limit, else a short per-user path keyed by the home. Both sides
+  — the ``ui`` tool and T4's receiver — call the same helper.
 """
 
 from __future__ import annotations
 
-import contextlib
+import hashlib
 import itertools
+import logging
 import os
-import secrets
+import stat
+import sys
+import tempfile
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -55,6 +60,12 @@ UNDO_KEEP = 20
 
 UndoKind = Literal["claim", "done"]
 
+UI_SOCKET_MAX = 100
+"""Bytes a unix socket path may take here: ``sun_path`` holds 108 on Linux and 104 on
+macOS, both counting the terminating NUL — 100 leaves room on either."""
+
+_log = logging.getLogger(__name__)
+
 
 def _now() -> datetime:
     return datetime.now(tz=UTC)
@@ -69,9 +80,96 @@ def speech_dir() -> Path:
     return captain_dir() / "speech"
 
 
-def ui_socket_path() -> Path:
-    """Where a running ``asq`` listens for ``ui`` actions (T4 binds it)."""
-    return captain_dir() / "ui.sock"
+def ui_socket_path(*, create: bool = False) -> Path:
+    """Where a running ``asq`` listens for ``ui`` actions — the ONE path both sides use.
+
+    ``$AISQUARE_HOME/captain/ui.sock`` when it fits :data:`UI_SOCKET_MAX`; a longer
+    home (every isolated test home, a deep checkout) would make ``bind`` and
+    ``connect`` fail with "AF_UNIX path too long", so it gets
+    ``captain-<hash of the home>.sock`` in the private per-user folder
+    ``/tmp/aisquare-<uid>`` instead (the temp dir on Windows, which has no unix
+    sockets). The hash keeps two homes from sharing a receiver. Nothing from the
+    ENVIRONMENT picks the folder — not ``XDG_RUNTIME_DIR``, not ``TMPDIR``: tmux, cron
+    and ``sudo -u`` do not carry them, and a binder and a dialer that disagreed on the
+    folder would make ``ui`` say "asq is not running" while asq listens (review of the
+    #217 fix round). Only the uid and the resolved home decide.
+
+    ``create`` makes the folder — the binder's job (T4). A folder outside the home
+    must be a real directory owned by this user and closed to everyone else
+    (``0700``); anything else is refused with :class:`OSError`, because a socket
+    there could be squatted or read by another account. The client dials through
+    :func:`ui_socket_to_dial`, which holds a folder outside the home to the same rule.
+
+    The home is RESOLVED first, for the length test and the hash alike, so two
+    spellings of one home (a symlink) land on one path.
+    """
+    home = paths.aisquare_home().resolve()
+    natural = home / "captain" / "ui.sock"
+    if _fits(natural):
+        if create:
+            natural.parent.mkdir(parents=True, exist_ok=True)
+        return natural
+    name = f"captain-{hashlib.sha256(str(home).encode()).hexdigest()[:16]}.sock"
+    folder = _short_root() / f"aisquare-{_user_tag()}"
+    if create:
+        _private_folder(folder)
+    return folder / name
+
+
+def _short_root() -> Path:
+    """Where a long home's socket folder lives: ``/tmp`` on POSIX (short everywhere, and the
+    same for every process of the user), the temp dir on Windows. A test seam too."""
+    if sys.platform == "win32":
+        return Path(tempfile.gettempdir())
+    return Path("/tmp")
+
+
+def ui_socket_to_dial() -> Path | None:
+    """The ui socket a client may connect to, or ``None`` when its folder does not exist.
+
+    A folder outside the home (the short-path fallback, in a shared ``/tmp``) is
+    checked BEFORE dialling, exactly as the binder checks it: another account could
+    have pre-created it and be listening there, and would then read every ``ui``
+    request and answer it as asq (gate on the #217 fix round). A missing folder
+    means nothing can be listening — ``None``, and no connect, so there is no
+    window for a squatter to create it between a check and the dial. A folder
+    that exists but is not a private one of this user raises :class:`OSError`.
+    """
+    path = ui_socket_path()
+    folder = path.parent
+    if folder == paths.aisquare_home().resolve() / "captain":
+        return path  # inside the user's own home
+    try:
+        facts = folder.lstat()
+    except FileNotFoundError:
+        return None
+    _check_private(folder, facts)
+    return path
+
+
+def _fits(path: Path) -> bool:
+    return len(os.fsencode(str(path))) <= UI_SOCKET_MAX
+
+
+def _user_tag() -> str:
+    if sys.platform == "win32":
+        return os.environ.get("USERNAME", "user")
+    return str(os.getuid())
+
+
+def _private_folder(folder: Path) -> None:
+    """Make ``folder`` 0700, or refuse one that is shared, foreign or not a directory."""
+    folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+    _check_private(folder, folder.lstat())
+
+
+def _check_private(folder: Path, facts: os.stat_result) -> None:
+    if sys.platform == "win32":
+        return  # no unix sockets there; nothing binds or dials this folder
+    if not stat.S_ISDIR(facts.st_mode) or facts.st_uid != os.getuid() or facts.st_mode & 0o077:
+        raise OSError(
+            f"refusing the ui socket folder {folder}: not a private folder (0700) of this user"
+        )
 
 
 # --- the home board and the captain's sessions ------------------------------------------
@@ -125,12 +223,37 @@ def ensure_session(project: ProjectInfo) -> str:
 # --- watermarks ---------------------------------------------------------------------------
 
 
+def _state() -> dict[str, object]:
+    """``state.json``, strictly: an UNREADABLE file raises its ``OSError`` rather than reading
+    as empty — a watermark that silently reads as unset re-reports old events as new."""
+    return state_file.read_state(strict=True)
+
+
+def _malformed(key: str, value: object) -> None:
+    _log.warning("state.json %s holds %r, which is not what the captain wrote; ignored", key, value)
+
+
 def watermark(project_id: str, agent: str | None) -> int | None:
     """The last seq ``since`` reported for this board (``agent`` None) or this agent."""
-    marks = state_file.read_state().get(_WATERMARKS)
-    board = marks.get(project_id) if isinstance(marks, dict) else None
-    seq = board.get(agent or _WHOLE_BOARD) if isinstance(board, dict) else None
-    return seq if isinstance(seq, int) and not isinstance(seq, bool) else None
+    marks = _state().get(_WATERMARKS)
+    if marks is None:
+        return None
+    if not isinstance(marks, dict):
+        _malformed(_WATERMARKS, marks)
+        return None
+    board = marks.get(project_id)
+    if board is None:
+        return None
+    if not isinstance(board, dict):
+        _malformed(f"{_WATERMARKS}.{project_id}", board)
+        return None
+    seq = board.get(agent or _WHOLE_BOARD)
+    if seq is None:
+        return None
+    if not isinstance(seq, int) or isinstance(seq, bool):
+        _malformed(f"{_WATERMARKS}.{project_id}.{agent or _WHOLE_BOARD}", seq)
+        return None
+    return seq
 
 
 def set_watermark(project_id: str, agent: str | None, seq: int) -> None:
@@ -154,8 +277,13 @@ def set_busy(on: bool) -> None:
 
 
 def busy_since() -> datetime | None:
-    flag = state_file.read_state().get(_BUSY)
-    return _parse_time(flag.get("since")) if isinstance(flag, dict) else None
+    flag = _state().get(_BUSY)
+    if flag is None:
+        return None
+    since = _parse_time(flag.get("since")) if isinstance(flag, dict) else None
+    if since is None:
+        _malformed(_BUSY, flag)
+    return since
 
 
 # --- the speech spool -----------------------------------------------------------------------
@@ -180,7 +308,7 @@ def enqueue_speech(text: str) -> str:
     """
     folder = speech_dir()
     folder.mkdir(parents=True, exist_ok=True)
-    speech_id = f"spk_{time.time_ns():020d}_{next(_SPEECH_SEQUENCE):06d}_{secrets.token_hex(3)}"
+    speech_id = f"spk_{time.time_ns():020d}_{next(_SPEECH_SEQUENCE):06d}_{os.urandom(3).hex()}"
     temp = folder / f".{speech_id}.tmp"
     temp.write_text(text, encoding="utf-8")
     os.replace(temp, folder / f"{speech_id}.txt")
@@ -194,37 +322,64 @@ def _spooled() -> list[Path]:
     return sorted(path for path in folder.glob("spk_*.txt"))
 
 
+def _read_line(path: Path) -> str:
+    return path.read_text(encoding="utf-8")
+
+
 def pending_speech() -> list[Speech]:
-    """Every line still waiting, oldest first."""
+    """Every line still waiting, oldest first.
+
+    A line taken by the Speaker between the listing and the read is gone, not
+    lost (debug log). A line that cannot be read is logged as a warning naming
+    its file — it stays in the spool, and the Speaker's own take says why.
+    """
     pending: list[Speech] = []
     for path in _spooled():
-        with contextlib.suppress(OSError):
-            pending.append(Speech(path.stem, path.read_text(encoding="utf-8")))
+        try:
+            pending.append(Speech(path.stem, _read_line(path)))
+        except FileNotFoundError:
+            _log.debug("speech %s was taken while listing the spool", path.name)
+        except OSError as exc:
+            _log.warning("speech %s could not be read and is left in the spool: %s", path, exc)
     return pending
 
 
 def take_speech() -> Speech | None:
-    """Take the oldest line: exactly one taker wins it (a rename claims it first)."""
+    """Take the oldest line: exactly one taker wins it (a rename claims it first).
+
+    Losing the rename to another taker is the expected race (debug log). Any
+    other failure to claim or read a line is logged with its file and the next
+    line is tried, so one bad file cannot silence the Speaker.
+    """
     for path in _spooled():
         claimed = path.with_name(f".{path.stem}.{os.getpid()}.taking")
         try:
             os.replace(path, claimed)
-        except OSError:
-            continue  # another taker won it
+        except FileNotFoundError:
+            _log.debug("speech %s was taken by another reader", path.name)
+            continue
+        except OSError as exc:
+            _log.warning("speech %s could not be claimed: %s", path, exc)
+            continue
         try:
-            return Speech(path.stem, claimed.read_text(encoding="utf-8"))
+            return Speech(path.stem, _read_line(claimed))
+        except OSError as exc:
+            _log.warning("speech %s was claimed but could not be read, dropped: %s", path, exc)
         finally:
             claimed.unlink(missing_ok=True)
     return None
 
 
 def clear_speech() -> int:
-    """Drop every waiting line; returns how many went."""
+    """Drop every waiting line; returns how many went (a line the Speaker took first is not one)."""
     cleared = 0
     for path in _spooled():
-        with contextlib.suppress(FileNotFoundError):
+        try:
             path.unlink()
-            cleared += 1
+        except FileNotFoundError:
+            _log.debug("speech %s was taken before the brake cleared it", path.name)
+            continue
+        cleared += 1
     return cleared
 
 
@@ -239,8 +394,14 @@ def pull_brake() -> datetime:
 
 
 def brake_pulled_after(started: datetime) -> bool:
-    at = _parse_time(state_file.read_state().get(_BRAKE))
-    return at is not None and at >= started
+    raw = _state().get(_BRAKE)
+    if raw is None:
+        return False
+    at = _parse_time(raw)
+    if at is None:
+        _malformed(_BRAKE, raw)
+        return False
+    return at >= started
 
 
 def set_waiting(project_id: str | None) -> None:
@@ -253,9 +414,14 @@ def set_waiting(project_id: str | None) -> None:
 
 def waiting_on() -> str | None:
     """The project an ``ask_manager`` wait is in flight for, if one is."""
-    wait = state_file.read_state().get(_WAITING)
+    wait = _state().get(_WAITING)
+    if wait is None:
+        return None
     project = wait.get("project") if isinstance(wait, dict) else None
-    return project if isinstance(project, str) else None
+    if not isinstance(project, str):
+        _malformed(_WAITING, wait)
+        return None
+    return project
 
 
 # --- the undo log ----------------------------------------------------------------------------
@@ -271,9 +437,12 @@ class Undo:
 
 
 def _undo_entries(current: object) -> list[dict[str, str]]:
-    if not isinstance(current, list):
+    if current is None:
         return []
-    return [
+    if not isinstance(current, list):
+        _log.warning("state.json captain_undo is not a list and is ignored: %r", current)
+        return []
+    kept = [
         cast(dict[str, str], entry)
         for entry in current
         if isinstance(entry, dict)
@@ -281,6 +450,11 @@ def _undo_entries(current: object) -> list[dict[str, str]]:
         and isinstance(entry.get("task"), str)
         and isinstance(entry.get("project"), str)
     ]
+    if len(kept) != len(current):
+        _log.warning(
+            "state.json captain_undo: %d malformed entries ignored", len(current) - len(kept)
+        )
+    return kept
 
 
 def record_undo(kind: UndoKind, task_id: str, project_id: str) -> None:

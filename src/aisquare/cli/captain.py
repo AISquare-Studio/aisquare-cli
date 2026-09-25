@@ -13,7 +13,7 @@ from typing import Annotated
 import typer
 
 from aisquare.cli.common import fail
-from aisquare.cli.serve import _dependency_error
+from aisquare.cli.serve import dependency_error
 
 app = typer.Typer(
     help="The captain: the home-level agent that runs every project's fleet for you.",
@@ -32,7 +32,8 @@ def serve(
         typer.Option(
             "--close-after",
             min=0,
-            help="Exit after this many seconds without a client message (0 = run forever).",
+            help="Exit after this many seconds without a client message or a running tool "
+            "call (0 = run forever).",
         ),
     ] = 300,
 ) -> None:
@@ -42,7 +43,7 @@ def serve(
             "the captain's server speaks stdio only — run: aisquare captain serve --stdio",
             param_hint="'--stdio'",
         )
-    problem = _dependency_error()
+    problem = dependency_error()
     if problem is not None:
         fail(problem, error="serve_not_installed")
     from aisquare.core.orchestrator import team_enabled

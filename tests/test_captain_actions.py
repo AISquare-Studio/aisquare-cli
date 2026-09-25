@@ -11,8 +11,11 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import os
+import shutil
 import socket
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -48,9 +51,9 @@ from aisquare.models import (
     TeamSession,
     TeamTask,
 )
-from aisquare.services import fleet
+from aisquare.services import fleet, mcp_server
 from aisquare.services import team as team_service
-from aisquare.services.captain import actions
+from aisquare.services.captain import actions, errors
 from aisquare.services.captain import queue as captain_queue
 from aisquare.services.captain import state as captain_state
 
@@ -97,6 +100,8 @@ class Pane:
     history: list[str] = field(default_factory=list)
     keys: list[tuple[str, ...]] = field(default_factory=list)
     pastes: list[str] = field(default_factory=list)
+    typed: list[tuple[str, str]] = field(default_factory=list)
+    """Everything that reached the pane, in order: ``("keys", "Enter")``, ``("paste", text)``."""
 
     def facts(self, pane_id: str) -> PaneFacts:
         return PaneFacts(
@@ -124,9 +129,11 @@ class FakeServer:
 
     def send_keys(self, pane_id: str, *keys: str) -> None:
         self._panes[pane_id].keys.append(keys)
+        self._panes[pane_id].typed.append(("keys", " ".join(keys)))
 
     def paste(self, pane_id: str, text: str) -> None:
         self._panes[pane_id].pastes.append(text)
+        self._panes[pane_id].typed.append(("paste", text))
 
     def pane_facts(self, pane_id: str) -> PaneFacts:
         return self._panes[pane_id].facts(pane_id)
@@ -151,6 +158,12 @@ class Fleet:
         self.states: dict[str, FleetAgentState] = {}
         self.panes: dict[str, Pane] = {}
         self.on_tell: Callable[[ProjectInfo, str, str], None] | None = None
+        self.effects: list[TeamEvent] = []
+        """The board events the stand-ins wrote as their effect (what the real services write)."""
+        self.crowd = False
+        """Also write the same kind of event for ANOTHER agent first — a busy board."""
+        self.relabel: str | None = None
+        """A restart whose replacement re-picked its label, with no board session."""
         for name in ("tell", "spawn", "stop", "restart", "attach_persona", "list_agents"):
             monkeypatch.setattr(fleet, name, getattr(self, name))
         monkeypatch.setattr(fleet, "status_of", self.status_of)
@@ -186,13 +199,59 @@ class Fleet:
             agent=agent, asked_label=kwargs.get("label"), tmux_session="asq-x", notes=["noted"]
         )
 
+    def _board_row(self, project: ProjectInfo, label: str) -> FleetAgent:
+        with store_session() as store:
+            row = store.fleet_agent_by_label(project.id, label, live_only=False)
+        return row if row is not None else _row(project, label, "coder", "%1")
+
+    def _effect(
+        self,
+        project: ProjectInfo,
+        kind: str,
+        text: str,
+        *,
+        session_id: str | None = None,
+        to_role: str | None = None,
+    ) -> TeamEvent:
+        with store_session() as store:
+            event = store.add_team_event(
+                TeamEvent(
+                    id=new_event_id(),
+                    project_id=project.id,
+                    session_id=session_id,
+                    kind=kind,
+                    text=text,
+                    to_role=to_role,
+                    created_at=datetime.now(tz=UTC),
+                )
+            )
+        return event
+
     def stop(self, project: ProjectInfo, label: str, **kwargs: Any) -> fleet.StopReceipt:
         self.calls.append(("stop", {"project": project.id, "label": label, **kwargs}))
-        return fleet.StopReceipt(agent=_row(project, label, "coder", "%1"), released=[])
+        row = self._board_row(project, label)
+        if self.crowd:
+            self._effect(project, "agent_exited", "coder-2 exited (0)", session_id="sess-coder-2")
+        self.effects.append(
+            self._effect(project, "agent_exited", f"{label} exited (0)", session_id=row.session_id)
+        )
+        return fleet.StopReceipt(agent=row, released=[])
 
     def restart(self, project: ProjectInfo, label: str, **kwargs: Any) -> fleet.RestartReceipt:
         self.calls.append(("restart", {"project": project.id, "label": label, **kwargs}))
-        row = _row(project, label, "coder", "%1")
+        row = self._board_row(project, label)
+        if self.relabel is not None:
+            row = row.model_copy(update={"label": self.relabel, "session_id": None})
+        if self.crowd:
+            self._effect(project, "restarted", "coder-2 restarted", session_id="sess-coder-2")
+        self.effects.append(
+            self._effect(
+                project,
+                "restarted",
+                f"{label} restarted — resumed its session",
+                session_id=row.session_id,
+            )
+        )
         return fleet.RestartReceipt(
             replaced=row, started=row, resumed=True, was_running=False, tmux_session="asq-x"
         )
@@ -204,6 +263,19 @@ class Fleet:
             (
                 "attach_persona",
                 {"project": project.id, "label": label, "name": name, "sender": sender},
+            )
+        )
+        if self.crowd:
+            self._effect(
+                project, "persona_attached", "persona x attached to coder-2", to_role="coder-2"
+            )
+        self.effects.append(
+            self._effect(
+                project,
+                "persona_attached",
+                f"persona {name} attached to {label}",
+                session_id=sender,
+                to_role=label,
             )
         )
         return fleet.AttachReceipt(
@@ -369,6 +441,11 @@ def add_task(project: ProjectInfo, title: str) -> TeamTask:
     return task
 
 
+def _events_of(project: ProjectInfo, kind: str) -> list[TeamEvent]:
+    with store_session() as store:
+        return store.filtered_events(project.id, kind=kind, since_seq=0, limit=500)
+
+
 def task_now(task_id: str) -> TeamTask:
     with store_session() as store:
         task = store.get_task(task_id)
@@ -379,6 +456,32 @@ def task_now(task_id: str) -> TeamTask:
 def write_config(text: str) -> None:
     paths.ensure_home()
     paths.config_path().write_text(text, encoding="utf-8")
+
+
+def _unix_socket() -> socket.socket:
+    """A unix stream socket. The guard is one mypy reads: Windows typeshed has no AF_UNIX."""
+    if sys.platform == "win32":
+        raise NotImplementedError("unix sockets: the ui tests skip on Windows")
+    return socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+
+
+@pytest.fixture
+def short_root(monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
+    """A short folder of the test's own standing in for /tmp, so a long home's socket
+    folder is made there — never in the machine's shared /tmp. In-process only: a child
+    server process cannot see this patch."""
+    folder = Path(tempfile.mkdtemp(prefix="asq", dir=None if sys.platform == "win32" else "/tmp"))
+    monkeypatch.setattr(captain_state, "_short_root", lambda: folder)
+    try:
+        yield folder
+    finally:
+        shutil.rmtree(folder, ignore_errors=True)
+
+
+UNIX_SOCKETS = pytest.mark.skipif(
+    sys.platform == "win32" or not hasattr(socket, "AF_UNIX"),
+    reason="the ui socket is a unix socket",
+)
 
 
 # --- the vocabulary and the server ------------------------------------------------------
@@ -416,6 +519,47 @@ def test_the_server_starts_and_answers_in_under_a_second() -> None:
     assert elapsed < 1.0, f"build + handshake + list took {elapsed:.3f}s"
 
 
+def test_a_call_the_sdk_rejects_before_the_tool_runs_is_audited_too(
+    projects: dict[str, ProjectInfo],
+) -> None:
+    """A missing argument or an unknown tool never reaches _run: without this, the call —
+    and the owner's words in it — left no captain_action. A call the TOOL refuses is still
+    audited once, by the tool, never a second time by the rejection path."""
+
+    async def go() -> tuple[Any, Any, Any, Any]:
+        async with Client(actions.build_server(), mode="legacy") as client:
+            missing = await client.call_tool("spawn", {"project": "alpha", "utterance": "a coder"})
+            unknown = await client.call_tool("fly", {"utterance": "fly"})
+            fine = await client.call_tool("projects", {"utterance": "list"})
+            inside = await client.call_tool("stop", {"project": "alpha", "label": "coder-1"})
+            return missing, unknown, fine, inside
+
+    missing, unknown, fine, inside = anyio.run(go)
+    home = audit(captain_state.home_project().id)
+    assert [a["tool"] for a in home] == ["spawn", "fly", "projects"], "one event per call"
+    assert [a["tool"] for a in audit(projects["alpha"].id)] == ["stop"], "audited once"
+    assert inside.is_error and inside.content[0].text.startswith("refused: stopping coder-1")
+    assert home[0]["utterance"] == "a coder" and home[0]["ok"] is False
+    assert home[0]["said"].startswith("refused: the call was rejected before the tool ran")
+    assert home[0]["args"] == {"project": "alpha"}
+    assert missing.is_error and unknown.is_error and not fine.is_error
+    assert missing.content[0].text.endswith(f"(action seq {_home_seqs()[0]})")
+
+
+def _home_seqs() -> list[int]:
+    with store_session() as store:
+        return [
+            e.seq
+            for e in store.filtered_events(
+                captain_state.home_project().id, kind="captain_action", since_seq=0, limit=50
+            )
+        ]
+
+
+def test_the_server_tells_the_captain_every_tool_that_needs_confirm() -> None:
+    assert "stop, spawn and restart need confirm=true" in actions.INSTRUCTIONS
+
+
 def test_a_call_through_the_protocol_reaches_the_tool_and_a_refusal_is_an_error_result(
     projects: dict[str, ProjectInfo],
 ) -> None:
@@ -433,11 +577,21 @@ def test_a_call_through_the_protocol_reaches_the_tool_and_a_refusal_is_an_error_
     assert bad.content[0].text.startswith("refused: no project matches 'nowhere'")
 
 
-def test_the_stdio_server_closes_itself_after_the_idle_deadline(isolated_home: Path) -> None:
+SERVE_ENTRIES = {
+    "cli": ["-m", "aisquare", "captain", "serve", "--stdio"],
+    "lean": ["-m", "aisquare.services.captain", "--stdio"],
+}
+"""Both ways to start the server: the CLI verb, and the module entry that skips the CLI tree."""
+
+
+@pytest.mark.parametrize("entry", sorted(SERVE_ENTRIES))
+def test_the_stdio_server_closes_itself_after_the_idle_deadline(
+    entry: str, isolated_home: Path
+) -> None:
     """``--close-after`` is the same idle deadline ``aisquare serve --stdio`` keeps (#19)."""
     started = time.perf_counter()
     proc = subprocess.Popen(
-        [sys.executable, "-m", "aisquare", "captain", "serve", "--stdio", "--close-after", "1"],
+        [sys.executable, *SERVE_ENTRIES[entry], "--close-after", "1"],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -458,6 +612,162 @@ def test_the_stdio_server_closes_itself_after_the_idle_deadline(isolated_home: P
     assert proc.returncode == 0, err
     assert b"aisquare captain serve --stdio: no client messages for 1s" in err
     assert time.perf_counter() - started < 30
+
+
+def test_the_lean_entry_speaks_stdio_only() -> None:
+    from aisquare.services.captain import __main__ as lean
+
+    with pytest.raises(SystemExit) as caught:
+        lean.main(["--close-after", "5"])
+    assert caught.value.code == 2
+
+
+@dataclass
+class Tick:
+    """A monotonic clock the test moves by hand."""
+
+    now: float = 50.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def test_the_idle_clock_stands_still_while_a_tool_call_runs() -> None:
+    """13038 item 2: a call longer than --close-after is activity, not silence."""
+    tick = Tick()
+    idle = mcp_server.IdleClock(tick)
+    tick.now += 10
+    assert idle.idle_for() == 10
+    idle.started()
+    tick.now += 400  # ask_manager(timeout=400) under the default --close-after 300
+    assert idle.idle_for() == 0, "a running call keeps the server awake"
+    idle.finished()
+    assert idle.idle_for() == 0, "the answer going out is activity too"
+    tick.now += 7
+    assert idle.idle_for() == 7
+    idle.started()
+    idle.started()
+    idle.finished()
+    tick.now += 400
+    assert idle.idle_for() == 0, "one of two calls is still running"
+
+
+def test_the_stdio_runner_counts_a_tool_call_in_flight_for_its_whole_run(
+    projects: dict[str, ProjectInfo], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server = actions.build_server()
+    idle = mcp_server.IdleClock()
+    mcp_server.track_tool_calls(server, idle)
+    seen: list[int] = []
+    real = actions._projects
+
+    def observed() -> actions.Outcome:
+        seen.append(idle.in_flight)
+        return real()
+
+    monkeypatch.setattr(actions, "_projects", observed)
+
+    async def go() -> Any:
+        async with Client(server, mode="legacy") as client:
+            return await client.call_tool("projects", {})
+
+    result = anyio.run(go)
+    assert not result.is_error
+    assert seen == [1], "the tool ran inside the tracked call"
+    assert idle.in_flight == 0, "and the call is over when the answer is out"
+
+
+@UNIX_SOCKETS
+def test_a_tool_call_longer_than_the_idle_deadline_still_returns(
+    projects: dict[str, ProjectInfo],
+) -> None:
+    """The real process: a 1 s deadline, a ui call that takes 2 s (a receiver that never
+    answers). Counting inbound lines only, the server exited mid-call at 1 s."""
+    from mcp import ClientSession
+    from mcp.client.stdio import StdioServerParameters, stdio_client
+
+    path = captain_state.ui_socket_path(create=True)
+    receiver = _unix_socket()
+    receiver.bind(str(path))
+    receiver.listen(1)
+    params = StdioServerParameters(
+        command=sys.executable,
+        args=["-m", "aisquare", "captain", "serve", "--stdio", "--close-after", "1"],
+        env=dict(os.environ),
+    )
+
+    async def go() -> tuple[bool, str]:
+        async with stdio_client(params) as (read, write), ClientSession(read, write) as session:
+            await session.initialize()
+            result = await session.call_tool("ui", {"action": "open_spawn"})
+            block = result.content[0]
+            return result.is_error, getattr(block, "text", "")
+
+    try:
+        is_error, text = anyio.run(go)
+    finally:
+        receiver.close()
+        path.unlink(missing_ok=True)
+    assert is_error
+    assert text.startswith(f"error: asq did not answer within {actions.UI_TIMEOUT_S:g}s")
+    # runner2's 13043 pin: the call the watchdog used to kill left NO audit row.
+    uis = [a for a in audit(captain_state.home_project().id) if a["tool"] == "ui"]
+    assert len(uis) == 1 and uis[0]["ok"] is False
+
+
+@UNIX_SOCKETS
+def test_a_client_that_hangs_up_mid_call_still_gets_the_call_audited(
+    projects: dict[str, ProjectInfo],
+) -> None:
+    """13043/13044: the audit lands even when a call is cut short. The client sends a 2 s
+    call and closes stdin at once: the server finishes the call, writes its one event,
+    then exits on the EOF."""
+    path = captain_state.ui_socket_path(create=True)
+    receiver = _unix_socket()
+    receiver.bind(str(path))
+    receiver.listen(1)  # accepts at the kernel, never answers
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "aisquare", "captain", "serve", "--stdio", "--close-after", "30"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=dict(os.environ),
+    )
+    assert proc.stdin is not None and proc.stdout is not None
+    hello = {
+        "protocolVersion": "2025-11-25",
+        "capabilities": {},
+        "clientInfo": {"name": "t", "version": "0"},
+    }
+    try:
+        for message in (
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": hello},
+            {"jsonrpc": "2.0", "method": "notifications/initialized"},
+        ):
+            proc.stdin.write((json.dumps(message) + "\n").encode())
+            proc.stdin.flush()
+        assert b'"id":1' in proc.stdout.readline().replace(b" ", b"")
+        call = {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {"name": "ui", "arguments": {"action": "open_spawn"}},
+        }
+        proc.stdin.write((json.dumps(call) + "\n").encode())
+        proc.stdin.flush()
+        proc.stdin.close()  # the client is gone before the call can answer
+        assert proc.wait(timeout=30) == 0
+    finally:
+        with contextlib.suppress(Exception):
+            proc.kill()
+        receiver.close()
+        path.unlink(missing_ok=True)
+        for stream in (proc.stdout, proc.stderr):
+            if stream is not None:
+                stream.close()
+    uis = [a for a in audit(captain_state.home_project().id) if a["tool"] == "ui"]
+    assert len(uis) == 1, "exactly one audit for the call the client walked away from"
+    assert uis[0]["said"].startswith("error: asq did not answer within")
 
 
 def test_captain_serve_speaks_stdio_only(runner: CliRunner) -> None:
@@ -481,9 +791,11 @@ EVERY_CALL: list[tuple[str, dict[str, Any]]] = [
     ("read_pane", {"project": "alpha", "label": "coder-1"}),
     ("tell", {"project": "alpha", "label": "coder-1", "text": "hi"}),
     ("spawn", {"project": "alpha", "role": "coder"}),
+    ("spawn", {"project": "alpha", "role": "coder", "confirm": True}),
     ("stop", {"project": "alpha", "label": "coder-1"}),
     ("stop", {"project": "alpha", "label": "coder-1", "confirm": True}),
     ("restart", {"project": "alpha", "label": "coder-1"}),
+    ("restart", {"project": "alpha", "label": "coder-1", "confirm": True}),
     ("attach_persona", {"project": "alpha", "label": "coder-1", "name": "skeptic"}),
     ("task", {"project": "alpha", "verb": "add", "ref": "write the docs"}),
     ("task", {"project": "alpha", "verb": "explode", "ref": "x"}),
@@ -491,6 +803,7 @@ EVERY_CALL: list[tuple[str, dict[str, Any]]] = [
     ("press", {"project": "alpha", "label": "coder-1", "key": "y"}),
     ("press", {"project": "alpha", "label": "coder-1", "key": "F13"}),
     ("paste", {"project": "alpha", "label": "coder-1", "text": "a\nb"}),
+    ("paste", {"project": "alpha", "label": "coder-1", "text": "a\nb", "submit": True}),
     ("ui", {"action": "open_spawn"}),
     ("act", {"name": "approve_prompt", "args": {"project": "alpha", "label": "coder-1"}}),
     ("act", {"name": "no_such_action"}),
@@ -585,6 +898,21 @@ def test_the_audit_never_reaches_a_teammates_delta(
     assert "captain_action" not in delta and "read_pane" not in delta
 
 
+def test_the_captains_session_keeps_its_start_across_calls(
+    alpha: ProjectInfo, agents: dict[str, FleetAgent], fleet_rec: Fleet
+) -> None:
+    ok(actions.note("alpha", "first"))
+    with store_session() as store:
+        first = store.get_session(captain_state.session_id_for(alpha.id))
+    time.sleep(0.01)
+    ok(actions.note("alpha", "second"))
+    with store_session() as store:
+        later = store.get_session(captain_state.session_id_for(alpha.id))
+    assert first is not None and later is not None
+    assert later.started_at == first.started_at
+    assert later.last_seen_at > first.last_seen_at
+
+
 def test_writes_route_by_the_captains_session_never_by_the_hub(
     projects: dict[str, ProjectInfo], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -672,6 +1000,61 @@ def test_since_without_a_watermark_shows_the_latest_fifty(
     assert captain_state.watermark(alpha.id, None) is None
 
 
+def test_since_first_look_shows_fifty_real_events_on_a_board_the_captain_reads_a_lot(
+    alpha: ProjectInfo, agents: dict[str, FleetAgent], fleet_rec: Fleet
+) -> None:
+    real = add_events(alpha, "sess-coder-1", 60)
+    add_events(alpha, captain_state.session_id_for(alpha.id), 250, kind="captain_action")
+    shown = ok(actions.since("alpha"))
+    assert [e["seq"] for e in shown["events"]] == [e.seq for e in real[-50:]]
+
+
+def test_since_moves_its_watermark_only_once_its_audit_has_landed(
+    alpha: ProjectInfo,
+    agents: dict[str, FleetAgent],
+    fleet_rec: Fleet,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Moved first and the audit then failing, the events were never delivered and the
+    next since started after them."""
+    first = add_events(alpha, "sess-coder-1", 2)
+    captain_state.set_watermark(alpha.id, None, first[0].seq)
+    real = actions._audit
+
+    def locked(tool: str, *args: Any, **kwargs: Any) -> int:
+        if tool == "since" and kwargs.get("ok"):
+            raise sqlite3.OperationalError("database is locked")
+        return real(tool, *args, **kwargs)
+
+    monkeypatch.setattr(actions, "_audit", locked)
+    assert refused(lambda: actions.since("alpha", advance=True)).startswith("error: since was done")
+    assert captain_state.watermark(alpha.id, None) == first[0].seq, "not moved"
+    monkeypatch.setattr(actions, "_audit", real)
+    shown = ok(actions.since("alpha", advance=True))
+    assert shown["advanced"] is True
+    assert captain_state.watermark(alpha.id, None) == first[1].seq
+
+
+def test_a_watermark_that_cannot_be_moved_is_said_in_the_answer(
+    alpha: ProjectInfo,
+    agents: dict[str, FleetAgent],
+    fleet_rec: Fleet,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from aisquare.core.state_file import StateUnwritableError
+
+    add_events(alpha, "sess-coder-1", 1)
+
+    def stuck(project_id: str, agent: str | None, seq: int) -> None:
+        raise StateUnwritableError("state.json.lock is held by another process")
+
+    monkeypatch.setattr(captain_state, "set_watermark", stuck)
+    shown = ok(actions.since("alpha", advance=True))
+    assert shown["advanced"] is False
+    assert shown["after_error"] == "error: state.json.lock is held by another process"
+    assert len(shown["events"]) == 1, "the events still arrive"
+
+
 def test_since_advance_moves_the_watermark_and_the_next_read_starts_there(
     alpha: ProjectInfo, agents: dict[str, FleetAgent], fleet_rec: Fleet
 ) -> None:
@@ -717,6 +1100,7 @@ def test_since_still_answers_when_the_agents_pane_is_gone(
     agents: dict[str, FleetAgent],
     fleet_rec: Fleet,
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     def gone(self: FakeServer, pane_id: str, **kwargs: Any) -> Capture:
         raise TmuxError(f"can't find pane: {pane_id}")
@@ -724,9 +1108,13 @@ def test_since_still_answers_when_the_agents_pane_is_gone(
     monkeypatch.setattr(FakeServer, "capture", gone)
     captain_state.set_watermark(alpha.id, "coder-1", 0)
     mine = add_events(alpha, "sess-coder-1", 1)
-    shown = ok(actions.since("alpha", agent="coder-1"))
+    with caplog.at_level(logging.WARNING, logger="aisquare.services.captain.actions"):
+        shown = ok(actions.since("alpha", agent="coder-1"))
     assert [e["seq"] for e in shown["events"]] == [mine[0].seq]
     assert shown["pane"] is None
+    assert shown["pane_error"] == "can't find pane: %1"
+    assert "coder-1" in caplog.text and "can't find pane: %1" in caplog.text
+    assert audit(alpha.id)[-1]["said"].endswith("(its pane could not be read)")
 
 
 def test_since_pages_at_two_hundred_and_says_it_was_cut(
@@ -765,10 +1153,24 @@ def test_tell_goes_through_fleet_tell_as_the_captain(
     assert result["how"] == "typed into its pane (it was waiting)"
 
 
+def test_spawn_refuses_without_confirm_and_never_reaches_the_fleet(
+    alpha: ProjectInfo, fleet_rec: Fleet
+) -> None:
+    """Starting a session spends quota: plan section 3's confirm step (13013)."""
+    message = refused(lambda: actions.spawn("alpha", "coder", label="coder-7"))
+    assert message.startswith("refused: spawning a coder in alpha starts a session")
+    assert "confirm=true" in message
+    assert fleet_rec.calls == []
+
+
 def test_spawn_goes_through_fleet_spawn_marked_as_the_captains(
     alpha: ProjectInfo, fleet_rec: Fleet
 ) -> None:
-    result = ok(actions.spawn("alpha", "coder", label="coder-7", task="tsk_1", persona="skeptic"))
+    result = ok(
+        actions.spawn(
+            "alpha", "coder", label="coder-7", task="tsk_1", persona="skeptic", confirm=True
+        )
+    )
     assert fleet_rec.calls == [
         (
             "spawn",
@@ -803,8 +1205,17 @@ def test_stop_refuses_without_confirm_and_never_reaches_the_fleet(
     assert result["released"] == []
 
 
+def test_restart_refuses_without_confirm_and_never_reaches_the_fleet(
+    alpha: ProjectInfo, fleet_rec: Fleet
+) -> None:
+    message = refused(lambda: actions.restart("alpha", "coder-1"))
+    assert message.startswith("refused: restarting coder-1 starts a session")
+    assert "confirm=true" in message
+    assert fleet_rec.calls == []
+
+
 def test_restart_goes_through_fleet_restart(alpha: ProjectInfo, fleet_rec: Fleet) -> None:
-    result = ok(actions.restart("alpha", "coder-1"))
+    result = ok(actions.restart("alpha", "coder-1", confirm=True))
     assert fleet_rec.calls == [
         ("restart", {"project": alpha.id, "label": "coder-1", "spawned_by": "captain"})
     ]
@@ -829,6 +1240,68 @@ def test_attach_persona_goes_through_the_fleet_as_the_captain(
     assert (result["persona"], result["delivered"]) == ("skeptic", "typed")
 
 
+@pytest.mark.parametrize(
+    ("tool", "kwargs"),
+    [
+        ("stop", {"project": "alpha", "label": "coder-1", "confirm": True}),
+        ("restart", {"project": "alpha", "label": "coder-1", "confirm": True}),
+        ("attach_persona", {"project": "alpha", "label": "coder-1", "name": "skeptic"}),
+    ],
+    ids=["stop", "restart", "attach_persona"],
+)
+def test_the_receipt_is_the_effects_own_event_even_on_a_busy_board(
+    tool: str,
+    kwargs: dict[str, Any],
+    alpha: ProjectInfo,
+    agents: dict[str, FleetAgent],
+    fleet_rec: Fleet,
+) -> None:
+    """13010: the effect's seq is the receipt — for every effect, not only a Delivery's.
+    Another agent's event of the same kind lands first, and must not be taken for it."""
+    fleet_rec.crowd = True
+    ok(dict(actions.TOOLS)[tool](**kwargs))
+    (effect,) = fleet_rec.effects
+    assert audit(alpha.id)[-1]["receipt"] == effect.seq
+
+
+def test_a_receipt_that_cannot_be_read_never_turns_a_done_stop_into_an_error(
+    alpha: ProjectInfo,
+    agents: dict[str, FleetAgent],
+    fleet_rec: Fleet,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The stop happened: a store too busy to read its receipt back afterwards must not
+    make it an error the owner answers with a second stop (or a second restart)."""
+    from aisquare.core.store import SqliteStore
+
+    real = SqliteStore.filtered_events
+
+    def busy(self: SqliteStore, project_id: str, **kwargs: Any) -> list[TeamEvent]:
+        if kwargs.get("limit") == 500:  # the receipt lookup, and only it
+            raise sqlite3.OperationalError("database is locked")
+        return real(self, project_id, **kwargs)
+
+    monkeypatch.setattr(SqliteStore, "filtered_events", busy)
+    result = ok(actions.stop("alpha", "coder-1", confirm=True))
+    assert result["label"] == "coder-1"
+    event = audit(alpha.id)[-1]
+    assert (event["ok"], event["receipt"]) == (True, None)
+    assert event["said"] == "stopped coder-1 (receipt unknown: database is locked)"
+
+
+def test_a_restart_whose_replacement_re_picked_its_label_still_gets_its_receipt(
+    alpha: ProjectInfo, agents: dict[str, FleetAgent], fleet_rec: Fleet
+) -> None:
+    """No board session to match, and the replacement now reads coder-4: the fleet writes
+    the label it was ASKED to restart, so that is what the receipt matches."""
+    fleet_rec.crowd = True
+    fleet_rec.relabel = "coder-4"
+    ok(actions.restart("alpha", "coder-3", confirm=True))
+    (effect,) = fleet_rec.effects
+    assert effect.text.startswith("coder-3 restarted")
+    assert audit(alpha.id)[-1]["receipt"] == effect.seq
+
+
 def test_a_fleet_refusal_is_said_never_faked(
     alpha: ProjectInfo, fleet_rec: Fleet, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -836,7 +1309,7 @@ def test_a_fleet_refusal_is_said_never_faked(
         raise fleet.FleetError("alpha already runs 6 agents (max_agents_per_project = 6)")
 
     monkeypatch.setattr(fleet, "spawn", no_room)
-    message = refused(lambda: actions.spawn("alpha", "coder"))
+    message = refused(lambda: actions.spawn("alpha", "coder", confirm=True))
     assert message.startswith("refused: alpha already runs 6 agents")
     assert audit(alpha.id)[-1]["ok"] is False
 
@@ -1016,7 +1489,36 @@ def test_paste_is_one_bracketed_paste_and_never_an_enter(
     pane = fleet_rec.panes["%1"]
     assert pane.pastes == ["line one\nline two"]
     assert pane.keys == []
+    assert pane.typed == [("paste", "line one\nline two")]
     assert result["chars"] == len("line one\nline two")
+
+
+def test_paste_submit_sends_exactly_one_enter_after_the_paste(
+    alpha: ProjectInfo, agents: dict[str, FleetAgent], fleet_rec: Fleet
+) -> None:
+    """One Enter for the whole paste — never one per newline (13013, acceptance line 2)."""
+    result = ok(actions.paste("alpha", "coder-1", "line one\nline two\n", submit=True))
+    assert fleet_rec.panes["%1"].typed == [("paste", "line one\nline two\n"), ("keys", "Enter")]
+    assert result["submitted"] is True
+    plain = ok(actions.paste("alpha", "coder-1", "again"))
+    assert plain["submitted"] is False
+    assert fleet_rec.panes["%1"].typed[-1] == ("paste", "again")
+
+
+def test_an_enter_that_fails_after_the_paste_says_the_text_is_waiting_in_the_input(
+    alpha: ProjectInfo,
+    agents: dict[str, FleetAgent],
+    fleet_rec: Fleet,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def no_enter(self: FakeServer, pane_id: str, *keys: str) -> None:
+        raise TmuxError("can't find pane: %1")
+
+    monkeypatch.setattr(FakeServer, "send_keys", no_enter)
+    message = refused(lambda: actions.paste("alpha", "coder-1", "abc", submit=True))
+    assert message.startswith("error: pasted 3 characters into coder-1 but the Enter failed")
+    assert "do not paste it again" in message
+    assert fleet_rec.panes["%1"].pastes == ["abc"], "the paste itself landed"
 
 
 def test_paste_refuses_a_busy_pane(
@@ -1038,6 +1540,73 @@ def test_ui_without_a_running_asq_is_a_said_no_op(projects: dict[str, ProjectInf
     assert result["said"] == "asq is not running"
 
 
+def test_ui_is_a_said_no_op_under_a_home_too_long_for_a_unix_socket(
+    projects: dict[str, ProjectInfo],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    short_root: Path,
+) -> None:
+    """runner2's repro (13041): a 100+ byte AISQUARE_HOME gave 'AF_UNIX path too long'."""
+    deep = tmp_path / ("h" * 60) / ("o" * 60) / "home"
+    monkeypatch.setenv("AISQUARE_HOME", str(deep))
+    assert len(str(deep / "captain" / "ui.sock")) > 110
+    result = ok(actions.ui("open_spawn"))
+    assert (result["delivered"], result["said"]) == (False, "asq is not running")
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX ownership and modes")
+def test_ui_never_dials_into_a_fallback_folder_someone_else_could_have_made(
+    projects: dict[str, ProjectInfo],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    short_root: Path,
+) -> None:
+    """The fix round's own review: a long home's socket lives in a shared place, and a
+    folder there another account pre-created could hold a listener that reads every ui
+    request and answers it as asq. The client holds it to the binder's rule first."""
+    monkeypatch.setenv("AISQUARE_HOME", str(tmp_path / ("h" * 60) / ("o" * 60) / "home"))
+    squatted = short_root / f"aisquare-{captain_state._user_tag()}"
+    squatted.mkdir()
+    os.chmod(squatted, 0o777)
+    message = refused(lambda: actions.ui("open_spawn"))
+    assert message.startswith("error: refusing the ui socket folder")
+    assert "not a private folder" in message
+
+
+@UNIX_SOCKETS
+def test_ui_reaches_a_receiver_bound_at_the_helpers_path_under_a_long_home(
+    projects: dict[str, ProjectInfo],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    short_root: Path,
+) -> None:
+    """The one helper both sides use (T4 binds it): it fits, so bind and connect both work."""
+    deep = tmp_path / ("h" * 60) / ("o" * 60) / "home"
+    monkeypatch.setenv("AISQUARE_HOME", str(deep))
+    path = captain_state.ui_socket_path(create=True)
+    assert path.is_relative_to(short_root), "the long home's socket is in the short root"
+    server = _unix_socket()
+    server.bind(str(path))
+    server.listen(1)
+
+    def serve() -> None:
+        conn, _ = server.accept()
+        with conn, conn.makefile("rwb") as stream:
+            stream.readline()
+            stream.write(b'{"ok": true, "said": "done"}\n')
+            stream.flush()
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    try:
+        result = ok(actions.ui("open_spawn"))
+    finally:
+        thread.join(timeout=5)
+        server.close()
+        path.unlink(missing_ok=True)
+    assert (result["delivered"], result["said"]) == (True, "done")
+
+
 @contextlib.contextmanager
 def _asq_socket(
     monkeypatch: pytest.MonkeyPatch, reply: dict[str, Any] | None
@@ -1048,9 +1617,9 @@ def _asq_socket(
     """
     folder = Path(tempfile.mkdtemp(prefix="asq"))
     path = folder / "ui.sock"
-    monkeypatch.setattr(captain_state, "ui_socket_path", lambda: path)
+    monkeypatch.setattr(captain_state, "ui_socket_path", lambda **_: path)
     received: list[dict[str, Any]] = []
-    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server = _unix_socket()
     server.bind(str(path))
     server.listen(1)
 
@@ -1075,7 +1644,7 @@ def _asq_socket(
         folder.rmdir()
 
 
-@pytest.mark.skipif(not hasattr(socket, "AF_UNIX"), reason="the ui socket is a unix socket")
+@UNIX_SOCKETS
 def test_ui_delivers_one_json_line_and_relays_the_receivers_answer(
     projects: dict[str, ProjectInfo], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1085,7 +1654,7 @@ def test_ui_delivers_one_json_line_and_relays_the_receivers_answer(
     assert (result["delivered"], result["said"]) == (True, "spawn dialog open")
 
 
-@pytest.mark.skipif(not hasattr(socket, "AF_UNIX"), reason="the ui socket is a unix socket")
+@UNIX_SOCKETS
 def test_ui_says_the_receivers_refusal(
     projects: dict[str, ProjectInfo], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1094,7 +1663,7 @@ def test_ui_says_the_receivers_refusal(
     assert message.startswith("refused: asq said: unknown ui action 'fly'")
 
 
-@pytest.mark.skipif(not hasattr(socket, "AF_UNIX"), reason="the ui socket is a unix socket")
+@UNIX_SOCKETS
 def test_ui_says_a_receiver_that_never_answers(
     projects: dict[str, ProjectInfo], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1104,14 +1673,14 @@ def test_ui_says_a_receiver_that_never_answers(
     assert message.startswith("error: asq did not answer within 0.2s")
 
 
-@pytest.mark.skipif(not hasattr(socket, "AF_UNIX"), reason="the ui socket is a unix socket")
+@UNIX_SOCKETS
 def test_a_socket_a_crashed_asq_left_behind_is_a_said_no_op(
     projects: dict[str, ProjectInfo], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     folder = Path(tempfile.mkdtemp(prefix="asq"))
     path = folder / "ui.sock"
-    monkeypatch.setattr(captain_state, "ui_socket_path", lambda: path)
-    stale = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    monkeypatch.setattr(captain_state, "ui_socket_path", lambda **_: path)
+    stale = _unix_socket()
     stale.bind(str(path))
     stale.close()  # the file stays; nothing listens on it
     try:
@@ -1191,6 +1760,36 @@ def test_a_config_action_wins_over_a_bundled_one_of_the_same_name(
     assert fleet_rec.panes["%1"].keys == [("Enter",)]
 
 
+def test_a_step_that_fails_keeps_error_and_a_step_that_writes_keeps_its_receipt(
+    alpha: ProjectInfo,
+    agents: dict[str, FleetAgent],
+    fleet_rec: Fleet,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    card = add_task(alpha, "take me")
+    write_config(
+        '[captain.actions.take]\nsteps = ["task claim {task}"]\n'
+        '[captain.actions.nudge]\nsteps = ["tell {text}"]\n'
+    )
+    taken = ok(actions.act("take", {"project": "alpha", "task": card.id}))
+    claims = [e for e in _events_of(alpha, "task_claimed") if e.task_id == card.id]
+    assert taken["steps"][0]["receipt"] == claims[-1].seq
+    assert audit(alpha.id)[-1]["receipt"] == claims[-1].seq
+
+    def tmux_down(
+        project: ProjectInfo, label: str, text: str, *, sender: str | None = None
+    ) -> fleet.TellResult:
+        raise TmuxError("no server running on /tmp/tmux-1001/asq")
+
+    monkeypatch.setattr(fleet, "tell", tmux_down)
+    message = refused(
+        lambda: actions.act("nudge", {"project": "alpha", "label": "coder-1", "text": "hi"})
+    )
+    assert message.startswith("error: action nudge stopped at step 1 (tell hi)"), (
+        "a failure is not a rule: the captain may retry it"
+    )
+
+
 def test_a_failing_step_stops_the_sequence_and_names_the_step(
     alpha: ProjectInfo, agents: dict[str, FleetAgent], fleet_rec: Fleet
 ) -> None:
@@ -1223,6 +1822,40 @@ def test_the_queue_tools_say_the_queue_is_not_built_yet(projects: dict[str, Proj
         lambda: actions.snooze("q1", 10),
     ):
         assert refused(call).startswith("refused: the attention queue lands with T7")
+
+
+def test_a_queue_that_drops_the_stubs_class_still_refuses_in_words(
+    projects: dict[str, ProjectInfo], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T7 replaces queue.py whole. A refusal is errors.Refused, which T7 raises too — the
+    actions side must not name a class only the stub defines (13038 item 5)."""
+    monkeypatch.delattr(captain_queue, "QueueUnavailable")
+
+    def unknown(item_id: str, how: str) -> dict[str, object]:
+        raise errors.Refused(f"no open item {item_id}")
+
+    monkeypatch.setattr(captain_queue, "resolve", unknown)
+    assert refused(lambda: actions.resolve("q9", "said yes")).startswith("refused: no open item q9")
+
+
+def test_a_queue_that_raises_its_own_runtime_error_is_said_as_an_error_not_a_crash(
+    projects: dict[str, ProjectInfo], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T7's queue raises a RuntimeError of its own on a held lock (13046): it is a failure
+    the owner hears, audited like any other, never a crashed tool."""
+
+    class HeldLock(RuntimeError):
+        pass
+
+    def locked(limit: int) -> list[dict[str, object]]:
+        raise HeldLock("queue.json is locked by another process")
+
+    monkeypatch.setattr(captain_queue, "ranked", locked)
+    message = refused(lambda: actions.attention())
+    assert message.startswith(
+        "error: the attention queue failed: queue.json is locked by another process"
+    )
+    assert audit(captain_state.home_project().id)[-1]["ok"] is False
 
 
 def test_the_queue_tools_hand_the_queue_seams_answer_through(
@@ -1287,6 +1920,9 @@ def test_bt_undoes_a_recorded_claim(
         "project": alpha.id,
         "how": "released",
     }
+    released = _events_of(alpha, "task_released")
+    assert audit(alpha.id)[-1]["tool"] == "task"  # the claim's audit; bt audits on home
+    assert audit(captain_state.home_project().id)[-1]["receipt"] == released[-1].seq
     after = task_now(card.id)
     assert (after.status, after.claimed_by) == ("todo", None)
     assert ok(actions.bt())["undid"] is None
@@ -1300,6 +1936,33 @@ def test_bt_reopens_a_task_the_captain_closed(
     result = ok(actions.bt())
     assert result["undid"]["how"] == "reopened"
     assert task_now(card.id).status == "todo"
+    reopened = _events_of(alpha, "task_reopened")
+    assert audit(captain_state.home_project().id)[-1]["receipt"] == reopened[-1].seq
+
+
+def test_a_bt_whose_undo_fails_puts_it_back_and_says_what_it_did_do(
+    alpha: ProjectInfo,
+    agents: dict[str, FleetAgent],
+    fleet_rec: Fleet,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = add_task(alpha, "first")
+    second = add_task(alpha, "second")
+    ok(actions.task("alpha", "claim", first.id))
+    ok(actions.task("alpha", "claim", second.id))
+    actions.speak("one")
+
+    def locked(ref: str, *, session_ref: str | None = None) -> TeamTask:
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(team_service, "release_task", locked)
+    message = refused(lambda: actions.bt())
+    assert message.startswith(
+        f"error: brake: cleared 1 queued line; undoing the claim of {second.id}"
+    )
+    assert "back on the undo list" in message
+    back = captain_state.pop_undo()
+    assert back is not None and back.task_id == second.id, "the SAME entry, not an older one"
 
 
 def test_bt_clears_the_speech_queue_and_stamps_the_brake(projects: dict[str, ProjectInfo]) -> None:
@@ -1335,6 +1998,8 @@ def test_wololo_converts_an_idle_agent_to_a_new_task(
     assert (name, call["label"]) == ("tell", "coder-1")
     assert new.id in call["text"]
     assert result["said"] == f"Wololo! coder-1 converts to {new.id}"
+    claimed = [e for e in _events_of(alpha, "task_claimed") if e.task_id == new.id]
+    assert audit(alpha.id)[-1]["receipt"] == claimed[-1].seq
 
 
 def test_wololo_refuses_a_working_agent_and_changes_nothing(

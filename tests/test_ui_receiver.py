@@ -502,13 +502,14 @@ def test_the_captains_ui_tool_reaches_asq_and_the_action_runs(
 def test_the_captains_ui_tool_is_told_why_asq_said_no(
     tmp_path: Path, script: Script, ui_path: Path
 ) -> None:
-    pytest.importorskip("mcp", reason="the [serve] extra is not installed")
-    from mcp.server.mcpserver.exceptions import ToolError
+    """A direct call raises the frame's own Refused, in the words the captain is told; the
+    SDK's ToolError wraps it only at the server boundary (T5, actions._as_sdk_tool)."""
+    from aisquare.services.captain.errors import Refused
 
     fleet(tmp_path, script)
 
     async def body(pilot: Pilot[None]) -> str:
-        with pytest.raises(ToolError) as caught:
+        with pytest.raises(Refused) as caught:
             await asyncio.to_thread(actions.ui, "select_project", "zeta")
         return str(caught.value)
 

@@ -21,8 +21,11 @@ from typer.core import TyperGroup
 
 from aisquare.cli.common import fail
 from aisquare.cli.serve import dependency_error
-from aisquare.core.console import stdout_console
+from aisquare.core.console import stderr_console, stdout_console
 from aisquare.core.state import get_state
+
+NO_TEXT = "the captain's turn ended without text — its pane shows what it did"
+"""What ``say`` reports for a turn that answered with tools alone: said, never as the reply."""
 
 
 class _SayByDefault(TyperGroup):
@@ -129,7 +132,8 @@ def say(
     Under ``--json``: one object, ``{"reply", "ended_at", "timed_out"}`` — the reply,
     when the answering turn ended, and whether it timed out. With no reply, ``"said"``
     says why and the exit is 1; ``timed_out`` is false when waiting longer would not
-    have helped (the captain died, tmux refused the keys).
+    have helped (the captain died, tmux refused the keys). A turn that ended without
+    text is an answer (exit 0) whose ``reply`` is null, and ``"said"`` says so.
     """
     from aisquare.services import fleet as fleet_service
     from aisquare.services.captain import brain
@@ -150,7 +154,13 @@ def say(
         fail(str(exc), error="captain_unavailable", detail=str(exc))
     if as_json:
         ended = reply.ended_at.isoformat() if reply.ended_at is not None else None
-        typer.echo(json.dumps({"reply": reply.text, "ended_at": ended, "timed_out": False}))
+        body: dict[str, object] = {"reply": reply.text, "ended_at": ended, "timed_out": False}
+        if reply.text is None:
+            body["said"] = NO_TEXT
+        typer.echo(json.dumps(body))
+        return
+    if reply.text is None:
+        stderr_console().print(NO_TEXT, markup=False, highlight=False, style="dim")
         return
     stdout_console().print(reply.text, markup=False, highlight=False)
 
@@ -174,6 +184,9 @@ def chat(
             reply = brain.say(text, timeout=timeout)
         except (brain.NoReply, fleet_service.FleetError) as exc:
             console.print(f"✗ {exc}", markup=False, highlight=False)
+            continue
+        if reply.text is None:
+            console.print(f"({NO_TEXT})", markup=False, highlight=False, style="dim")
             continue
         console.print(reply.text, markup=False, highlight=False)
 

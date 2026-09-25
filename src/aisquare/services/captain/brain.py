@@ -74,9 +74,14 @@ class NoReply(Exception):
 
 @dataclass(frozen=True)
 class Reply:
-    """What the captain said back, and when its answering turn ended."""
+    """What the captain said back, and when its answering turn ended.
 
-    text: str
+    ``text`` is ``None`` when the turn ended without text — it answered with tools
+    alone. Never a placeholder in its place: under ``--json`` that read as the
+    captain's own words, and the voice page (T3) would speak it.
+    """
+
+    text: str | None
     ended_at: datetime | None = None
 
 
@@ -309,10 +314,7 @@ def _await_reply(
         ):
             text = transcripts.last_reply(Path(session.transcript_path), since=typed_at)
             if text is not None:
-                return Reply(
-                    text or "(the captain's turn ended without text — see its pane)",
-                    ended_at=session.last_seen_at,
-                )
+                return Reply(text or None, ended_at=session.last_seen_at)
         state = fleet.status_of(row).state
         if state in ("exited", "lost"):
             raise NoReply(

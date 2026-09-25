@@ -345,6 +345,19 @@ def test_a_previous_turns_waiting_is_not_taken_for_the_answer(
     assert reply.text == "Nothing needs you right now."
 
 
+def test_a_turn_that_ends_without_text_is_no_reply_text_never_a_placeholder(
+    captain: tuple[Captain, Clock],
+) -> None:
+    """The captain answered with tools alone. ``Reply.text`` is ``None``: a placeholder in
+    its place reads as the captain's words under ``--json``, and T3's page would speak it."""
+    fake, _ = captain
+    fake.present()  # type: ignore[attr-defined]
+    fake.reply = ""
+    reply = brain.say("stop coder-2", timeout=60)
+    assert reply.text is None
+    assert reply.ended_at is not None
+
+
 def test_a_prompt_the_spawn_could_not_type_is_said_at_once(
     captain: tuple[Captain, Clock],
 ) -> None:
@@ -470,6 +483,8 @@ def said(monkeypatch: pytest.MonkeyPatch) -> Said:
             raise brain.NoReply("the captain exited before it answered", timed_out=False)
         if text == "refused":
             raise fleet.FleetError("the home already has a captain (agt_x) — one per home")
+        if text == "tools only":
+            return brain.Reply(text=None, ended_at=datetime(2026, 9, 25, 10, 6, tzinfo=UTC))
         return brain.Reply(
             text=f"reply to: {text}", ended_at=datetime(2026, 9, 25, 10, 5, tzinfo=UTC)
         )
@@ -650,3 +665,23 @@ def test_bare_captain_says_a_tmux_it_cannot_run(
     result = runner.invoke(app, ["captain"])
     assert result.exit_code == 1
     assert "could not run tmux" in result.output
+
+
+def test_a_reply_without_text_is_null_under_json_and_said_why(
+    runner: CliRunner, said: Said
+) -> None:
+    result = runner.invoke(app, ["--json", "captain", "tools only"])
+    assert result.exit_code == 0, result.output
+    body = json.loads(result.stdout)
+    assert (body["reply"], body["timed_out"]) == (None, False)
+    assert body["ended_at"] == "2026-09-25T10:06:00+00:00"
+    assert body["said"] == "the captain's turn ended without text — its pane shows what it did"
+
+
+def test_a_reply_without_text_prints_nothing_as_the_captains_words(
+    runner: CliRunner, said: Said
+) -> None:
+    result = runner.invoke(app, ["captain", "tools only"])
+    assert result.exit_code == 0, result.output
+    assert result.stdout == ""
+    assert "ended without text" in result.stderr

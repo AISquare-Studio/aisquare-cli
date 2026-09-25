@@ -66,6 +66,20 @@ def test_the_home_is_captured_never_onboarded(project: ProjectInfo) -> None:
     assert project.id in listed, "every other project still onboards"
 
 
+def test_onboarding_says_a_row_that_vanished_after_its_write(
+    project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``onboard_project`` promises the stored row. A row deleted between the write and the
+    read (another process's purge) is a ``KeyError``, as the store's other lookups say it
+    — never ``None`` returned against the type, which an ``assert`` gave under ``-O``."""
+    home = captain_state.home_project()
+    with store_session() as store:
+        monkeypatch.setattr(type(store), "get_project", lambda self, project_id: None)
+        for row in (home, project):
+            with pytest.raises(KeyError):
+                store.onboard_project(row)
+
+
 # --- the spawn --------------------------------------------------------------------------
 
 

@@ -440,6 +440,27 @@ class RealFleetGuard:
         return None
 
 
+_PRIVATE_FLEETS: list[Path] = []
+"""Every private TMUX_TMPDIR a test made — swept again when the session ends."""
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _sweep_private_fleets() -> Iterator[None]:
+    """End every private tmux server and remove every private folder the tests left.
+
+    ``no_real_fleet`` cleans up after each test, but its teardown runs while that
+    test's monkeypatches still stand: a test that patches ``os.unlink`` (test_atomic)
+    or ``subprocess.run`` quietly breaks the per-test cleanup, and 14 folders were
+    left in ``/tmp`` after one full run. Here, at the session's end, nothing is patched.
+    """
+    yield
+    tmux = shutil.which("tmux")
+    for folder in _PRIVATE_FLEETS:
+        if folder.exists():
+            _kill_private_servers(folder, _uid(), tmux)
+            shutil.rmtree(folder, ignore_errors=True)
+
+
 @pytest.fixture(autouse=True)
 def no_real_fleet(isolated_home: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[RealFleetGuard]:
     """No test may reach the owner's tmux server or launch the real ``claude`` (board 13220).
@@ -473,6 +494,7 @@ def no_real_fleet(isolated_home: Path, monkeypatch: pytest.MonkeyPatch) -> Itera
     from aisquare.core.tmux import Completed
 
     private = Path(tempfile.mkdtemp(prefix="asqtx", dir="/tmp"))
+    _PRIVATE_FLEETS.append(private)
     # Read once, now: a test may remove os.getuid, or patch sys.platform, to stand for
     # Windows (test_tmux.py, test_windows_contention.py) — and teardown runs under it.
     guard = RealFleetGuard(private, _uid(), shutil.which("tmux"))
@@ -503,8 +525,13 @@ def no_real_fleet(isolated_home: Path, monkeypatch: pytest.MonkeyPatch) -> Itera
         yield guard
         verdict = guard.verdict()
     finally:
-        _kill_private_servers(private, guard.uid, guard.tmux)
-        shutil.rmtree(private, ignore_errors=True)
+        # A first pass, under the test's own monkeypatches, which are still standing: a
+        # spy on os.open that refuses rmtree's dir_fd (test_state_file, on CI's 3.12)
+        # raised TypeError here and ERRORED the test. Whatever this pass cannot do, the
+        # session's sweep does, with nothing patched.
+        with contextlib.suppress(Exception):
+            _kill_private_servers(private, guard.uid, guard.tmux)
+            shutil.rmtree(private, ignore_errors=True)
     if verdict is not None:
         pytest.fail(verdict)
 

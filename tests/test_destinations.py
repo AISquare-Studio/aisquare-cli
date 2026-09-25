@@ -684,6 +684,79 @@ def test_a_key_attached_for_the_destinations_deployment_never_answers_as_the_mac
     )
 
 
+def test_a_key_bound_to_the_machines_target_never_answers_for_a_destination_elsewhere(
+    runner: CliRunner, isolated_home: Path, tmp_path: Path
+) -> None:
+    """The other way round. On the machine ``init --explainability`` writes, a key attached
+    with ``key set`` before any ``use`` is bound to the machine's ``stg``, which is the
+    top-level prod gateway. ``use`` on a staging workspace took it as the project's own
+    key for the destination's ``stg``, bound the staging roster with it, and launches sent
+    it to the staging gateway and proxy (review of #203, round 2). It is kept and not used
+    there, ``key show`` (words, ``--json``) and the Explainability page say so in one
+    sentence, and it answers again as the machine's ``stg``. On a machine whose own ``stg``
+    is staging, it answers for the destination as before."""
+    from aisquare.cli.ui.views import explainability as view
+
+    config = AppConfig()
+    config.explainability.enabled = True
+    config.explainability.gateway_url = "https://explainability-api.aisquare.studio"
+    config.explainability.proxy_url = "https://explainability-api.aisquare.studio:9443"
+    save_config(config)
+    service.store_api_key("AIS_machine_prod_key")
+    project = _project(tmp_path / "web")
+    workspace = dest.Workspace(id=42, uid="ws-uid-42", name="acme", role="ADMIN")
+    studio = dest.Studio(id=301, uid="st-301", name="Frontend")
+    staging = iam.Session(api_url="https://stg-api.aisquare.studio", token="aisq_x", source="env")
+    stg_gateway = "https://stg-explainability-api.aisquare.studio"
+    prod = (
+        "https://explainability-api.aisquare.studio",
+        "https://explainability-api.aisquare.studio:9443",
+    )
+
+    def resolved() -> ops.ResolvedTarget:
+        return ops.resolve_target(load_config().explainability, None, project_id=project.id)
+
+    def read() -> tuple[str, str, str, str | None]:
+        target = resolved()
+        return (target.gateway_url, target.proxy_url, target.key_source, target.api_key)
+
+    ops.attach_project_key(project, "AIS_hand_key", target="stg")
+    assert read() == (*prod, "project", "AIS_hand_key")
+
+    with store_session() as store:
+        dest.choose(store, project, workspace, studio, staging)
+    staging_proxy = "https://stg-explainability.api.aisquare.studio:9443"
+    assert read() == (stg_gateway, staging_proxy, "unset", None), "the prod key went to staging"
+    kept = (
+        "attached for this machine's own target stg, another deployment than the one this "
+        f"project's destination names ({stg_gateway}): not used for it"
+    )
+    shown = runner.invoke(app, ["explainability", "key", "show"])
+    assert shown.exit_code == 0, shown.output
+    assert kept in " ".join(shown.output.split())
+    row = view._key_origin_row(project, resolved(), load_config().explainability)
+    assert kept in " ".join(row.split())
+    payload = _json(runner, "explainability", "key", "show")
+    assert (payload["target"], payload["api_url"], payload["serves"]) == ("stg", None, False)
+
+    with store_session() as store:
+        dest.forget(store, project)
+    assert read() == (*prod, "project", "AIS_hand_key")
+
+    own = load_config()  # the machine's own stg is staging: the key is that deployment's
+    own.explainability.targets["stg"] = ExplainabilityTarget(gateway_url=stg_gateway)
+    save_config(own)
+    with store_session() as store:
+        dest.choose(store, project, workspace, studio, staging)
+    assert read() == (stg_gateway, staging_proxy, "project", "AIS_hand_key")
+    payload = _json(runner, "explainability", "key", "show")
+    assert (payload["api_url"], payload["serves"], payload["key_source"]) == (
+        None,
+        True,
+        "project",
+    )
+
+
 def test_no_remediation_for_a_projects_deployment_makes_it_the_machines_target(
     isolated_home: Path, tmp_path: Path
 ) -> None:

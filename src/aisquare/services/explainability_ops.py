@@ -365,7 +365,8 @@ def resolve_target(
     with ``explainability key set`` and bound to ONE deployment, so it answers
     only when that deployment is the one resolved here (:func:`binding_serves`:
     a key attached for a destination's deployment never answers for the
-    machine's target of the same name) — then the target's environment
+    machine's target of the same name, nor one bound to the machine's target
+    for a destination's deployment elsewhere) — then the target's environment
     variable, then the machine key file under the same rule as before.
     Without a project id the read is machine-level, as every caller made it
     until now; ``doctor`` passes none and so opens no store.
@@ -420,7 +421,8 @@ def resolve_target(
     else:
         target, placed = settings.targets.get(chosen, ExplainabilityTarget()), False
 
-    api_key, key_source = _project_api_key(project_id, chosen, destination), "project"
+    api_key = _project_api_key(project_id, chosen, destination, settings, environ)
+    key_source = "project"
     if api_key is None:
         api_key, key_source = environ.get(target.api_key_env) or None, "env"
     if api_key is None and target.api_key_env == KEY_ENV_VAR:
@@ -518,7 +520,11 @@ def deployment_fix(
 
 
 def _project_api_key(
-    project_id: str | None, target_name: str, destination: TraceDestination | None
+    project_id: str | None,
+    target_name: str,
+    destination: TraceDestination | None,
+    settings: ExplainabilitySettings,
+    environ: Mapping[str, str],
 ) -> str | None:
     """The project's own key, when one is attached FOR ``target_name`` and its file reads.
 
@@ -536,13 +542,20 @@ def _project_api_key(
     if project_id is None:
         return None
     binding = project_key_binding(project_id)
-    if binding is None or not binding_serves(binding, target_name, destination):
+    if binding is None or not binding_serves(
+        binding, target_name, destination, settings, env=environ
+    ):
         return None
     return read_project_key(binding.key_path)
 
 
 def binding_serves(
-    binding: ProjectExplainability, target_name: str, destination: TraceDestination | None
+    binding: ProjectExplainability,
+    target_name: str,
+    destination: TraceDestination | None,
+    settings: ExplainabilitySettings,
+    *,
+    env: Mapping[str, str] | None = None,
 ) -> bool:
     """Whether the project's key ``binding`` is a key for the deployment ``target_name`` names.
 
@@ -558,15 +571,65 @@ def binding_serves(
     kept and not used until a destination names its deployment again, and the
     machine's key applies meanwhile (review of #203).
 
+    The other way round too. A key bound to one of the machine's targets
+    (``api_url`` NULL) answered for a destination's deployment of the same name.
+    On that machine, a prod key attached with ``key set`` before any ``use`` is
+    bound to the machine's ``stg``. ``use`` on a staging workspace then took it
+    as the project's own key and bound the staging roster with it, and every
+    launch sent it to the staging gateway and proxy. The mint never overwrites
+    a hand key, so nothing replaced it (review of #203, round 2). Such a key
+    does not answer for the destination's deployment when the machine's target
+    of that name resolves another gateway: it is kept and not used, as above.
+    A name none of the machine's targets has, or a machine target with no
+    gateway at all, is a deployment by name only, and the name is the
+    destination's, so the key answers there as it did (``key set`` on a
+    machine whose target was set to ``local`` before ``use``, #141).
+
     ONE rule, for the resolver and for the surfaces that say whether the key is
-    in use (``key show``, the Explainability page's key row), so neither calls a
-    kept key the one in use, or a key in use a missing file.
+    in use (``key show``, the Explainability page's key row, through
+    :func:`kept_key_note`), so neither calls a kept key the one in use, or a key
+    in use a missing file.
     """
     if binding.target != target_name:
         return False
-    if binding.api_url is None:
+    if destination is None or destination.environment != target_name:
+        return binding.api_url is None
+    if binding.api_url is not None:
         return True
-    return destination is not None and destination.environment == target_name
+    if target_name != settings.target and target_name not in settings.targets:
+        return True
+    from aisquare.services.destinations import deployment_target  # lazy: it imports this
+
+    # Both resolved, the machine's by the one resolver: neither is read off the config.
+    machine = resolve_target(settings, target_name, env=env)
+    theirs = deployment_target(settings, destination)
+    return not machine.gateway_url or machine.gateway_url == theirs.gateway_url.rstrip("/")
+
+
+def kept_key_note(
+    binding: ProjectExplainability, target: ResolvedTarget, settings: ExplainabilitySettings
+) -> str:
+    """Why the project's key, bound to ``target``'s name, is kept and not used for it.
+
+    Empty when it is a key for ``target`` (:func:`binding_serves`), or is bound
+    to another name, which each surface words on its own. ONE sentence for
+    ``key show`` and the Explainability page's key row, which wrote it twice
+    (review of #203, round 2).
+    """
+    if binding.target != target.name or binding_serves(
+        binding, target.name, target.destination, settings
+    ):
+        return ""
+    if binding.api_url is not None:
+        return (
+            f"attached for the deployment of {binding.api_url}, which no destination of this "
+            f"project names now: not used for this machine's target {target.name}"
+        )
+    return (
+        f"attached for this machine's own target {binding.target}, another deployment than "
+        f"the one this project's destination names ({target.gateway_url or 'no gateway known'}): "
+        "not used for it"
+    )
 
 
 def read_project_key(path: Path) -> str | None:

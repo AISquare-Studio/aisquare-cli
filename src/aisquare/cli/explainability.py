@@ -33,7 +33,7 @@ import typer
 
 from aisquare.cli.common import expected_config_write_errors, fail, project_for_ref
 from aisquare.core import orchestrator, outbox
-from aisquare.core.config import load_config, save_config
+from aisquare.core.config import ExplainabilitySettings, load_config, save_config
 from aisquare.core.state import get_state
 from aisquare.core.store import store_session
 from aisquare.models import CheckStatus, ProjectInfo, TraceDestination
@@ -103,23 +103,32 @@ def _key_project_id(ref: str | None) -> str | None:
         return None
 
 
-def _key_payload(project: ProjectInfo, target: str | None) -> dict[str, object]:
+def _key_payload(
+    project: ProjectInfo, resolved: ops.ResolvedTarget, settings: ExplainabilitySettings
+) -> dict[str, object]:
     binding = ops.project_key_binding(project.id)
     present = binding is not None and binding.key_path.is_file()
     # A file there that is not UTF-8, or is blank, is no key: the resolver
     # reads it as a missing file (review of #170's follow-ups, round 1, F8).
     holds_key = binding is not None and ops.read_project_key(binding.key_path) is not None
+    # What the binding was attached for, and whether that is `resolves_for`: a key kept
+    # and not used read exactly like one in use here (review of #203, round 2).
+    serves = binding is not None and ops.binding_serves(
+        binding, resolved.name, resolved.destination, settings
+    )
     return {
         "project": project.id,
         "name": project.root.name or project.id,
         "attached": binding is not None,
         "target": binding.target if binding is not None else None,
+        "api_url": binding.api_url if binding is not None else None,
         "key_path": str(binding.key_path) if binding is not None else None,
         "file_present": present,
         "file_holds_key": holds_key,
         "set_at": binding.set_at.isoformat() if binding is not None else None,
         "set_by": binding.set_by if binding is not None else None,
-        "resolves_for": target,
+        "resolves_for": resolved.name,
+        "serves": serves,
     }
 
 
@@ -194,7 +203,7 @@ def key_set(
     except ops.UnknownTarget as exc:  # the config changed under this command
         fail(str(exc), error="unknown_target", ref=target)
     revocations = dest.revoke_owed(iam.signed_in_quietly(), project_ids={project.id})
-    payload = _key_payload(project, target)
+    payload = _key_payload(project, resolved, settings)
     if get_state().json_output:
         launches = ops.resolve_target(settings, None, project_id=project.id).name
         typer.echo(
@@ -243,7 +252,7 @@ def key_show(
     project = _project_for(project_ref)
     settings = load_config().explainability
     resolved = ops.resolve_target(settings, target_name, project_id=project.id)
-    payload = _key_payload(project, resolved.name)
+    payload = _key_payload(project, resolved, settings)
     payload["key_source"] = resolved.key_source
     payload["key_origin"] = resolved.key_origin
     payload["key_set"] = bool(resolved.api_key)
@@ -265,16 +274,15 @@ def key_show(
     elif ops.read_project_key(binding.key_path) is None:
         where += " (file holds no key: blank or not UTF-8 — attach it again)"
     match = ""
+    # Attached for another deployment than the one this name resolves now: a
+    # destination's while no destination names it, or the machine's while the
+    # destination names another of that name (review of #203). Kept, and used again
+    # once that deployment is the one resolved.
+    kept = ops.kept_key_note(binding, resolved, settings)
     if binding.target != resolved.name:
         match = f" — not used for target {resolved.name}"
-    elif not ops.binding_serves(binding, resolved.name, resolved.destination):
-        # Attached for a destination's deployment, and no destination names it now:
-        # this project's `stg` is the machine's, which can be another deployment
-        # (review of #203). Kept, and used again once a destination names it.
-        match = (
-            f" — attached for the deployment of {binding.api_url}, which no destination "
-            f"of this project names now: not used for this machine's target {resolved.name}"
-        )
+    elif kept:
+        match = f" — {kept}"
     typer.echo(
         f"{name}: project key for target {binding.target} at {where}, set "
         f"{binding.set_at:%Y-%m-%d %H:%M} by {binding.set_by or 'unknown'}{match}"

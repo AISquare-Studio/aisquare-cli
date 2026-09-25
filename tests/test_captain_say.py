@@ -150,9 +150,7 @@ class Clock:
         self.now += timedelta(seconds=seconds)
 
 
-RULE = "─" * 60
-INPUT_BOX = [RULE, "❯ ", RULE, "  ⏵⏵ accept edits on (shift+tab to cycle)"]  # noqa: RUF001
-"""How a waiting Claude Code pane ends: the ❯ input line between two rules, the mode footer."""  # noqa: RUF001
+from tests.captain_screens import INPUT_BOX  # noqa: E402 — the one screen set
 
 
 def _pane(*transcript: str, box: bool = True) -> list[str]:
@@ -559,7 +557,7 @@ def test_a_fresh_captain_parked_at_the_dialog_is_said_not_waited_out(
         (["How is Claude doing this session? (optional)", "1: Bad  2: Fine  3: Good  0: Dismiss"],
          "the session-rating prompt"),
         (
-            ["Do you want to proceed?", "❯ 1. Yes", "  2. No"],  # noqa: RUF001
+            ["Do you want to proceed?", "❯ 1. Yes", "  2. No", " Esc to cancel"],  # noqa: RUF001
             "a numbered choice",
         ),
         (
@@ -578,6 +576,33 @@ def test_say_never_types_into_a_dialog_and_names_what_is_showing(
         brain.say("what is up", timeout=60)
     assert "`aisquare captain` attaches" in str(caught.value)
     assert caught.value.timed_out is False and fake.typed == []
+
+
+def test_a_highlighted_list_mid_turn_without_a_dialog_footer_is_not_a_dialog(
+    captain: tuple[Captain, Clock],
+) -> None:
+    """One reader with T1b (13278): a chooser is numbered options WITH the Esc/Enter footer.
+    Output that happens to highlight a line mid-turn is not one, so say does not refuse it."""
+    fake, _ = captain
+    fake.present()  # type: ignore[attr-defined]
+    fake.screen = [
+        "Here are the options:",
+        " ❯ 1. Yes",  # noqa: RUF001
+        "   2. No",
+        "✻ Thinking… (esc to interrupt)",
+    ]
+    fake.busy_for = 2.0
+
+    real_sleep = brain._sleep
+
+    def draw(seconds: float) -> None:
+        real_sleep(seconds)
+        if fake.busy_for <= 0:
+            fake.screen = list(INPUT_BOX)
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(brain, "_sleep", draw)
+        assert brain.say("what is up", timeout=60).text == "Nothing needs you right now."
 
 
 def test_a_numbered_list_in_the_captains_own_words_is_not_a_dialog(

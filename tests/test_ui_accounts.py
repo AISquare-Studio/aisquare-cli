@@ -500,6 +500,70 @@ def test_ticks_while_the_accounts_read_waits_let_it_answer_and_read_once_more_af
     assert held == [1, 2], held  # three ticks during one wait cost one more read
 
 
+def test_a_tick_the_app_handles_before_a_reads_answer_still_lets_that_answer_paint(
+    no_network: dict[str, Any],
+) -> None:
+    """Review of the fix above, round 2. Textual marks a worker finished, and
+    ``refresh_accounts`` then starts the next read, BEFORE the app handles the
+    ``StateChanged`` that carries the answer. A tick or an ``AccountsChanged`` already
+    queued ahead of that message started the next read, and the answer that arrived
+    after it was dropped for no longer coming from the newest read: the page kept a
+    frame older than one it had been handed. Reads never overlap, so answers arrive in
+    the order they were read, and each one is painted."""
+    no_network["session"] = _session()
+    hold = threading.Event()
+    asked = {n: threading.Event() for n in range(1, 4)}
+    gates = {n: threading.Event() for n in range(1, 4)}
+    held: list[int] = []  # the reads that ran while the registry was held, numbered
+
+    def reader() -> AccountsOverview:
+        n = 0
+        if hold.is_set():
+            held.append(len(held) + 1)
+            n = held[-1]
+            asked[n].set()
+            gates[n].wait(10)  # as a writer holds the lock
+        emails = ["me@example.com", *(f"{i}@example.com" for i in range(2, n + 2))]
+        return _overview(*(_status(i, email) for i, email in enumerate(emails, 1)))
+
+    async def run() -> tuple[str, str]:
+        app = FleetApp(refresh_seconds=3600, doctor=lambda: [], accounts=reader)
+        async with app.run_test(size=SIZE) as pilot:
+            await accounts_read(app)
+            detail = app.query_one(AccountsSection).query_one(".accounts-line", Static)
+            hold.set()
+            try:
+                app.refresh_data()  # a tick: the first held read waits on the registry
+                assert await asyncio.to_thread(asked[1].wait, 5), "the tick asked"
+                [first] = [
+                    w for w in app.workers if w.group == ACCOUNTS_WORKER and not w.is_finished
+                ]
+
+                async def tick_ahead_of_the_answer() -> None:
+                    # The app handles nothing else while this callback runs, so the
+                    # first read's StateChanged queues behind the tick below, as it
+                    # does behind a tick that was already queued when the read ended.
+                    gates[1].set()
+                    await first.wait()
+                    app.refresh_data()
+
+                app.call_later(tick_ahead_of_the_answer)
+                assert await asyncio.to_thread(asked[2].wait, 5), "the tick read again"
+                await pilot.pause()
+                answered = shown(detail)
+                gates[2].set()
+                await accounts_read(app)
+            finally:
+                for gate in gates.values():
+                    gate.set()
+            return answered, shown(detail)
+
+    answered, after = asyncio.run(run())
+    assert answered == "2 Claude · me@example.com"  # the first read's answer, painted
+    assert after == "3 Claude · me@example.com"  # and the tick's read after it
+    assert held == [1, 2], held
+
+
 def test_buttons_follow_each_slots_state() -> None:
     overview = _overview(
         _status(1, "me@example.com"), _status(2, "two@example.com"), _status(3, None)

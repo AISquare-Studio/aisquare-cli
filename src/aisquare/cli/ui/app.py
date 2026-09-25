@@ -730,8 +730,12 @@ class FleetApp(SelectionHost, inherit_bindings=False):
 
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
         if event.worker.name == ACCOUNTS_WORKER:
-            if event.worker is self._accounts_worker:
-                self._accounts_read(event)
+            # Every read's answer, not only the newest read's: a worker is finished
+            # before its StateChanged is handled, so a tick handled in between
+            # starts the next read, and the answer that then arrived was dropped
+            # (review of the #203 accounts fix, round 2). Reads never overlap
+            # (`refresh_accounts`), so answers arrive in the order they were read.
+            self._accounts_read(event)
             return
         if event.worker.name != _DOCTOR_WORKER:
             return

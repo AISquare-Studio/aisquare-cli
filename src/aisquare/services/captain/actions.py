@@ -626,10 +626,24 @@ def _task(target: ProjectInfo, verb: str, ref: str, note: str | None) -> Outcome
         raise Refused("reopen needs a note (the feedback)")
     card = _card(target, ref)
     if verb == "claim":
-        moved = team_service.claim_task(card.id, session_ref=actor)
+        try:
+            moved = team_service.claim_task(card.id, session_ref=actor)
+        except Exception:
+            # Written, then its event failed (team.py commits first): still the captain's
+            # claim, so still bt's to undo — never an older entry undone in its place.
+            if not (card.status == "doing" and card.claimed_by == actor) and _held_by(
+                card.id, actor
+            ):
+                _record_quietly("claim", card.id, target)
+            raise
         captain_state.record_undo("claim", card.id, target.id)
     elif verb == "done":
-        moved = team_service.finish_task(card.id, note=note, session_ref=actor)
+        try:
+            moved = team_service.finish_task(card.id, note=note, session_ref=actor)
+        except Exception:
+            if card.status != "done" and _status_now(card.id) == "done":
+                _record_quietly("done", card.id, target)
+            raise
         captain_state.record_undo("done", card.id, target.id)
     elif verb == "reopen":
         moved = team_service.reopen_task(card.id, reason=note or "", session_ref=actor)
@@ -642,6 +656,22 @@ def _task(target: ProjectInfo, verb: str, ref: str, note: str | None) -> Outcome
         said=f"{verb}: {moved.id} is now {moved.status}",
         receipt=_receipt(before),
     )
+
+
+def _status_now(task_id: str) -> str | None:
+    with store_session() as store:
+        now = store.get_task(task_id)
+    return now.status if now is not None else None
+
+
+def _record_quietly(kind: captain_state.UndoKind, task_id: str, target: ProjectInfo) -> None:
+    """Record the undo of a write that landed while its call failed. The call's own error is
+    what the owner hears; an undo that cannot be recorded as well is logged, not raised
+    over it."""
+    try:
+        captain_state.record_undo(kind, task_id, target.id)
+    except (StateUnwritableError, OSError) as exc:
+        _log.warning("the undo of %s %s could not be recorded: %s", kind, task_id, exc)
 
 
 def _note(target: ProjectInfo, text: str, kind: str) -> Outcome:
@@ -933,6 +963,14 @@ def _undo(entry: captain_state.Undo) -> tuple[dict[str, Any], _Found]:
     return {**undid, "how": how}, found
 
 
+def _held_by(task_id: str, session: str | None) -> bool:
+    """Whether the card reads back as ``session``'s claim now (a write that raised may have
+    landed: team.py commits before it writes the event)."""
+    with store_session() as store:
+        now = store.get_task(task_id)
+    return now is not None and now.status == "doing" and now.claimed_by == session
+
+
 def _undo_wololo(
     entry: captain_state.Undo,
     project: ProjectInfo,
@@ -949,8 +987,9 @@ def _undo_wololo(
     label = entry.label or "the agent"
     said: list[str] = []
     done: list[str] = []
+    ours = card.status == "doing" and card.claimed_by == session
     try:
-        if card.status == "doing" and card.claimed_by == session:
+        if ours:
             team_service.release_task(card.id, session_ref=session)
             done.append(f"released {card.id} from {label}")
             said.append(done[-1])
@@ -974,9 +1013,24 @@ def _undo_wololo(
             elif old.status == "todo" and old.claimed_by is None:
                 try:
                     team_service.claim_task(old.id, session_ref=session)
-                except (sqlite3.Error, OSError, ValueError, LookupError) as exc:
-                    said.append(f"{old_id} could not be re-claimed ({exc}), left in the pool")
-                    continue
+                except (
+                    sqlite3.Error,
+                    OSError,
+                    ValueError,
+                    LookupError,
+                    team_service.ClaimLostError,
+                    team_service.DeliveryUnconfirmedError,
+                ) as exc:
+                    if not _held_by(old_id, session):  # else it landed, only its event failed
+                        with store_session() as store:
+                            now = store.get_task(old_id)
+                        said.append(
+                            f"{old_id} was taken meanwhile by {now.claimed_by} ({now.status}), "
+                            "not stolen back"
+                            if now is not None and now.claimed_by
+                            else f"{old_id} could not be re-claimed ({exc}), left in the pool"
+                        )
+                        continue
                 done.append(f"re-claimed {old.id} for {label}")
                 restored.append(old.id)
             elif old.status == "doing" and old.claimed_by == session:
@@ -990,6 +1044,9 @@ def _undo_wololo(
             else _Found(None)
         )
     except Exception as exc:
+        released = f"released {card.id} from {label}"
+        if released not in done and ours and not _held_by(card.id, session):
+            done.insert(0, released)  # the release landed; its event is what failed
         reason = _failure(exc)
         if reason is None or not done:
             raise
@@ -1016,18 +1073,22 @@ def _bt() -> Outcome:
         except Exception as exc:
             # The entry goes back on the list, and the owner hears what DID happen: a
             # retried bt would otherwise undo an older action nobody asked to undo.
-            captain_state.record_undo_entry(entry)
+            back = "it is back on the undo list"
+            try:
+                captain_state.record_undo_entry(entry)
+            except (StateUnwritableError, OSError) as put:
+                back = f"it could not be put back on the undo list ({put})"
             reason = _failure(exc)
             if reason is None:
                 raise
             raise Failed(
                 f"brake: {', '.join(parts)}; undoing the {entry.kind} of {entry.task_id} "
-                f"failed and it is back on the undo list: {reason}"
+                f"failed and {back}: {reason}"
             ) from exc
     if undid is None:
         parts.append("nothing to undo")
-    elif undid["kind"] == "wololo":
-        parts.append(str(undid["how"]))  # its own line names every card already
+    elif "restored" in undid:  # a wololo's own line names every card already
+        parts.append(str(undid["how"]))
     else:
         parts.append(f"{undid['how']} {undid['task']}")
     said = "brake: " + ", ".join(parts) + found.note
@@ -1057,45 +1118,67 @@ def _wololo(target: ProjectInfo, label: str, task: str) -> Outcome:
         raise Refused(f"{card.id} is {card.status} — wololo takes a card from the pool")
     actor = captain_state.ensure_session(target)
     before = _seq_now(target.id)
-    # The new claim first: a claim that loses a race leaves the agent's old work as it was.
-    team_service.claim_task(card.id, session_ref=agent.session_id)
-    released: list[str] = []
+    session = agent.session_id
+    with store_session() as store:
+        held = [
+            t.id
+            for t in store.team_tasks(target.id, status="doing")
+            if t.claimed_by == session and t.id != card.id
+        ]
+    step = f"claiming {card.id}"
+    failure: Exception | None = None
     try:
-        with store_session() as store:
-            held = [
-                t
-                for t in store.team_tasks(target.id, status="doing")
-                if t.claimed_by == agent.session_id and t.id != card.id
-            ]
-        for old in held:
-            team_service.release_task(old.id, session_ref=actor)
-            released.append(old.id)
-    finally:
-        # One compound undo entry (13242), recorded the moment the claims have moved and
-        # naming only the releases that happened: a release or the tell that fails after
-        # this still leaves a conversion bt can brake — never an older entry undone in
-        # its place (13295 S1).
+        # The new claim first: a claim that loses a race leaves the agent's old work as it was.
+        team_service.claim_task(card.id, session_ref=session)
+        for old_id in held:
+            step = f"releasing {old_id}"
+            team_service.release_task(old_id, session_ref=actor)
+    except Exception as exc:  # what moved is read back below, whatever raised
+        failure = exc
+    # Read back, never counted from the calls that returned: team.py commits a claim or a
+    # release BEFORE it writes its event, so a call can raise after its change landed.
+    if not _held_by(card.id, session):
+        if failure is not None:
+            raise failure  # the claim is first and it did not land: nothing moved
+        raise Failed(f"{card.id} was claimed but does not read back as {label}'s")
+    released = [old_id for old_id in held if not _held_by(old_id, session)]
+    kept = [old_id for old_id in held if old_id not in released]
+    problems = [f"{step} failed: {failure}"] if failure is not None else []
+    # One compound undo entry (13242), from what moved: a step that failed still leaves a
+    # conversion bt can brake — never an older entry undone in its place (13295 S1).
+    recorded = True
+    try:
         captain_state.record_undo(
             "wololo",
             card.id,
             target.id,
-            agent_session=agent.session_id,
+            agent_session=session,
             label=label,
             released=tuple(released),
         )
+    except (StateUnwritableError, OSError) as exc:
+        recorded = False
+        problems.append(f"its undo could not be recorded: {exc}")
+    # The agent holds the card whatever else failed, so it is always told, and told true.
+    moves = [f"{', '.join(released)} went back to the pool"] if released else []
+    moves += [f"still yours: {', '.join(kept)}"] if kept else []
+    told: fleet.TellResult | None = None
     try:
         told = fleet.tell(
             target,
             label,
             f"aisquare: the captain reassigned you — {card.id} is claimed for you: "
             f"{card.title}. Read it with `aisquare task show {card.id}` and start"
-            + ("; your earlier claims went back to the pool." if released else "."),
+            + (f"; {'; '.join(moves)}." if moves else "."),
             sender=actor,
         )
     except (fleet.FleetError, sqlite3.Error, OSError) as exc:
-        raise Failed(
-            f"{label} was converted to {card.id} (bt undoes it) but the tell failed: {exc}"
-        ) from exc
+        problems.append(f"the tell failed: {exc}")
+    if failure is not None and _failure(failure) is None:
+        raise failure  # a crash: the conversion is recorded and told, its traceback kept
+    if told is None or problems:
+        brake = "bt undoes it" if recorded else "bt cannot undo it"
+        raise Failed(f"{label} was converted to {card.id} ({brake}) but {'; '.join(problems)}")
     claimed = _effect_seq(
         target.id, before, ("task_claimed",), lambda event: event.task_id == card.id
     )
@@ -1559,6 +1642,7 @@ def perform_read(
     utterance: str,
     read: Callable[[], tuple[dict[str, Any], str]],
     *,
+    project: str | None = None,
     via: str = "cli",
 ) -> dict[str, Any]:
     """A read the owner runs that is no captain tool — ``log``, ``actions`` — through the
@@ -1566,7 +1650,7 @@ def perform_read(
     answers the data and the line to say; its errors are said like any tool's."""
     token = _VIA.set(via)
     try:
-        answer = _run(name, dict(args), utterance, lambda _: Outcome(*read()))
+        answer = _run(name, dict(args), utterance, lambda _: Outcome(*read()), project=project)
     finally:
         _VIA.reset(token)
     data = json.loads(answer)

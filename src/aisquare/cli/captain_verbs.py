@@ -60,11 +60,20 @@ TYPED: ContextVar[tuple[str, ...]] = ContextVar("captain_typed", default=())
 def _typed() -> str:
     """The command as the owner typed it, for the audit's ``utterance`` (13081).
 
-    ``-m 7`` stays ``-m 7`` and a default never appears; ``--json`` is the root's.
-    Shell-quoted, so the line can be run again.
+    The process's own argv when it carries this call (it ends with the words the group
+    kept), root flags and all. Otherwise — the CLI run in-process, as tests do — the
+    root's ``--json`` when it is on and not typed after ``captain``, then the words as
+    typed. ``-m 7`` stays ``-m 7`` and a default never appears. Shell-quoted, so the
+    line can be run again.
     """
-    root = ["aisquare", *(["--json"] if get_state().json_output else []), "captain"]
-    return shlex.join([*root, *TYPED.get()])
+    import sys
+
+    words = list(TYPED.get())
+    argv = sys.argv[1:]
+    if words and argv[-len(words) :] == words and "captain" in argv[: -len(words)]:
+        return shlex.join(["aisquare", *argv])
+    json_root = get_state().json_output and "--json" not in words
+    return shlex.join(["aisquare", *(["--json"] if json_root else []), "captain", *words])
 
 
 def _perform(tool: str, args: Mapping[str, Any]) -> dict[str, Any]:
@@ -252,12 +261,10 @@ def since(
     events = result.get("events")
     rows = events if isinstance(events, list) else []
     frm, to = result.get("from_seq"), result.get("to_seq")
-    more = " (more waiting)" if result.get("truncated") else ""
-    console.print(
-        f"{who}: {result.get('said')}"  # nothing to span (e.g. an agent never joined)
-        if to is None
-        else f"{who}: {len(rows)} event(s), seq {'the start' if frm is None else frm} → "
-        f"{to}{more}" + (" · watermark advanced" if result.get("advanced") else "")
+    span = f", seq {'the start' if frm is None else frm} → {to}" if to is not None else ""
+    console.print(  # the tool's own line: it says an agent that never joined, and a page more
+        f"{who}: {result.get('said')}{span}"
+        + (" · watermark advanced" if result.get("advanced") else "")
     )
     for event in rows:
         if not isinstance(event, dict):
@@ -296,7 +303,9 @@ def log(
             raise Refused(str(exc)) from exc
         return {"events": found}, f"read {len(found)} captain action(s)"
 
-    rows = _read_audited("log", {"project": project, "limit": limit}, read)["events"]
+    rows = _read_audited("log", {"project": project, "limit": limit}, read, project=project)[
+        "events"
+    ]
     if get_state().json_output:
         _emit_json({"events": rows})
         return
@@ -323,14 +332,18 @@ def log(
 
 
 def _read_audited(
-    name: str, args: Mapping[str, Any], read: Callable[[], tuple[dict[str, Any], str]]
+    name: str,
+    args: Mapping[str, Any],
+    read: Callable[[], tuple[dict[str, Any], str]],
+    *,
+    project: str | None = None,
 ) -> dict[str, Any]:
     """A read that is no captain tool, audited like one (13081). The verb prints only what it
     read, so ``log`` and ``actions`` keep their shapes."""
     from aisquare.services.captain import actions
 
     try:
-        data = actions.perform_read(name, args, _typed(), read)
+        data = actions.perform_read(name, args, _typed(), read, project=project)
     except (Refused, Failed) as exc:
         _said_and_exit(exc)
     except (sqlite3.DatabaseError, OSError) as exc:

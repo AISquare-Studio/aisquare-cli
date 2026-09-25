@@ -242,7 +242,7 @@ def test_since_reads_a_board_and_advance_moves_the_watermark(
     assert [e["kind"] for e in data["events"]] == ["question"]
     first_to = data["to_seq"]
     code, out = run(runner, "since", "alpha")
-    assert code == 0 and "1 event(s)" in out and "approve the deploy" in out
+    assert code == 0 and "1 event for alpha" in out and "approve the deploy" in out
     code, data = run_json(runner, "since", "alpha", "--advance")
     assert code == 0 and data["advanced"] is True
     assert captain_state.watermark(alpha.id, None) == first_to
@@ -490,6 +490,46 @@ def test_since_for_an_agent_that_never_joined_says_so_in_its_own_words(
     code, out = run(runner, "since", "alpha", "--agent", "coder-9")
     assert code == 0, out
     assert "coder-9 has not joined the board" in out and "None" not in out
+
+
+def test_since_says_an_agent_never_joined_even_over_an_old_watermark(
+    runner: CliRunner, alpha: ProjectInfo
+) -> None:
+    """A label reused by a new agent that has not joined: the tool's own line, never a
+    bare "0 event(s)" span read off the old agent's watermark."""
+    now = datetime.now(UTC)
+    with store_session() as store:
+        store.upsert_fleet_agent(
+            FleetAgent(
+                id=new_agent_id(), project_id=alpha.id, label="coder-9", role="coder",
+                pane_id="%9", cwd=alpha.root, created_at=now,
+            )
+        )  # fmt: skip
+    captain_state.set_watermark(alpha.id, "coder-9", 1)
+    code, out = run(runner, "since", "alpha", "--agent", "coder-9")
+    assert code == 0, out
+    assert "coder-9 has not joined the board" in out and "None" not in out
+
+
+def test_log_of_one_board_is_audited_on_that_board(runner: CliRunner, alpha: ProjectInfo) -> None:
+    run(runner, "log", "alpha")
+    code, data = run_json(runner, "log", "alpha")
+    assert code == 0 and [row["tool"] for row in data["events"]] == ["log"]
+    assert data["events"][-1]["project"] == alpha.id
+
+
+def test_the_utterance_is_the_argv_as_typed(
+    runner: CliRunner, alpha: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """13081: what the owner typed — the process's own argv when it carries this call, the
+    root's flags included; a --json after ``captain`` is recorded once, where it was."""
+    typed = ["--no-color", "captain", "attention", "--limit", "3"]
+    monkeypatch.setattr(sys, "argv", ["/usr/local/bin/aisquare", *typed])
+    assert runner.invoke(app, typed, catch_exceptions=False).exit_code == 0
+    assert last_audit()["utterance"] == "aisquare --no-color captain attention --limit 3"
+    monkeypatch.setattr(sys, "argv", ["pytest"])
+    assert runner.invoke(app, ["captain", "--json", "next"], catch_exceptions=False).exit_code == 0
+    assert last_audit()["utterance"] == "aisquare captain --json next"
 
 
 def test_the_verbs_need_no_mcp_sdk(runner: CliRunner, monkeypatch: pytest.MonkeyPatch) -> None:

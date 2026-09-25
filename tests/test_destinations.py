@@ -576,10 +576,9 @@ def test_an_unknown_hosts_key_never_goes_to_the_machines_gateway_or_proxy(
             dest.Studio(id=301, uid="st-301", name="Frontend"),
             session,
         )
-        path = service.store_project_api_key(project.id, "AIS_selfhosted_key")
-        store.set_project_explainability(
-            project.id, target=row.environment, key_path=path, set_by=None
-        )
+    # As `key set` binds it: to the destination's deployment. A binding to a name the
+    # machine has no target for, and no destination's API, answers for no destination.
+    ops.attach_project_key(project, "AIS_selfhosted_key", target=row.environment)
 
     settings = load_config().explainability
     for chosen in (None, row.environment):  # by the destination, and named by --target
@@ -843,6 +842,105 @@ def test_the_tables_proxy_goes_with_the_tables_gateway_only(isolated_home: Path)
     config.explainability.targets["stg"] = ExplainabilityTarget(gateway_url=written_out)
     written = dest.deployment_target(config.explainability, on_staging)
     assert written.proxy_url == "https://stg-explainability.api.aisquare.studio:9443"
+
+
+def test_a_key_bound_to_a_target_renamed_away_answers_for_no_destination(
+    runner: CliRunner, isolated_home: Path, tmp_path: Path
+) -> None:
+    """The doctor's fix for a project on staging, on the machine ``init --explainability``
+    writes, says to give the machine's own target (``stg``, on prod) a name of its own
+    first. Once it had, a prod key ``key set`` had bound to the machine's ``stg`` before
+    any ``use`` was bound to a name no target has, and such a name answered for the
+    destination's ``stg``: the prod key went to the staging gateway and proxy, and ``key
+    show`` called it in use (review of #203, round 3). Which deployment it was attached
+    for is not recorded, so it answers for no destination until ``key set`` attaches it
+    there, and ``key show`` says so."""
+    config = AppConfig()
+    config.explainability.enabled = True
+    config.explainability.gateway_url = "https://explainability-api.aisquare.studio"
+    config.explainability.proxy_url = "https://explainability-api.aisquare.studio:9443"
+    save_config(config)
+    service.store_api_key("AIS_machine_prod_key")
+    project = _project(tmp_path / "web")
+    ops.attach_project_key(project, "AIS_hand_prod_key", target="stg")
+    with store_session() as store:
+        dest.choose(
+            store,
+            project,
+            dest.Workspace(id=42, uid="ws-uid-42", name="acme", role="ADMIN"),
+            dest.Studio(id=301, uid="st-301", name="Frontend"),
+            iam.Session(api_url="https://stg-api.aisquare.studio", token="aisq_x", source="env"),
+        )
+    staging = (
+        "https://stg-explainability-api.aisquare.studio",
+        "https://stg-explainability.api.aisquare.studio:9443",
+    )
+
+    def read() -> tuple[str, str, str, str | None]:
+        resolved = ops.resolve_target(load_config().explainability, None, project_id=project.id)
+        return (resolved.gateway_url, resolved.proxy_url, resolved.key_source, resolved.api_key)
+
+    assert read() == (*staging, "unset", None)
+    renamed = load_config()
+    renamed.explainability.target = "own"
+    save_config(renamed)
+    assert read() == (*staging, "unset", None), "the prod key went to staging"
+    shown = runner.invoke(app, ["explainability", "key", "show"])
+    assert shown.exit_code == 0, shown.output
+    assert "attached for target stg, which this machine no longer has" in " ".join(
+        shown.output.split()
+    )
+    assert _json(runner, "explainability", "key", "show")["serves"] is False
+
+    ops.attach_project_key(project, "AIS_staging_key", target="stg")
+    assert read() == (*staging, "project", "AIS_staging_key")
+
+
+def test_a_key_set_for_another_machine_target_with_no_gateway_answers_for_its_destination(
+    isolated_home: Path, tmp_path: Path
+) -> None:
+    """``key set --target local`` for an entry with no gateway (the Setup form writes one
+    without making it active) binds a key to a deployment known by name only. The check
+    that a key bound to one of the machine's targets is the destination's deployment read
+    ``local`` as a machine read does, falling back to the top-level prod gateway. So it
+    dropped the key once ``use`` pointed the project at the ``local`` deployment, and
+    called ``local`` the machine's own target, which is ``stg`` (review of #203, round 3).
+    A project key bound off the machine's target never falls back that way, and the
+    destination reads the same entry: the key answers there."""
+    config = AppConfig()
+    config.explainability.enabled = True
+    config.explainability.gateway_url = "https://explainability-api.aisquare.studio"
+    config.explainability.proxy_url = "https://explainability-api.aisquare.studio:9443"
+    config.explainability.targets["local"] = ExplainabilityTarget(proxy_url="http://127.0.0.1:9090")
+    save_config(config)
+    service.store_api_key("AIS_machine_prod_key")
+    project = _project(tmp_path / "web")
+    ops.attach_project_key(project, "AIS_local_key", target="local")
+    settings = load_config().explainability
+    before = ops.resolve_target(settings, "local", project_id=project.id)
+    assert (before.gateway_url, before.proxy_url, before.key_source) == (
+        "",
+        "http://127.0.0.1:9090",
+        "project",
+    )
+
+    with store_session() as store:
+        dest.choose(
+            store,
+            project,
+            dest.Workspace(id=42, uid="ws-uid-42", name="acme", role="ADMIN"),
+            dest.Studio(id=301, uid="st-301", name="Frontend"),
+            iam.Session(api_url="http://localhost:8000", token="aisq_x", source="env"),
+        )
+    after = ops.resolve_target(settings, None, project_id=project.id)
+    assert (after.name, after.gateway_url, after.key_source, after.api_key) == (
+        "local",
+        "http://localhost:8000",
+        "project",
+        "AIS_local_key",
+    )
+    binding = ops.project_key_binding(project.id)
+    assert binding is not None and ops.kept_key_note(binding, after, settings) == ""
 
 
 def test_no_remediation_for_a_projects_deployment_makes_it_the_machines_target(

@@ -578,12 +578,25 @@ def binding_serves(
     as the project's own key and bound the staging roster with it, and every
     launch sent it to the staging gateway and proxy. The mint never overwrites
     a hand key, so nothing replaced it (review of #203, round 2). Such a key
-    does not answer for the destination's deployment when the machine's target
-    of that name resolves another gateway: it is kept and not used, as above.
-    A name none of the machine's targets has, or a machine target with no
-    gateway at all, is a deployment by name only, and the name is the
-    destination's, so the key answers there as it did (``key set`` on a
-    machine whose target was set to ``local`` before ``use``, #141).
+    answers for the destination's deployment only while the machine's target
+    of that name is that deployment, and is kept and not used otherwise:
+
+    * **The machine's own target**, while the machine's read of it resolves the
+      destination's gateway, or none at all (a deployment by name only: ``key
+      set`` on a machine whose target was set to ``local`` before ``use``,
+      #141). That read falls back to ``$EXPLAINABILITY_GATEWAY_URL`` and the
+      top-level gateway, as a key bound to that target does.
+    * **Another of the machine's entries**, always. A key bound to it takes the
+      entry's own gateway and never the top-level one, and the destination
+      reads the same entry, a gateway set by hand included. Compared with the
+      machine's read of it, which does fall back, a key ``key set --target
+      local`` bound to an entry with no gateway stopped answering for the
+      ``local`` deployment (review of #203, round 3).
+    * **Never a name the machine no longer has.** The binding records the name
+      and not which deployment it had: once the doctor's fix had the machine's
+      ``stg`` (on prod) renamed, a prod key bound to it answered for the
+      destination's ``stg`` and went to staging (same review). It answers for
+      the destination once ``key set`` attaches it there.
 
     ONE rule, for the resolver and for the surfaces that say whether the key is
     in use (``key show``, the Explainability page's key row, through
@@ -596,8 +609,8 @@ def binding_serves(
         return binding.api_url is None
     if binding.api_url is not None:
         return True
-    if target_name != settings.target and target_name not in settings.targets:
-        return True
+    if target_name != settings.target:
+        return target_name in settings.targets
     from aisquare.services.destinations import deployment_target  # lazy: it imports this
 
     # Both resolved, the machine's by the one resolver: neither is read off the config.
@@ -624,6 +637,12 @@ def kept_key_note(
         return (
             f"attached for the deployment of {binding.api_url}, which no destination of this "
             f"project names now: not used for this machine's target {target.name}"
+        )
+    if binding.target != settings.target:  # not one of its entries either (binding_serves)
+        return (
+            f"attached for target {binding.target}, which this machine no longer has, so not "
+            "used for the deployment this project's destination names "
+            f"({target.gateway_url or 'no gateway known'}) until `key set` attaches it there"
         )
     return (
         f"attached for this machine's own target {binding.target}, another deployment than "

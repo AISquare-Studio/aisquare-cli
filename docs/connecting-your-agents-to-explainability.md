@@ -447,7 +447,9 @@ reported on its own line:
   another gateway, so a prod key is never sent to staging. It is kept, answers
   again once the project has no destination, and `key show` says why (`--json`
   carries the binding's `api_url`, null for the machine's target, and whether it
-  `serves` the target asked about). A key you
+  `serves` the target asked about). Nor does a key bound to a target the
+  machine no longer has (renamed, as the fix above says) answer for a
+  destination until `key set` attaches it there. A key you
   attached by hand is used as is and never minted over; `key set` over a minted
   key revokes the minted one once the new key is recorded (a `key set` that
   fails leaves the minted key working), and so do `key clear`, `use --clear`, a

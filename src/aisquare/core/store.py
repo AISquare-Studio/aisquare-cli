@@ -987,6 +987,7 @@ class ContextStore(Protocol):
         self, session_id: str, *, cursor: int | None = None, state: str | None = None
     ) -> None: ...
     def replace_session_state(self, session_id: str, expected: str, state: str) -> bool: ...
+    def mark_handover(self, session_id: str, *, held_after: datetime) -> bool: ...
     def mark_attention(self, session_id: str) -> bool: ...
     def mark_limited(self, session_id: str, resets_at: datetime | None) -> None: ...
     def unmark_handover(self, session_id: str, state: str) -> None: ...
@@ -2047,6 +2048,30 @@ class SqliteStore:
         cursor = self._conn.execute(
             "UPDATE team_session SET state = ? WHERE id = ? AND state = ?",
             (state, session_id, expected),
+        )
+        self._conn.commit()
+        return cursor.rowcount == 1
+
+    def mark_handover(self, session_id: str, *, held_after: datetime) -> bool:
+        """Set a hand-over's mark (``'switching'``) where no other hand-over holds one.
+
+        A compare-and-set. ``fleet switch`` and ``restart`` of a running agent read
+        the session, refused one a hand-over held, and then marked it with
+        :meth:`touch_session`, which writes unconditionally. Two of them on one
+        agent (two restarts, a restart and a switch, a switch by hand and the
+        automatic one) both got past that read and both marked it, and both
+        started a replacement (review of #203). The mark is held when the state
+        is ``'switching'`` and was written after ``held_after``, which is the
+        caller's rule (``fleet._handed_over``: after the row being moved was
+        created, and within the grace). Then nothing is written and this returns
+        False. Otherwise it is the heartbeat :meth:`touch_session` is, with the
+        mark as its state, and returns True. A session row that is not there
+        returns False too, as there is nothing to mark.
+        """
+        cursor = self._conn.execute(
+            "UPDATE team_session SET state = 'switching', last_seen_at = ?, ended_at = NULL "
+            "WHERE id = ? AND NOT (state = 'switching' AND last_seen_at > ?)",
+            (_now_iso(), session_id, held_after.astimezone(UTC).isoformat()),
         )
         self._conn.commit()
         return cursor.rowcount == 1

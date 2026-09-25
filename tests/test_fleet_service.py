@@ -19,6 +19,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Collection, Iterator, Mapping, Sequence
 from contextlib import contextmanager, suppress
@@ -8636,6 +8637,110 @@ def test_a_restart_or_a_switch_inside_a_switch_is_refused_and_leaves_the_hand_ov
         kinds = [e.kind for e in store.recent_events(project.id, limit=20)]
     assert "agent_exited" not in kinds and "task_released" not in kinds
     assert nudges == []
+
+
+@pytest.mark.parametrize(
+    "pair", [("restart", "restart"), ("restart", "switch"), ("switch", "switch")]
+)
+def test_two_hand_overs_of_one_agent_at_once_start_one_replacement_and_refuse_the_other(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    pair: tuple[str, str],
+) -> None:
+    """Each hand-over reads the session and refuses one a hand-over holds, then marks it.
+    The mark was an unconditional write, so two hand-overs that both read the session
+    before either marked it (a restart racing a restart, a restart racing a switch, a
+    switch by hand racing the automatic one) both marked it. The second typed its
+    ``/exit``, the first ended the row and took its mark back, and the second's stop then
+    read the ended row, with no mark on it, as a stop that worked: both started a
+    replacement (review of #203). Driven in exactly that order here. The mark is a
+    compare-and-set now, so the second is refused before it stops anything."""
+    _two_slots_with_usage(monkeypatch, work=95, personal=10)
+    task = _task(project, "keep it across the move")
+    agent = fleet_service.spawn(
+        project, "coder", worktree=False, account="2", task_id=task.id
+    ).agent
+    _coder(project, label="coder-other")  # keeps the session, and the server, up
+    _with_transcript(agent, None)
+    assert team_service.claim_task(task.id, session_ref=agent.session_id or "").status == "doing"
+    _recorded_nudges(monkeypatch)
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
+
+    def me() -> str:
+        return threading.current_thread().name
+
+    both_read = threading.Barrier(2, timeout=30)  # both past their read, neither marked
+    first_marked, second_moved, first_unmarked = (threading.Event() for _ in range(3))
+    real_check = fleet_service._refuse_a_replay_that_cannot_start
+    real_mark = fleet_service._mark_handing_over
+    real_unmark = fleet_service._unmark_handing_over
+    real_keys = tmux.send_keys
+
+    def check_then_wait_for_the_other(*args: Any, **kwargs: Any) -> None:
+        real_check(*args, **kwargs)
+        both_read.wait()
+
+    def mark_in_turn(*args: Any) -> None:
+        if me() == "second":
+            first_marked.wait(30)
+            real_mark(*args)
+            return
+        real_mark(*args)
+        first_marked.set()
+        second_moved.wait(30)  # the second types its /exit (or is refused) first
+
+    def unmark_then_say_so(*args: Any) -> str | None:
+        try:
+            return real_unmark(*args)
+        finally:
+            if me() == "first":
+                first_unmarked.set()
+
+    def keys_then_wait_for_the_first(pane_id: str, *keys: str) -> None:
+        real_keys(pane_id, *keys)
+        if me() == "second" and pane_id == agent.pane_id:
+            second_moved.set()
+            first_unmarked.wait(30)  # the first ends the row and takes its mark back
+
+    monkeypatch.setattr(
+        fleet_service, "_refuse_a_replay_that_cannot_start", check_then_wait_for_the_other
+    )
+    monkeypatch.setattr(fleet_service, "_mark_handing_over", mark_in_turn)
+    monkeypatch.setattr(fleet_service, "_unmark_handing_over", unmark_then_say_so)
+    monkeypatch.setattr(tmux, "send_keys", keys_then_wait_for_the_first)
+    outcomes: dict[str, object] = {}
+
+    def hand_over(command: str) -> None:
+        try:
+            if command == "restart":
+                outcomes[me()] = fleet_service.restart(project, agent.label).started
+            else:
+                outcomes[me()] = fleet_service.switch(project, agent.label).started
+        except Exception as exc:
+            outcomes[me()] = exc
+        finally:
+            if me() == "second":
+                second_moved.set()
+
+    threads = [
+        threading.Thread(target=hand_over, args=(command,), name=name)
+        for name, command in zip(("first", "second"), pair, strict=True)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=90)
+
+    started, refused = outcomes.get("first"), outcomes.get("second")
+    assert isinstance(started, FleetAgent), outcomes
+    assert isinstance(refused, FleetError), outcomes
+    assert "a hand-over is already moving it" in str(refused)
+    assert len(tmux.spawned) == 3  # the two above, and one replacement
+    assert tmux.typed.count((agent.pane_id, "literal", "/exit")) == 1, "the refused one typed none"
+    held = _task_now(task.id)
+    assert held.status == "doing" and held.claimed_by == started.session_id
 
 
 def test_a_hand_over_refused_after_its_agent_s_session_ended_leaves_that_session_ended(

@@ -3747,7 +3747,7 @@ def switch(
     with store_session() as store:
         _live_agent(store, project, label, agent_id=agent.id)
     if session is not None:
-        _mark_handing_over(session)
+        _mark_handing_over(agent, session, "switch", label)
     try:
         handed_over = stop(project, label, handover=True, agent_id=agent.id)
     finally:
@@ -4071,7 +4071,7 @@ def restart(
             # no claims to park and nothing to mark; a listing that records the death
             # meanwhile leaves the stop one that worked (`_stop_row`), not a failure.
             if session is not None:
-                _mark_handing_over(session)
+                _mark_handing_over(agent, session, "restart", label)
             try:
                 handed_over = stop(project, label, handover=True, agent_id=agent.id)
             finally:
@@ -4188,10 +4188,25 @@ def _account_slot_of(agent: FleetAgent, session: TeamSession | None) -> int | No
     return claude_accounts_service.slot_of(session.account)
 
 
-def _mark_handing_over(session: TeamSession) -> None:
-    """The session's own ``SessionEnd`` parks its claims for the replacement (rule 2)."""
+def _mark_handing_over(agent: FleetAgent, session: TeamSession, verb: str, label: str) -> None:
+    """The session's own ``SessionEnd`` parks its claims for the replacement (rule 2).
+
+    Marked for ONE hand-over. ``switch`` and ``restart`` refuse a session a
+    hand-over holds (:func:`_handed_over`) when they first read it, and then
+    marked it unconditionally. Two hand-overs of one agent (two restarts, a
+    restart and a switch, a switch by hand and the automatic one) both got past
+    that read and both marked it. Whichever stop came second found the row ended
+    by the first, whose mark was already taken back, read that as a stop that
+    worked (:func:`_stop_row`), and both started a replacement (review of
+    #203). The mark is now a compare-and-set by the same rule
+    (``SqliteStore.mark_handover``), and the hand-over that loses is refused as
+    that read would have refused it, before it has stopped anything.
+    """
+    held_after = max(agent.created_at, _now() - HANDOVER_GRACE)
     with store_session() as store:
-        store.touch_session(session.id, state=_team().HANDOVER_STATE)
+        marked = store.mark_handover(session.id, held_after=held_after)
+    if not marked:
+        raise _in_hand_over(verb, label)
 
 
 def _unmark_handing_over(session: TeamSession) -> str | None:

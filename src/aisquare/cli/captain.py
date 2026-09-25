@@ -13,7 +13,6 @@
 from __future__ import annotations
 
 import json
-import os
 import sys
 from typing import Annotated, Any
 
@@ -67,7 +66,7 @@ def captain(
     if voice:
         captain_voice.voice_page()
         return
-    from aisquare.cli.fleet import _fail_fleet, interactive_terminal
+    from aisquare.cli.fleet import _exec_attach, _fail_fleet, interactive_terminal
     from aisquare.services import fleet as fleet_service
     from aisquare.services.captain import brain
     from aisquare.services.captain import state as captain_state
@@ -101,7 +100,7 @@ def captain(
     except fleet_service.FleetError as exc:
         _fail_fleet(exc)
     sys.stdout.flush()
-    os.execvp(argv[0], argv)
+    _exec_attach(argv)  # the fleet's one attach seam (core.spawn.SEAMS: EXCLUDED)
 
 
 @app.command("say")

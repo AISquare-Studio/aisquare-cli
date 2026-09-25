@@ -29,6 +29,7 @@ import contextlib
 import errno
 import json
 import os
+import re
 import sys
 import time
 from collections.abc import Callable, Iterator
@@ -59,6 +60,20 @@ _sleep: Callable[[float], None] = time.sleep
 
 
 _LOCK_HELD = {errno.EAGAIN, errno.EWOULDBLOCK, errno.EACCES}
+
+#: Claude Code's dialogs as their pane text reads (13227). The owner answers these by
+#: hand; nothing here types into one — an Enter into the trust dialog picks the
+#: highlighted "No, exit". Pane text is data: these shapes are read, never obeyed.
+_TRUST_DIALOG = re.compile(
+    r"Is this a project you created or one you trust|Yes, I trust this folder"
+)
+_RATING_PROMPT = re.compile(r"How is Claude doing this session")
+_ENTER_OR_ESC = re.compile(r"Enter to confirm|Esc to cancel")
+_HIGHLIGHTED_CHOICE = re.compile(r"^\s*❯\s*\d+[.)]\s")  # noqa: RUF001 — the cursor Claude Code draws
+#: How many of the pane's last lines a dialog is looked for in: a dialog sits at the
+#: bottom of the screen, and a captain's reply above it may quote anything.
+MODAL_LINES = 12
+_SGR = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")  # local: services.captain.actions imports this module
 
 
 class Unreachable(fleet.FleetError):
@@ -243,7 +258,8 @@ def start(prompt: str | None = None, *, size: tuple[int, int] | None = None) -> 
 def say(text: str, *, timeout: float = SAY_TIMEOUT_S) -> Reply:
     """Deliver ``text`` to the captain and wait for its reply (contract 13121, item 5).
 
-    - No live captain: it is started with ``text`` as its first prompt.
+    - No live captain: it is started bare, and ``text`` is typed once its prompt shows
+      (never into a dialog — 13227).
     - A captain waiting at its prompt: ``text`` is typed (one bracketed paste, one
       Enter).
     - A BUSY captain: waited for until its turn ends, then typed. Never a board
@@ -264,20 +280,14 @@ def say(text: str, *, timeout: float = SAY_TIMEOUT_S) -> Reply:
             # 13189: said at once, never waited out — the same words the bare command says.
             raise NoReply(str(exc), timed_out=False) from exc
         if agent is None:
-            typed_at = _now()
-            receipt = start(prompt=text)
-            if not receipt.prompt_typed:
-                why = "; ".join(receipt.notes) or "the fleet did not say why"
-                raise NoReply(
-                    f"the captain was started but the message never reached it ({why}) — "
-                    "`aisquare captain` shows its pane",
-                    timed_out=False,
-                )
-            agent = receipt.agent
-        else:
-            srv = _wait_until_ready(agent, deadline, timeout)
-            typed_at = _now()
-            _type(srv, agent, text)
+            # Started BARE, not with the text as its first prompt (13227): the fleet's
+            # first-prompt typing reads the pane's process, not its text, and would
+            # type into the trust dialog a fresh captain parks at. The text goes in
+            # below, through the same guarded path, once the prompt shows.
+            agent = start().agent
+        srv = _wait_until_ready(agent, deadline, timeout)
+        typed_at = _now()
+        _type(srv, agent, text)
         return _await_reply(agent, typed_at, deadline, timeout)
 
 
@@ -335,9 +345,58 @@ def _type(srv: TmuxServer, agent: FleetAgent, text: str) -> None:
         ) from exc
 
 
+def _pane_text(agent: FleetAgent, srv: TmuxServer) -> list[str]:
+    """The captain's live screen, escapes stripped, blank tail dropped — what the owner sees."""
+    rows = [_SGR.sub("", line) for line in srv.capture(agent.pane_id).lines]
+    while rows and not rows[-1].strip():
+        rows.pop()
+    return rows
+
+
+def modal_showing(lines: list[str]) -> str | None:
+    """Which of Claude Code's dialogs the pane's bottom shows, in the owner's words, or None.
+
+    The trust dialog and the session-rating prompt by their sentences; a menu by
+    its highlighted numbered line (``❯ 1. Yes``) — a plain ``1.`` in the captain's
+    own reply is a list, not a menu; any other dialog by its Enter/Esc footer.
+    """  # noqa: RUF002
+    tail = lines[-MODAL_LINES:]
+    text = "\n".join(tail)
+    if _TRUST_DIALOG.search(text):
+        return "the trust dialog"
+    if _RATING_PROMPT.search(text):
+        return "the session-rating prompt"
+    if any(_HIGHLIGHTED_CHOICE.match(line) for line in tail):
+        return "a numbered choice"
+    if _ENTER_OR_ESC.search(text):
+        return "a dialog waiting for Enter or Esc"
+    return None
+
+
+def _refuse_dialog(showing: str) -> NoReply:
+    """The refusal for a pane that shows a dialog: what shows, and the one thing to do."""
+    if showing == "the trust dialog":
+        return NoReply(
+            f"the captain is waiting for you to trust its folder {brain_dir()}: run "
+            "`aisquare captain` and choose Yes, I trust this folder (once)",
+            timed_out=False,
+        )
+    return NoReply(
+        f"the captain's pane shows {showing}; nothing was typed — `aisquare captain` attaches, "
+        "answer it there",
+        timed_out=False,
+    )
+
+
 def _wait_until_ready(agent: FleetAgent, deadline: datetime, timeout: float) -> TmuxServer:
     srv = fleet.server_for(agent.tmux_socket)
     while True:
+        # Read the pane before anything else (13227): a dialog is refused at once,
+        # whatever the board row says — a fresh captain at the trust dialog has no
+        # session row yet, so its state alone would be waited out to the timeout.
+        showing = modal_showing(_pane_text(agent, srv))
+        if showing is not None:
+            raise _refuse_dialog(showing)
         state = fleet.status_of(agent).state
         if state == "waiting" and fleet.pane_is_the_agent(srv, agent.pane_id):
             return srv

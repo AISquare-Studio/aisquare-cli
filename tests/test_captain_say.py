@@ -169,6 +169,8 @@ class Captain:
     session: TeamSession | None = None
     prompt_typed: bool = True
     notes: list[str] = field(default_factory=list)
+    screen: list[str] = field(default_factory=lambda: ["> "])
+    """What the captain's pane shows, escapes already stripped — the REPL prompt by default."""
     paste_fails: bool = False
     dies_after: float | None = None
     """Seconds after the text goes in until the captain's pane dies."""
@@ -272,6 +274,7 @@ def captain(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Captain, C
     monkeypatch.setattr(brain, "start", start)
     monkeypatch.setattr(brain, "find", lambda: fake.row)
     monkeypatch.setattr(brain, "_bound", lambda agent: (fake.row, fake.session))
+    monkeypatch.setattr(brain, "_pane_text", lambda agent, srv: list(fake.screen))
     monkeypatch.setattr(fleet, "tell", tell)
     monkeypatch.setattr(
         fleet, "status_of", lambda agent: FleetAgentStatus(agent=agent, state=status_now())
@@ -289,13 +292,16 @@ def captain(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Captain, C
     return fake, clock
 
 
-def test_an_absent_captain_is_started_with_the_text_as_its_first_prompt(
+def test_an_absent_captain_is_started_bare_and_the_text_typed_once_it_is_at_its_prompt(
     captain: tuple[Captain, Clock],
 ) -> None:
+    """13227: nothing types into the captain without reading its pane first, and the fleet's
+    first-prompt typing cannot read a pane — so the captain starts bare, and the text goes in
+    through the same guarded path once its prompt shows."""
     fake, _ = captain
     reply = brain.say("what is up", timeout=60)
-    assert fake.started == ["what is up"]
-    assert fake.typed == [], "the spawn types its first prompt; say types nothing more"
+    assert fake.started == [None], "started with no first prompt"
+    assert fake.typed == [("paste", "what is up"), ("keys", "Enter")]
     assert reply.text == "Nothing needs you right now."
 
 
@@ -358,17 +364,95 @@ def test_a_turn_that_ends_without_text_is_no_reply_text_never_a_placeholder(
     assert reply.ended_at is not None
 
 
-def test_a_prompt_the_spawn_could_not_type_is_said_at_once(
+def test_a_started_captain_that_never_reaches_its_prompt_is_said_at_the_deadline(
     captain: tuple[Captain, Clock],
 ) -> None:
-    """The fleet notes a prompt it did not type; waiting the timeout out for it hid why."""
+    fake, _ = captain
+    fake.busy_for = 10_000.0  # up, but never at its prompt
+    with pytest.raises(
+        brain.NoReply, match="stayed working for 30s, so nothing was typed"
+    ) as caught:
+        brain.say("what is up", timeout=30)
+    assert caught.value.timed_out is True
+    assert fake.typed == []
+
+
+TRUST_DIALOG = [
+    "Quick safety check: Is this a project you created or one you trust?",
+    "❯ No, exit",  # noqa: RUF001 — Claude Code's own cursor
+    "  Yes, I trust this folder",
+]
+
+
+def test_say_never_types_into_the_trust_dialog_and_says_how_to_answer_it(
+    captain: tuple[Captain, Clock],
+) -> None:
+    """13227: a fresh captain parks at Claude Code's trust dialog; an Enter typed there picks
+    the highlighted "No, exit". Read first, refuse at once, name the one thing to do."""
     fake, clock = captain
-    fake.prompt_typed = False
-    fake.notes = ["the agent exited before the prompt could be typed"]
-    with pytest.raises(brain.NoReply, match="exited before the prompt could be typed") as caught:
+    fake.present()  # type: ignore[attr-defined]
+    fake.screen = TRUST_DIALOG
+    with pytest.raises(brain.NoReply, match="trust its folder") as caught:
         brain.say("what is up", timeout=60)
+    message = str(caught.value)
+    assert str(brain.brain_dir()) in message
+    assert "run `aisquare captain` and choose Yes, I trust this folder (once)" in message
     assert caught.value.timed_out is False
-    assert clock.slept < 10
+    assert fake.typed == [], "nothing was typed into the dialog"
+    assert clock.slept == 0.0, "said at once"
+
+
+def test_a_fresh_captain_parked_at_the_dialog_is_said_not_waited_out(
+    captain: tuple[Captain, Clock], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake, clock = captain
+    real_start = brain.start
+
+    def start_at_the_dialog(prompt: str | None = None, *, size: Any = None) -> fleet.SpawnReceipt:
+        receipt = real_start(prompt, size=size)
+        fake.screen = TRUST_DIALOG
+        return receipt
+
+    monkeypatch.setattr(brain, "start", start_at_the_dialog)
+    with pytest.raises(brain.NoReply, match="trust its folder") as caught:
+        brain.say("what is up", timeout=60)
+    assert caught.value.timed_out is False and fake.typed == []
+    assert clock.slept < 5, "not the whole timeout"
+
+
+@pytest.mark.parametrize(
+    ("screen", "showing"),
+    [
+        (["How is Claude doing this session? (optional)", "1: Bad  2: Fine  3: Good  0: Dismiss"],
+         "the session-rating prompt"),
+        (
+            ["Do you want to proceed?", "❯ 1. Yes", "  2. No"],  # noqa: RUF001
+            "a numbered choice",
+        ),
+        (["Select a model", "Enter to confirm · Esc to cancel"], "a dialog waiting for Enter or Esc"),
+    ],
+)  # fmt: skip
+def test_say_never_types_into_a_dialog_and_names_what_is_showing(
+    captain: tuple[Captain, Clock], screen: list[str], showing: str
+) -> None:
+    fake, _ = captain
+    fake.present()  # type: ignore[attr-defined]
+    fake.screen = screen
+    with pytest.raises(brain.NoReply, match=showing) as caught:
+        brain.say("what is up", timeout=60)
+    assert "`aisquare captain` attaches" in str(caught.value)
+    assert caught.value.timed_out is False and fake.typed == []
+
+
+def test_a_numbered_list_in_the_captains_own_words_is_not_a_dialog(
+    captain: tuple[Captain, Clock],
+) -> None:
+    """The captain answers in lists; a "1." in its reply must not read as a menu."""
+    fake, _ = captain
+    fake.present()  # type: ignore[attr-defined]
+    fake.screen = ["Two things need you:", "1. approve the deploy", "2. merge #218", "", "> "]
+    assert brain.say("what is up", timeout=60).text == "Nothing needs you right now."
+    assert fake.typed[0] == ("paste", "what is up")
 
 
 def test_a_captain_that_dies_before_answering_is_said_at_once(

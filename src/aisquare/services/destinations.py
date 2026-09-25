@@ -56,6 +56,7 @@ from aisquare.core.store import ContextStore, store_session
 from aisquare.models import UNKNOWN_KEY_UID, PendingRevocation, ProjectInfo, TraceDestination
 from aisquare.services import iam
 from aisquare.services.explainability import (
+    KEY_ENV_VAR,
     clear_project_api_key,
     project_key_path,
     store_project_api_key,
@@ -177,17 +178,21 @@ def key_env_for(name: str) -> str:
     return f"EXPLAINABILITY_{slug}_API_KEY"
 
 
-def _machine_key_serves(settings: ExplainabilitySettings, environment: Environment | None) -> bool:
-    """Whether the machine's unlabelled key is already this deployment's.
+def _machine_key_serves(settings: ExplainabilitySettings, gateway_url: str) -> bool:
+    """Whether the machine's unlabelled key is already the key of the deployment at ``gateway_url``.
 
     ``init --explainability`` writes the top-level gateway and the key file
     together, so a top-level gateway equal to the deployment's IS the
-    single-deployment machine pointing at it; anything else is a key issued
-    for somewhere this function cannot see.
+    single-deployment machine pointing at it. The machine's own target reads
+    that key too, so its gateway counts as well: the machine already sends the
+    key there. Anything else is a key issued for somewhere this function cannot
+    see, and so is a deployment with no gateway known.
     """
-    if environment is None or not settings.gateway_url:
+    if not gateway_url:
         return False
-    return settings.gateway_url.rstrip("/") == environment.gateway_url
+    own = settings.targets.get(settings.target)
+    served = {settings.gateway_url, own.gateway_url if own is not None else ""}
+    return gateway_url.rstrip("/") in {url.rstrip("/") for url in served if url}
 
 
 def deployment_target(
@@ -197,16 +202,20 @@ def deployment_target(
 
     The operator's ``[explainability.targets.<name>]`` for that deployment when
     there is one, with only what is empty filled from the table: a gateway or
-    proxy set by hand stays. Otherwise a target of its own, which names a key
-    variable of its own (:func:`key_env_for`). With the default one, the
-    unlabelled machine key — ``~/.aisquare/explainability-key`` or
-    ``$EXPLAINABILITY_API_KEY`` — would answer for every deployment anyone
-    signs in to, and ``use`` would bind the roster and every launch would
-    authenticate with a key issued for somewhere else: the hazard
-    ``tests/test_key_never_crosses_deployments.py`` pins. The one exception is
-    the machine whose top-level gateway already is this deployment's, where
-    that key is exactly the right one and a new variable would only take it
-    away.
+    proxy set by hand stays. Otherwise a target of its own. Either way it names
+    a key variable of its own (:func:`key_env_for`) unless it already names
+    one. With the default one, the unlabelled machine key —
+    ``~/.aisquare/explainability-key`` or ``$EXPLAINABILITY_API_KEY`` — would
+    answer for every deployment anyone signs in to, and ``use`` would bind the
+    roster and every launch would authenticate with a key issued for somewhere
+    else: the hazard ``tests/test_key_never_crosses_deployments.py`` pins. An
+    entry the operator wrote without an ``api_key_env`` is no exception: it is
+    the entry ``use`` tells them to write for a host outside the table (its
+    gateway and proxy), and the machine's prod key went to the self-hosted
+    gateway and proxy with it (review of #203). The one exception is the
+    deployment the machine key already serves (:func:`_machine_key_serves`),
+    where that key is exactly the right one and a new variable would only take
+    it away.
 
     BUILT FOR THE ONE RESOLUTION, NEVER WRITTEN TO THE CONFIG. ``use`` used to
     write it into the ``targets`` map the machine's own target is read from, so
@@ -227,13 +236,14 @@ def deployment_target(
     environment = environment_for(destination.api_url)
     configured = settings.targets.get(destination.environment)
     target = configured.model_copy() if configured is not None else ExplainabilityTarget()
-    if configured is None and not _machine_key_serves(settings, environment):
-        target.api_key_env = key_env_for(destination.environment)
     if environment is not None:
         if not target.gateway_url:
             target.gateway_url = environment.gateway_url
         if not target.proxy_url and environment.proxy_url:
             target.proxy_url = environment.proxy_url
+    # Judged on the gateway this resolution uses, filled in or set by hand.
+    if target.api_key_env == KEY_ENV_VAR and not _machine_key_serves(settings, target.gateway_url):
+        target.api_key_env = key_env_for(destination.environment)
     return target
 
 

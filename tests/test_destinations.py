@@ -749,11 +749,70 @@ def test_the_destinations_deployment_names_its_own_key_variable(isolated_home: P
     single.gateway_url = "https://stg-explainability-api.aisquare.studio/"
     staging = dest.deployment_target(single, _destination("https://stg-api.aisquare.studio"))
     assert staging.api_key_env == service.KEY_ENV_VAR
-    # A target the operator wrote is theirs, variable and all.
+    # A target the operator wrote keeps the variable it names.
     mine = AppConfig().explainability
-    mine.targets["prod"] = ExplainabilityTarget(gateway_url="https://mine.example")
+    mine.targets["prod"] = ExplainabilityTarget(
+        gateway_url="https://mine.example", api_key_env="MY_PROD_KEY"
+    )
     theirs = dest.deployment_target(mine, _destination("https://api.aisquare.studio"))
-    assert theirs.api_key_env == service.KEY_ENV_VAR
+    assert theirs.api_key_env == "MY_PROD_KEY"
+    # One that names none gets its own too: the default is the machine key (review of #203)…
+    mine.targets["prod"] = ExplainabilityTarget(gateway_url="https://mine.example")
+    unnamed = dest.deployment_target(mine, _destination("https://api.aisquare.studio"))
+    assert unnamed.api_key_env == "EXPLAINABILITY_PROD_API_KEY"
+    # …unless the machine key already goes to that gateway, as the machine's own target.
+    mine.target = "prod"
+    own = dest.deployment_target(mine, _destination("https://api.aisquare.studio"))
+    assert own.api_key_env == service.KEY_ENV_VAR
+
+
+def test_the_entry_use_names_for_an_unknown_host_takes_no_machine_key(
+    isolated_home: Path, tmp_path: Path
+) -> None:
+    """``use`` on an API host outside the table says to set ``gateway_url`` and
+    ``proxy_url`` under ``[explainability.targets."<host>"]``. That entry names no key
+    variable, so the default one answered: the machine key file, issued for prod by
+    ``init --explainability``, went to the self-hosted gateway and proxy with every
+    launch (review of #203). Followed word for word, the deployment reads a variable of
+    its own, and the machine's own read keeps its key."""
+    config = AppConfig()
+    config.explainability.enabled = True
+    config.explainability.gateway_url = "https://explainability-api.aisquare.studio"
+    config.explainability.proxy_url = "https://explainability-api.aisquare.studio:9443"
+    save_config(config)
+    service.store_api_key("AIS_machine_prod_key")
+    project = _project(tmp_path / "web")
+    session = iam.Session(
+        api_url="https://api.acme-selfhosted.example", token="aisq_x", source="env"
+    )
+    with store_session() as store:
+        row = dest.choose(
+            store,
+            project,
+            dest.Workspace(id=42, uid="ws-uid-42", name="acme", role="ADMIN"),
+            dest.Studio(id=301, uid="st-301", name="Frontend"),
+            session,
+        )
+    unplaced = ops.resolve_target(load_config().explainability, None, project_id=project.id)
+    entry = f'[explainability.targets."{row.environment}"]'
+    assert ops.deployment_fix(unplaced).startswith(f"gateway_url and proxy_url under {entry}")
+
+    with paths.config_path().open("a", encoding="utf-8") as config_file:  # as the operator would
+        config_file.write(
+            f"\n{entry}\n"
+            'gateway_url = "https://gw.acme-selfhosted.example"\n'
+            'proxy_url = "https://proxy.acme-selfhosted.example:9443"\n'
+        )
+
+    settings = load_config().explainability
+    resolved = ops.resolve_target(settings, None, project_id=project.id)
+    assert resolved.gateway_url == "https://gw.acme-selfhosted.example", "the entry is read"
+    assert resolved.api_key_env == "EXPLAINABILITY_API_ACME_SELFHOSTED_EXAMPLE_API_KEY"
+    assert (resolved.key_source, resolved.api_key) == ("unset", None), (
+        "the machine's prod key answered for the self-hosted deployment"
+    )
+    machine = ops.resolve_target(settings, None)
+    assert (machine.key_source, machine.api_key) == ("file", "AIS_machine_prod_key")
 
 
 def test_another_deployments_machine_key_is_never_used_for_the_destination(

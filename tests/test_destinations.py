@@ -18,7 +18,7 @@ import shlex
 import sqlite3
 import stat
 import sys
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -29,7 +29,7 @@ import aisquare
 from aisquare.cli import auth as auth_cli
 from aisquare.cli.app import app
 from aisquare.core.config import AppConfig, ExplainabilityTarget, load_config, save_config
-from aisquare.core.store import SqliteStore, store_session
+from aisquare.core.store import ContextStore, SqliteStore, store_session
 from aisquare.core.workspace import pin_project, project_id_for
 from aisquare.models import ProjectInfo, TraceDestination
 from aisquare.services import destinations as dest
@@ -979,27 +979,43 @@ def test_a_repoint_keeps_a_key_only_on_the_same_api(isolated_home: Path, tmp_pat
     assert moved.key_uid is None, "a staging key's uid carried onto a production destination"
 
 
-def test_logout_revokes_only_on_the_host_that_minted_and_survives_a_stuck_file(
+def _minted_by_hand(
+    store: ContextStore, project: ProjectInfo, session: iam.Session, uid: str
+) -> None:
+    """``project`` pointed at acme on ``session``'s API, its file holding the key ``uid`` names."""
+    workspace = dest.Workspace(id=42, uid="ws-uid-42", name="acme", role="ADMIN")
+    dest.choose(
+        store, project, workspace, dest.Studio(id=301, uid="st-301", name="Frontend"), session
+    )
+    path = service.store_project_api_key(project.id, f"AIS_{uid}_{'x' * 20}")
+    store.set_project_explainability(
+        project.id, target="local", key_path=path, set_by=None, minted=uid
+    )
+
+
+def test_logout_revokes_where_each_key_was_minted_and_keeps_owing_the_rest(
     runner: CliRunner,
     idp: IdentityProviderStub,
     signed_in: iam.Session,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Every minted key is detached; one this session cannot revoke is owed, not forgotten.
+
+    A key minted on another host was dropped from the store unrevoked — a live
+    ``ingest:write`` key nothing on this machine remembered (review of #172). It
+    is detached like the others, stays owed, and ``logout`` names it. A key file
+    that will not delete does not keep the other projects' keys, and its own key
+    is revoked all the same: nothing binds the file any more.
+    """
     here = _project(tmp_path / "here")
     elsewhere = _project(tmp_path / "elsewhere")
     stuck = _project(tmp_path / "stuck")
     other = iam.Session(api_url="https://stg-api.aisquare.studio", token="aisq_y", source="env")
-    workspace = dest.Workspace(id=42, uid="ws-uid-42", name="acme", role="ADMIN")
-    studio = dest.Studio(id=301, uid="st-301", name="Frontend")
     with store_session() as store:
-        for project, session, uid in (
-            (here, signed_in, "key-here"),
-            (elsewhere, other, "key-elsewhere"),
-            (stuck, signed_in, "key-stuck"),
-        ):
-            dest.choose(store, project, workspace, studio, session)
-            store.set_project_destination_key(project.id, uid)
+        _minted_by_hand(store, here, signed_in, "key-here")
+        _minted_by_hand(store, elsewhere, other, "key-elsewhere")
+        _minted_by_hand(store, stuck, signed_in, "key-stuck")
     real_clear = service.clear_project_api_key
 
     def refuse_one(project_id: str) -> bool:
@@ -1008,18 +1024,23 @@ def test_logout_revokes_only_on_the_host_that_minted_and_survives_a_stuck_file(
         return real_clear(project_id)
 
     monkeypatch.setattr(dest, "clear_project_api_key", refuse_one)
-    with store_session() as store:
-        # `stuck` has a key file that will not delete; the projects after it still clear.
-        store.set_project_explainability(
-            stuck.id, target="local", key_path=service.project_key_path(stuck.id), set_by=None
-        )
-        cleared = dest.revoke_minted_keys(store, signed_in)
-    assert sorted(cleared) == sorted([here.id, elsewhere.id])
-    assert "key-elsewhere" not in idp.revoked_keys, "a key uid sent to a host that never minted it"
+    out = _json(runner, "logout")
+
+    assert out["minted_keys_cleared"] == 3
     assert sorted(idp.revoked_keys) == ["key-here", "key-stuck"]
+    assert "key-elsewhere" not in idp.revoked_keys, "a key uid sent to a host that never minted it"
+    [owed] = out["minted_keys_still_live"]
+    assert owed["key_uid"] == "key-elsewhere" and owed["api_url"] == other.api_url
+    assert f"signed in to {idp.url}, not {other.api_url}" in owed["reason"]
+    with store_session() as store:
+        assert [record.key_uid for record in store.pending_revocations()] == ["key-elsewhere"]
+        assert not any(d.key_uid for d in store.project_destinations())
+        assert store.project_explainability_all() == []
+    assert not service.project_key_path(here.id).exists()
+    assert service.project_key_path(stuck.id).exists(), "left on disk, bound to nothing"
 
 
-def test_a_revoke_whose_answer_is_cut_short_keeps_no_minted_key_after_logout(
+def test_a_revoke_whose_answer_is_cut_short_keeps_that_key_owed_after_logout(
     idp: IdentityProviderStub,
     signed_in: iam.Session,
     tmp_path: Path,
@@ -1027,21 +1048,17 @@ def test_a_revoke_whose_answer_is_cut_short_keeps_no_minted_key_after_logout(
 ) -> None:
     """``_revoke`` tolerates an unreachable server as ``IamError``, and ``http.client``'s
     own exceptions escaped ``iam._http`` past it: one truncated answer to a revoke ended
-    ``logout``'s loop over the minted keys, which goes on only past an ``OSError``, and
-    every key after it stayed on disk after the sign-out (review of the accounts stack's
-    fold, round 1, F2)."""
+    ``logout``'s loop over the minted keys, and every key after it stayed on disk after
+    the sign-out (review of the accounts stack's fold, round 1, F2). The key whose
+    answer never arrived may or may not be revoked, so it stays owed rather than
+    forgotten (review of #172), and the next pass settles it either way."""
     import urllib.request
     from http.client import IncompleteRead
 
     projects = [_project(tmp_path / name) for name in ("first", "second")]
-    workspace = dest.Workspace(id=42, uid="ws-uid-42", name="acme", role="ADMIN")
-    studio = dest.Studio(id=301, uid="st-301", name="Frontend")
     with store_session() as store:
         for project in projects:
-            dest.choose(store, project, workspace, studio, signed_in)
-            path = service.store_project_api_key(project.id, f"minted-{project.root.name}")
-            store.set_project_explainability(project.id, target="local", key_path=path, set_by=None)
-            store.set_project_destination_key(project.id, f"key-{project.root.name}")
+            _minted_by_hand(store, project, signed_in, f"key-{project.root.name}")
     real_urlopen = urllib.request.urlopen
     cut: list[str] = []
 
@@ -1053,13 +1070,247 @@ def test_a_revoke_whose_answer_is_cut_short_keeps_no_minted_key_after_logout(
         return real_urlopen(request, timeout=timeout)
 
     monkeypatch.setattr(urllib.request, "urlopen", first_revoke_cut_short)
-    with store_session() as store:
-        cleared = dest.revoke_minted_keys(store, signed_in)
+    forgotten = dest.forget_minted_keys(signed_in)
 
     assert len(cut) == 1
-    assert sorted(cleared) == sorted(project.id for project in projects)
+    assert forgotten.detached == 2
     assert not any(service.project_key_path(project.id).exists() for project in projects)
     assert len(idp.revoked_keys) == 1, "the other key's revoke reached the server"
+    [owed] = forgotten.revocations.owed
+    assert owed.key_uid != idp.revoked_keys[0] and "IncompleteRead" in (owed.last_error or "")
+    again = dest.revoke_owed(signed_in)
+    assert [record.key_uid for record in again.revoked] == [owed.key_uid]
+    with store_session() as store:
+        assert store.pending_revocations() == []
+
+
+def test_a_key_moved_onto_another_deployment_stays_owed_until_its_own_host_revokes_it(
+    runner: CliRunner, idp: IdentityProviderStub, signed_in: iam.Session, tmp_path: Path
+) -> None:
+    """A move revoked the old key with the NEW deployment's session, which ``_revoke``
+    refuses to send anywhere but the host that minted it — so the key was dropped from
+    the store and left live, while the CHANGELOG said it was revoked (review of #172)."""
+    project = _project(tmp_path / "web")
+    _json(runner, "explainability", "use", "acme/Frontend")
+    prod = iam.Session(api_url="https://api.aisquare.studio", token="aisq_x", source="env")
+    workspace = dest.Workspace(id=42, uid="ws-uid-42", name="acme", role="ADMIN")
+    with store_session() as store:
+        previous = store.project_destination(project.id)
+        dest.choose(
+            store,
+            project,
+            workspace,
+            dest.Studio(id=1, uid=None, name="Web"),
+            prod,
+            previous=previous,
+        )
+        moved = store.project_destination(project.id)
+    assert moved is not None and moved.key_uid is None
+    assert not service.project_key_path(project.id).exists()
+
+    with_prod = dest.revoke_owed(prod)
+    assert idp.revoked_keys == [] and [r.key_uid for r in with_prod.owed] == ["key-1"]
+    assert with_prod.owed[0].last_error == f"signed in to {prod.api_url}, not {idp.url}"
+
+    back_home = dest.revoke_owed(signed_in)
+    assert [record.key_uid for record in back_home.revoked] == ["key-1"]
+    assert idp.revoked_keys == ["key-1"]
+    with store_session() as store:
+        assert store.pending_revocations() == []
+
+
+def test_a_clear_while_signed_out_keeps_the_key_owed_and_the_next_use_revokes_it(
+    runner: CliRunner,
+    idp: IdentityProviderStub,
+    signed_in: iam.Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``use --clear`` with no session to revoke with dropped the uid and kept nothing."""
+    _project(tmp_path / "web")
+    _json(runner, "explainability", "use", "acme/Frontend")
+    with monkeypatch.context() as signed_out:
+        signed_out.setattr(iam, "signed_in_quietly", lambda: None)
+        cleared = _json(runner, "explainability", "use", "--clear")
+    assert idp.revoked_keys == []
+    [owed] = cleared["revocations"]["still_live"]
+    assert (owed["key_uid"], owed["reason"]) == ("key-1", "signed out")
+
+    again = _json(runner, "explainability", "use", "acme/Frontend")
+    assert again["revocations"] == {"revoked": ["key-1"], "still_live": []}
+    assert idp.revoked_keys == ["key-1"] and len(idp.minted) == 2
+
+
+def test_a_refused_revoke_is_said_kept_owed_and_retried_by_doctor_live(
+    runner: CliRunner, idp: IdentityProviderStub, signed_in: iam.Session, tmp_path: Path
+) -> None:
+    """A 4xx to the revoke was tolerated and the uid dropped, silently (review of #172)."""
+    from aisquare.services import diagnostics
+
+    _project(tmp_path / "web")
+    _json(runner, "explainability", "use", "acme/Frontend")
+    idp.key_mint = "token_not_valid"  # the key endpoints answer the sign-in token 401
+    cleared = runner.invoke(app, ["explainability", "key", "clear"])
+    assert cleared.exit_code == 0, cleared.output
+    assert "⚠ 1 key the CLI minted is still live on the server — acme for web" in cleared.output
+    assert "HTTP 401" in cleared.output and "doctor --live" in cleared.output
+    assert idp.revoked_keys == []
+
+    offline = diagnostics._minted_keys_check(live=False)
+    assert offline is not None and offline.status == "warn" and "HTTP 401" in offline.detail
+    idp.key_mint = "ok"
+    live = diagnostics._minted_keys_check(live=True)
+    assert live is not None and live.status == "ok" and idp.revoked_keys == ["key-1"]
+    assert diagnostics._minted_keys_check(live=False) is None, "nothing owed: no row"
+
+
+def test_an_interrupted_key_set_keeps_the_minted_key_minted_and_in_its_file(
+    runner: CliRunner,
+    idp: IdentityProviderStub,
+    signed_in: iam.Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Ctrl-C inside ``key set`` dropped the minted key's uid for good.
+
+    The uid was dropped first and put back only for an ``Exception``, and the file
+    was put back only for one too: interrupted, the hand key sat in the minted key's
+    file, no longer called minted, and the minted key was live and forgotten
+    (review of #172). The binding and the detachment are one commit now.
+    """
+    project = _project(tmp_path / "web")
+    _json(runner, "explainability", "use", "acme/Frontend")
+    minted = service.project_key_path(project.id).read_text()
+
+    def interrupted(*_args: object, **_kwargs: object) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setenv("WEB_KEY", "AIS_handmade_key")
+    with monkeypatch.context() as patched:
+        patched.setattr(SqliteStore, "set_project_explainability", interrupted)
+        runner.invoke(app, ["explainability", "key", "set", "--from-env", "WEB_KEY"])
+    assert service.project_key_path(project.id).read_text() == minted
+    with store_session() as store:
+        row = store.project_destination(project.id)
+        assert store.pending_revocations() == []
+    assert row is not None and row.key_uid == "key-1"
+    assert idp.revoked_keys == []
+
+
+def test_the_minted_keys_own_value_attached_again_stays_minted_and_live(
+    runner: CliRunner,
+    idp: IdentityProviderStub,
+    signed_in: iam.Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``key set`` with the value already in the file revoked the key it had just attached."""
+    project = _project(tmp_path / "web")
+    _json(runner, "explainability", "use", "acme/Frontend")
+    monkeypatch.setenv("SAME_KEY", service.project_key_path(project.id).read_text())
+    attached = _json(runner, "explainability", "key", "set", "--from-env", "SAME_KEY")
+    assert attached["revocations"] == {"revoked": [], "still_live": []}
+    assert idp.revoked_keys == []
+    with store_session() as store:
+        row = store.project_destination(project.id)
+    assert row is not None and row.key_uid == "key-1"
+
+
+def test_a_mint_that_answers_with_the_same_uid_owes_nothing(
+    runner: CliRunner, idp: IdentityProviderStub, signed_in: iam.Session, tmp_path: Path
+) -> None:
+    """An idempotent mint revoked the uid it had just stored: the project's key, dead."""
+    project = _project(tmp_path / "web")
+    _json(runner, "explainability", "use", "acme/Frontend")
+    service.project_key_path(project.id).unlink()  # `use` mints again when the file is gone
+    idp.minted.pop()  # the stub numbers keys by count: the next one is key-1 again
+    again = _json(runner, "explainability", "use", "acme/Frontend")
+    assert again["key"]["minted"] is True and idp.minted[0]["uid"] == "key-1"
+    assert idp.revoked_keys == []
+    with store_session() as store:
+        row = store.project_destination(project.id)
+        assert store.pending_revocations() == []
+    assert row is not None and row.key_uid == "key-1"
+
+
+def test_a_minted_key_the_store_cannot_record_is_revoked_and_leaves_no_file(
+    runner: CliRunner,
+    idp: IdentityProviderStub,
+    signed_in: iam.Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Recorded nowhere, the key it made was live and unknown, and its file unbound."""
+    project = _project(tmp_path / "web")
+
+    def locked(*_args: object, **_kwargs: object) -> None:
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(SqliteStore, "set_project_explainability", locked)
+    failed = runner.invoke(app, ["explainability", "use", "acme/Frontend"])
+    assert failed.exit_code != 0
+    assert [key["uid"] for key in idp.minted] == ["key-1"] and idp.revoked_keys == ["key-1"]
+    assert not service.project_key_path(project.id).exists()
+
+
+def test_every_write_that_takes_a_minted_uid_off_its_row_owes_it_in_the_same_commit(
+    isolated_home: Path, tmp_path: Path
+) -> None:
+    """The one primitive (``_owe_revocation``): no store write can detach a minted key
+    without recording it, and one whose transaction fails detaches nothing.
+
+    Each of these took the uid off (or deleted the row) and left the revoke to its
+    caller, which a lock, an interrupt or a missing session skipped — the key live,
+    and nothing here naming it (review of #172). The refusal below fails the write
+    after the uid is off in its transaction: a second write putting it back, as
+    ``retiring_minted_key`` did, lost it when that write failed too.
+    """
+    project = _project(tmp_path / "web")
+    session = iam.Session(api_url="https://api.aisquare.studio", token="aisq_x", source="env")
+    other_path = tmp_path / "hand-key"
+
+    def moved(store: SqliteStore) -> None:
+        row = store.project_destination(project.id)
+        assert row is not None
+        store.set_project_destination(row.model_copy(update={"workspace_id": 7, "key_uid": None}))
+
+    writes: dict[str, Callable[[SqliteStore], object]] = {
+        "a hand key over it": lambda store: store.set_project_explainability(
+            project.id, target="prod", key_path=other_path, set_by=None
+        ),
+        "its binding cleared": lambda store: store.clear_project_explainability(project.id),
+        "a move": moved,
+        "another uid": lambda store: store.set_project_destination_key(project.id, "key-2"),
+        "no uid": lambda store: store.set_project_destination_key(project.id, None),
+        "detached": lambda store: store.detach_minted_key(project.id),
+        "the row cleared": lambda store: store.clear_project_destination(project.id),
+        "a purge": lambda store: store.purge_project(project.id),
+    }
+    for name, write in writes.items():
+        with store_session() as store:
+            assert isinstance(store, SqliteStore)
+            store.ensure_project(project)
+            _minted_by_hand(store, project, session, "key-1")
+            for earlier in store.pending_revocations():  # the previous round's
+                store.settle_revocation(earlier.key_uid)
+            # Refused inside the write's own transaction, as the uid comes off:
+            # nothing may change, the uid least of all.
+            store._conn.execute(
+                "CREATE TEMP TRIGGER refuse BEFORE UPDATE OF key_uid ON project_destination "
+                "BEGIN SELECT RAISE(ABORT, 'refused'); END"
+            )
+            with pytest.raises(sqlite3.IntegrityError):
+                write(store)
+            row = store.project_destination(project.id)
+            assert row is not None and row.key_uid == "key-1", name
+            assert store.pending_revocations() == [], name
+            store._conn.execute("DROP TRIGGER refuse")
+            write(store)
+            owed = store.pending_revocations()
+            row = store.project_destination(project.id)
+        assert [record.key_uid for record in owed] == ["key-1"], name
+        assert owed[0].api_url == session.api_url and owed[0].project_name == "web", name
+        assert row is None or row.key_uid != "key-1", name
 
 
 def test_an_exported_target_does_not_make_use_mint_again(
@@ -1141,6 +1392,52 @@ def test_a_purge_revokes_the_minted_key_it_leaves_nothing_to_find(
     assert idp.revoked_keys == ["key-1", "key-2"], "a forget without --purge keeps the row"
     assert _json(runner, "logout")["minted_keys_cleared"] == 1
     assert idp.revoked_keys == ["key-1", "key-2", "key-3"]
+
+
+def test_a_purge_signed_out_keeps_its_keys_owed_says_so_and_revokes_after_the_sweep(
+    runner: CliRunner,
+    idp: IdentityProviderStub,
+    signed_in: iam.Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Signed out, offline or on another host, a purge revoked nothing and deleted the
+    only record of the key, silently; ``prune --purge`` made one blocking revoke per
+    project inside its loop and the store session (review of #172). The keys stay
+    owed and are reported, the sweep revokes once after the store is closed, and the
+    next ``use`` revokes what is still owed.
+    """
+    one, two, three = (_project(tmp_path / name) for name in ("one", "two", "three"))
+    for project in (one, two, three):
+        _json(runner, "explainability", "use", "acme/Frontend", "--project", project.id)
+    passes: list[object] = []
+    real = dest.revoke_owed
+
+    def counted(session: iam.Session | None, **kwargs: Any) -> dest.Revocations:
+        passes.append(kwargs.get("project_ids"))
+        return real(session, **kwargs)
+
+    one.root.rmdir()
+    two.root.rmdir()
+    with monkeypatch.context() as signed_out:
+        signed_out.setattr(iam, "signed_in_quietly", lambda: None)
+        signed_out.setattr(dest, "revoke_owed", counted)
+        pruned = runner.invoke(app, ["--json", "project", "prune", "--missing", "--purge", "--yes"])
+        forgotten = runner.invoke(app, ["project", "forget", str(three.root), "--purge"])
+    assert pruned.exit_code == 0, pruned.output
+    still_live = json.loads(pruned.stdout)["keys_still_live"]
+    assert sorted(key["key_uid"] for key in still_live) == ["key-1", "key-2"]
+    assert {key["last_error"] for key in still_live} == {"signed out"}
+    assert passes[0] == {one.id, two.id}, "one pass after the sweep, not a revoke per project"
+    assert forgotten.exit_code == 0, forgotten.output
+    assert "⚠ 1 key the CLI minted is still live on the server — acme for three" in (
+        forgotten.output
+    )
+    assert idp.revoked_keys == []
+
+    again = _json(runner, "explainability", "use", "acme/Frontend")
+    assert sorted(again["revocations"]["revoked"]) == ["key-1", "key-2", "key-3"]
+    assert sorted(idp.revoked_keys) == ["key-1", "key-2", "key-3"]
 
 
 # --- the store and the directory ----------------------------------------------------------------

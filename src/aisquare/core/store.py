@@ -40,10 +40,12 @@ from aisquare.core.ids import new_prompt_id
 from aisquare.models import (
     CLAIM_KEEPING_STATUSES,
     CLOSED_STATUSES,
+    UNKNOWN_KEY_UID,
     ClaudeAccountRecord,
     ContextEntry,
     FleetAgent,
     LaunchSpec,
+    PendingRevocation,
     Pool,
     ProjectExplainability,
     ProjectGroup,
@@ -695,6 +697,28 @@ CREATE TABLE project_destination (
     set_by         TEXT
 );
 """
+# v22 (#142, review of the accounts stack's fold): the revocations still owed for
+# keys the CLI minted. A minted key's uid lived on its destination row alone, and
+# every path that took it off — a move, `use --clear`, `key set`, `key clear`, a
+# new mint, a purge, `logout` — dropped it whether or not the server had revoked
+# the key, so a revoke that could not be made (signed out, another host, offline)
+# left a live `ingest:write` key nothing here remembered. A row is written in the
+# transaction that detaches the key and deleted on the server's confirmation.
+# No foreign key to `project`: the record must outlive a purge of its project,
+# which is one of the ways a key gets here. IF NOT EXISTS, so a store that meets
+# this step twice (a cohort renumbered onto it) converges instead of failing.
+_SCHEMA_V22 = """
+CREATE TABLE IF NOT EXISTS pending_revocation (
+    key_uid        TEXT PRIMARY KEY,
+    api_url        TEXT NOT NULL,
+    workspace_id   INTEGER NOT NULL,
+    workspace_name TEXT NOT NULL,
+    project_id     TEXT NOT NULL,
+    project_name   TEXT NOT NULL,
+    detached_at    TEXT NOT NULL,
+    last_error     TEXT
+);
+"""
 # Ordered migrations; index i upgrades the db from user_version i to i+1.
 _MIGRATIONS = (
     _SCHEMA_V1,
@@ -718,6 +742,7 @@ _MIGRATIONS = (
     _SCHEMA_V19,
     _SCHEMA_V20,
     _SCHEMA_V21,
+    _SCHEMA_V22,
 )
 SCHEMA_VERSION = len(_MIGRATIONS)
 
@@ -956,7 +981,13 @@ class ContextStore(Protocol):
     def project_explainability(self, project_id: str) -> ProjectExplainability | None: ...
     def project_explainability_all(self) -> list[ProjectExplainability]: ...
     def set_project_explainability(
-        self, project_id: str, *, target: str, key_path: Path, set_by: str | None
+        self,
+        project_id: str,
+        *,
+        target: str,
+        key_path: Path,
+        set_by: str | None,
+        minted: str | None = None,
     ) -> ProjectExplainability: ...
     def clear_project_explainability(self, project_id: str) -> bool: ...
     # Where a project's traces land (v21, #142).
@@ -964,7 +995,12 @@ class ContextStore(Protocol):
     def project_destinations(self) -> list[TraceDestination]: ...
     def set_project_destination(self, destination: TraceDestination) -> TraceDestination: ...
     def set_project_destination_key(self, project_id: str, key_uid: str | None) -> None: ...
+    def detach_minted_key(self, project_id: str) -> ProjectExplainability | None: ...
     def clear_project_destination(self, project_id: str) -> bool: ...
+    # The revocations owed for keys the CLI minted (v22, #142).
+    def pending_revocations(self) -> list[PendingRevocation]: ...
+    def settle_revocation(self, key_uid: str) -> bool: ...
+    def note_revocation_failure(self, key_uid: str, reason: str) -> None: ...
     def fleet_agent_by_label(
         self, project_id: str, label: str, *, live_only: bool = True
     ) -> FleetAgent | None: ...
@@ -1581,6 +1617,13 @@ class SqliteStore:
         :meth:`_purge_team_meta`. LIVE fleet agents are the caller's problem to
         refuse before getting here: this deletes their rows too, and a pane that
         is still running would then be unaccounted for.
+
+        A key the CLI minted for the project (#142) is detached first, in the
+        same transaction, and its revocation owed (:meth:`_owe_revocation`):
+        the destination row is how anything here found that key, and a purge
+        that deleted it took a live ``ingest:write`` key off every list this
+        machine keeps (review of #172). The caller revokes it once the store
+        session is closed.
         """
         sessions = [
             str(row["id"])
@@ -1590,6 +1633,7 @@ class SqliteStore:
         ]
         removed: dict[str, int] = {}
         with self._conn:  # one BEGIN…COMMIT: a purge is whole or it is nothing
+            self._owe_revocation(project_id)
             for table, column in self._tables_referencing_project():
                 cursor = self._conn.execute(
                     f'DELETE FROM "{table}" WHERE "{column}" = ?', (project_id,)
@@ -2774,27 +2818,53 @@ class SqliteStore:
         return [_row_to_project_explainability(row) for row in rows]
 
     def set_project_explainability(
-        self, project_id: str, *, target: str, key_path: Path, set_by: str | None
+        self,
+        project_id: str,
+        *,
+        target: str,
+        key_path: Path,
+        set_by: str | None,
+        minted: str | None = None,
     ) -> ProjectExplainability:
-        """Attach (or re-point) the project's key: one row per project, the newest wins."""
-        self._conn.execute(
-            "INSERT INTO project_explainability (project_id, target, key_path, set_at, set_by) "
-            "VALUES (?, ?, ?, ?, ?) "
-            "ON CONFLICT (project_id) DO UPDATE SET target = excluded.target, "
-            "key_path = excluded.key_path, set_at = excluded.set_at, set_by = excluded.set_by",
-            (project_id, target, str(key_path), _now_iso(), set_by),
-        )
-        self._conn.commit()
+        """Attach (or re-point) the project's key: one row per project, the newest wins.
+
+        The binding and the destination's ``key_uid`` describe one file, so they
+        are written together (#142). ``minted`` is the uid of a key the CLI has
+        just minted into that file; ``None`` is a key attached by hand. A minted
+        key the file held before, other than ``minted``, has been overwritten:
+        it is detached and its revocation owed in this same transaction
+        (:meth:`_owe_revocation`), so a hand key never goes on being described
+        as minted and the key it replaced is never forgotten while still live.
+        """
+        with self._conn:
+            self._conn.execute(
+                "INSERT INTO project_explainability (project_id, target, key_path, set_at, "
+                "set_by) VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT (project_id) DO UPDATE SET target = excluded.target, "
+                "key_path = excluded.key_path, set_at = excluded.set_at, set_by = excluded.set_by",
+                (project_id, target, str(key_path), _now_iso(), set_by),
+            )
+            self._owe_revocation(project_id, keep=minted)
+            if minted is not None:
+                self._conn.execute(
+                    "UPDATE project_destination SET key_uid = ? WHERE project_id = ?",
+                    (minted, project_id),
+                )
         stored = self.project_explainability(project_id)
         assert stored is not None  # just written
         return stored
 
     def clear_project_explainability(self, project_id: str) -> bool:
-        """Detach the project's key; ``False`` when there was none."""
-        cursor = self._conn.execute(
-            "DELETE FROM project_explainability WHERE project_id = ?", (project_id,)
-        )
-        self._conn.commit()
+        """Detach the project's key; ``False`` when there was none.
+
+        A key the CLI minted goes with its binding, its revocation owed in the
+        same transaction (:meth:`_owe_revocation`).
+        """
+        with self._conn:
+            self._owe_revocation(project_id)
+            cursor = self._conn.execute(
+                "DELETE FROM project_explainability WHERE project_id = ?", (project_id,)
+            )
         return cursor.rowcount > 0
 
     # --- where a project's traces land (#142) -------------------------------------------
@@ -2818,52 +2888,166 @@ class SqliteStore:
         ``set_at`` is stamped here, not trusted from the caller, so the row says
         when the choice was made on THIS machine. A re-point keeps ``key_uid``
         only when the caller carries it over — a destination in another
-        workspace is not served by a key minted for the old one.
+        workspace is not served by a key minted for the old one — and a minted
+        key it does not carry over is detached, its binding with it, and its
+        revocation owed in the same transaction (:meth:`_owe_revocation`).
         """
-        self._conn.execute(
-            f"INSERT INTO project_destination ({_DESTINATION_COLUMNS}) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
-            "ON CONFLICT (project_id) DO UPDATE SET api_url = excluded.api_url, "
-            "environment = excluded.environment, workspace_id = excluded.workspace_id, "
-            "workspace_uid = excluded.workspace_uid, workspace_name = excluded.workspace_name, "
-            "studio_id = excluded.studio_id, studio_uid = excluded.studio_uid, "
-            "studio_name = excluded.studio_name, key_uid = excluded.key_uid, "
-            "set_at = excluded.set_at, set_by = excluded.set_by",
-            (
-                destination.project_id,
-                destination.api_url,
-                destination.environment,
-                destination.workspace_id,
-                destination.workspace_uid,
-                destination.workspace_name,
-                destination.studio_id,
-                destination.studio_uid,
-                destination.studio_name,
-                destination.key_uid,
-                _now_iso(),
-                destination.set_by,
-            ),
-        )
-        self._conn.commit()
+        with self._conn:
+            if self._owe_revocation(destination.project_id, keep=destination.key_uid) and (
+                destination.key_uid is None
+            ):
+                self._drop_binding(destination.project_id)
+            self._conn.execute(
+                f"INSERT INTO project_destination ({_DESTINATION_COLUMNS}) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT (project_id) DO UPDATE SET api_url = excluded.api_url, "
+                "environment = excluded.environment, workspace_id = excluded.workspace_id, "
+                "workspace_uid = excluded.workspace_uid, "
+                "workspace_name = excluded.workspace_name, "
+                "studio_id = excluded.studio_id, studio_uid = excluded.studio_uid, "
+                "studio_name = excluded.studio_name, key_uid = excluded.key_uid, "
+                "set_at = excluded.set_at, set_by = excluded.set_by",
+                (
+                    destination.project_id,
+                    destination.api_url,
+                    destination.environment,
+                    destination.workspace_id,
+                    destination.workspace_uid,
+                    destination.workspace_name,
+                    destination.studio_id,
+                    destination.studio_uid,
+                    destination.studio_name,
+                    destination.key_uid,
+                    _now_iso(),
+                    destination.set_by,
+                ),
+            )
         stored = self.project_destination(destination.project_id)
         assert stored is not None  # just written
         return stored
 
     def set_project_destination_key(self, project_id: str, key_uid: str | None) -> None:
-        """Remember (or forget) the ingest key the CLI minted for this destination."""
-        self._conn.execute(
-            "UPDATE project_destination SET key_uid = ? WHERE project_id = ?",
-            (key_uid, project_id),
-        )
-        self._conn.commit()
+        """Remember the ingest key the CLI minted for this destination; ``None``: it has none.
+
+        The uid it replaces is owed a revocation, in the same transaction
+        (:meth:`_owe_revocation`); with ``None`` the key's binding goes too, as
+        :meth:`detach_minted_key` takes it.
+        """
+        with self._conn:
+            detached = self._owe_revocation(project_id, keep=key_uid)
+            if key_uid is not None:
+                self._conn.execute(
+                    "UPDATE project_destination SET key_uid = ? WHERE project_id = ?",
+                    (key_uid, project_id),
+                )
+            elif detached:
+                self._drop_binding(project_id)
+
+    def detach_minted_key(self, project_id: str) -> ProjectExplainability | None:
+        """Take the key the CLI minted off the project: its revocation owed, its binding gone.
+
+        One transaction: the destination's ``key_uid`` is cleared, the uid is
+        written to ``pending_revocation``, and the binding that named the key's
+        file is deleted — a binding left on a key about to be revoked is a
+        project whose launches authenticate with a dead key. Returns that
+        binding, whose file the caller deletes; ``None`` when the project had no
+        minted key, or no binding for it.
+        """
+        with self._conn:
+            if not self._owe_revocation(project_id):
+                return None
+            binding = self.project_explainability(project_id)
+            self._drop_binding(project_id)
+        return binding
 
     def clear_project_destination(self, project_id: str) -> bool:
-        """Forget where the project's traces land; ``False`` when nothing was recorded."""
-        cursor = self._conn.execute(
-            "DELETE FROM project_destination WHERE project_id = ?", (project_id,)
+        """Forget where the project's traces land; ``False`` when nothing was recorded.
+
+        A minted key goes with the row, as :meth:`detach_minted_key` takes it.
+        """
+        with self._conn:
+            if self._owe_revocation(project_id):
+                self._drop_binding(project_id)
+            cursor = self._conn.execute(
+                "DELETE FROM project_destination WHERE project_id = ?", (project_id,)
+            )
+        return cursor.rowcount > 0
+
+    def _owe_revocation(self, project_id: str, *, keep: str | None = None) -> bool:
+        """Inside the caller's transaction: detach the project's minted key, owing its revocation.
+
+        THE ONE PLACE a minted key's uid leaves its destination row. Every write
+        that takes it off — the binding replaced or cleared, the row re-pointed,
+        re-keyed or deleted, the project purged — calls this first, in its own
+        transaction, so the uid moves to ``pending_revocation`` in the same
+        commit that detaches it: no crash, lock or interrupt between two writes
+        can leave a live key that nothing here remembers, and no caller can
+        detach one without owing it. The revoke itself is a network call and
+        happens after the store session closes (``destinations.revoke_owed``),
+        which deletes the record only on the server's confirmation.
+
+        ``keep`` is a uid the row may go on naming (the key a new mint just
+        stored, a re-point within the workspace): nothing is detached then. A
+        uid that never arrived (:data:`UNKNOWN_KEY_UID`) is detached with nothing
+        owed, since nothing could revoke it. The INSERT goes first: as the
+        transaction's first write it takes the write lock, so the row it reads
+        cannot change under it. Returns whether a key was detached.
+        """
+        self._conn.execute(
+            "INSERT INTO pending_revocation (key_uid, api_url, workspace_id, workspace_name, "
+            "project_id, project_name, detached_at) "
+            "SELECT d.key_uid, d.api_url, d.workspace_id, d.workspace_name, d.project_id, "
+            "COALESCE(p.name, d.project_id), ? "
+            "FROM project_destination AS d LEFT JOIN project AS p ON p.id = d.project_id "
+            "WHERE d.project_id = ? AND d.key_uid IS NOT NULL AND d.key_uid IS NOT ? "
+            "AND d.key_uid <> ? "
+            "ON CONFLICT (key_uid) DO NOTHING",
+            (_now_iso(), project_id, keep, UNKNOWN_KEY_UID),
         )
+        cursor = self._conn.execute(
+            "UPDATE project_destination SET key_uid = NULL "
+            "WHERE project_id = ? AND key_uid IS NOT NULL AND key_uid IS NOT ?",
+            (project_id, keep),
+        )
+        return cursor.rowcount > 0
+
+    def _drop_binding(self, project_id: str) -> None:
+        self._conn.execute("DELETE FROM project_explainability WHERE project_id = ?", (project_id,))
+
+    # --- revocations owed for keys the CLI minted (v22, #142) -----------------------------
+
+    def pending_revocations(self) -> list[PendingRevocation]:
+        """Every minted key detached from its project and not confirmed revoked, oldest first."""
+        rows = self._conn.execute(
+            "SELECT key_uid, api_url, workspace_id, workspace_name, project_id, project_name, "
+            "detached_at, last_error FROM pending_revocation ORDER BY detached_at, key_uid"
+        ).fetchall()
+        return [
+            PendingRevocation(
+                key_uid=row["key_uid"],
+                api_url=row["api_url"],
+                workspace_id=int(row["workspace_id"]),
+                workspace_name=row["workspace_name"],
+                project_id=row["project_id"],
+                project_name=row["project_name"],
+                detached_at=datetime.fromisoformat(row["detached_at"]),
+                last_error=row["last_error"],
+            )
+            for row in rows
+        ]
+
+    def settle_revocation(self, key_uid: str) -> bool:
+        """The server confirmed the key is revoked: nothing is owed for it any more."""
+        cursor = self._conn.execute("DELETE FROM pending_revocation WHERE key_uid = ?", (key_uid,))
         self._conn.commit()
         return cursor.rowcount > 0
+
+    def note_revocation_failure(self, key_uid: str, reason: str) -> None:
+        """Why the last attempt to revoke ``key_uid`` did not: what every report of it says."""
+        self._conn.execute(
+            "UPDATE pending_revocation SET last_error = ? WHERE key_uid = ?", (reason, key_uid)
+        )
+        self._conn.commit()
 
     # --- UI state (#144) ---------------------------------------------------------------
 

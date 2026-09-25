@@ -29,6 +29,7 @@ from aisquare.models import (
     InjectionRecord,
     MetricsSummary,
     OnboardReport,
+    PendingRevocation,
     Pool,
     ProjectForgetReport,
     ProjectInfo,
@@ -343,9 +344,21 @@ def emit_project_forget(report: ProjectForgetReport) -> None:
             "  its context entries, prompt history and board rows stay in the store, hidden "
             "— --purge deletes them; registering the root again brings them back"
         )
+    _say_keys_still_live(report.keys_still_live)
     note = _active_note(report.active, changed=report.active_changed, pin_error=report.pin_error)
     if note is not None:
         console.print(f"  {note}")
+
+
+def _say_keys_still_live(owed: list[PendingRevocation]) -> None:
+    """A purge whose minted keys (#142) could not be revoked yet: which, why, and who retries."""
+    if not owed:
+        return
+    from aisquare.services import destinations  # lazy: the explainability modules
+
+    stdout_console().print(
+        f"  ⚠ {destinations.describe_owed(owed)} — {destinations.REVOKE_RETRY}", markup=False
+    )
 
 
 def emit_prune(report: ProjectPruneReport) -> None:
@@ -393,6 +406,7 @@ def emit_prune(report: ProjectPruneReport) -> None:
             "  their context entries, prompt history and board rows stay in the store, hidden "
             "— --purge deletes them"
         )
+    _say_keys_still_live(report.keys_still_live)
     note = _active_note(report.active, changed=report.active_changed, pin_error=report.pin_error)
     if note is not None:
         console.print(f"  {note}")

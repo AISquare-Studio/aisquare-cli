@@ -210,7 +210,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   same target as the key, `key set` binds to the destination's deployment, the
   CLI never mints over a hand key, and a minted key that is replaced, cleared,
   purged with its project or left behind by a move is revoked on the host that
-  minted it — a replaced one only once its replacement is recorded.
+  minted it — a replaced one only once its replacement is recorded. Its uid is
+  never forgotten before the server confirms the revoke: the commit that takes
+  the key off its project records the revocation as owed (schema v22,
+  `pending_revocation`), and one that cannot be made yet — signed out, signed
+  in to another host, offline, refused — stays owed, is said by the command
+  that detached it, and is tried again by `use`, `logout` and `doctor --live`
+  (a `minted-keys` row names what is still live).
 - **Project groups, pinning and manual order in the sidebar** (#140). A
   management layer only, like browser tab groups: a `project_group` table and
   `group_id` / `position` / `pinned_at` on the project row (schema v20); a

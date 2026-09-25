@@ -365,6 +365,7 @@ def logout() -> None:
                         "env_token_still_set": env_set,
                         # The signed-in branch's shape (#142); no session, nothing to revoke with.
                         "minted_keys_cleared": 0,
+                        "minted_keys_still_live": [],
                     }
                 )
             )
@@ -374,7 +375,7 @@ def logout() -> None:
                 _say(f"⚠ {iam.TOKEN_ENV_VAR} is still set in this shell.")
         return
     # Before the session is revoked: revoking a minted key needs the Bearer.
-    keys_cleared = _forget_minted_keys(session)
+    keys = destinations.forget_minted_keys(session)
     revoked = auth_service.sign_out(session).revoked
     if get_state().json_output:
         typer.echo(
@@ -383,13 +384,17 @@ def logout() -> None:
                     "signed_out": True,
                     "server_revoked": revoked,
                     "env_token_still_set": env_set,
-                    "minted_keys_cleared": keys_cleared,
+                    "minted_keys_cleared": keys.detached,
+                    "minted_keys_still_live": keys.revocations.as_json()["still_live"],
                 }
             )
         )
         return
-    if keys_cleared:
-        _say(f"✓ Forgot {keys_cleared} ingest key(s) the CLI had minted for your projects.")
+    if keys.detached:
+        _say(f"✓ Forgot {keys.detached} ingest key(s) the CLI had minted for your projects.")
+    if keys.revocations.owed:
+        # Kept owed, not forgotten: the next sign-in's `use` or `doctor --live` tries again.
+        _say(f"⚠ {destinations.describe_owed(keys.revocations.owed)} — {destinations.REVOKE_RETRY}")
     if revoked:
         _say("✓ Signed out. The session was revoked on the server.")
     else:
@@ -458,17 +463,6 @@ def _destination_here() -> TraceDestination | None:
             return store.project_destination(project_id)
     except Exception:
         return None
-
-
-def _forget_minted_keys(session: iam.Session) -> int:
-    """``logout``: the ingest keys the CLI minted go with the session (#142). Never raises."""
-    if not destinations.derived_credentials_exist():
-        return 0
-    try:
-        with store_session() as store:
-            return len(destinations.revoke_minted_keys(store, session))
-    except Exception:
-        return 0
 
 
 # --------------------------------------------------------------------------- aisquare auth

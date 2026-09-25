@@ -721,6 +721,10 @@ class ProjectForgetReport(BaseModel):
     """Why the pin could not be moved after the forget, when it could not — the
     forget itself is complete; the active project follows the working directory
     until ``project switch`` succeeds."""
+    keys_still_live: list[PendingRevocation] = Field(default_factory=list)
+    """Keys the CLI minted for the purged project that could not be revoked yet
+    (#142): still live on the server, and still owed — ``use``, ``doctor --live``
+    and ``logout`` try again. Empty unless ``purged``."""
 
 
 PruneReason = Literal["missing", "worktree", "captured"]
@@ -755,6 +759,8 @@ class ProjectPruneReport(BaseModel):
     pin_error: str | None = None
     """Why the pin could not be moved after the sweep, when it could not — the
     registrations are dropped (and purged) regardless."""
+    keys_still_live: list[PendingRevocation] = Field(default_factory=list)
+    """As for ``ProjectForgetReport``: minted keys of purged projects still live."""
 
 
 class AgentConnection(BaseModel):
@@ -840,6 +846,40 @@ class TraceDestination(BaseModel):
         if self.studio_name:
             return f"{self.workspace_name} / {self.studio_name}"
         return self.workspace_name
+
+
+UNKNOWN_KEY_UID = "minted"
+"""``TraceDestination.key_uid`` for a minted key whose uid never arrived (#142).
+
+The key exists and the project's file holds it, so the row still says minted;
+but there is no uid to revoke it by, so detaching it owes nothing — it is found
+in the dashboard's key list by its name, ``aisquare-cli <host> <project>``.
+"""
+
+
+class PendingRevocation(BaseModel):
+    """A key the CLI minted, taken off its project and not yet revoked on the server (#142).
+
+    Written in the transaction that detaches the key from its project — a move
+    into another workspace, ``use --clear``, ``key set`` or ``key clear`` over
+    it, a new mint, a purge, a sign-out — and deleted only once the server has
+    confirmed the revocation (a 2xx, or a 404 for a key it no longer has). In
+    between it is this machine's one record that the key exists: a revoke that
+    could not be made (signed out, signed in to another host, offline, refused)
+    leaves it here for ``explainability use``, ``doctor`` and ``logout`` to try
+    again and report. It names no project row, so a purge does not take it along.
+    """
+
+    key_uid: str
+    api_url: str
+    """The API the key was minted on — the only one a revoke of it can go to."""
+    workspace_id: int
+    workspace_name: str
+    project_id: str
+    project_name: str
+    detached_at: datetime
+    last_error: str | None = None
+    """Why the last attempt did not revoke it; ``None`` until one was made."""
 
 
 class LaunchSpec(BaseModel):

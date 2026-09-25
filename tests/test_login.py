@@ -403,6 +403,7 @@ def test_logout_revokes_and_forgets_but_keeps_other_credentials(
         "server_revoked": False,
         "env_token_still_set": False,
         "minted_keys_cleared": 0,  # the signed-in branch's shape (#142)
+        "minted_keys_still_live": [],
     }
 
 
@@ -418,6 +419,7 @@ def test_logout_offline_forgets_locally_and_says_so(runner: CliRunner) -> None:
         "server_revoked": False,
         "env_token_still_set": False,
         "minted_keys_cleared": 0,  # #142: no project had a CLI-minted ingest key
+        "minted_keys_still_live": [],
     }
     assert "iam_token" not in _stored()
 

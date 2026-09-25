@@ -407,9 +407,15 @@ reported on its own line:
   key to the project's destination unless you pass `--target`. A key you
   attached by hand is used as is and never minted over; `key set` over a minted
   key revokes the minted one once the new key is recorded (a `key set` that
-  fails leaves the minted key working), and so do `use --clear`, a move into
-  another workspace, a new mint over it (when its file is gone), and
-  `project forget --purge` or `project prune --purge`.
+  fails leaves the minted key working), and so do `key clear`, `use --clear`, a
+  move into another workspace, a new mint over it (when its file is gone), and
+  `project forget --purge` or `project prune --purge`. A minted key that cannot
+  be revoked yet — you are signed out, signed in to another deployment than the
+  one that minted it, offline, or the API refuses — is not forgotten: the
+  command says it is still live, and `use`, `logout` and `doctor --live` try
+  again until the server confirms (`doctor` lists what is still owed in a
+  `minted-keys` row). The key is named `aisquare-cli <host> <project>` in the
+  dashboard's key list if you would rather revoke it there.
 - **routing** — a span lands in the studio its agent identity is bound to in
   that workspace (unbound identities go to the workspace's *Unassigned* inbox),
   so `use` binds this machine's identities (`aisquare-planner`, `aisquare-coder`,
@@ -417,8 +423,8 @@ reported on its own line:
   key or the studio owner's; a refusal is reported per identity, and the
   destination is still recorded.
 - `whoami` gains a `traces:` line for the same project; `aisquare logout`
-  forgets every key the CLI minted (revoking each on the server when it can) and
-  leaves hand-attached keys alone.
+  forgets every key the CLI minted (revoking each on the server when it can, and
+  naming any it could not) and leaves hand-attached keys alone.
 
 `status --json` carries the choice under `destination`; `use --json` carries
 the destination, the target, the key's standing and the routing result. Only a

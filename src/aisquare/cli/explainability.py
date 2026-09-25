@@ -181,18 +181,17 @@ def key_set(
         value = sys.stdin.read().strip()
         if not value:
             fail("nothing on stdin — the key was empty", error="no_key")
-    # The same file holds a key the CLI minted (#142): this one replaces it.
-    # The minted key stops being called minted before the write, so the uid
-    # never names a hand key, and is revoked once the new one is recorded: a
-    # write that fails puts the file back, and the uid with it (review of #172).
-    with (
-        store_session() as store,
-        dest.retiring_minted_key(store, project.id, session=_signed_in_quietly()),
-    ):
-        binding = ops.attach_project_key(project, value, target=target)
+    # The same file holds a key the CLI minted (#142): this one replaces it. The
+    # new binding and the minted key's detachment are one commit, which owes the
+    # minted key's revocation; a write or a binding that fails leaves the file,
+    # the binding and the uid as they were. The revoke is made once the store is
+    # closed, and a key it cannot revoke yet stays owed, and is said (review of
+    # #172).
+    binding = ops.attach_project_key(project, value, target=target)
+    revocations = dest.revoke_owed(iam.signed_in_quietly(), project_ids={project.id})
     payload = _key_payload(project, target)
     if get_state().json_output:
-        typer.echo(json.dumps(payload))
+        typer.echo(json.dumps({**payload, "revocations": revocations.as_json()}))
         return
     name = project.root.name or project.id
     # The register step, named: a key for ANOTHER workspace traces nothing until
@@ -214,6 +213,7 @@ def key_set(
         "(mode 600); launches and spawns in this project authenticate the proxy with it. "
         f"If that workspace has not registered this machine's agents yet: {register}"
     )
+    _say_revocations(revocations)
 
 
 @key_app.command("show")
@@ -251,20 +251,29 @@ def key_show(
 def key_clear(project_ref: Annotated[str | None, _PROJECT_OPTION] = None) -> None:
     """Detach the project's key and delete its file; the machine key applies again."""
     project = _project_for(project_ref)
-    with (
-        store_session() as store,
-        dest.retiring_minted_key(store, project.id, session=_signed_in_quietly()),  # (#142)
-    ):
+    with store_session() as store:
+        # A minted key (#142) goes with its binding, its revocation owed in the
+        # same commit; revoked below, once the store is closed.
         had_row = store.clear_project_explainability(project.id)
     had_file = clear_project_api_key(project.id)
+    revocations = dest.revoke_owed(iam.signed_in_quietly(), project_ids={project.id})
     if get_state().json_output:
-        typer.echo(json.dumps({"project": project.id, "cleared": had_row or had_file}))
+        typer.echo(
+            json.dumps(
+                {
+                    "project": project.id,
+                    "cleared": had_row or had_file,
+                    "revocations": revocations.as_json(),
+                }
+            )
+        )
         return
     name = project.root.name or project.id
     if not (had_row or had_file):
         typer.echo(f"{name} had no key of its own — nothing to clear")
-        return
-    typer.echo(f"✓ key cleared for {name} — the machine key applies again")
+    else:
+        typer.echo(f"✓ key cleared for {name} — the machine key applies again")
+    _say_revocations(revocations)
 
 
 _TARGET_OPTION = typer.Option("--target", help="Deployment to act on, e.g. stg or prod.")
@@ -294,12 +303,11 @@ def _session_or_fail() -> iam.Session:
     return session
 
 
-def _signed_in_quietly() -> iam.Session | None:
-    """The sign-in when there is one, for a best-effort revoke that must never cost the command."""
-    try:
-        return iam.current_session()
-    except iam.IamError:
-        return None
+def _say_revocations(report: dest.Revocations) -> None:
+    """The revokes a command made of keys the CLI minted (#142), and what is still live."""
+    line = dest.describe_revocations(report)
+    if line is not None:
+        typer.echo(f"{'⚠' if report.owed else '✓'} {line}")
 
 
 def _workspace_rows(found: list[dest.Workspace]) -> list[dict[str, object]]:
@@ -483,18 +491,31 @@ def use(
     different workspace revokes and drops the key the CLI minted for the old
     one. Only the project's own key skips the mint — a machine key was issued
     for whichever workspace set the machine up, so it only answers meanwhile.
+    Every key the CLI minted and could not revoke yet (signed out, another
+    host, offline) is tried again here, and what is still live is said.
     """
     project = _project_for(project_ref)
     pname = project.root.name or project.id
     if clear:
         with store_session() as store:
-            previous = dest.forget(store, project, session=_signed_in_quietly())
+            previous = dest.forget(store, project)
+        revocations = dest.revoke_owed(iam.signed_in_quietly(), project_ids={project.id})
         if get_state().json_output:
-            typer.echo(json.dumps({"project": project.id, "cleared": dest.as_json(previous)}))
-        elif previous is None:
+            typer.echo(
+                json.dumps(
+                    {
+                        "project": project.id,
+                        "cleared": dest.as_json(previous),
+                        "revocations": revocations.as_json(),
+                    }
+                )
+            )
+            return
+        if previous is None:
             typer.echo(f"{pname} had no destination")
         else:
             typer.echo(f"✓ {pname} no longer points at {previous.label}")
+        _say_revocations(revocations)
         return
     if destination is None:
         fail(
@@ -566,6 +587,9 @@ def use(
                 f"{row.workspace_name}'s"
             )
     routing = dest.bind_roster(row, target) if target.api_key else dest.RosterReport()
+    # Outside the store session, and every key owed, not only a replaced one:
+    # `use` is where a signed-in operator lands, so it is one of the retries.
+    revocations = dest.revoke_owed(session)
 
     if get_state().json_output:
         typer.echo(
@@ -594,6 +618,7 @@ def use(
                         }
                         for b in routing.bound
                     ],
+                    "revocations": revocations.as_json(),
                 }
             )
         )
@@ -606,6 +631,9 @@ def use(
         typer.echo(f"  routing:  {'; '.join(_routing_lines(routing))}")
     else:
         typer.echo("  routing:  not applied — no key to bind the agent identities with")
+    revoked = dest.describe_revocations(revocations)
+    if revoked is not None:
+        typer.echo(f"  revoke:   {revoked}")
     if not config.explainability.enabled:
         typer.echo("  next:     aisquare explainability enable   (tracing is off on this machine)")
     else:

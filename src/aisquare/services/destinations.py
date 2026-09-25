@@ -32,7 +32,9 @@ Design rules, each with its reason in the function that enforces it: the
 environment the session belongs to decides the deployment (no URL typed, no
 staging key near a prod gateway); the choice lives in the store per project
 (one machine, many workspaces); a minted key is the CLI's and ``logout`` clears
-it, a key attached by hand (#141) is the operator's and is left alone.
+it, a key attached by hand (#141) is the operator's and is left alone; and a
+minted key's uid is never forgotten until the server has confirmed its
+revocation (:func:`revoke_owed`).
 """
 
 from __future__ import annotations
@@ -40,7 +42,9 @@ from __future__ import annotations
 import contextlib
 import re
 import socket
-from collections.abc import Iterator
+import sqlite3
+import time
+from collections.abc import Collection, Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -48,8 +52,8 @@ from urllib.parse import urlsplit
 
 from aisquare.core import paths
 from aisquare.core.config import AppConfig, ExplainabilitySettings, ExplainabilityTarget
-from aisquare.core.store import ContextStore
-from aisquare.models import ProjectInfo, TraceDestination
+from aisquare.core.store import ContextStore, store_session
+from aisquare.models import UNKNOWN_KEY_UID, PendingRevocation, ProjectInfo, TraceDestination
 from aisquare.services import iam
 from aisquare.services.explainability import (
     clear_project_api_key,
@@ -436,12 +440,15 @@ def choose(
 ) -> TraceDestination:
     """Record where ``project``'s traces land.
 
-    A re-point into ANOTHER workspace drops the key the CLI minted: it was that
-    workspace's credential and cannot serve this one, so it is revoked (with
-    ``session``, when it belongs to the host that minted it) and forgotten. A
-    re-point within the same workspace (another studio) keeps it. "The same
-    workspace" is the id on the same API: workspace ids are per deployment, so
-    a staging 7 and a production 7 are two workspaces.
+    A re-point into ANOTHER workspace detaches the key the CLI minted: it was
+    that workspace's credential and cannot serve this one. Its file and binding
+    go and its revocation is owed (:func:`detach`); the caller revokes it once
+    the store session is closed (:func:`revoke_owed`) — which a move onto
+    another deployment cannot do with the new one's session, so the key stays
+    owed, and said, until a sign-in on the host that minted it can (review of
+    #172). A re-point within the same workspace (another studio) keeps it.
+    "The same workspace" is the id on the same API: workspace ids are per
+    deployment, so a staging 7 and a production 7 are two workspaces.
 
     The project row is made sure of first — a destination references it, and
     ``use`` may run in a directory nothing has registered yet. Captured, not
@@ -459,7 +466,7 @@ def choose(
         # The minted key was the old workspace's; it cannot serve the new one.
         # The key FILE is dropped too: a binding to the old deployment would
         # otherwise keep answering for a project that moved.
-        _forget_minted_key(store, project.id, previous, session)
+        detach(store, project.id)
     return store.set_project_destination(
         TraceDestination(
             project_id=project.id,
@@ -478,20 +485,17 @@ def choose(
     )
 
 
-def forget(
-    store: ContextStore, project: ProjectInfo, *, session: iam.Session | None = None
-) -> TraceDestination | None:
-    """Drop the project's destination and the key the CLI minted for it; the old row, or None.
+def forget(store: ContextStore, project: ProjectInfo) -> TraceDestination | None:
+    """Drop the project's destination and detach the key the CLI minted for it; the old row.
 
-    The minted key is revoked on the server when ``session`` belongs to the
-    host that minted it — dropped locally only, it would stay a live
-    ``ingest:write`` credential that nothing on this machine remembers.
+    ``None`` when there was none. The key's revocation is owed from the commit
+    that detaches it; the caller revokes it once the store session is closed
+    (:func:`revoke_owed`).
     """
     previous = store.project_destination(project.id)
     if previous is None:
         return None
-    if previous.key_uid:
-        _forget_minted_key(store, project.id, previous, session)
+    detach(store, project.id)
     store.clear_project_destination(project.id)
     return previous
 
@@ -500,83 +504,175 @@ def _same_api(one: str, other: str) -> bool:
     return one.rstrip("/") == other.rstrip("/")
 
 
-def _forget_minted_key(
-    store: ContextStore,
-    project_id: str,
-    destination: TraceDestination,
-    session: iam.Session | None,
-) -> None:
-    """Revoke and delete a MINTED key: on the server, its file, its binding, its uid on the row.
+def detach(store: ContextStore, project_id: str) -> bool:
+    """Take the project's MINTED key off it — its revocation owed — and delete its file.
 
-    Only ever called for a row with ``key_uid``, and that uid is set only while
-    the project's key file holds the key the CLI minted: ``key set`` and
-    ``key clear`` drop it (:func:`retiring_minted_key`) before they touch the
-    file. That invariant is what keeps a hand-attached key out of here — the
-    file and the binding are the same for both kinds.
+    The store does the part that must not come apart in one transaction
+    (``detach_minted_key``: the uid off the row and into ``pending_revocation``,
+    the binding deleted); the file goes after, and only when that binding named
+    the project's own key file. A file that will not delete is left: nothing
+    binds it any more, so nothing reads it, and the key in it is owed a
+    revocation all the same. Nothing here revokes — that is a network call, made
+    outside the store session (:func:`revoke_owed`). Returns whether a key was
+    detached.
+
+    The uid is set only while the project's key file holds the key the CLI
+    minted — every writer of the binding says which kind it wrote
+    (``set_project_explainability(minted=)``) — and that invariant is what keeps
+    a hand-attached key out of here: the file and the binding are the same for
+    both kinds.
     """
-    _revoke(destination, session)
-    binding = store.project_explainability(project_id)
+    binding = store.detach_minted_key(project_id)
     if binding is not None and binding.key_path == project_key_path(project_id):
-        clear_project_api_key(project_id)
-        store.clear_project_explainability(project_id)
-    store.set_project_destination_key(project_id, None)
+        with contextlib.suppress(OSError):
+            clear_project_api_key(project_id)
+    return binding is not None
 
 
-@contextlib.contextmanager
-def retiring_minted_key(
-    store: ContextStore, project_id: str, *, session: iam.Session | None = None
-) -> Iterator[None]:
-    """A key attached (or cleared) by hand takes the minted key's place: drop its uid, then revoke.
+# ── revocations owed ──────────────────────────────────────────────────────────
 
-    One key file per project serves both kinds, so ``key set`` over a minted
-    key overwrites it. Left with its uid, the operator's key would go on being
-    described as minted, and ``logout``, ``use --clear`` or a re-point would
-    delete it — so the uid is dropped BEFORE the block, which is the caller's
-    write or clear of the file (:func:`_forget_minted_key` relies on that).
 
-    The key is revoked AFTER the block, once what replaces it is recorded, as
-    :func:`mint_key` does. Revoked first, a ``key set`` whose binding failed to
-    record put the file back — the key just revoked, no longer called minted —
-    and ``use`` went on calling that dead key "the project's own key" (review
-    of #172). So when the block raises, the uid is put back and nothing is
-    revoked: the file still holds the minted key, as ``attach_project_key``
-    and a failed ``key clear`` leave it. Revoked on the server when ``session``
-    belongs to the host that minted it; without one the old key stays in the
-    workspace's key list, named ``aisquare-cli <host> <project>``.
+REVOKE_BUDGET_SECONDS = 20.0
+"""What one pass of :func:`revoke_owed` may spend on requests, whatever the count.
+
+A ``prune --purge`` over many keyed projects made one blocking revoke (10 s
+timeout each) per project, inside the loop and the store session (review of
+#172); now they share this, and what it does not reach stays owed.
+"""
+
+REVOKE_RETRY = (
+    "`aisquare explainability use`, `aisquare doctor --live` and `aisquare logout` try "
+    "again while signed in to the API that minted it; or revoke it in the dashboard's key "
+    "list (aisquare-cli <host> <project>)"
+)
+"""Where a key still owed is tried again — the one remedy every surface names."""
+
+
+@dataclass
+class Revocations:
+    """One pass over the revocations owed (:func:`revoke_owed`): what went, what is still live."""
+
+    revoked: list[PendingRevocation] = field(default_factory=list)
+    owed: list[PendingRevocation] = field(default_factory=list)
+    """Still live on the server, each with ``last_error`` saying why."""
+
+    def as_json(self) -> dict[str, Any]:
+        return {
+            "revoked": [record.key_uid for record in self.revoked],
+            "still_live": [
+                {
+                    "key_uid": record.key_uid,
+                    "workspace": record.workspace_name,
+                    "project": record.project_name,
+                    "api_url": record.api_url,
+                    "reason": record.last_error,
+                }
+                for record in self.owed
+            ],
+        }
+
+
+def revoke_owed(
+    session: iam.Session | None,
+    *,
+    project_ids: Collection[str] | None = None,
+    budget: float = REVOKE_BUDGET_SECONDS,
+) -> Revocations:
+    """Revoke the minted keys that were detached, and forget each once the server confirms it.
+
+    Runs with NO store session open: the owed records are read, the store is
+    closed, one request goes out per key, and the outcome is written in a second
+    session — a revoke is a network call (10 s timeout), and made inside a
+    session it held the store for every key. A record is deleted only on the
+    server's confirmation (:func:`_revoke`); anything else — signed out, signed
+    in to another host, offline, refused, out of ``budget`` — keeps it, with
+    the reason, for the next pass. ``project_ids`` limits the pass to what a
+    command just detached; ``None`` is every key owed, which is what ``use``,
+    ``doctor --live`` and ``logout`` retry. A store that cannot record the
+    outcome costs the bookkeeping, not the command: a key the server revoked
+    and this could not forget answers 404 on the next pass, which settles it.
     """
-    destination = store.project_destination(project_id)
-    if destination is None or not destination.key_uid:
-        yield
-        return
-    store.set_project_destination_key(project_id, None)
+    report = Revocations()
+    if not paths.db_path().exists():
+        return report  # nothing was ever detached; a read must not create the store
+    with store_session() as store:
+        owed = [
+            record
+            for record in store.pending_revocations()
+            if project_ids is None or record.project_id in project_ids
+        ]
+    if not owed:
+        return report
+    deadline = time.monotonic() + budget
+    for record in owed:
+        reason = _revoke(record, session, deadline)
+        if reason is None:
+            report.revoked.append(record)
+        else:
+            report.owed.append(record.model_copy(update={"last_error": reason}))
+    with contextlib.suppress(sqlite3.Error, OSError), store_session() as store:
+        for record in report.revoked:
+            store.settle_revocation(record.key_uid)
+        for record in report.owed:
+            store.note_revocation_failure(record.key_uid, record.last_error or "")
+    return report
+
+
+def _revoke(record: PendingRevocation, session: iam.Session | None, deadline: float) -> str | None:
+    """Revoke one owed key where it was minted: ``None`` once the server confirms, else why not.
+
+    Confirmed is a 2xx, or a 404 — the server has no such key any more (revoked
+    from the dashboard, or by an earlier attempt whose answer was lost), so
+    nothing is left to revoke. Only against the API the key was minted on: a
+    session belongs to one host, and a uid sent to another gets a 404 that
+    would read as that confirmation. A refusal (the endpoint shares the mint's
+    authentication gap; only a workspace OWNER or ADMIN may revoke), a server
+    error or an unreachable server leaves it owed. Never raises.
+    """
+    if session is None:
+        return "signed out"
+    if not _same_api(record.api_url, session.api_url):
+        return f"signed in to {session.api_url}, not {record.api_url}"
+    left = deadline - time.monotonic()
+    if left <= 0:
+        return "not tried — this pass ran out of time"
     try:
-        yield
-    except Exception:
-        store.set_project_destination_key(project_id, destination.key_uid)
-        raise
-    _revoke(destination, session)
-
-
-def _revoke(destination: TraceDestination, session: iam.Session | None) -> None:
-    """Revoke the destination's minted key on the server — best effort, and only where it lives.
-
-    Only against the API the key was minted on: a session belongs to one host,
-    and sending the uid to another one gets a 404 that reads like success. The
-    endpoint has the mint's authentication gap and a machine may be offline, so
-    a refusal is tolerated, never raised.
-    """
-    uid = destination.key_uid
-    if session is None or not uid or uid == "minted":
-        return
-    if not _same_api(destination.api_url, session.api_url):
-        return
-    with contextlib.suppress(iam.IamError):
-        iam.request(
-            f"api/v2/iam/workspace-api-key/{uid}/revoke/",
+        result = iam.request(
+            f"api/v2/iam/workspace-api-key/{record.key_uid}/revoke/",
             method="POST",
             api_url=session.api_url,
             tolerate=(400, 401, 403, 404),
+            timeout=min(iam.HTTP_TIMEOUT_SECONDS, left),
         )
+    except iam.IamError as exc:
+        return exc.message
+    if 200 <= result.status < 300 or result.status == 404:
+        return None
+    return f"the API answered HTTP {result.status}: {_detail(result.body)}"
+
+
+def describe_owed(owed: list[PendingRevocation]) -> str:
+    """``1 key the CLI minted is still live on the server — acme for web (signed out)``."""
+    noun = "key the CLI minted is" if len(owed) == 1 else "keys the CLI minted are"
+    which = "; ".join(
+        f"{record.workspace_name} for {record.project_name} "
+        f"({record.last_error or 'not tried yet'})"
+        for record in owed
+    )
+    return f"{len(owed)} {noun} still live on the server — {which}"
+
+
+def describe_revocations(report: Revocations) -> str | None:
+    """The line a command adds for the revocations it made; ``None`` when it made none."""
+    parts: list[str] = []
+    if report.revoked:
+        which = ", ".join(
+            f"{record.workspace_name} for {record.project_name}" for record in report.revoked
+        )
+        parts.append(f"revoked {len(report.revoked)} key(s) the CLI minted ({which})")
+    if report.owed:
+        parts.append(f"{describe_owed(report.owed)} — {REVOKE_RETRY}")
+    return "; ".join(parts) or None
 
 
 # ── the credential, on the user's behalf ──────────────────────────────────────
@@ -617,11 +713,18 @@ def mint_key(
     a command that promised to leave it alone. Refused before the request, so
     no key is created only to be thrown away.
 
-    A KEY THE CLI MINTED BEFORE IS REVOKED: the row's uid now names the new
-    one, so the old one would stay a live ``ingest:write`` key that nothing on
-    this machine remembers (``use`` mints over one when its file is gone).
-    Revoked only once the new key is stored, so a key is never revoked before
-    its replacement is in place.
+    A KEY THE CLI MINTED BEFORE IS OWED A REVOCATION: the row's uid now names
+    the new one, so the old one would stay a live ``ingest:write`` key that
+    nothing on this machine remembers (``use`` mints over one when its file is
+    gone). The new binding and uid and the old uid's pending revocation are one
+    commit (``set_project_explainability(minted=)``), made once the new key is
+    in its file, so a key is never owed before its replacement is in place; an
+    idempotent mint that answers with the same uid owes nothing. The caller
+    revokes it once the store session is closed (:func:`revoke_owed`).
+
+    A new key that cannot be recorded (the store refuses the commit) is put
+    back out of the file and revoked on the spot, best effort: recorded
+    nowhere, it would be a live key this machine never knew it had.
     """
     binding = store.project_explainability(project.id)
     if binding is not None and not destination.key_uid and binding.key_path.is_file():
@@ -657,68 +760,97 @@ def mint_key(
         )
     body = result.body if isinstance(result.body, dict) else {}
     value = body.get("api_key")
-    uid = body.get("uid")
+    uid = str(body.get("uid") or UNKNOWN_KEY_UID)
     if result.status not in (200, 201) or not isinstance(value, str) or not value:
         raise DestinationError(
             "api_error", f"key creation answered HTTP {result.status}: {_detail(result.body)}"
         )
+    earlier = _key_file_contents(project.id)
     path = store_project_api_key(project.id, value)
-    store.set_project_explainability(
-        project.id, target=destination.environment, key_path=path, set_by=destination.set_by
-    )
-    store.set_project_destination_key(project.id, str(uid) if uid else "minted")
-    _revoke(destination, session)  # the uid it carried is the key just replaced
-    return MintedKey(uid=str(uid or "minted"), name=str(body.get("name") or ""), path=str(path))
-
-
-def revoke_minted_keys(store: ContextStore, session: iam.Session) -> list[str]:
-    """``logout``: forget every key the CLI minted, revoking each on the server when it can.
-
-    The revoke call takes the Bearer, so it must run BEFORE the session itself
-    is revoked; it is best effort (the endpoint has the same authentication
-    gap as the mint, and a machine may be offline), and the local copy goes
-    regardless — a credential the CLI obtained on the user's behalf must not
-    outlive the sign-in that obtained it. A key minted on another host is not
-    revoked from this one (:func:`_revoke` says why), and one project's file
-    that will not delete does not keep the others'. Returns the project ids
-    cleared.
-    """
-    cleared: list[str] = []
-    for destination in store.project_destinations():
-        if not destination.key_uid:
-            continue
-        try:
-            _forget_minted_key(store, destination.project_id, destination, session)
-        except OSError:
-            continue
-        cleared.append(destination.project_id)
-    return cleared
-
-
-@contextlib.contextmanager
-def purging_minted_key(store: ContextStore, project_id: str) -> Iterator[None]:
-    """``project forget --purge`` and ``prune --purge``: the purge in the block, then the revoke.
-
-    A purge deletes the destination row, and its ``key_uid`` with it, and the
-    project's directory with the key file — and ``logout`` finds a minted key
-    by that row alone. Unrevoked, the key stayed a live ``ingest:write``
-    credential that nothing on this machine remembered (review of #172). So
-    the row is read before the block and the key revoked after it — only once
-    the purge is done, as :func:`retiring_minted_key` revokes: a purge that
-    fails (it is one transaction) keeps the row, the file and a key that
-    still works. The row and the file are the purge's; only the server's copy
-    is revoked here, best effort as every revoke is: signed out, offline or
-    signed in to another host, the purge goes on.
-    """
-    destination = store.project_destination(project_id)
-    yield
-    if destination is None or not destination.key_uid:
-        return
     try:
-        session = iam.current_session()
-    except iam.IamError:
-        session = None
-    _revoke(destination, session)
+        store.set_project_explainability(
+            project.id,
+            target=destination.environment,
+            key_path=path,
+            set_by=destination.set_by,
+            minted=uid,
+        )
+    except BaseException:
+        if earlier is None:
+            with contextlib.suppress(OSError):
+                clear_project_api_key(project.id)
+        else:
+            with contextlib.suppress(OSError):
+                store_project_api_key(project.id, earlier)
+        if uid != UNKNOWN_KEY_UID:
+            unrecorded = PendingRevocation(
+                key_uid=uid,
+                api_url=destination.api_url,
+                workspace_id=destination.workspace_id,
+                workspace_name=destination.workspace_name,
+                project_id=project.id,
+                project_name=project.root.name or project.id,
+                detached_at=datetime.now(tz=UTC),
+            )
+            _revoke(unrecorded, session, time.monotonic() + iam.HTTP_TIMEOUT_SECONDS)
+        raise
+    return MintedKey(uid=uid, name=str(body.get("name") or ""), path=str(path))
+
+
+def _key_file_contents(project_id: str) -> str | None:
+    """What the project's key file holds now, to put back; ``None`` when there is none to read."""
+    try:
+        return project_key_path(project_id).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
+def detach_minted_keys(store: ContextStore) -> list[str]:
+    """Sign-out: take every key the CLI minted off its project, each owed a revocation.
+
+    A credential the CLI obtained on the user's behalf must not outlive the
+    sign-in that obtained it, so every one is detached — file, binding, uid —
+    and its revocation owed from the same commit; the caller revokes them with
+    the session BEFORE revoking the session itself, whose Bearer the revoke
+    call takes (:func:`forget_minted_keys`). One project's file that will not
+    delete does not keep the others' (:func:`detach`). Returns the project ids.
+    """
+    return [
+        destination.project_id
+        for destination in store.project_destinations()
+        if destination.key_uid and detach(store, destination.project_id)
+    ]
+
+
+@dataclass(frozen=True)
+class MintedKeysForgotten:
+    """What a sign-out did with the keys the CLI minted: how many it detached, what it revoked."""
+
+    detached: int
+    revocations: Revocations
+
+
+def forget_minted_keys(session: iam.Session) -> MintedKeysForgotten:
+    """``logout`` and the Accounts page's *Sign out*: the keys the CLI minted go with the session.
+
+    Every minted key is detached (:func:`detach_minted_keys`) and every key
+    owed — these and any an earlier command could not revoke — is revoked with
+    ``session``, which must still be live: call this BEFORE the session is
+    revoked. What cannot be revoked stays owed and is in the result, for the
+    sign-out to say; the next sign-in's ``use`` or ``doctor --live`` tries
+    again. Never raises: a store that cannot be read costs these keys' cleanup,
+    never the sign-out.
+    """
+    if not derived_credentials_exist():
+        return MintedKeysForgotten(detached=0, revocations=Revocations())
+    detached: list[str] = []
+    with contextlib.suppress(Exception), store_session() as store:
+        detached = detach_minted_keys(store)
+    try:
+        revocations = revoke_owed(session)
+    except Exception:
+        revocations = Revocations()
+    return MintedKeysForgotten(detached=len(detached), revocations=revocations)
 
 
 def derived_credentials_exist() -> bool:

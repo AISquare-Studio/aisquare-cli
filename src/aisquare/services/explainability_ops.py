@@ -457,7 +457,15 @@ def attach_project_key(project: ProjectInfo, value: str, *, target: str) -> Proj
     keeps no credential that nothing names, and an earlier binding keeps the
     key it named. Keeping the NEW file under the OLD row handed the old
     binding's deployment the other deployment's key — a stg row answering
-    with the prod key (review of #170).
+    with the prod key (review of #170). Put back on an interrupt too: a
+    Ctrl-C between the write and the commit left the new key under the old
+    binding just the same.
+
+    Over a key the CLI minted (#142) the binding's commit also detaches it,
+    owing its revocation (``set_project_explainability``); the caller revokes
+    it once the store is closed. The minted key's OWN value attached again is
+    still that key: it stays minted, and nothing is owed — detached, the key
+    just attached would have been revoked under the project (review of #172).
     """
     from aisquare.core.store import store_session  # lazy, as in project_key_binding
 
@@ -468,12 +476,16 @@ def attach_project_key(project: ProjectInfo, value: str, *, target: str) -> Proj
             # A binding whose file is gone keeps no file: it stays as `key show` saw it.
             with contextlib.suppress(OSError):
                 earlier = project_key_path(project.id).read_text(encoding="utf-8")
+        destination = store.project_destination(project.id)
+        minted = None
+        if destination is not None and earlier is not None and earlier.strip() == value.strip():
+            minted = destination.key_uid
         path = store_project_api_key(project.id, value)
         try:
             return store.set_project_explainability(
-                project.id, target=target, key_path=path, set_by=key_owner()
+                project.id, target=target, key_path=path, set_by=key_owner(), minted=minted
             )
-        except Exception:
+        except BaseException:
             if earlier is None:
                 clear_project_api_key(project.id)
             else:

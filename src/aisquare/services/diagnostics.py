@@ -43,6 +43,7 @@ from aisquare.services import (
     ci_client,
     ci_descriptor,
     ci_override,
+    destinations,
     explainability_ops,
     iam,
 )
@@ -151,6 +152,9 @@ def doctor(
         _check_fleet_terminal(),
         *_experiment_checks(),
         *explainability_ops.checks(live=live, target_name=target),
+        # Only while a key the CLI minted is owed a revocation (#142); --live
+        # tries each again first — one request per key, on the API that minted it.
+        *_optional(_minted_keys_check(live)),
         # Only when a fleet role runs `auto` behind a configured proxy (#150);
         # offline — config, the store, the head of a few transcripts.
         *_optional(auto_mode.doctor_check()),
@@ -1087,6 +1091,43 @@ def _workspace_credits_check() -> DoctorCheck | None:
             "Sign in again (aisquare login) or check the API; the row reads once it answers",
         )
     return _ok("workspace-credits", summary)
+
+
+def _minted_keys_check(live: bool) -> DoctorCheck | None:
+    """Keys the CLI minted and took off their projects that the server has not revoked (#142).
+
+    A key is detached — by a move into another workspace, ``use --clear``,
+    ``key set``/``key clear``, a new mint, a purge or a sign-out — in the same
+    commit that records its revocation as owed, and the record goes only on the
+    server's confirmation. Until then it is a live ``ingest:write`` key nothing
+    else on this machine names, so this row says so. Offline it reads the
+    record; with ``--live`` it tries each again first (as ``use`` and ``logout``
+    do), which is the only part that leaves the machine. ``None`` when nothing
+    is owed, and before ``context.db`` exists — a doctor run must not create
+    the store it is diagnosing.
+    """
+    if not paths.db_path().exists():
+        return None
+    try:
+        if live:
+            report = destinations.revoke_owed(iam.signed_in_quietly())
+            owed, revoked = report.owed, report.revoked
+        else:
+            with store_session() as store:
+                owed, revoked = store.pending_revocations(), []
+    except Exception:  # the database row says why the store is broken; this adds nothing
+        return None
+    if owed:
+        fix = destinations.REVOKE_RETRY
+        if not live:
+            fix = "Run aisquare doctor --live to try again now — " + fix
+        return _warn("minted-keys", destinations.describe_owed(owed), fix)
+    if revoked:
+        return _ok(
+            "minted-keys",
+            f"revoked {len(revoked)} key(s) the CLI minted that were still owed a revocation",
+        )
+    return None
 
 
 def _claude_account_default_checks() -> list[DoctorCheck]:

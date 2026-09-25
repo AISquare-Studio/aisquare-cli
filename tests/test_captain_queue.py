@@ -12,6 +12,7 @@ pinned, and the whole refresh over the fixture under a second.
 
 from __future__ import annotations
 
+import errno
 import json
 import logging
 import os
@@ -40,10 +41,14 @@ from aisquare.services import fleet as fleet_service
 from aisquare.services.captain import queue as captain_queue
 from aisquare.services.captain.queue import (
     EVENT_LIMIT,
+    HISTORY_KEEP,
     NEAR_WINDOW,
     QUESTION_HORIZON,
     RANK,
+    RETAIN_RESOLVED,
+    SNOOZE_MAX_MINUTES,
     STALE_AFTER,
+    AlreadyResolvedError,
     AmbiguousItemError,
     AttentionQueue,
     PullRequest,
@@ -53,7 +58,9 @@ from aisquare.services.captain.queue import (
     UnknownItemError,
     as_json,
     dedup_key,
+    near_duplicates,
     normalise,
+    plain,
 )
 
 T0 = datetime(2026, 9, 25, 9, 0, tzinfo=UTC)
@@ -82,6 +89,8 @@ class FakeSources:
     _sessions: dict[str, list[TeamSession]] = field(default_factory=dict)
     _tails: dict[str, list[str]] = field(default_factory=dict)
     _prs: dict[str, list[PullRequest]] = field(default_factory=dict)
+    _unobservable: set[str] = field(default_factory=set)
+    """Agent ids whose pane cannot be read this pass (``pane_tail`` answers ``None``)."""
     calls: list[str] = field(default_factory=list)
 
     def projects(self) -> list[ProjectInfo]:
@@ -98,6 +107,10 @@ class FakeSources:
     def events(self, project_id: str, *, since_seq: int) -> list[TeamEvent]:
         return [e for e in self._events.get(project_id, []) if e.seq > since_seq]
 
+    def recent_events(self, project_id: str, *, limit: int) -> list[TeamEvent]:
+        newest = sorted(self._events.get(project_id, []), key=lambda e: e.seq)[-limit:]
+        return newest
+
     def events_about(self, project_id: str, task_id: str, *, since: datetime) -> list[TeamEvent]:
         return [
             e
@@ -111,7 +124,9 @@ class FakeSources:
     def sessions(self, project_id: str) -> list[TeamSession]:
         return list(self._sessions.get(project_id, []))
 
-    def pane_tail(self, status: FleetAgentStatus) -> list[str]:
+    def pane_tail(self, status: FleetAgentStatus) -> list[str] | None:
+        if status.agent.id in self._unobservable:
+            return None
         return list(self._tails.get(status.agent.id, []))
 
     def pull_requests(self, project: ProjectInfo) -> list[PullRequest]:
@@ -615,7 +630,9 @@ def test_a_question_whose_card_is_closed_resolves_itself(fx: Fixture) -> None:
     queue.refresh()
     assert [item.status for item in queue.items()] == ["open", "open"]
     fx.clock.tick(minutes=10)
-    fx.sources._tasks[fx.alpha.id] = [card.model_copy(update={"status": "done"})]
+    fx.sources._tasks[fx.alpha.id] = [
+        card.model_copy(update={"status": "done", "updated_at": fx.clock.now})
+    ]
     snapshot = queue.refresh()
     about_card = queue.get(next(i.id for i in queue.items() if i.card == card.id))
     assert about_card.status == "resolved"
@@ -862,6 +879,423 @@ def test_refresh_reads_every_project_once(fx: Fixture) -> None:
     assert sorted(c for c in fx.sources.calls if c.startswith("agents:")) == sorted(
         f"agents:{p.id}" for p in (fx.alpha, fx.beta, fx.gamma)
     )
+
+
+# --- the gate 1 fix round (coderp, PR #218 comment 5830221685): each pinned --------------------
+
+
+def test_a_question_about_a_card_that_was_already_closed_is_still_the_owners(fx: Fixture) -> None:
+    """Blocking 1a: the closing must come AFTER the question to answer it."""
+    fx.manager(fx.alpha)
+    done = _task(fx.alpha, "the fold", "done", at=fx.clock.now - timedelta(hours=1))
+    fx.sources._tasks[fx.alpha.id] = [done]
+    fx.ask(fx.alpha, "The fold card is done — may I merge it to main?", seq=1, task_id=done.id)
+    queue = fx.queue()
+    snapshot = queue.refresh()
+    (row,) = queue.attention()
+    assert row.status == "open" and row.card == done.id and snapshot.cleared == 0
+
+
+def test_questions_about_two_cards_are_two_rows_and_only_the_closed_cards_row_clears(
+    fx: Fixture,
+) -> None:
+    """Blocking 1b: the card is part of the key; ids are stripped from the text."""
+    fx.manager(fx.alpha)
+    a = _task(fx.alpha, "A", "doing", at=fx.clock.now)
+    b = _task(fx.alpha, "B", "doing", at=fx.clock.now)
+    fx.sources._tasks[fx.alpha.id] = [a, b]
+    fx.ask(fx.alpha, f"Can I merge {a.id}?", seq=1, task_id=a.id)
+    fx.clock.tick(minutes=1)
+    fx.ask(fx.alpha, f"Can I merge {b.id}?", seq=2, task_id=b.id)
+    queue = fx.queue()
+    queue.refresh()
+    rows = {row.card: row for row in queue.attention() if row.kind == "question"}
+    assert set(rows) == {a.id, b.id}
+    fx.clock.tick(minutes=5)
+    fx.sources._tasks[fx.alpha.id] = [
+        a.model_copy(update={"status": "done", "updated_at": fx.clock.now}),
+        b,
+    ]
+    snapshot = queue.refresh()
+    assert snapshot.cleared == 1
+    assert queue.get(rows[a.id].id).status == "resolved"
+    assert queue.get(rows[b.id].id).status == "open", "B's ask still waits"
+
+
+def test_an_unreadable_queue_file_refuses_every_call_and_is_never_overwritten(
+    fx: Fixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Blocking 2: one failed read must not become an empty queue written back."""
+    _seed_three_projects(fx)
+    queue = fx.queue()
+    queue.refresh()
+    before = fx.path.read_bytes()
+    real = Path.read_bytes
+
+    def denied(self: Path) -> bytes:
+        if self == fx.path:
+            raise PermissionError(errno.EACCES, "denied", str(self))
+        return real(self)
+
+    monkeypatch.setattr(Path, "read_bytes", denied)
+    with pytest.raises(QueueError, match="could not be read"):
+        queue.refresh()
+    with pytest.raises(QueueError):
+        queue.attention()
+    with pytest.raises(QueueError):
+        queue.resolve("q", "x")
+    monkeypatch.undo()
+    assert fx.path.read_bytes() == before
+    assert len(queue.items()) == 3
+    assert issubclass(QueueError, OSError), "T1 says error:, not refused:"
+
+
+def test_resolve_and_snooze_on_a_resolved_row_are_refused_and_the_absence_survives(
+    fx: Fixture,
+) -> None:
+    """Blocking 3: the parked-prompt sequence from the review."""
+    aid = new_agent_id()
+    prompt = _agent(fx.alpha, "coder1", "attention", detail="permission prompt", agent_id=aid)
+    fx.sources._agents[fx.alpha.id] = [prompt]
+    queue = fx.queue()
+    queue.refresh()
+    (row,) = queue.items()
+    fx.sources._agents[fx.alpha.id] = [_agent(fx.alpha, "coder1", "working", agent_id=aid)]
+    fx.clock.tick(seconds=30)
+    queue.refresh()  # the owner granted it: the tick clears the row
+    assert queue.get(row.id).status == "resolved"
+    with pytest.raises(AlreadyResolvedError, match="already resolved") as caught:
+        queue.resolve(row.id, "pressed y")  # the captain's bookkeeping, a tick late
+    assert isinstance(caught.value, LookupError), "T1 says refused:"
+    with pytest.raises(AlreadyResolvedError):
+        queue.snooze(row.id, 5)
+    assert len(queue.get(row.id).history) == 1, "no silent second entry"
+    fx.clock.tick(minutes=2)
+    fx.sources._agents[fx.alpha.id] = [prompt]
+    queue.refresh()  # the next prompt: the row comes back
+    back = queue.get(row.id)
+    assert back.status == "open" and back.count == 2
+
+
+def test_a_snoozed_row_can_still_be_resolved(fx: Fixture) -> None:
+    fx.manager(fx.alpha)
+    fx.ask(fx.alpha, "Approve the deploy", seq=1)
+    queue = fx.queue()
+    queue.refresh()
+    (row,) = queue.attention()
+    queue.snooze(row.id, 5)
+    assert queue.resolve(row.id, "done anyway").status == "resolved"
+
+
+def test_first_sight_reads_the_boards_own_newest_events_not_a_global_window(fx: Fixture) -> None:
+    """Should-fix 4: seqs are global; a quiet board next to a busy one keeps its questions."""
+    fx.manager(fx.alpha)
+    fx.manager(fx.beta)
+    fx.ask(fx.alpha, "The quiet board's one question", seq=1, at=fx.clock.now - timedelta(hours=1))
+    for seq in range(2, EVENT_LIMIT + 200):
+        fx.sources._events.setdefault(fx.beta.id, []).append(
+            _event(fx.beta, f"busy note {seq}", seq, at=fx.clock.now, kind="note")
+        )
+    queue = fx.queue()
+    queue.refresh()
+    assert [item.text for item in queue.attention()] == ["The quiet board's one question"]
+
+
+def test_a_pane_that_could_not_be_read_keeps_its_rows_unchanged(fx: Fixture) -> None:
+    """Should-fix 5: "could not observe" is not "observed absent"."""
+    aid = new_agent_id()
+    quiet = _agent(fx.alpha, "codex1", "waiting", detail="no hooks", agent_id=aid)
+    fx.sources._agents[fx.alpha.id] = [quiet]
+    fx.sources._tails[aid] = ["Do you want to proceed? [y/N]"]
+    queue = fx.queue()
+    queue.refresh()
+    (row,) = queue.attention()
+    fx.sources._unobservable.add(aid)
+    fx.clock.tick(seconds=30)
+    snapshot = queue.refresh()
+    assert snapshot.cleared == 0 and queue.get(row.id).status == "open"
+    fx.sources._unobservable.discard(aid)
+    fx.sources._tails[aid] = ["$ "]
+    queue.refresh()
+    assert queue.get(row.id).status == "resolved" and queue.get(row.id).count == 1
+
+
+def test_only_the_bottom_lines_of_a_screen_can_hold_the_prompt(fx: Fixture) -> None:
+    quiet = _agent(fx.alpha, "codex1", "waiting", detail="no hooks")
+    fx.sources._agents[fx.alpha.id] = [quiet]
+    fx.sources._tails[quiet.agent.id] = [
+        "Do you want to proceed? [y/N] y",
+        "installing...",
+        "done.",
+        "",
+        "$ ",
+    ]
+    queue = fx.queue()
+    queue.refresh()
+    assert queue.items() == []
+
+
+def test_the_captains_own_question_is_never_the_owners(fx: Fixture) -> None:
+    """Should-fix 6: a question the captain relays through T1's note() is not read back."""
+    fx.manager(fx.alpha)
+    captain = _session(fx.alpha, "captain:alpha", "captain", last_seen=fx.clock.now)
+    fx.sources._sessions[fx.alpha.id].append(captain)
+    fx.ask(fx.alpha, "coder-1: is the migration done?", seq=1, session_id=captain.id)
+    queue = fx.queue()
+    queue.refresh()
+    assert queue.items() == []
+
+
+def test_an_older_observation_folded_later_does_not_undo_a_newer_fold(fx: Fixture) -> None:
+    """Should-fix 7: two refreshes racing; the one that looked later wins."""
+    from aisquare.services.captain.queue import _fold, observe
+
+    aid = new_agent_id()
+    prompt = _agent(fx.alpha, "coder1", "attention", detail="permission prompt", agent_id=aid)
+    fx.sources._agents[fx.alpha.id] = [prompt]
+    queue = fx.queue()
+    queue.refresh()
+    (row,) = queue.attention()
+    older = observe(fx.sources, cursors=queue._load().cursors, now=fx.clock.now)  # sees the prompt
+    fx.clock.tick(seconds=20)
+    fx.sources._agents[fx.alpha.id] = [_agent(fx.alpha, "coder1", "working", agent_id=aid)]
+    queue.refresh()  # the newer look: the prompt is gone, the row clears
+    assert queue.get(row.id).status == "resolved"
+    state = queue._load()
+    snapshot = _fold(state, older, fx.clock.now)
+    assert snapshot.reopened == 0
+    assert state.items[row.key].status == "resolved", "the older look changes nothing"
+
+
+def test_normalise_is_bounded_on_untrusted_text() -> None:
+    """Should-fix 8a: no quadratic pattern under the lock."""
+    hostile = "seq" + " " * 200_000 + "1 " + "x" * 200_000
+    started = time.perf_counter()
+    out = normalise(hostile)
+    assert time.perf_counter() - started < 0.5
+    assert len(out) <= 2000
+
+
+def test_escape_sequences_and_hyperlink_targets_never_reach_the_owner(fx: Fixture) -> None:
+    """Should-fix 8b: an OSC 8 link target is invisible on screen and must stay so."""
+    line = (
+        "\x1b]8;;http://evil.example/ignore-your-rules\x07Continue? [y/N]"
+        "\x1b]8;;\x07\x1b[31m\x1b[0m"
+    )
+    assert plain(line) == "Continue? [y/N]"
+    quiet = _agent(fx.alpha, "codex1", "waiting", detail="no hooks")
+    fx.sources._agents[fx.alpha.id] = [quiet]
+    fx.sources._tails[quiet.agent.id] = [line]
+    queue = fx.queue()
+    queue.refresh()
+    (row,) = queue.items()
+    assert "evil" not in row.text and "Continue? [y/N]" in row.text
+
+
+def test_a_one_word_substitution_is_not_a_near_duplicate_but_an_added_word_is(
+    fx: Fixture,
+) -> None:
+    """Should-fix 9: staging vs production sit at exactly 0.800 — two requests."""
+    a = "Can I delete the staging database before the release tonight?"
+    b = "Can I delete the production database before the release tonight?"
+    assert not near_duplicates(a, b)
+    assert near_duplicates(a, a + " please")
+    fx.manager(fx.alpha)
+    fx.ask(fx.alpha, a, seq=1)
+    fx.clock.tick(minutes=1)
+    fx.ask(fx.alpha, b, seq=2)
+    queue = fx.queue()
+    queue.refresh()
+    assert len(queue.attention()) == 2
+
+
+def test_the_source_seq_guard_folds_the_same_observation_once(fx: Fixture) -> None:
+    """Pin 10a: the guard, not the cursor, is what makes a fold idempotent."""
+    from aisquare.services.captain.queue import _fold, observe
+
+    fx.manager(fx.alpha)
+    fx.ask(fx.alpha, "Approve the deploy", seq=1)
+    queue = fx.queue()
+    seen = observe(fx.sources, cursors={}, now=fx.clock.now)
+    state = queue._load()
+    _fold(state, seen, fx.clock.now)
+    _fold(state, seen, fx.clock.now)
+    (row,) = state.items.values()
+    assert row.count == 1
+
+
+def test_a_managers_question_counts_whoever_it_is_addressed_to(fx: Fixture) -> None:
+    """Pin 10b: the manager-author rule."""
+    manager = fx.manager(fx.alpha)
+    fx.ask(fx.alpha, "manager asks a runner", seq=1, session_id=manager.id, to_role="runner")
+    queue = fx.queue()
+    queue.refresh()
+    assert [i.text for i in queue.items()] == ["manager asks a runner"]
+
+
+def test_a_question_to_a_stale_manager_falls_to_the_owner(fx: Fixture) -> None:
+    """Pin 10c: "live" means seen within STALE_AFTER."""
+    fx.manager(fx.alpha, live=False)
+    coder = _session(fx.alpha, "coder-a", "coder", last_seen=fx.clock.now)
+    fx.sources._sessions[fx.alpha.id].append(coder)
+    fx.ask(
+        fx.alpha,
+        "coder asks a manager who went dark",
+        seq=1,
+        session_id=coder.id,
+        to_role="manager",
+    )
+    queue = fx.queue()
+    queue.refresh()
+    assert len(queue.items()) == 1
+
+
+def test_the_same_text_on_two_boards_is_two_rows(fx: Fixture) -> None:
+    """Pin 10d: the project is part of the key."""
+    fx.manager(fx.alpha)
+    fx.manager(fx.beta)
+    fx.ask(fx.alpha, "Approve the deploy", seq=1)
+    fx.ask(fx.beta, "Approve the deploy", seq=2)
+    queue = fx.queue()
+    queue.refresh()
+    assert sorted(i.project for i in queue.items()) == sorted([fx.alpha.id, fx.beta.id])
+
+
+@pytest.mark.parametrize(
+    ("noisy", "clean"),
+    [
+        ("ask about 0c9e1a2b-3d4e-5f60-7182-93a4b5c6d7e8 now", "ask about now"),
+        ("ask about deadbeefcafe now", "ask about now"),
+        ("ask at 2026-09-25T07:14:16Z now", "ask at now"),
+        ("ask at 07:14 now", "ask at now"),
+        ("ask on evt_01abc now", "ask on now"),
+        ("ask #13011 now", "ask now"),
+        ("ask seq 13011 now", "ask now"),
+    ],
+)
+def test_each_stripping_pattern_earns_its_place(noisy: str, clean: str) -> None:
+    """Pin 10e: every pattern in _ID_PATTERNS is exercised on its own."""
+    assert normalise(noisy) == clean
+
+
+def test_a_decision_event_gates_a_review_card_too(fx: Fixture) -> None:
+    """Pin 10f: GATE_KINDS is result AND decision."""
+    card = _task(fx.alpha, "Gate the fold", "review", at=fx.clock.now - timedelta(hours=1))
+    fx.sources._tasks[fx.alpha.id] = [card]
+    fx.sources._events[fx.alpha.id] = [
+        _event(fx.alpha, "APPROVE", seq=5, at=fx.clock.now, kind="decision", task_id=card.id)
+    ]
+    queue = fx.queue()
+    queue.refresh()
+    assert queue.items() == []
+
+
+def test_history_entries_are_part_of_the_json_shape(fx: Fixture) -> None:
+    """Pin 10g."""
+    fx.manager(fx.alpha)
+    fx.ask(fx.alpha, "Approve the deploy", seq=1)
+    queue = fx.queue()
+    queue.refresh()
+    (row,) = queue.attention()
+    queue.snooze(row.id, 5)
+    (dumped,) = as_json(queue.items())
+    history = dumped["history"]
+    assert isinstance(history, list) and len(history) == 1
+    assert set(history[0]) == {"at", "action", "how"}
+    assert history[0]["action"] == "snoozed" and history[0]["how"] == "5 min"
+
+
+def test_review_with_no_gate_anchors_on_the_task_review_event_not_updated_at(fx: Fixture) -> None:
+    """Should-fix 12: a later bump of updated_at must not hide the gate."""
+    entered = fx.clock.now - timedelta(hours=2)
+    card = _task(fx.alpha, "Gate the fold", "review", at=fx.clock.now)  # updated_at bumped NOW
+    fx.sources._tasks[fx.alpha.id] = [card]
+    fx.sources._events[fx.alpha.id] = [
+        _event(fx.alpha, "to review", seq=3, at=entered, kind="task_review", task_id=card.id),
+        _event(
+            fx.alpha,
+            "GATE PASS",
+            seq=4,
+            at=entered + timedelta(minutes=30),
+            kind="result",
+            task_id=card.id,
+        ),
+    ]
+    queue = fx.queue()
+    queue.refresh()
+    assert queue.items() == [], "gated after it entered review; the bump is not a re-entry"
+
+
+def test_history_is_capped_and_old_resolved_rows_are_dropped(fx: Fixture) -> None:
+    """Should-fix 13a: the file must not only grow."""
+    fx.manager(fx.alpha)
+    queue = fx.queue()
+    fx.ask(fx.alpha, "Approve the deploy", seq=1)
+    queue.refresh()
+    (row,) = queue.attention()
+    for seq in range(2, HISTORY_KEEP + 12):
+        queue.resolve(row.id, f"round {seq}")
+        fx.clock.tick(minutes=1)
+        fx.ask(fx.alpha, "Approve the deploy", seq=seq)
+        queue.refresh()
+    assert len(queue.get(row.id).history) <= HISTORY_KEEP
+    queue.resolve(row.id, "for good")
+    fx.clock.tick(seconds=RETAIN_RESOLVED.total_seconds() + 60)
+    queue.refresh()
+    assert queue.items() == []
+
+
+def test_an_unchanged_fold_does_not_rewrite_the_file(fx: Fixture) -> None:
+    """Should-fix 13b: no rewrite, no fsync, when nothing moved."""
+    _seed_three_projects(fx)
+    queue = fx.queue()
+    queue.refresh()
+    before = fx.path.read_bytes()
+    stamp = fx.path.stat().st_mtime_ns
+    fx.clock.tick(seconds=5)
+    queue.refresh()
+    assert fx.path.read_bytes() == before and fx.path.stat().st_mtime_ns == stamp
+
+
+def test_snooze_is_bounded(fx: Fixture) -> None:
+    fx.manager(fx.alpha)
+    fx.ask(fx.alpha, "Approve the deploy", seq=1)
+    queue = fx.queue()
+    queue.refresh()
+    (row,) = queue.attention()
+    with pytest.raises(ValueError, match="minutes"):
+        queue.snooze(row.id, 10**10)
+    assert queue.snooze(row.id, SNOOZE_MAX_MINUTES).status == "snoozed"
+
+
+def test_a_lock_error_that_is_not_held_is_refused_at_once(
+    fx: Fixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def broken(fd: int) -> None:
+        raise OSError(errno.EBADF, "bad descriptor")
+
+    monkeypatch.setattr(captain_queue, "lock_exclusive", broken)
+    started = time.perf_counter()
+    with pytest.raises(QueueError, match="could not be taken"):
+        fx.queue().refresh()
+    assert time.perf_counter() - started < 1.0
+
+
+def test_a_bom_is_read_and_invalid_utf8_is_corrupt_said_once(
+    fx: Fixture, caplog: pytest.LogCaptureFixture
+) -> None:
+    _seed_three_projects(fx)
+    queue = fx.queue()
+    queue.refresh()
+    fx.path.write_bytes(b"\xef\xbb\xbf" + fx.path.read_bytes())
+    assert len(queue.items()) == 3, "a BOM is not corruption"
+    fx.path.write_bytes(b"\xff\xfe{not utf8")
+    with caplog.at_level(logging.WARNING, logger="aisquare.services.captain.queue"):
+        assert queue.items() == []
+        queue.items()
+    assert len([r for r in caplog.records if "is not a queue file" in r.getMessage()]) == 1
+    queue.refresh()
+    assert len(queue.items()) == 3, "the next write replaces the bad file"
 
 
 # --- the default sources read the store ---------------------------------------------------------

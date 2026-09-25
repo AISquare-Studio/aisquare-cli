@@ -38,6 +38,7 @@ tick while the pane is still drawing the prompt.
 from __future__ import annotations
 
 import contextlib
+import errno
 import hashlib
 import json
 import logging
@@ -79,8 +80,10 @@ RANK: dict[str, int] = {
     "pr": 4,
     "stale": 5,
 }
-#: Token-set (Jaccard) similarity at or above which two questions from the same
-#: project, agent and kind, close in time, are one request said twice.
+#: Token-set (Jaccard) similarity ABOVE which two questions from the same project,
+#: agent, kind and card, close in time, are one request said twice — and only when one
+#: token set contains the other: a one-word substitution ("staging" for
+#: "production") is a different request however alike the rest reads (gate 1, item 9).
 NEAR_THRESHOLD = 0.8
 #: How close in time a near-duplicate must be to the row it folds into.
 NEAR_WINDOW = timedelta(minutes=10)
@@ -93,14 +96,27 @@ QUESTION_HORIZON = timedelta(hours=24)
 STALE_AFTER = timedelta(minutes=30)
 #: Roles a question is addressed to that mean "the owner": the human, everyone.
 OWNER_ROLES: frozenset[str] = frozenset({"owner", "user", "all"})
+#: The captain's own board sessions (``captain:<project>``, T1's ``state.CAPTAIN_ROLE``):
+#: a question the captain wrote is never the owner's to answer (gate 1, item 6).
+CAPTAIN_ROLE = "captain"
 #: Kinds derived from the state of things (not from an event): these clear
 #: themselves when the state moves on.
 STATE_KINDS: frozenset[str] = frozenset({"blocked", "waiting", "review", "pr", "stale"})
 #: The events kinds that count as a card having been gated while in review.
 GATE_KINDS: frozenset[str] = frozenset({"result", "decision"})
-#: Rows of a pane tail read for a y/N line, and how many events one refresh reads.
+#: Rows of a pane tail read for a y/N line, how many of its LAST non-blank lines may
+#: hold the prompt (a prompt waits at the bottom; a ``[y/N]`` answered higher up is
+#: history — gate 1, item 5), and how many events one refresh reads.
 PANE_TAIL_LINES = 12
+PROMPT_SCAN_LINES = 3
 EVENT_LIMIT = 500
+#: How much history a row keeps, how long a resolved row stays in the file, and the
+#: longest snooze: the file must not only grow (gate 1, item 13).
+HISTORY_KEEP = 20
+RETAIN_RESOLVED = timedelta(days=7)
+SNOOZE_MAX_MINUTES = 7 * 24 * 60
+#: Untrusted text is bounded before any pattern runs over it (gate 1, item 8).
+NORMALISE_MAX = 2000
 #: The file's format, for a reader of a later version.
 FILE_VERSION = 1
 #: How long a writer waits for the queue's lock before giving up.
@@ -124,12 +140,21 @@ _ID_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\b[0-9a-f]{8,}\b"),
     re.compile(r"\b\d{4}-\d{2}-\d{2}[t ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:z|[+-]\d{2}:?\d{2})?\b"),
     re.compile(r"\b\d{1,2}:\d{2}(?::\d{2})?\b"),
-    re.compile(r"\bseq\s*#?\s*\d+\b"),
+    re.compile(r"\bseq\s{0,3}#?\s{0,3}\d+\b"),
     re.compile(r"#\d+\b"),
 )
 _TOKEN = re.compile(r"[a-z0-9]+")
 _SPACE = re.compile(r"\s+")
-_ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+#: Terminal escapes a pane line may carry — CSI, OSC (BEL- or ST-terminated, so an
+#: OSC 8 hyperlink's target never reaches the owner's ears), single-character ESC
+#: sequences — and the C0 controls left over: T1's ``actions._ESCAPES`` grammar.
+_ESCAPES = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-Z\\-_])")
+_CONTROLS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
+#: The errnos that mean "another writer holds the lock": these are waited on; any
+#: other failure of the lock primitive is refused at once (``state_file._HELD``).
+_HELD: frozenset[int] = frozenset(
+    {errno.EAGAIN, errno.EWOULDBLOCK, errno.EACCES, getattr(errno, "EDEADLK", 35)}
+)
 #: Lines a parked binary prints when it wants a key from a human.
 _PROMPT_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\[\s*y\s*/\s*n\s*\]", re.IGNORECASE),
@@ -144,9 +169,9 @@ _PROMPT_PATTERNS: tuple[re.Pattern[str], ...] = (
 class QueueUnavailable(RuntimeError):
     """The queue cannot answer right now — its lock was held past :data:`LOCK_WAIT_S`.
 
-    The name is the seam's from T1's stub (``actions._failure`` maps it to a
-    refusal the owner can retry), kept so the actions module never references a
-    class that went away with the stub.
+    A ``RuntimeError`` the actions module (T1) reports as ``error: the attention
+    queue failed: …`` — something a retry may fix, not a rule that said no. The
+    name is the seam's from T1's stub, kept so nothing that once imported it breaks.
     """
 
 
@@ -164,6 +189,12 @@ class UnknownItemError(LookupError):
 
 class AmbiguousItemError(LookupError):
     """The reference is a prefix of more than one item's id."""
+
+
+class AlreadyResolvedError(LookupError):
+    """The item is resolved already: resolving or snoozing it again is refused, never a
+    silent second entry — and never a way to lose the absence a tick recorded (gate 1,
+    item 3)."""
 
 
 class HistoryEntry(BaseModel):
@@ -255,7 +286,16 @@ class Observed:
     cursors: dict[str, int] = field(default_factory=dict)
     """The highest event seq read per project — the next refresh reads past it."""
     task_status: dict[str, str] = field(default_factory=dict)
+    task_closed: dict[str, datetime] = field(default_factory=dict)
+    """When each done or dropped card last changed: a question about it clears only if
+    the card closed AFTER the question was last asked (gate 1, item 1)."""
     agent_state: dict[str, str] = field(default_factory=dict)
+    unobserved: set[str] = field(default_factory=set)
+    """Agents whose pane could not be read this pass: "could not observe" is not
+    "observed absent", so their rows pass through the fold unchanged (gate 1, item 5)."""
+    at: datetime | None = None
+    """When the sources were read. A fold whose observation is older than the last one
+    committed skips the state items: it would undo what a newer look already knew."""
 
 
 class Sources(Protocol):
@@ -269,6 +309,8 @@ class Sources(Protocol):
 
     def events(self, project_id: str, *, since_seq: int) -> list[TeamEvent]: ...
 
+    def recent_events(self, project_id: str, *, limit: int) -> list[TeamEvent]: ...
+
     def events_about(
         self, project_id: str, task_id: str, *, since: datetime
     ) -> list[TeamEvent]: ...
@@ -277,7 +319,7 @@ class Sources(Protocol):
 
     def sessions(self, project_id: str) -> list[TeamSession]: ...
 
-    def pane_tail(self, status: FleetAgentStatus) -> list[str]: ...
+    def pane_tail(self, status: FleetAgentStatus) -> list[str] | None: ...
 
     def pull_requests(self, project: ProjectInfo) -> list[PullRequest]: ...
 
@@ -313,6 +355,12 @@ class StoreSources:
         with store_session() as store:
             return store.events_since(project_id, since_seq, limit=EVENT_LIMIT)
 
+    def recent_events(self, project_id: str, *, limit: int) -> list[TeamEvent]:
+        """The board's OWN newest ``limit`` events, oldest first — first sight reads these,
+        not a window of global seqs a busier board may have filled (gate 1, item 4)."""
+        with store_session() as store:
+            return store.filtered_events(project_id, limit=limit)
+
     def events_about(self, project_id: str, task_id: str, *, since: datetime) -> list[TeamEvent]:
         with store_session() as store:
             return store.filtered_events(
@@ -327,22 +375,26 @@ class StoreSources:
         with store_session() as store:
             return store.team_sessions(project_id)
 
-    def pane_tail(self, status: FleetAgentStatus) -> list[str]:
+    def pane_tail(self, status: FleetAgentStatus) -> list[str] | None:
+        """The pane's screen, or ``None`` when it could not be read this pass.
+
+        ``None`` is "could not observe", which the fold keeps apart from "observed
+        and no prompt": a failed capture must not clear a waiting row and re-open
+        it a tick later with its count moved (gate 1, item 5). Said in the log.
+        """
         agent = status.agent
         try:
             server = fleet_service.server_for(agent.tmux_socket)
             return list(server.capture(agent.pane_id, height=self._tail_lines).lines)
         except TmuxError as exc:
-            # Fail-soft, said: the pane is skipped this refresh and the next one
-            # reads it again; a y/N line that is really there is a bell missed
-            # for one tick, never one invented.
             log.warning(
-                "captain queue: could not read the pane of %s (%s): %s",
+                "captain queue: could not read the pane of %s (%s), its rows are kept as "
+                "they were: %s",
                 agent.label,
                 agent.pane_id,
                 exc,
             )
-            return []
+            return None
 
     def pull_requests(self, project: ProjectInfo) -> list[PullRequest]:
         if self._pull_requests is None:
@@ -355,16 +407,25 @@ class StoreSources:
 
 def normalise(text: str) -> str:
     """The comparison form of a request: lower-case, ids, seqs and timestamps stripped,
-    whitespace collapsed — so the same ask about a different task id is the same ask."""
-    lowered = text.lower()
+    whitespace collapsed — so the same ask about a different task id is the same ask.
+
+    Bounded first (:data:`NORMALISE_MAX`, whitespace collapsed) and only then
+    matched: the text is untrusted, and a pattern over a long run of whitespace
+    must not cost quadratic time under the queue's lock (gate 1, item 8).
+    """
+    lowered = _SPACE.sub(" ", text[:NORMALISE_MAX].lower())
     for pattern in _ID_PATTERNS:
         lowered = pattern.sub(" ", lowered)
     return _SPACE.sub(" ", lowered).strip()
 
 
-def dedup_key(project: str, agent: str | None, kind: str, text: str) -> str:
-    """The stable key of a request: project, agent, kind and the normalised text."""
-    return _digest(f"{project}|{agent or ''}|{kind}|{normalise(text)}")
+def dedup_key(
+    project: str, agent: str | None, kind: str, text: str, card: str | None = None
+) -> str:
+    """The stable key of a request: project, agent, kind, the card it is about (if any) and
+    the normalised text — so "merge tsk_A?" and "merge tsk_B?" are two requests even
+    though the ids are stripped from the text (gate 1, item 1b)."""
+    return _digest(f"{project}|{agent or ''}|{kind}|{card or ''}|{normalise(text)}")
 
 
 def _state_key(project: str, agent: str | None, kind: str, ref: str) -> str:
@@ -380,13 +441,25 @@ def _item_id(key: str) -> str:
     return "q" + key[:8]
 
 
+def _tokens(text: str) -> set[str]:
+    return set(_TOKEN.findall(normalise(text)))
+
+
 def similarity(a: str, b: str) -> float:
     """Jaccard similarity of the two texts' token sets, over their normalised forms."""
-    first = set(_TOKEN.findall(normalise(a)))
-    second = set(_TOKEN.findall(normalise(b)))
+    first, second = _tokens(a), _tokens(b)
     if not first or not second:
         return 0.0
     return len(first & second) / len(first | second)
+
+
+def near_duplicates(a: str, b: str) -> bool:
+    """Whether two texts are one request said twice: alike ABOVE :data:`NEAR_THRESHOLD`
+    and one token set containing the other — words added or dropped, never swapped."""
+    first, second = _tokens(a), _tokens(b)
+    if not first or not second or not (first <= second or second <= first):
+        return False
+    return len(first & second) / len(first | second) > NEAR_THRESHOLD
 
 
 # --- what counts --------------------------------------------------------------------------------
@@ -399,11 +472,15 @@ def is_owner_question(event: TeamEvent, *, roles: Mapping[str, str], manager_liv
     so is anything addressed to the owner, to everyone, or to nobody in
     particular; and a question to the manager on a board with NO live manager
     falls to the owner, because nobody else will read it. A coder's question to
-    a live manager, or to a runner, is that role's business.
+    a live manager, or to a runner, is that role's business — and a question the
+    CAPTAIN wrote (``note(kind="question")`` through T1) is the captain relaying the
+    owner, never something to read back to them (gate 1, item 6).
     """
     if event.kind != "question":
         return False
     author = roles.get(event.session_id or "")
+    if author is not None and team_service.base_role(author) == CAPTAIN_ROLE:
+        return False  # the captain's own question, relayed for the owner — never read back
     if author is not None and team_service.base_role(author) == "manager":
         return True
     to = (event.to_role or "").strip().lower()
@@ -421,11 +498,18 @@ def _manager_live(sessions: Iterable[TeamSession], now: datetime) -> bool:
     )
 
 
+def plain(line: str) -> str:
+    """A pane line as the owner would hear it: escapes (CSI, OSC, ESC) and controls gone."""
+    return _CONTROLS.sub("", _ESCAPES.sub("", line)).strip()
+
+
 def _prompt_line(tail: Iterable[str]) -> str | None:
-    """The last line of a pane tail that asks a human for a key, plain text, or ``None``."""
-    for raw in reversed(list(tail)):
-        line = _ANSI.sub("", raw).strip()
-        if line and any(pattern.search(line) for pattern in _PROMPT_PATTERNS):
+    """The line among the LAST :data:`PROMPT_SCAN_LINES` non-blank ones that asks a human
+    for a key, plain text, or ``None`` — a prompt waits at the bottom of the screen."""
+    lines = [plain(raw) for raw in tail]
+    bottom = [line for line in lines if line][-PROMPT_SCAN_LINES:]
+    for line in reversed(bottom):
+        if any(pattern.search(line) for pattern in _PROMPT_PATTERNS):
             return line
     return None
 
@@ -454,7 +538,7 @@ class _PaneSite:
 
 def observe(sources: Sources, *, cursors: Mapping[str, int], now: datetime) -> Observed:
     """One pass over every project: what needs the owner right now, and where the events stand."""
-    seen = Observed()
+    seen = Observed(at=now)
     for project in sources.projects():
         name = project.root.name or project.id
         sessions = sources.sessions(project.id)
@@ -464,14 +548,17 @@ def observe(sources: Sources, *, cursors: Mapping[str, int], now: datetime) -> O
         cursor = cursors.get(project.id)
         horizon: datetime | None = None
         if cursor is None:
-            # First sight of this board: the tail of its history, and only what is
-            # recent enough to still be an agenda. From here on every event past
-            # the cursor is new to the owner, however long the captain was away.
-            latest = sources.latest_seq(project.id)
-            cursor = max(0, latest - EVENT_LIMIT)
+            # First sight of this board: ITS newest events (not a window of global
+            # seqs a busier board may have filled — gate 1, item 4), and only what is
+            # recent enough to still be an agenda. From here on every event past the
+            # cursor is new to the owner, however long the captain was away.
+            events = sources.recent_events(project.id, limit=EVENT_LIMIT)
             horizon = now - QUESTION_HORIZON
-            seen.cursors[project.id] = latest
-        for event in sources.events(project.id, since_seq=cursor):
+            seen.cursors[project.id] = sources.latest_seq(project.id)
+            cursor = 0
+        else:
+            events = sources.events(project.id, since_seq=cursor)
+        for event in events:
             seen.cursors[project.id] = max(seen.cursors.get(project.id, cursor), event.seq)
             if event.kind != "question":
                 continue
@@ -483,7 +570,7 @@ def observe(sources: Sources, *, cursors: Mapping[str, int], now: datetime) -> O
             text = event.text.strip()
             seen.observations.append(
                 Observation(
-                    key=dedup_key(project.id, agent, "question", text),
+                    key=dedup_key(project.id, agent, "question", text, event.task_id),
                     project=project.id,
                     project_name=name,
                     agent=agent,
@@ -497,6 +584,8 @@ def observe(sources: Sources, *, cursors: Mapping[str, int], now: datetime) -> O
             )
         for task in sources.tasks(project.id):
             seen.task_status[task.id] = task.status
+            if task.status in ("done", "dropped"):
+                seen.task_closed[task.id] = task.updated_at
             if task.status == "blocked":
                 seen.observations.append(
                     Observation(
@@ -511,10 +600,15 @@ def observe(sources: Sources, *, cursors: Mapping[str, int], now: datetime) -> O
                     )
                 )
             elif task.status == "review":
-                gated = any(
-                    event.kind in GATE_KINDS
-                    for event in sources.events_about(project.id, task.id, since=task.updated_at)
+                # "Entered review" is the latest task_review event about the card, not
+                # updated_at, which other writes bump (gate 1, item 12); a gate is a
+                # result or decision about the card since then.
+                about = sources.events_about(project.id, task.id, since=task.created_at)
+                entered = max(
+                    (e.created_at for e in about if e.kind == "task_review"),
+                    default=task.updated_at,
                 )
+                gated = any(e.kind in GATE_KINDS and e.created_at >= entered for e in about)
                 if not gated:
                     seen.observations.append(
                         Observation(
@@ -533,7 +627,9 @@ def observe(sources: Sources, *, cursors: Mapping[str, int], now: datetime) -> O
             label = agent_row.label
             seen.agent_state[agent_row.id] = status.state
             session = status.session
-            seen_at = session.last_seen_at if session is not None else now
+            # The hook's stamp when there is one, else the agent's start: never this
+            # tick's clock, so a persisting condition is not a new fact every tick.
+            seen_at = session.last_seen_at if session is not None else agent_row.created_at
             pane = _PaneSite(project.id, name, label, agent_row.id)
             if status.state == "attention":
                 suffix = f": {status.detail}" if status.detail else ""
@@ -549,15 +645,23 @@ def observe(sources: Sources, *, cursors: Mapping[str, int], now: datetime) -> O
                         )
                     )
                 else:
-                    line = _prompt_line(sources.pane_tail(status))
-                    if line is not None:
-                        seen.observations.append(
-                            pane.observed("waiting", f"{label} asks: {line}", now)
-                        )
+                    tail = sources.pane_tail(status)
+                    if tail is None:
+                        seen.unobserved.add(agent_row.id)
+                    else:
+                        line = _prompt_line(tail)
+                        if line is not None:
+                            # No hook stamped this prompt; the agent's start is the
+                            # stable stamp, so a persisting prompt is not "new" each tick.
+                            seen.observations.append(
+                                pane.observed(
+                                    "waiting", f"{label} asks: {line}", agent_row.created_at
+                                )
+                            )
             elif status.state in ("lost", "unknown"):
                 suffix = f": {status.detail}" if status.detail else ""
                 seen.observations.append(
-                    pane.observed("stale", f"{label} is {status.state}{suffix}", now)
+                    pane.observed("stale", f"{label} is {status.state}{suffix}", seen_at)
                 )
         for pr in sources.pull_requests(project):
             seen.observations.append(
@@ -568,7 +672,7 @@ def observe(sources: Sources, *, cursors: Mapping[str, int], now: datetime) -> O
                     agent=None,
                     kind="pr",
                     text=f"PR #{pr.number} {pr.title} waits on you",
-                    seen_at=now,
+                    seen_at=now,  # a provider gives no stamp; the row's first_seen keeps it
                     source_ref=str(pr.number),
                 )
             )
@@ -605,6 +709,10 @@ class _State:
     items: dict[str, QueueItem] = field(default_factory=dict)
     """By dedup key."""
     cursors: dict[str, int] = field(default_factory=dict)
+    folded_at: datetime | None = None
+    """When the newest committed fold observed its sources (gate 1, item 7)."""
+    raw: str | None = None
+    """The file's text as read, so an unchanged fold writes nothing (gate 1, item 13)."""
 
 
 class AttentionQueue:
@@ -679,21 +787,24 @@ class AttentionQueue:
         with self._locked():
             state = self._load()
             item = _find(state, ref)
+            _refuse_resolved(item, "resolve")
             item.status = "resolved"
             item.snoozed_until = None
-            item.absent_since = None
+            # absent_since is left alone: a state item resolved by hand keeps whatever
+            # absence a tick recorded, so the condition coming back is still queued.
             item.history.append(HistoryEntry(at=now, action="resolved", how=how.strip() or None))
             self._write(state)
         return item
 
     def snooze(self, ref: str, minutes: int) -> QueueItem:
         """Hide a row for ``minutes``; it returns to the list, open, when the time is up."""
-        if minutes <= 0:
-            raise ValueError("snooze needs a positive number of minutes")
+        if not 0 < minutes <= SNOOZE_MAX_MINUTES:
+            raise ValueError(f"snooze takes 1 to {SNOOZE_MAX_MINUTES} minutes (a week)")
         now = self._clock()
         with self._locked():
             state = self._load()
             item = _find(state, ref)
+            _refuse_resolved(item, "snooze")
             item.status = "snoozed"
             item.snoozed_until = now + timedelta(minutes=minutes)
             item.history.append(HistoryEntry(at=now, action="snoozed", how=f"{minutes} min"))
@@ -703,13 +814,26 @@ class AttentionQueue:
     # -- the file --
 
     def _load(self) -> _State:
+        """The file, or an empty state for a missing or blank one.
+
+        A file that EXISTS but cannot be read raises :class:`QueueError`: reading it
+        as empty and then writing that back would lose every resolved row, its
+        history and the cursors (gate 1, item 2), so the refresh, the resolve and
+        the reads all stop instead. Through ``paths.despite_windows_contention``,
+        as ``state.json`` is read: a read racing another process's rename on NTFS
+        is retried, not refused.
+        """
         try:
-            raw = self.path.read_text(encoding="utf-8")
+            data = paths.despite_windows_contention(self.path.read_bytes)
         except FileNotFoundError:
             return _State()
         except OSError as exc:
-            log.warning("captain queue: %s could not be read, starting empty: %s", self.path, exc)
-            return _State()
+            raise QueueError(f"{self.path} exists but could not be read: {exc}") from exc
+        try:
+            raw = data.decode("utf-8-sig")
+        except UnicodeDecodeError as exc:
+            self._report_corrupt(exc)
+            return _State(raw=None)
         if not raw.strip(_BLANK):
             return _State()  # nothing in it to protect: a fresh file, or a crash's NULs
         try:
@@ -722,28 +846,38 @@ class AttentionQueue:
                 raise ValueError("items is not a list or cursors is not an object")
             items = [QueueItem.model_validate(row) for row in items_raw]
             cursors = {str(key): int(value) for key, value in cursors_raw.items()}
+            folded_raw = body.get("folded_at")
+            folded_at = datetime.fromisoformat(folded_raw) if isinstance(folded_raw, str) else None
         except (ValueError, TypeError, ValidationError) as exc:
-            # Said, never silent: a corrupt queue costs the owner its history,
-            # and the file is rewritten whole on the next write. Once per path
-            # per process: reads cannot mend the file and would say it forever.
-            if self.path not in _REPORTED_CORRUPT:
-                _REPORTED_CORRUPT.add(self.path)
-                log.warning(
-                    "captain queue: %s is not a queue file, starting empty: %s", self.path, exc
-                )
+            self._report_corrupt(exc)
             return _State()
-        return _State(items={item.key: item for item in items}, cursors=cursors)
+        return _State(
+            items={item.key: item for item in items}, cursors=cursors, folded_at=folded_at, raw=raw
+        )
+
+    def _report_corrupt(self, exc: Exception) -> None:
+        # Said, never silent: a corrupt queue costs the owner its history, and the
+        # file is rewritten whole on the next write. Once per path per process:
+        # reads cannot mend the file and would say it forever.
+        if self.path not in _REPORTED_CORRUPT:
+            _REPORTED_CORRUPT.add(self.path)
+            log.warning("captain queue: %s is not a queue file, starting empty: %s", self.path, exc)
 
     def _write(self, state: _State) -> None:
         body = {
             "version": FILE_VERSION,
             "cursors": dict(sorted(state.cursors.items())),
+            "folded_at": state.folded_at.isoformat() if state.folded_at is not None else None,
             "items": [item.model_dump(mode="json") for item in rank(state.items.values())],
         }
+        text = json.dumps(body, indent=1, sort_keys=True) + "\n"
+        if text == state.raw:
+            return  # the fold changed nothing: no rewrite, no fsync
         try:
-            write_replacing(self.path, json.dumps(body, indent=1, sort_keys=True) + "\n")
+            write_replacing(self.path, text)
         except OSError as exc:
             raise QueueError(f"{self.path} could not be written: {exc}") from exc
+        state.raw = text
         _REPORTED_CORRUPT.discard(self.path)  # whole again; a later corruption is news
 
     @contextlib.contextmanager
@@ -769,6 +903,8 @@ class AttentionQueue:
                     lock_exclusive(fd)
                     break
                 except OSError as exc:
+                    if exc.errno not in _HELD:
+                        raise QueueError(f"{self.path}.lock could not be taken: {exc}") from exc
                     if time.monotonic() >= deadline:
                         raise QueueUnavailable(
                             f"{self.path}.lock is held by another writer — try again"
@@ -809,7 +945,17 @@ def _find(state: _State, ref: str) -> QueueItem:
     return matches[0]
 
 
-def _wake(state: _State, now: datetime) -> None:
+def _refuse_resolved(item: QueueItem, verb: str) -> None:
+    if item.status != "resolved":
+        return
+    last = next((h for h in reversed(item.history) if h.action in ("resolved", "cleared")), None)
+    how = f" ({last.how})" if last is not None and last.how else ""
+    raise AlreadyResolvedError(f"{item.id} is already resolved{how} — nothing to {verb}")
+
+
+def _wake(state: _State, now: datetime) -> int:
+    """Snoozes that ran out come back open; returns how many did."""
+    woken = 0
     for item in state.items.values():
         if (
             item.status == "snoozed"
@@ -818,20 +964,24 @@ def _wake(state: _State, now: datetime) -> None:
         ):
             item.status = "open"
             item.snoozed_until = None
+            woken += 1
+    return woken
 
 
 def _near_match(state: _State, obs: Observation) -> QueueItem | None:
-    """The row a near-duplicate question folds into: same project, agent and kind, last
-    seen within :data:`NEAR_WINDOW`, texts at least :data:`NEAR_THRESHOLD` alike."""
+    """The row a near-duplicate question folds into: same project, agent, kind and card,
+    last seen within :data:`NEAR_WINDOW`, :func:`near_duplicates` of each other."""
     best: QueueItem | None = None
     best_score = 0.0
     for item in state.items.values():
         if item.kind != "question" or item.project != obs.project or item.agent != obs.agent:
             continue
-        if abs(obs.seen_at - item.last_seen) > NEAR_WINDOW:
+        if item.card != obs.card or abs(obs.seen_at - item.last_seen) > NEAR_WINDOW:
+            continue
+        if not near_duplicates(item.text, obs.text):
             continue
         score = similarity(item.text, obs.text)
-        if score >= NEAR_THRESHOLD and score > best_score:
+        if score > best_score:
             best, best_score = item, score
     return best
 
@@ -848,11 +998,18 @@ def _cleared_how(item: QueueItem, seen: Observed) -> str:
 
 def _fold(state: _State, seen: Observed, now: datetime) -> QueueSnapshot:
     """Fold one pass of observations into the rows; the counts are the receipt."""
-    _wake(state, now)
+    woken = _wake(state, now)
     snapshot = QueueSnapshot(refreshed_at=now)
+    # A fold whose look at the sources is OLDER than the last one committed must not
+    # undo what the newer look knew (the owner pressed y; a later tick cleared the
+    # row; this older view would re-open it): its state items are skipped, and its
+    # questions — keyed by seq, idempotent — still fold (gate 1, item 7).
+    stale = state.folded_at is not None and seen.at is not None and seen.at < state.folded_at
     present: set[str] = set()
     ordered = sorted(seen.observations, key=lambda o: (o.seen_at, o.source_seq or 0))
     for obs in ordered:
+        if stale and obs.kind in STATE_KINDS:
+            continue
         item = state.items.get(obs.key)
         if item is None and obs.kind == "question":
             item = _near_match(state, obs)
@@ -886,44 +1043,50 @@ def _fold(state: _State, seen: Observed, now: datetime) -> QueueSnapshot:
             item.last_seen = max(item.last_seen, obs.seen_at)
             item.source_seq = obs.source_seq
             item.source_ref = obs.source_ref
-            item.card = item.card or obs.card
             if item.status == "resolved":
                 _reopen(item, now)
                 snapshot.reopened += 1
             else:
                 snapshot.folded += 1
             continue
-        # A state item: the condition is (still) there.
+        # A state item: the condition is (still) there. Its last_seen is the SOURCE's
+        # own stamp (the hook that parked it, the card's change), not this tick's clock:
+        # a world that did not move is a file that does not move (gate 1, item 13).
         item.project_name = obs.project_name
         if item.status == "resolved":
             if item.absent_since is not None:
                 item.count += 1
                 item.text = obs.text
-                item.last_seen = max(item.last_seen, obs.seen_at, now)
+                item.last_seen = max(item.last_seen, obs.seen_at)
                 item.absent_since = None
                 _reopen(item, now)
                 snapshot.reopened += 1
             else:
-                item.last_seen = max(item.last_seen, now)
+                item.last_seen = max(item.last_seen, obs.seen_at)
         else:
             item.text = obs.text
-            item.last_seen = max(item.last_seen, now)
+            item.last_seen = max(item.last_seen, obs.seen_at)
     for item in state.items.values():
         if item.kind == "question":
-            # The rider on the card (seq 13019): a question about a card that has
-            # since closed is answered by the closing, whoever did it.
-            closed = item.card is not None and seen.task_status.get(item.card) in (
-                "done",
-                "dropped",
-            )
-            if closed and item.status in ("open", "snoozed"):
+            # The rider on the card (seq 13019): a question about a card that closed
+            # AFTER it was last asked is answered by the closing, whoever did it. A
+            # card that was already closed when the question came is not an answer
+            # to it — the owner hears that question (gate 1, item 1a).
+            closed_at = seen.task_closed.get(item.card) if item.card is not None else None
+            if (
+                closed_at is not None
+                and closed_at > item.last_seen
+                and item.status in ("open", "snoozed")
+            ):
                 item.status = "resolved"
                 item.snoozed_until = None
                 item.history.append(HistoryEntry(at=now, action="cleared", how="closed"))
                 snapshot.cleared += 1
             continue
-        if item.key in present:
+        if stale or item.key in present:
             continue
+        if item.kind in ("waiting", "stale") and item.source_ref in seen.unobserved:
+            continue  # the pane could not be read: not absent, not present — unchanged
         if item.status in ("open", "snoozed"):
             item.status = "resolved"
             item.snoozed_until = None
@@ -934,6 +1097,20 @@ def _fold(state: _State, seen: Observed, now: datetime) -> QueueSnapshot:
             snapshot.cleared += 1
         elif item.absent_since is None:
             item.absent_since = now
+    retired = _retire(state, now)
+    # The stamp moves only when the fold CHANGED something: a look that agreed with
+    # the file has nothing an older look could undo, and stamping it would rewrite
+    # (and fsync) the file on every quiet tick (gate 1, item 13).
+    changed = bool(
+        woken
+        or retired
+        or snapshot.added
+        or snapshot.folded
+        or snapshot.reopened
+        or snapshot.cleared
+    )
+    if changed and seen.at is not None and not stale:
+        state.folded_at = seen.at
     for item in state.items.values():
         if item.status == "open":
             snapshot.open += 1
@@ -942,6 +1119,25 @@ def _fold(state: _State, seen: Observed, now: datetime) -> QueueSnapshot:
         else:
             snapshot.resolved += 1
     return snapshot
+
+
+def _retire(state: _State, now: datetime) -> int:
+    """Keep the file bounded: :data:`HISTORY_KEEP` entries per row, and a resolved row
+    goes once nothing has touched it for :data:`RETAIN_RESOLVED` (gate 1, item 13). A
+    row that comes back after that is simply new, with a new history. Returns how many
+    rows or entries went."""
+    gone = 0
+    for key, item in list(state.items.items()):
+        if len(item.history) > HISTORY_KEEP:
+            gone += len(item.history) - HISTORY_KEEP
+            del item.history[: len(item.history) - HISTORY_KEEP]
+        if item.status != "resolved":
+            continue
+        touched = max([item.last_seen, *(entry.at for entry in item.history)])
+        if now - touched > RETAIN_RESOLVED:
+            del state.items[key]
+            gone += 1
+    return gone
 
 
 def _reopen(item: QueueItem, now: datetime) -> None:

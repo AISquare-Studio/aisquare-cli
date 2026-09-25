@@ -161,7 +161,7 @@ function connect() {
   ws.onmessage = (e) => {
     let m; try { m = JSON.parse(e.data); } catch { return; }
     switch (m.t) {
-      case 'hello': wakeWord = m.wake_word || ''; setStatus('connected', 'on'); setMode(m.mode, false); listening = m.listening; speakerBtn.textContent = 'speaker: ' + (m.speaker ? 'on' : 'off'); thinking.className = 'chip' + (m.thinking ? ' on' : ''); if (m.mode === 'listen' && m.listening) startStream(); break;
+      case 'hello': wakeWord = m.wake_word || ''; awake = false; setStatus('connected', 'on'); setMode(m.mode, false); listening = m.listening; speakerBtn.textContent = 'speaker: ' + (m.speaker ? 'on' : 'off'); thinking.className = 'chip' + (m.thinking ? ' on' : ''); if (m.mode === 'listen' && m.listening) startStream(); break;
       case 'mode': setMode(m.mode, false); listening = m.listening; if (listening) startStream(); else stopStream(); break;
       case 'awake': awake = m.on; if (listening) setStatus(awake ? 'listening' : idleListenLabel(), 'on'); if (awake) cue(); break;
       case 'listening': listening = m.on; if (!m.on) { stopStream(); say('note', m.why ? 'mic off (' + m.why + ')' : 'mic off'); muteBtn.textContent = 'unmute'; muted = true; } else { muteBtn.textContent = 'mute'; muted = false; startStream(); } break;

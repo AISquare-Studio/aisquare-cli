@@ -91,8 +91,23 @@ KEYS: dict[str, str] = {
     "tab": "Tab",
     "space": "Space",
     "ctrl-c": "C-c",
+    **{str(digit): str(digit) for digit in range(1, 10)},
 }
-"""The keys ``press`` may send, by the name the captain uses → tmux's own key name."""
+"""The keys ``press`` may send, by the name the captain uses → tmux's own key name. The
+digits are what Claude Code's numbered chooser takes (T1b: runner2-1 measured on a real
+claude that ``y`` does nothing there and ``1`` answers Yes, board 13265)."""
+
+ANSWERS = ("yes", "no")
+"""The semantic keys: read off the pane at the moment of the press (``screen.prompt_showing``)."""
+
+ANSWERING_KEYS = frozenset({"yes", "no", "y", "n", "enter", "esc", *(str(d) for d in range(1, 10))})
+"""Keys that answer a prompt: pressed while one shows, the pane is read back, and a prompt
+still showing is a said failure — the captain never reports a press the prompt ignored.
+The arrows, tab, space and ctrl-c move or interrupt; they only report what shows after."""
+
+READBACK_POLLS = 10
+READBACK_POLL_S = 0.2
+"""How long a press waits for its prompt to go: ten reads, two seconds in all."""
 
 READY_STATES = frozenset({"waiting", "attention"})
 """Where ``press`` and ``paste`` may type: an agent at its prompt, or one asking the
@@ -107,8 +122,8 @@ PRIMITIVES = ("press", "paste", "tell", "read_pane", "ui", "task")
 own example needs it: ``unblock = press y then read_pane``."""
 
 BUNDLED_ACTIONS: dict[str, tuple[str, ...]] = {
-    "approve_prompt": ("press y",),
-    "unblock": ("press y", "read_pane 20"),
+    "approve_prompt": ("press yes",),
+    "unblock": ("press yes", "read_pane 20"),
     "open_spawn": ("ui open_spawn",),
 }
 """The owner action list's defaults; ``[captain.actions.<name>]`` in config.toml wins."""
@@ -690,15 +705,23 @@ def _ready(target: ProjectInfo, label: str) -> tuple[FleetAgent, FleetAgentStatu
     ``tell`` types only into a waiting agent whose pane runs the agent; ``press``
     and ``paste`` also type into one that is ASKING (a permission prompt reads
     ``attention``), because answering that prompt is what they are for.
+
+    And one the fleet still reads WORKING when its screen says otherwise (13313): a
+    fresh claude reads working until its first Stop hook, and the fleet's activity
+    window holds for seconds after a chooser draws. There a prompt showing, or the
+    input box drawn and idle, is the evidence; anything else stays refused. The screen
+    overrides the activity window, never a stop: limited, exited and lost are refused.
     """
     agent = _live(target, label)
     status = fleet.status_of(agent)
-    if status.state not in READY_STATES:
+    srv = fleet.server_for(agent.tmux_socket)
+    if status.state not in READY_STATES and not (
+        status.state == "working" and _asking_or_idle(srv, agent.pane_id)
+    ):
         raise Refused(
             f"{label} is {status.state} — the captain types only into an agent that is "
             "waiting at its prompt or asking something"
         )
-    srv = fleet.server_for(agent.tmux_socket)
     if not fleet.pane_is_the_agent(srv, agent.pane_id):
         raise Refused(
             f"{label}'s pane is not running the agent (a shell or the launcher is in front) — "
@@ -707,14 +730,72 @@ def _ready(target: ProjectInfo, label: str) -> tuple[FleetAgent, FleetAgentStatu
     return agent, status, srv
 
 
+def _screen(srv: TmuxServer, pane_id: str) -> list[str]:
+    return list(srv.capture(pane_id).lines)
+
+
+def _asking_or_idle(srv: TmuxServer, pane_id: str) -> bool:
+    """Whether the pane is ready by its screen: a prompt showing, or the box drawn and idle
+    (13313). A pane that cannot be read is not: the fleet's word, working, stands."""
+    try:
+        lines = _screen(srv, pane_id)
+    except TmuxError:
+        return False
+    return screen.prompt_showing(lines) is not None or screen.box_idle(lines)
+
+
 def _press(target: ProjectInfo, label: str, key: str) -> Outcome:
-    sent = KEYS.get(key)
-    if sent is None:
-        raise Refused(f"key {key!r} is not one of {', '.join(KEYS)}")
+    if key not in KEYS and key not in ANSWERS:
+        raise Refused(f"key {key!r} is not one of {', '.join((*ANSWERS, *KEYS))}")
     agent, status, srv = _ready(target, label)
+    try:
+        before = screen.prompt_showing(_screen(srv, agent.pane_id))
+    except TmuxError as exc:
+        if key in ANSWERS:
+            raise Refused(
+                f"{label}'s pane could not be read to see what {key} means ({exc}) — nothing "
+                "pressed"
+            ) from exc
+        before = None
+    if key in ANSWERS:
+        if before is None:
+            raise Refused(f"no prompt is showing on {label} — nothing pressed")
+        if before.shape == "trust":
+            raise Refused(
+                f"the trust dialog is showing on {label}: trusting a folder is the owner's to "
+                "answer (aisquare fleet attach) — nothing pressed"
+            )
+        sent = before.yes_key if key == "yes" else before.no_key
+        if sent is None:
+            raise Refused(f"the prompt on {label} offers no {key}: {before.question}")
+    else:
+        sent = KEYS[key]
     srv.send_keys(agent.pane_id, sent)
-    return Outcome(
-        {"label": label, "key": key, "state": status.state}, said=f"pressed {key} in {label}"
+    data: dict[str, Any] = {
+        "label": label,
+        "key": key,
+        "sent": sent,
+        "state": status.state,
+        "prompt": before.question if before is not None else None,
+        "answered": False,
+    }
+    shown = key if key == sent or key in KEYS else f"{key} ({sent})"
+    if before is None:
+        return Outcome(data, said=f"pressed {shown} in {label}")
+    if key not in ANSWERING_KEYS:
+        return Outcome(data, said=f"pressed {shown} in {label}: {before.question} still shows")
+    for _ in range(READBACK_POLLS):
+        _sleep(READBACK_POLL_S)
+        try:
+            after = screen.prompt_showing(_screen(srv, agent.pane_id))
+        except TmuxError:
+            continue
+        if after is None or after.question != before.question:
+            data["answered"] = True
+            return Outcome(data, said=f"pressed {shown} in {label}: the prompt is gone")
+    raise Failed(
+        f"pressed {shown} in {label} but the prompt is still showing: {before.question} — "
+        "the key did not answer it"
     )
 
 
@@ -853,8 +934,8 @@ def _plan_step(
     text = f"{primitive} {filled}".strip()
     label = args.get("label", "")
     if primitive == "press":
-        if filled not in KEYS:
-            raise Refused(f"{where}: key {filled!r} is not one of {', '.join(KEYS)}")
+        if filled not in KEYS and filled not in ANSWERS:
+            raise Refused(f"{where}: key {filled!r} is not one of {', '.join((*ANSWERS, *KEYS))}")
         return _Step(text, lambda: _press(_on(target), label, filled))
     if primitive in ("paste", "tell"):
         if not filled:
@@ -1525,9 +1606,14 @@ def note(project: str, text: str, kind: str = "note", utterance: str = "") -> st
 
 
 def press(project: str, label: str, key: str, utterance: str = "") -> str:
-    """Press one key in an agent's pane: y n enter esc up down left right tab space ctrl-c.
+    """Press one key in an agent's pane: yes or no to the prompt showing, or a literal key.
 
-    Only into an agent that is waiting or asking (a permission prompt) — never a busy one.
+    ``yes``/``no`` are read off the pane: on Claude Code's numbered chooser yes is the
+    digit of its Yes option and no is Esc; on a [y/N] line, y and n; refused when no
+    prompt shows, and on the trust dialog (the owner's to answer). Literal keys: 1-9 y n
+    enter esc up down left right tab space ctrl-c. After a key that answers, the pane is
+    read back: a prompt still showing is an error, never a success. Only into an agent
+    that is waiting or asking — never a busy one.
     """
     return _run(
         "press",

@@ -43,14 +43,21 @@ bare two-byte sequences. T1's pattern, character for character (coderp's S1 on #
 PROMPT_MARK = "\u276f"
 """Claude Code's prompt mark, U+276F: its input line and a chooser's highlighted option."""
 
-RULE = re.compile(r"^\s*[─━]{8,}\s*$")
-"""A horizontal rule: the two that frame the input line."""
+RULE = re.compile(r"^\s*[─━]{8,}(?: \S+ [─━]{1,8})?\s*$")
+"""A horizontal rule: the two that frame the input line. The TOP one carries the agent's
+name (T2b, 13383): the fleet launches every agent with --name, and Claude Code draws it
+there — a long rule, one space, the name, one space, a short closing run, nothing else."""
 INPUT_LINE = re.compile(r"^\s*" + PROMPT_MARK)
 OPTION = re.compile(r"^\s*(" + PROMPT_MARK + r"\s*)?(\d)[.)]\s+(\S.*)$")
 MODAL_FOOTER = re.compile(r"Esc to cancel|Enter to confirm")
 YES_NO = re.compile(r"[\[(]\s*[yY](?:es)?\s*/\s*[nN](?:o)?\s*[\])]\s*[:?]?\s*$")
 TRUST = re.compile(r"Quick safety check|Yes, I trust this folder")
 RATING = re.compile(r"How is Claude doing this session")
+WORKING = re.compile(r"esc to interrupt", re.IGNORECASE)
+"""What a turn in progress shows at the box: in the footer, or on the spinner line."""
+LIVE_SPINNER = re.compile(r"^\s*[·✢✳✶✻✽*]\s*\S[^…]*…")
+"""A turn in progress just above the box: a spinner glyph, a verb, the ellipsis
+('✻ Cogitating…'). A finished turn's line ('✻ Cooked for 5s · done') has none."""
 
 TAIL_LINES = 14
 """How many non-blank lines at the bottom are read: the box takes about five, a dialog about
@@ -59,6 +66,8 @@ FOOTER_LINES = 3
 """How many footer lines may sit under the input box (the mode line, a hint)."""
 BOX_BODY_LINES = 8
 """How tall the input box may be: a long draft wraps onto more input lines."""
+SPINNER_LINES = 2
+"""How far above the box a turn's spinner line may sit."""
 
 
 @dataclass(frozen=True)
@@ -93,6 +102,31 @@ def input_box_at(rows: Sequence[str]) -> int | None:
     mark, a rule, then up to :data:`FOOTER_LINES` footer lines. Leans towards "a box":
     a box read as a dialog only refuses, while a dialog read as a box would type into it.
     """
+    bounds = _box_bounds(rows)
+    return bounds[0] if bounds is not None else None
+
+
+def box_idle(lines: Sequence[str]) -> bool:
+    """Whether Claude Code's input box is drawn AND idle (13313): ready for text.
+
+    Real Claude Code keeps its box drawn DURING a turn, so the box alone is not enough.
+    Idle means no live spinner sits just above it and nothing at the box says 'esc to
+    interrupt'. A fresh claude draws its idle box before its first Stop hook, so the
+    fleet still reads it working: this is the screen's word for that window.
+    """
+    rows = tail(lines)
+    bounds = _box_bounds(rows)
+    if bounds is None:
+        return False
+    top, bottom = bounds
+    above = rows[max(0, top - SPINNER_LINES) : top]
+    if any(WORKING.search(row) for row in (*above, *rows[bottom + 1 :])):
+        return False
+    return not any(LIVE_SPINNER.match(row) for row in above)
+
+
+def _box_bounds(rows: Sequence[str]) -> tuple[int, int] | None:
+    """The input box's two rules, top and bottom, or ``None`` (see :func:`input_box_at`)."""
     end = len(rows)
     while end and not rows[end - 1].strip():
         end -= 1
@@ -109,7 +143,7 @@ def input_box_at(rows: Sequence[str]) -> int | None:
             continue
         body = rows[above + 1 : below]
         if body and INPUT_LINE.match(body[0]):
-            return above
+            return above, below
     return None
 
 

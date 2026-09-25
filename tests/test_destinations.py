@@ -867,7 +867,7 @@ def test_no_remediation_for_a_projects_deployment_makes_it_the_machines_target(
 
 
 def test_a_fix_for_a_projects_deployment_followed_moves_no_other_project(
-    isolated_home: Path, tmp_path: Path
+    isolated_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """On the machine ``init --explainability`` writes (prod, and ``target = "stg"`` by
     default) the destination's ``stg`` entry is also the machine's target's. The proxy
@@ -876,6 +876,22 @@ def test_a_fix_for_a_projects_deployment_followed_moves_no_other_project(
     proxy, with the prod gateway and key (review of #203, round 2). Followed as it is
     written now, the other project resolves exactly what it did, and this one takes the
     proxy it was told to set."""
+    # The table's staging proxy as it was before it became the one beside staging's
+    # gateway (final review of #203, EX4): on another host than the gateway, where a
+    # healthy proxy that does not report its gateway gets the row followed here. With
+    # the table's own proxy, the fix named the one the project already read, and the
+    # proxy it was told to set was never checked (review of the #203 final-review
+    # fixes, M1).
+    monkeypatch.setattr(
+        dest,
+        "ENVIRONMENTS",
+        tuple(
+            replace(e, proxy_url="https://stg-explainability.api.aisquare.studio:9443")
+            if e.name == "stg"
+            else e
+            for e in dest.ENVIRONMENTS
+        ),
+    )
     config = AppConfig()
     config.explainability.enabled = True
     config.explainability.gateway_url = "https://explainability-api.aisquare.studio"
@@ -899,17 +915,11 @@ def test_a_fix_for_a_projects_deployment_followed_moves_no_other_project(
 
     before = read(other)
     target = ops.resolve_target(load_config().explainability, None, project_id=web.id)
-    # A healthy proxy on another host than the gateway's, which does not report its
-    # gateway, gets this row. The table's staging proxy was one until it became the one
-    # beside staging's gateway (final review of #203, EX4), so it is set here.
-    row = ops.proxy_state(
-        replace(target, proxy_url="https://proxy.elsewhere.example:9443"),
-        on=True,
-        prober=lambda _url: service.ProxyProbe(True, "ok"),
-    )
+    row = ops.proxy_state(target, on=True, prober=lambda _url: service.ProxyProbe(True, "ok"))
     fix = " ".join(row.remediation.split())
     setting = re.search(r'proxy_url = "([^"]+)" under (\[explainability\.targets\."stg"\])', fix)
     assert setting is not None, fix
+    assert read(web)[1] != setting[1], "the fix names the proxy the project already reads"
 
     if 'target = "<name>" under [explainability]' in fix:  # the rename, as the operator would
         renamed = load_config()

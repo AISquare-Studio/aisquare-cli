@@ -389,8 +389,12 @@ reported on its own line:
   project, the doctor and the shipper resolve exactly what they did before —
   even when the machine's own target has the same name. A
   `[explainability.targets.<name>]` you wrote for that deployment is used, and
-  only what it leaves empty is filled in, and `use` does **not** turn tracing
-  on — that is still `aisquare explainability enable`. Unless your entry names
+  only what it leaves empty is filled in: the hosted proxy only beside the
+  deployment's own gateway, never beside another one you set. The machine's
+  own target's entry counts only while that target is on the deployment's
+  gateway (`enable --gateway-url` with no `--target` writes into it). `use`
+  does **not** turn tracing on — that is still `aisquare explainability
+  enable`. Unless your entry names
   an `api_key_env` other than the default `EXPLAINABILITY_API_KEY` (which is the
   machine key's, so it is replaced like a missing one), the target names its
   own key variable (`EXPLAINABILITY_PROD_API_KEY`, …), so the machine key —

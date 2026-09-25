@@ -148,14 +148,21 @@ def test_the_destinations_deployment_fills_only_what_is_empty_and_is_never_writt
     assert stg.gateway_url == "https://stg-explainability-api.aisquare.studio"
     assert stg.proxy_url == "https://stg-explainability.api.aisquare.studio:9443"
     assert config.explainability.targets == {}, "read off the destination, never written"
-    # A hand-set gateway stays, and the entry itself is not filled in.
+    # A hand-set gateway stays, and the entry itself is not filled in. The table's proxy
+    # is its own gateway's, so none is filled in beside another (review of #203, round 3).
     config.explainability.targets["prod"] = ExplainabilityTarget(gateway_url="https://mine.example")
     prod = dest.deployment_target(
         config.explainability, _destination("https://api.aisquare.studio")
     )
     assert prod.gateway_url == "https://mine.example"
-    assert prod.proxy_url == "https://explainability-api.aisquare.studio:9443"
-    assert config.explainability.targets["prod"].proxy_url is None
+    assert prod.proxy_url is None
+    config.explainability.targets["prod"] = ExplainabilityTarget(proxy_url="https://mine.example")
+    prod = dest.deployment_target(
+        config.explainability, _destination("https://api.aisquare.studio")
+    )
+    assert prod.gateway_url == "https://explainability-api.aisquare.studio"
+    assert prod.proxy_url == "https://mine.example"
+    assert config.explainability.targets["prod"].gateway_url == ""
     # An unknown host: nothing to fill in.
     unknown = dest.deployment_target(config.explainability, _destination("https://api.example.org"))
     assert (unknown.gateway_url, unknown.proxy_url) == ("", None)
@@ -757,6 +764,87 @@ def test_a_key_bound_to_the_machines_target_never_answers_for_a_destination_else
     )
 
 
+def test_the_machines_own_target_on_another_gateway_is_never_a_destinations_deployment(
+    runner: CliRunner, isolated_home: Path, tmp_path: Path
+) -> None:
+    """``explainability enable --gateway-url <prod>`` with no ``--target`` writes the prod
+    gateway into the machine's own target's entry: ``targets.stg`` on the machine ``init
+    --explainability`` writes. A destination on staging read that entry as its deployment.
+    It kept the entry's gateway and took the table's proxy, so its launches went to the
+    prod gateway through the staging proxy, with the machine's prod key file or a prod key
+    ``key set`` had bound to the machine's ``stg`` (review of #203, round 3). The entry is
+    the machine's while its target is on another gateway: the destination resolves the
+    gateway and proxy the table gives staging, neither prod key answers there, and a
+    project without a destination resolves what it did."""
+    prod = (
+        "https://explainability-api.aisquare.studio",
+        "https://explainability-api.aisquare.studio:9443",
+    )
+    staging = (
+        "https://stg-explainability-api.aisquare.studio",
+        "https://stg-explainability.api.aisquare.studio:9443",
+    )
+    config = AppConfig()
+    config.explainability.enabled = True
+    config.explainability.gateway_url, config.explainability.proxy_url = prod
+    save_config(config)
+    service.store_api_key("AIS_machine_prod_key")
+    enabled = runner.invoke(app, ["explainability", "enable", "--gateway-url", prod[0]])
+    assert enabled.exit_code == 0, enabled.output
+    assert load_config().explainability.targets["stg"].gateway_url == prod[0]
+    keyed, keyless, other = (_project(tmp_path / name) for name in ("web", "api", "lib"))
+    ops.attach_project_key(keyed, "AIS_hand_prod_key", target="stg")
+
+    def read(project: ProjectInfo) -> tuple[str, str, str, str | None]:
+        resolved = ops.resolve_target(load_config().explainability, None, project_id=project.id)
+        return (resolved.gateway_url, resolved.proxy_url, resolved.key_source, resolved.api_key)
+
+    before = read(other)
+    assert before == (*prod, "file", "AIS_machine_prod_key")
+    session = iam.Session(api_url="https://stg-api.aisquare.studio", token="aisq_x", source="env")
+    for project in (keyed, keyless):
+        with store_session() as store:
+            dest.choose(
+                store,
+                project,
+                dest.Workspace(id=42, uid="ws-uid-42", name="acme", role="ADMIN"),
+                dest.Studio(id=301, uid="st-301", name="Frontend"),
+                session,
+            )
+        assert read(project) == (*staging, "unset", None), "a prod key went to staging"
+    assert read(other) == before
+    settings = load_config().explainability
+    binding = ops.project_key_binding(keyed.id)
+    assert binding is not None
+    resolved = ops.resolve_target(settings, None, project_id=keyed.id)
+    assert not ops.binding_serves(binding, "stg", resolved.destination, settings)
+    assert "attached for this machine's own target stg" in ops.kept_key_note(
+        binding, resolved, settings
+    )
+
+
+def test_the_tables_proxy_goes_with_the_tables_gateway_only(isolated_home: Path) -> None:
+    """An entry's gateway set by hand stays, and the table filled the proxy beside it:
+    ``targets.stg`` on the prod gateway sent a staging destination's traces to prod
+    through the staging proxy (review of #203, round 3). Another deployment's gateway
+    gets no proxy from the table; the table's own gateway, written out, still does."""
+    config = AppConfig()
+    config.explainability.target = "prod"
+    config.explainability.targets["stg"] = ExplainabilityTarget(
+        gateway_url="https://explainability-api.aisquare.studio"
+    )
+    on_staging = _destination("https://stg-api.aisquare.studio")
+    mixed = dest.deployment_target(config.explainability, on_staging)
+    assert (mixed.gateway_url, mixed.proxy_url) == (
+        "https://explainability-api.aisquare.studio",
+        None,
+    )
+    written_out = "https://stg-explainability-api.aisquare.studio/"
+    config.explainability.targets["stg"] = ExplainabilityTarget(gateway_url=written_out)
+    written = dest.deployment_target(config.explainability, on_staging)
+    assert written.proxy_url == "https://stg-explainability.api.aisquare.studio:9443"
+
+
 def test_no_remediation_for_a_projects_deployment_makes_it_the_machines_target(
     isolated_home: Path, tmp_path: Path
 ) -> None:
@@ -960,8 +1048,18 @@ def test_the_destinations_deployment_names_its_own_key_variable(isolated_home: P
     assert unnamed.api_key_env == "EXPLAINABILITY_PROD_API_KEY"
     # …unless the machine key already goes to that gateway, as the machine's own target.
     mine.target = "prod"
+    mine.targets["prod"].gateway_url = "https://explainability-api.aisquare.studio"
     own = dest.deployment_target(mine, _destination("https://api.aisquare.studio"))
     assert own.api_key_env == service.KEY_ENV_VAR
+    # On another gateway, the machine's own target's entry is another deployment's, and
+    # the machine key does not follow the destination to the table's (review of #203,
+    # round 3).
+    mine.targets["prod"].gateway_url = "https://mine.example"
+    elsewhere = dest.deployment_target(mine, _destination("https://api.aisquare.studio"))
+    assert (elsewhere.gateway_url, elsewhere.api_key_env) == (
+        "https://explainability-api.aisquare.studio",
+        "EXPLAINABILITY_PROD_API_KEY",
+    )
 
 
 def test_the_entry_use_names_for_an_unknown_host_takes_no_machine_key(

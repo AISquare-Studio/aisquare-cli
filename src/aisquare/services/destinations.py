@@ -202,6 +202,11 @@ def _machine_key_serves(settings: ExplainabilitySettings, gateway_url: str) -> b
     return gateway_url.rstrip("/") in {url.rstrip("/") for url in served if url}
 
 
+def _same_gateway(gateway_url: str, environment: Environment) -> bool:
+    """Whether ``gateway_url`` is ``environment``'s gateway, a trailing slash aside."""
+    return bool(gateway_url) and gateway_url.rstrip("/") == environment.gateway_url.rstrip("/")
+
+
 def deployment_target(
     settings: ExplainabilitySettings, destination: TraceDestination
 ) -> ExplainabilityTarget:
@@ -236,7 +241,25 @@ def deployment_target(
     and the shipper moved to staging with no key, so untraced. Filling an
     existing target's empty gateway did the same (review of #203). Only
     :func:`~aisquare.services.explainability_ops.resolve_target` calls this,
-    for the project whose destination names the target.
+    for the project whose destination names the target, and
+    :func:`~aisquare.services.explainability_ops.binding_serves`, to ask which
+    deployment that is.
+
+    NOR IS THE MACHINE'S OWN TARGET'S ENTRY A DESTINATION'S BY NAME. For a
+    deployment in the table it is read here only while the machine's own
+    target is on that deployment's gateway: the entry's own, else the top-level
+    one it falls back to. Otherwise it is another deployment's, or one nothing
+    names, and reading it mixed that deployment into this one. ``enable
+    --gateway-url <prod>`` with no ``--target`` writes the prod gateway into
+    ``targets.stg`` on the machine ``init --explainability`` writes, and a
+    destination on staging kept that gateway, took the table's staging proxy
+    beside it, and the prod key with them (review of #203, round 3). Judged on
+    the config alone, as the rest of a destination's deployment is: it is the
+    same in every shell. Any other entry is read as it is: it is the one
+    :func:`~aisquare.services.explainability_ops.deployment_fix` names for the
+    deployment. And the table's proxy goes with the table's gateway only: beside
+    another gateway, set by hand, it sent that deployment's traces, and its
+    key, through this one's proxy (same review).
 
     An API host outside the table gets no gateway and no proxy here, and the
     resolver answers "no gateway known" rather than reaching for the machine's
@@ -244,11 +267,22 @@ def deployment_target(
     """
     environment = environment_for(destination.api_url)
     configured = settings.targets.get(destination.environment)
+    if (
+        configured is not None
+        and environment is not None
+        and destination.environment == settings.target
+        and not _same_gateway(configured.gateway_url or settings.gateway_url, environment)
+    ):
+        configured = None  # the machine's own target, and not on this deployment's gateway
     target = configured.model_copy() if configured is not None else ExplainabilityTarget()
     if environment is not None:
         if not target.gateway_url:
             target.gateway_url = environment.gateway_url
-        if not target.proxy_url and environment.proxy_url:
+        if (
+            not target.proxy_url
+            and environment.proxy_url
+            and _same_gateway(target.gateway_url, environment)
+        ):
             target.proxy_url = environment.proxy_url
     # Judged on the gateway this resolution uses, filled in or set by hand.
     if target.api_key_env == KEY_ENV_VAR and not _machine_key_serves(settings, target.gateway_url):

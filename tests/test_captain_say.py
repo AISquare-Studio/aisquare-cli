@@ -150,7 +150,7 @@ class Clock:
         self.now += timedelta(seconds=seconds)
 
 
-from tests.captain_screens import BOX_WITH_ESC_FOOTER, INPUT_BOX  # noqa: E402 — one set
+from tests.captain_screens import BOX_WITH_ESC_FOOTER, INPUT_BOX, REAL_TRUST  # noqa: E402
 
 
 def _pane(*transcript: str, box: bool = True) -> list[str]:
@@ -615,14 +615,19 @@ def test_a_fresh_captain_parked_at_the_dialog_is_said_not_waited_out(
         ),
     ],
 )  # fmt: skip
+@pytest.mark.parametrize("door", ["say", "send"])
 def test_say_never_types_into_a_dialog_and_names_what_is_showing(
-    captain: tuple[Captain, Clock], screen: list[str], showing: str
+    captain: tuple[Captain, Clock], screen: list[str], showing: str, door: str
 ) -> None:
+    """Both doors into the captain refuse the same screens in the same words (13325)."""
     fake, _ = captain
     fake.present()  # type: ignore[attr-defined]
     fake.screen = screen
     with pytest.raises(brain.NoReply, match=showing) as caught:
-        brain.say("what is up", timeout=60)
+        if door == "say":
+            brain.say("what is up", timeout=60)
+        else:
+            brain.send("what is up", timeout=60)
     assert "`aisquare captain` attaches" in str(caught.value)
     assert caught.value.timed_out is False and fake.typed == []
 
@@ -751,6 +756,82 @@ def test_one_message_reaches_the_captain_at_a_time(captain: tuple[Captain, Clock
     assert caught.value.timed_out is True
     assert fake.typed == []
     assert brain.say("what is up", timeout=60).text == "Nothing needs you right now."
+
+
+# --- send: the one guarded door, without a reply wait (13325) -------------------------------
+
+
+def test_send_types_into_a_waiting_captain_and_returns_without_waiting_for_a_reply(
+    captain: tuple[Captain, Clock],
+) -> None:
+    """T4's What's up types through here: at once, and back before any answer comes."""
+    fake, clock = captain
+    fake.present()  # type: ignore[attr-defined]
+    fake.turn_ends_after = None  # the captain never answers: send must not care
+    asked_at = clock.now
+    typed_at = brain.send("what is up")
+    assert fake.typed == [("paste", "what is up"), ("keys", "Enter")]
+    assert typed_at == asked_at and clock.slept == 0.0, "no settle, and no reply wait"
+    assert fake.started == [] and fake.told == []
+
+
+def test_send_never_types_into_the_trust_dialog_and_says_how_to_answer_it(
+    captain: tuple[Captain, Clock],
+) -> None:
+    """The first-run trap through the second door (13325): the Enter picks "No, exit". The
+    real capture of Claude Code's trust dialog, as a fresh captain parks at it."""
+    fake, clock = captain
+    fake.present()  # type: ignore[attr-defined]
+    fake.screen = list(REAL_TRUST)
+    with pytest.raises(brain.NoReply, match="trust its folder") as caught:
+        brain.send("what is up")
+    assert "run `aisquare captain` and choose Yes, I trust this folder (once)" in str(caught.value)
+    assert caught.value.timed_out is False and fake.typed == [] and clock.slept == 0.0
+
+
+def test_send_to_a_captain_that_is_not_running_is_said_never_started(
+    captain: tuple[Captain, Clock],
+) -> None:
+    fake, _ = captain
+    with pytest.raises(brain.NoReply, match="the captain is not running") as caught:
+        brain.send("what is up")
+    assert caught.value.timed_out is False
+    assert fake.started == [] and fake.typed == []
+
+
+def test_send_waits_out_a_busy_captain_then_types_never_a_board_note(
+    captain: tuple[Captain, Clock],
+) -> None:
+    fake, clock = captain
+    fake.present()  # type: ignore[attr-defined]
+    fake.busy_for = 5.0
+    brain.send("what is up")
+    assert fake.typed == [("paste", "what is up"), ("keys", "Enter")]
+    assert clock.slept >= 5.0 and fake.told == []
+
+
+def test_send_says_an_unreachable_captain_at_once(
+    captain: tuple[Captain, Clock], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake, clock = captain
+
+    def unreachable() -> None:
+        raise brain.Unreachable("run `aisquare fleet reap -P prj_home --server-down`")
+
+    monkeypatch.setattr(brain, "find", unreachable)
+    with pytest.raises(brain.NoReply, match="--server-down") as caught:
+        brain.send("what is up")
+    assert caught.value.timed_out is False and fake.typed == [] and clock.slept == 0.0
+
+
+def test_send_never_types_while_a_say_waits_for_its_reply(captain: tuple[Captain, Clock]) -> None:
+    """One delivery at a time: a line typed mid-say would be read as the say's answer."""
+    fake, _ = captain
+    fake.present()  # type: ignore[attr-defined]
+    held = brain._one_at_a_time(brain._now() + timedelta(seconds=5), 5.0)
+    with held, pytest.raises(brain.NoReply, match="another message to the captain") as caught:
+        brain.send("what is up", timeout=5)
+    assert caught.value.timed_out is True and fake.typed == []
 
 
 # --- the CLI ----------------------------------------------------------------------------------

@@ -12,6 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import ClassVar, Literal
 
+from rich.text import Text
 from textual import on
 from textual.app import ComposeResult
 from textual.containers import Vertical
@@ -133,7 +134,10 @@ class GroupPicker(ModalScreen[str | None]):
     def on_mount(self) -> None:
         picker = self.query_one("#grouplist", OptionList)
         for group in self._groups:
-            picker.add_option(Option(f"📁 {group.name}", id=f"group:{group.id}"))
+            # A Text, never a markup string: a group name is the operator's text, and
+            # `client [/api]` parsed as markup raised MarkupError on every `g`, taking
+            # the whole TUI down (review of #203).
+            picker.add_option(Option(Text(f"📁 {group.name}"), id=f"group:{group.id}"))
         picker.add_option(Option("+ New group…", id=NEW_GROUP))
         picker.add_option(Option("⤴ Ungroup (back to the top level)", id=UNGROUP))
         picker.highlighted = 0

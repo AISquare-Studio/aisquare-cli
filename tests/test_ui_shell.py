@@ -36,7 +36,7 @@ from textual.content import Content
 from textual.geometry import Region
 from textual.pilot import Pilot
 from textual.widget import Widget
-from textual.widgets import Button, Checkbox, Input, Static, Switch
+from textual.widgets import Button, Checkbox, Input, OptionList, Static, Switch
 from textual.widgets._toast import Toast
 from textual.worker import Worker, WorkerState
 
@@ -3821,6 +3821,39 @@ def test_dragging_a_card_onto_a_group_header_groups_it_and_the_picker_groups_a_s
     with store_session() as store:
         names = {g.name for g in store.project_groups()}
     assert names == {"tools", "web"}
+
+
+def test_a_group_named_like_markup_is_listed_as_typed_and_can_be_picked(
+    tmp_path: Path, script: Script, isolated_home: Path
+) -> None:
+    """A group name is the operator's text, never Textual markup. The picker handed
+    ``📁 client [/api]`` to its OptionList as a markup string, so ``g`` raised MarkupError
+    and took the TUI down for as long as such a group existed (review of #203)."""
+    seed(tmp_path, ("prj_a", "api", None), ("prj_b", "cli", None))
+    name = "client [/api] [bold]"
+    with store_session() as store:
+        groups_service.create_group(store, name, ["prj_b"])
+
+    async def go(pilot: Pilot[None]) -> tuple[list[str], str, list[str]]:
+        app = fleet_app(pilot)
+        app.sidebar.focus()
+        app.sidebar.select("project:prj_a")
+        await pilot.press("g")
+        await pilot.pause()
+        assert isinstance(app.screen, GroupPicker), type(app.screen).__name__
+        picker = app.screen.query_one("#grouplist", OptionList)
+        listed = [
+            str(picker.get_option_at_index(index).prompt) for index in range(picker.option_count)
+        ]
+        await pilot.press("enter")  # the group, first in the list
+        await pilot.pause()
+        await pilot.pause()
+        return listed, shown(app.sidebar.query_one(GroupHeader)), _cards(app)
+
+    listed, header, grouped = drive(go)
+    assert listed[0] == f"📁 {name}", listed
+    assert name in header
+    assert grouped == [f"group:{name}", "prj_b", "prj_a"]
 
 
 def test_a_click_on_a_group_header_folds_it_and_a_drag_back_onto_itself_opens_nothing(

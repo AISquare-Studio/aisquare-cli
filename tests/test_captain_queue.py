@@ -57,6 +57,7 @@ from aisquare.services.captain.queue import (
     StoreSources,
     UnknownItemError,
     as_json,
+    card_in,
     dedup_key,
     near_duplicates,
     normalise,
@@ -283,9 +284,11 @@ def test_three_projects_with_the_same_request_repeated_fold_into_one_row_with_co
     _seed_three_projects(fx)
     for seq in (21, 22, 23):
         fx.clock.tick(seconds=30)
+        # Identical but for the noise ids stripped by normalise: an event seq and a
+        # session prefix. A different TASK id would be a different question (card_in).
         fx.ask(
             fx.alpha,
-            f"Owner, please approve the deploy of tsk_01m3bq{seq}abc (seq {seq})",
+            f"Owner, please approve the deploy of the release train (seq {seq}, 5e12e94e{seq})",
             seq=seq,
         )
     queue = fx.queue()
@@ -1026,6 +1029,10 @@ def test_only_the_bottom_lines_of_a_screen_can_hold_the_prompt(fx: Fixture) -> N
     fx.sources._tails[quiet.agent.id] = [
         "Do you want to proceed? [y/N] y",
         "installing...",
+        "fetching...",
+        "linking...",
+        "checking...",
+        "cleaning...",
         "done.",
         "",
         "$ ",
@@ -1033,6 +1040,54 @@ def test_only_the_bottom_lines_of_a_screen_can_hold_the_prompt(fx: Fixture) -> N
     queue = fx.queue()
     queue.refresh()
     assert queue.items() == []
+
+
+def test_a_menu_prompt_with_the_question_above_its_options_is_a_waiting_item(
+    fx: Fixture,
+) -> None:
+    """runner2 (seq 13126): a hook-less binary that prints the question, then the options."""
+    quiet = _agent(fx.alpha, "codex1", "waiting", detail="no hooks")
+    fx.sources._agents[fx.alpha.id] = [quiet]
+    fx.sources._tails[quiet.agent.id] = [
+        "Do you want to proceed?",
+        "",
+        "1. Yes",
+        "2. No",
+        "3. No, and tell me what to do differently",
+        "> ",
+    ]
+    queue = fx.queue()
+    queue.refresh()
+    (row,) = queue.items()
+    assert row.kind == "waiting" and "Do you want to proceed?" in row.text
+
+
+def test_a_question_that_names_one_card_in_its_words_is_about_that_card(fx: Fixture) -> None:
+    """runner2 (seq 13126): without --task, the one tsk_ id in the text is the card."""
+    fx.manager(fx.alpha)
+    a = _task(fx.alpha, "A", "doing", at=fx.clock.now)
+    b = _task(fx.alpha, "B", "doing", at=fx.clock.now)
+    fx.sources._tasks[fx.alpha.id] = [a, b]
+    fx.ask(fx.alpha, f"Can I merge {a.id}?", seq=1)
+    fx.clock.tick(minutes=1)
+    fx.ask(fx.alpha, f"Can I merge {b.id}?", seq=2)
+    fx.ask(fx.alpha, f"Merge {a.id} and {b.id} together?", seq=3)
+    queue = fx.queue()
+    queue.refresh()
+    rows = queue.attention()
+    assert sorted(str(row.card) for row in rows) == sorted([a.id, b.id, "None"])
+    assert card_in("nothing here") is None and card_in(f"{a.id} or {b.id}") is None
+    fx.clock.tick(minutes=5)
+    fx.sources._tasks[fx.alpha.id] = [
+        a.model_copy(update={"status": "done", "updated_at": fx.clock.now}),
+        b,
+    ]
+    queue.refresh()
+    assert {row.card: row.status for row in queue.items()} == {
+        a.id: "resolved",
+        b.id: "open",
+        None: "open",
+    }
 
 
 def test_the_captains_own_question_is_never_the_owners(fx: Fixture) -> None:

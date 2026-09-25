@@ -106,9 +106,11 @@ STATE_KINDS: frozenset[str] = frozenset({"blocked", "waiting", "review", "pr", "
 GATE_KINDS: frozenset[str] = frozenset({"result", "decision"})
 #: Rows of a pane tail read for a y/N line, how many of its LAST non-blank lines may
 #: hold the prompt (a prompt waits at the bottom; a ``[y/N]`` answered higher up is
-#: history — gate 1, item 5), and how many events one refresh reads.
+#: history — gate 1, item 5; six, so a menu whose question sits above three options
+#: and a prompt line still counts — runner2, seq 13126), and how many events one
+#: refresh reads.
 PANE_TAIL_LINES = 12
-PROMPT_SCAN_LINES = 3
+PROMPT_SCAN_LINES = 6
 EVENT_LIMIT = 500
 #: How much history a row keeps, how long a resolved row stays in the file, and the
 #: longest snooze: the file must not only grow (gate 1, item 13).
@@ -145,6 +147,7 @@ _ID_PATTERNS: tuple[re.Pattern[str], ...] = (
 )
 _TOKEN = re.compile(r"[a-z0-9]+")
 _SPACE = re.compile(r"\s+")
+_CARD_IN_TEXT = re.compile(r"\btsk_[a-z0-9]+\b")
 #: Terminal escapes a pane line may carry — CSI, OSC (BEL- or ST-terminated, so an
 #: OSC 8 hyperlink's target never reaches the owner's ears), single-character ESC
 #: sequences — and the C0 controls left over: T1's ``actions._ESCAPES`` grammar.
@@ -445,6 +448,18 @@ def _tokens(text: str) -> set[str]:
     return set(_TOKEN.findall(normalise(text)))
 
 
+def card_in(text: str) -> str | None:
+    """The one card a question names in its words, when it names exactly one.
+
+    A note posted with ``--task`` carries its card; one that only writes the id
+    ("can I merge tsk_A?") would otherwise fold with the same words about tsk_B,
+    because ids are stripped from the compared text (runner2, seq 13126). Two or
+    more ids named is a question about several cards, and is left without one.
+    """
+    found = sorted(set(_CARD_IN_TEXT.findall(text.lower())))
+    return found[0] if len(found) == 1 else None
+
+
 def similarity(a: str, b: str) -> float:
     """Jaccard similarity of the two texts' token sets, over their normalised forms."""
     first, second = _tokens(a), _tokens(b)
@@ -568,9 +583,10 @@ def observe(sources: Sources, *, cursors: Mapping[str, int], now: datetime) -> O
                 continue
             agent = labels.get(event.session_id or "")
             text = event.text.strip()
+            card = event.task_id or card_in(text)
             seen.observations.append(
                 Observation(
-                    key=dedup_key(project.id, agent, "question", text, event.task_id),
+                    key=dedup_key(project.id, agent, "question", text, card),
                     project=project.id,
                     project_name=name,
                     agent=agent,
@@ -579,7 +595,7 @@ def observe(sources: Sources, *, cursors: Mapping[str, int], now: datetime) -> O
                     seen_at=event.created_at,
                     source_seq=event.seq,
                     source_ref=event.id,
-                    card=event.task_id,
+                    card=card,
                 )
             )
         for task in sources.tasks(project.id):

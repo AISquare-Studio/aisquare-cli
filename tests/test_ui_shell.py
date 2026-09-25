@@ -3877,15 +3877,15 @@ def test_a_drag_on_a_card_or_a_group_header_selects_no_text(
 
     async def go(
         pilot: Pilot[None],
-    ) -> tuple[list[str], dict[object, object], str | None, list[str], dict[object, object]]:
+    ) -> tuple[list[str], list[Widget], str | None, list[str], list[Widget]]:
         app = fleet_app(pilot)
         tools = app.sidebar.query_one("#group-" + group_id("tools"), GroupHeader)
         web = app.sidebar.query_one("#group-" + group_id("web"), GroupHeader)
         title = card_for(app, "prj_c").query_one(ProjectTitle)
         await _drag_onto(pilot, title, tools, offset=(3, 0))
-        carded = _cards(app), dict(app.screen.selections), app.screen.get_selected_text()
+        carded = _cards(app), list(app.screen.selections), app.screen.get_selected_text()
         await _drag_onto(pilot, web, tools, offset=(3, 0))
-        return (*carded, _cards(app), dict(app.screen.selections))
+        return (*carded, _cards(app), list(app.screen.selections))
 
     def group_id(name: str) -> str:
         with store_session() as store:
@@ -3895,8 +3895,8 @@ def test_a_drag_on_a_card_or_a_group_header_selects_no_text(
     # The premise: both drags did what a drag does.
     assert carded == ["group:tools", "prj_b", "prj_c", "group:web", "prj_a"], carded
     assert headed == ["group:web", "prj_a", "group:tools", "prj_b", "prj_c"], headed
-    assert card_selections == {} and selected is None, "a card's drag selects no text"
-    assert header_selections == {}, "nor does a group header's"
+    assert card_selections == [] and selected is None, "a card's drag selects no text"
+    assert header_selections == [], "nor does a group header's"
 
 
 @_needs_tmux
@@ -3950,7 +3950,7 @@ def test_a_mark_on_a_card_that_leaves_the_list_goes_with_it(
         store.ensure_project(ProjectInfo(id="prj_scratch", root=tmp_path / "scratch"))  # a hook
         tools, _ = groups_service.create_group(store, "tools", ["prj_b"])
 
-    async def go(pilot: Pilot[None]) -> tuple[list[str], list[str]]:
+    async def go(pilot: Pilot[None]) -> tuple[list[str], list[str], list[str]]:
         app = fleet_app(pilot)
         app.sidebar.focus()
         await pilot.press("a")  # the captured directory is a card now

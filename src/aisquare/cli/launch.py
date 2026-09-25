@@ -28,12 +28,13 @@ answers for ``launch`` and ``fleet spawn`` alike.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import os
 import re
 import shutil
 import sqlite3
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Annotated
 
@@ -42,7 +43,7 @@ from rich.text import Text
 
 from aisquare.cli.common import fail
 from aisquare.core import claude_accounts as claude_accounts_core
-from aisquare.core import harness, orchestrator, personas
+from aisquare.core import harness, orchestrator, paths, personas
 from aisquare.core.config import load_config
 from aisquare.core.console import stderr_console
 from aisquare.core.store import ContextStore, is_locked_error, store_session
@@ -132,6 +133,60 @@ def _check_persona(name: str, project: ProjectInfo | None) -> None:
         personas.resolve(name, root)
     except personas.PersonaError as exc:
         fail(str(exc), error="unknown_persona", ref=name)
+
+
+SYSTEM_PROMPT_FLAG = "--append-system-prompt-file"
+"""Claude Code's seam for appending to its default system prompt — a FILE, so the body
+never sits in argv, which ``ps`` shows (the name travels as ``AISQUARE_PERSONA``)."""
+_SYSTEM_PROMPT_FLAGS = (SYSTEM_PROMPT_FLAG, "--append-system-prompt")
+
+
+def _persona_system_prompt(
+    name: str, project: ProjectInfo | None, binary: str, args: Sequence[str]
+) -> list[str]:
+    """The persona in the agent's system prompt too, where the binary has a seam for it.
+
+    Claude Code takes ``--append-system-prompt-file``: the same block the
+    session-start hook briefs (``personas.briefing``), written under the home
+    and appended to the default system prompt, so the persona holds over a
+    long session as hook context alone may not (docs/plans/spawn-personas.md
+    §9; gh #210). The hook keeps briefing it: that channel survives ``/clear``,
+    this one does not. ``[persona] system_prompt = false`` keeps the hook
+    alone. Any other binary — codex, aider, a wrapper not named claude — has no
+    seam this launcher knows (codex reads AGENTS.md, aider its own prompts), so
+    it gets the hook alone and one dim line says so. An ``--append-system-prompt``
+    of either spelling already in the arguments is the operator's and wins.
+
+    The file is named by the block's own hash: two launches of one persona
+    share it, and a project-layer persona that differs from a bundled one of
+    the same name gets a file of its own — no launch can read another's.
+    Owner decision, 2026-09-24.
+    """
+    try:
+        wanted = load_config().persona.system_prompt
+    except Exception:  # an unreadable config was already said above; the default stands
+        wanted = True
+    if not wanted:
+        return []
+    if any(
+        arg == flag or arg.startswith(f"{flag}=") for arg in args for flag in _SYSTEM_PROMPT_FLAGS
+    ):
+        return []
+    if not harness.is_default_agent(binary):
+        stderr_console().print(
+            f"persona {name}: {os.path.basename(binary)!r} takes no system-prompt flag this "
+            "launcher knows — briefed by the session-start hook alone",
+            style="dim",
+        )
+        return []
+    root = project.root if project is not None else git_common_root(Path.cwd())
+    block = "\n".join(personas.briefing(personas.resolve(name, root))) + "\n"
+    digest = hashlib.sha256(block.encode("utf-8")).hexdigest()[:12]
+    path = paths.aisquare_home() / "cache" / "persona-prompts" / f"{name}-{digest}.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not path.exists() or path.read_text(encoding="utf-8") != block:
+        path.write_text(block, encoding="utf-8")
+    return [SYSTEM_PROMPT_FLAG, str(path)]
 
 
 def _exec(binary: str, argv: list[str], env: dict[str, str]) -> None:
@@ -473,7 +528,18 @@ def launch(
             # the join for EVERY binary, wrapper or not — which is why nothing
             # here needs to write one, and why an unpinnable launch still joins.
             env.update(explainability_service.trace_marker(wiring))
-    argv = [resolution.binary, *profile.args, *role_args, *ctx.args, *pinned_id]
+    # The persona's system-prompt seam, after the role's own flags and before the
+    # operator's line: `_persona_system_prompt` stands down when that line already
+    # carries the flag. `_check_persona` refused an unknown name above, so the
+    # resolve inside cannot fail here.
+    persona_args = (
+        _persona_system_prompt(
+            persona, project, resolution.binary, [*profile.args, *role_args, *ctx.args]
+        )
+        if persona is not None
+        else []
+    )
+    argv = [resolution.binary, *profile.args, *role_args, *persona_args, *ctx.args, *pinned_id]
     # Text.assemble rather than "[bold]{role}[/bold]": this is the one line that
     # styles a single token instead of the whole line, and it interpolates a
     # role name, a binary path and a project name. A Text carries its styling

@@ -141,6 +141,24 @@ spawns without one even when the role has a default. The Settings tab sets each
 role's default persona, and an agent running as a persona carries a dim
 `· skeptic` on its sidebar row.
 
+### The system prompt, and the switch
+
+The persona reaches the agent on two channels. The session-start briefing
+carries it as one block, once, and survives `/clear`. For Claude Code the
+launch also appends the same block to the default system prompt with
+`--append-system-prompt-file` (a file under `~/.aisquare/cache/persona-prompts/`;
+the name travels in the environment, never the body), so the persona holds
+over a long session as hook context alone may not. `[persona] system_prompt =
+false` keeps the briefing alone and appends nothing, for a session whose system
+prompt must stay exactly the binary's own; an `--append-system-prompt` of either
+spelling on your own line wins over the launch's. Other harnesses — codex, aider,
+a wrapper not named `claude` — have no system-prompt seam this launcher knows
+(codex reads `AGENTS.md`, aider its own prompts), so they get the briefing alone
+and the launch says so in one dim line. A restart or hand-over replays the row's
+persona: the one it was spawned with or given since; if that no longer resolves,
+the role's current default; if that does not either, none — said on the receipt,
+never a refusal.
+
 ## In `asq`: the Personas tab
 
 Open a project in `asq` and its **Personas** tab lists every persona that

@@ -7703,15 +7703,15 @@ def test_restart_keeps_the_account_a_row_without_a_slot_ran_under(
     assert _flag(_command(tmux), "--account") == "3" and receipt.started.account_slot == 3
 
 
-def test_restart_replays_the_rows_persona_and_says_when_it_no_longer_resolves(
+def test_restart_replays_the_rows_persona_and_steps_down_when_it_no_longer_resolves(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A restart is the same agent (#144), and the row is the record of how it ran
     (spawn-personas §3.8): the persona it was spawned with comes back with it; a row
-    that had none replays with none, even once the role has adopted a default; and a
-    persona deleted since starts the agent without it and SAYS so — refusing would
-    leave the agent stopped over a prompt it can run without, the failure the binary's
-    ``_refuse_a_replay_that_cannot_start`` exists to prevent."""
+    that had none replays with none, even once the role has adopted a default. A
+    persona deleted since steps DOWN, and says so: to the role's current default when
+    there is one that resolves, else to none — never a refusal, which would leave the
+    agent stopped over a prompt it can run without (owner decision, 2026-09-24)."""
     from aisquare.core.config import FleetRoleSettings
 
     skill = project.root / ".aisquare" / "personas" / "tempo" / "SKILL.md"
@@ -7724,22 +7724,31 @@ def test_restart_replays_the_rows_persona_and_says_when_it_no_longer_resolves(
     kept = fleet_service.spawn(project, "coder", label="coder-kept", persona="careful").agent
     plain = fleet_service.spawn(project, "coder", label="coder-plain").agent
     gone = fleet_service.spawn(project, "coder", label="coder-gone", persona="tempo").agent
-    # A default adopted since the spawns: a replay must not pick it up.
+    lone = fleet_service.spawn(project, "tester", label="tester-gone", persona="tempo").agent
+    # A default adopted since the spawns, for coders only: a replay must not pick it
+    # up over a persona the row has, nor over a row that ran with none.
     _settings(monkeypatch, roles={"coder": FleetRoleSettings(persona="minimalist")})
     shutil.rmtree(skill.parent)
-    for agent in (kept, plain, gone):
+    for agent in (kept, plain, gone, lone):
         tmux.die(agent.pane_id, 0)
 
     kept_again = fleet_service.restart(project, "coder-kept")
     plain_again = fleet_service.restart(project, "coder-plain")
     gone_again = fleet_service.restart(project, "coder-gone")
+    lone_again = fleet_service.restart(project, "tester-gone")
 
     assert kept_again.started.persona == "careful"
-    assert _flag(_command(tmux, -3), "--persona") == "careful"
-    assert plain_again.started.persona is None and "--persona" not in _command(tmux, -2)
-    assert gone_again.started.persona is None and "--persona" not in _command(tmux, -1)
-    assert [note for note in gone_again.notes if "persona tempo no longer resolves" in note]
-    assert all("started without it" in note for note in gone_again.notes if "tempo" in note)
+    assert _flag(_command(tmux, -4), "--persona") == "careful"
+    assert plain_again.started.persona is None and "--persona" not in _command(tmux, -3)
+    # Gone, and the role has a default that resolves: the default, said.
+    assert gone_again.started.persona == "minimalist"
+    assert _flag(_command(tmux, -2), "--persona") == "minimalist"
+    assert [n for n in gone_again.notes if "persona tempo no longer resolves" in n]
+    assert [n for n in gone_again.notes if "started with the role's default, minimalist" in n]
+    # Gone, and no default to step down to: none, said.
+    assert lone_again.started.persona is None and "--persona" not in _command(tmux, -1)
+    assert [n for n in lone_again.notes if "persona tempo no longer resolves" in n]
+    assert [n for n in lone_again.notes if "started without a persona" in n]
 
 
 def test_a_death_two_readers_see_is_announced_once(

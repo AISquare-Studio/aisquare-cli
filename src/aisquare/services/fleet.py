@@ -3939,27 +3939,43 @@ def _respawn(
 
 
 def _persona_for_replay(project: ProjectInfo, agent: FleetAgent, notes: list[str]) -> str:
-    """The persona a replay runs as: the ROW's, exactly — the one it was spawned with or
-    given since (``attach_persona``), never the role's default of the day.
+    """The persona a replay runs as: the ROW's, then the role's default, then none; never a refusal.
 
     A restart is the same agent (#144), and the row is the record of how it ran
-    (docs/plans/spawn-personas.md §3.8). So a row with no persona replays with
-    none — the empty string, which :func:`_chosen_persona` reads as "none was
-    asked" rather than as "ask the role" — and a row whose persona no longer
-    resolves (deleted, or renamed since) starts without it and the receipt says
-    so: refusing would leave the agent stopped over a prompt it can run without,
-    the failure :func:`_refuse_a_replay_that_cannot_start` exists to prevent.
+    (docs/plans/spawn-personas.md §3.8): the persona it was spawned with, or was
+    given since (``attach_persona``), comes back with it. A row with no persona
+    replays with none — the empty string, which :func:`_chosen_persona` reads as
+    "none was asked" rather than "ask the role" — so a role default adopted since
+    does not quietly change an agent that ran without one. Only when the row's
+    persona no longer resolves (deleted or renamed since) does the ladder step
+    down: to the role's current default when that resolves, else to none, and
+    each step is said on the receipt. A replay never refuses over a persona —
+    the agent can run without one, and refusing would leave it stopped, the
+    failure :func:`_refuse_a_replay_that_cannot_start` exists to prevent
+    (owner decision, 2026-09-24).
     """
     if not agent.persona:
         return ""
     try:
         personas.resolve(agent.persona, project.root)
     except personas.PersonaError as exc:
+        gone = f"persona {agent.persona} no longer resolves ({exc.rule})"
+    else:
+        return agent.persona
+    fallback = role_settings(agent.role, settings()).persona
+    if not fallback or fallback == agent.persona:
+        notes.append(f"{gone} — started without a persona")
+        return ""
+    try:
+        personas.resolve(fallback, project.root)
+    except personas.PersonaError as exc:
         notes.append(
-            f"persona {agent.persona} no longer resolves ({exc.rule}) — started without it"
+            f"{gone}, and the role's default {fallback} does not either ({exc.rule}) — "
+            "started without a persona"
         )
         return ""
-    return agent.persona
+    notes.append(f"{gone} — started with the role's default, {fallback}")
+    return fallback
 
 
 def _refuse_a_replay_that_cannot_start(agent: FleetAgent, session: TeamSession | None) -> None:

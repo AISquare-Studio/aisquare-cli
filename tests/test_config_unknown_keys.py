@@ -216,5 +216,6 @@ def test_the_persona_import_section_round_trips_under_its_file_key(tmp_path: Pat
 
     assert config.persona.import_.engine == "off"
     assert _sections(target)["persona"] == {
-        "import": {"engine": "off", "api_model": "claude-sonnet-5", "retries": 2}
+        "system_prompt": True,  # the section's own key, written with its default
+        "import": {"engine": "off", "api_model": "claude-sonnet-5", "retries": 2},
     }

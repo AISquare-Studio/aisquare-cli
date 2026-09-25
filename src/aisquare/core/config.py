@@ -337,6 +337,14 @@ class PersonaSettings(BaseModel):
     )
 
     import_: PersonaImportSettings = Field(default_factory=PersonaImportSettings, alias="import")
+    #: The persona block is appended to the agent's system prompt at launch too (Claude
+    #: Code: ``--append-system-prompt-file``), beside the session-start briefing that
+    #: survives ``/clear``, so it holds over a long session as hook context alone may
+    #: not (docs/plans/spawn-personas.md §9, gh #210). ``false`` keeps the briefing
+    #: alone and appends nothing — for a session whose system prompt must stay exactly
+    #: the binary's own. A binary without a seam this launcher knows (codex, aider) gets
+    #: the briefing alone either way, and the launch says so. Owner decision, 2026-09-24.
+    system_prompt: bool = True
 
 
 class AccountsSettings(BaseModel):

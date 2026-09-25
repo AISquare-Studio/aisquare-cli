@@ -39,19 +39,40 @@ worktree `~/work/aisquare-cli-hack-merge`), not pushed, for the owner's review.
    `StopReceipt`. The train's three direct-press view tests go through the
    dialog; P21's rule tests ask the new constant; one new test drives the
    exited-row dialog end to end.
-5. **A replay keeps the row's persona.** `_respawn` (restart, switch) passes the
-   row's persona — spawned with or attached since — never the role's default of
-   the day; one that no longer resolves starts the agent without it and says so
-   (`test_restart_replays_the_rows_persona_and_says_when_it_no_longer_resolves`).
+5. **A replay keeps the row's persona, then steps down.** `_respawn` (restart,
+   switch) passes the row's persona — spawned with or attached since — never
+   the role's default of the day; one that no longer resolves steps down to the
+   role's current default, then to none, each said on the receipt and never a
+   refusal (owner decision, decision audit;
+   `test_restart_replays_the_rows_persona_and_steps_down_when_it_no_longer_resolves`).
 6. **Two test helpers predated the train's rules.** `test_ui_spawn.register` now
    onboards (#139: captured is not shown), and its socket guard lets the
    socket-less `tmux -V` probe through, as `test_ui_shell`'s already does.
 7. **Gate.** On the head of the second merge, in a venv with the tree installed editable (`[dev]`, py3.12): ruff format/check clean; mypy strict clean (317 files); `pytest -ra` **5239 passed, 4 skipped, 0 failed** (the skips are the Windows answers, NTFS ACLs and `capture-pane -F` below tmux 3.7 — environmental, as on CI). The first merge's tree was gated the same way at 5231 passed with the three spawn-test failures fixed in that commit (§6). Handoff: `~/work/HACKATHON-RC-FOLD-2026-09-24.md`.
-8. **Open for the owner.** Push (or open a PR onto `rc/hackathon-v1`); the
-   Stop-on-exited decision (§4) is the one product call made here and is one
-   constant to flip; when #203 lands on `main`, the `main` merge into this
-   branch should be small (its content is already here) unless Anmol's store
-   fix differs from #208.
+8. **Decision audit (owner, 00:36 close).** Nine questions, each an OWNER
+   DECISION note on the crew board: the fold stays local until #203 is on
+   `main`, then one push and #201 refreshed; #208 rides in the new RC, no
+   retarget, one RC branch and one PR to `main`; #136 folded after #203 lands
+   (card filed); the two crew-gate bugs on #203 fixed tonight (below); Stop on
+   exited rows stays; the persona replay ladder (§5); version stays 0.6.0 until
+   the next RC; the persona goes through the system prompt by default with a
+   switch (below); the three homes unchanged.
+9. **Tonight's work, on the local branch, before the owner's end-to-end run.**
+   The two findings the crew gate held #203 on: a target `explainability use`
+   writes is marked the destination's — the machine default never resolves it
+   and it borrows no gateway or proxy from the machine — and `ensure_target`
+   creates a missing target only; so `use` for one project changes nothing for
+   a project without a destination, and an API host the CLI cannot place
+   resolves to no gateway rather than to prod's (`tests/test_destinations.py`,
+   three tests; the doctor's proxy lane says "no proxy known"). The persona
+   through the system prompt: Claude Code gets `--append-system-prompt-file`
+   with the same block the hook briefs, `[persona] system_prompt = false` keeps
+   the hook alone, codex and aider and any wrapper not named claude get the
+   hook alone and the launch says so (`tests/test_launch.py`, four tests;
+   `docs/personas.md`). Reinstalled on this machine for the run. Gate: ruff format/check clean, mypy strict clean (317 files), `pytest -ra` **5244 passed, 4 skipped, 0 failed** (21:48), in the same venv as the fold's gate.
+10. **Open for the owner.** When #203 lands on `main`: merge `main` into this
+   branch (small unless Anmol's store fix differs from #208), fold #136, bump
+   the version to the next rc, push once, refresh #201 with the delta note.
 
 ## Done — what to do this morning (15:16, 2026-09-15)
 

@@ -202,6 +202,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     same discriminator, on the precedent `stored_api_key` set.
 
 ### Added
+- **The persona rides the system prompt too, and a replay keeps it.** For Claude
+  Code the launch appends the persona block to the default system prompt
+  (`--append-system-prompt-file`, a file under `~/.aisquare/cache/persona-prompts/`;
+  the name travels as `AISQUARE_PERSONA`, never the body) beside the
+  session-start briefing that survives `/clear`, so a persona holds over a long
+  session as hook context alone may not (plan §9, #210). `[persona]
+  system_prompt = false` keeps the briefing alone; an `--append-system-prompt`
+  of either spelling on the operator's line wins. codex, aider and any wrapper
+  not named `claude` have no seam this launcher knows and get the briefing
+  alone, said in one dim line. `fleet restart` and `fleet switch` replay the
+  ROW's persona — spawned with, or attached since — never the role's default of
+  the day; one that no longer resolves steps down to the role's current
+  default, then to none, each said on the receipt and never a refusal (owner
+  decision, 2026-09-24; supersedes #209).
 - **Stop an agent from `asq`.** The agent view's header gains a compact **Stop**
   button, and `x` with the sidebar focused stops the selected agent — both open
   one dialog (*Stop* · *Force* · *Cancel*) over `services.fleet.stop`, the same

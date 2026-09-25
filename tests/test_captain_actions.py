@@ -1311,6 +1311,9 @@ def test_bt_clears_the_speech_queue_and_stamps_the_brake(projects: dict[str, Pro
     assert captain_state.pending_speech() == []
     assert captain_state.brake_pulled_after(before)
     assert result["said"].startswith("brake: cleared 2 queued lines")
+    one = ok(actions.speak("three"))
+    assert one["queued"] == 1
+    assert ok(actions.bt())["said"].startswith("brake: cleared 1 queued line,")
 
 
 # --- wololo -----------------------------------------------------------------------------

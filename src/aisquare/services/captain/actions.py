@@ -246,6 +246,11 @@ def _on(target: ProjectInfo | None) -> ProjectInfo:
     return target
 
 
+def _count(n: int, noun: str) -> str:
+    """``1 line``, ``2 lines`` — the said line is often read aloud."""
+    return f"{n} {noun}" if n == 1 else f"{n} {noun}s"
+
+
 def _name(project: ProjectInfo) -> str:
     return project.root.name or project.id
 
@@ -304,7 +309,7 @@ def _projects() -> Outcome:
     with store_session() as store:
         rows = store.list_projects()
     listed = [_project(project) for project in rows]
-    return Outcome({"projects": listed}, said=f"{len(listed)} projects")
+    return Outcome({"projects": listed}, said=_count(len(listed), "project"))
 
 
 def _board(target: ProjectInfo) -> Outcome:
@@ -339,7 +344,7 @@ def _board(target: ProjectInfo) -> Outcome:
             ],
             "events": [_event(event) for event in events],
         },
-        said=f"{_name(target)}: {len(agents)} agents, {len(tasks)} open tasks",
+        said=f"{_name(target)}: {_count(len(agents), 'agent')}, {_count(len(tasks), 'open task')}",
     )
 
 
@@ -373,7 +378,7 @@ def _read(target: ProjectInfo, label: str, lines: int) -> Outcome:
     tail = _pane_tail(agent, lines)
     return Outcome(
         {"label": label, "state": status.state, "lines": tail, "untrusted": True},
-        said=f"read {len(tail)} lines of {label}",
+        said=f"read {_count(len(tail), 'line')} of {label}",
     )
 
 
@@ -414,7 +419,7 @@ def _since(target: ProjectInfo, agent: str | None, advance: bool) -> Outcome:
         except TmuxError:
             pane = None  # the pane went away; the board's events still answer
     who = agent or _name(target)
-    said = f"{len(events)} events for {who}" + (" (more waiting)" if truncated else "")
+    said = f"{_count(len(events), 'event')} for {who}" + (" (more waiting)" if truncated else "")
     if agent is not None and session_id is None:
         said = f"{agent} has not joined the board — its pane only"
     return Outcome(
@@ -570,7 +575,8 @@ def _paste(target: ProjectInfo, label: str, text: str) -> Outcome:
     agent, _, srv = _ready(target, label)
     srv.paste(agent.pane_id, text)  # bracketed; no Enter follows — the owner submits
     return Outcome(
-        {"label": label, "chars": len(text)}, said=f"pasted {len(text)} characters into {label}"
+        {"label": label, "chars": len(text)},
+        said=f"pasted {_count(len(text), 'character')} into {label}",
     )
 
 
@@ -795,7 +801,7 @@ def _bt() -> Outcome:
     cleared = captain_state.clear_speech()
     entry = captain_state.pop_undo()
     undid = _undo(entry) if entry is not None else None
-    parts = [f"cleared {cleared} queued lines"]
+    parts = [f"cleared {_count(cleared, 'queued line')}"]
     if waiting is not None:
         parts.append("cancelled the wait for a manager's answer")
     parts.append(f"{undid['how']} {undid['task']}" if undid is not None else "nothing to undo")

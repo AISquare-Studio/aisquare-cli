@@ -11,7 +11,7 @@ import errno
 import os
 import tomllib
 from pathlib import Path
-from typing import IO, Any, Literal
+from typing import Any, Literal
 
 import tomli_w
 from pydantic import BaseModel, Field
@@ -414,8 +414,8 @@ def _keep_unknown(existing: Any, dumped: Any, model: Any) -> Any:
     return merged
 
 
-def _parse_toml(handle: IO[bytes]) -> dict[str, Any]:
-    """The TOML document in ``handle``, read past a UTF-8 BOM if it starts with one.
+def _parse_toml(raw: bytes) -> dict[str, Any]:
+    """The TOML document in ``raw``, read past a UTF-8 BOM if it starts with one.
 
     ``tomllib`` refuses a leading U+FEFF ("Invalid statement (at line 1,
     column 1)"), so a config saved by Windows PowerShell 5.1's ``Set-Content
@@ -428,7 +428,7 @@ def _parse_toml(handle: IO[bytes]) -> dict[str, Any]:
     fixes, round 1): ``load_config`` reports it, and ``save_config``'s merge
     read fails open on it as on a ``TOMLDecodeError``.
     """
-    loaded: dict[str, Any] = tomllib.loads(handle.read().decode("utf-8-sig"))
+    loaded: dict[str, Any] = tomllib.loads(raw.decode("utf-8-sig"))
     return loaded
 
 
@@ -441,11 +441,7 @@ def load_config(path: Path | None = None) -> AppConfig:
     if not target.exists():
         return AppConfig()
 
-    def _read() -> dict[str, Any]:
-        with target.open("rb") as fh:
-            return _parse_toml(fh)
-
-    data = despite_windows_contention(_read)
+    data = _parse_toml(despite_windows_contention(target.read_bytes))
     return AppConfig.model_validate(data)
 
 
@@ -546,12 +542,9 @@ def save_config(config: AppConfig, path: Path | None = None) -> Path:
         # fail-open the result is a green-looking machine with no tracing".
         # Failing open is right for a config we cannot PARSE; it is not right for
         # one that is busy for 40 microseconds.
-        def _read_existing() -> dict[str, Any]:
-            with written.open("rb") as handle:
-                return _parse_toml(handle)
-
         with contextlib.suppress(OSError, tomllib.TOMLDecodeError, UnicodeDecodeError):
-            dumped = _keep_unknown(despite_windows_contention(_read_existing), dumped, config)
+            existing = _parse_toml(despite_windows_contention(written.read_bytes))
+            dumped = _keep_unknown(existing, dumped, config)
     payload = tomli_w.dumps(dumped)
 
     # Written BESIDE the target and renamed over it, never into the target

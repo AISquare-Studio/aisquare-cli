@@ -673,34 +673,51 @@ def _next_step(output: str) -> list[str]:
     return argv[1:]
 
 
-def test_the_next_step_for_the_projects_key_resolves_the_projects_key(
+def _gateway_posts(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str | None, str | None]]:
+    """The gateway as ``doctor --live`` meets it, answering; each span it posts is recorded
+    as the project the key was resolved for and the key it carried."""
+    posted: list[tuple[str | None, str | None]] = []
+
+    def ingest(target: ops.ResolvedTarget, identity: str) -> ops.HttpVerdict:
+        posted.append((target.project_id, target.api_key))
+        return ops.HttpVerdict(ok=True, status=202, detail="accepted")
+
+    monkeypatch.setattr(ops, "probe_ready", lambda *_a, **_k: ops.HttpVerdict(True, 200, "ok"))
+    monkeypatch.setattr(ops, "probe_ingest", ingest)
+    return posted
+
+
+def test_the_next_step_for_the_projects_key_puts_that_key_to_the_gateway(
     runner: CliRunner,
     idp: IdentityProviderStub,
     signed_in: iam.Session,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`doctor` opens no store, so a minted key is invisible to it; `status` resolves it."""
+    """`use` named `explainability status`, which resolves the project's key and only
+    probes the proxy: a revoked key or another workspace's passed it (review of #172,
+    D2 round 2). `doctor --live --project` posts a span with the key the project's
+    launches take. The project is named by id whether `use` was given one or not (D7)."""
     _trace_on(monkeypatch)
-    _project(tmp_path / "lib")
-    _project(tmp_path / "web")  # the checkout the commands run from
+    posted = _gateway_posts(monkeypatch)
+    lib = _project(tmp_path / "lib")
+    web = _project(tmp_path / "web")  # the checkout the commands run from
     result = runner.invoke(app, ["explainability", "use", "acme/Frontend"])
     assert result.exit_code == 0, result.output
     step = _next_step(result.output)
-    assert step == ["explainability", "status", "--target", "local"]
-    followed = runner.invoke(app, ["--json", *step])
-    assert followed.exit_code == 0, followed.output
-    shown = json.loads(followed.stdout)
-    assert (shown["key_source"], shown["key_set"]) == ("project", True)
+    assert step == ["doctor", "--live", "--project", web.id]
+    runner.invoke(app, step)
+    minted = service.project_key_path(web.id).read_text(encoding="utf-8")
+    assert posted == [(web.id, minted)], "the span went out with the project's own key"
 
     # For a project other than this checkout's, the check is about THAT project.
     other = runner.invoke(app, ["explainability", "use", "--project", "lib", "acme/API"])
     assert other.exit_code == 0, other.output
     step = _next_step(other.output)
-    assert step == ["explainability", "status", "--target", "local", "--project", "lib"]
-    shown = _json(runner, *step)
-    assert shown["destination"]["studio"]["name"] == "API", "this checkout's project was checked"
-    assert (shown["key_source"], shown["key_set"]) == ("project", True)
+    assert step == ["doctor", "--live", "--project", lib.id]
+    posted.clear()
+    runner.invoke(app, step)
+    assert posted == [(lib.id, service.project_key_path(lib.id).read_text(encoding="utf-8"))]
 
 
 def test_with_no_key_the_next_step_attaches_one_to_the_destination(
@@ -710,20 +727,22 @@ def test_with_no_key_the_next_step_attaches_one_to_the_destination(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Not `doctor`: its remedy is a machine key, which never stands in for the project's."""
+    """Not `doctor`: its remedy is a machine key, which never stands in for the project's.
+    The step runs as printed, with the key on stdin: it printed `--from-env VAR`, a
+    placeholder presented as a command (review of #172, D2 round 2, D8)."""
     _trace_on(monkeypatch)
     idp.key_mint = "token_not_valid"
     project = _project(tmp_path / "web")
     result = runner.invoke(app, ["explainability", "use", "acme/Frontend"])
     assert result.exit_code == 0, result.output
     step = _next_step(result.output)
-    assert step == ["explainability", "key", "set", "--from-env", "VAR", "--target", "local"]
-    monkeypatch.setenv("VAR", "AIS_handmade_key")
-    assert runner.invoke(app, step).exit_code == 0
+    assert step == ["explainability", "key", "set", "--project", project.id]
+    assert "VAR" not in next(ln for ln in result.output.splitlines() if "next:" in ln)
+    assert runner.invoke(app, step, input="AIS_handmade_key\n").exit_code == 0
     resolved = ops.resolve_target(load_config().explainability, None, project_id=project.id)
     assert (resolved.name, resolved.key_source) == ("local", "project")
     again = runner.invoke(app, ["explainability", "use", "acme/Frontend"])
-    assert _next_step(again.output) == ["explainability", "status", "--target", "local"]
+    assert _next_step(again.output) == ["doctor", "--live", "--project", project.id]
 
 
 def test_the_next_step_for_a_machine_key_is_doctor_and_doctor_resolves_it(
@@ -737,14 +756,14 @@ def test_the_next_step_for_a_machine_key_is_doctor_and_doctor_resolves_it(
     _trace_on(monkeypatch)
     idp.key_mint = "token_not_valid"
     monkeypatch.setenv("EXPLAINABILITY_LOCAL_API_KEY", "AIS_machine_local_key")
-    _project(tmp_path / "web")
+    web = _project(tmp_path / "web")
     result = runner.invoke(app, ["explainability", "use", "acme/Frontend"])
     assert result.exit_code == 0, result.output
     step = _next_step(result.output)
-    assert step == ["doctor", "--live", "--target", "local"]
+    assert step == ["doctor", "--live", "--project", web.id]
     # Offline: the rows --live adds dial the gateway. The config row is the one
     # that failed when this line named doctor for a project's key.
-    rows = {check.name: check for check in ops.checks(target_name=step[-1])}
+    rows = {check.name: check for check in ops.checks(project_id=step[-1])}
     assert rows["explainability config"].status == "ok", rows["explainability config"].detail
 
 

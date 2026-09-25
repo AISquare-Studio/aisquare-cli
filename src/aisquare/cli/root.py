@@ -27,6 +27,7 @@ from aisquare.services import diagnostics as diagnostics_service
 from aisquare.services import explainability as explainability_service
 from aisquare.services import explainability_ops
 from aisquare.services import lifecycle as lifecycle_service
+from aisquare.services import project as project_service
 from aisquare.services import sync as sync_service
 
 
@@ -141,14 +142,40 @@ def doctor(
     yes: Annotated[
         bool, typer.Option("--yes", "-y", help="Answer yes to every --fix prompt.")
     ] = False,
+    project: Annotated[
+        str | None,
+        typer.Option(
+            "--project",
+            "-P",
+            help="Check the explainability key this project's launches use, by codename, "
+            "name or id prefix (default: the machine's key).",
+        ),
+    ] = None,
 ) -> None:
-    """Run diagnostics and suggest fixes for common problems."""
+    """Run diagnostics and suggest fixes for common problems.
+
+    ``--project`` resolves the explainability section's key for one project,
+    its own key (#141) first, as ``launch`` does. Without it the section reads
+    the machine's key and opens no store. With ``--live`` that is the check that
+    puts a project's key to the gateway: ``use`` names it once tracing is on,
+    and ``explainability status``, which it used to name, only probes the
+    proxy, so a revoked or wrong-workspace key passed it (review of #172, D2
+    round 2).
+    """
+    project_id = None
+    if project is not None:
+        try:
+            project_id = project_service.resolve(project).id
+        except KeyError:
+            fail(f"no project matches '{project}'", error="not_found", ref=project)
+        except ValueError as exc:
+            fail(str(exc), error="ambiguous_project", ref=project)
     if fix:
         for action in explainability_ops.apply_fixes(
             target=target, assume_yes=yes, confirm=typer.confirm
         ):
             typer.echo(f"fix: {action}")
-    checks = diagnostics_service.doctor(live=live, target=target)
+    checks = diagnostics_service.doctor(live=live, target=target, project_id=project_id)
     emit_doctor(checks)
     if any(check.status is CheckStatus.fail for check in checks):
         raise typer.Exit(1)

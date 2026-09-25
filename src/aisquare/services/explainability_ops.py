@@ -1148,8 +1148,13 @@ def checks(
     target_name: str | None = None,
     live: bool = False,
     env: Mapping[str, str] | None = None,
+    project_id: str | None = None,
 ) -> list[DoctorCheck]:
     """The explainability section of ``aisquare doctor``, in dependency order.
+
+    ``project_id`` resolves the key (and, through the project's destination,
+    the target) as that project's launches do (``doctor --project``); without
+    it the read is machine-level and opens no store.
 
     Severity follows a single rule: **an unwired machine is not a broken
     machine**. Nothing here fails while tracing is off — the section reads as
@@ -1168,7 +1173,7 @@ def checks(
             )
         ]
 
-    target = resolve_target(resolved_settings, target_name, env=env)
+    target = resolve_target(resolved_settings, target_name, env=env, project_id=project_id)
     on = resolved_settings.enabled
     switch = _check_switch(resolved_settings, target, live=live)
 

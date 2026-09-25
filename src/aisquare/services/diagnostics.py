@@ -104,7 +104,11 @@ def _shipping_status() -> ShippingStatus | None:
 
 
 def doctor(
-    *, live: bool = False, target: str | None = None, cwd: Path | None = None
+    *,
+    live: bool = False,
+    target: str | None = None,
+    cwd: Path | None = None,
+    project_id: str | None = None,
 ) -> list[DoctorCheck]:
     """Run health checks over the install, dependencies and integration.
 
@@ -118,6 +122,10 @@ def doctor(
     must not ``os.chdir`` (docs/plans/fleet-tui.md §5.6), so it passes the
     selected project's root here and gets that project's report in-process.
     The machine-wide checks ignore it — they are about this machine.
+
+    ``project_id`` is the project whose explainability key the explainability
+    section resolves, as its launches do (``doctor --project``); ``None`` is
+    the machine's key.
     """
     return [
         _check_python(),
@@ -151,7 +159,7 @@ def doctor(
         _check_browser_tools(cwd),
         _check_fleet_terminal(),
         *_experiment_checks(),
-        *explainability_ops.checks(live=live, target_name=target),
+        *explainability_ops.checks(live=live, target_name=target, project_id=project_id),
         # Only while a key the CLI minted is owed a revocation (#142); --live
         # tries each again first — one request per key, on the API that minted it.
         *_optional(_minted_keys_check(live)),

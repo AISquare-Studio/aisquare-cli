@@ -204,15 +204,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `key set` is the way in — and binds this machine's agent identities to the
   chosen studio, which is what makes spans land there. `status` shows
   `destination:` (the UI's Explainability view `lands in`) and takes
-  `--project`: it is the check `use` names once tracing is on, since `doctor`
-  resolves only the machine's key; `whoami` gains a `traces:` line; `logout`,
-  and *Sign out* on the fleet UI's Accounts page, forget every key the CLI
-  minted and leave hand-attached keys alone. The key never crosses a deployment
-  or a workspace: a target `use` creates names its own key variable, a machine
-  key never stands in for the mint, launches take the proxy from the same target
-  as the key, `key set` binds to the destination's deployment, the CLI never
-  mints over a hand key, and a minted key that is replaced, cleared, purged with
-  its project or left behind by a move is revoked on the host that minted it — a
+  `--project`; `doctor --project P` resolves P's key as its launches do, and
+  `doctor --live --project <id>`, which posts a span with that key, is the check
+  `use` names once tracing is on; `whoami` gains a `traces:` line; `logout`, and
+  *Sign out* on the fleet UI's Accounts page, forget every key the CLI minted
+  and leave hand-attached keys alone. The key never crosses a deployment or a
+  workspace: a target `use` creates names its own key variable, a machine key
+  never stands in for the mint, launches take the proxy from the same target as
+  the key, `key set` binds to the destination's deployment, the CLI never mints
+  over a hand key, and a minted key that is replaced, cleared, purged with its
+  project or left behind by a move is revoked on the host that minted it — a
   replaced one only once its replacement is recorded. Its uid is never forgotten
   before the server confirms the revoke: the commit that takes the key off its
   project records the revocation as owed (schema v22, `pending_revocation`), and

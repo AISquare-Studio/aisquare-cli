@@ -450,29 +450,26 @@ def _routing_lines(report: dest.RosterReport) -> list[str]:
     return [f"{b.agent} → {'bound' if b.ok else 'not bound: ' + b.detail}" for b in report.bound]
 
 
-def _next_check(target: ops.ResolvedTarget, project_ref: str | None) -> str:
-    """The step ``use`` names once tracing is on: one that resolves the key ``use`` set up.
+def _next_check(target: ops.ResolvedTarget, project: ProjectInfo) -> str:
+    """The step ``use`` names once tracing is on: one that puts the key ``use`` set up to use.
 
-    ``doctor`` resolves the MACHINE's key and opens no store, so the project's
-    own key — minted or attached by hand — is invisible to it: it fails the
-    config row and tells the operator to export a machine key, the one thing
-    that never stands in for the project's. ``explainability status`` resolves
-    the project's key and probes the destination's proxy. With no key at all
-    the next step is attaching one, not a check. ``doctor --live`` stays for a
-    machine key, which it resolves too and is the one check that puts it to the
-    gateway. ``--target`` pins the destination's deployment whatever the shell
-    exports, and ``--project`` is repeated when ``use`` was given one.
+    ``doctor --live --project`` resolves the key the project's launches take,
+    its own key (minted or attached by hand) first, and posts a real span to the
+    gateway with it. ``use`` named ``explainability status`` for the project's
+    own key, which only probes the proxy, so a revoked key or another
+    workspace's passed it (review of #172, D2 round 2). With no key at all the
+    next step is attaching one, not a check: ``key set`` for the same project,
+    which binds it to the destination's deployment. The project is always
+    named by id. Without it, the step asked about the checkout it was run
+    from, which is not the project a ``use --project`` chose (D7).
     """
-    name = shlex.quote(target.name)
-    project = f" --project {shlex.quote(project_ref)}" if project_ref is not None else ""
-    if target.key_source == "project":
-        return f"aisquare explainability status --target {name}{project}"
+    project_id = shlex.quote(project.id)
     if target.key_source == "unset":
         return (
-            f"aisquare explainability key set --from-env VAR --target {name}{project}"
-            "   (the project has no key for this destination yet)"
+            f"aisquare explainability key set --project {project_id}"
+            "   (pipe the workspace's key on stdin, or name its variable with --from-env)"
         )
-    return f"aisquare doctor --live --target {name}"
+    return f"aisquare doctor --live --project {project_id}"
 
 
 @app.command()
@@ -680,7 +677,7 @@ def use(
     if not config.explainability.enabled:
         typer.echo("  next:     aisquare explainability enable   (tracing is off on this machine)")
     else:
-        typer.echo(f"  next:     {_next_check(target, project_ref)}")
+        typer.echo(f"  next:     {_next_check(target, project)}")
 
 
 def _unused_env_note(target: ops.ResolvedTarget) -> str:

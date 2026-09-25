@@ -358,7 +358,8 @@ the project's launches resolve it; typed
 beside other settings that would go to a different deployment, it is refused
 until the field names one. The client lane — the insights this CLI buffers and `ship` drains — still
 ships under the machine key, and `doctor --live` checks the machine's
-workspace; per-project shipping is a follow-up.
+workspace (`doctor --live --project P` checks P's key instead); per-project
+shipping is a follow-up.
 `init --explainability` keeps writing the machine key, so a single-workspace
 machine is unaffected.
 
@@ -390,14 +391,16 @@ reported on its own line:
   never answers for another one; the exception is the machine whose top-level
   gateway already is that deployment's. Launches, `fleet spawn` and
   `explainability env` in the project take the proxy **and** the key from this
-  target, whatever `AISQUARE_EXPLAINABILITY_TARGET` says: a project's destination
-  comes before that variable, which moves only the projects without one
-  (`--target` overrides both, and `status` says when the variable is not in
+  target, whatever `AISQUARE_EXPLAINABILITY_TARGET` says: a project's
+  destination comes before that variable, which moves only the projects without
+  one (`--target` overrides both, and `status` says when the variable is not in
   play). `use` asks about the same target, and once tracing is on it ends with
-  the check for what it set up: `aisquare explainability status --target <name>`
-  (plus `--project` when you named one) for the project's own key, because
-  `doctor` resolves only the machine's; `aisquare doctor --live --target <name>`
-  for a machine key; and `key set` when there is no key yet.
+  the check for what it set up: `aisquare doctor --live --project <id>`, which
+  resolves the key the project's launches take (its own first, else the
+  machine's) and posts a real span with it, or
+  `aisquare explainability key set --project <id>` when there is no key yet.
+  `explainability status` probes only the proxy, so it is not that check: a
+  revoked key passes it.
 - **key** — ingest still needs a workspace key (neither the gateway nor the
   hosted proxy accepts a sign-in token), so the CLI obtains one on your behalf
   unless the project already has its own, scoped to `ingest:write`, named

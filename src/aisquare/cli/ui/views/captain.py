@@ -13,8 +13,10 @@ under the header:
   through T2's one guarded door, ``brain.send`` — never ``fleet.tell``, which reads
   no screen: its Enter at a fresh captain's trust dialog picks "No, exit" (13227,
   T4 gate B1). ``send`` reads the pane by structure and refuses any dialog by name,
-  and that refusal is the notification. Offered only while the captain waits at
-  its prompt, so the button is greyed while it works.
+  and that refusal is the notification. Offered to any live captain, greyed only
+  once it has exited or is lost: send decides when a line may go in, and says why
+  when it may not (13478). A fresh real captain reads working until its first
+  Stop, and a view that asked for waiting did nothing on the owner's first click.
 
 - **the voice controls**, over T3's page (``services.captain.voice`` and
   ``speaker``), each writing the one key in state.json the page and the CLI write
@@ -61,6 +63,8 @@ THINKING_TICK_S = 1.0
 """How often the view reads the busy flag — T3's page polls state at the same pace."""
 
 TELL_WORKER = "captain-whats-up"
+DEAD_STATES = frozenset({"exited", "lost"})
+"""A captain row in these states cannot take a line: What's up is greyed."""
 VOICE_WORKER = "captain-voice-switch"
 MIC_WORKER = "captain-mic"
 BAR_WORKER = "captain-bar"
@@ -336,7 +340,9 @@ class CaptainView(AgentView):
             for worker in self.workers
         )
         button = self.query_one("#captain-whats-up", Button)
-        button.disabled = busy or self.status.state != "waiting"
+        # No copy of send's readiness here (13478): the row being live is enough to ask,
+        # and brain.send types, waits or refuses, and the notification says which.
+        button.disabled = busy or self.status.state in DEAD_STATES
 
     @on(Button.Pressed, "#captain-whats-up")
     def _whats_up(self, event: Button.Pressed) -> None:

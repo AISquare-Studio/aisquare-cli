@@ -29,7 +29,7 @@ from aisquare.services.captain import brain
 from aisquare.services.captain import state as captain_state
 from tests import test_captain_say as say_suite
 from tests import test_ui_shell as ui_suite
-from tests.captain_screens import INPUT_BOX, REAL_IDLE_AFTER_STOP, REAL_TRUST
+from tests.captain_screens import INPUT_BOX, REAL_IDLE_AFTER_STOP, REAL_TRUST, REAL_WORKING
 from tests.test_captain_say import Captain, Clock
 from tests.test_captain_sidebar import agent_opened, quiet, until
 from tests.test_ui_shell import Script, fleet_app, row_for, seed, shown, status
@@ -338,28 +338,65 @@ def test_the_quick_action_types_nothing_into_a_fresh_captains_trust_dialog(
     assert any("choose Yes, I trust this folder (once)" in line for line in said), said
 
 
-def test_the_quick_action_waits_for_a_captain_at_its_prompt(
+def test_the_quick_action_is_offered_to_any_live_captain_and_withheld_from_a_dead_one(
     tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Offered only to a WAITING captain; a working one is greyed, never queued."""
+    """runner2's reopen (13477): the view's own waiting-only gate kept the button off while a
+    fresh real captain still read working (no Stop hook before its first turn), so the
+    owner's first click did nothing and said nothing. The one door decides (13325, 13478):
+    the button is on for any live row, off only once the captain has exited or is lost."""
     told = _record_tell(monkeypatch)
     home = captain_state.home_project()
     script[home.id] = [_captain("working")]
 
-    async def body(pilot: Pilot[None]) -> None:
+    async def body(pilot: Pilot[None]) -> list[bool]:
         app = fleet_app(pilot)
         app.refresh_data()
         await pilot.pause()
         await _open_view(pilot)
         button = app.query_one("#captain-whats-up", Button)
-        assert button.disabled
-        script[home.id] = [_captain("waiting")]
-        app.refresh_data()
-        await pilot.pause()
-        assert not button.disabled
+        seen = [button.disabled]
+        for state in ("waiting", "exited", "lost", "working"):
+            script[home.id] = [_captain(state)]
+            app.refresh_data()
+            await pilot.pause()
+            seen.append(button.disabled)
+        return seen
 
-    drive(body)
+    assert drive(body) == [False, False, True, True, False], (
+        "working, waiting, exited, lost, working"
+    )
     assert told.calls == []
+
+
+def test_a_fresh_captain_the_fleet_still_reads_working_takes_what_s_up_through_send(
+    tmp_path: Path, script: Script, captain_door: tuple[Captain, Clock]
+) -> None:
+    """The first click on a fresh real captain (13477): the fleet reads working until its first
+    Stop, its box is drawn and idle (runner2's real capture), and brain.send types (13399)."""
+    fake, _ = captain_door
+    fake.present()  # type: ignore[attr-defined]
+    fake.state = "working"
+    fake.screen = list(REAL_IDLE_AFTER_STOP)
+    script[captain_state.home_project().id] = [_captain("working")]
+    said = drive(_whats_up)
+    assert fake.typed == [("paste", WHAT_IS_UP), ("keys", "Enter")]
+    assert any(f"asked the captain: {WHAT_IS_UP}" in line for line in said), said
+
+
+def test_a_click_on_a_captain_mid_turn_is_said_never_silent(
+    tmp_path: Path, script: Script, captain_door: tuple[Captain, Clock]
+) -> None:
+    """Mid-turn (runner2's real capture: a live spinner above the box, 'esc to interrupt' at
+    it) send waits its time and refuses; the toast says so, in send's own words."""
+    fake, _ = captain_door
+    fake.present()  # type: ignore[attr-defined]
+    fake.state = "working"
+    fake.screen = list(REAL_WORKING)
+    script[captain_state.home_project().id] = [_captain("working")]
+    said = drive(_whats_up)
+    assert fake.typed == []
+    assert any("nothing typed" in line and "stayed working" in line for line in said), said
 
 
 def _thinking(pilot: Pilot[None]) -> str:

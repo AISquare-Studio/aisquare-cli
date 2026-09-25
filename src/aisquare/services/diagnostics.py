@@ -1046,10 +1046,13 @@ def _workspace_credits_check() -> DoctorCheck | None:
 
     Reads the destinations only when ``context.db`` exists (a doctor run must not
     create the store) and asks only with a session for the destination's host.
-    Only a project a launch can join counts: a forgotten one keeps its
-    destination row for ``logout`` (the minted key it may name), but no fleet
-    is spawned into its workspace, so it is neither asked about nor warned on
-    (review of #173, round 1). Warns on the server's own band — ``low`` or
+    Every destination counts, a forgotten project's too: a forget keeps the row,
+    and a launch in that root still traces into its workspace (the destination
+    is read by project id, and the launch's first prompt revives the row), as
+    ``whoami`` and ``explainability status`` say. Hiding it here and on the
+    Accounts page told the operator nothing about the workspace the next fleet
+    there traces into (review of #173 after the stack's merge). Warns on the
+    server's own band — ``low`` or
     ``exhausted`` — and when a balance could not be read at all, because a
     fleet spawned into an exhausted workspace traces nothing. ``None`` when
     there is nothing to ask.
@@ -1064,8 +1067,7 @@ def _workspace_credits_check() -> DoctorCheck | None:
         return None
     try:
         with store_session() as store:
-            visible = {p.id for p in store.list_projects(all=True)}  # captured ones launch too
-            destinations = [d for d in store.project_destinations() if d.project_id in visible]
+            destinations = store.project_destinations()
     except Exception:
         return None
     readings: list[credits_service.WorkspaceCredits] = []

@@ -21,6 +21,7 @@ from aisquare.cli import auth as auth_cli
 from aisquare.cli.app import app
 from aisquare.cli.ui.sidebar import DoctorSection
 from aisquare.cli.ui.views.accounts import credits_text
+from aisquare.core.config import load_config
 from aisquare.core.store import store_session
 from aisquare.core.workspace import project_id_for
 from aisquare.models import ProjectInfo
@@ -156,36 +157,32 @@ def test_doctor_live_warns_on_the_servers_band(
     assert "workspace-credits" not in {c.name for c in diagnostics.doctor(live=False)}
 
 
-def test_a_forgotten_projects_workspace_is_neither_asked_about_nor_warned_on(
-    idp: IdentityProviderStub, pointed: ProjectInfo
+def test_a_forgotten_projects_workspace_is_asked_about_wherever_a_launch_there_traces(
+    runner: CliRunner, idp: IdentityProviderStub, pointed: ProjectInfo
 ) -> None:
-    """Review of #173, round 1: ``project forget`` tombstones the project and
-    leaves its ``project_destination`` row, which ``logout`` still needs for a
-    minted key. ``doctor --live`` and the Accounts page read every row, so a
-    workspace only a forgotten project pointed at was still asked about, drawn,
-    and warned on ("Top up the workspace … before spawning a fleet into it")."""
+    """One rule for a forgotten project's destination, on every surface. ``project
+    forget`` keeps the ``project_destination`` row, and a launch in that root still
+    traces into its workspace: the resolver reads the destination by project id, and
+    the launch's first prompt revives the row. ``whoami`` and ``explainability status``
+    said so, while ``doctor --live`` and the Accounts page (review of #173, round 1)
+    hid that workspace's credits, low or exhausted, from the operator whose next fleet
+    there traces into it (review of #173 after the stack's merge, J1)."""
     from aisquare.cli.ui.views.accounts import _read_credits
-    from aisquare.services import diagnostics
+    from aisquare.services import diagnostics, explainability_ops
 
     session = iam.current_session()
     assert session is not None
-    asked = len(_balance_calls(idp))
     with store_session() as store:
         store.forget_project(pointed.id)
-        assert store.project_destination(pointed.id) is not None, "logout still reaches it"
-    assert "workspace-credits" not in {c.name for c in diagnostics.doctor(live=True)}
-    assert _read_credits(session) == []
-    assert len(_balance_calls(idp)) == asked, "nobody asks about a forgotten project's workspace"
-    # A CAPTURED directory pointed at the same workspace still counts: a launch there joins it.
-    root = pointed.root.parent / "api"
-    root.mkdir()
-    captured = ProjectInfo(id=project_id_for(root), root=root, linked_repos=[])
-    with store_session() as store:
-        store.ensure_project(captured)
-        destination = store.project_destination(pointed.id)
-        assert destination is not None
-        store.set_project_destination(destination.model_copy(update={"project_id": captured.id}))
-    assert {c.name for c in diagnostics.doctor(live=True)} >= {"workspace-credits"}
+        assert store.get_project(pointed.id) is None
+    lands_in = explainability_ops.resolve_target(
+        load_config().explainability, None, project_id=pointed.id
+    ).destination
+    assert lands_in is not None and lands_in.workspace_name == "acme", "a launch there"
+
+    assert "credits: acme [low]" in runner.invoke(app, ["whoami"]).output
+    row = {c.name: c for c in diagnostics.doctor(live=True)}["workspace-credits"]
+    assert row.status == "warn" and "acme" in row.detail
     assert [r.workspace_name for r in _read_credits(session)] == ["acme"]
 
 

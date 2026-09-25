@@ -595,8 +595,11 @@ def revoke_owed(
     session — a revoke is a network call (10 s timeout), and made inside a
     session it held the store for every key. A record is deleted only on the
     server's confirmation (:func:`_revoke`); anything else — signed out, signed
-    in to another host, offline, refused, out of ``budget`` — keeps it, with
-    the reason, for the next pass. ``project_ids`` limits the pass to what a
+    in to another host, offline, refused, out of ``budget`` — keeps it for the
+    next pass, and the report says why. The record keeps only what an ATTEMPT
+    learned: a pass that could not ask (signed out, another host, out of time)
+    leaves the reason the server last gave, which is what the ``minted-keys``
+    row goes on saying. ``project_ids`` limits the pass to what a
     command just detached; ``None`` is every key owed, which is what ``use``,
     ``doctor --live`` and ``logout`` retry. A store that cannot be read or
     cannot record the outcome costs the bookkeeping, not the command, whose
@@ -620,22 +623,32 @@ def revoke_owed(
     if not owed:
         return report
     deadline = time.monotonic() + budget
+    attempted: list[PendingRevocation] = []
     for record in owed:
-        reason = _revoke(record, session, deadline)
+        reason, asked = _revoke(record, session, deadline)
         if reason is None:
             report.revoked.append(record)
-        else:
-            report.owed.append(record.model_copy(update={"last_error": reason}))
+            continue
+        kept = record.model_copy(update={"last_error": reason})
+        report.owed.append(kept)
+        if asked:
+            attempted.append(kept)
     with contextlib.suppress(sqlite3.Error, OSError), store_session() as store:
         for record in report.revoked:
             store.settle_revocation(record.key_uid)
-        for record in report.owed:
+        # Every pass wrote its reason: a signed-out one replaced the 403 a caller
+        # who is not OWNER or ADMIN had been given, and the `minted-keys` row sent
+        # the operator to sign in when the blocker was the role (review of #172's
+        # follow-ups, round 1, F6).
+        for record in attempted:
             store.note_revocation_failure(record.key_uid, record.last_error or "")
     return report
 
 
-def _revoke(record: PendingRevocation, session: iam.Session | None, deadline: float) -> str | None:
-    """Revoke one owed key where it was minted: ``None`` once the server confirms, else why not.
+def _revoke(
+    record: PendingRevocation, session: iam.Session | None, deadline: float
+) -> tuple[str | None, bool]:
+    """Revoke one owed key where it was minted: why not (``None`` once confirmed), and if it asked.
 
     Confirmed is a 2xx, or a 404 — the server has no such key any more (revoked
     from the dashboard, or by an earlier attempt whose answer was lost), so
@@ -643,7 +656,10 @@ def _revoke(record: PendingRevocation, session: iam.Session | None, deadline: fl
     session belongs to one host, and a uid sent to another gets a 404 that
     would read as that confirmation. A refusal (the endpoint shares the mint's
     authentication gap; only a workspace OWNER or ADMIN may revoke), a server
-    error or an unreachable server leaves it owed. Never raises.
+    error or an unreachable server leaves it owed. No request goes out while
+    signed out, signed in to another host or out of time, and the second value
+    says so: that reason is this pass's, not the key's (:func:`revoke_owed`).
+    Never raises.
 
     On that host the 404 does not depend on who asks, or from which workspace:
     measured against AISquare-Studio-BE ``aab6d7f5``, the endpoint finds the
@@ -656,12 +672,12 @@ def _revoke(record: PendingRevocation, session: iam.Session | None, deadline: fl
     settles nothing (review of #172's follow-ups, round 1, F1).
     """
     if session is None:
-        return "signed out"
+        return "signed out", False
     if not _same_api(record.api_url, session.api_url):
-        return f"signed in to {session.api_url}, not {record.api_url}"
+        return f"signed in to {session.api_url}, not {record.api_url}", False
     left = deadline - time.monotonic()
     if left <= 0:
-        return "not tried — this pass ran out of time"
+        return "not tried — this pass ran out of time", False
     try:
         result = iam.request(
             f"api/v2/iam/workspace-api-key/{record.key_uid}/revoke/",
@@ -672,10 +688,10 @@ def _revoke(record: PendingRevocation, session: iam.Session | None, deadline: fl
             timeout=min(iam.HTTP_TIMEOUT_SECONDS, left),
         )
     except iam.IamError as exc:
-        return exc.message
+        return exc.message, True
     if 200 <= result.status < 300 or result.status == 404:
-        return None
-    return f"the API answered HTTP {result.status}: {_detail(result.body)}"
+        return None, True
+    return f"the API answered HTTP {result.status}: {_detail(result.body)}", True
 
 
 def describe_owed(owed: list[PendingRevocation]) -> str:

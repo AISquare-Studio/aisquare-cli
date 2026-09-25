@@ -1324,6 +1324,29 @@ def test_a_refused_revoke_is_said_kept_owed_and_retried_by_doctor_live(
     assert diagnostics._minted_keys_check(live=False) is None, "nothing owed: no row"
 
 
+def test_a_pass_that_could_not_ask_keeps_the_reason_the_server_gave(
+    runner: CliRunner, idp: IdentityProviderStub, signed_in: iam.Session, tmp_path: Path
+) -> None:
+    """Every pass wrote its reason over the last one: a signed-out pass replaced the
+    refusal the server had given, and the ``minted-keys`` row sent the operator to sign
+    in when the blocker was the endpoint (review of #172's follow-ups, round 1, F6).
+    The pass's own report still says why it did not ask."""
+    from aisquare.services import diagnostics
+
+    _project(tmp_path / "web")
+    _json(runner, "explainability", "use", "acme/Frontend")
+    idp.key_mint = "token_not_valid"  # the key endpoints answer the sign-in token 401
+    cleared = _json(runner, "explainability", "key", "clear")
+    [refused] = cleared["revocations"]["still_live"]
+    assert "HTTP 401" in refused["reason"]
+
+    signed_out = dest.revoke_owed(None)
+    assert [record.last_error for record in signed_out.owed] == ["signed out"]
+    offline = diagnostics._minted_keys_check(live=False)
+    assert offline is not None and "HTTP 401" in offline.detail, offline
+    assert "signed out" not in offline.detail
+
+
 def test_a_store_that_cannot_be_read_for_the_revokes_costs_them_not_the_command(
     runner: CliRunner,
     idp: IdentityProviderStub,

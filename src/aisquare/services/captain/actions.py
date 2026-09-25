@@ -26,10 +26,15 @@ Rules every tool keeps:
   ends with the audit's seq.
 
 Results are JSON objects, each with ``action_seq`` (the audit event's seq).
+Called from Python — :func:`perform`, which the CLI verbs use — a tool raises
+:class:`~aisquare.services.captain.errors.Refused` or ``Failed`` with that same
+text; only the MCP server boundary (:func:`build_server`) turns them into the
+SDK's ``ToolError``.
 """
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import re
@@ -199,13 +204,14 @@ def _run(
             )
             raise  # a bug: the SDK logs it server-side and says the tool failed
         recorded = _audit_quietly(tool, target, args, utterance, said)
-        raise _tool_error(f"{said} (action seq {recorded})") from exc
+        outcome_error = Failed if said.startswith("error:") else Refused
+        raise outcome_error(f"{said} (action seq {recorded})") from exc
     try:
         seq = _audit(
             tool, target, args, utterance, ok=True, said=outcome.said, receipt=outcome.receipt
         )
     except Exception as exc:
-        raise _tool_error(
+        raise Failed(
             f"error: {tool} was done ({outcome.said}) but its audit event could not be "
             f"written: {exc}"
         ) from exc
@@ -1425,6 +1431,46 @@ INSTRUCTIONS = (
 )
 
 
+def perform(tool: str, args: Mapping[str, Any], utterance: str) -> dict[str, Any]:
+    """Run one tool by the name the captain calls it — from Python, no MCP SDK needed.
+
+    The CLI verbs (``aisquare captain attention``, ``… wololo``, ``… bt``; card T5)
+    are the owner's own hands on the same tools, so they go through the same
+    frame: one ``captain_action`` per call, the argv as the ``utterance``, the same
+    refusals in the same words. Returns the tool's result with its ``action_seq``;
+    raises :class:`Refused` or :class:`Failed` whose text is exactly what the
+    captain would have been told, the audit's seq included.
+    """
+    function = dict(TOOLS).get(tool)
+    if function is None:
+        known = ", ".join(name for name, _ in TOOLS)
+        raise Refused(f"no tool named {tool!r} — the captain's tools are {known}")
+    data = json.loads(function(**dict(args), utterance=utterance))
+    if not isinstance(data, dict):  # pragma: no cover — every tool answers an object
+        raise Failed(f"{tool} answered something that is not an object")
+    return data
+
+
+def _as_sdk_tool(function: Callable[..., str]) -> Callable[..., str]:
+    """The tool as the MCP SDK wants it: a refusal or failure becomes its ``ToolError``.
+
+    The frame itself (:func:`_run`) raises :class:`Refused` and :class:`Failed`
+    so that :func:`perform` and the CLI verbs need no SDK; this one wrapper at
+    the server boundary is the only place the SDK's exception is named.
+    ``functools.wraps`` keeps the signature and annotations the SDK reads for
+    the tool's schema.
+    """
+
+    @functools.wraps(function)
+    def tool(*args: Any, **kwargs: Any) -> str:
+        try:
+            return function(*args, **kwargs)
+        except (Refused, Failed) as exc:
+            raise _tool_error(str(exc)) from exc
+
+    return tool
+
+
 # --- the server --------------------------------------------------------------------------------
 
 
@@ -1437,7 +1483,7 @@ def build_server() -> MCPServer:
 
     server = MCPServer(SERVER_NAME, version=__version__, instructions=INSTRUCTIONS)
     for name, tool in TOOLS:
-        server.add_tool(tool, name=name)
+        server.add_tool(_as_sdk_tool(tool), name=name)
     exact_error_results(server)
     _audit_rejected_calls(server)
     return server

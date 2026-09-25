@@ -53,9 +53,10 @@ from aisquare.models import (
 )
 from aisquare.services import fleet, mcp_server
 from aisquare.services import team as team_service
-from aisquare.services.captain import actions
+from aisquare.services.captain import actions, errors
 from aisquare.services.captain import queue as captain_queue
 from aisquare.services.captain import state as captain_state
+from aisquare.services.captain.errors import Failed, Refused
 
 CONTRACT_TOOLS = frozenset(
     {
@@ -386,7 +387,9 @@ def ok(result: str) -> dict[str, Any]:
 
 
 def refused(call: Callable[[], str]) -> str:
-    with pytest.raises(ToolError) as caught:
+    # A direct call raises the frame's own Refused/Failed; through the SDK it is a ToolError
+    # with the same words (test_a_call_through_the_protocol_...).
+    with pytest.raises((ToolError, Refused, Failed)) as caught:
         call()
     return str(caught.value)
 
@@ -828,7 +831,7 @@ def test_every_call_writes_exactly_one_captain_action_success_or_refusal(
 ) -> None:
     before = audit_count(projects)
     function = dict(actions.TOOLS)[tool]
-    with contextlib.suppress(ToolError):
+    with contextlib.suppress(ToolError, Refused, Failed):
         function(**kwargs, utterance=f"owner asked for {tool}")
     assert audit_count(projects) == before + 1
 
@@ -837,7 +840,7 @@ def test_ask_manager_writes_one_captain_action_too(
     alpha: ProjectInfo, agents: dict[str, FleetAgent], fleet_rec: Fleet, clock: Clock
 ) -> None:
     before = len(audit(alpha.id))
-    with contextlib.suppress(ToolError):
+    with contextlib.suppress(ToolError, Refused, Failed):
         actions.ask_manager("alpha", "status?", timeout=2)
     assert len(audit(alpha.id)) == before + 1
 
@@ -1827,6 +1830,40 @@ def test_the_queue_tools_answer_from_the_real_queue(projects: dict[str, ProjectI
     assert refused(lambda: actions.snooze("q1", 10)).startswith(
         "refused: no queue item matches 'q1'"
     )
+
+
+def test_a_queue_that_drops_the_stubs_class_still_refuses_in_words(
+    projects: dict[str, ProjectInfo], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T7 replaces queue.py whole. A refusal is errors.Refused, which T7 raises too — the
+    actions side must not name a class only the stub defines (13038 item 5)."""
+    monkeypatch.delattr(captain_queue, "QueueUnavailable")
+
+    def unknown(item_id: str, how: str) -> dict[str, object]:
+        raise errors.Refused(f"no open item {item_id}")
+
+    monkeypatch.setattr(captain_queue, "resolve", unknown)
+    assert refused(lambda: actions.resolve("q9", "said yes")).startswith("refused: no open item q9")
+
+
+def test_a_queue_that_raises_its_own_runtime_error_is_said_as_an_error_not_a_crash(
+    projects: dict[str, ProjectInfo], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T7's queue raises a RuntimeError of its own on a held lock (13046): it is a failure
+    the owner hears, audited like any other, never a crashed tool."""
+
+    class HeldLock(RuntimeError):
+        pass
+
+    def locked(limit: int) -> list[dict[str, object]]:
+        raise HeldLock("queue.json is locked by another process")
+
+    monkeypatch.setattr(captain_queue, "ranked", locked)
+    message = refused(lambda: actions.attention())
+    assert message.startswith(
+        "error: the attention queue failed: queue.json is locked by another process"
+    )
+    assert audit(captain_state.home_project().id)[-1]["ok"] is False
 
 
 def test_the_queue_tools_hand_the_queue_seams_answer_through(

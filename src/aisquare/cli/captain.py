@@ -12,6 +12,7 @@ from typing import Annotated
 
 import typer
 
+from aisquare.cli import captain_verbs
 from aisquare.cli.common import fail
 from aisquare.cli.serve import dependency_error
 
@@ -19,6 +20,9 @@ app = typer.Typer(
     help="The captain: the home-level agent that runs every project's fleet for you.",
     no_args_is_help=True,
 )
+captain_verbs.register(
+    app
+)  # attention, next, resolve, snooze, since, log, uav, wololo, bt, actions (T5)
 
 
 @app.command("serve")

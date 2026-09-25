@@ -126,10 +126,21 @@ def window_team_hub() -> str:
     ``tmux -e`` can only set, and the server's retained value must not leak in
     as ours.
     """
+    hub = team_hub()
+    return str(hub) if hub is not None else ""
+
+
+def team_hub() -> Path | None:
+    """The hub this process honours: ``AISQUARE_TEAM_HUB`` as an absolute path, else ``None``.
+
+    :func:`team_project`'s rule without its warning: a relative value is
+    ignored. For a surface that has to say it is under a hub, such as the fleet
+    UI's Explainability tab, whose key then belongs to the hub project.
+    """
     hub = os.environ.get(TEAM_HUB_ENV_VAR, "").strip()
     if not hub or not Path(hub).expanduser().is_absolute():
-        return ""
-    return str(Path(hub).expanduser().resolve())
+        return None
+    return Path(hub).expanduser().resolve()
 
 
 #: Relative hub values already reported, so a command that resolves the board

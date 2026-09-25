@@ -1404,6 +1404,104 @@ def test_make_active_does_not_make_a_typo_a_known_deployment_for_the_key(
     assert not explainability_service.project_key_path(project.id).exists()
 
 
+def test_a_key_the_projects_launches_do_not_resolve_is_not_called_the_one_they_use(
+    project: ProjectInfo, quiet_explainability: dict[str, int]
+) -> None:
+    """Typed for prod with 'make active' unticked, on a machine that stays on stg, the key
+    is bound to prod and the launches keep resolving stg. The toast said "launches in
+    this project authenticate the proxy with it" (review of #170's Setup-form merge,
+    G3)."""
+
+    async def scenario(pilot: Pilot[None], host: Host) -> list[tuple[str, str]]:
+        host.query_one(ProjectView).active = "tab-explainability"
+        await settle(pilot)
+        _attach_in_setup(host, "pk-prod-0123456789", target="prod", gateway="https://p.example")
+        await settle(pilot)
+        return list(host.notices)
+
+    notices = drive(project, scenario)
+    [(attached, severity)] = [(m, s) for m, s in notices if m.startswith("✓ key attached to")]
+    assert "authenticate the proxy with it" not in attached, attached
+    assert "not used by this project's launches, which resolve target stg" in attached
+    assert "tick 'make active'" in attached and severity == "warning"
+
+
+def test_this_project_only_with_no_key_is_refused_not_ignored(
+    project: ProjectInfo, quiet_explainability: dict[str, int]
+) -> None:
+    """The box ticked and the key blank: the box was dropped without a word and the other
+    settings saved as the machine's (review of #170's Setup-form merge, G4)."""
+
+    async def scenario(pilot: Pilot[None], host: Host) -> list[tuple[str, str]]:
+        host.query_one(ProjectView).active = "tab-explainability"
+        await settle(pilot)
+        _attach_in_setup(host, "", target="stg", gateway="https://g.example")
+        await settle(pilot)
+        return list(host.notices)
+
+    notices = drive(project, scenario)
+    assert any(
+        m.startswith("'this project only' attaches the workspace key") and s == "warning"
+        for m, s in notices
+    ), notices
+    assert "stg" not in load_config().explainability.targets, "nothing was saved"
+
+
+def test_a_machine_key_beside_its_own_variable_names_the_box_that_would_work(
+    project: ProjectInfo, quiet_explainability: dict[str, int], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """On a page, a project's own key is the fix that works beside a custom key variable,
+    and the refusal did not say so (review of #170's Setup-form merge, G8)."""
+    config = load_config()
+    config.explainability.targets = {
+        "stg": ExplainabilityTarget(gateway_url="https://stg.example", api_key_env="MY_KEY"),
+    }
+    save_config(config)
+    monkeypatch.delenv("MY_KEY", raising=False)
+
+    async def scenario(pilot: Pilot[None], host: Host) -> list[tuple[str, str]]:
+        host.query_one(ProjectView).active = "tab-explainability"
+        await settle(pilot)
+        host.query_one("#explainability-key", Input).value = "AIS_machine_0123456789"
+        host.query_one("#explainability-save", Button).press()
+        await settle(pilot)
+        return list(host.notices)
+
+    notices = drive(project, scenario)
+    [refused] = [m for m, _ in notices if "reads its key from $MY_KEY" in m]
+    assert "tick 'this project only'" in refused
+
+
+def test_under_a_hub_the_box_and_the_tab_say_whose_key_it_is(
+    project: ProjectInfo,
+    quiet_explainability: dict[str, int],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Under AISQUARE_TEAM_HUB the key goes to the hub project, which every project under
+    the hub launches with, and the box read "this project only" (G5). A key the page
+    had of its own vanished from the tab while its file stayed on disk (B7)."""
+    ops.attach_project_key(project, "pk-page-0123456789", target="stg")  # the page's own
+    hub = tmp_path / "hub"
+    hub.mkdir()
+    monkeypatch.setenv("AISQUARE_TEAM_HUB", str(hub))
+
+    async def scenario(pilot: Pilot[None], host: Host) -> tuple[str, list[tuple[str, str]], str]:
+        host.query_one(ProjectView).active = "tab-explainability"
+        await settle(pilot)
+        label = str(host.query_one("#explainability-key-project", Checkbox).label)
+        _attach_in_setup(host, "pk-hub-0123456789")
+        await settle(pilot)
+        return label, list(host.notices), host.query_one(ExplainabilityView).status_text
+
+    label, notices, status = drive(project, scenario)
+    assert label == "the hub (hub) only", label
+    [attached] = [m for m, _ in notices if m.startswith("✓ key attached to")]
+    assert attached.startswith("✓ key attached to hub (the AISQUARE_TEAM_HUB project"), attached
+    assert "its own key for target stg is not used — its launches join hub" in status, status
+    assert f"key clear --project {project.id}" in status
+
+
 def test_a_project_key_lands_where_its_destination_does_and_never_over_a_minted_one(
     project: ProjectInfo, quiet_explainability: dict[str, int]
 ) -> None:

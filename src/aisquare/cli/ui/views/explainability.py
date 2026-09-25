@@ -145,7 +145,7 @@ def status_report(page: ProjectInfo | None = None) -> StatusReport:
         ("lands in", destinations.describe(target.destination, key_source=target.key_source)),
         ("credits", _credits_row(target)),
         ("key", f"{target.key_origin} {'is set' if target.api_key else 'is NOT set'}"),
-        ("project", _project_key_row(project, target)),
+        ("project", _project_key_row(project, target, page)),
         ("proxy", target.proxy_url),
         ("identity", target.agent_name_template),
         ("agents", ", ".join(target.agent_names) or "(none)"),
@@ -207,10 +207,35 @@ def _credits_row(target: ops.ResolvedTarget) -> str:
     return credits_service.describe(reading)
 
 
-def _project_key_row(project: ProjectInfo | None, target: ops.ResolvedTarget) -> str:
-    """``<name>: its own key for stg`` / ``<name>: the machine key`` — the origin per project."""
+def _project_key_row(
+    project: ProjectInfo | None, target: ops.ResolvedTarget, page: ProjectInfo | None = None
+) -> str:
+    """``<name>: its own key for stg`` / ``<name>: the machine key`` — the origin per project.
+
+    When the page's launches join another project (the hub's, under a hub), a
+    key the PAGE has of its own is named too, as not used. The row used to show
+    only the hub's, so the page's binding vanished from the tab while its key
+    file stayed on disk (review of #170, D1b round 2, B7).
+    """
     if project is None:
         return "(no project)"
+    return _key_origin_row(project, target) + _unused_page_key(page, project)
+
+
+def _unused_page_key(page: ProjectInfo | None, project: ProjectInfo) -> str:
+    if page is None or page.id == project.id:
+        return ""
+    binding = ops.project_key_binding(page.id)
+    if binding is None:
+        return ""
+    return (
+        f"\n  {page.root.name or page.id}: its own key for target {binding.target} is not used — "
+        f"its launches join {project.root.name or project.id}; remove it with: aisquare "
+        f"explainability key clear --project {page.id}"
+    )
+
+
+def _key_origin_row(project: ProjectInfo, target: ops.ResolvedTarget) -> str:
     name = project.root.name or project.id
     binding = ops.project_key_binding(project.id)
     if binding is None:
@@ -240,8 +265,8 @@ _MINTED_KEY_REFUSAL = Notice(
 def minted_key_refusal(project: ProjectInfo) -> Notice | None:
     """The refusal when ``project``'s key file holds a key the CLI minted (#142), else ``None``.
 
-    Replacing it here would owe that key a revocation — a network call, and
-    this tab's handlers run on the UI thread — so the CLI does it instead:
+    Replacing it here would owe that key a revocation, a network call whose
+    outcome, and what stays live, the CLI reports, so the CLI does it instead:
     ``key set`` revokes the minted key once its own is written. The form asks
     this BEFORE any write of its own, so a refusal keeps what was typed; the
     writer asks again inside its own session (:func:`attach_project_key`).
@@ -259,7 +284,9 @@ def minted_key_refusal(project: ProjectInfo) -> Notice | None:
     return _MINTED_KEY_REFUSAL
 
 
-def attach_project_key(value: str, project: ProjectInfo, target: str) -> Notice:
+def attach_project_key(
+    value: str, project: ProjectInfo, target: str, *, launches: ops.ResolvedTarget | None = None
+) -> Notice:
     """What *Save setup* does with a key and *this project only* ticked (#141).
 
     ``project`` is the one the page's agents launch into (:func:`key_project`),
@@ -273,18 +300,54 @@ def attach_project_key(value: str, project: ProjectInfo, target: str) -> Notice:
     session (``refuse_minted``), nothing is written, and the refusal
     :func:`minted_key_refusal` gives is returned instead — so no caller of this
     writer can skip the check, and it costs no store session of its own.
+
+    ``launches`` is what the project's launches resolve when it is not
+    ``target`` (:func:`ops.launches_elsewhere`, asked by the caller), and the
+    notice then says the key is not theirs.
     """
     try:
         binding = ops.attach_project_key(project, value.strip(), target=target, refuse_minted=True)
     except ops.MintedKeyInPlace:
         return _MINTED_KEY_REFUSAL
     name = project.root.name or project.id
+    if project.root == orchestrator.team_hub():
+        # 'this project only' under a hub is the HUB's key, and every project
+        # under it launches with it: said, since the box's own words say the
+        # opposite (review of #170's Setup-form merge, G5).
+        name += " (the AISQUARE_TEAM_HUB project: every project under the hub launches with it)"
+    if launches is not None:
+        # Attached, and not what the project's launches take: the success line
+        # said they did (review of #170's Setup-form merge, G3).
+        move = (
+            " — tick 'make active' and save again to move this machine to it"
+            if launches.target_source == "config"
+            else ""
+        )
+        return Notice(
+            f"✓ key attached to {name} for target {target} — {binding.key_path} (mode 600); "
+            f"{ops.unused_key_note(launches)}{move}",
+            "warning",
+            timeout=10,
+        )
     return Notice(
         f"✓ key attached to {name} for target {target} — {binding.key_path} (mode 600); "
         "launches in this project authenticate the proxy with it. If that workspace has not "
         "registered this machine's agents yet, press Register roster",
         "information",
     )
+
+
+def _launches_elsewhere(
+    config: AppConfig, project: ProjectInfo, target: str
+) -> ops.ResolvedTarget | None:
+    """:func:`ops.launches_elsewhere` for the notice; a resolver that fails says nothing.
+
+    It decorates a success line, so it must not stop the attach it is asked beside.
+    """
+    try:
+        return ops.launches_elsewhere(config.explainability, project.id, target)
+    except Exception:  # decoration on a success line
+        return None
 
 
 #: The probe row's style per verdict — one mapping, so a new severity is one
@@ -423,11 +486,19 @@ def save_setup(form: SetupForm, page: ProjectInfo | None) -> SetupOutcome:
     # the target names, so the rule is the file's alone.
     reads_from = key_env or settings.targets.get(name, ExplainabilityTarget()).api_key_env
     if key and owner is None and reads_from != KEY_ENV_VAR:
+        # A project's own key is read whatever variable the target names, so on
+        # a page that box is the fix that works, and it is named (review of
+        # #170's Setup-form merge, G8).
+        own_key = (
+            ", or tick 'this project only' to make it this project's own key"
+            if page is not None
+            else ""
+        )
         return _refused(
             f"target '{name}' reads its key from ${reads_from}, and the key file is read "
             f"only for ${KEY_ENV_VAR} — a key typed here would never be used. Export "
             f"${reads_from} in the shell instead, or leave 'key variable' blank to use "
-            "the file"
+            f"the file{own_key}"
         )
     # Offered, not imposed -- and only where nothing was CHOSEN. `chosen_proxy`
     # is the resolver's own fold minus the shipped default: the target's
@@ -513,8 +584,11 @@ def save_setup(form: SetupForm, page: ProjectInfo | None) -> SetupOutcome:
     # inert, while a target whose key failed to land is a red check that
     # names its own fix. The cheaper failure is the one left behind.
     if owner is not None:
+        # What the launches resolve, asked of the config just saved, before
+        # the writer's one store session.
+        launches = _launches_elsewhere(config, owner, key_target)
         try:
-            attached = attach_project_key(key, owner, key_target)
+            attached = attach_project_key(key, owner, key_target, launches=launches)
         except Exception as exc:  # the store or the filesystem said no: a notice
             return _failed_after_save(f"the key could not be attached: {exc}")
         said.append(attached)
@@ -616,8 +690,11 @@ class ExplainabilityView(VerticalScroll):
             yield Label("workspace key")
             yield Input(placeholder="AIS_…", password=True, id="explainability-key")
             # A key per project (#141), in the one key field: no page, no project to own it.
+            # Under a hub the key is the HUB project's, shared by every project under
+            # it, and the box says so (review of #170's Setup-form merge, G5).
+            hub = orchestrator.team_hub()
             yield Checkbox(
-                "this project only",
+                "this project only" if hub is None else f"the hub ({hub.name}) only",
                 id="explainability-key-project",
                 disabled=self.project is None,
             )
@@ -737,6 +814,19 @@ class ExplainabilityView(VerticalScroll):
                 else "nothing to save — every field is blank"
             )
             self.notify(message, severity="warning", timeout=8, markup=False)
+            return
+
+        # The box makes the key typed beside it the project's own; with no key it
+        # was silently ignored and the other settings saved as the machine's
+        # (review of #170's Setup-form merge, G4). Refused, the fields kept.
+        if own and not key:
+            self.notify(
+                "'this project only' attaches the workspace key typed beside it, and that "
+                "field is blank — type the key, or untick the box to save the other settings",
+                severity="warning",
+                timeout=8,
+                markup=False,
+            )
             return
 
         # The writer's own question about the key variable, asked FIRST — it is

@@ -543,6 +543,25 @@ def test_the_writer_refuses_a_target_this_machine_does_not_have(
     assert not service.project_key_path(api.id).exists()
 
 
+def test_key_set_says_when_the_projects_launches_will_not_use_the_key(
+    home: Path, tmp_path: Path, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``key set --target prod`` on a machine on stg said "launches and spawns in this
+    project authenticate the proxy with it" (review of #170's Setup-form merge, G3)."""
+    _settings()
+    api = _project(tmp_path / "api")
+    monkeypatch.chdir(api.root)
+
+    prod = runner.invoke(
+        app, ["explainability", "key", "set", "--target", "prod"], input=PROJECT_KEY + "\n"
+    )
+    assert prod.exit_code == 0, prod.output
+    assert "authenticate the proxy with it" not in prod.output
+    assert "not used by this project's launches, which resolve target stg" in prod.output
+    stg = runner.invoke(app, ["explainability", "key", "set"], input=PROJECT_KEY + "\n")
+    assert "launches and spawns in this project authenticate the proxy with it" in stg.output
+
+
 def test_key_set_records_the_signed_in_email_as_who_attached_it(
     home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -198,7 +198,12 @@ def key_set(
     revocations = dest.revoke_owed(iam.signed_in_quietly(), project_ids={project.id})
     payload = _key_payload(project, target)
     if get_state().json_output:
-        typer.echo(json.dumps({**payload, "revocations": revocations.as_json()}))
+        launches = ops.resolve_target(settings, None, project_id=project.id).name
+        typer.echo(
+            json.dumps(
+                {**payload, "launches_target": launches, "revocations": revocations.as_json()}
+            )
+        )
         return
     name = project.root.name or project.id
     # The register step, named: a key for ANOTHER workspace traces nothing until
@@ -215,9 +220,17 @@ def key_set(
             binding.target,
         ]
     )
+    # Said only when it is true: a key bound to another deployment than the
+    # one the project's launches resolve is kept, and not used by them.
+    elsewhere = ops.launches_elsewhere(settings, project.id, binding.target)
+    used = (
+        "launches and spawns in this project authenticate the proxy with it"
+        if elsewhere is None
+        else ops.unused_key_note(elsewhere)
+    )
     typer.echo(
         f"✓ key attached to {name} for target {binding.target} — {binding.key_path} "
-        "(mode 600); launches and spawns in this project authenticate the proxy with it. "
+        f"(mode 600); {used}. "
         f"If that workspace has not registered this machine's agents yet: {register}"
     )
     _say_revocations(revocations)

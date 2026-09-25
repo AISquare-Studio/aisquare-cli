@@ -511,6 +511,30 @@ def known_targets(settings: ExplainabilitySettings) -> list[str]:
     return sorted({settings.target, *settings.targets})
 
 
+def launches_elsewhere(
+    settings: ExplainabilitySettings, project_id: str, target: str
+) -> ResolvedTarget | None:
+    """What the project's launches resolve, when it is not ``target``; ``None`` when it is.
+
+    A key bound to a deployment the project's launches do not resolve is kept
+    and unused until they do. ``key set --target prod`` on a machine on stg,
+    and the Setup form with a deployment typed and 'make active' unticked,
+    both said "launches in this project authenticate the proxy with it" for
+    such a key (review of #170's Setup-form merge, G3).
+    """
+    launches = resolve_target(settings, None, project_id=project_id)
+    return None if launches.name == target else launches
+
+
+def unused_key_note(launches: ResolvedTarget) -> str:
+    """The one sentence both surfaces say about a key :func:`launches_elsewhere` found unused."""
+    why = {
+        "destination": "its destination's deployment",
+        "env": f"named by ${TARGET_ENV_VAR}",
+    }.get(launches.target_source, "this machine's target")
+    return f"not used by this project's launches, which resolve target {launches.name} ({why})"
+
+
 class MintedKeyInPlace(Exception):
     """The project's key file holds a key the CLI minted (#142), and the caller will not replace it.
 
@@ -546,9 +570,9 @@ def attach_project_key(
     still that key: it stays minted, and nothing is owed — detached, the key
     just attached would have been revoked under the project (review of #172).
 
-    ``refuse_minted`` is the fleet UI's: its handlers run on the UI thread,
-    where the revoke a replaced minted key is owed cannot be made, so a minted
-    key raises :class:`MintedKeyInPlace` and nothing is written. Asked here,
+    ``refuse_minted`` is the fleet UI's, which leaves the revoke a replaced
+    minted key is owed, and saying what is still live, to ``key set``, so a
+    minted key raises :class:`MintedKeyInPlace` and nothing is written. Asked here,
     in the session the write opens anyway: the tab asked it through a store
     session of its own, then again beside this one (review of #172).
 

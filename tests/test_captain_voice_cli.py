@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 from typer.testing import CliRunner
@@ -36,8 +37,14 @@ def test_show_token_prints_the_url_the_qr_and_the_adb_line_without_serving(
 def test_serving_hands_the_token_mode_and_model_to_the_server(
     runner: CliRunner, isolated_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    served: list[dict[str, object]] = []
-    monkeypatch.setattr("aisquare.services.captain.voice.serve", lambda **kw: served.append(kw))
+    served: list[dict[str, Any]] = []
+
+    def fake_serve(**kw: Any) -> None:
+        served.append(kw)
+        kw["hooks"].on_thinking(True)  # what the page server does on each flip
+        kw["hooks"].on_thinking(False)
+
+    monkeypatch.setattr("aisquare.services.captain.voice.serve", fake_serve)
     monkeypatch.setattr(captain_voice, "voice_dependency_error", lambda: None)
     result = runner.invoke(app, ["captain", "voice", "--mode", "listen", "--speaker", "off"])
     assert result.exit_code == 0, result.output
@@ -45,6 +52,21 @@ def test_serving_hands_the_token_mode_and_model_to_the_server(
     assert call["mode"] == "listen" and call["port"] == 8749 and call["host"] == "127.0.0.1"
     assert "token=" + str(call["token"]) in result.output
     assert speaker_mod.speaker_on() is False, "--speaker off flipped the switch before serving"
+    assert call["hooks"].on_thinking is captain_voice._print_thinking
+    assert "thinking" in result.output and "idle" in result.output, (
+        "the CLI side of the thinking signal: the terminal shows it too"
+    )
+
+
+def test_captain_dash_dash_voice_is_the_plans_spelling_of_the_voice_leaf(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """13143 (1): `aisquare captain --voice` keeps working as the alias of `captain voice`."""
+    calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(captain_voice, "voice_page", lambda **kw: calls.append(kw))
+    result = runner.invoke(app, ["captain", "--voice"])
+    assert result.exit_code == 0, result.output
+    assert calls == [{}], "the leaf, with its own defaults"
 
 
 def test_a_missing_extra_is_the_install_line_and_show_token_still_answers(

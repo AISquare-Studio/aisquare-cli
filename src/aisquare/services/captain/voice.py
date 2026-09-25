@@ -30,10 +30,14 @@ path is testable without a model.
 
 THE THINKING SIGNAL: the page shows *thinking* while a delivery is in flight,
 while T1's busy flag (``thinking on``) is set, or while the captain's pane
-reads ``working``; if a reply takes longer than :data:`CUE_AFTER_S` the Speaker
-says one short cue ("on it"). A background task drains the speech spool T1's
-``speak`` tool fills, so the captain's own spoken lines come out of the same
-adapter; ``bt`` clears that spool.
+reads ``working``, and the CLI's terminal shows the same through a hook; if a
+reply takes longer than :data:`CUE_AFTER_S` the Speaker says one short cue
+("on it"). THE BRAIN DECIDES WHAT IS WORTH SAYING (plan section 2, manager seq
+13143): the reply text is spoken only when the captain made no ``speak()`` call
+during that turn — read from the ``captain_action`` audit on the home board —
+so a captain that forgets still answers audibly and no answer is heard twice.
+The speech spool itself is drained by ONE thread in the captain's server
+process (``speaker.start_drainer``, started by ``actions.run_stdio``), not here.
 """
 
 from __future__ import annotations
@@ -91,9 +95,8 @@ STOP_WORDS: frozenset[str] = frozenset({"stop listening"})
 #: A reply slower than this earns one spoken cue, so the owner knows the request landed.
 CUE_AFTER_S = 3.0
 CUE_TEXT = "on it"
-#: How often the thinking signal and the speech spool are looked at.
+#: How often the thinking signal is looked at.
 POLL_S = 1.0
-SPOOL_POLL_S = 0.5
 AUTH_TIMEOUT_S = 5.0
 CLOSE_AUTH_FAILED = 4401
 CLOSE_AUTH_TIMEOUT = 4408
@@ -390,6 +393,32 @@ def captain_is_thinking() -> bool:
     return agent is not None and fleet_service.status_of(agent).state == "working"
 
 
+def home_seq() -> int:
+    """The home board's latest event seq: where a turn starts, for :func:`spoke_since`."""
+    from aisquare.core.store import store_session
+
+    with store_session() as store:
+        return store.latest_seq(captain_state.home_project().id)
+
+
+def spoke_since(seq: int) -> int:
+    """How many ``speak()`` calls the captain audited on the home board past ``seq``."""
+    from aisquare.core.store import store_session
+
+    home = captain_state.home_project()
+    with store_session() as store:
+        events = store.filtered_events(home.id, since_seq=seq, kind="captain_action", limit=500)
+    spoken = 0
+    for event in events:
+        try:
+            record = json.loads(event.text)
+        except ValueError:
+            continue
+        if isinstance(record, dict) and record.get("tool") == "speak" and record.get("ok"):
+            spoken += 1
+    return spoken
+
+
 @dataclass
 class Hooks:
     """Everything the server reaches outside itself, replaceable in one place for a test."""
@@ -400,11 +429,13 @@ class Hooks:
         default_factory=lambda: speaker_mod.Voice(speaker_mod.pick_speaker())
     )
     thinking: Callable[[], bool] = captain_is_thinking
-    take_speech: Callable[[], captain_state.Speech | None] = captain_state.take_speech
+    home_seq: Callable[[], int] = home_seq
+    spoke_since: Callable[[int], int] = spoke_since
+    on_thinking: Callable[[bool], None] | None = None
+    """The CLI's side of the thinking signal: called on every flip, the terminal prints it."""
     clock: Callable[[], float] = time.monotonic
     cue_after_s: float = CUE_AFTER_S
     poll_s: float = POLL_S
-    spool_poll_s: float = SPOOL_POLL_S
 
 
 # --- the page -------------------------------------------------------------------------------------
@@ -487,18 +518,13 @@ class _Connection:
             speaker=speaker_mod.speaker_on(),
             thinking=self._shown_thinking,
         )
-        tasks = [
-            asyncio.create_task(self._thinking_loop()),
-            asyncio.create_task(self._spool_loop()),
-        ]
+        poller = asyncio.create_task(self._thinking_loop())
         try:
             await self._read_loop()
         finally:
-            for task in tasks:
-                task.cancel()
-            for task in tasks:
-                with _swallow_cancel():
-                    await task
+            poller.cancel()
+            with _swallow_cancel():
+                await poller
 
     async def _authenticate(self) -> bool:
         from starlette.websockets import WebSocketDisconnect
@@ -695,13 +721,14 @@ class _Connection:
             return
         await self._deliver(text)
 
-    # -- delivery, thinking, the spool
+    # -- delivery, and the thinking signal
 
     async def _deliver(self, text: str) -> None:
         await self._send("utterance", text=text)
         async with self._deliveries:
             self._delivering += 1
             await self._show_thinking()
+            since = await asyncio.to_thread(self._read_home_seq)
             cue = asyncio.create_task(self._cue_later())
             try:
                 reply = await asyncio.to_thread(self._hooks.deliver, text)
@@ -709,19 +736,40 @@ class _Connection:
                 cue.cancel()
                 self._delivering -= 1
                 await self._send("error", code="no_reply", message=str(exc))
-                await asyncio.to_thread(self._hooks.voice.say, "the captain did not answer")
+                await asyncio.to_thread(self._hooks.voice.utter, "the captain did not answer")
                 await self._show_thinking()
                 return
             cue.cancel()
             self._delivering -= 1
-            await self._send("reply", text=reply)
+            # The brain decides what is worth saying (13143): a turn in which the
+            # captain called speak() is already audible; only a silent turn's reply
+            # is spoken here, so nothing is heard twice and nothing is missed.
+            spoken_by_captain = await asyncio.to_thread(self._count_spoken, since)
+            await self._send("reply", text=reply, spoken=spoken_by_captain == 0)
             await self._show_thinking()
-            await asyncio.to_thread(self._hooks.voice.say, reply)
+            if spoken_by_captain == 0:
+                await asyncio.to_thread(self._hooks.voice.utter, reply)
+
+    def _read_home_seq(self) -> int:
+        try:
+            return self._hooks.home_seq()
+        except Exception as exc:  # a courtesy read: without it every reply is spoken, said
+            log.warning("captain voice: the home board could not be read: %s", exc)
+            return -1
+
+    def _count_spoken(self, since: int) -> int:
+        if since < 0:
+            return 0
+        try:
+            return self._hooks.spoke_since(since)
+        except Exception as exc:
+            log.warning("captain voice: the speak() audit could not be read: %s", exc)
+            return 0
 
     async def _cue_later(self) -> None:
         with _swallow_cancel():
             await asyncio.sleep(self._hooks.cue_after_s)
-            await asyncio.to_thread(self._hooks.voice.say, CUE_TEXT)
+            await asyncio.to_thread(self._hooks.voice.utter, CUE_TEXT)
 
     def _thinking_now(self) -> bool:
         if self._delivering:
@@ -737,21 +785,13 @@ class _Connection:
         if now != self._shown_thinking:
             self._shown_thinking = now
             await self._send("thinking", on=now)
+            if self._hooks.on_thinking is not None:
+                self._hooks.on_thinking(now)
 
     async def _thinking_loop(self) -> None:
         while True:
             await asyncio.sleep(self._hooks.poll_s)
             await self._show_thinking()
-
-    async def _spool_loop(self) -> None:
-        while True:
-            await asyncio.sleep(self._hooks.spool_poll_s)
-            try:
-                await asyncio.to_thread(
-                    speaker_mod.drain_spool, self._hooks.voice, take=self._hooks.take_speech
-                )
-            except Exception as exc:  # the spool is a courtesy too; said, and tried again next tick
-                log.warning("captain voice: the speech spool could not be drained: %s", exc)
 
 
 @contextmanager

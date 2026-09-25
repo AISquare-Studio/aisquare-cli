@@ -51,9 +51,21 @@ captain_voice.register(app)  # `voice`: the page, in its own module (T3)
 
 
 @app.callback()
-def captain(ctx: typer.Context) -> None:
+def captain(
+    ctx: typer.Context,
+    voice: Annotated[
+        bool,
+        typer.Option(
+            "--voice",
+            help="Serve the voice page: the plan's spelling of `aisquare captain voice`.",
+        ),
+    ] = False,
+) -> None:
     """Start the home's captain, or attach to it when it is already running."""
     if ctx.invoked_subcommand is not None:
+        return
+    if voice:
+        captain_voice.voice_page()
         return
     from aisquare.cli.fleet import _fail_fleet, interactive_terminal
     from aisquare.services import fleet as fleet_service

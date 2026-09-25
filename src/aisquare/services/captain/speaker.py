@@ -29,6 +29,8 @@ import logging
 import shutil
 import subprocess
 import sys
+import threading
+import time
 import tomllib
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -46,6 +48,10 @@ Runner = Callable[[Sequence[str], str | None], None]
 SPEAK_TIMEOUT_S = 60.0
 """A line that is still playing after this long is a stuck synthesiser, not speech."""
 STATE_KEY = "captain_speaker"
+SPEECH_TTL_S = 30.0
+"""A spooled line older than this when it is taken is dropped, not played late: a cue for a
+turn that ended half a minute ago is noise (manager, seq 13143)."""
+DRAIN_POLL_S = 0.5
 ADAPTERS = ("powershell", "say", "spd-say", "null")
 """The names ``[captain] speaker`` may take, and each adapter's ``name``."""
 
@@ -67,7 +73,7 @@ class Speaker(Protocol):
     @property
     def name(self) -> str: ...
 
-    def say(self, text: str) -> None: ...
+    def utter(self, text: str) -> None: ...
 
 
 def run_subprocess(argv: Sequence[str], stdin: str | None) -> None:
@@ -99,7 +105,7 @@ class PowerShellSpeaker:
     runner: Runner = run_subprocess
     name: str = "powershell"
 
-    def say(self, text: str) -> None:
+    def utter(self, text: str) -> None:
         self.runner(
             ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", POWERSHELL_SCRIPT], text
         )
@@ -112,7 +118,7 @@ class SaySpeaker:
     runner: Runner = run_subprocess
     name: str = "say"
 
-    def say(self, text: str) -> None:
+    def utter(self, text: str) -> None:
         self.runner(["say"], text)
 
 
@@ -123,7 +129,7 @@ class SpdSaySpeaker:
     runner: Runner = run_subprocess
     name: str = "spd-say"
 
-    def say(self, text: str) -> None:
+    def utter(self, text: str) -> None:
         self.runner(["spd-say", "--wait", "--", text], None)
 
 
@@ -133,7 +139,7 @@ class NullSpeaker:
 
     name: str = "null"
 
-    def say(self, text: str) -> None:
+    def utter(self, text: str) -> None:
         log.info("captain speaker (null): %s", text)
 
 
@@ -240,7 +246,7 @@ class Voice:
         self.speaker = speaker
         self._enabled = enabled
 
-    def say(self, text: str) -> bool:
+    def utter(self, text: str) -> bool:
         """Speak ``text``; returns whether it was played (off, empty or failed → ``False``)."""
         line = text.strip()
         if not line:
@@ -249,7 +255,7 @@ class Voice:
             log.info("captain speaker is off; not spoken: %s", line[:80])
             return False
         try:
-            self.speaker.say(line)
+            self.speaker.utter(line)
         except SpeakerError as exc:
             log.warning(
                 "captain speaker (%s) failed; not spoken, the page still shows it: %r (%s)",
@@ -261,18 +267,98 @@ class Voice:
         return True
 
 
+def age_of(speech_id: str, *, now_ns: int | None = None) -> float | None:
+    """Seconds since a spooled line was written, read from its id (``spk_<time_ns>_…``)."""
+    parts = speech_id.split("_")
+    if len(parts) < 2 or not parts[1].isdigit():
+        return None
+    stamp = int(parts[1])
+    current = time.time_ns() if now_ns is None else now_ns
+    return max(0.0, (current - stamp) / 1e9)
+
+
 def drain_spool(
     voice: Voice,
     *,
     take: Callable[[], captain_state.Speech | None] = captain_state.take_speech,
     limit: int = 20,
+    ttl_s: float = SPEECH_TTL_S,
+    now_ns: int | None = None,
 ) -> int:
-    """Speak what the captain spooled (T1's ``speak`` tool), oldest first; returns how many."""
+    """Speak what the captain spooled (T1's ``speak`` tool), oldest first; returns how many.
+
+    A line older than ``ttl_s`` is dropped and said in the log, never played late.
+    """
     spoken = 0
     for _ in range(limit):
         line = take()
         if line is None:
             break
-        voice.say(line.text)
+        age = age_of(line.id, now_ns=now_ns)
+        if age is not None and age > ttl_s:
+            log.info(
+                "captain speaker: dropped a %.0fs-old line, not played late: %r",
+                age,
+                line.text[:80],
+            )
+            continue
+        voice.utter(line.text)
         spoken += 1
     return spoken
+
+
+def _drain_until_stopped(
+    voice: Voice,
+    take: Callable[[], captain_state.Speech | None],
+    poll_s: float,
+    ttl_s: float,
+    halt: threading.Event,
+) -> None:
+    """The drainer thread's body: a tick every ``poll_s`` until ``halt`` is set.
+
+    Module-level, not nested in :func:`start_drainer`, and reached only as a
+    ``Thread`` target: a bad tick is said here and never raised to the server's
+    client, and tests/test_config_writes_stay_in_the_cli.py's by-name graph,
+    which fuses ``Voice.say`` with the CLI's ``say`` command, must not read the
+    server as a daemon that reaches a config write through it.
+    """
+    while not halt.is_set():
+        try:
+            drain_spool(voice, take=take, ttl_s=ttl_s)
+        except Exception as exc:  # said, then tried again next tick: the spool is a courtesy
+            log.warning("captain speaker: the spool could not be drained this tick: %s", exc)
+        halt.wait(poll_s)
+
+
+def start_drainer(
+    voice: Voice,
+    *,
+    take: Callable[[], captain_state.Speech | None] = captain_state.take_speech,
+    poll_s: float = DRAIN_POLL_S,
+    ttl_s: float = SPEECH_TTL_S,
+    stop: threading.Event | None = None,
+) -> threading.Thread:
+    """THE drainer: one daemon thread that lives as long as the captain's server does.
+
+    Exactly one per captain (manager, seq 13143): it runs in the Actions server
+    process, so speech plays whenever the captain speaks and the switch is on,
+    whether or not the voice page or the TUI is open. ``take_speech`` claims a
+    line by rename, so even a second drainer could not say a line twice; this
+    keeps the design to one anyway. ``stop`` ends it; a daemon thread ends with
+    the process regardless.
+    """
+    halt = stop if stop is not None else threading.Event()
+    thread = threading.Thread(
+        target=_drain_until_stopped,
+        args=(voice, take, poll_s, ttl_s, halt),
+        name="captain-speaker",
+        daemon=True,
+    )
+    thread.stop = halt  # type: ignore[attr-defined]
+    thread.start()
+    return thread
+
+
+def machine_voice() -> Voice:
+    """The Voice this machine speaks with: the configured adapter, else the platform's."""
+    return Voice(pick_speaker(configured=configured_speaker()))

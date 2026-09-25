@@ -132,5 +132,12 @@ def voice_page(
         port=port,
         host=host,
         mode="listen" if mode == "listen" else "focus",
-        hooks=voice.Hooks(transcriber_factory=lambda: voice.transcriber(model)),
+        hooks=voice.Hooks(
+            transcriber_factory=lambda: voice.transcriber(model), on_thinking=_print_thinking
+        ),
     )
+
+
+def _print_thinking(on: bool) -> None:
+    """The CLI side of the thinking signal: the terminal says it too (the card's line)."""
+    stdout_console().print("thinking…" if on else "idle", style="yellow" if on else "dim")

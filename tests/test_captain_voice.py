@@ -13,6 +13,7 @@ a fake — the shape T1's tests and cliXR's took.
 from __future__ import annotations
 
 import json
+import logging
 import sys
 import threading
 import time
@@ -59,7 +60,7 @@ class Spoken:
     def __init__(self) -> None:
         self.lines: list[str] = []
 
-    def say(self, text: str) -> None:
+    def utter(self, text: str) -> None:
         self.lines.append(text)
 
 
@@ -67,15 +68,23 @@ class Deliveries:
     """``brain.say`` as a recorder: what was delivered, answered as told."""
 
     def __init__(
-        self, reply: str = "done", *, delay_s: float = 0.0, fail: str | None = None
+        self,
+        reply: str = "done",
+        *,
+        delay_s: float = 0.0,
+        fail: str | None = None,
+        during: Callable[[], None] | None = None,
     ) -> None:
         self.texts: list[str] = []
         self.reply = reply
         self.delay_s = delay_s
         self.fail = fail
+        self.during = during  # what the captain does inside the turn (a speak() call)
 
     def __call__(self, text: str) -> str:
         self.texts.append(text)
+        if self.during is not None:
+            self.during()
         if self.delay_s:
             time.sleep(self.delay_s)
         if self.fail:
@@ -96,28 +105,42 @@ class Harness:
         self.transcribers: list[FakeTranscriber] = []
         self.spoken = Spoken()
         self.deliveries = deliveries or Deliveries()
-        self.spool: list[captain_state.Speech] = []
         self.thinking_flag = False
+        self.thinking_flips: list[bool] = []  # the CLI's side of the signal (Hooks.on_thinking)
+        self.seq = 100  # the home board's latest seq; captain_speaks() moves it
+        self.speak_seqs: list[int] = []  # where the captain's speak() audits landed
+        self.board_broken: str | None = None
 
         def factory() -> FakeTranscriber:
             fake = FakeTranscriber(canned)
             self.transcribers.append(fake)
             return fake
 
-        def take() -> captain_state.Speech | None:
-            return self.spool.pop(0) if self.spool else None
+        def home_seq() -> int:
+            if self.board_broken is not None:
+                raise OSError(self.board_broken)
+            return self.seq
+
+        def spoke_since(since: int) -> int:
+            return sum(1 for seq in self.speak_seqs if seq > since)
 
         self.hooks = Hooks(
             transcriber_factory=factory,
             deliver=self.deliveries,
             voice=speaker_mod.Voice(self.spoken, enabled=lambda: True),
             thinking=thinking or (lambda: self.thinking_flag),
-            take_speech=take,
+            home_seq=home_seq,
+            spoke_since=spoke_since,
+            on_thinking=self.thinking_flips.append,
             cue_after_s=cue_after_s,
             poll_s=0.02,
-            spool_poll_s=0.02,
         )
         self.app = build_app(token=TOKEN, hooks=self.hooks, mode=mode)
+
+    def captain_speaks(self) -> None:
+        """What T1's ``speak()`` leaves behind: one ok ``captain_action`` on the home board."""
+        self.seq += 1
+        self.speak_seqs.append(self.seq)
 
 
 @pytest.fixture
@@ -239,7 +262,7 @@ def test_focus_a_held_burst_is_interim_then_final_then_delivered_and_the_reply_i
     assert interim == {"t": "stt", "text": "approve the deploy", "final": False}
     assert final == {"t": "stt", "text": "approve the deploy", "final": True}
     assert utterance["text"] == "approve the deploy"
-    assert reply["text"] == "done"
+    assert reply == {"t": "reply", "text": "done", "spoken": True}
     assert harness.deliveries.texts == ["approve the deploy"], "brain.say got the final, once"
     assert harness.spoken.lines == ["done"], "the reply is spoken, nothing else"
     assert len(harness.transcribers) == 1, "one transcriber per connection"
@@ -289,6 +312,44 @@ def test_the_thinking_signal_shows_while_a_delivery_runs_and_follows_the_captain
             assert _until(connection, "thinking")["on"] is True
             harness.thinking_flag = False
             assert _until(connection, "thinking")["on"] is False
+    assert harness.thinking_flips == [True, False, True, False], (
+        "the terminal hook saw every flip the page did, and nothing else"
+    )
+
+
+@pytest.mark.parametrize("captain_spoke", [False, True])
+def test_the_reply_is_spoken_only_when_the_captain_made_no_speak_call_that_turn(
+    captain_spoke: bool,
+) -> None:
+    """13143 (4): the brain decides what is worth saying. A turn in which the captain called
+    ``speak()`` is already audible through the server's drainer, so the page stays quiet;
+    a silent turn's reply is spoken so a captain that forgets still answers aloud."""
+    harness = Harness(deliveries=Deliveries("all green"))
+    harness.captain_speaks()  # an earlier turn's line: not this turn's, never counted
+    if captain_spoke:
+        harness.deliveries.during = harness.captain_speaks
+    with TestClient(harness.app) as client:
+        for connection in _authed(client):
+            connection.send_text(json.dumps({"t": "text", "text": "how is the fold"}))
+            reply = _until(connection, "reply")
+    assert reply == {"t": "reply", "text": "all green", "spoken": not captain_spoke}
+    assert harness.spoken.lines == ([] if captain_spoke else ["all green"])
+
+
+def test_when_the_home_board_cannot_be_read_the_reply_is_still_spoken_and_it_is_said(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    harness = Harness()
+    harness.board_broken = "the board's disk is on fire"
+    with (
+        caplog.at_level(logging.WARNING, logger="aisquare.services.captain.voice"),
+        TestClient(harness.app) as client,
+    ):
+        for connection in _authed(client):
+            connection.send_text(json.dumps({"t": "text", "text": "hello"}))
+            reply = _until(connection, "reply")
+    assert reply["spoken"] is True and harness.spoken.lines == ["done"], "audible beats silent"
+    assert any("disk is on fire" in r.getMessage() for r in caplog.records), "never quietly"
 
 
 def test_a_slow_reply_earns_one_spoken_cue_before_it_arrives() -> None:
@@ -421,19 +482,38 @@ def test_a_wrong_token_is_refused_and_closed_and_a_binary_first_frame_too(harnes
             assert json.loads(_text(connection))["code"] == "auth_invalid"
 
 
-def test_the_speech_spool_is_spoken_by_the_page_server_and_the_speaker_switch_is_on_the_wire(
+def test_the_speaker_switch_is_on_the_wire_and_the_page_runs_no_spool_drainer(
     harness: Harness,
 ) -> None:
+    """13143 (5): exactly ONE drainer of the speech spool, in the captain's server process
+    (``speaker.start_drainer`` from ``actions.run_stdio``); the page server has none."""
     with TestClient(harness.app) as client:
         for connection in _authed(client):
-            harness.spool.append(captain_state.Speech("spk_1", "the fold is green"))
-            deadline = time.monotonic() + 5
-            while harness.spoken.lines != ["the fold is green"] and time.monotonic() < deadline:
-                time.sleep(0.02)
             connection.send_text(json.dumps({"t": "speaker", "on": False}))
             assert _until(connection, "speaker") == {"t": "speaker", "on": False}
-    assert harness.spoken.lines == ["the fold is green"]
     assert speaker_mod.speaker_on() is False
+    assert harness.spoken.lines == []
+    assert not hasattr(voice._Connection, "_spool_loop")
+    assert "take_speech" not in Hooks.__dataclass_fields__
+    assert not hasattr(voice, "SPOOL_POLL_S")
+
+
+def test_spoke_since_counts_only_ok_speak_audits_on_the_home_board(isolated_home: Path) -> None:
+    from aisquare.services import team as team_service
+    from aisquare.services.captain import actions
+
+    home = captain_state.home_project()
+    before = voice.home_seq()
+    actions.speak("the fold is green", "how is the fold")  # one ok speak, audited by T1
+    session = captain_state.ensure_session(home)
+    for text in (
+        json.dumps({"v": 1, "tool": "speak", "ok": False, "said": "nothing to say"}),
+        json.dumps({"v": 1, "tool": "thinking", "ok": True, "said": "on"}),
+        "not json at all",
+    ):
+        team_service.add_note(text, session_ref=session, kind="captain_action")
+    assert voice.spoke_since(before) == 1
+    assert voice.spoke_since(voice.home_seq()) == 0, "a speak() before a turn is not the turn's"
 
 
 def test_an_unavailable_backend_is_said_with_its_fix_not_a_dead_socket() -> None:
@@ -493,7 +573,8 @@ def test_the_default_hooks_reach_the_product_seams() -> None:
     hooks = Hooks()
     assert hooks.deliver is voice.deliver_to_captain
     assert hooks.thinking is voice.captain_is_thinking
-    assert hooks.take_speech is captain_state.take_speech
+    assert hooks.home_seq is voice.home_seq and hooks.spoke_since is voice.spoke_since
+    assert hooks.on_thinking is None, "the CLI wires its terminal in; the library prints nothing"
     assert isinstance(hooks.voice, speaker_mod.Voice)
 
 

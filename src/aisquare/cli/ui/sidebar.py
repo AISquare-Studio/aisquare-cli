@@ -341,6 +341,17 @@ class DragHandle(Activatable):
     between its events, so the suite never saw it).
     """
 
+    ALLOW_SELECT: ClassVar[bool] = False
+    """A drag handle is not text, as the divider is not (``divider.py`` says why).
+
+    The screen opens a text selection on the press BEFORE it forwards it, so the
+    capture ``on_mouse_down`` takes is too late to stop it, and every move of
+    the drag extended it: a regroup left a highlight across the sidebar, and a
+    card released over an agent's pane copied the pane's rows and left them
+    standing, so the pane's next ctrl+c copied instead of interrupting the
+    agent (final review of #203, F1).
+    """
+
     _dragged = False
     """Whether the gesture that just ended here was a drag (so its Click is not a click)."""
 

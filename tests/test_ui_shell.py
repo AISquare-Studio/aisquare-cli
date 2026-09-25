@@ -3823,6 +3823,81 @@ def test_dragging_a_card_onto_a_group_header_groups_it_and_the_picker_groups_a_s
     assert names == {"tools", "web"}
 
 
+def test_a_drag_on_a_card_or_a_group_header_selects_no_text(
+    tmp_path: Path, script: Script, isolated_home: Path
+) -> None:
+    """Final review of #203, F1. The screen opens a text selection on the press BEFORE
+    it forwards it, so the capture a handle takes in ``on_mouse_down`` is too late to
+    stop one: every drag of a title or a group header also drag-selected, and a regroup
+    left the rows from the pressed title to the header highlighted across the sidebar.
+    A drag handle is not text, as the divider is not."""
+    seed(tmp_path, ("prj_a", "api", None), ("prj_b", "cli", None), ("prj_c", "docs", None))
+    with store_session() as store:
+        groups_service.create_group(store, "tools", ["prj_b"])
+        groups_service.create_group(store, "web", ["prj_a"])
+
+    async def go(
+        pilot: Pilot[None],
+    ) -> tuple[list[str], dict[object, object], str | None, list[str], dict[object, object]]:
+        app = fleet_app(pilot)
+        tools = app.sidebar.query_one("#group-" + group_id("tools"), GroupHeader)
+        web = app.sidebar.query_one("#group-" + group_id("web"), GroupHeader)
+        title = card_for(app, "prj_c").query_one(ProjectTitle)
+        await _drag_onto(pilot, title, tools, offset=(3, 0))
+        carded = _cards(app), dict(app.screen.selections), app.screen.get_selected_text()
+        await _drag_onto(pilot, web, tools, offset=(3, 0))
+        return (*carded, _cards(app), dict(app.screen.selections))
+
+    def group_id(name: str) -> str:
+        with store_session() as store:
+            return groups_service.resolve_group(store, name).id
+
+    carded, card_selections, selected, headed, header_selections = drive(go)
+    # The premise: both drags did what a drag does.
+    assert carded == ["group:tools", "prj_b", "prj_c", "group:web", "prj_a"], carded
+    assert headed == ["group:web", "prj_a", "group:tools", "prj_b", "prj_c"], headed
+    assert card_selections == {} and selected is None, "a card's drag selects no text"
+    assert header_selections == {}, "nor does a group header's"
+
+
+@_needs_tmux
+def test_a_card_released_over_an_agents_pane_copies_nothing_and_ctrl_c_still_interrupts(
+    tmp_path: Path,
+    script: Script,
+    no_real_tmux: list[tuple[str, ...]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Final review of #203, F1, where it costs the most. The drag-select a card's press
+    opened reached into the pane it was released over: the pane copied its rows to the
+    clipboard with a toast, and the highlight stood, so the pane's next ctrl+c copied
+    again instead of interrupting the agent. A card let go over a pane snaps back and
+    touches nothing else."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+    script["prj_a"] = [status("prj_a", "coder-auth", "coder", "working")]
+    tmux = scripted_pane(no_real_tmux, ["red plain", "second row", "third row"])
+    monkeypatch.setattr(tmux_core, "_tmux", tmux)
+
+    async def go(pilot: Pilot[None]) -> tuple[str, int, bool, list[tuple[str, ...]]]:
+        app = fleet_app(pilot)
+        pane, _header = await _agent_pane(pilot)
+        title = card_for(app, "prj_a").query_one(ProjectTitle)
+        await press(pilot, title, (1, 0))
+        await move(pilot, pane, (5, 1), button=1)
+        await release(pilot, pane, (5, 1))
+        await pilot.pause()
+        standing = pane.has_standing_selection()
+        pane.focus()
+        await pilot.pause()
+        await pilot.press("ctrl+c")
+        await pilot.pause()
+        return app.clipboard, len(app._notifications), standing, tmux.sent()
+
+    clipboard, toasts, standing, sent = drive(go, notifications=True)
+    assert clipboard == "" and toasts == 0, "a card let go over a pane copies nothing"
+    assert not standing, "and leaves no highlight there"
+    assert sent == [("C-c",)], "so ctrl+c in the pane is the agent's interrupt"
+
+
 def test_a_drop_the_store_refuses_part_way_lands_none_of_its_moves(
     tmp_path: Path, script: Script, isolated_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

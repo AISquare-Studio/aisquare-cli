@@ -209,6 +209,18 @@ class FakeTmux(TmuxServer):
         except TmuxError:
             return False
 
+    def server_absent(self) -> bool:
+        """Faithful to :meth:`aisquare.core.tmux.TmuxServer.server_absent`: True only on
+        tmux's OWN word that no server is behind the socket (``running = False`` is the
+        shape ``kill-server`` and a swept ``/tmp`` leave); a question that could not be
+        put — no client, an unrunnable one, a denied socket, a wedged server — is no
+        evidence of absence and answers False, as the real one does."""
+        if not self.installed or self.exec_unavailable or self.answers_raises is not None:
+            return False
+        if self.socket_denied:
+            return False
+        return not self.running
+
     def _read(self) -> bool:
         """What a LENIENT read sees: True when the server answered this query.
 
@@ -731,7 +743,7 @@ def test_spawn_refuses_an_unknown_persona_before_any_window_worktree_or_row(
     with pytest.raises(fleet_service.FleetError) as caught:
         fleet_service.spawn(project, "coder", persona="nope")
 
-    assert "known: careful, mentor, minimalist, skeptic" in str(caught.value)
+    assert "known: captain, careful, mentor, minimalist, skeptic" in str(caught.value)
     assert tmux.spawned == []
     assert not (project.root / ".aisquare-worktrees").exists()
     with store_session() as store:
@@ -765,7 +777,7 @@ def test_a_stale_default_persona_refuses_naming_the_config_key(
         fleet_service.spawn(project, "coder")
 
     assert "[fleet.roles.coder].persona = 'retired'" in str(caught.value)
-    assert "known: careful, mentor, minimalist, skeptic" in str(caught.value)
+    assert "known: captain, careful, mentor, minimalist, skeptic" in str(caught.value)
     assert tmux.spawned == []
 
 
@@ -2158,7 +2170,7 @@ def test_attaching_an_unknown_persona_refuses_before_the_store_or_tmux(
     agent = _coder(project)
     tmux.installed = False  # from here on any tmux call would raise TmuxUnavailable instead
 
-    with pytest.raises(FleetError, match="known: careful, mentor, minimalist, skeptic"):
+    with pytest.raises(FleetError, match="known: captain, careful, mentor, minimalist, skeptic"):
         fleet_service.attach_persona(project, "coder-1", "nope")
 
     with store_session() as store:

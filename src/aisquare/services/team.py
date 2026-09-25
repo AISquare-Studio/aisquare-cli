@@ -74,6 +74,12 @@ _CLAIM_ORPHAN_AFTER = timedelta(hours=4)
 MANAGER_ROLE = "manager"
 """The one role whose ``Stop`` hook may keep it going (docs/plans/fleet-tui.md §7.3)."""
 
+CAPTAIN_ROLE = "captain"
+"""The home-level captain's role (services.captain): briefed by :func:`_captain_briefing`."""
+
+_COMPACT_SOURCE = "compact"
+"""The ``SessionStart`` source of a compaction — the one start that can come mid-turn."""
+
 CLEAR_REASON = "clear"
 """Claude Code's ``SessionEnd`` reason for ``/clear``: the session id ends, the process
 does not — and the ``SessionStart`` of the id that follows comes AFTER this end
@@ -1458,6 +1464,23 @@ def hook_session_start(
         )
         if role is not None and known is not None and known.role != role:
             session = store.update_session(session.id, role=role)
+        if base_role(session.role) == CAPTAIN_ROLE:
+            # Bound like every fleet row (rule 1 of the fleet-row section), or a
+            # `/clear` left the row on the ended id and `say` waited on a session that
+            # would never answer. The captain has no task, so there is nothing to brief.
+            _assignment(store, session.id, project.id)
+            if source != _COMPACT_SOURCE:
+                # A captain that just started, cleared or resumed sits at its prompt
+                # until something is typed — whose own hook says `working`. Left at
+                # the upsert's `working`, the row read busy for its whole fresh window
+                # and `say` refused to type into it (T2 fix round). A compaction can
+                # come mid-turn, so it keeps what the turn said.
+                store.touch_session(session.id, state="waiting")
+                session = store.get_session(session.id) or session
+            # The captain's own briefing (T2, 13121): it has no shell, so no `aisquare
+            # task …` protocol lines, and the home board's captain_action lines are the
+            # OWNER's audit, not the captain's context.
+            return collision + _captain_briefing(project, session, persona_note)
         # Before the board is read below: the assignment may move this agent's
         # claims onto its new id, and a board read first still named the old one.
         # ``source`` plays no part — see rule 1 of the fleet-row section.
@@ -2773,6 +2796,24 @@ def _role_cycle(me: TeamSession) -> list[str]:
     seat's own comment in ``cli/launch.py`` promises it does not lose.
     """
     return harness.role_cycle(base_role(me.role), short_id(me.id))
+
+
+def _captain_briefing(project: ProjectInfo, me: TeamSession, persona_note: str | None) -> str:
+    """The captain's session-start block: who it is, its only hands, its cycle, its persona."""
+    lines = [
+        "<aisquare-team>",
+        f"You are the captain (team session {short_id(me.id)}): the owner's agent across every "
+        "project, working from the home board.",
+        "Your only hands are the captain tools (mcp__captain__*) — no shell and no files; "
+        "what you cannot do through them, you ask the owner or a project's manager to do.",
+        *_role_cycle(me),
+    ]
+    if me.persona:
+        lines += _persona_briefing(me.persona, project.root)
+    if persona_note:
+        lines.append(persona_note)
+    lines.append("</aisquare-team>")
+    return "\n".join(lines)
 
 
 def _persona_briefing(name: str, root: Path) -> list[str]:

@@ -22,7 +22,7 @@ from aisquare.core.paths import HOME_ENV_VAR
 from aisquare.core.personas import PersonaError
 from aisquare.services import personas as service
 
-BUNDLED = ["careful", "mentor", "minimalist", "skeptic"]
+BUNDLED = ["captain", "careful", "mentor", "minimalist", "skeptic"]
 
 #: A real skill's shapes at once: a folded block scalar, a list, a comma string
 #: under metadata, a key Claude Code reads and aisquare never does.
@@ -108,7 +108,7 @@ def _import(
     )
 
 
-def test_the_four_bundled_personas_are_clean_skills_inside_the_body_budget() -> None:
+def test_the_bundled_personas_are_clean_skills_inside_the_body_budget() -> None:
     personas, invalid = core.catalogue(None)
 
     assert invalid == []
@@ -116,7 +116,9 @@ def test_the_four_bundled_personas_are_clean_skills_inside_the_body_budget() -> 
     for persona in personas:
         assert persona.layer == "bundled"
         assert persona.path == core.BUNDLED_DIR / persona.name
-        assert len(persona.body) <= 1_200, persona.name
+        # Counted as a Windows checkout reads it (CRLF): the captain's body fitted on
+        # Linux at 1,196 and was 1,208 on the Windows leg of CI (#219).
+        assert len(persona.body.replace("\n", "\r\n")) <= 1_200, persona.name
         assert persona.description, persona.name
         assert persona.roles and persona.tags, persona.name
         assert persona.frontmatter["name"] == persona.name
@@ -274,7 +276,7 @@ def test_an_unknown_name_lists_the_known_ones_and_never_walks_out_of_a_layer() -
         core.resolve("nope")
 
     assert caught.value.code == "unknown_persona"
-    assert "known: careful, mentor, minimalist, skeptic" in str(caught.value)
+    assert "known: captain, careful, mentor, minimalist, skeptic" in str(caught.value)
     with pytest.raises(PersonaError):
         core.resolve("../personas/skeptic")
 

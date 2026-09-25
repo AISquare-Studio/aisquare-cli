@@ -17,7 +17,7 @@ from typing import Annotated, Any
 import typer
 
 from aisquare.cli.common import fail
-from aisquare.core.console import stdout_console
+from aisquare.core.console import stderr_console, stdout_console
 from aisquare.core.state import get_state
 
 VOICE_INSTALL = "pip install 'aisquare-cli[voice]'"
@@ -97,16 +97,21 @@ def voice_page(
             "through adb reverse over USB)",
             error="not_loopback",
         )
+    if speaker is not None and speaker not in ("on", "off"):
+        fail("--speaker takes on or off", error="bad_speaker")
+    try:
+        chosen = speaker_mod.machine_voice()  # a bad [captain] speaker: one line, no traceback
+    except ValueError as exc:
+        fail(str(exc), error="bad_speaker_config")
+    problem = voice_dependency_error()
+    if problem is not None and not show_token:
+        fail(problem, error="voice_not_installed")
+    # Nothing is written before every refusal above has had its say.
     if speaker is not None:
-        if speaker not in ("on", "off"):
-            fail("--speaker takes on or off", error="bad_speaker")
         speaker_mod.set_speaker(speaker == "on")
     if mode is not None:
         voice.set_voice_mode("listen" if mode == "listen" else "focus")  # the key is its home
     effective: voice.Mode = voice.voice_mode() or "focus"
-    problem = voice_dependency_error()
-    if problem is not None and not show_token:
-        fail(problem, error="voice_not_installed")
     token = serve_token()
     url = voice.voice_url(port, token)
     report: dict[str, Any] = {
@@ -141,11 +146,19 @@ def voice_page(
         host=host,
         mode=effective,
         hooks=voice.Hooks(
-            transcriber_factory=lambda: voice.transcriber(model), on_thinking=_print_thinking
+            transcriber_factory=lambda: voice.transcriber(model),
+            on_thinking=_print_thinking,
+            voice=chosen,
         ),
     )
 
 
 def _print_thinking(on: bool) -> None:
-    """The CLI side of the thinking signal: the terminal says it too (the card's line)."""
+    """The CLI side of the thinking signal: the terminal says it too (the card's line).
+
+    Under ``--json`` stdout is the report and nothing else, so the line goes to stderr.
+    """
+    if get_state().json_output:
+        stderr_console().print("thinking…" if on else "idle", style="dim")
+        return
     stdout_console().print("thinking…" if on else "idle", style="yellow" if on else "dim")

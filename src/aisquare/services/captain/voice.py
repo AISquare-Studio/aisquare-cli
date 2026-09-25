@@ -51,6 +51,7 @@ from array import array
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from math import sqrt
 from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
@@ -385,16 +386,27 @@ NO_TEXT_NOTE = "the captain answered with tools alone — its pane shows what it
 """Shown on the page for a turn that ended without text (contract 13175); never spoken."""
 
 
-def deliver_to_captain(text: str) -> str | None:
+@dataclass(frozen=True)
+class Delivered:
+    """What a delivery came back with: the reply text (``None`` for a turn of tools alone,
+    13175) and when the text went into the pane — the moment the speak() window opens."""
+
+    text: str | None
+    typed_at: datetime | None = None
+
+
+def deliver_to_captain(text: str) -> Delivered:
     """The product delivery: T2's ``brain.say`` — typed into the pane, the reply read back.
 
-    ``None`` is a turn that ended without text (13175): the captain answered with
-    tools alone. It is not a failure and it is never a placeholder.
+    A ``NoReply`` and a fleet refusal (T2's ``brain.Unreachable`` after a reboot is
+    one) are both a failed delivery the page says; nothing else is expected, and
+    anything else is caught by the turn and said as ``internal``.
     """
     try:
-        return brain.say(text).text
-    except brain.NoReply as exc:
+        reply = brain.say(text)
+    except (brain.NoReply, fleet_service.FleetError) as exc:
         raise DeliveryFailed(str(exc)) from exc
+    return Delivered(reply.text, typed_at=reply.typed_at)
 
 
 def voice_mode() -> Mode | None:
@@ -438,8 +450,10 @@ def home_seq() -> int:
         return store.latest_seq(captain_state.home_project().id)
 
 
-def spoke_since(seq: int) -> int:
-    """How many ``speak()`` calls the captain audited on the home board past ``seq``."""
+def spoke_since(seq: int, typed_at: datetime | None = None) -> int:
+    """How many ``speak()`` calls the captain audited on the home board past ``seq`` — and,
+    when ``typed_at`` is known, not before the text went in (coderp's S3: a speak() from the
+    busy turn ``say`` waited out, or from another page's turn, is not this turn's)."""
     from aisquare.core.store import store_session
 
     home = captain_state.home_project()
@@ -451,9 +465,24 @@ def spoke_since(seq: int) -> int:
             record = json.loads(event.text)
         except ValueError:
             continue
-        if isinstance(record, dict) and record.get("tool") == "speak" and record.get("ok"):
-            spoken += 1
+        if not (isinstance(record, dict) and record.get("tool") == "speak" and record.get("ok")):
+            continue
+        if typed_at is not None and _event_time(event.created_at) < typed_at:
+            continue
+        spoken += 1
     return spoken
+
+
+def _event_time(raw: object) -> datetime:
+    """An event's ``created_at`` as an aware datetime."""
+    if isinstance(raw, datetime):
+        stamp = raw
+    else:
+        try:
+            stamp = datetime.fromisoformat(str(raw))
+        except ValueError:
+            return datetime.min.replace(tzinfo=UTC)
+    return stamp if stamp.tzinfo is not None else stamp.replace(tzinfo=UTC)
 
 
 @dataclass
@@ -461,15 +490,13 @@ class Hooks:
     """Everything the server reaches outside itself, replaceable in one place for a test."""
 
     transcriber_factory: Callable[[], Transcriber] = transcriber
-    deliver: Callable[[str], str | None] = deliver_to_captain
-    voice: speaker_mod.Voice = field(
-        default_factory=lambda: speaker_mod.Voice(speaker_mod.pick_speaker())
-    )
+    deliver: Callable[[str], Delivered] = deliver_to_captain
+    voice: speaker_mod.Voice = field(default_factory=speaker_mod.machine_voice)
     thinking: Callable[[], bool] = captain_is_thinking
     voice_mode: Callable[[], Mode | None] = voice_mode
     set_voice_mode: Callable[[Mode], None] = set_voice_mode
     home_seq: Callable[[], int] = home_seq
-    spoke_since: Callable[[int], int] = spoke_since
+    spoke_since: Callable[[int, datetime | None], int] = spoke_since
     on_thinking: Callable[[bool], None] | None = None
     """The CLI's side of the thinking signal: called on every flip, the terminal prints it."""
     clock: Callable[[], float] = time.monotonic
@@ -541,6 +568,8 @@ class _Connection:
         self._burst_bytes = 0
         self._delivering = 0
         self._deliveries = asyncio.Lock()
+        self._turns: set[asyncio.Task[None]] = set()
+        self._mode_writing = 0
         self._shown_thinking: bool | None = None
         self._send_lock = asyncio.Lock()
 
@@ -565,6 +594,12 @@ class _Connection:
             poller.cancel()
             with _swallow_cancel():
                 await poller
+            # A turn in flight is AWAITED, not cancelled: the owner who closed the tab is
+            # still in the room, and the reply is still theirs to hear. Its frames go to
+            # a socket that is gone, which _send swallows.
+            for turn in list(self._turns):
+                with _swallow_cancel():
+                    await turn
 
     async def _authenticate(self) -> bool:
         from starlette.websockets import WebSocketDisconnect
@@ -658,8 +693,11 @@ class _Connection:
             await self._set_listening(False)
         elif kind == "text":
             text = str(message.get("text", "")).strip()
-            if text:
-                await self._deliver(text)
+            if text and self.mode == "listen" and is_stop_word(text):
+                self.listening = False  # typed, the stop word is the stop word
+                await self._send("listening", on=False, why="stop word")
+            elif text:
+                self._start_delivery(text)
         elif kind == "speaker":
             speaker_mod.set_speaker(bool(message.get("on", True)))
             await self._send("speaker", on=speaker_mod.speaker_on())
@@ -677,7 +715,10 @@ class _Connection:
         self.listening = self.mode == "listen"
         if write:
             # The page's toggle writes the key (13179), so the TUI and every other
-            # page agree; a switch that CAME from the key is not written back.
+            # page agree; a switch that CAME from the key is not written back. While
+            # the write is in flight the poll still reads the old value: it must not
+            # bounce the page (coderp's minor), so it stands aside until the write lands.
+            self._mode_writing += 1
             try:
                 await asyncio.to_thread(self._hooks.set_voice_mode, self.mode)
             except Exception as exc:  # the page still switched; the key did not, said
@@ -685,6 +726,8 @@ class _Connection:
                 await self._send(
                     "error", code="mode_not_saved", message=f"the mode was not saved: {exc}"
                 )
+            finally:
+                self._mode_writing -= 1
         await self._send("mode", mode=self.mode, listening=self.listening)
 
     def _mode_key(self) -> Mode | None:
@@ -697,8 +740,10 @@ class _Connection:
     async def _follow_mode_key(self) -> None:
         """The one-second poll's other job (13179): a key another writer changed — T4's
         control, another page, ``--mode`` — switches this page, and the page is told."""
+        if self._mode_writing:
+            return
         wanted = await asyncio.to_thread(self._mode_key)
-        if wanted is not None and wanted != self.mode:
+        if wanted is not None and wanted != self.mode and not self._mode_writing:
             await self._set_mode(wanted, write=False)
 
     async def _set_listening(self, on: bool) -> None:
@@ -783,9 +828,19 @@ class _Connection:
             self.listening = False
             await self._send("listening", on=False, why="stop word")
             return
-        await self._deliver(text)
+        self._start_delivery(text)
 
     # -- delivery, and the thinking signal
+
+    def _start_delivery(self, text: str) -> None:
+        """A turn runs as its own task, never inside the read loop (coderp's B1): with the
+        loop blocked, uvicorn stopped reading the page's pongs and its keepalive closed the
+        socket 20 to 40 s into any longer turn, and the reply went to a dead socket. The
+        turns of one page still run one at a time (``_deliveries``); the read loop keeps
+        receiving, so a mute, a stop, a mode switch or the speaker switch lands at once."""
+        task = asyncio.create_task(self._deliver(text))
+        self._turns.add(task)
+        task.add_done_callback(self._turns.discard)
 
     async def _deliver(self, text: str) -> None:
         await self._send("utterance", text=text)
@@ -794,32 +849,58 @@ class _Connection:
             await self._show_thinking()
             since = await asyncio.to_thread(self._read_home_seq)
             cue = asyncio.create_task(self._cue_later())
+            ended = False
             try:
-                reply = await asyncio.to_thread(self._hooks.deliver, text)
-            except DeliveryFailed as exc:
+                try:
+                    delivered = await asyncio.to_thread(self._hooks.deliver, text)
+                except DeliveryFailed as exc:
+                    cue.cancel()
+                    await self._send("error", code="no_reply", message=str(exc))
+                    ended = await self._end_turn()
+                    await asyncio.to_thread(self._hooks.voice.utter, "the captain did not answer")
+                    return
+                except Exception as exc:  # said, never a page stuck on "thinking" (S2)
+                    cue.cancel()
+                    log.warning("captain voice: the delivery failed: %s", exc)
+                    await self._send("error", code="internal", message=str(exc))
+                    ended = await self._end_turn()
+                    return
                 cue.cancel()
-                self._delivering -= 1
-                await self._send("error", code="no_reply", message=str(exc))
-                await asyncio.to_thread(self._hooks.voice.utter, "the captain did not answer")
-                await self._show_thinking()
-                return
-            cue.cancel()
-            self._delivering -= 1
-            # The brain decides what is worth saying (13143): a turn in which the
-            # captain called speak() is already audible; only a silent turn's reply
-            # is spoken here, so nothing is heard twice and nothing is missed.
-            spoken_by_captain = await asyncio.to_thread(self._count_spoken, since)
-            if reply is None:
-                # 13175: a turn of tools alone. The page says so in its own words and
-                # nothing is spoken — there is no reply text, and a placeholder read
-                # aloud would be the captain's words to the owner's ear.
-                await self._send("reply", text=None, spoken=False, note=NO_TEXT_NOTE)
-                await self._show_thinking()
-                return
-            await self._send("reply", text=reply, spoken=spoken_by_captain == 0)
-            await self._show_thinking()
-            if spoken_by_captain == 0:
-                await asyncio.to_thread(self._hooks.voice.utter, reply)
+                # The brain decides what is worth saying (13143): a turn in which the
+                # captain called speak() is already audible; only a silent turn's reply
+                # is spoken here, so nothing is heard twice and nothing is missed. The
+                # window opens when the text went in (S3), not when say started to wait.
+                spoken_by_captain = await asyncio.to_thread(
+                    self._count_spoken, since, delivered.typed_at
+                )
+                reply = delivered.text
+                if reply is None:
+                    # 13175: a turn of tools alone. The page says so in its own words and
+                    # nothing is spoken — there is no reply text, and a placeholder read
+                    # aloud would be the captain's words to the owner's ear.
+                    await self._send("reply", text=None, spoken=False, note=NO_TEXT_NOTE)
+                    ended = await self._end_turn()
+                    return
+                will_speak = (
+                    spoken_by_captain == 0 and bool(reply.strip()) and speaker_mod.speaker_on()
+                )
+                await self._send("reply", text=reply, spoken=will_speak)
+                ended = await self._end_turn()
+                if spoken_by_captain == 0:
+                    await asyncio.to_thread(self._hooks.voice.utter, reply)
+            finally:
+                # Whatever path left, or a cancellation mid-turn (S2): the cue never
+                # fires late, and the page is never left on "thinking".
+                cue.cancel()
+                if not ended:
+                    with _swallow_socket_errors():
+                        await self._end_turn()
+
+    async def _end_turn(self) -> bool:
+        """The turn is over: the delivering count drops and the thinking signal follows."""
+        self._delivering -= 1
+        await self._show_thinking()
+        return True
 
     def _read_home_seq(self) -> int:
         try:
@@ -828,11 +909,11 @@ class _Connection:
             log.warning("captain voice: the home board could not be read: %s", exc)
             return -1
 
-    def _count_spoken(self, since: int) -> int:
+    def _count_spoken(self, since: int, typed_at: datetime | None) -> int:
         if since < 0:
             return 0
         try:
-            return self._hooks.spoke_since(since)
+            return self._hooks.spoke_since(since, typed_at)
         except Exception as exc:
             log.warning("captain voice: the speak() audit could not be read: %s", exc)
             return 0
@@ -852,7 +933,7 @@ class _Connection:
             return False
 
     async def _show_thinking(self) -> None:
-        now = self._thinking_now()
+        now = await asyncio.to_thread(self._thinking_now)  # tmux and the store, off the loop
         if now != self._shown_thinking:
             self._shown_thinking = now
             await self._send("thinking", on=now)
@@ -917,6 +998,15 @@ def serve(
     """Run the voice page until interrupted (the CLI's ``captain voice``)."""
     import uvicorn
 
-    uvicorn.run(
-        build_app(token=token, hooks=hooks, mode=mode), host=host, port=port, log_level="warning"
-    )
+    app = build_app(token=token, hooks=hooks, mode=mode)
+    uvicorn.Server(uvicorn_config(app, host, port)).run()
+
+
+def uvicorn_config(app: Starlette, host: str, port: int, **overrides: Any) -> Any:
+    """The server's own uvicorn settings — one place, so a test can shorten the websocket
+    keepalive (``ws_ping_interval``, ``ws_ping_timeout``) and drive the real server."""
+    import uvicorn
+
+    settings: dict[str, Any] = {"host": host, "port": port, "log_level": "warning"}
+    settings.update(overrides)
+    return uvicorn.Config(app, **settings)

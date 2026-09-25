@@ -136,6 +136,50 @@ def test_dash_dash_mode_writes_the_key_and_without_it_the_key_is_the_default(
     assert json.loads(result.stdout)["mode"] == "listen"
 
 
+def test_a_bad_speaker_in_config_is_refused_with_a_line_not_a_traceback(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """coderp's S5, the CLI half: the page refuses a bad [captain] speaker in one line."""
+    monkeypatch.setattr(speaker_mod, "configured_speaker", lambda: "bogus")
+    monkeypatch.setattr(captain_voice, "voice_dependency_error", lambda: None)
+    result = runner.invoke(app, ["captain", "voice", "--show-token"])
+    assert result.exit_code == 1, result.output
+    assert "bogus" in result.output and "Traceback" not in result.output
+
+
+def test_dash_dash_model_reaches_the_transcriber_and_json_keeps_stdout_to_the_report(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """coderp's minors: nothing tested --model, and --json printed plain thinking lines after
+    the report."""
+    from aisquare.services.captain import voice
+
+    served: list[dict[str, Any]] = []
+    asked: list[str | None] = []
+
+    def fake_transcriber(model: str | None) -> object:
+        asked.append(model)
+        return object()
+
+    monkeypatch.setattr(voice, "transcriber", fake_transcriber)
+    monkeypatch.setattr(captain_voice, "voice_dependency_error", lambda: None)
+
+    def fake_serve(**kw: Any) -> None:
+        served.append(kw)
+        kw["hooks"].transcriber_factory()
+        kw["hooks"].on_thinking(True)
+        kw["hooks"].on_thinking(False)
+
+    monkeypatch.setattr("aisquare.services.captain.voice.serve", fake_serve)
+    result = runner.invoke(app, ["--json", "captain", "voice", "--model", "small.en"])
+    assert result.exit_code == 0, result.output
+    assert asked == ["small.en"], "--model reached the factory"
+    lines = [line for line in result.stdout.splitlines() if line.strip()]
+    assert len(lines) == 1 and json.loads(lines[0])["serving"] is True, (
+        "one JSON object, no chatter"
+    )
+
+
 def test_a_non_loopback_host_and_a_bad_mode_are_refused(
     runner: CliRunner, isolated_home: Path
 ) -> None:

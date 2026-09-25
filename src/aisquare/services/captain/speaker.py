@@ -46,7 +46,7 @@ log = logging.getLogger(__name__)
 Runner = Callable[[Sequence[str], str | None], None]
 """Runs one command, ``(argv, stdin_text)``, raising on failure: the seam every adapter uses."""
 
-SPEAK_TIMEOUT_S = 60.0
+SPEAK_TIMEOUT_S = 300.0  # a long reply is read out whole; 60 cut it mid-sentence
 """A line that is still playing after this long is a stuck synthesiser, not speech."""
 STATE_KEY = "captain_speaker"
 SPEECH_TTL_S = 30.0
@@ -57,11 +57,18 @@ ADAPTERS = ("powershell", "say", "spd-say", "null")
 """The names ``[captain] speaker`` may take, and each adapter's ``name``."""
 
 POWERSHELL_SCRIPT = (
+    "[Console]::InputEncoding = [System.Text.Encoding]::UTF8; "
     "Add-Type -AssemblyName System.Speech; "
     "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer; "
     "$s.Speak([Console]::In.ReadToEnd())"
 )
-"""Reads the text from stdin so the owner's words never sit in a PowerShell command line."""
+"""Reads the text from stdin so the owner's words never sit in a PowerShell command line.
+
+The input encoding is set to UTF-8 FIRST: Windows PowerShell 5.1 reads stdin in the
+console code page, and the UTF-8 bytes of an em dash arrived as ``ÔÇö`` and were
+spoken as such (coderp's S7; runner2 measured it through the real powershell.exe,
+board 13253). The runner sends UTF-8 on every platform.
+"""
 
 
 class SpeakerError(RuntimeError):
@@ -84,6 +91,7 @@ def run_subprocess(argv: Sequence[str], stdin: str | None) -> None:
             list(argv),
             input=stdin,
             text=True,
+            encoding="utf-8",
             capture_output=True,
             timeout=SPEAK_TIMEOUT_S,
             check=False,
@@ -93,6 +101,8 @@ def run_subprocess(argv: Sequence[str], stdin: str | None) -> None:
         )
     except FileNotFoundError as exc:
         raise SpeakerError(f"{argv[0]} is not on PATH") from exc
+    except OSError as exc:  # a denied binary, a bad interpreter: said, never raised out of utter
+        raise SpeakerError(f"{argv[0]} could not be run: {exc}") from exc
     except subprocess.TimeoutExpired as exc:
         raise SpeakerError(f"{argv[0]} did not finish speaking in {SPEAK_TIMEOUT_S:g}s") from exc
     if completed.returncode != 0:
@@ -364,5 +374,19 @@ def start_drainer(
 
 
 def machine_voice() -> Voice:
-    """The Voice this machine speaks with: the configured adapter, else the platform's."""
+    """The Voice this machine speaks with: the configured adapter, else the platform's.
+
+    An unknown ``[captain] speaker`` name is a ``ValueError`` naming the four: the
+    CLI refuses on it in one line. The server uses :func:`server_voice`.
+    """
     return Voice(pick_speaker(configured=configured_speaker()))
+
+
+def server_voice() -> Voice:
+    """:func:`machine_voice` for the captain's server, which must serve whatever the speaker
+    config says (coderp's S4): a bad name is logged and the platform adapter plays."""
+    try:
+        return machine_voice()
+    except ValueError as exc:
+        log.warning("captain speaker: %s — speaking through the platform adapter instead", exc)
+        return Voice(pick_speaker())

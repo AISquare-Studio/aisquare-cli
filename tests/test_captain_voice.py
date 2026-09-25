@@ -12,13 +12,16 @@ a fake — the shape T1's tests and cliXR's took.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
+import socket
 import sys
 import threading
 import time
 from array import array
 from collections.abc import Callable, Iterator
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -73,23 +76,34 @@ class Deliveries:
         *,
         delay_s: float = 0.0,
         fail: str | None = None,
+        raises: Exception | None = None,
         during: Callable[[], None] | None = None,
+        before_typing: Callable[[], None] | None = None,
     ) -> None:
         self.texts: list[str] = []
         self.reply = reply
         self.delay_s = delay_s
         self.fail = fail
+        self.raises = raises  # any other exception out of the delivery seam (S2)
         self.during = during  # what the captain does inside the turn (a speak() call)
+        self.before_typing = before_typing  # what happens while say waits to type (S3)
+        self.typed_at: list[datetime] = []
 
-    def __call__(self, text: str) -> str | None:
+    def __call__(self, text: str) -> voice.Delivered:
         self.texts.append(text)
+        if self.before_typing is not None:
+            self.before_typing()
+        typed = datetime.now(tz=UTC)
+        self.typed_at.append(typed)
         if self.during is not None:
             self.during()
         if self.delay_s:
             time.sleep(self.delay_s)
         if self.fail:
             raise DeliveryFailed(self.fail)
-        return self.reply
+        if self.raises is not None:
+            raise self.raises
+        return voice.Delivered(self.reply, typed_at=typed)
 
 
 class Harness:
@@ -108,7 +122,7 @@ class Harness:
         self.thinking_flag = False
         self.thinking_flips: list[bool] = []  # the CLI's side of the signal (Hooks.on_thinking)
         self.seq = 100  # the home board's latest seq; captain_speaks() moves it
-        self.speak_seqs: list[int] = []  # where the captain's speak() audits landed
+        self.speak_seqs: list[tuple[int, datetime]] = []  # the captain's speak() audits
         self.board_broken: str | None = None
         self.mode_key: voice.Mode | None = None  # state.json captain_voice_mode, in memory
         self.mode_writes: list[voice.Mode] = []
@@ -123,8 +137,12 @@ class Harness:
                 raise OSError(self.board_broken)
             return self.seq
 
-        def spoke_since(since: int) -> int:
-            return sum(1 for seq in self.speak_seqs if seq > since)
+        def spoke_since(since: int, typed_at: datetime | None) -> int:
+            return sum(
+                1
+                for seq, at in self.speak_seqs
+                if seq > since and (typed_at is None or at >= typed_at)
+            )
 
         def set_mode_key(mode: voice.Mode) -> None:
             self.mode_key = mode
@@ -145,10 +163,10 @@ class Harness:
         )
         self.app = build_app(token=TOKEN, hooks=self.hooks, mode=mode)
 
-    def captain_speaks(self) -> None:
+    def captain_speaks(self, at: datetime | None = None) -> None:
         """What T1's ``speak()`` leaves behind: one ok ``captain_action`` on the home board."""
         self.seq += 1
-        self.speak_seqs.append(self.seq)
+        self.speak_seqs.append((self.seq, at or datetime.now(tz=UTC)))
 
 
 @pytest.fixture
@@ -357,6 +375,114 @@ def test_a_turn_without_text_shows_the_pages_own_note_and_speaks_nothing() -> No
     assert harness.deliveries.texts == ["stop coder-2"]
 
 
+def _free_port() -> int:
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return int(probe.getsockname()[1])
+
+
+def test_a_long_turn_in_listen_mode_keeps_the_socket_open_and_the_reply_arrives() -> None:
+    """coderp's B1 (comment 5833331924): the delivery blocked the websocket read loop, uvicorn
+    stopped reading the page's pongs, and its keepalive closed the socket 20 to 40 s into any
+    longer turn with 1011 — the reply frame went to a dead socket. Real uvicorn on loopback,
+    a 1 s ping and a 1 s timeout, a four-second turn, and a client that streams room tone the
+    whole time without pinging, as a browser does: the socket stays open, the reply arrives."""
+    import uvicorn
+    from websockets.sync.client import connect
+
+    harness = Harness(mode="listen", deliveries=Deliveries("all quiet", delay_s=4.0))
+    port = _free_port()
+    config = voice.uvicorn_config(
+        harness.app, host="127.0.0.1", port=port, ws_ping_interval=1.0, ws_ping_timeout=1.0
+    )
+    server = uvicorn.Server(config)
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    try:
+        deadline = time.monotonic() + 10
+        while not server.started and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert server.started, "uvicorn did not come up"
+        with connect(f"ws://127.0.0.1:{port}/ws", ping_interval=None) as ws:
+            ws.send(json.dumps({"t": "auth", "token": TOKEN}))
+            assert json.loads(ws.recv(timeout=5))["t"] == "hello"
+            ws.send(json.dumps({"t": "text", "text": "what is up"}))
+            reply: dict[str, Any] | None = None
+            seen: list[str] = []
+            until = time.monotonic() + 9
+            while reply is None and time.monotonic() < until:
+                ws.send(QUIET)  # the page streams a frame every 20 ms in listen mode
+                try:
+                    frame = json.loads(ws.recv(timeout=0.02))
+                except TimeoutError:
+                    continue
+                seen.append(frame["t"])
+                if frame["t"] == "reply":
+                    reply = frame
+    finally:
+        server.should_exit = True
+        thread.join(5)
+    assert reply is not None, f"no reply within nine seconds; frames seen: {seen}"
+    assert reply["text"] == "all quiet"
+    assert harness.deliveries.texts == ["what is up"]
+
+
+def test_a_delivery_error_of_any_kind_is_said_and_clears_thinking_and_the_cue(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """coderp's S2: only NoReply was caught; anything else left thinking on for the page's life
+    and still said "on it". Now every failure is an error frame, the cue is cancelled, and the
+    next turn starts clean."""
+    harness = Harness(
+        deliveries=Deliveries(raises=RuntimeError("the board's disk is on fire")), cue_after_s=0.2
+    )
+    with (
+        caplog.at_level(logging.WARNING, logger="aisquare.services.captain.voice"),
+        TestClient(harness.app) as client,
+    ):
+        for connection in _authed(client):
+            connection.send_text(json.dumps({"t": "text", "text": "hello"}))
+            error = _until(connection, "error")
+            off = _until(connection, "thinking")
+            time.sleep(0.4)  # past the cue: nothing may be spoken
+            harness.deliveries.raises = None
+            connection.send_text(json.dumps({"t": "text", "text": "again"}))
+            reply = _until(connection, "reply")
+    assert error["code"] == "internal" and "disk is on fire" in error["message"]
+    assert off["on"] is False, "thinking is off again after the failure"
+    assert harness.spoken.lines == ["done"], "no cue and no line for the failed turn"
+    assert reply["text"] == "done", "the next turn starts clean"
+    assert harness.thinking_flips == [True, False, True, False]
+
+
+def test_deliver_to_captain_says_a_fleet_refusal_as_a_failed_delivery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T2's brain.Unreachable after a reboot is a FleetError: the page must say it, not crash."""
+    from aisquare.services import fleet
+
+    def unreachable(text: str, *, timeout: float = 180.0) -> brain.Reply:
+        raise fleet.FleetError("the captain's row is live but its tmux server does not answer")
+
+    monkeypatch.setattr(brain, "say", unreachable)
+    with pytest.raises(voice.DeliveryFailed, match="tmux server does not answer"):
+        voice.deliver_to_captain("what is up")
+
+
+def test_a_speak_from_the_wait_before_the_text_was_typed_does_not_mute_this_reply() -> None:
+    """coderp's S3: the window opened before brain.say waited for the lock or a busy captain,
+    so another turn's speak() muted this reply. It opens when the text is typed."""
+    harness = Harness(deliveries=Deliveries("all green"))
+    harness.deliveries.before_typing = lambda: harness.captain_speaks(
+        at=datetime.now(tz=UTC)
+    )  # the busy turn's own speak(), landing while say waits to type
+    with TestClient(harness.app) as client:
+        for connection in _authed(client):
+            connection.send_text(json.dumps({"t": "text", "text": "how is the fold"}))
+            reply = _until(connection, "reply")
+    assert reply["spoken"] is True and harness.spoken.lines == ["all green"]
+
+
 def test_when_the_home_board_cannot_be_read_the_reply_is_still_spoken_and_it_is_said(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -460,6 +586,70 @@ def test_listen_the_stop_word_turns_the_mic_off_and_is_not_delivered() -> None:
     assert harness.deliveries.texts == []
 
 
+def test_a_typed_stop_word_turns_the_mic_off_and_frames_after_it_are_ignored() -> None:
+    """coderp's minors: the stop word typed into the page's box ('Stop listening.') was delivered
+    as a request, and nothing pinned that frames after the stop word go nowhere."""
+    harness = Harness(canned="approve the deploy", mode="listen")
+    with TestClient(harness.app) as client:
+        for connection in _authed(client):
+            connection.send_text(json.dumps({"t": "text", "text": "Stop listening."}))
+            off = _until(connection, "listening")
+            for _ in range(FRAMES_PER_SECOND):
+                connection.send_bytes(LOUD)
+            connection.send_text(
+                json.dumps({"t": "text", "text": "ping"})
+            )  # a typed request still lands
+            reply = _until(connection, "reply")
+    assert off == {"t": "listening", "on": False, "why": "stop word"}
+    assert harness.deliveries.texts == ["ping"], "the stop word was not delivered, nor the frames"
+    assert harness.transcribers == [], "no transcriber was ever fed after the mic went off"
+    assert reply["text"] == "done"
+
+
+def test_the_pages_own_mode_switch_is_not_bounced_back_by_the_key_poll() -> None:
+    """coderp's minor: the 1 s poll read the key while the page's write was still in flight and
+    flipped the page back. A slow key write must not undo the page's own switch."""
+    harness = Harness(mode="focus")
+    harness.mode_key = "focus"  # the key holds the OLD mode while the page's write is in flight
+    slow_write = threading.Event()
+
+    def set_mode_key(mode: voice.Mode) -> None:
+        slow_write.wait(0.3)  # the write takes longer than several polls (poll_s is 0.02)
+        harness.mode_key = mode
+        harness.mode_writes.append(mode)
+
+    harness.hooks = voice.Hooks(**{**harness.hooks.__dict__, "set_voice_mode": set_mode_key})
+    harness.app = voice.build_app(token=TOKEN, hooks=harness.hooks, mode="focus")
+    with TestClient(harness.app) as client:
+        for connection in _authed(client):
+            connection.send_text(json.dumps({"t": "mode", "mode": "listen"}))
+            frames = [_until(connection, "mode")]
+            deadline = time.monotonic() + 0.6
+            while time.monotonic() < deadline:
+                with contextlib.suppress(TimeoutError):
+                    frames.append(_until_within(connection, "mode", 0.1))
+    assert [f["mode"] for f in frames] == ["listen"], f"the page was bounced: {frames}"
+    assert harness.mode_writes == ["listen"]
+
+
+def _until_within(connection: Any, kind: str, seconds: float) -> dict[str, Any]:
+    """Like ``_until``, bounded by ``seconds`` instead of the receive timeout."""
+    received: list[str] = []
+
+    def read() -> None:
+        received.append(connection.receive_text())
+
+    worker = threading.Thread(target=read, daemon=True)
+    worker.start()
+    worker.join(seconds)
+    if not received:
+        raise TimeoutError
+    frame = json.loads(received[0])
+    if frame["t"] != kind:
+        return _until_within(connection, kind, seconds)
+    return dict(frame)
+
+
 def test_switching_modes_flushes_an_open_utterance_and_the_hello_says_which_mode() -> None:
     harness = Harness(canned="half a sentence", mode="listen")
     with TestClient(harness.app) as client, client.websocket_connect("/ws") as connection:
@@ -473,8 +663,10 @@ def test_switching_modes_flushes_an_open_utterance_and_the_hello_says_which_mode
         connection.send_text(json.dumps({"t": "mode", "mode": "focus"}))
         final = _until(connection, "stt")
         assert final["text"] == "half a sentence" and final["final"]
-        _until(connection, "reply")
+        # The switch lands at once (coderp's S1): the mode frame does not wait behind the
+        # flushed utterance's turn, which answers after it.
         assert _until(connection, "mode") == {"t": "mode", "mode": "focus", "listening": False}
+        _until(connection, "reply")
         connection.send_text(json.dumps({"t": "mode", "mode": "sideways"}))
         assert _until(connection, "error")["code"] == "bad_message"
     assert harness.deliveries.texts == ["half a sentence"]
@@ -580,6 +772,13 @@ def test_spoke_since_counts_only_ok_speak_audits_on_the_home_board(isolated_home
         team_service.add_note(text, session_ref=session, kind="captain_action")
     assert voice.spoke_since(before) == 1
     assert voice.spoke_since(voice.home_seq()) == 0, "a speak() before a turn is not the turn's"
+    # coderp's S3: the window opens when the text is typed. A speak() audited before that
+    # moment (the busy turn's, another page's) is not this turn's, seq or no seq.
+    from datetime import timedelta
+
+    later = datetime.now(tz=UTC) + timedelta(seconds=5)
+    assert voice.spoke_since(before, later) == 0, "spoken before the text went in"
+    assert voice.spoke_since(before, later - timedelta(minutes=1)) == 1
 
 
 def test_an_unavailable_backend_is_said_with_its_fix_not_a_dead_socket() -> None:
@@ -643,6 +842,13 @@ def test_the_default_hooks_reach_the_product_seams() -> None:
     assert hooks.home_seq is voice.home_seq and hooks.spoke_since is voice.spoke_since
     assert hooks.on_thinking is None, "the CLI wires its terminal in; the library prints nothing"
     assert isinstance(hooks.voice, speaker_mod.Voice)
+
+
+def test_the_default_voice_is_the_configured_one(monkeypatch: pytest.MonkeyPatch) -> None:
+    """coderp's S5: the page built its own Voice from the platform adapter and ignored
+    [captain] speaker, so the page and the drainer spoke through different adapters."""
+    monkeypatch.setattr(speaker_mod, "configured_speaker", lambda: "null")
+    assert isinstance(Hooks().voice.speaker, speaker_mod.NullSpeaker)
 
 
 def test_captain_is_thinking_reads_the_busy_flag_first(

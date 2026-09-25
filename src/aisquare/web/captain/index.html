@@ -120,6 +120,9 @@ const modeButtons = { focus: $('mode-focus'), listen: $('mode-listen') };
 const token = new URLSearchParams(location.hash.replace(/^#/, '')).get('token') || '';
 let ws = null, mode = 'focus', listening = false, muted = false, holding = false, seq = 0;
 let ctx = null, stream = null, node = null, source = null, moduleReady = null, streaming = false;
+// coderp's S6: a burst that starts within the drain window of the one before it must not be
+// ended by the old timer — every burst gets a generation, and a stale timer does nothing.
+let burstGeneration = 0, drainTimer = null;
 
 function say(cls, text) {
   const el = document.createElement('div'); el.className = cls; el.textContent = text;
@@ -212,6 +215,7 @@ async function pressStart() {
   if (!(await ensureGraph())) { holding = false; return; }
   if (!holding) return;
   send({ t: 'audio', seq: ++seq });
+  burstGeneration += 1; if (drainTimer) { clearTimeout(drainTimer); drainTimer = null; }
   streaming = true; source.connect(node); talk.className = 'big live';
   interim.textContent = '…';
 }
@@ -222,9 +226,11 @@ function pressEnd() {
 }
 function finishStream(then) {
   if (!streaming) { then?.(); return; }
-  const done = () => { if (!streaming) return; streaming = false; try { source?.disconnect(); } catch {} then?.(); };
+  const gen = burstGeneration;
+  const done = () => { if (gen !== burstGeneration || !streaming) return; streaming = false; try { source?.disconnect(); } catch {} then?.(); };
   pendingEnd = done;
-  setTimeout(done, DRAIN_TIMEOUT_MS);
+  if (drainTimer) clearTimeout(drainTimer);
+  drainTimer = setTimeout(done, DRAIN_TIMEOUT_MS);
   // Ask the processor for its partial frame; a fresh node replaces the stopping one.
   node?.port.postMessage('stop'); const old = node; node = null; setTimeout(() => old?.disconnect?.(), DRAIN_TIMEOUT_MS + 50);
 }
@@ -233,6 +239,7 @@ function finishStream(then) {
 async function startStream() {
   if (mode !== 'listen' || muted || streaming) return;
   if (!(await ensureGraph())) return;
+  burstGeneration += 1; if (drainTimer) { clearTimeout(drainTimer); drainTimer = null; }
   streaming = true; source.connect(node); setStatus('listening', 'on');
 }
 function stopStream() { finishStream(); setStatus('connected', 'on'); }

@@ -3857,15 +3857,6 @@ def _respawn(
             "no transcript on disk to resume — the replacement starts fresh with a hand-off prompt"
         )
     prompt = resume_prompt if resume is not None else _handoff_prompt(agent, task, recent, reason)
-    if agent.launch_spec is not None:
-        replayed = (
-            "binary and arguments"
-            if permission_mode is not None
-            else "binary, permission mode and arguments"
-        )
-        notes.append(
-            f"launched as recorded — {replayed} come from the row, not from today's config (#144)"
-        )
     receipt = spawn(
         project,
         agent.role,
@@ -3886,6 +3877,19 @@ def _respawn(
         takes_over=session.id if takes_over and resume is None and session is not None else None,
         onboard=onboard,
     )
+    if agent.launch_spec is not None:
+        # Said once the replacement is up, for what it really took from the row: a
+        # recorded binary that has left the PATH was replaced by today's resolution,
+        # which the spawn's own note names, and "the binary comes from the row" beside
+        # it said the opposite (review of #169, F7).
+        kept = [
+            *(["binary"] if receipt.agent.binary == agent.launch_spec.binary else []),
+            *(["permission mode"] if permission_mode is None else []),
+        ]
+        said = f"{', '.join(kept)} and arguments" if kept else "arguments"
+        notes.append(
+            f"launched as recorded — {said} come from the row, not from today's config (#144)"
+        )
     notes.extend(receipt.notes)
     return receipt, resume is not None, notes
 

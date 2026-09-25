@@ -9252,6 +9252,11 @@ def test_a_restart_whose_recorded_binary_left_the_path_resolves_it_again_and_say
         and "'claude' (chosen by: default)" in note
         for note in receipt.notes
     )
+    # Not beside it "the binary comes from the row" (review of #169, F7): it did not.
+    assert (
+        "launched as recorded — permission mode and arguments come from the row, not from "
+        "today's config (#144)" in receipt.notes
+    ), receipt.notes
     assert receipt.started.launch_spec is not None
     assert receipt.started.launch_spec.binary == "claude", "the spec records what ran"
 

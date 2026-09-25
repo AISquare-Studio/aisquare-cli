@@ -3986,18 +3986,30 @@ def _ladder_schema() -> _Schema:
     Built, not listed, so it cannot drift from the steps: every step from v1 on,
     run by :func:`_migrate` itself in memory (a few milliseconds). SQLite's own
     objects (``sqlite_sequence``, automatic indexes) come and go with the tables
-    that cause them and are left out.
+    that cause them and are left out. So do a virtual table's shadow tables
+    (``entry_fts_data``, ``entry_fts_idx`` …), the module's own storage, made and
+    dropped with it: counted as tables, a store without ``entry_fts`` lacked five,
+    and they took five of the six names doctor's database row shows.
     """
     connection = sqlite3.connect(":memory:")
     try:
         _migrate(connection)
         tables: dict[str, frozenset[str]] = {}
         objects: dict[str, tuple[str, str]] = {}
+        virtual = [
+            name
+            for (name,) in connection.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type = 'table' AND sql LIKE 'CREATE VIRTUAL TABLE%'"
+            )
+        ]
         for kind, name, table in connection.execute(
             "SELECT type, name, tbl_name FROM sqlite_master "
             "WHERE name NOT GLOB 'sqlite_*' ORDER BY rowid"
         ).fetchall():
             if kind == "table":
+                if any(name.startswith(f"{owner}_") for owner in virtual):
+                    continue  # a shadow table
                 columns = connection.execute(f"PRAGMA table_info({name})").fetchall()
                 tables[name] = frozenset(column[1] for column in columns)
             elif kind == "index":

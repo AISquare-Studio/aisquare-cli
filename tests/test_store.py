@@ -1119,6 +1119,30 @@ def test_doctor_fails_on_what_no_step_of_this_build_puts_back() -> None:
     assert row.status is CheckStatus.fail, row
     assert f"schema: {', '.join(missing[:6])} and 1 more;" in row.detail, row.detail
     assert row.detail.startswith("context.db opens (1 user entries) but"), row.detail
+
+
+def test_a_store_without_its_full_text_index_lacks_one_table_not_five() -> None:
+    """``entry_fts`` is an FTS5 table, and SQLite keeps what it indexes in shadow tables
+    the module makes and drops with it (``entry_fts_data``, ``entry_fts_idx`` …). Read as
+    this build's tables, a store without ``entry_fts`` lacked five, and they took five of
+    the six names doctor's database row shows, crowding out what else the store lacked
+    (review of the #203 side merges, F7). It lacks one table."""
+    from aisquare.services import diagnostics
+
+    open_store().close()
+    raw = sqlite3.connect(str(_db_path()))
+    try:
+        raw.executescript("DROP TABLE entry_fts; DROP INDEX team_session_project;")
+    finally:
+        raw.close()
+
+    with store_session() as store:
+        missing = store.missing_schema()
+    row = diagnostics._check_database()
+
+    assert missing == ["table entry_fts", "index team_session_project"], missing
+    assert row.status is CheckStatus.fail, row
+    assert f"schema: {', '.join(missing)};" in row.detail, row.detail
     assert row.detail.endswith(
         "; a command that reads a missing table or column fails with 'no such table' or "
         "'no such column'; a missing index that is not unique only slows the reads it served"

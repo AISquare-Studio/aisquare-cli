@@ -2682,6 +2682,44 @@ def test_a_drag_survives_a_right_button_and_ends_on_a_lost_release_or_a_pushed_s
     )
 
 
+def test_a_divider_drag_whose_release_was_lost_ends_at_the_next_press_where_no_motion_reports_it(
+    tmp_path: Path, script: Script, isolated_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Final review of #203, F3: the divider's side of the card handle's round-2 fix. A
+    terminal that reports no motion without a button never sends the move that ends a
+    lost release; the next report is the next press, long past DUPLICATE_PRESS_WINDOW.
+    The divider still held the mouse, so that press came to it and armed a new drag,
+    and the release, over a title at the left edge, set the width: the navigator went
+    to its floor, the floor was saved, and api did not open. The press ends the old
+    drag where it got to instead, and the click is api's."""
+    seed(tmp_path, ("prj_a", "api", None), ("prj_b", "cli", None))
+    now = {"t": 100.0}
+    monkeypatch.setattr("aisquare.cli.ui.terminal._monotonic", lambda: now["t"])
+
+    async def go(pilot: Pilot[None]) -> tuple[int, object, int, object, str | None, object]:
+        app = fleet_app(pilot)
+        await _mouse(pilot, events.MouseDown, app.sidebar.outer_size.width, 5)
+        await _mouse(pilot, events.MouseMove, 60, 5)
+        held = app.sidebar.outer_size.width, app.mouse_captured
+        now["t"] += DUPLICATE_PRESS_WINDOW + 1.0  # let go outside; nothing reported it
+        await _click(pilot, card_for(app, "prj_a").query_one(ProjectTitle))
+        await _settled(pilot)
+        view = app.current_view()
+        return (
+            *held,
+            app.sidebar.outer_size.width,
+            app.mouse_captured,
+            view.id if view is not None else None,
+            _state(isolated_home).get(SIDEBAR_WIDTH_KEY),
+        )
+
+    width, captured, after, released, opened, saved = drive(go)
+    assert width == 60 and isinstance(captured, Divider), "the premise: a drag still held"
+    assert after == 60 and saved == 60, "the drag ended where it got to, and that is saved"
+    assert released is None, "the divider let the mouse go"
+    assert opened == "project-prj_a", "the click is the click it was"
+
+
 def test_a_tap_after_a_drag_keeps_the_drag_and_two_clicks_reset_and_forget_the_width(
     tmp_path: Path, script: Script, isolated_home: Path
 ) -> None:

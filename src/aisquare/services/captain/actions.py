@@ -49,6 +49,7 @@ from aisquare.core.tmux import TmuxError, TmuxServer
 from aisquare.models import FleetAgent, FleetAgentStatus, ProjectInfo, TeamEvent, TeamTask
 from aisquare.services import fleet
 from aisquare.services import team as team_service
+from aisquare.services.captain import brain
 from aisquare.services.captain import queue as captain_queue
 from aisquare.services.captain import state as captain_state
 from aisquare.services.captain.errors import Failed, Refused
@@ -110,7 +111,7 @@ BUNDLED_ACTIONS: dict[str, tuple[str, ...]] = {
 UNDONE_REASON = "undone by the captain's brake (bt)"
 
 _OPEN_STATUSES = frozenset({"todo", "doing", "review", "blocked"})
-_ESCAPES = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-Z\\-_])")
+_ESCAPES = brain.PANE_ESCAPES  # one pattern for every captured pane (coderp's M4)
 _PLACEHOLDER = re.compile(r"\{([a-z_][a-z0-9_]*)\}")
 _UI_ACTION = re.compile(r"[a-z][a-z0-9_]*")
 

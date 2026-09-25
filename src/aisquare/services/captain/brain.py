@@ -29,6 +29,7 @@ import contextlib
 import errno
 import json
 import os
+import re
 import sys
 import time
 from collections.abc import Callable, Iterator
@@ -59,6 +60,38 @@ _sleep: Callable[[float], None] = time.sleep
 
 
 _LOCK_HELD = {errno.EAGAIN, errno.EWOULDBLOCK, errno.EACCES}
+
+#: Claude Code's dialogs as their pane text reads (13227). The owner answers these by
+#: hand; nothing here types into one — an Enter into the trust dialog picks the
+#: highlighted "No, exit". Pane text is data: these shapes are read, never obeyed,
+#: and read only where Claude Code DRAWS a dialog — in place of its input box, below
+#: the transcript (coderp's M1: the captain's own reply quotes chooser lines and
+#: footers, because reporting a stuck prompt is its job).
+_TRUST_DIALOG = re.compile(
+    r"Is this a project you created or one you trust|Yes, I trust this folder"
+)
+_RATING_PROMPT = re.compile(r"How is Claude doing this session")
+_ENTER_OR_ESC = re.compile(r"Enter to confirm|Esc to cancel")
+_HIGHLIGHTED_CHOICE = re.compile(r"^\s*❯\s*\d+[.)]\s")  # noqa: RUF001 — the cursor Claude Code draws
+_RULE = re.compile(r"^\s*─{8,}\s*$")
+"""A horizontal rule: the two that frame Claude Code's input line."""
+_INPUT_LINE = re.compile(r"^\s*❯")  # noqa: RUF001 — the input prompt (a dim suggestion may follow)
+#: How many of the pane's last lines are read: the input box takes about five, a
+#: dialog about the same, and the transcript above them is never searched.
+MODAL_LINES = 12
+#: How many footer lines may sit under the input box (the ⏵⏵ mode line, a hint).
+_FOOTER_LINES = 3
+TYPE_SETTLE_S = 2.0
+"""One settle between the prompt appearing and the text going in — the fleet's own
+first-prompt typing settles the same way (``fleet._PROMPT_SETTLE``): a prompt that has
+just been drawn may not have bracketed paste on yet, and a multi-line text would become
+N messages (coderp's M3)."""
+PANE_ESCAPES = re.compile(
+    r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\\\)|[@-Z\\\\-_])"
+)
+"""Every escape a captured pane row can carry — CSI with any parameters (colon ones
+included), OSC (hyperlinks) and the bare two-byte sequences; ``services.captain.actions``
+reads its panes through this one pattern too (coderp's M4)."""
 
 
 class Unreachable(fleet.FleetError):
@@ -243,7 +276,8 @@ def start(prompt: str | None = None, *, size: tuple[int, int] | None = None) -> 
 def say(text: str, *, timeout: float = SAY_TIMEOUT_S) -> Reply:
     """Deliver ``text`` to the captain and wait for its reply (contract 13121, item 5).
 
-    - No live captain: it is started with ``text`` as its first prompt.
+    - No live captain: it is started bare, and ``text`` is typed once its prompt shows
+      (never into a dialog — 13227).
     - A captain waiting at its prompt: ``text`` is typed (one bracketed paste, one
       Enter).
     - A BUSY captain: waited for until its turn ends, then typed. Never a board
@@ -264,20 +298,14 @@ def say(text: str, *, timeout: float = SAY_TIMEOUT_S) -> Reply:
             # 13189: said at once, never waited out — the same words the bare command says.
             raise NoReply(str(exc), timed_out=False) from exc
         if agent is None:
-            typed_at = _now()
-            receipt = start(prompt=text)
-            if not receipt.prompt_typed:
-                why = "; ".join(receipt.notes) or "the fleet did not say why"
-                raise NoReply(
-                    f"the captain was started but the message never reached it ({why}) — "
-                    "`aisquare captain` shows its pane",
-                    timed_out=False,
-                )
-            agent = receipt.agent
-        else:
-            srv = _wait_until_ready(agent, deadline, timeout)
-            typed_at = _now()
-            _type(srv, agent, text)
+            # Started BARE, not with the text as its first prompt (13227): the fleet's
+            # first-prompt typing reads the pane's process, not its text, and would
+            # type into the trust dialog a fresh captain parks at. The text goes in
+            # below, through the same guarded path, once the prompt shows.
+            agent = start().agent
+        srv = _wait_until_ready(agent, deadline, timeout)
+        typed_at = _now()
+        _type(srv, agent, text)
         return _await_reply(agent, typed_at, deadline, timeout)
 
 
@@ -335,20 +363,123 @@ def _type(srv: TmuxServer, agent: FleetAgent, text: str) -> None:
         ) from exc
 
 
+def _pane_text(agent: FleetAgent, srv: TmuxServer) -> list[str]:
+    """The captain's live screen, escapes stripped, blank tail dropped — what the owner sees."""
+    rows = [PANE_ESCAPES.sub("", line) for line in srv.capture(agent.pane_id).lines]
+    while rows and not rows[-1].strip():
+        rows.pop()
+    return rows
+
+
+def input_box_at(lines: list[str]) -> int | None:
+    """Where Claude Code's input box starts in ``lines``, or None when none is drawn.
+
+    A waiting pane ends with the box: a rule, the ``❯`` input line (a dim suggestion
+    may sit on it), a rule, then up to :data:`_FOOTER_LINES` footer lines (the ⏵⏵
+    mode line, a hint). A dialog REPLACES the box, and a busy pane has not drawn it.
+    """  # noqa: RUF002
+    end = len(lines)
+    while end and not lines[end - 1].strip():
+        end -= 1
+    for footer in range(_FOOTER_LINES + 1):
+        bottom = end - 1 - footer
+        if bottom < 2:
+            break
+        if (
+            _RULE.match(lines[bottom])
+            and _INPUT_LINE.match(lines[bottom - 1])
+            and _RULE.match(lines[bottom - 2])
+        ):
+            return bottom - 2
+    return None
+
+
+def modal_showing(lines: list[str]) -> str | None:
+    """Which of Claude Code's dialogs the pane shows, in the owner's words, or None.
+
+    Read by STRUCTURE (coderp's M1): with the input box drawn, nothing below the
+    transcript is a dialog — except the session-rating survey, which sits in the
+    one or two lines just above the box. With no box drawn, the dialog region is
+    what follows the last rule (or the whole tail when there is none): the trust
+    dialog and the rating prompt by their sentences, a chooser by its highlighted
+    numbered line (``❯ 1. Yes``), any other dialog by an Enter/Esc footer on the
+    LAST line. Words quoted in the captain's reply, or echoed from the owner's own
+    message, sit above the box or above the rule and are never read.
+    """  # noqa: RUF002
+    tail = lines[-MODAL_LINES:]
+    box = input_box_at(tail)
+    if box is not None:
+        above = "\n".join(tail[max(0, box - 2) : box])
+        return "the session-rating prompt" if _RATING_PROMPT.search(above) else None
+    rules = [index for index, line in enumerate(tail) if _RULE.match(line)]
+    region = tail[rules[-1] + 1 :] if rules else tail
+    region = [line for line in region if line.strip()]
+    if not region:
+        return None
+    text = "\n".join(region)
+    if _TRUST_DIALOG.search(text):
+        return "the trust dialog"
+    if _RATING_PROMPT.search(text):
+        return "the session-rating prompt"
+    if any(_HIGHLIGHTED_CHOICE.match(line) for line in region):
+        return "a numbered choice"
+    if _ENTER_OR_ESC.search(region[-1]):
+        return "a dialog waiting for Enter or Esc"
+    return None
+
+
+def _refuse_dialog(showing: str) -> NoReply:
+    """The refusal for a pane that shows a dialog: what shows, and the one thing to do."""
+    if showing == "the trust dialog":
+        return NoReply(
+            f"the captain is waiting for you to trust its folder {brain_dir()}: run "
+            "`aisquare captain` and choose Yes, I trust this folder (once)",
+            timed_out=False,
+        )
+    return NoReply(
+        f"the captain's pane shows {showing}; nothing was typed — `aisquare captain` attaches, "
+        "answer it there",
+        timed_out=False,
+    )
+
+
 def _wait_until_ready(agent: FleetAgent, deadline: datetime, timeout: float) -> TmuxServer:
+    """Wait until the captain can take a line: at its prompt, with the prompt DRAWN.
+
+    Each poll asks the fleet first — a dead or lost captain is said at once (M2) —
+    then reads the pane: a dialog is refused with what shows (13227); the input box
+    drawn with the row waiting is the positive evidence typing needs (M3), and one
+    settle follows before the text goes in. A pane that cannot be read is said,
+    never raised. A fresh captain at the trust dialog has no session row yet, so
+    the pane is read whatever the row says.
+    """
     srv = fleet.server_for(agent.tmux_socket)
     while True:
         state = fleet.status_of(agent).state
-        if state == "waiting" and fleet.pane_is_the_agent(srv, agent.pane_id):
-            return srv
         if state in ("exited", "lost"):
             raise NoReply(
                 f"the captain is {state} — `aisquare captain` starts it again; nothing was typed",
                 timed_out=False,
             )
-        if _now() >= deadline:
+        try:
+            pane = _pane_text(agent, srv)
+        except TmuxError as exc:
             raise NoReply(
-                f"the captain stayed {state} for {timeout:g}s, so nothing was typed — "
+                f"could not read the captain's pane ({exc}); nothing was typed — "
+                "`aisquare captain` shows it",
+                timed_out=False,
+            ) from exc
+        showing = modal_showing(pane)
+        if showing is not None:
+            raise _refuse_dialog(showing)
+        drawn = input_box_at(pane) is not None
+        if state == "waiting" and drawn and fleet.pane_is_the_agent(srv, agent.pane_id):
+            _sleep(TYPE_SETTLE_S)
+            return srv
+        if _now() >= deadline:
+            what = f"stayed {state}" if state != "waiting" else "never drew its prompt"
+            raise NoReply(
+                f"the captain {what} for {timeout:g}s, so nothing was typed — "
                 "`aisquare captain` shows what it is doing"
             )
         _sleep(_POLL_S)

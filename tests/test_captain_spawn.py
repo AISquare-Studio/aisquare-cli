@@ -322,8 +322,11 @@ def test_a_tmux_that_cannot_be_asked_is_refused_not_recovered(
         tmux.installed = False
     else:
         tmux.socket_denied = True
-    with pytest.raises(brain.Unreachable, match=r"tmux could not be (run|asked) .*reap -P"):
+    with pytest.raises(brain.Unreachable, match=r"tmux could not be (run|asked) .*reap -P") as got:
         brain.find()  # said as a question that could not be put, not as a missing socket
+    assert "sweep" not in str(got.value), (
+        "refused before any sweep ran (coderp's delta gate, 13233)"
+    )
     with store_session() as store:
         row = store.get_fleet_agent(agent.id)
     assert row is not None and row.ended_at is None

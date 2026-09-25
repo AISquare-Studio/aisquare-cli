@@ -1156,12 +1156,12 @@ def test_a_store_without_its_full_text_index_lacks_one_table_not_five() -> None:
 def test_doctor_fails_on_a_full_text_index_that_lost_a_shadow_table(shadow: str) -> None:
     """A shadow table gone with ``entry_fts`` is that table's absence, named once. Gone
     alone, the index is damaged: no note can be added, and SQLite's answer reads as a
-    damaged store. Left out of this build's schema whatever else was there, a store
-    without ``entry_fts_data`` lacked nothing and doctor's row said "context.db is
-    readable"; without ``entry_fts_config`` the row's own column read raised and called
-    the store unreadable, with the corrupt-store move (review of the #203 side merges,
-    R2-F1). The row fails naming the shadow table, says what it costs, and still counts
-    the notes, which are intact."""
+    damaged store, or without ``_config`` ends in a traceback. Left out of this build's
+    schema whatever else was there, a store without ``entry_fts_data`` lacked nothing and
+    doctor's row said "context.db is readable"; without ``entry_fts_config`` the row's
+    own column read raised and called the store unreadable, with the corrupt-store move
+    (review of the #203 side merges, R2-F1). The row fails naming the shadow table, says
+    what it costs, and still counts the notes, which are intact."""
     from aisquare.services import diagnostics
 
     with store_session() as store:
@@ -1174,17 +1174,24 @@ def test_doctor_fails_on_a_full_text_index_that_lost_a_shadow_table(shadow: str)
 
     with store_session() as store:
         missing = store.missing_schema()
-        with pytest.raises(sqlite3.DatabaseError):
+        with pytest.raises(sqlite3.DatabaseError) as raised:
             store.add(_entry())
     row = diagnostics._check_database()
 
+    if shadow == "entry_fts_config":
+        # Not damage to the CLI, so a traceback: the row's sentence says so, where it
+        # said every shadow table's error reads as a damaged store (review of #203,
+        # round 3, F9).
+        assert "vtable constructor failed" in str(raised.value), raised.value
+        assert not is_corrupt_error(raised.value), raised.value
     assert missing == [f"shadow table {shadow}"], missing
     assert row.status is CheckStatus.fail, row
     assert row.detail == (
         "context.db opens (1 user entries) but lacks part of this build's schema: shadow "
         f"table {shadow}; without a shadow table the notes' full-text index can be neither "
-        "written nor searched: adding a note and `aisquare context search` fail with an "
-        "error that reads as a damaged store, though the notes are intact"
+        "written nor searched: adding a note and `aisquare context search` fail, with an "
+        "error that reads as a damaged store or, without entry_fts_config, a traceback "
+        "ending 'vtable constructor failed', though the notes are intact"
     ), row.detail
 
 

@@ -72,9 +72,13 @@ _STALE_AFTER = timedelta(minutes=30)
 _CLAIM_ORPHAN_AFTER = timedelta(hours=4)
 
 MANAGER_ROLE = "manager"
+"""The one role whose ``Stop`` hook may keep it going (docs/plans/fleet-tui.md §7.3)."""
+
 CAPTAIN_ROLE = "captain"
 """The home-level captain's role (services.captain): briefed by :func:`_captain_briefing`."""
-"""The one role whose ``Stop`` hook may keep it going (docs/plans/fleet-tui.md §7.3)."""
+
+_COMPACT_SOURCE = "compact"
+"""The ``SessionStart`` source of a compaction — the one start that can come mid-turn."""
 
 CLEAR_REASON = "clear"
 """Claude Code's ``SessionEnd`` reason for ``/clear``: the session id ends, the process
@@ -1461,6 +1465,18 @@ def hook_session_start(
         if role is not None and known is not None and known.role != role:
             session = store.update_session(session.id, role=role)
         if base_role(session.role) == CAPTAIN_ROLE:
+            # Bound like every fleet row (rule 1 of the fleet-row section), or a
+            # `/clear` left the row on the ended id and `say` waited on a session that
+            # would never answer. The captain has no task, so there is nothing to brief.
+            _assignment(store, session.id, project.id)
+            if source != _COMPACT_SOURCE:
+                # A captain that just started, cleared or resumed sits at its prompt
+                # until something is typed — whose own hook says `working`. Left at
+                # the upsert's `working`, the row read busy for its whole fresh window
+                # and `say` refused to type into it (T2 fix round). A compaction can
+                # come mid-turn, so it keeps what the turn said.
+                store.touch_session(session.id, state="waiting")
+                session = store.get_session(session.id) or session
             # The captain's own briefing (T2, 13121): it has no shell, so no `aisquare
             # task …` protocol lines, and the home board's captain_action lines are the
             # OWNER's audit, not the captain's context.

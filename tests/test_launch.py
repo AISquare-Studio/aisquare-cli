@@ -291,6 +291,19 @@ def test_launch_rejects_an_unknown_role(
     assert not spy, "nothing should be exec'd for an invalid role"
 
 
+def test_launch_captain_outside_the_fleet_is_refused(
+    runner: CliRunner, work_dir: Path, spy: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``captain`` is a launch role only for the window ``aisquare captain`` starts: by hand in
+    a project it was plain claude with every tool, briefed as the one captain with no shell."""
+    monkeypatch.delenv("AISQUARE_FLEET_AGENT", raising=False)
+    result = runner.invoke(app, ["launch", "captain"])
+
+    assert result.exit_code == 1
+    assert "`aisquare captain` starts it" in result.output
+    assert not spy, "nothing should be exec'd"
+
+
 def test_launch_reports_a_missing_agent_binary(
     runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

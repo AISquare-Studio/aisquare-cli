@@ -269,7 +269,7 @@ def launch(
     ctx: typer.Context,
     role: Annotated[
         str,
-        typer.Argument(help=f"Team role for this session: {', '.join((*ROLES, *UNSEATED))}."),
+        typer.Argument(help=f"Team role for this session: {', '.join(ROLES)}."),
     ],
     command: Annotated[
         str | None,
@@ -328,9 +328,17 @@ def launch(
     """
     if not _role_ok(role):
         fail(
-            f"unknown role {role!r} — expected one of: {', '.join((*ROLES, *UNSEATED))}, "
+            f"unknown role {role!r} — expected one of: {', '.join(ROLES)}, "
             "a numbered seat of one (coder1, coder2), or a role you have "
             "bound with `aisquare team bind`",
+            error="unknown_role",
+        )
+    if role in UNSEATED and orchestrator.env_fleet_agent() is None:
+        # Only the window `aisquare captain` starts is the captain: its brain folder,
+        # its one server, no other tool. By hand in a project this was plain claude
+        # with every tool, briefed as the one captain that has no shell.
+        fail(
+            f"the {role} lives on the home board, one per home — `aisquare captain` starts it",
             error="unknown_role",
         )
     # Resolve WHICH executable on the same ladder `team spawn` uses, so a role

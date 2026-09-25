@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -19,7 +20,7 @@ from aisquare.core import paths
 from aisquare.core.harness import role_cycle
 from aisquare.core.store import store_session
 from aisquare.core.workspace import project_id_for
-from aisquare.models import ProjectInfo
+from aisquare.models import FleetAgent, FleetAgentStatus, ProjectInfo
 from aisquare.services import fleet as fleet_service
 from aisquare.services import team as team_service
 from aisquare.services.captain import brain
@@ -65,6 +66,20 @@ def test_the_home_is_captured_never_onboarded(project: ProjectInfo) -> None:
     assert project.id in listed, "every other project still onboards"
 
 
+def test_onboarding_says_a_row_that_vanished_after_its_write(
+    project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``onboard_project`` promises the stored row. A row deleted between the write and the
+    read (another process's purge) is a ``KeyError``, as the store's other lookups say it
+    — never ``None`` returned against the type, which an ``assert`` gave under ``-O``."""
+    home = captain_state.home_project()
+    with store_session() as store:
+        monkeypatch.setattr(type(store), "get_project", lambda self, project_id: None)
+        for row in (home, project):
+            with pytest.raises(KeyError):
+                store.onboard_project(row)
+
+
 # --- the spawn --------------------------------------------------------------------------
 
 
@@ -107,7 +122,14 @@ def test_there_is_one_captain_per_home(tmux: FakeTmux, claude_on_path: Path) -> 
     brain.start()
     home = captain_state.home_project()
     with pytest.raises(fleet_service.FleetError, match="already has a captain"):
-        fleet_service.spawn(home, "captain", label="captain", persona="captain")
+        fleet_service.spawn(
+            home,
+            "captain",
+            label="captain",
+            persona="captain",
+            cwd=brain.brain_dir(),
+            agent_args=brain.launch_args(home.root),
+        )
     assert len(tmux.spawned) == 1, "refused before a second window was ever started"
     with store_session() as store:
         rows = store.fleet_agents(home.id, live_only=True)
@@ -122,6 +144,123 @@ def test_the_captain_cannot_be_spawned_into_a_project(
     with pytest.raises(fleet_service.FleetError, match="the captain lives on the home board"):
         fleet_service.spawn(project, "captain")
     assert tmux.spawned == []
+
+
+def test_the_fleet_refuses_a_captain_without_the_captains_launch(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+) -> None:
+    """``fleet spawn captain`` on the home would be a captain with every tool and no brain
+    folder, and ``aisquare captain`` would then attach to it and type into it."""
+    home = captain_state.home_project()
+    with pytest.raises(fleet_service.FleetError, match="started by `aisquare captain`"):
+        fleet_service.spawn(home, "captain")
+    with pytest.raises(fleet_service.FleetError, match="started by `aisquare captain`"):
+        fleet_service.spawn(home, "captain", cwd=brain.brain_dir(), agent_args=["--tools", ""])
+    with pytest.raises(fleet_service.FleetError, match="started by `aisquare captain`"):
+        fleet_service.spawn(  # its one server, but every built-in tool left on
+            home, "captain", cwd=brain.brain_dir(), agent_args=["--strict-mcp-config"]
+        )
+    assert tmux.spawned == []
+
+
+def test_the_captains_window_carries_the_home_and_the_hub(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+) -> None:
+    """The window's own ``aisquare launch`` activates a board BEFORE it hands the agent its
+    ``-e`` pairs: without the hub in the window's environment it onboarded the brain folder
+    (or ``$HOME``, under ``~/.aisquare``) as a project."""
+    brain.start()
+    home = captain_state.home_project()
+    env = tmux.spawned[-1]["env"]
+    assert isinstance(env, dict)
+    assert env["AISQUARE_TEAM_HUB"] == str(home.root)
+    assert env["AISQUARE_HOME"] == str(paths.aisquare_home().resolve())
+
+
+def test_the_captains_launcher_joins_the_home_board_never_a_project(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """What the window's launcher does first, run with the window's environment and cwd."""
+    brain.start()
+    env = tmux.spawned[-1]["env"]
+    assert isinstance(env, dict)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.chdir(brain.brain_dir())
+    board = team_service.activate()
+    assert board.id == captain_state.home_project().id
+    with store_session() as store:
+        assert store.list_projects() == [], "neither the brain folder nor the home onboarded"
+
+
+def test_a_relative_home_gives_the_captain_absolute_paths(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The window starts in the brain folder, so a relative path would resolve from there."""
+    home = paths.aisquare_home()
+    monkeypatch.chdir(home.parent)
+    monkeypatch.setenv("AISQUARE_HOME", home.name)
+    agent = brain.start().agent
+    command = _command(tmux)
+    envs = [command[i + 1] for i, word in enumerate(command) if word == "-e"]
+    assert agent.cwd.is_absolute()
+    assert Path(_after(command, "--mcp-config")).is_absolute()
+    assert all(Path(pair.split("=", 1)[1]).is_absolute() for pair in envs)
+    config = json.loads(brain.mcp_config_path().read_text(encoding="utf-8"))
+    assert Path(config["mcpServers"]["captain"]["env"]["AISQUARE_HOME"]).is_absolute()
+
+
+# --- a captain that died --------------------------------------------------------------
+
+
+def test_an_exited_captain_is_not_found_and_a_bare_start_replaces_it(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+) -> None:
+    """``say`` and the bare command both ask :func:`brain.find`; a dead pane under a row
+    nothing has ended yet (no UI open, no ``fleet ls``) answered "already running"."""
+    first = brain.start().agent
+    tmux.die(first.pane_id, 0)
+    assert brain.find() is None
+    second = brain.start().agent
+    assert second.id != first.id
+    with store_session() as store:
+        ended = store.get_fleet_agent(first.id)
+    assert ended is not None and ended.ended_at is not None
+
+
+def test_a_dead_captain_the_listing_could_not_end_is_still_not_found(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The listing ends a dead row best-effort; a store locked past its busy timeout leaves
+    the row live while its pane reads ``exited`` — and that is still no captain."""
+    home = captain_state.home_project()
+    row = FleetAgent(
+        id="agt_dead", project_id=home.id, label="captain", role="captain",
+        pane_id="%9", cwd=brain.brain_dir(), created_at=datetime.now(tz=UTC),
+    )  # fmt: skip
+    monkeypatch.setattr(
+        fleet_service,
+        "list_agents",
+        lambda project, **kw: [FleetAgentStatus(agent=row, state="exited")],
+    )
+    assert brain.find() is None
+
+
+def test_a_vanished_captain_is_reaped_so_it_can_be_started_again(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+) -> None:
+    first = brain.start().agent
+    tmux.vanish(first.pane_id)
+    assert brain.find() is None
+    assert brain.start().agent.id != first.id
 
 
 def test_the_captain_label_is_reserved(
@@ -183,6 +322,74 @@ def test_the_bundled_captain_persona_carries_the_cards_rules() -> None:
         "confirm=true",
     ):
         assert rule in body, rule
+
+
+def _captain_window_env(monkeypatch: pytest.MonkeyPatch, agent_id: str) -> None:
+    home = captain_state.home_project()
+    monkeypatch.setenv("AISQUARE_ROLE", "captain")
+    monkeypatch.setenv("AISQUARE_PERSONA", "captain")
+    monkeypatch.setenv("AISQUARE_TEAM_HUB", str(home.root))
+    monkeypatch.setenv("AISQUARE_FLEET_AGENT", agent_id)
+    monkeypatch.delenv("CLAUDE_PID", raising=False)
+
+
+def test_a_captains_session_start_binds_its_row_and_waits_for_the_owner(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Started bare, the captain sits at its prompt: its row must say so and be bound.
+
+    Left ``working`` from the start hook with no turn to end, ``say`` refused to type
+    for the row's whole fresh window (30 minutes): the fleet reads a fresh board row
+    before the pane.
+    """
+    agent = brain.start().agent
+    assert agent.session_id is not None  # Claude Code starts on the id the fleet chose
+    _captain_window_env(monkeypatch, agent.id)
+    team_service.hook_session_start(agent.session_id, brain.brain_dir(), "startup")
+    with store_session() as store:
+        row = store.get_fleet_agent(agent.id)
+        session = store.get_session(agent.session_id)
+    assert row is not None and row.session_id == agent.session_id
+    assert session is not None and session.state == "waiting"
+    assert fleet_service.status_of(row).state == "waiting"
+
+
+def test_a_compaction_mid_turn_leaves_the_captain_working(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = brain.start().agent
+    assert agent.session_id is not None
+    _captain_window_env(monkeypatch, agent.id)
+    team_service.hook_session_start(agent.session_id, brain.brain_dir(), "startup")
+    team_service.hook_prompt_heartbeat(agent.session_id, brain.brain_dir())
+    team_service.hook_session_start(agent.session_id, brain.brain_dir(), "compact")
+    with store_session() as store:
+        session = store.get_session(agent.session_id)
+    assert session is not None and session.state == "working"
+
+
+def test_after_a_clear_the_captains_row_follows_the_new_session(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = brain.start().agent
+    _captain_window_env(monkeypatch, agent.id)
+    monkeypatch.setenv("CLAUDE_PID", "4242")
+    tmux.pids[agent.pane_id] = 4242  # the pane's own process clears (rule 1 of team's section)
+    assert agent.session_id is not None
+    team_service.hook_session_start(agent.session_id, brain.brain_dir(), "startup")
+    team_service.hook_session_end(agent.session_id, brain.brain_dir(), reason="clear")
+    team_service.hook_session_start("captain-claude-2", brain.brain_dir(), "clear")
+    with store_session() as store:
+        row = store.get_fleet_agent(agent.id)
+        session = store.get_session("captain-claude-2")
+    assert row is not None and row.session_id == "captain-claude-2"
+    assert session is not None and session.state == "waiting"
 
 
 def test_the_captains_session_start_is_the_captains_briefing(

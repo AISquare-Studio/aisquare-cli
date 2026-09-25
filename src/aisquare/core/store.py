@@ -1567,9 +1567,7 @@ class SqliteStore:
             # activation onboarding it would put `.aisquare` in the sidebar, in
             # `project list` and in the captain's own projects() tool (T2, 13121).
             self.ensure_project(project)
-            stored = self.get_project(project.id)
-            assert stored is not None  # just written
-            return stored
+            return self._written_project(project.id)
         now = _now_iso()
         self._conn.execute(
             "INSERT INTO project (id, root, name, linked_repos, created_at, onboarded_at) "
@@ -1587,8 +1585,16 @@ class SqliteStore:
             ),
         )
         self._conn.commit()
-        stored = self.get_project(project.id)
-        assert stored is not None  # just written
+        return self._written_project(project.id)
+
+    def _written_project(self, project_id: str) -> ProjectInfo:
+        """The row just written — a ``KeyError`` if it is gone already (another process's
+        purge between the write and this read), as every lookup here says a missing
+        project. Checked, not asserted: under ``python -O`` an ``assert`` is stripped and
+        ``None`` went back against the return type (pre-gate review of #219)."""
+        stored = self.get_project(project_id)
+        if stored is None:
+            raise KeyError(project_id)
         return stored
 
     def list_projects(

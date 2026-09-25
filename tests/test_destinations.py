@@ -1186,6 +1186,20 @@ def test_logout_counts_a_minted_uid_whose_binding_was_already_gone(
     assert idp.revoked_keys == ["key-1"]
 
 
+def test_a_revoke_names_the_workspace_the_key_was_minted_in(
+    runner: CliRunner, idp: IdentityProviderStub, signed_in: iam.Session, tmp_path: Path
+) -> None:
+    """The revoke went out with no ``X-Workspace-Id``: an endpoint that took its
+    context from the header would have answered from the caller's personal workspace,
+    where a 404 settles nothing (review of #172's follow-ups, round 1, F1)."""
+    _project(tmp_path / "web")
+    _json(runner, "explainability", "use", "acme/Frontend")
+    cleared = _json(runner, "explainability", "use", "--clear")
+    assert cleared["revocations"]["revoked"] == ["key-1"]
+    [revoke] = [r for r in idp.requests if r["path"].endswith("/revoke/")]
+    assert revoke["headers"].get("x-workspace-id") == "42"
+
+
 def test_a_revoke_whose_answer_is_cut_short_keeps_that_key_owed_after_logout(
     idp: IdentityProviderStub,
     signed_in: iam.Session,

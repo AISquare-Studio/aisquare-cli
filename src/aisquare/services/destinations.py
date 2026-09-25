@@ -644,6 +644,16 @@ def _revoke(record: PendingRevocation, session: iam.Session | None, deadline: fl
     would read as that confirmation. A refusal (the endpoint shares the mint's
     authentication gap; only a workspace OWNER or ADMIN may revoke), a server
     error or an unreachable server leaves it owed. Never raises.
+
+    On that host the 404 does not depend on who asks, or from which workspace:
+    measured against AISquare-Studio-BE ``aab6d7f5``, the endpoint finds the
+    key by its uid alone among the host's active keys and checks the caller's
+    role in the workspace the KEY belongs to, so a caller who may not revoke it
+    is answered 403, never 404. The request names that workspace in
+    ``X-Workspace-Id`` all the same, as every call meaning a workspace must
+    (``iam.request``): an endpoint that took its context from the header
+    would otherwise answer from the caller's personal workspace, where a 404
+    settles nothing (review of #172's follow-ups, round 1, F1).
     """
     if session is None:
         return "signed out"
@@ -656,6 +666,7 @@ def _revoke(record: PendingRevocation, session: iam.Session | None, deadline: fl
         result = iam.request(
             f"api/v2/iam/workspace-api-key/{record.key_uid}/revoke/",
             method="POST",
+            workspace=str(record.workspace_id),
             api_url=session.api_url,
             tolerate=(400, 401, 403, 404),
             timeout=min(iam.HTTP_TIMEOUT_SECONDS, left),

@@ -467,6 +467,28 @@ _MISSING_SHOWN = 6
 #: pyproject's ``[project.urls] Issues``, kept in step by the tests.
 _ISSUES_URL = "https://github.com/AISquare-Studio/aisquare-cli/issues"
 
+#: What the database row says each missing trigger costs. Every trigger of this build
+#: keeps `aisquare context search` in step with the notes, and each one's absence puts
+#: it out of step in its own way, measured with it dropped (the tests repeat each
+#: measurement). One per trigger the ladder makes, in its order (pinned by the tests),
+#: so a trigger added without its sentence fails a test, not the operator.
+_TRIGGER_COSTS = {
+    "entry_ai": (
+        "without trigger entry_ai a new note is not indexed: `aisquare context search` "
+        "misses it, and editing or removing it, or purging its project, fails as "
+        "'database disk image is malformed', which the CLI calls a damaged store though "
+        "the notes are intact"
+    ),
+    "entry_ad": (
+        "without trigger entry_ad a note purged with its project stays indexed, and "
+        "`aisquare context search` can match a later note on the purged one's words"
+    ),
+    "entry_au": (
+        "without trigger entry_au an edited note stays indexed under its old text, so "
+        "`aisquare context search` matches what it said, not what it says"
+    ),
+}
+
 
 def _check_database() -> DoctorCheck:
     absent = _uncreated_home("database")
@@ -506,15 +528,18 @@ def _check_database() -> DoctorCheck:
         shown = ", ".join(missing[:_MISSING_SHOWN])
         if len(missing) > _MISSING_SHOWN:
             shown += f" and {len(missing) - _MISSING_SHOWN} more"
-        # What the gap costs depends on what is missing, so the row says it only of
-        # the kinds it names. A table or column fails its readers loudly. A missing
-        # index or trigger raises nothing itself, but a note trigger's absence surfaces
-        # later: a note it did not index, once edited or removed, hands FTS5 a
-        # 'delete' for text it never held, and SQLite answers "database disk image is
-        # malformed", which the CLI reports as a damaged store with the corrupt-store
-        # move (measured with `entry_ai` dropped: `context add`, then `context
-        # remove`). Warned here, the operator who meets it knows the notes are intact.
-        # Every trigger of this build is a note trigger (pinned by the tests).
+        # What the gap costs depends on what is missing, so the row says it of each
+        # kind the store lacks, a kind counted in "and N more" too: what it costs is
+        # what the operator will meet. A table or column fails its readers loudly. A
+        # missing index or trigger raises nothing itself, and each trigger costs
+        # something of its own (:data:`_TRIGGER_COSTS`, whose sentences name it). The
+        # costly one is `entry_ai`: a note it did not index, once edited, removed or
+        # purged, hands FTS5 a 'delete' for text it never held, and SQLite answers
+        # "database disk image is malformed", which the CLI reports as a damaged store
+        # with the corrupt-store move (measured: `context add`, then `context remove`
+        # or `project forget --purge`). Warned here, the operator who meets it knows
+        # the notes are intact. Without `entry_au` or `entry_ad` nothing fails; search
+        # only goes stale.
         kinds = {item.rsplit(" ", 1)[0] for item in missing}
         costs: list[str] = []
         if kinds & {"table", "column"}:
@@ -522,14 +547,9 @@ def _check_database() -> DoctorCheck:
                 "a command that reads a missing table or column fails with 'no such "
                 "table' or 'no such column'"
             )
-        if "trigger" in kinds:
-            costs.append(
-                "a missing note trigger raises nothing itself but puts `aisquare context "
-                "search` out of step with the notes: a note it did not index is not found, "
-                "and a later edit or removal of that note can fail as 'database disk image "
-                "is malformed', which the CLI calls a damaged store though the notes are "
-                "intact"
-            )
+        costs += [
+            cost for trigger, cost in _TRIGGER_COSTS.items() if f"trigger {trigger}" in missing
+        ]
         if "unique index" in kinds:
             costs.append(
                 "a missing unique index raises nothing and lets in the duplicates it refused"

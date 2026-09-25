@@ -1089,7 +1089,8 @@ def test_doctor_fails_on_what_no_step_of_this_build_puts_back() -> None:
     before that, gone from a store another build or a hand edit changed, stays gone
     whatever the open does, and doctor's database row is where it shows. It names six
     and counts the rest, so the row stays one line an operator can read. It says what
-    each kind it names costs, and it still counts the notes, whose table is whole."""
+    each kind the store lacks costs, and it still counts the notes, whose table is
+    whole."""
     from aisquare.services import diagnostics
 
     indexes = (
@@ -1121,6 +1122,36 @@ def test_doctor_fails_on_what_no_step_of_this_build_puts_back() -> None:
         "; a command that reads a missing table or column fails with 'no such table' or "
         "'no such column'; a missing index that is not unique only slows the reads it served"
     ), row.detail
+
+
+def test_doctor_says_what_a_trigger_it_only_counts_costs() -> None:
+    """The row names six missing objects and counts the rest, but says what each kind
+    the store lacks costs, a counted one too: what it costs is what the operator will
+    meet. A trigger's sentence names the trigger, so a note trigger that falls into
+    "and 1 more" still comes with its warning, and says which it is."""
+    from aisquare.services import diagnostics
+
+    tables = ("prompt", "team_event", "team_task", "team_meta", "metric")
+    open_store().close()
+    raw = sqlite3.connect(str(_db_path()))
+    try:
+        raw.executescript(
+            "ALTER TABLE project DROP COLUMN linked_repos;"
+            + "".join(f"DROP TABLE {table};" for table in tables)
+            + "DROP TRIGGER entry_ai;"
+        )
+    finally:
+        raw.close()
+
+    row = diagnostics._check_database()
+
+    assert row.status is CheckStatus.fail, row
+    assert row.detail.startswith(
+        "context.db opens (0 user entries) but lacks part of this build's schema: column "
+        f"project.linked_repos, {', '.join(f'table {table}' for table in tables)} and 1 "
+        "more; a command that reads a missing table or column fails"
+    ), row.detail
+    assert row.detail.endswith(f"; {diagnostics._TRIGGER_COSTS['entry_ai']}"), row.detail
 
 
 @pytest.mark.parametrize(
@@ -1165,12 +1196,25 @@ def test_doctor_names_a_store_without_its_notes_table_instead_of_calling_it_unre
     [
         (
             "DROP TRIGGER entry_ai;",
-            "schema: trigger entry_ai; a missing note trigger raises nothing itself but puts "
-            "`aisquare context search` out of step with the notes: a note it did not index is "
-            "not found, and a later edit or removal of that note can fail as 'database disk "
-            "image is malformed', which the CLI calls a damaged store though the notes are "
-            "intact",
-            ("duplicates", "slows"),
+            "schema: trigger entry_ai; without trigger entry_ai a new note is not indexed: "
+            "`aisquare context search` misses it, and editing or removing it, or purging its "
+            "project, fails as 'database disk image is malformed', which the CLI calls a "
+            "damaged store though the notes are intact",
+            ("stays indexed", "duplicates", "slows"),
+        ),
+        (
+            "DROP TRIGGER entry_ad;",
+            "schema: trigger entry_ad; without trigger entry_ad a note purged with its "
+            "project stays indexed, and `aisquare context search` can match a later note on "
+            "the purged one's words",
+            ("malformed", "old text", "duplicates", "slows"),
+        ),
+        (
+            "DROP TRIGGER entry_au;",
+            "schema: trigger entry_au; without trigger entry_au an edited note stays indexed "
+            "under its old text, so `aisquare context search` matches what it said, not what "
+            "it says",
+            ("malformed", "purged", "duplicates", "slows"),
         ),
         (
             "DROP INDEX fleet_agent_live_label;",
@@ -1185,20 +1229,20 @@ def test_doctor_names_a_store_without_its_notes_table_instead_of_calling_it_unre
             ("context search", "duplicates"),
         ),
     ],
-    ids=["note trigger", "unique index", "index"],
+    ids=["entry_ai", "entry_ad", "entry_au", "unique index", "index"],
 )
 def test_doctor_says_what_a_missing_index_or_trigger_costs(
     script: str, said: str, not_said: tuple[str, ...]
 ) -> None:
     """A missing table or column fails its readers with "no such table" or "no such
     column"; nothing raises on a missing index or trigger, so the row says what each
-    costs, and only of the kinds it names. It once said a missing index or trigger
-    "fails nothing". A note trigger that did not index a note hands FTS5 a 'delete'
-    for text it never held when that note is edited or removed, and SQLite answers
-    "database disk image is malformed", which the CLI calls a damaged store and answers
-    with the corrupt-store move: measured with `entry_ai` dropped, `context add` and
-    then `context remove`. The row now warns of that, so the operator who meets it
-    knows the notes are intact."""
+    costs, and only of the kinds the store lacks. It once said a missing index or
+    trigger "fails nothing", and then gave every trigger the cost of `entry_ai`: a note
+    it did not index hands FTS5 a 'delete' for text it never held when that note is
+    edited, removed or purged, and SQLite answers "database disk image is malformed",
+    which the CLI calls a damaged store and answers with the corrupt-store move. Without
+    `entry_ad` or `entry_au` nothing fails, and search goes stale in a way of its own,
+    so each trigger gets its own sentence (the tests after this one measure each)."""
     from aisquare.services import diagnostics
 
     open_store().close()
@@ -1230,24 +1274,80 @@ def test_doctor_reports_a_schema_gap_where_the_package_says_issues_go() -> None:
     assert urls["Issues"] == diagnostics._ISSUES_URL
 
 
-def test_every_trigger_of_this_build_keeps_the_notes_search_index() -> None:
-    """Doctor's database row calls any missing trigger a note trigger and tells what
-    its absence does to `aisquare context search`. That holds while every trigger the
-    ladder makes is on ``entry`` and writes ``entry_fts``; a trigger for anything else
-    needs its own sentence in the row."""
+def _drop_trigger(name: str) -> None:
+    """A store whose ``name`` trigger a hand edit or another build dropped."""
+    open_store().close()
+    raw = sqlite3.connect(str(_db_path()))
+    try:
+        raw.execute(f"DROP TRIGGER {name}")
+        raw.commit()
+    finally:
+        raw.close()
+
+
+def test_without_entry_ai_a_new_note_is_unsearchable_and_changing_it_is_malformed() -> None:
+    """What doctor's row says of a missing `entry_ai`, measured: the new note never
+    reaches the search index, and each later change hands FTS5 a 'delete' for text it
+    never held, which SQLite answers as a corrupt file though nothing in it is."""
+    _drop_trigger("entry_ai")
+    with store_session() as store:
+        store.ensure_project(PROJECT)
+        note = store.add(_entry("alpha beta", pool="project", project_id=PROJECT.id))
+
+        assert store.search("alpha", project_id=PROJECT.id) == []
+        for change in (
+            lambda: store.update(note.id, text="gamma delta"),
+            lambda: store.delete(note.id),
+            lambda: store.purge_project(PROJECT.id),
+        ):
+            with pytest.raises(sqlite3.DatabaseError, match="database disk image is malformed"):
+                change()
+
+
+def test_without_entry_ad_a_later_note_matches_a_purged_notes_words() -> None:
+    """What doctor's row says of a missing `entry_ad`, measured: a purge deletes the
+    project's notes for real, their text stays in the search index, and a note that
+    takes the freed rowid is found by words it does not hold. Nothing fails."""
+    _drop_trigger("entry_ad")
+    with store_session() as store:
+        store.ensure_project(PROJECT)
+        store.add(_entry("alpha beta", pool="project", project_id=PROJECT.id))
+        store.purge_project(PROJECT.id)
+        later = store.add(_entry("gamma delta"))
+
+        assert [entry.id for entry in store.search("alpha")] == [later.id]
+
+
+def test_without_entry_au_an_edited_note_is_found_by_its_old_text() -> None:
+    """What doctor's row says of a missing `entry_au`, measured: an edit leaves the
+    search index on the text the note had. Nothing fails, a removal included."""
+    _drop_trigger("entry_au")
+    with store_session() as store:
+        note = store.add(_entry("alpha beta"))
+        store.update(note.id, text="gamma delta")
+
+        assert [entry.text for entry in store.search("alpha")] == ["gamma delta"]
+        assert store.search("gamma") == []
+        store.delete(note.id)
+
+
+def test_doctor_has_a_cost_for_every_trigger_of_this_build() -> None:
+    """Doctor's database row says what a missing trigger costs from a sentence per
+    trigger, in the ladder's order. A trigger the ladder makes without one would be
+    named in the row with no word of what its absence does, so a new trigger fails
+    here until it has its sentence."""
+    from aisquare.services import diagnostics
+
     connection = sqlite3.connect(":memory:")
     try:
         store_module._migrate(connection)
         triggers = connection.execute(
-            "SELECT name, tbl_name, sql FROM sqlite_master WHERE type = 'trigger'"
+            "SELECT name FROM sqlite_master WHERE type = 'trigger' ORDER BY rowid"
         ).fetchall()
     finally:
         connection.close()
 
-    assert triggers, "the ladder makes the note triggers"
-    assert [
-        name for name, table, sql in triggers if table != "entry" or "entry_fts" not in sql
-    ] == [], triggers
+    assert [name for (name,) in triggers] == list(diagnostics._TRIGGER_COSTS)
 
 
 def test_each_step_from_v15_on_declares_what_it_builds_and_builds_nothing_twice() -> None:

@@ -769,8 +769,9 @@ def status(
     # the gap was that the tool never said the right one.
     #
     # Fail open: this is decoration on a status line, and `status`'s exit code
-    # has exactly one documented meaning (tracing on, proxy refusing). A home
-    # that cannot be resolved costs the path, never the command.
+    # has exactly one documented meaning (tracing on, the proxy lane red; see
+    # the docstring). A home that cannot be resolved costs the path, never the
+    # command.
     try:
         queue_dir: str | None = str(outbox.queue_dir())
     except Exception:

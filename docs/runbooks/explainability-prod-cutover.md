@@ -1458,11 +1458,17 @@ path; the
 sandbox run that produced this had neither set and showed `(unset)` and `is NOT
 set`. Everything else is what a correctly wired machine prints.
 
-`status` exits non-zero **only** when tracing is enabled *and* the probe fails —
-the precise state in which launches would silently fall back to untraced. That
-is what makes it the right single check. (A `--project` that names no project
-is a usage error, and exits **2** before anything is read, where a red lane
-exits **1**.)
+`status` exits non-zero **only** when tracing is enabled *and* the proxy lane is
+**red**, which is one of two states: the proxy would not take a session (the
+precise state in which launches would silently fall back to untraced), or the
+proxy is alive and reports that it ships to **another deployment** than the
+target, so sessions are traced onto a gateway nobody is watching. Both are
+"the traces are not arriving where you think", and that is what makes it the
+right single check. They are told apart by the `probe:` line, which names the
+other gateway when it is the second, and by `probe_severity` and `probe` in the
+JSON; an **amber** lane (a destination that cannot be checked from here) exits
+**0**. (A `--project` that names no project is a usage error, and exits **2**
+before anything is read, where a red lane exits **1**.)
 
 > **[verified-train]** `status` honours `--json` now (it used to print human
 > text under the flag). `aisquare --json explainability status` returns a real

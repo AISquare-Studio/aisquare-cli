@@ -68,8 +68,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   proxy would not take a session"; the destination check widened it without a
   word. Both states are "the traces are not arriving where you think", which is
   what a cutover script gating on this code asks, so the rule stands and the
-  docstring, the comment and this entry carry it. Amber exits 0, and
-  `probe_severity` says which — that field is now tested, with `probe_fix`.
+  docstring, the comments, the cutover runbook, the connecting guide and this
+  entry carry it. Amber exits 0, and `probe_severity` says which — that field
+  is now tested, with `probe_fix`.
 - **The key field is cleared even when the key write fails.** A failed
   `store_api_key` returned before the field was cleared, leaving the plaintext
   live in a masked `Input` for the rest of the session.

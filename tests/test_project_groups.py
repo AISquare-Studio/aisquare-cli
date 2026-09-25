@@ -373,3 +373,62 @@ def test_a_project_forgotten_mid_move_drops_out_and_the_move_completes(
     assert _shape(store)["groups"] == {"tools": ["prj_docs"]}
     assert _shape(store)["loose"] == ["prj_cli", "prj_web"]
     assert [p.position for p in groups.load_arrangement(store).loose] == [0, 2]
+
+
+def _layout(opened: ContextStore) -> dict[str, Any]:
+    """Every project's and group's place: group, position, pin; and each group's position."""
+    return {
+        "projects": {
+            p.id: (p.group_id, p.position, p.pinned_at) for p in opened.list_projects(all=True)
+        },
+        "groups": {g.id: (g.name, g.position) for g in opened.project_groups()},
+    }
+
+
+@pytest.mark.parametrize("change", ["move", "group move", "several moves"])
+def test_a_change_the_store_refuses_part_way_leaves_the_layout_as_it_was(
+    store: ContextStore, monkeypatch: pytest.MonkeyPatch, change: str
+) -> None:
+    """A move is several writes, and each was committed on its own. When the store
+    refused the second one (a FOREIGN KEY failure on a group deleted from a shell since
+    the move read it), the first stayed committed: a half-applied layout, and the TUI
+    recorded no undo entry for it because the move raised (review of #203). Each change
+    is one transaction now, a gesture of several moves included, so a refusal leaves
+    the layout exactly as it was, in this connection and on disk."""
+    tools, _ = groups.create_group(store, "tools", ["prj_web"])
+    groups.create_group(store, "ops")
+    groups.create_group(store, "misc")
+    before = _layout(store)
+    method = "update_project_group" if change == "group move" else "update_project_layout"
+    real = getattr(store, method)
+    writes: list[str] = []
+
+    def refused(ident: str, **fields: Any) -> Any:
+        if fields:
+            writes.append(ident)
+            second = change != "several moves" and len(writes) == 2
+            # The second project's move, as it writes that project into the group.
+            into_group = ident == "prj_cli" and fields.get("group_id") == tools.id
+            if second or (change == "several moves" and into_group):
+                raise sqlite3.IntegrityError("FOREIGN KEY constraint failed")
+        return real(ident, **fields)
+
+    misc = _group_id(store, "misc")
+    # Scoped, never `monkeypatch.undo()`: that undoes the isolated home as well, and the
+    # fresh session below would then open the real ~/.aisquare store.
+    with monkeypatch.context() as patched, pytest.raises(sqlite3.IntegrityError):
+        patched.setattr(store, method, refused)
+        if change == "move":
+            groups.move_project(store, "prj_api", to="tools")
+        elif change == "group move":
+            groups.move_group(store, misc, position=0)
+        else:
+            groups.add_to_group(store, "tools", ["prj_api", "prj_cli"])
+    assert len(writes) >= 2, "the refusal came after a write had been made"
+    assert _layout(store) == before
+    with store_session() as fresh:
+        assert _layout(fresh) == before, "a part of the change was committed"
+
+
+def _group_id(store: ContextStore, name: str) -> str:
+    return groups.resolve_group(store, name).id

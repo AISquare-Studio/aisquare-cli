@@ -1070,6 +1070,7 @@ class ContextStore(Protocol):
         collapsed: bool | None = None,
     ) -> ProjectGroup: ...
     def delete_project_group(self, group_id: str) -> list[str]: ...
+    def layout_change(self) -> contextlib.AbstractContextManager[None]: ...
     def update_project_layout(
         self,
         project_id: str,
@@ -1433,6 +1434,7 @@ class SqliteStore:
 
     def __init__(self, connection: sqlite3.Connection) -> None:
         self._conn = connection
+        self._layout_depth = 0  # open :meth:`layout_change` blocks
 
     def add(self, entry: ContextEntry) -> ContextEntry:
         self._conn.execute(
@@ -2770,6 +2772,39 @@ class SqliteStore:
 
     # --- project groups, pins and order (#140) ------------------------------------------
 
+    @contextmanager
+    def layout_change(self) -> Iterator[None]:
+        """One change to the arrangement (a move, a group made or deleted, an undo) as ONE
+        transaction.
+
+        Each layout writer below commits on its own, and a change is several of
+        them: a move renumbers the scope it leaves and the one it joins, and a
+        group move renumbers every group. When the store refused a write part-way
+        (a FOREIGN KEY failure on a group deleted from a shell since the change
+        read it, a locked database), the rows written before it stayed committed.
+        The layout was half-applied, and no undo entry was recorded for it,
+        because the change raised (review of #203). Inside this block those
+        writers leave the commit to the block: everything lands, or a raise rolls
+        all of it back, the commit included. Blocks nest, and only the outermost
+        one commits.
+        """
+        self._layout_depth += 1
+        try:
+            yield
+            if self._layout_depth == 1:
+                self._conn.commit()
+        except BaseException:
+            if self._layout_depth == 1:
+                self._conn.rollback()
+            raise
+        finally:
+            self._layout_depth -= 1
+
+    def _commit_layout(self) -> None:
+        """A layout writer's commit, unless a :meth:`layout_change` block makes it."""
+        if not self._layout_depth:
+            self._conn.commit()
+
     def project_groups(self) -> list[ProjectGroup]:
         rows = self._conn.execute(
             f"SELECT {_GROUP_COLUMNS} FROM project_group ORDER BY position, name"
@@ -2809,7 +2844,7 @@ class SqliteStore:
             )
         except sqlite3.IntegrityError as exc:
             raise ValueError(f"a group named {name!r} already exists") from exc
-        self._conn.commit()
+        self._commit_layout()
         created = self.get_project_group(new_id)
         assert created is not None
         return created
@@ -2849,7 +2884,7 @@ class SqliteStore:
                 )
             except sqlite3.IntegrityError as exc:
                 raise ValueError(f"a group named {name!r} already exists") from exc
-            self._conn.commit()
+            self._commit_layout()
             if cursor.rowcount != 1:
                 raise KeyError(group_id)
         updated = self.get_project_group(group_id)
@@ -2869,7 +2904,7 @@ class SqliteStore:
             "UPDATE project SET group_id = NULL, position = NULL WHERE group_id = ?", (group_id,)
         )
         cursor = self._conn.execute("DELETE FROM project_group WHERE id = ?", (group_id,))
-        self._conn.commit()
+        self._commit_layout()
         if cursor.rowcount != 1:
             raise KeyError(group_id)
         return members
@@ -2906,7 +2941,7 @@ class SqliteStore:
                 f"UPDATE project SET {', '.join(sets)} WHERE id = ? AND forgotten_at IS NULL",
                 (*params, project_id),
             )
-            self._conn.commit()
+            self._commit_layout()
             if cursor.rowcount != 1:
                 raise KeyError(project_id)
         updated = self._conn.execute(

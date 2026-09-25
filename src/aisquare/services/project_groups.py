@@ -9,7 +9,7 @@ live in the store (schema v20), not in ``state.json``.
 
 One place computes the order every surface shows (:func:`arrange`), one place
 applies each change (:func:`move_project`, :func:`move_group`, :func:`pin`,
-:func:`create_group`, …), and every change returns an :class:`UndoEntry` —
+:func:`create_group`, …) as one transaction, and every change returns an :class:`UndoEntry` —
 the rows' layout as it was — so the sidebar's ``u`` and a CLI mistake have the
 same way back (:func:`undo`). Positions are integers per scope (the top level,
 or one group), renumbered densely after every move, so two projects never tie.
@@ -19,15 +19,41 @@ index, never by number.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import functools
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from typing import Concatenate, ParamSpec, TypeVar
 
 from aisquare.core.store import ContextStore
 from aisquare.models import ProjectGroup, ProjectInfo
 
 TOP = "top"
 """The scope name for "no group" in ``move_project(to=…)``."""
+
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
+
+
+def _one_transaction(
+    change: Callable[Concatenate[ContextStore, _P], _R],
+) -> Callable[Concatenate[ContextStore, _P], _R]:
+    """Apply ``change`` as one transaction (``ContextStore.layout_change``): all of it, or none.
+
+    A change here is several writes, and each committed on its own: a move that
+    the store refused part-way (a FOREIGN KEY failure on a group deleted from a
+    shell since the move read it) left the scope it renumbered first committed
+    and the rest not, with no undo entry for the part that landed, because the
+    change raised (review of #203). Changes that call each other (a group made
+    with its members, a step) nest into the outermost one.
+    """
+
+    @functools.wraps(change)
+    def applied(store: ContextStore, /, *args: _P.args, **kwargs: _P.kwargs) -> _R:
+        with store.layout_change():
+            return change(store, *args, **kwargs)
+
+    return applied
 
 
 @dataclass(frozen=True)
@@ -166,6 +192,7 @@ def _remember_group(store: ContextStore, entry: UndoEntry, group_id: str) -> Non
         entry.groups[group_id] = store.get_project_group(group_id)
 
 
+@_one_transaction
 def undo(store: ContextStore, entry: UndoEntry) -> str:
     """Put every row the entry names back; returns what was undone."""
     for group_id, before in entry.groups.items():
@@ -303,6 +330,7 @@ def resolve_group(store: ContextStore, ref: str) -> ProjectGroup:
     return found
 
 
+@_one_transaction
 def move_project(
     store: ContextStore,
     project_id: str,
@@ -354,6 +382,7 @@ def move_project(
     return entry
 
 
+@_one_transaction
 def move_group(
     store: ContextStore,
     group_id: str,
@@ -389,6 +418,7 @@ def move_group(
     return entry
 
 
+@_one_transaction
 def pin(store: ContextStore, project_id: str, pinned: bool = True) -> UndoEntry:
     """Pin a project into the Pinned section, or return it to its place.
 
@@ -441,6 +471,7 @@ def set_collapsed(store: ContextStore, group_id: str, collapsed: bool) -> UndoEn
     return entry
 
 
+@_one_transaction
 def create_group(
     store: ContextStore, name: str, project_ids: Sequence[str] = ()
 ) -> tuple[ProjectGroup, UndoEntry]:
@@ -471,6 +502,7 @@ def rename_group(store: ContextStore, group_id: str, name: str) -> UndoEntry:
     return entry
 
 
+@_one_transaction
 def delete_group(store: ContextStore, group_id: str) -> UndoEntry:
     """Delete a group; its members go back to the top level, at the end, in their order."""
     group = store.get_project_group(group_id)
@@ -496,6 +528,7 @@ def delete_group(store: ContextStore, group_id: str) -> UndoEntry:
     return entry
 
 
+@_one_transaction
 def add_to_group(store: ContextStore, group_ref: str, project_ids: Sequence[str]) -> UndoEntry:
     group = resolve_group(store, group_ref)
     entry = UndoEntry(f"group {len(project_ids)} project(s) into {group.name}")
@@ -506,6 +539,7 @@ def add_to_group(store: ContextStore, group_ref: str, project_ids: Sequence[str]
     return entry
 
 
+@_one_transaction
 def remove_from_group(store: ContextStore, project_ids: Sequence[str]) -> UndoEntry:
     entry = UndoEntry(f"ungroup {len(project_ids)} project(s)")
     for project_id in project_ids:

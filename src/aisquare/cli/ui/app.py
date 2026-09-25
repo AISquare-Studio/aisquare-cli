@@ -899,12 +899,16 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         def drop(store: ContextStore) -> project_groups.UndoEntry:
             entry = project_groups.UndoEntry(f"move {len(ids)} project(s)")
             before = event.before
-            for project_id in ids:
-                part = project_groups.move_project(
-                    store, project_id, to=event.scope or project_groups.TOP, before=before
-                )
-                for pid, layout in part.projects.items():
-                    entry.projects.setdefault(pid, layout)
+            # One gesture, one transaction, as the service's own changes are: a move
+            # the store refuses part-way leaves the moves before it undone too, so no
+            # part of the drop lands without its entry (review of #203).
+            with store.layout_change():
+                for project_id in ids:
+                    part = project_groups.move_project(
+                        store, project_id, to=event.scope or project_groups.TOP, before=before
+                    )
+                    for pid, layout in part.projects.items():
+                        entry.projects.setdefault(pid, layout)
             return entry
 
         self._layout(drop, "move")

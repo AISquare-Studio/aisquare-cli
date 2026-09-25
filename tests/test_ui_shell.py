@@ -44,7 +44,7 @@ from aisquare.cli.ui import app as app_mod
 from aisquare.cli.ui.app import SIDEBAR_WIDTH_KEY, FleetApp, HelpScreen, Panes
 from aisquare.cli.ui.autosave import Autosave
 from aisquare.cli.ui.divider import WIDEST_ASK, Divider, cells
-from aisquare.cli.ui.groups import GroupPicker
+from aisquare.cli.ui.groups import DropProject, GroupPicker
 from aisquare.cli.ui.sidebar import (
     RESIZE_STEP,
     Activatable,
@@ -80,7 +80,7 @@ from aisquare.core.atomic import write_replacing
 from aisquare.core.config import load_config, save_config
 from aisquare.core.locking import lock_exclusive, unlock
 from aisquare.core.state_file import update_state
-from aisquare.core.store import ContextStore, store_session
+from aisquare.core.store import ContextStore, SqliteStore, store_session
 from aisquare.core.tmux import Completed
 from aisquare.models import CheckStatus, DoctorCheck, FleetAgent, FleetAgentStatus, ProjectInfo
 from aisquare.services import explainability as explainability_service
@@ -3821,6 +3821,41 @@ def test_dragging_a_card_onto_a_group_header_groups_it_and_the_picker_groups_a_s
     with store_session() as store:
         names = {g.name for g in store.project_groups()}
     assert names == {"tools", "web"}
+
+
+def test_a_drop_the_store_refuses_part_way_lands_none_of_its_moves(
+    tmp_path: Path, script: Script, isolated_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A drag of several cards is one gesture, made of one move per card. When the store
+    refused the second card's move (a FOREIGN KEY failure on a group deleted from a shell
+    since the drag began), the first card's move stayed committed, and `u` had no entry
+    for it because the gesture raised (review of #203). The drop is one transaction: none
+    of it lands."""
+    seed(tmp_path, ("prj_a", "api", None), ("prj_b", "cli", None), ("prj_c", "docs", None))
+    with store_session() as store:
+        tools, _ = groups_service.create_group(store, "tools")
+    real = SqliteStore.update_project_layout
+
+    def refused(self: SqliteStore, project_id: str, **fields: Any) -> ProjectInfo:
+        if project_id == "prj_b" and fields.get("group_id") == tools.id:
+            raise sqlite3.IntegrityError("FOREIGN KEY constraint failed")
+        return real(self, project_id, **fields)
+
+    async def go(pilot: Pilot[None]) -> tuple[list[str], list[str], int]:
+        app = fleet_app(pilot)
+        before = _cards(app)
+        with monkeypatch.context() as patched:  # scoped: the isolated home stays in place
+            patched.setattr(SqliteStore, "update_project_layout", refused)
+            app.on_drop_project(DropProject(["prj_a", "prj_b"], scope=tools.id, before=None))
+        app.refresh_data()
+        await pilot.pause()
+        return before, _cards(app), len(app._undo)
+
+    before, after, undo_depth = drive(go)
+    assert after == before == ["group:tools", "prj_a", "prj_b", "prj_c"]
+    assert undo_depth == 0
+    with store_session() as store:
+        assert [p.group_id for p in store.list_projects()] == [None, None, None]
 
 
 def test_a_group_named_like_markup_is_listed_as_typed_and_can_be_picked(

@@ -37,7 +37,7 @@ import socket
 import sqlite3
 import time
 import tomllib
-from collections.abc import Callable, Collection, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping
 from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, TypeVar
@@ -93,7 +93,7 @@ digits are what Claude Code's numbered chooser takes (T1b: runner2-1 measured on
 claude that ``y`` does nothing there and ``1`` answers Yes, board 13265)."""
 
 ANSWERS = ("yes", "no")
-"""The semantic keys: resolved from the pane at the moment of the press (:func:`prompt_showing`)."""
+"""The semantic keys: read off the pane at the moment of the press (``screen.prompt_showing``)."""
 
 ANSWERING_KEYS = frozenset({"yes", "no", "y", "n", "enter", "esc", *(str(d) for d in range(1, 10))})
 """Keys that answer a prompt: pressed while one shows, the pane is read back, and a prompt
@@ -667,15 +667,23 @@ def _ready(target: ProjectInfo, label: str) -> tuple[FleetAgent, FleetAgentStatu
     ``tell`` types only into a waiting agent whose pane runs the agent; ``press``
     and ``paste`` also type into one that is ASKING (a permission prompt reads
     ``attention``), because answering that prompt is what they are for.
+
+    And one the fleet still reads WORKING when its screen says otherwise (13313): a
+    fresh claude reads working until its first Stop hook, and the fleet's activity
+    window holds for seconds after a chooser draws. There a prompt showing, or the
+    input box drawn and idle, is the evidence; anything else stays refused. The screen
+    overrides the activity window, never a stop: limited, exited and lost are refused.
     """
     agent = _live(target, label)
     status = fleet.status_of(agent)
-    if status.state not in READY_STATES:
+    srv = fleet.server_for(agent.tmux_socket)
+    if status.state not in READY_STATES and not (
+        status.state == "working" and _asking_or_idle(srv, agent.pane_id)
+    ):
         raise Refused(
             f"{label} is {status.state} — the captain types only into an agent that is "
             "waiting at its prompt or asking something"
         )
-    srv = fleet.server_for(agent.tmux_socket)
     if not fleet.pane_is_the_agent(srv, agent.pane_id):
         raise Refused(
             f"{label}'s pane is not running the agent (a shell or the launcher is in front) — "
@@ -684,99 +692,18 @@ def _ready(target: ProjectInfo, label: str) -> tuple[FleetAgent, FleetAgentStatu
     return agent, status, srv
 
 
-# --- the prompt on a pane (T1b) --------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class Prompt:
-    """A prompt showing at the bottom of an agent's pane, and the keys that answer it."""
-
-    shape: str
-    """``chooser`` (Claude Code's numbered menu), ``yn`` (a ``[y/N]`` line), ``trust``."""
-    question: str
-    yes_key: str | None
-    """tmux's key for yes — the digit of the first option that says Yes, or ``y``."""
-    no_key: str | None
-
-
-PROMPT_MARK = "\u276f"
-"""Claude Code's prompt mark, U+276F: its input line and a chooser's highlighted option."""
-
-_RULE = re.compile(r"^\s*[─━]{10,}\s*$")
-_OPTION = re.compile(r"^\s*(" + PROMPT_MARK + r"\s*)?(\d)[.)]\s+(\S.*)$")
-_MODAL_FOOTER = re.compile(r"Esc to cancel|Enter to confirm")
-_YES_NO = re.compile(r"[\[(]\s*[yY](?:es)?\s*/\s*[nN](?:o)?\s*[\])]\s*[:?]?\s*$")
-_TRUST = re.compile(r"Quick safety check|Yes, I trust this folder")
-_PROMPT_TAIL = 14
-"""How many non-blank lines at the bottom a prompt is looked for in."""
-
-
-def prompt_showing(lines: Sequence[str]) -> Prompt | None:
-    """The prompt at the bottom of a pane, read by its STRUCTURE (board 13264), or ``None``.
-
-    Claude Code at its prompt ends with the input box: the prompt-mark line between two
-    rules, footer lines under it. A dialog REPLACES that box. So a box at the bottom
-    means no prompt, whatever the conversation above it quotes — a reply that quotes a
-    whole chooser is not one. Without the box, the lines that replaced it are read:
-
-    - a numbered chooser — options ``1.``, ``2.``… with one highlighted (the mark), and a
-      footer naming Esc or Enter on the last two lines. Yes is the digit of the first
-      option that SAYS yes (``1`` on the real permission chooser, never a blind ``1``);
-      no is Esc, the chooser's own cancel.
-    - the trust dialog (``Quick safety check``) — its own shape, with no keys: trusting
-      a folder is the owner's to answer.
-    - a ``[y/N]``-style last line — a hook-less binary's question: ``y`` and ``n``.
-    """
-    rows = [_ESCAPES.sub("", line).rstrip() for line in lines]
-    rows = [row for row in rows if row.strip()][-_PROMPT_TAIL:]
-    if not rows or _input_box_at_bottom(rows):
-        return None
-    footer = any(_MODAL_FOOTER.search(row) for row in rows[-2:])
-    if footer and any(_TRUST.search(row) for row in rows):
-        question = next((row.strip() for row in rows if "Quick safety check" in row), "")
-        return Prompt("trust", question or "the trust dialog", None, None)
-    options = [(i, _OPTION.match(row)) for i, row in enumerate(rows)]
-    numbered = [(i, m) for i, m in options if m is not None]
-    if footer and len(numbered) >= 2:
-        digits = [m.group(2) for _, m in numbered]
-        highlighted = [m for _, m in numbered if m.group(1)]
-        if digits == [str(n) for n in range(1, len(digits) + 1)] and len(highlighted) == 1:
-            first = numbered[0][0]
-            question = next(
-                (row.strip() for row in reversed(rows[:first]) if row.strip()), "a numbered choice"
-            )
-            yes = next(
-                (m.group(2) for _, m in numbered if m.group(3).lower().startswith("yes")), None
-            )
-            return Prompt("chooser", question, yes, "Escape")
-    if _YES_NO.search(rows[-1]):
-        return Prompt("yn", rows[-1].strip(), "y", "n")
-    return None
-
-
-def _input_box_at_bottom(rows: Sequence[str]) -> bool:
-    """Whether the pane ends with Claude Code's input box: rule, prompt-mark line(s), rule,
-    footer.
-
-    Leans towards "a box": a box read as a prompt would have ``yes`` type a digit into
-    the agent's input, while a prompt read as a box only refuses the press.
-    """
-    below = len(rows) - 1
-    while below >= 0 and not _RULE.match(rows[below]) and len(rows) - 1 - below < 3:
-        below -= 1
-    if below < 0 or not _RULE.match(rows[below]):
-        return False
-    above = below - 1
-    while above >= 0 and not _RULE.match(rows[above]) and below - above <= 8:
-        above -= 1
-    if above < 0 or not _RULE.match(rows[above]):
-        return False
-    body = rows[above + 1 : below]
-    return bool(body) and body[0].lstrip().startswith(PROMPT_MARK)
-
-
 def _screen(srv: TmuxServer, pane_id: str) -> list[str]:
     return list(srv.capture(pane_id).lines)
+
+
+def _asking_or_idle(srv: TmuxServer, pane_id: str) -> bool:
+    """Whether the pane is ready by its screen: a prompt showing, or the box drawn and idle
+    (13313). A pane that cannot be read is not: the fleet's word, working, stands."""
+    try:
+        lines = _screen(srv, pane_id)
+    except TmuxError:
+        return False
+    return screen.prompt_showing(lines) is not None or screen.box_idle(lines)
 
 
 def _press(target: ProjectInfo, label: str, key: str) -> Outcome:
@@ -784,7 +711,7 @@ def _press(target: ProjectInfo, label: str, key: str) -> Outcome:
         raise Refused(f"key {key!r} is not one of {', '.join((*ANSWERS, *KEYS))}")
     agent, status, srv = _ready(target, label)
     try:
-        before = prompt_showing(_screen(srv, agent.pane_id))
+        before = screen.prompt_showing(_screen(srv, agent.pane_id))
     except TmuxError as exc:
         if key in ANSWERS:
             raise Refused(
@@ -822,7 +749,7 @@ def _press(target: ProjectInfo, label: str, key: str) -> Outcome:
     for _ in range(READBACK_POLLS):
         _sleep(READBACK_POLL_S)
         try:
-            after = prompt_showing(_screen(srv, agent.pane_id))
+            after = screen.prompt_showing(_screen(srv, agent.pane_id))
         except TmuxError:
             continue
         if after is None or after.question != before.question:

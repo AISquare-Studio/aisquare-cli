@@ -82,6 +82,29 @@ TRUST_QUOTED_MID_TURN = [
 ]
 WORKING_QUOTING = [f"Reading coder-1's pane: {MARK} 1. Yes / Esc to cancel", "· Thinking…"]
 
+# CONSTRUCTED from the manager's description at 13313, until runner2 captures the real ones:
+# real Claude Code keeps its input box drawn DURING a turn, with a live spinner above it and
+# "esc to interrupt" in the footer; a fresh one draws its box before its first Stop hook, so
+# the fleet still reads it working while it is idle at its prompt.
+FRESH_IDLE = [
+    "╭───────────────────────────────────────────────╮",
+    "│ ✻ Welcome to Claude Code!                     │",
+    "│   cwd: /home/owner/proj-a                     │",
+    "╰───────────────────────────────────────────────╯",
+    REAL_RULE,
+    f"{MARK} ",
+    REAL_RULE,
+    "  ? for shortcuts",
+]
+WORKING_BOX = [
+    "● Reading the fold's test log",
+    "✻ Cogitating… (12s · ↓ 1.2k tokens)",
+    REAL_RULE,
+    f"{MARK} ",
+    REAL_RULE,
+    "  ⏵⏵ accept edits on (shift+tab to cycle) · esc to interrupt",
+]
+
 
 def pane(*transcript: str, box: bool = True) -> list[str]:
     """A pane: the conversation, then (unless a dialog replaced it) the input box."""

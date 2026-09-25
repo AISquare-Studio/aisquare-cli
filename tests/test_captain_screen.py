@@ -42,6 +42,8 @@ MARK = shots.MARK
             "the session-rating prompt",
         ),
         ("a model picker", shots.MODEL_PICKER, None, "a dialog waiting for Enter or Esc"),
+        ("a fresh coder's idle box (constructed)", shots.FRESH_IDLE, None, None),
+        ("a box drawn mid-turn (constructed)", shots.WORKING_BOX, None, None),
         ("an empty pane", [], None, None),
         ("a shell", ["$ ", "ready"], None, None),
     ],
@@ -62,6 +64,29 @@ def test_both_views_of_the_one_reader_agree_on_every_captured_screen(
         assert modal is not None, f"{name}: press sees a prompt that say would type over"
     if modal in ("a numbered choice", "the trust dialog"):
         assert got is not None, f"{name}: say refuses a prompt that press cannot answer"
+
+
+@pytest.mark.parametrize(
+    ("name", "lines", "idle"),
+    [
+        ("the real idle pane, its finished turn's line above the box", shots.REAL_IDLE, True),
+        ("a fresh coder's box, no turn yet", shots.FRESH_IDLE, True),
+        ("the plain input box", shots.INPUT_BOX, True),
+        ("a box drawn mid-turn: a live spinner above, esc to interrupt below",
+         shots.WORKING_BOX, False),
+        ("the live spinner alone says it",
+         [*shots.WORKING_BOX[:-1], "  ⏵⏵ accept edits on (shift+tab to cycle)"], False),
+        ("the footer alone says it", [shots.WORKING_BOX[0], *shots.WORKING_BOX[2:]], False),
+        ("a chooser: no box at all", shots.REAL_CHOOSER, False),
+        ("a spinner and no box", shots.MID_TURN_LIST, False),
+        ("an empty pane", [], False),
+    ],
+)  # fmt: skip
+def test_an_idle_box_is_read_by_its_structure(name: str, lines: list[str], idle: bool) -> None:
+    """13313: real Claude Code keeps its input box drawn DURING a turn. Idle means the box is
+    drawn, no live spinner sits just above it, and its footer does not say 'esc to interrupt'.
+    The finished turn's line ('✻ Cooked for 5s · done') is no spinner."""
+    assert screen.box_idle(lines) is idle, name
 
 
 def test_the_box_is_read_with_a_wrapped_draft_and_a_dim_suggestion() -> None:

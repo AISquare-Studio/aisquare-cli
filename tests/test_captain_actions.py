@@ -55,7 +55,9 @@ from aisquare.services import fleet, mcp_server
 from aisquare.services import team as team_service
 from aisquare.services.captain import actions
 from aisquare.services.captain import queue as captain_queue
+from aisquare.services.captain import screen as screen_reader
 from aisquare.services.captain import state as captain_state
+from tests import captain_screens as shots
 from tests.rendered import plain
 
 CONTRACT_TOOLS = frozenset(
@@ -1507,47 +1509,13 @@ def test_press_refuses_a_key_outside_the_list_by_name(
 # its permission chooser and on the trust dialog the letter y does nothing; the digit 1
 # (Yes), Enter with Yes highlighted and the arrows do.
 
-RULE = "─" * 100
-MARK = actions.PROMPT_MARK
-IDLE = [
-    "● Created probe2.txt in the working directory containing the word again.",
-    "✻ Cooked for 5s · done 10:17 AM",
-    RULE,
-    f"{MARK} ",
-    RULE,
-    "  ⏸ manual mode on · ? for shortcuts · ← for agents",
-]
-CHOOSER = [
-    f"{MARK} Create a file named probe2.txt in this folder containing the word again",
-    "",
-    " Do you want to create probe2.txt?",
-    f" {MARK} 1. Yes",
-    "   2. Yes, and switch to accept edits (auto-approve file edits and common file commands)"
-    " for this session (shift+tab)",
-    "   3. No",
-    "",
-    " Esc to cancel · Tab to amend",
-]
-TRUST = [
-    " Quick safety check: Is this a project you created or one you trust? (Like your own"
-    " code, a well-known open source",
-    f" {MARK} No, exit",
-    "   Yes, I trust this folder",
-    "",
-    " Enter to confirm · Esc to cancel",
-]
-YES_NO = ["Installing 3 packages.", "Proceed? [y/N] "]
-QUOTED = [
-    "● coder-2 is stuck at this prompt:",
-    "  Do you want to create probe2.txt?",
-    f"  {MARK} 1. Yes",
-    "    2. No",
-    "  Esc to cancel · Tab to amend",
-    RULE,
-    f"{MARK} ",
-    RULE,
-    "  ⏸ manual mode on · ? for shortcuts",
-]
+MARK = shots.MARK
+RULE = shots.REAL_RULE
+IDLE = shots.REAL_IDLE
+CHOOSER = shots.REAL_CHOOSER
+TRUST = shots.REAL_TRUST
+YES_NO = shots.YES_NO
+QUOTED = shots.REAL_QUOTED
 
 
 def _at(fleet_rec: Fleet, screen: list[str], **answers: list[str]) -> Pane:
@@ -1559,7 +1527,7 @@ def _at(fleet_rec: Fleet, screen: list[str], **answers: list[str]) -> Pane:
 
 
 def test_the_permission_chooser_is_read_as_one_with_its_yes_digit() -> None:
-    prompt = actions.prompt_showing(CHOOSER)
+    prompt = screen_reader.prompt_showing(CHOOSER)
     assert prompt is not None
     assert (prompt.shape, prompt.yes_key, prompt.no_key) == ("chooser", "1", "Escape")
     assert prompt.question == "Do you want to create probe2.txt?"
@@ -1567,18 +1535,18 @@ def test_the_permission_chooser_is_read_as_one_with_its_yes_digit() -> None:
 
 def test_a_chooser_whose_first_option_is_no_answers_yes_with_its_yes_digit() -> None:
     screen = [" Allow this?", f" {MARK} 1. No", "   2. Yes", " Esc to cancel"]
-    prompt = actions.prompt_showing(screen)
+    prompt = screen_reader.prompt_showing(screen)
     assert prompt is not None and prompt.yes_key == "2", "never a blind 1"
 
 
 def test_a_y_n_line_is_read_as_one() -> None:
-    prompt = actions.prompt_showing(YES_NO)
+    prompt = screen_reader.prompt_showing(YES_NO)
     assert prompt is not None
     assert (prompt.shape, prompt.yes_key, prompt.no_key) == ("yn", "y", "n")
 
 
 def test_the_trust_dialog_is_read_as_its_own_shape() -> None:
-    prompt = actions.prompt_showing(TRUST)
+    prompt = screen_reader.prompt_showing(TRUST)
     assert prompt is not None and prompt.shape == "trust"
     assert prompt.yes_key is None and prompt.no_key is None
 
@@ -1586,14 +1554,14 @@ def test_the_trust_dialog_is_read_as_its_own_shape() -> None:
 @pytest.mark.parametrize("screen", [IDLE, QUOTED, ["$ ", "ready"], []])
 def test_an_input_box_or_a_plain_screen_is_no_prompt(screen: list[str]) -> None:
     """A reply that quotes a whole chooser sits ABOVE the input box: it is no prompt (13264)."""
-    assert actions.prompt_showing(screen) is None
+    assert screen_reader.prompt_showing(screen) is None
 
 
 def test_an_input_box_at_the_bottom_is_no_prompt_whatever_else_shows() -> None:
     """13264's rule on its own: the box means the agent is at its input. Here the footer
     under the box ALSO mentions Esc, and a chooser is quoted above — still no prompt."""
     screen = [*QUOTED[:5], RULE, f"{MARK} ", RULE, "  ⏸ manual mode on · Esc to cancel a draft"]
-    assert actions.prompt_showing(screen) is None
+    assert screen_reader.prompt_showing(screen) is None
 
 
 def test_a_numbered_list_mid_turn_is_no_prompt_without_a_dialog_footer() -> None:
@@ -1605,7 +1573,98 @@ def test_a_numbered_list_mid_turn_is_no_prompt_without_a_dialog_footer() -> None
         "   2. No",
         "✻ Thinking… (esc to interrupt)",
     ]
-    assert actions.prompt_showing(screen) is None
+    assert screen_reader.prompt_showing(screen) is None
+
+
+# --- ready by the screen while the hook still says working (13313) -----------------------------
+
+
+def _working(fleet_rec: Fleet, lines: list[str], **answers: list[str]) -> Pane:
+    """A pane the fleet reads WORKING: a fresh real claude before its first Stop hook, or
+    the 5 s activity window after a chooser draws (runner2's 13308 and 13323)."""
+    pane = fleet_rec.panes["%1"]
+    pane.screen = list(lines)
+    pane.answers = dict(answers)
+    fleet_rec.states["coder-1"] = "working"
+    return pane
+
+
+def test_a_fresh_coder_takes_a_paste_when_its_box_is_drawn_and_idle(
+    alpha: ProjectInfo, agents: dict[str, FleetAgent], fleet_rec: Fleet
+) -> None:
+    """Acceptance line 2 (13313; runner2's red-before at 13323): a just-spawned real claude
+    reads working until its first Stop hook. Its drawn, idle box is the evidence."""
+    pane = _working(fleet_rec, shots.FRESH_IDLE)
+    result = ok(actions.paste("alpha", "coder-1", "run the fold's tests", submit=True))
+    assert result["submitted"] is True
+    assert pane.typed == [("paste", "run the fold's tests"), ("keys", "Enter")]
+
+
+def test_the_real_idle_pane_is_ready_its_finished_turns_line_is_no_spinner(
+    alpha: ProjectInfo, agents: dict[str, FleetAgent], fleet_rec: Fleet
+) -> None:
+    pane = _working(fleet_rec, IDLE)
+    ok(actions.paste("alpha", "coder-1", "next"))
+    assert pane.pastes == ["next"]
+
+
+def test_a_box_drawn_mid_turn_refuses_the_paste(
+    alpha: ProjectInfo, agents: dict[str, FleetAgent], fleet_rec: Fleet
+) -> None:
+    """Real Claude Code keeps its box during a turn: a live spinner above it and 'esc to
+    interrupt' in its footer are what say the agent is working."""
+    pane = _working(fleet_rec, shots.WORKING_BOX)
+    message = refused(lambda: actions.paste("alpha", "coder-1", "run the fold's tests"))
+    assert "coder-1 is working" in message
+    assert pane.typed == []
+
+
+def test_a_chooser_just_drawn_takes_press_yes_while_the_fleet_still_reads_working(
+    alpha: ProjectInfo, agents: dict[str, FleetAgent], fleet_rec: Fleet
+) -> None:
+    """A prompt showing is the agent asking, whatever the activity window says (13313)."""
+    pane = _working(fleet_rec, CHOOSER, **{"1": IDLE})
+    result = ok(actions.press("alpha", "coder-1", "yes"))
+    assert pane.keys == [("1",)] and result["answered"] is True
+
+
+@pytest.mark.parametrize("state", ["limited", "exited", "lost"])
+def test_only_working_is_read_past_an_idle_screen(
+    alpha: ProjectInfo, agents: dict[str, FleetAgent], fleet_rec: Fleet, state: str
+) -> None:
+    """The screen overrides the activity window, never a stop: an agent parked on its usage
+    limit, or gone, is refused whatever its last screen shows."""
+    pane = _working(fleet_rec, shots.FRESH_IDLE)
+    fleet_rec.states["coder-1"] = state  # type: ignore[assignment]
+    message = refused(lambda: actions.paste("alpha", "coder-1", "next"))
+    assert f"coder-1 is {state}" in message or "no live agent" in message
+    assert pane.typed == []
+
+
+def test_a_working_pane_that_cannot_be_read_stays_refused_as_working(
+    alpha: ProjectInfo,
+    agents: dict[str, FleetAgent],
+    fleet_rec: Fleet,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pane = _working(fleet_rec, shots.FRESH_IDLE)
+
+    def unreadable(*args: object, **kwargs: object) -> Capture:
+        raise TmuxError("tmux capture-pane failed: no such pane")
+
+    monkeypatch.setattr(FakeServer, "capture", unreadable)
+    message = refused(lambda: actions.paste("alpha", "coder-1", "next"))
+    assert "coder-1 is working" in message and pane.typed == []
+
+
+def test_the_captains_persona_says_yes_through_approve_prompt_and_its_result() -> None:
+    """13273: the persona line rides with whichever of T2 (the persona's owner) and T1b lands
+    second. T2 landed first (e49c5464), so it is T1b's."""
+    from aisquare.core import personas
+
+    persona = personas.resolve("captain", paths.aisquare_home())
+    body = "\n".join(personas.briefing(persona))
+    assert "approve_prompt" in body and "its result" in body
 
 
 def test_press_yes_answers_the_real_chooser_with_1_and_reads_it_gone(

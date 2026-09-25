@@ -251,8 +251,20 @@ def test_bulk_concurrent_writes_never_lose_a_confirmed_write(tmp_path: Path) -> 
         with ThreadPoolExecutor(max_workers=WRITERS) as pool:
             batches = list(pool.map(partial(_writer, project=project, env=env), range(WRITERS)))
     finally:
-        for reader in readers:
-            reader.wait(timeout=60)
+        try:
+            for reader in readers:
+                reader.wait(timeout=60)
+        finally:
+            # A reader loop still running a minute after the writers fails the
+            # test (the `TimeoutExpired` above) but must not outlive it: it would
+            # keep hammering this store and, on Windows, hold open the temp
+            # directory it runs in against pytest's cleanup. Readers make 40
+            # calls to a writer's 25, and the storm's first windows-latest runs
+            # are this release's (review of the #203 tests-ci fixes, round 1).
+            for reader in readers:
+                if reader.poll() is None:
+                    reader.kill()
+                    reader.wait()
     elapsed = time.monotonic() - started
 
     results = [result for batch in batches for result in batch]

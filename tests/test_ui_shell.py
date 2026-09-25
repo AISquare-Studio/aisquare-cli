@@ -3858,6 +3858,45 @@ def test_a_drop_the_store_refuses_part_way_lands_none_of_its_moves(
         assert [p.group_id for p in store.list_projects()] == [None, None, None]
 
 
+def test_an_undo_the_store_refuses_keeps_its_entry_for_the_next_u(
+    tmp_path: Path, script: Script, isolated_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``u`` popped its entry before applying it, so an undo the store refused lost the
+    way back with nothing undone, and the next ``u`` said "nothing to undo" (review of
+    #203). The undo is one transaction and changes nothing when refused; its entry goes
+    back on the stack, and the next ``u`` applies it."""
+    seed(tmp_path, ("prj_a", "api", None), ("prj_b", "cli", None))
+    real = groups_service.undo
+    refusals: list[str] = []
+
+    def refused_once(store: ContextStore, entry: groups_service.UndoEntry) -> str:
+        if not refusals:
+            refusals.append(entry.description)
+            raise sqlite3.OperationalError("database is locked")
+        return real(store, entry)
+
+    async def go(pilot: Pilot[None]) -> tuple[list[str], list[str], list[str]]:
+        app = fleet_app(pilot)
+        app.sidebar.focus()
+        app.sidebar.select("project:prj_b")
+        await pilot.press("shift+up")
+        await pilot.pause()
+        moved = _cards(app)
+        with monkeypatch.context() as patched:  # scoped: the isolated home stays in place
+            patched.setattr(groups_service, "undo", refused_once)
+            await pilot.press("u")
+            await pilot.pause()
+            refused = _cards(app)
+            await pilot.press("u")
+            await pilot.pause()
+        return moved, refused, _cards(app)
+
+    moved, refused, undone = drive(go)
+    assert moved == ["prj_b", "prj_a"]
+    assert refused == moved and len(refusals) == 1
+    assert undone == ["prj_a", "prj_b"], "the entry the refused undo kept was applied"
+
+
 def test_a_group_named_like_markup_is_listed_as_typed_and_can_be_picked(
     tmp_path: Path, script: Script, isolated_home: Path
 ) -> None:

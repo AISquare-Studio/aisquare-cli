@@ -953,6 +953,10 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             with store_session() as store:
                 done = project_groups.undo(store, entry)
         except Exception as exc:
+            # Back on the stack: an undo is one transaction (`project_groups.undo`), so
+            # one the store refused changed nothing, and popped for good it was the way
+            # back lost with nothing done — `u` again said "nothing to undo" (review of #203).
+            self._undo.append(entry)
             self.notify(f"could not undo: {exc}", severity="error", markup=False)
             return
         self.refresh_data()

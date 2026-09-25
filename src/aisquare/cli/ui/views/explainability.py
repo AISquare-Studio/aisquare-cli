@@ -30,7 +30,7 @@ from textual.containers import Horizontal, VerticalScroll
 from textual.widgets import Button, Checkbox, Input, Label, Static
 from textual.worker import Worker, WorkerState
 
-from aisquare.core import orchestrator, outbox
+from aisquare.core import orchestrator, outbox, paths
 from aisquare.core.config import AppConfig, ExplainabilityTarget, load_config, save_config
 from aisquare.core.store import store_session
 from aisquare.models import CheckStatus, ProjectInfo
@@ -199,22 +199,33 @@ def _project_key_row(project: ProjectInfo | None, target: ops.ResolvedTarget) ->
     return f"{name}: its own key for target {binding.target} ({state})"
 
 
+_MINTED_KEY_REFUSAL = Notice(
+    "this project's key was minted by the CLI — replace it with "
+    "aisquare explainability key set, which revokes the minted one",
+    "warning",
+)
+
+
 def minted_key_refusal(project: ProjectInfo) -> Notice | None:
     """The refusal when ``project``'s key file holds a key the CLI minted (#142), else ``None``.
 
-    Replacing it here would leave that key live and forgotten — revoking it is
-    a network call, and this tab's handlers run on the UI thread — so the CLI
-    does it instead: ``key set`` revokes the minted key once its own is written.
+    Replacing it here would owe that key a revocation — a network call, and
+    this tab's handlers run on the UI thread — so the CLI does it instead:
+    ``key set`` revokes the minted key once its own is written. The form asks
+    this BEFORE any write of its own, so a refusal keeps what was typed; the
+    writer asks again inside its own session (:func:`attach_project_key`).
+
+    No ``context.db`` means nothing was ever minted here, and the answer is
+    ``None`` without opening one: a store session creates the database, and on
+    a fresh machine this read ran before anything was saved (review of #172).
     """
+    if not paths.db_path().exists():
+        return None
     with store_session() as store:
         minted = store.project_destination(project.id)
     if minted is None or not minted.key_uid:
         return None
-    return Notice(
-        "this project's key was minted by the CLI — replace it with "
-        "aisquare explainability key set, which revokes the minted one",
-        "warning",
-    )
+    return _MINTED_KEY_REFUSAL
 
 
 def attach_project_key(value: str, project: ProjectInfo, target: str) -> Notice:
@@ -227,14 +238,15 @@ def attach_project_key(value: str, project: ProjectInfo, target: str) -> Notice:
     field: two key inputs on one tab, writing to two places under two rules for
     the deployment. One field now, and the box says whose key it is.
 
-    Never over a key the CLI minted (#142): :func:`minted_key_refusal` is
-    returned instead, and nothing is written. The form asks it before any write
-    of its own; asked here too, so no caller of this writer can skip it.
+    Never over a key the CLI minted (#142): the writer refuses it in its own
+    session (``refuse_minted``), nothing is written, and the refusal
+    :func:`minted_key_refusal` gives is returned instead — so no caller of this
+    writer can skip the check, and it costs no store session of its own.
     """
-    refused = minted_key_refusal(project)
-    if refused is not None:
-        return refused
-    binding = ops.attach_project_key(project, value.strip(), target=target)
+    try:
+        binding = ops.attach_project_key(project, value.strip(), target=target, refuse_minted=True)
+    except ops.MintedKeyInPlace:
+        return _MINTED_KEY_REFUSAL
     name = project.root.name or project.id
     return Notice(
         f"✓ key attached to {name} for target {target} — {binding.key_path} (mode 600); "

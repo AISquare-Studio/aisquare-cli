@@ -28,6 +28,7 @@ from typer.testing import CliRunner
 import aisquare
 from aisquare.cli import auth as auth_cli
 from aisquare.cli.app import app
+from aisquare.core import paths
 from aisquare.core.config import AppConfig, ExplainabilityTarget, load_config, save_config
 from aisquare.core.store import ContextStore, SqliteStore, store_session
 from aisquare.core.workspace import pin_project, project_id_for
@@ -936,6 +937,57 @@ def test_the_ui_attach_leaves_a_minted_key_to_the_cli(
     assert view.minted_key_refusal(project) is not None
     refused = view.attach_project_key("AIS_pasted_again", project, "local")
     assert refused.severity == "warning" and "minted by the CLI" in refused.message
+    assert service.project_key_path(project.id).read_text() == idp.minted[0]["api_key"]
+
+
+def test_the_tabs_minted_key_check_creates_no_store_on_a_fresh_machine(
+    isolated_home: Path, tmp_path: Path
+) -> None:
+    """The Setup form asks before any write; its store session created ``context.db`` on a
+    machine where nothing had been saved yet — a read that creates (review of #172)."""
+    from aisquare.cli.ui.views import explainability as view
+
+    root = tmp_path / "fresh"
+    fresh = ProjectInfo(id=project_id_for(root), root=root, linked_repos=[])
+    assert not paths.db_path().exists()
+    assert view.minted_key_refusal(fresh) is None
+    assert not paths.db_path().exists()
+
+
+def test_the_tabs_attach_asks_about_a_minted_key_inside_the_writers_own_session(
+    runner: CliRunner,
+    idp: IdentityProviderStub,
+    signed_in: iam.Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One store session per attach, on the UI thread: the check opened one of its own
+    before the writer opened another (review of #172). Refused all the same."""
+    from aisquare.cli.ui.views import explainability as view
+    from aisquare.core import store as store_module
+
+    project = _project(tmp_path / "web")
+    opened: list[int] = []
+    real_open = store_module.open_store
+
+    def counted() -> ContextStore:
+        opened.append(1)
+        return real_open()
+
+    with monkeypatch.context() as counting:
+        counting.setattr(store_module, "open_store", counted)
+        attached = view.attach_project_key("AIS_pasted_key", project, "local")
+    assert attached.severity == "information", attached.message
+    assert len(opened) == 1, "a store session for the check, and another for the write"
+
+    runner.invoke(app, ["explainability", "key", "clear"])
+    _json(runner, "explainability", "use", "acme/Frontend")
+    opened.clear()
+    with monkeypatch.context() as counting:
+        counting.setattr(store_module, "open_store", counted)
+        refused = view.attach_project_key("AIS_pasted_again", project, "local")
+    assert refused.severity == "warning" and "minted by the CLI" in refused.message
+    assert len(opened) == 1
     assert service.project_key_path(project.id).read_text() == idp.minted[0]["api_key"]
 
 

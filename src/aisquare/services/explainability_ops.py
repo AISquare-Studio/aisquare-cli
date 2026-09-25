@@ -444,7 +444,16 @@ def key_owner() -> str | None:
     return os.environ.get("USER") or None
 
 
-def attach_project_key(project: ProjectInfo, value: str, *, target: str) -> ProjectExplainability:
+class MintedKeyInPlace(Exception):
+    """The project's key file holds a key the CLI minted (#142), and the caller will not replace it.
+
+    Raised by :func:`attach_project_key` with ``refuse_minted``, before anything is written.
+    """
+
+
+def attach_project_key(
+    project: ProjectInfo, value: str, *, target: str, refuse_minted: bool = False
+) -> ProjectExplainability:
     """Attach ``value`` as ``project``'s own key for ``target`` — ``key set`` and *Attach key*.
 
     Attaching a key is a deliberate act, so the project is REGISTERED first
@@ -466,17 +475,25 @@ def attach_project_key(project: ProjectInfo, value: str, *, target: str) -> Proj
     it once the store is closed. The minted key's OWN value attached again is
     still that key: it stays minted, and nothing is owed — detached, the key
     just attached would have been revoked under the project (review of #172).
+
+    ``refuse_minted`` is the fleet UI's: its handlers run on the UI thread,
+    where the revoke a replaced minted key is owed cannot be made, so a minted
+    key raises :class:`MintedKeyInPlace` and nothing is written. Asked here,
+    in the session the write opens anyway: the tab asked it through a store
+    session of its own, then again beside this one (review of #172).
     """
     from aisquare.core.store import store_session  # lazy, as in project_key_binding
 
     with store_session() as store:
+        destination = store.project_destination(project.id)
+        if refuse_minted and destination is not None and destination.key_uid:
+            raise MintedKeyInPlace(project.id)
         store.onboard_project(project)
         earlier = None
         if store.project_explainability(project.id) is not None:
             # A binding whose file is gone keeps no file: it stays as `key show` saw it.
             with contextlib.suppress(OSError):
                 earlier = project_key_path(project.id).read_text(encoding="utf-8")
-        destination = store.project_destination(project.id)
         minted = None
         if destination is not None and earlier is not None and earlier.strip() == value.strip():
             minted = destination.key_uid

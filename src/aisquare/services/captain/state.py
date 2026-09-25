@@ -38,7 +38,7 @@ import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Literal, cast
+from typing import Any, Literal, cast
 
 from aisquare.core import paths, state_file
 from aisquare.core.store import store_session
@@ -58,7 +58,7 @@ _WHOLE_BOARD = "*"
 UNDO_KEEP = 20
 """How many reversible actions ``bt`` can walk back through, newest first."""
 
-UndoKind = Literal["claim", "done"]
+UndoKind = Literal["claim", "done", "wololo"]
 
 UI_SOCKET_MAX = 100
 """Bytes a unix socket path may take here: ``sun_path`` holds 108 on Linux and 104 on
@@ -257,11 +257,18 @@ def watermark(project_id: str, agent: str | None) -> int | None:
 
 
 def set_watermark(project_id: str, agent: str | None, seq: int) -> None:
+    """Move a watermark forward — never back. The CLI (T5) and the captain both advance it,
+    and a slower writer's older seq must not rewind what the faster one moved past."""
+
     def change(current: object) -> object:
         marks = cast(dict[str, object], current) if isinstance(current, dict) else {}
         board = marks.get(project_id)
         entries = cast(dict[str, object], board) if isinstance(board, dict) else {}
-        entries[agent or _WHOLE_BOARD] = seq
+        key = agent or _WHOLE_BOARD
+        existing = entries.get(key)
+        if isinstance(existing, int) and not isinstance(existing, bool) and existing >= seq:
+            return marks
+        entries[key] = seq
         marks[project_id] = entries
         return marks
 
@@ -429,26 +436,43 @@ def waiting_on() -> str | None:
 
 @dataclass(frozen=True)
 class Undo:
-    """One reversible action: a claim the captain made, or a task it closed."""
+    """One reversible action: a claim the captain made, a task it closed, or a wololo.
+
+    A ``wololo`` entry is compound (13242): the converted agent's session and label,
+    the card claimed for it (``task_id``), and the ``doing`` cards of its own that
+    the conversion released — so ``bt`` can give both sides back.
+    """
 
     kind: UndoKind
     task_id: str
     project_id: str
+    agent_session: str | None = None
+    label: str | None = None
+    released: tuple[str, ...] = ()
 
 
-def _undo_entries(current: object) -> list[dict[str, str]]:
+def _undo_entries(current: object) -> list[dict[str, Any]]:
     if current is None:
         return []
     if not isinstance(current, list):
         _log.warning("state.json captain_undo is not a list and is ignored: %r", current)
         return []
     kept = [
-        cast(dict[str, str], entry)
+        cast(dict[str, Any], entry)
         for entry in current
         if isinstance(entry, dict)
-        and entry.get("kind") in ("claim", "done")
+        and entry.get("kind") in ("claim", "done", "wololo")
         and isinstance(entry.get("task"), str)
         and isinstance(entry.get("project"), str)
+        and (
+            entry.get("kind") != "wololo"
+            or (
+                isinstance(entry.get("agent"), str)
+                and isinstance(entry.get("label"), str)
+                and isinstance(entry.get("released"), list)
+                and all(isinstance(card, str) for card in entry["released"])
+            )
+        )
     ]
     if len(kept) != len(current):
         _log.warning(
@@ -457,18 +481,42 @@ def _undo_entries(current: object) -> list[dict[str, str]]:
     return kept
 
 
-def record_undo(kind: UndoKind, task_id: str, project_id: str) -> None:
+def record_undo(
+    kind: UndoKind,
+    task_id: str,
+    project_id: str,
+    *,
+    agent_session: str | None = None,
+    label: str | None = None,
+    released: tuple[str, ...] = (),
+) -> None:
+    entry: dict[str, Any] = {"kind": kind, "task": task_id, "project": project_id}
+    if kind == "wololo":
+        entry.update({"agent": agent_session, "label": label, "released": list(released)})
+
     def change(current: object) -> object:
         entries = _undo_entries(current)
-        entries.append({"kind": kind, "task": task_id, "project": project_id})
+        entries.append(entry)
         return entries[-UNDO_KEEP:]
 
     state_file.modify_state(_UNDO, change)
 
 
+def record_undo_entry(entry: Undo) -> None:
+    """Put an entry back as it was (``bt`` after an undo that failed)."""
+    record_undo(
+        entry.kind,
+        entry.task_id,
+        entry.project_id,
+        agent_session=entry.agent_session,
+        label=entry.label,
+        released=entry.released,
+    )
+
+
 def pop_undo() -> Undo | None:
     """Take the newest reversible action off the log (``None`` when there is none)."""
-    popped: list[dict[str, str]] = []
+    popped: list[dict[str, Any]] = []
 
     def change(current: object) -> object:
         entries = _undo_entries(current)
@@ -480,7 +528,14 @@ def pop_undo() -> Undo | None:
     if not popped:
         return None
     entry = popped[0]
-    return Undo(cast(UndoKind, entry["kind"]), entry["task"], entry["project"])
+    return Undo(
+        cast(UndoKind, entry["kind"]),
+        entry["task"],
+        entry["project"],
+        agent_session=entry.get("agent"),
+        label=entry.get("label"),
+        released=tuple(entry.get("released") or ()),
+    )
 
 
 def _parse_time(raw: object) -> datetime | None:

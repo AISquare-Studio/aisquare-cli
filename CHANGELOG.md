@@ -173,6 +173,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   bind`, while an unknown top-level section beside them survived. Each entry
   is now merged like a section. The model still decides which entries exist,
   so a role removed on purpose stays removed.
+- **A credentials file saved with a UTF-8 BOM keeps its keys.** Windows
+  PowerShell 5.1's `Set-Content -Encoding UTF8` and Notepad's "UTF-8 with BOM"
+  put one in front of `~/.aisquare/credentials`, and the reader kept it, so the
+  JSON did not parse: a multi-line file read as empty, and the next write (a
+  serve token minted, a sign-in) replaced the API key and the IAM session with
+  its own key; a one-line file came back whole as the API key. The BOM is now
+  decoded away, as `state.json`'s reader already did.
 - **A store another line stamped 15 or 17 converges instead of failing.** Schema
   v15-v17 were claimed by other lines of development too: #136 stamps 15 for
   `work_brief`, #201 stamps 15 for persona columns, #113 stamps 15-17 for its

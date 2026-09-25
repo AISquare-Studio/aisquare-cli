@@ -18,7 +18,7 @@ from typer.testing import CliRunner
 from aisquare.cli.app import app
 from aisquare.core import personas as core
 
-BUNDLED = ["careful", "mentor", "minimalist", "skeptic"]
+BUNDLED = ["captain", "careful", "mentor", "minimalist", "skeptic"]
 
 
 @pytest.fixture(autouse=True)
@@ -90,7 +90,7 @@ def test_list_prints_the_bundled_personas_with_layer_and_description(runner: Cli
     assert result.exit_code == 0, result.output
     rows = result.stdout.splitlines()
     assert [row.split()[0] for row in rows] == BUNDLED
-    assert rows[3].split(None, 2) == ["skeptic", "bundled", core.resolve("skeptic").description]
+    assert rows[4].split(None, 2) == ["skeptic", "bundled", core.resolve("skeptic").description]
 
 
 def test_list_json_carries_each_field_and_the_directories_that_did_not_load(
@@ -103,7 +103,7 @@ def test_list_json_carries_each_field_and_the_directories_that_did_not_load(
     assert code == 0
     assert set(payload) == {"personas", "invalid"}
     assert [entry["name"] for entry in payload["personas"]] == BUNDLED
-    skeptic = payload["personas"][3]
+    skeptic = payload["personas"][4]
     assert set(skeptic) >= {"name", "description", "roles", "tags", "layer", "path", "files"}
     assert skeptic["layer"] == "bundled"
     assert skeptic["roles"] == ["tester", "reviewer", "runner"]
@@ -139,7 +139,7 @@ def test_show_of_an_unknown_name_is_one_line_not_a_traceback(runner: CliRunner) 
 
     assert human.exit_code == 1
     assert isinstance(human.exception, SystemExit)
-    assert "known: careful, mentor, minimalist, skeptic" in human.stderr
+    assert "known: captain, careful, mentor, minimalist, skeptic" in human.stderr
     assert (code, payload["error"]) == (1, "unknown_persona")
     assert "no persona named 'nope'" in payload["detail"]
 

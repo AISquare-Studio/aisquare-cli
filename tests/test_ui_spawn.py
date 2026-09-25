@@ -987,6 +987,7 @@ def test_the_persona_select_lists_none_and_the_catalogue_with_the_description_be
     prompts, before, after = drive(git_project, scenario)
     assert prompts == [
         "(none)",
+        "captain · bundled",
         "careful · bundled",
         "mentor · bundled",
         "minimalist · bundled",

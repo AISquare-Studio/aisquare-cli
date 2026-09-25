@@ -80,8 +80,10 @@ from aisquare.cli.ui.views.doctor import DoctorRefreshed, DoctorView
 from aisquare.cli.ui.views.onboard import OnboardFailed, OnboardView, ProjectOnboarded
 from aisquare.cli.ui.views.project import ProjectView
 from aisquare.cli.ui.views.welcome import WelcomeView
+from aisquare.core import paths
 from aisquare.core.console import stderr_console
 from aisquare.core.store import ContextStore, store_session
+from aisquare.core.workspace import project_id_for
 from aisquare.models import (
     AccountsOverview,
     CheckStatus,
@@ -165,9 +167,34 @@ class FleetSnapshot:
     taken_at: datetime = field(default_factory=datetime.now)
     stale_since: datetime | None = None
     """Set when a later refresh could not read the store and this frame was kept."""
+    home: ProjectInfo | None = None
+    """The captain's home board (T2): never one of ``projects`` and never a project to
+    the shell — no card, no project page, no Doctor scope. Its agent, the captain, is
+    in ``agents``, so selecting it resolves; :meth:`board` answers the home for the
+    actions on that row."""
 
     def project(self, project_id: str) -> ProjectInfo | None:
+        """A listed project — never the home board.
+
+        Every caller takes the answer for a project: the page ``stop_finished``
+        goes back to, the Doctor's scope, a restored selection's fallback. The
+        home answered here opened a project page of ``$AISQUARE_HOME`` — "has no
+        manager yet", with a Start-manager button onto the home board.
+        """
         return next((p for p in self.projects if p.id == project_id), None)
+
+    def board(self, project_id: str) -> ProjectInfo | None:
+        """The board an agent's row lives on: a listed project, or the captain's home.
+
+        Only for an action on the row itself — Stop needs the ``ProjectInfo`` of
+        the captain's board as much as any agent's.
+        """
+        if self.is_home(project_id):
+            return self.home
+        return self.project(project_id)
+
+    def is_home(self, project_id: str) -> bool:
+        return self.home is not None and self.home.id == project_id
 
     def agent(self, project_id: str, agent_id: str) -> FleetAgentStatus | None:
         return next((s for s in self.agents.get(project_id, []) if s.agent.id == agent_id), None)
@@ -413,7 +440,9 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         keeps for itself: the theme stays in ``state.json`` because the board
         shares it. A remembered agent whose row has left the frame falls back
         to its project; a project that is gone falls back to the welcome view,
-        and the memory is dropped rather than retried every launch.
+        and the memory is dropped rather than retried every launch. So does a
+        captain whose row has left: its board is no project, and
+        ``FleetSnapshot.project`` never answers the home (T2).
         """
         remembered = _ui_state(SELECTED_KEY)
         if not remembered or self.snapshot is None:
@@ -531,9 +560,17 @@ class FleetApp(SelectionHost, inherit_bindings=False):
     def refresh_data(self) -> None:
         """Re-read projects and agents; keep (and label) the last frame if the store is busy."""
         sidebar = self.sidebar
+        home_id = project_id_for(paths.aisquare_home().resolve())
         try:
             with store_session() as store:
-                projects = store.list_projects(all=self.show_captured)
+                # The home is captured, never onboarded, so only `a` lists it — and
+                # it is still no project: the captain's section shows its board (T2).
+                # As a card it doubled the captain's row, whose repeated selection
+                # key sent ↓ round a loop above every project, and it offered a
+                # spawn row onto the home board.
+                projects = [
+                    p for p in store.list_projects(all=self.show_captured) if p.id != home_id
+                ]
                 groups = store.project_groups()
         except Exception as exc:  # the store is briefly unavailable — keep what is shown
             self.store_error = f"{type(exc).__name__}: {exc}"
@@ -557,12 +594,52 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             except Exception as exc:  # a bug in the fleet path must not take the view down
                 agents[project.id] = []
                 notices[project.id] = f"agents unavailable — {type(exc).__name__}: {exc}"
+        home, captain, captain_notice = self._captain(home_id)
+        if home is not None:
+            agents[home.id] = [captain] if captain is not None else []
         self.store_error = None
-        self.snapshot = FleetSnapshot(projects, agents, notices)
+        self.snapshot = FleetSnapshot(projects, agents, notices, home=home)
         sidebar.show_notice(None)
+        sidebar.show_captain(captain, notice=captain_notice)
         sidebar.show_projects(projects, agents, notices=notices, groups=groups)
         self._feed_open_views(self.snapshot)
         self.refresh_accounts()
+
+    def _captain(
+        self, home_id: str
+    ) -> tuple[ProjectInfo | None, FleetAgentStatus | None, str | None]:
+        """The home board, its captain's row, and — when the read failed — why.
+
+        Read without writing anything: the home's id is computed, not registered,
+        because this runs on every refresh tick and ``captain_state.home_project()``
+        would write the row each time.
+
+        **A read that failed is not "no captain".** ``list_agents`` opens its own
+        session, so one momentarily locked sqlite db fails this read while the
+        projects' succeeded. Answered as ``(None, None)``, it took the LIVE
+        captain's row off the screen and told the owner to start one. A failure
+        keeps the last frame's home and row instead — Stop and Restart still
+        resolve against them — and the notice says why where the "starts one"
+        line would be: the project cards' rule, for the captain.
+        """
+        try:
+            with store_session() as store:
+                home = store.get_project(home_id)
+            if home is None:
+                return None, None, None
+            statuses = fleet_service.list_agents(home)
+        except Exception as exc:  # a bug in the fleet path must not take the view down
+            # The cards' wording: a FleetError already says what failed.
+            if isinstance(exc, fleet_service.FleetError):
+                reason = str(exc)
+            else:
+                reason = f"{type(exc).__name__}: {exc}"
+            last = self.snapshot
+            kept = last.home if last is not None else None
+            rows = last.agents.get(kept.id, []) if last is not None and kept is not None else []
+            return kept, next(iter(rows), None), f"captain unavailable — {reason}"
+        captain = next((s for s in statuses if s.agent.role == fleet_service.CAPTAIN_ROLE), None)
+        return home, captain, None
 
     def refresh_accounts(self) -> None:
         """Re-read the Claude accounts and the AISquare session; the section and the page follow.
@@ -989,8 +1066,12 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         self.post_message(AgentSelected(agent.project_id, agent.id))
 
     def on_stop_agent(self, event: StopAgent) -> None:
-        """The agent view's Stop button, or ``x`` on the selected row: one question first."""
-        project = self.snapshot.project(event.project_id) if self.snapshot else None
+        """The agent view's Stop button, or ``x`` on the selected row: one question first.
+
+        ``board``, not ``project``: the captain's row stops against the home board,
+        which is no listed project (T2).
+        """
+        project = self.snapshot.board(event.project_id) if self.snapshot else None
         status = self.snapshot.agent(event.project_id, event.agent_id) if self.snapshot else None
         if project is None or status is None:
             self.notify("that agent is no longer listed", severity="warning", timeout=4)
@@ -1004,13 +1085,24 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         happened, so nothing is said. Its own view would otherwise keep polling
         a pane that is gone, so the shell goes back to the project the way a
         click on the project's title does.
+
+        The captain's board is no project (T2): going back to it opened a
+        project page of ``$AISQUARE_HOME``. There is no page to go back to, so
+        the shell goes back to where it starts — the welcome page, nothing
+        selected, nothing to reopen at the next launch.
         """
         if agent is None:
             return
         self.notify(f"✓ stopped {agent.label} ({agent.id})", timeout=6, markup=False)
         self.refresh_data()
         view = self.current_view()
-        if isinstance(view, AgentView) and view.status.agent.id == agent.id:
+        if not (isinstance(view, AgentView) and view.status.agent.id == agent.id):
+            return
+        if self.snapshot is not None and self.snapshot.is_home(agent.project_id):
+            self.content.current = "welcome"
+            self.sidebar.select(None)
+            self._remember_selection(None)
+        else:
             self.post_message(ProjectSelected(agent.project_id))
 
     def on_spawn_completed(self, event: SpawnCompleted) -> None:
@@ -1067,6 +1159,15 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             self.run_doctor()
 
     def _set_doctor_scope(self, project_id: str | None) -> None:
+        if (
+            project_id is not None
+            and self.snapshot is not None
+            and self.snapshot.is_home(project_id)
+        ):
+            # The captain's board is no project (T2). Scoped to it, the Doctor ran
+            # the per-project checks with cwd=$AISQUARE_HOME and armed their fixes
+            # there; the captain's Doctor is the global one.
+            project_id = None
         changed = project_id != self.doctor_scope
         self.doctor_scope = project_id
         self.sidebar.set_doctor_scope(project_id)

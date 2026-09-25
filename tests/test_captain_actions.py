@@ -987,6 +987,16 @@ def test_read_pane_returns_the_tail_without_escapes_and_marks_it_untrusted(
     assert ok(actions.read_pane("alpha", "coder-1", lines=500))["lines"][0] == "old 0"
 
 
+def test_read_pane_strips_a_hyperlink_ended_by_st(
+    alpha: ProjectInfo, agents: dict[str, FleetAgent], fleet_rec: Fleet
+) -> None:
+    """coderp's S1 on #219: T1's pattern stripped a hyperlink ended by ST (ESC and one
+    backslash). The shared one must too, or read_pane hands the captain link targets."""
+    pane = fleet_rec.panes["%1"]
+    pane.screen = ["see \x1b]8;;https://example.com/pr/219\x1b\\the PR\x1b]8;;\x1b\\ now", ""]
+    assert ok(actions.read_pane("alpha", "coder-1", lines=5))["lines"][-1] == "see the PR now"
+
+
 def test_read_pane_refuses_an_agent_that_is_not_there(
     alpha: ProjectInfo, agents: dict[str, FleetAgent], fleet_rec: Fleet
 ) -> None:

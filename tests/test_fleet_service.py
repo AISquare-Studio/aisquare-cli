@@ -1500,6 +1500,82 @@ def test_a_spawn_onboards_a_captured_project_that_already_has_a_codename(
     assert project.id in listed, "the project its agent runs in is listed"
 
 
+@pytest.mark.parametrize("refusal", ["account", "worktree", "cap"])
+@pytest.mark.parametrize("state", ["captured", "forgotten"])
+def test_a_refused_spawn_leaves_the_registration_as_it_found_it(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    plain_project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    refusal: str,
+    state: str,
+) -> None:
+    """Review of #168, round 2: ``spawn`` onboarded the project before its refusals, so
+    a spawn refused for an account the machine does not have, a worktree outside git or
+    the cap listed a captured directory, or brought a forgotten one back, for an agent
+    that never started. A spawn that does start still adds its project, and one in a
+    forgotten directory comes back under the codename its tombstone kept."""
+    target = plain_project if refusal == "worktree" else project
+    first = _coder(target)
+    fleet_service.stop(target, first.label, force=True)
+    with store_session() as store:
+        kept = store.get_project(target.id)
+        assert kept is not None and kept.codename
+        store.forget_project(target.id)
+        if state == "captured":
+            store.ensure_project(target)  # a prompt there: back, not listed
+    # What `resolve_project` hands a spawn: the stored row, or for a forgotten
+    # directory the bare one its cwd resolves to.
+    asked = kept if state == "captured" else team_project(target.root)
+    spawned_before = len(tmux.spawned)
+    with pytest.raises(FleetError):
+        if refusal == "account":
+            fleet_service.spawn(asked, "coder", worktree=False, account="9")
+        elif refusal == "worktree":
+            fleet_service.spawn(asked, "coder", worktree=True)
+        else:
+            _settings(monkeypatch, max_agents_per_project=0)
+            fleet_service.spawn(asked, "coder", worktree=False)
+
+    assert len(tmux.spawned) == spawned_before, "nothing was started"
+    with store_session() as store:
+        assert target.id not in {p.id for p in store.list_projects()}, "not listed"
+        row = store.get_project(target.id)
+    if state == "captured":
+        assert row is not None and row.onboarded_at is None, "still captured"
+    else:
+        assert row is None, "still forgotten"
+    _settings(monkeypatch)  # the default cap again
+    started = fleet_service.spawn(asked, "coder", worktree=False)
+    assert started.tmux_session == f"asq-{kept.codename}"
+    with store_session() as store:
+        assert target.id in {p.id for p in store.list_projects()}, "a spawn that starts adds it"
+
+
+def test_a_codename_is_not_an_onboarding(
+    tmux: FakeTmux, project: ProjectInfo, tmp_path: Path
+) -> None:
+    """Review of #168, round 2: ``ensure_codename`` onboarded, so ``fleet attach`` in a
+    captured directory listed it and was then refused — it had no session to attach
+    to. A codename needs a live row, so a directory never seen is captured for it."""
+    with pytest.raises(FleetError, match="nothing to attach to"):
+        fleet_service.attach_argv(project)
+    unseen = team_project(tmp_path / "unseen")
+    named = fleet_service.ensure_codename(unseen)
+
+    assert named.codename
+    with store_session() as store:
+        assert store.list_projects() == []
+        captured = {p.id: p for p in store.captured_projects()}
+    assert set(captured) == {project.id, unseen.id}
+    assert captured[project.id].codename, "the attach still named the project"
+    # A deliberate caller still adds it.
+    fleet_service.rename(named, "quiet-lynx")
+    with store_session() as store:
+        assert [p.id for p in store.list_projects()] == [unseen.id]
+
+
 # --- derived state (§5.1) --------------------------------------------------------------
 
 

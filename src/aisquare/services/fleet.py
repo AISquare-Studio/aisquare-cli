@@ -500,12 +500,22 @@ def ensure_codename(project: ProjectInfo, store: ContextStore | None = None) -> 
     That refusal is retried, not raised: the walk is deterministic, and the
     re-read includes the name that was just taken, so the next attempt lands
     one pair further on.
+
+    A codename is not an onboarding (#139). ``attach_argv`` and ``_stop_row``
+    call this too, and neither is a deliberate add: ``fleet attach`` in a
+    captured directory listed it and was then refused, since it had no session
+    to attach to. A codename still needs a live row to sit on, so a directory
+    with none, never seen or forgotten, is CAPTURED here, as the next prompt
+    there would capture it. The deliberate callers onboard for themselves:
+    :func:`spawn` once its agent is recorded, :func:`rename` before it writes
+    (review of #168, round 2).
     """
     if project.codename:
         return project
 
     def assign(store: ContextStore) -> ProjectInfo:
-        store.onboard_project(project)  # entering the fleet is a deliberate add (#139)
+        if store.get_project(project.id) is None:
+            store.ensure_project(project)
         for _ in range(_CODENAME_RETRIES):
             current = store.get_project(project.id)
             if current is not None and current.codename:
@@ -1235,6 +1245,11 @@ def spawn(
     locked store, a relabel or the cap check can delay the agent's start, never
     strip its briefing (review of #135, second round, cut item).
 
+    A spawn is a deliberate add (#139): the project is onboarded with the row,
+    once the window exists, and not before a refusal could still come (review
+    of #168, round 2). A forget keeps the codename, so the onboarding cannot
+    ride on the codename's assignment.
+
     ``takes_over`` is a FRESH hand-over's (:func:`switch` with no transcript to
     resume, or ``--fresh``; never with ``resume``): the id of the session the
     agent ran as until now, whose claims wait for the replacement
@@ -1283,17 +1298,16 @@ def spawn(
         role, binary=binary, spec=spec, claude_code=claude_code, notes=notes
     )
     role_config = role_settings(role, config)
+    # Nothing up to the codename below writes the project's registration: every
+    # refusal that needs no window is given first (#139). A spawn refused for its
+    # account, its worktree, its task, the cap or a second manager had already
+    # onboarded the project, which listed a captured directory, and brought back a
+    # forgotten one, for an agent that never started (review of #168, round 2).
+    # The deliberate add is made with the agent's row (`_record`).
     with store_session() as store:
-        # A spawn is a deliberate add (#139) whatever the row already carries, so
-        # it onboards here and not only through `ensure_codename`'s assignment: a
-        # forget keeps the codename, and the next prompt there brings the row back
-        # captured. Not moved into `ensure_codename` itself: `_stop_row` and
-        # `attach_argv` call it too, and a shutdown stops a forgotten project's
-        # rows without reviving its registration (review of #121, round 7).
-        store.onboard_project(project)
-        project = ensure_codename(project, store)
-        codename = project.codename or codenames.codename_for(project.id)
+        known = store.get_project(project.id)
         rows = store.fleet_agents(project.id, live_only=False)
+    observed = project.codename or (known.codename if known is not None else None)
     live = [agent for agent in rows if agent.ended_at is None]
     # A row whose pane has died is ended HERE, before the checks below read it
     # (#138): a manager killed with ctrl+c in its window left a "live" row that
@@ -1301,7 +1315,7 @@ def spawn(
     # `reap`, while everyone could see the pane was dead. Absence is not
     # evidence and is left to `reap` (see `list_agents`). Every row is observed,
     # not only the live ones, because the ended rows' windows are read below.
-    views = _observe_sockets(rows, session_name(codename), config)
+    views = _observe_sockets(rows, session_name(observed) if observed else None, config)
     for ended in _end_dead_rows(live, views):
         live = [agent for agent in live if agent.id != ended.id]
         rows = [ended if agent.id == ended.id else agent for agent in rows]
@@ -1329,30 +1343,16 @@ def spawn(
             notes.append(f"label {label!r} is held by a live agent — using {picked!r}")
 
     use_worktree = role_config.worktree if worktree is None else worktree
-    cwd = project.root
+
+    def refuse_if_taken() -> None:
+        _refuse_occupied_worktree(project, config.worktree_dir, picked)
+
     if use_worktree:
         if not is_git_project(project.root):
             raise FleetError(
                 "not a git repository — spawn without --worktree or pick a repo inside it"
             )
-        branch = branch_name(
-            codename,
-            task_id=resolved_task_id,
-            title=task.title if task is not None else picked,
-        )
-
-        def refuse_if_taken() -> None:
-            _refuse_occupied_worktree(project, config.worktree_dir, picked)
-
         refuse_if_taken()
-        cwd = _ensure_worktree(
-            project.root,
-            config.worktree_dir,
-            picked,
-            branch,
-            notes,
-            refuse_if_taken=refuse_if_taken,
-        )
 
     mode = role_config.permission_mode if permission_mode is None else permission_mode
     # WHICH ACCOUNT, decided here and carried into the window as an explicit
@@ -1369,6 +1369,33 @@ def spawn(
         choice = claude_accounts_service.choose(account, role=role, project=project)
     except claude_accounts_service.NoSuchAccount as exc:
         raise FleetError(str(exc)) from exc
+
+    # The spawn goes ahead: the codename names its tmux session and its branch. A
+    # directory with no live row, never seen or forgotten, is captured for it
+    # (`ensure_codename`), not listed, and a worktree or a window that then cannot
+    # be made leaves it captured.
+    with store_session() as store:
+        project = ensure_codename(project, store)
+    codename = project.codename or codenames.codename_for(project.id)
+    if codename != observed:
+        # A forgotten project's ended rows keep their windows under the codename its
+        # tombstone kept, which the caller's registration did not carry.
+        views = _observe_sockets(rows, session_name(codename), config)
+    cwd = project.root
+    if use_worktree:
+        branch = branch_name(
+            codename,
+            task_id=resolved_task_id,
+            title=task.title if task is not None else picked,
+        )
+        cwd = _ensure_worktree(
+            project.root,
+            config.worktree_dir,
+            picked,
+            branch,
+            notes,
+            refuse_if_taken=refuse_if_taken,
+        )
     notes.extend(f"accounts: {note}" for note in choice.notes)
     # A replayed spec already holds the role's arguments as they were at spawn;
     # adding today's would double them (or add ones the agent never had).
@@ -1512,7 +1539,12 @@ def spawn(
         created_at=_now(),
     )
     stored = _record(
-        agent, project, srv, wanted=label, notes=notes, cap=config.max_agents_per_project
+        agent,
+        project,
+        srv,
+        wanted=label,
+        notes=notes,
+        cap=config.max_agents_per_project,
     )
     # `auto` behind the explainability proxy is refused from the first tool call
     # once the session baseline is past what the proxy's non-streaming forward
@@ -1807,6 +1839,11 @@ def _record(
     its busy timeout, or damaged), the cap — every one of them kills the window
     and raises :class:`FleetError`, because a live agent no row knows about is
     one no ``fleet ls`` shows and no ``fleet stop`` can address.
+
+    The spawn's deliberate add (#139) is made in the same store session, before
+    the insert, so a store that refuses it refuses the row too and the window
+    goes with it: onboarded after the insert, the refusal would leave a live
+    row on a killed window.
     """
     try:
         return _write_row(agent, project, wanted=wanted, notes=notes, cap=cap)
@@ -1828,10 +1865,16 @@ def _kill_unrecorded(srv: TmuxServer, pane_id: str) -> None:
 
 
 def _write_row(
-    agent: FleetAgent, project: ProjectInfo, *, wanted: str | None, notes: list[str], cap: int
+    agent: FleetAgent,
+    project: ProjectInfo,
+    *,
+    wanted: str | None,
+    notes: list[str],
+    cap: int,
 ) -> FleetAgent:
-    """The store half of :func:`_record`: insert, relabelling past a live collision."""
+    """The store half of :func:`_record`: onboard, insert, relabelling past a live collision."""
     with store_session() as store:
+        store.onboard_project(project)
         for _ in range(_LABEL_RETRIES):
             try:
                 stored = store.upsert_fleet_agent(agent)

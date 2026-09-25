@@ -959,8 +959,10 @@ Code, and `aisquare fleet attach` sends them through a raw tmux client instead.
 The table is generated from the translation table itself and pinned by
 `tests/test_keys.py` (one row per documented shortcut, plus the two-key
 sequences in order); `aisquare doctor` prints the `fleet terminal` line —
-which outer terminal it recognises, whether your tmux carries extended keys,
-and whether the running fleet server still has a prefix key.
+which outer terminal it recognises, whether the tmux the keys cross carries
+extended keys (the running fleet server's, which a tmux upgraded in place
+leaves on the old version until it restarts; yours when none runs), and
+whether the running fleet server still has a prefix key.
 
 | Claude Code shortcut | Sent to tmux (3.5+) | tmux 3.2–3.4 | Outer terminal |
 | --- | --- | --- | --- |

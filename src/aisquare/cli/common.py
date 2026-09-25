@@ -39,7 +39,6 @@ from aisquare.models import (
     StatusReport,
     TurnMetric,
 )
-from aisquare.services import project as project_service
 
 _DEFAULT_EMPTY = 'No context entries yet. Add one with: aisquare remember "…"'
 
@@ -71,7 +70,14 @@ def project_for_ref(ref: str) -> ProjectInfo:
     (review of #170's follow-ups, round 1, F6). One lookup for the
     explainability commands and ``doctor``, which carried a copy of it (F9).
     The JSON error stays ``not_found`` or ``ambiguous_project``.
+
+    The project service is imported here, not at module scope: this module is
+    imported by every command, and the service brings the store (``sqlite3``,
+    ``hashlib``) with it, which the commands that never name a project do not
+    pay for (tests/test_import_cost_of_the_integration.py).
     """
+    from aisquare.services import project as project_service  # lazy: see above
+
     try:
         return project_service.resolve(ref)
     except KeyError:

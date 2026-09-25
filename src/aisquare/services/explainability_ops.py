@@ -187,9 +187,10 @@ class ResolvedTarget:
     entry_shared: str | None = None
     """For a project's own deployment that has the machine's own target's name, what
     names that target: "config" (``settings.target``) or "env" (an exported
-    ``$AISQUARE_EXPLAINABILITY_TARGET``). Its ``[explainability.targets."<name>"]`` is
-    then also the entry every project without a destination reads, so a fix written
-    there moves them too (:func:`deployment_fix`); ``None`` otherwise."""
+    ``$AISQUARE_EXPLAINABILITY_TARGET``, when it is not what chose this deployment).
+    Its ``[explainability.targets."<name>"]`` is then also the entry every project
+    without a destination reads, so a fix written there moves them too
+    (:func:`deployment_fix`); ``None`` otherwise."""
 
     @property
     def configured(self) -> bool:
@@ -442,11 +443,13 @@ def resolve_target(
         source = "unset"
     proxy_url = target.proxy_url or (settings.proxy_url if machine else "")
     # The project's deployment, named like the machine's own target: one config entry
-    # for both, which `deployment_fix` must not name as this deployment's alone.
+    # for both, which `deployment_fix` must not name as this deployment's alone. Not
+    # when the variable chose this deployment itself: pointing it elsewhere moved the
+    # project off the entry the fix named (review of #203, round 3).
     entry_shared = None
     if not machine and chosen == settings.target:
         entry_shared = "config"
-    elif not machine and chosen == exported:
+    elif not machine and chosen == exported and target_source != "env":
         entry_shared = "env"
 
     roles = target.roles if target.roles is not None else settings.roles

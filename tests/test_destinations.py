@@ -943,6 +943,38 @@ def test_a_key_set_for_another_machine_target_with_no_gateway_answers_for_its_de
     assert binding is not None and ops.kept_key_note(binding, after, settings) == ""
 
 
+def test_a_deployment_the_variable_chose_is_not_one_its_fix_moves_the_variable_off(
+    isolated_home: Path, tmp_path: Path
+) -> None:
+    """``entry_shared`` "env" says an exported ``$AISQUARE_EXPLAINABILITY_TARGET`` names
+    the machine's target in this shell, so a fix for a project's deployment of that name
+    says to point the variable elsewhere. It was also set when the variable itself chose
+    this project's deployment (no destination, its key bound to the exported target), and
+    the fix, followed, moved the project off the entry it named (review of #203, round 3).
+    """
+    config = AppConfig()
+    config.explainability.target = "prod"
+    config.explainability.targets["selfhosted"] = ExplainabilityTarget(api_key_env="SELF_KEY")
+    save_config(config)
+    project = _project(tmp_path / "web")
+    ops.attach_project_key(project, "AIS_self_key", target="selfhosted")
+    resolved = ops.resolve_target(
+        load_config().explainability,
+        None,
+        project_id=project.id,
+        env={ops.TARGET_ENV_VAR: "selfhosted"},
+    )
+    assert (resolved.target_source, resolved.key_source, resolved.project_deployment) == (
+        "env",
+        "project",
+        True,
+    )
+    assert resolved.entry_shared is None
+    fix = " ".join(ops.deployment_fix(resolved).split())
+    assert '[explainability.targets."selfhosted"]' in fix
+    assert "names another target" not in fix
+
+
 def test_no_remediation_for_a_projects_deployment_makes_it_the_machines_target(
     isolated_home: Path, tmp_path: Path
 ) -> None:

@@ -177,11 +177,19 @@ def test_the_undo_log_pops_the_last_reversible_action_and_keeps_twenty() -> None
 
 
 def test_the_ui_socket_lives_in_the_home_when_the_path_fits(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    home = tmp_path / "h"
-    monkeypatch.setenv("AISQUARE_HOME", str(home))
-    assert captain_state.ui_socket_path() == home.resolve() / "captain" / "ui.sock"
+    # A home made short on purpose: pytest's tmp_path on the windows-latest runner is long
+    # enough by itself to push the socket past UI_SOCKET_MAX (CI on d8de2638), which is the
+    # OTHER branch of the rule, pinned by the next test.
+    home = Path(tempfile.mkdtemp(prefix="h", dir=None if sys.platform == "win32" else "/tmp"))
+    try:
+        monkeypatch.setenv("AISQUARE_HOME", str(home))
+        natural = home.resolve() / "captain" / "ui.sock"
+        assert len(os.fsencode(str(natural))) <= captain_state.UI_SOCKET_MAX
+        assert captain_state.ui_socket_path() == natural
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
 
 
 def test_a_home_too_long_for_a_unix_socket_gets_a_short_path_of_its_own(

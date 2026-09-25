@@ -1312,6 +1312,21 @@ def test_an_unchanged_fold_does_not_rewrite_the_file(fx: Fixture) -> None:
     assert fx.path.read_bytes() == before and fx.path.stat().st_mtime_ns == stamp
 
 
+def test_a_crlf_file_from_a_windows_write_is_still_an_unchanged_fold(fx: Fixture) -> None:
+    """13147: write_replacing writes text mode, so on Windows queue.json holds \\r\\n and
+    the unchanged check compared LF text against the CRLF file: identical content was
+    rewritten on every fold (st_mtime_ns moved 7 ms on CI). Newlines are normalised on
+    read, so a cold queue over a CRLF file is a no-op there too."""
+    _seed_three_projects(fx)
+    fx.queue().refresh()
+    fx.path.write_bytes(fx.path.read_bytes().replace(b"\n", b"\r\n"))
+    before = fx.path.read_bytes()
+    stamp = fx.path.stat().st_mtime_ns
+    fx.clock.tick(seconds=5)
+    fx.queue().refresh()  # a fresh queue reads the CRLF file cold
+    assert fx.path.read_bytes() == before and fx.path.stat().st_mtime_ns == stamp
+
+
 def test_snooze_is_bounded(fx: Fixture) -> None:
     fx.manager(fx.alpha)
     fx.ask(fx.alpha, "Approve the deploy", seq=1)

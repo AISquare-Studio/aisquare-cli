@@ -29,7 +29,7 @@ from aisquare.services.captain import brain
 from aisquare.services.captain import state as captain_state
 from tests import test_captain_say as say_suite
 from tests import test_ui_shell as ui_suite
-from tests.captain_screens import REAL_TRUST
+from tests.captain_screens import INPUT_BOX, REAL_IDLE_AFTER_STOP, REAL_TRUST
 from tests.test_captain_say import Captain, Clock
 from tests.test_captain_sidebar import agent_opened, quiet, until
 from tests.test_ui_shell import Script, fleet_app, row_for, seed, shown, status
@@ -301,12 +301,21 @@ async def _whats_up(pilot: Pilot[None]) -> list[str]:
     return [str(note.message) for note in app._notifications]
 
 
+@pytest.mark.parametrize(
+    "box",
+    [
+        pytest.param(INPUT_BOX, id="the named top rule"),
+        pytest.param(REAL_IDLE_AFTER_STOP, id="a real Claude Code idle box"),
+    ],
+)
 def test_the_quick_action_types_through_the_guarded_door_never_fleet_tell(
-    tmp_path: Path, script: Script, captain_door: tuple[Captain, Clock]
+    tmp_path: Path, script: Script, captain_door: tuple[Captain, Clock], box: list[str]
 ) -> None:
-    """13325 B1: T2's brain.send, which reads the pane first — a drawn input box, typed."""
+    """13325 B1: T2's brain.send, which reads the pane first — a drawn input box, typed. The
+    box as Claude Code draws it: its top rule carries the agent's name (T2b, 13388)."""
     fake, _ = captain_door
     fake.present()  # type: ignore[attr-defined]
+    fake.screen = list(box)
     script[captain_state.home_project().id] = [_captain("waiting")]
     said = drive(_whats_up)
     assert fake.typed == [("paste", WHAT_IS_UP), ("keys", "Enter")]

@@ -277,7 +277,7 @@ class SettingsView(VerticalScroll):
                 PICK_MODES, value=self.accounts.pick, allow_blank=False, id="accounts-pick"
             )
         with Horizontal(classes="row"):
-            yield Label("switch at (% of 5 h)")
+            yield Label("switch at (% used)")
             yield Input(value=str(self.accounts.switch_at), type="integer", id="accounts-switch-at")
         with Horizontal(classes="row"):
             yield Label("on a usage limit")
@@ -399,7 +399,7 @@ class SettingsView(VerticalScroll):
         except ValueError:
             return "switch at and wait-if-reset-within must be whole numbers"
         if not 1 <= switch_at <= 100:
-            return "switch at must be between 1 and 100 (a percentage of the five-hour window)"
+            return "switch at must be between 1 and 100 (a percentage of a usage window)"
         if wait_minutes < 0:
             return "wait if reset within cannot be negative"
         pick = self.query_one("#accounts-pick", Select).value
@@ -414,16 +414,28 @@ class SettingsView(VerticalScroll):
         )
 
     def _apply_account_bindings(self, config: AppConfig) -> None:
-        """Fold the account selects into ``config.team.profiles`` — the binding's one home.
+        """Fold the account selects the operator CHANGED into ``config.team.profiles``.
 
         A role whose select says "no binding" and whose profile holds nothing
         else has its profile REMOVED, not emptied: `team bind --clear` is one
         pop for the same reason, and an empty ``[team.profiles.coder]`` table
         would make ``_declared_roles`` think the operator declared a role.
+
+        A select still showing the binding the form was read with is left
+        alone: ``config`` is the file as it is NOW, and the form's copy may be
+        stale. Written back regardless, it undid every binding changed since
+        the tab was read — among them the re-pointing ``accounts remove`` does
+        (``_retarget_bindings``) so that a removed slot's number is not
+        inherited by the next login in that slot, run from the Accounts page
+        of this same app, which the kept-alive tab never hears about. The next
+        ``add`` reuses the slot, and the role launched on a stranger's login
+        without a word (final review of #203, accounts F3).
         """
         for role in self._roles:
             value = self.query_one(f"#acct-{widget_suffix(role)}", Select).value
             chosen = value if isinstance(value, str) and value != NO_ACCOUNT else None
+            if chosen == self._account_bindings.get(role):
+                continue  # untouched on the form: the file's binding stands
             profile = config.team.profiles.get(role)
             if chosen is None:
                 if profile is None:

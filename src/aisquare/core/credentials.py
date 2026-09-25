@@ -82,6 +82,14 @@ def load_all(*, strict: bool = False) -> dict[str, str]:
     traceback (review of the #65 fold, round 2, F4). It is ``{}`` by default
     and raised when ``strict``: the keys are still in it, in an encoding this
     reader does not speak, and a ``store`` must not replace them.
+
+    A UTF-8 file that starts with a BOM is decoded without it (``utf-8-sig``,
+    as ``core.state_file`` reads). Kept, the BOM made ``json.loads`` refuse the
+    document, which is a ``ValueError``, so even ``strict`` read it through
+    ``_legacy``: a multi-line document came back as ``{}`` and the next
+    ``store`` replaced every other secret, and a one-line one came back whole
+    as ``api_key``. Windows PowerShell 5.1's ``Set-Content -Encoding UTF8``
+    and Notepad's "UTF-8 with BOM" write one (final review of #203, store F3).
     """
     path = paths.credentials_path()
     if not path.exists():
@@ -99,7 +107,7 @@ def load_all(*, strict: bool = False) -> dict[str, str]:
         # The `except` is unchanged and still means what it says — a file that
         # genuinely cannot be read is nothing we can name — but contention is
         # now resolved before it gets there rather than swallowed by it.
-        raw = paths.despite_windows_contention(lambda: path.read_text(encoding="utf-8"))
+        raw = paths.despite_windows_contention(lambda: path.read_text(encoding="utf-8-sig"))
     except FileNotFoundError:
         return {}
     except (OSError, UnicodeDecodeError):

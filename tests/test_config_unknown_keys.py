@@ -151,3 +151,41 @@ def test_unknown_keys_survive_a_round_trip_through_this_build(tmp_path: Path) ->
     for key in ("sampling_rate", "redaction_profile", "retry"):
         assert key in explainability, f"{key} was erased by an ordinary write"
     assert _sections(target)["profile"] == "changed", "the actual edit did not land"
+
+
+def test_an_unknown_field_inside_a_role_entry_survives_and_a_removed_entry_stays_gone(
+    tmp_path: Path,
+) -> None:
+    """``[team.profiles.<role>]`` and ``[fleet.roles.<role>]`` are MAPPINGS of models.
+
+    The merge owned a mapping wholesale, so any save from this build erased what
+    other builds keep inside those entries, ``agent`` (#113) and ``persona``
+    (#201), while an unknown top-level section beside them survived (final
+    review of #203, store F2). Each entry the model kept is now merged like a
+    section; the model still owns which entries exist, so a role removed here
+    stays removed, and an edit to a kept one lands.
+    """
+    target = tmp_path / "config.toml"
+    _write(
+        target,
+        '[team.profiles.coder]\naccount = "2"\nagent = "codex"\n\n'
+        '[team.profiles.tester]\naccount = "3"\n\n'
+        '[fleet.roles.coder]\nworktree = true\npersona = "architect"\n\n'
+        "[future_section]\nkept = 1\n",
+    )
+
+    config = load_config(target)
+    config.team.profiles["coder"].account = "4"
+    config.team.profiles.pop("tester")
+    save_config(config, target)
+
+    data = _sections(target)
+    team, fleet = data["team"], data["fleet"]
+    assert isinstance(team, dict) and isinstance(fleet, dict)
+    coder = team["profiles"]["coder"]
+    assert coder["agent"] == "codex", "a field another build keeps in a role entry was erased"
+    assert coder["account"] == "4", "the edit to the entry did not land"
+    assert "tester" not in team["profiles"], "a removed entry came back"
+    assert fleet["roles"]["coder"]["persona"] == "architect"
+    assert fleet["roles"]["coder"]["worktree"] is True
+    assert data["future_section"] == {"kept": 1}

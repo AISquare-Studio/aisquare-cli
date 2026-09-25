@@ -123,6 +123,22 @@ def test_an_unreadable_config_still_resets(runner: CliRunner) -> None:
     assert load_config().explainability.targets == {}
 
 
+def test_a_config_that_is_not_utf8_still_resets(runner: CliRunner) -> None:
+    """The same recovery for a file ``doctor`` reports as undecodable rather than invalid.
+
+    Windows PowerShell 5.1's ``>`` and ``Out-File`` write UTF-16. The reset's save
+    reads the file it replaces to keep unknown keys, and a decode error escaped it:
+    ``--reinit`` exited 1 with a traceback (review of the #203 store fixes, round 2).
+    """
+    runner.invoke(app, ["init", "--yes"], catch_exceptions=False)
+    paths.config_path().write_bytes('profile = "work"\n'.encode("utf-16"))
+
+    result = runner.invoke(app, ["init", "--reinit"], catch_exceptions=False)
+
+    assert result.exit_code == 0, result.output
+    assert load_config() == AppConfig()
+
+
 def test_plain_init_never_refuses(runner: CliRunner, tmp_path: Path) -> None:
     """Only `--reinit` resets, so only `--reinit` can be refused."""
     runner.invoke(app, ["init", "--yes"], catch_exceptions=False)

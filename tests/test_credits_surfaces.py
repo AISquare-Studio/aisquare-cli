@@ -33,6 +33,7 @@ from tests.test_credits import BALANCE, NOW
 from tests.test_ui_accounts import (
     _overview,
     _status,
+    accounts_read,
     drive,
     fleet_app,
     open_accounts,
@@ -418,7 +419,7 @@ def test_a_sign_in_or_out_in_another_terminal_follows_on_the_next_frame(
         before = shown(line)
         current["session"] = None  # `aisquare logout` in another terminal
         app_.refresh_accounts()
-        await pilot.pause()
+        await accounts_read(app_)
         signed_out = shown(line)
         current["session"] = session  # and `aisquare login` again
         app_.refresh_accounts()
@@ -520,7 +521,7 @@ def test_another_sign_in_while_the_page_is_hidden_never_shows_the_last_ones_bars
             current["session"] = other  # `aisquare login` as someone else, in another terminal
             idp.credits = json.loads(json.dumps(BALANCE)) | {"state": "exhausted"}
             app_.refresh_accounts()
-            await pilot.pause()
+            await accounts_read(app_)  # not `settle`: the credits reading is held on purpose
             hidden = shown(line)
         finally:
             hold.clear()

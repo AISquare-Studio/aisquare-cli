@@ -1000,6 +1000,46 @@ def test_settings_binds_an_account_per_role_and_a_cleared_one_leaves_no_empty_pr
     assert "coder" not in load_config().team.profiles  # nothing else bound: the table goes
 
 
+def test_settings_save_leaves_the_bindings_it_did_not_change_as_the_file_has_them(
+    project: ProjectInfo,
+) -> None:
+    """Final review of #203, accounts F3: Save wrote every role's account select back, so a
+    binding changed since the tab was read was reverted by a save of any other field. The
+    sharp case is ``accounts remove``, run from the Accounts page of the same app: it clears
+    a binding to a slot that had no login, so the next ``add`` into that slot is not
+    inherited by the role, and the kept-alive tab put the number straight back."""
+    from aisquare.core import claude_accounts as accounts_core
+    from aisquare.services import claude_accounts as accounts_service
+    from aisquare.services import settings as settings_service
+
+    removed = accounts_core.create_account()  # slot 2, never signed in
+    accounts_core.create_account()  # slot 3
+    settings_service.bind_role("coder", account="2")
+    settings_service.bind_role("tester", account="2")
+
+    async def scenario(pilot: Pilot[None], host: Host) -> tuple[list[str], list[tuple[str, str]]]:
+        host.query_one(ProjectView).active = "tab-settings"
+        await settle(pilot)  # the form holds coder → 2 and tester → 2
+        notes: list[str] = []
+        accounts_service.remove(removed, notes=notes)  # the Accounts page's Remove
+        settings_service.bind_role("reviewer", account="3")  # `team bind` in another shell
+        host.query_one("#acct-tester", Select).value = "3"  # the one change made here
+        host.query_one("#max-agents", Input).value = "7"
+        host.query_one("#save-settings", Button).press()
+        await pilot.pause()
+        return notes, host.notices
+
+    notes, notices = drive(project, scenario)
+    assert any(m.startswith("✓ fleet settings saved") for m, _ in notices), notices
+    assert any("role coder was bound to slot 2" in note for note in notes), notes
+    profiles = load_config().team.profiles
+    assert "coder" not in profiles or profiles["coder"].account is None  # the clear stands
+    assert profiles["reviewer"].account == "3"  # the other shell's binding stands
+    assert profiles["tester"].account == "3"  # what the operator changed here lands
+    assert load_config().fleet.max_agents_per_project == 7
+    assert accounts_core.create_account().slot == 2  # the slot the stale "2" would have named
+
+
 def test_the_settings_form_reads_its_file_once_and_the_slots_off_the_ui_thread(
     project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:

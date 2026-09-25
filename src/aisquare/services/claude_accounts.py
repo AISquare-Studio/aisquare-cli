@@ -410,7 +410,7 @@ def choose(
 
     One rung is optional (#146): with ``[accounts] pick = "headroom"`` — or
     ``spread=True``, which a hand-over passes — the machine default gives way to
-    :func:`headroom_choice`, the account with room in its five-hour window,
+    :func:`headroom_choice`, the account with room in both of its windows,
     ``exclude`` naming the slot a hand-over is leaving. When no account's usage
     can be read, the machine default decides exactly as before.
 
@@ -773,8 +773,9 @@ def usage(
 # v16), and `usage_trend` turns this window's rows into "at this pace, N minutes
 # to the limit". `headroom_choice` is the automatic pick `[accounts] pick =
 # "headroom"` switches on: it reads every enabled, signed-in account ONCE,
-# concurrently, and applies one rule — in priority order, the first account
-# under `switch_at`; failing that, the one with the most room. Best effort at
+# concurrently, and applies one rule to the fuller of each account's two
+# windows (`headroom_percent`) — in priority order, the first account under
+# `switch_at`; failing that, the one with the most room. Best effort at
 # every step, because the endpoint is undocumented (§5): an account that does
 # not answer is skipped with a note, and when none answers the caller's next
 # rung (the machine default) decides exactly as it did before #146.
@@ -991,6 +992,44 @@ def read_usage_with_trends(
     return result
 
 
+def headroom_percent(reading: ClaudeUsage) -> float | None:
+    """How full an account reads for a pick: the FULLER of its two windows, or ``None``.
+
+    A weekly limit refuses requests exactly as a five-hour one does, and an
+    account that has spent its week builds no five-hour usage, so its
+    five-hour window reads near 0 % once that window rolls over. Ranked on the
+    five-hour window alone it was the account with the most room: the
+    automatic hand-over moved an agent that had just hit its weekly limit back
+    onto an account that had hit its own, the first request was refused, and
+    the hand-over cooldown then kept the agent parked until a reset days away
+    (final review of #203, accounts F1). ``None`` when the five-hour window was
+    not read, which the pick skips as it always has; the seven-day window only
+    ever makes an account read fuller.
+    """
+    if not reading.available or reading.session_percent is None:
+        return None
+    if reading.week_percent is None:
+        return reading.session_percent
+    return max(reading.session_percent, reading.week_percent)
+
+
+def describe_headroom(account: ClaudeAccount, reading: ClaudeUsage) -> str:
+    """``account 2 40%`` — and ``account 2 5% (week 100%)`` when the week is the fuller window.
+
+    The five-hour figure leads, as it does on the page; the weekly one is
+    named only when it is what ranks the account, so a note never shows a low
+    number beside an account the pick passed over without saying why.
+    """
+    name = core.label(account)
+    session = reading.session_percent
+    if session is None:
+        return name
+    week = reading.week_percent
+    if week is not None and week > session:
+        return f"{name} {session:.0f}% (week {week:.0f}%)"
+    return f"{name} {session:.0f}%"
+
+
 def headroom_choice(
     accounts: Sequence[ClaudeAccount],
     *,
@@ -1011,11 +1050,13 @@ def headroom_choice(
     ``exclude`` (the account a hand-over is leaving). Their usage is read
     concurrently through :func:`read_usage`, so a pick costs one round trip,
     not one per account. The rule: the FIRST candidate under ``switch_at``
-    percent of its five-hour window — priority order is the operator's
-    preference, and an account with room keeps it — else the candidate with
-    the lowest usage, because "every account is nearly out" still has a least
-    bad answer. An account whose usage cannot be read is skipped and named;
-    ``None`` when nothing could be measured, so the caller's next rung decides.
+    percent of the fuller of its two windows (:func:`headroom_percent`: a
+    spent week is no room, however empty the five hours read) — priority order
+    is the operator's preference, and an account with room keeps it — else the
+    candidate with the lowest usage, because "every account is nearly out"
+    still has a least bad answer. An account whose usage cannot be read is
+    skipped and named; ``None`` when nothing could be measured, so the
+    caller's next rung decides.
     """
     skip = set(exclude)
     candidates = [
@@ -1030,8 +1071,9 @@ def headroom_choice(
     notes: list[str] = []
     for account in candidates:
         reading = readings[account.slot]
-        if reading.available and reading.session_percent is not None:
-            measured.append((account, reading.session_percent))
+        percent = headroom_percent(reading)
+        if percent is not None:
+            measured.append((account, percent))
         else:
             notes.append(
                 f"headroom: {core.label(account)} skipped — {reading.reason or 'no reading'}"
@@ -1039,7 +1081,7 @@ def headroom_choice(
     if not measured:
         notes.append("headroom: no account's usage could be read — the default decides")
         return None, notes
-    summary = " · ".join(f"{core.label(a)} {pct:.0f}%" for a, pct in measured)
+    summary = " · ".join(describe_headroom(a, readings[a.slot]) for a, _pct in measured)
     under = next((a for a, pct in measured if pct < switch_at), None)
     if under is not None:
         notes.append(f"headroom: {summary} — {core.label(under)} is first under {switch_at}%")

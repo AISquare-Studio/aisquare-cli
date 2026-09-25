@@ -68,8 +68,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   proxy would not take a session"; the destination check widened it without a
   word. Both states are "the traces are not arriving where you think", which is
   what a cutover script gating on this code asks, so the rule stands and the
-  docstring, the comment and this entry carry it. Amber exits 0, and
-  `probe_severity` says which — that field is now tested, with `probe_fix`.
+  docstring, the comments, the cutover runbook, the connecting guide and this
+  entry carry it. Amber exits 0, and `probe_severity` says which — that field
+  is now tested, with `probe_fix`.
 - **The key field is cleared even when the key write fails.** A failed
   `store_api_key` returned before the field was cleared, leaving the plaintext
   live in a masked `Input` for the rest of the session.
@@ -165,6 +166,34 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     trailing slash or an explicitly written default port is not a misroute.
   - `explainability.is_loopback` is public for the second module that needs the
     same discriminator, on the precedent `stored_api_key` set.
+- **A save keeps what another build stores inside a role's entry.**
+  `[team.profiles.<role>]` and `[fleet.roles.<role>]` are maps of settings, and
+  a save from this build replaced each map whole: a field it has no name for
+  inside an entry — `agent` from the coding-agent adapters, `persona` from
+  spawn personas — was erased by any `config set`, Settings save or `team
+  bind`, while an unknown top-level section beside them survived. Each entry
+  is now merged like a section. The model still decides which entries exist,
+  so a role removed on purpose stays removed.
+- **A credentials file saved with a UTF-8 BOM keeps its keys.** Windows
+  PowerShell 5.1's `Set-Content -Encoding UTF8` and Notepad's "UTF-8 with BOM"
+  put one in front of `~/.aisquare/credentials`, and the reader kept it, so the
+  JSON did not parse: a multi-line file read as empty, and the next write (a
+  serve token minted, a sign-in) replaced the API key and the IAM session with
+  its own key; a one-line file came back whole as the API key. The BOM is now
+  decoded away, as `state.json`'s reader already did.
+- **A `config.toml` saved with a UTF-8 BOM loads.** The same editors put one in
+  front of `~/.aisquare/config.toml`, which the TOML parser refuses: commands
+  that read the config failed on it, a launch went untraced, and a save could
+  not read the file it merges into and dropped the sections this build does
+  not know. It is decoded past the BOM like the credentials file, and written
+  back without it.
+- **`init --reinit` resets a `config.toml` that is not UTF-8.** Windows
+  PowerShell 5.1's `>` and `Out-File` write UTF-16. `doctor` reports such a file
+  as invalid and points to `aisquare init --reinit`, but the reset's save read
+  the file first to keep the keys this build does not know, and the decode
+  error escaped: the documented recovery exited 1 with a traceback. The save now
+  treats a file it cannot decode like one it cannot parse and writes the
+  defaults; `doctor` still reports the file until then.
 - **A store another line stamped 15 or 17 converges instead of failing.** Schema
   v15-v17 were claimed by other lines of development too: #136 stamps 15 for
   `work_brief`, #201 stamps 15 for persona columns, #113 stamps 15-17 for its
@@ -330,8 +359,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   when its limit hits** (#146). A new `[accounts]` section (Settings tab, or
   `aisquare config set accounts.<key>`): `pick = headroom` makes every launch
   that nothing names an account for read each enabled, signed-in account's
-  five-hour window and take, in priority order, the first under `switch_at`
-  (85 %) — or the one with the most room when all are over it; usage that
+  usage and take, in priority order, the first under `switch_at` (85 %) — or
+  the one with the most room when all are over it. An account is as full as
+  the fuller of its five-hour and weekly windows, so one that has spent its
+  week is never taken for an empty five hours. Usage that
   cannot be read is skipped with a note, and when none can, the machine
   default decides as before. Every reading is kept (`claude_usage`, schema
   v16), so `accounts usage`, `list --usage` and the Accounts page say
@@ -381,7 +412,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   directories stay the record of which accounts exist; a removed slot's
   default, alias and project defaults go with it, so the next `add` in that
   number inherits nothing. On the Accounts page each row carries ★ *Default*,
-  ↑/↓ and *Disable*/*Enable*; the Settings tab binds an account per role; the
+  ↑/↓ and *Disable*/*Enable*; the Settings tab binds an account per role, and
+  its *Save* writes only the bindings changed there, so a binding `accounts
+  remove` or `team bind` changed while the tab was open stands; the
   agent header and `fleet ls` show the slot an agent was resolved to. `doctor`
   warns when the default is not signed in or disabled (`claude-account-default`)
   and when a role or project names a missing account (`claude-account-bindings`).
@@ -1049,8 +1082,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
   Three skips remain, all structural rather than deferred. The stdio-daemon
   leak probe needs each process's ENVIRONMENT to tell our daemons from a
-  sibling checkout's and `Win32_Process` carries only the command line, so it
-  and its two self-tests are `/proc`-only. Mount-table matching needs POSIX
+  sibling checkout's and `Win32_Process` carries only the command line, so its
+  two self-tests are `/proc`-only, and on Windows the #20 storm runs every
+  check but that leak count. Mount-table matching needs POSIX
   path semantics, and Windows has no mount table — the Windows answer
   (`None`, through the existing fail-open) is asserted separately so the
   behaviour is pinned rather than merely skipped.

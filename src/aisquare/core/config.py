@@ -320,9 +320,10 @@ class AccountsSettings(BaseModel):
     ``pick`` is how a launch chooses an account when nothing names one (no
     ``--account``, no role binding, no project default): ``default`` takes the
     machine default (#145); ``headroom`` reads each enabled, signed-in account's
-    five-hour usage and takes, in priority order, the first one under
-    ``switch_at`` percent — or, when every account is over it, the one with the
-    most room left. Usage is the undocumented endpoint Claude Code's own
+    usage and takes, in priority order, the first one under ``switch_at``
+    percent of the fuller of its two windows (five-hour and weekly) — or, when
+    every account is over it, the one with the most room left. Usage is the
+    undocumented endpoint Claude Code's own
     ``/usage`` reads (docs/plans/claude-accounts.md §5), so ``headroom`` is best
     effort: an account whose usage cannot be read is skipped with a note, and
     when none can be read the machine default decides as before.
@@ -381,13 +382,26 @@ def _keep_unknown(existing: Any, dumped: Any, model: Any) -> Any:
     the harm actually took, all five lost keys being sub-keys of a section both
     builds knew about.
 
-    A field whose value is a plain container (``targets: dict[str, Target]``)
-    has no sub-model to recurse into, so the model owns that subtree entirely
-    and it is replaced wholesale. That is correct: its keys are data, and a
-    stale entry there is a stale deployment, not an unknown field.
+    A field whose value is a MAPPING of sub-models (``targets: dict[str,
+    Target]``, ``[team.profiles.<role>]``, ``[fleet.roles.<role>]``) keeps two
+    rules apart. Its keys are data, so the model owns WHICH entries exist: a
+    removed target or role stays removed, and a stale entry is a stale
+    deployment, not an unknown field. But every entry the model kept is still a
+    model, and an unknown field INSIDE it survives like any other. The mapping
+    used to be replaced wholesale, so any save from this build erased what
+    other builds keep in those entries — ``[team.profiles.coder].agent`` (#113),
+    ``[fleet.roles.coder].persona`` (#201) — while an unknown top-level section
+    beside them survived (final review of #203, store F2). The recursion is
+    #201's, so the two builds agree on it. A mapping of plain values has
+    nothing to recurse into and is the model's.
     """
     if not isinstance(existing, dict) or not isinstance(dumped, dict):
         return dumped
+    if isinstance(model, dict):
+        return {
+            key: _keep_unknown(existing.get(key), value, model.get(key))
+            for key, value in dumped.items()
+        }
     fields = getattr(type(model), "model_fields", None)
     if not fields:
         return dumped
@@ -400,6 +414,24 @@ def _keep_unknown(existing: Any, dumped: Any, model: Any) -> Any:
     return merged
 
 
+def _parse_toml(raw: bytes) -> dict[str, Any]:
+    """The TOML document in ``raw``, read past a UTF-8 BOM if it starts with one.
+
+    ``tomllib`` refuses a leading U+FEFF ("Invalid statement (at line 1,
+    column 1)"), so a config saved by Windows PowerShell 5.1's ``Set-Content
+    -Encoding UTF8`` or Notepad's "UTF-8 with BOM" made ``load_config`` raise
+    for every command, and ``save_config``'s merge read failed open and
+    dropped the unknown keys it exists to keep. Decoded as ``utf-8-sig``, as
+    ``core.credentials`` and ``core.state_file`` read theirs; a file without
+    a BOM reads exactly as before, and one that is not UTF-8 still raises
+    ``UnicodeDecodeError`` as ``tomllib.load`` did (review of the #203 store
+    fixes, round 1): ``load_config`` reports it, and ``save_config``'s merge
+    read fails open on it as on a ``TOMLDecodeError``.
+    """
+    loaded: dict[str, Any] = tomllib.loads(raw.decode("utf-8-sig"))
+    return loaded
+
+
 def load_config(path: Path | None = None) -> AppConfig:
     """Load configuration from ``path`` (default: the standard location).
 
@@ -409,12 +441,7 @@ def load_config(path: Path | None = None) -> AppConfig:
     if not target.exists():
         return AppConfig()
 
-    def _read() -> dict[str, Any]:
-        with target.open("rb") as fh:
-            loaded: dict[str, Any] = tomllib.load(fh)
-            return loaded
-
-    data = despite_windows_contention(_read)
+    data = _parse_toml(despite_windows_contention(target.read_bytes))
     return AppConfig.model_validate(data)
 
 
@@ -499,7 +526,13 @@ def save_config(config: AppConfig, path: Path | None = None) -> Path:
         # Keys this build has never heard of belong to whoever wrote them; see
         # _keep_unknown. Reading fails open on purpose — a config we cannot parse
         # is exactly the state a write is most likely trying to repair, and
-        # refusing to write would strand the operator with the broken file.
+        # refusing to write would strand the operator with the broken file. One
+        # we cannot DECODE is the same case: Windows PowerShell 5.1's `>` and
+        # `Out-File` write UTF-16, `doctor` reports that file as invalid and
+        # sends the operator to `init --reinit`, and the `UnicodeDecodeError`
+        # this read let escape made that reset crash on the file it replaces
+        # (review of the #203 store fixes, round 2). `load_config` still raises
+        # on it, so `doctor` still reports it.
         #
         # THROUGH THE RETRY, like the rename in `write_replacing` below and
         # `load_config` above. A `PermissionError` IS an `OSError`, so under the
@@ -509,13 +542,9 @@ def save_config(config: AppConfig, path: Path | None = None) -> Path:
         # fail-open the result is a green-looking machine with no tracing".
         # Failing open is right for a config we cannot PARSE; it is not right for
         # one that is busy for 40 microseconds.
-        def _read_existing() -> dict[str, Any]:
-            with written.open("rb") as handle:
-                loaded: dict[str, Any] = tomllib.load(handle)
-                return loaded
-
-        with contextlib.suppress(OSError, tomllib.TOMLDecodeError):
-            dumped = _keep_unknown(despite_windows_contention(_read_existing), dumped, config)
+        with contextlib.suppress(OSError, tomllib.TOMLDecodeError, UnicodeDecodeError):
+            existing = _parse_toml(despite_windows_contention(written.read_bytes))
+            dumped = _keep_unknown(existing, dumped, config)
     payload = tomli_w.dumps(dumped)
 
     # Written BESIDE the target and renamed over it, never into the target

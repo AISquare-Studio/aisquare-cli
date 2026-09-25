@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import tomllib
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from aisquare.cli.app import app
@@ -39,6 +41,47 @@ def test_an_unknown_key_in_the_file_still_loads(tmp_path: Path) -> None:
     config = load_config(target)
     assert config.profile == "work"
     assert config.team.profiles == {}
+
+
+def test_a_config_saved_with_a_utf8_bom_loads_and_a_save_keeps_its_unknown_keys(
+    tmp_path: Path,
+) -> None:
+    """Windows PowerShell 5.1's ``Set-Content -Encoding UTF8`` and Notepad's "UTF-8 with
+    BOM" put U+FEFF in front, which ``tomllib`` refuses: every command raised, and a
+    save could not read the file it merges into, so a section this build does not know
+    was dropped (review of the #203 store fixes, round 1). Read past the BOM, the file
+    loads, a save keeps the section, and the file is written back without the BOM."""
+    target = tmp_path / "config.toml"
+    body = 'profile = "work"\n\n[future_feature]\nsomething = 42\n'
+    target.write_bytes(b"\xef\xbb\xbf" + body.encode("utf-8"))
+
+    config = load_config(target)
+    assert config.profile == "work"
+    save_config(config, target)
+
+    raw = target.read_bytes()
+    assert not raw.startswith(b"\xef\xbb\xbf")
+    written = tomllib.loads(raw.decode("utf-8"))
+    assert written["profile"] == "work"
+    assert written["future_feature"] == {"something": 42}
+
+
+def test_a_save_over_a_config_that_is_not_utf8_writes_the_model(tmp_path: Path) -> None:
+    """Windows PowerShell 5.1's ``>`` and ``Out-File`` write UTF-16. ``load_config`` raises
+    on such a file, which is how ``doctor`` reports it and points at ``init --reinit``; but
+    the save that reset makes reads the file first to keep its unknown keys, and failed
+    open only on a ``TOMLDecodeError``, so the ``UnicodeDecodeError`` escaped and the
+    documented recovery crashed on the file it exists to replace (review of the #203
+    store fixes, round 2). A config we cannot decode is one we cannot parse: the save
+    writes the model's view, and loading still raises until it does."""
+    target = tmp_path / "config.toml"
+    target.write_bytes('profile = "work"\n'.encode("utf-16"))
+    with pytest.raises(UnicodeDecodeError):
+        load_config(target)
+
+    save_config(AppConfig(profile="home"), target)
+
+    assert load_config(target).profile == "home"
 
 
 def test_round_trip_explicit_path(tmp_path: Path) -> None:

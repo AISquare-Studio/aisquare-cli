@@ -559,8 +559,11 @@ def save_setup(form: SetupForm, page: ProjectInfo | None) -> SetupOutcome:
         key_target = resolved.name
         if resolved.destination is not None:
             # Its destination's deployment is read off the destination, not the
-            # config (review of #203), so it is known without an entry.
-            known = sorted({*known, *ops.known_targets(settings, resolved.destination)})
+            # config (review of #203), so it is known without an entry. That name
+            # alone: `known_targets(settings, …)` read the machine's target off
+            # the config `configure_target` had just changed, and with 'make
+            # active' ticked the typo was known again (final review of #203, EX2).
+            known = sorted({*known, resolved.destination.environment})
         if key_target not in known:
             named = f", named by ${ops.TARGET_ENV_VAR}" if resolved.target_source == "env" else ""
             return _refused(

@@ -1500,6 +1500,46 @@ def test_make_active_does_not_make_a_typo_a_known_deployment_for_the_key(
     assert not explainability_service.project_key_path(project.id).exists()
 
 
+def test_make_active_does_not_make_a_typo_known_beside_a_destination(
+    project: ProjectInfo, quiet_explainability: dict[str, int]
+) -> None:
+    """G1 again, on the path a destination (#142) adds: its deployment joined the known
+    names through ``known_targets`` on the config ``configure_target`` had just changed,
+    so with 'make active' ticked the typed name was the machine's target and passed. The
+    machine moved to ``prdo``, which has no entry, and the key was bound to it under two
+    success toasts (final review of #203, EX2)."""
+    from aisquare.services import destinations, iam
+
+    config = load_config()
+    config.explainability.targets = {"prod": ExplainabilityTarget(gateway_url="https://p.example")}
+    save_config(config)
+    session = iam.Session(api_url="https://api.aisquare.studio", token="aisq_x", source="env")
+    with store_session() as store:
+        destinations.choose(
+            store,
+            project,
+            destinations.Workspace(id=42, uid="ws-uid-42", name="acme", role="ADMIN"),
+            destinations.Studio(id=301, uid="st-301", name="Frontend"),
+            session,
+        )
+
+    async def scenario(pilot: Pilot[None], host: Host) -> list[tuple[str, str]]:
+        host.query_one(ProjectView).active = "tab-explainability"
+        await settle(pilot)
+        host.query_one("#explainability-switch", Checkbox).value = True
+        _attach_in_setup(host, "pk-typo-0123456789", target="prdo")
+        await settle(pilot)
+        return list(host.notices)
+
+    notices = drive(project, scenario)
+    assert any(m.startswith("no target 'prdo' on this machine") for m, _ in notices), notices
+    assert not any("setup saved" in m for m, _ in notices), notices
+    assert load_config().explainability.target == "stg", "the machine did not move to the typo"
+    with store_session() as store:
+        assert store.project_explainability(project.id) is None
+    assert not explainability_service.project_key_path(project.id).exists()
+
+
 def test_a_key_the_projects_launches_do_not_resolve_is_not_called_the_one_they_use(
     project: ProjectInfo, quiet_explainability: dict[str, int]
 ) -> None:

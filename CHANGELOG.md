@@ -281,7 +281,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   write the store refuses lands none of
   it, and an undo it refuses stays on the stack. Group names are shown as
   typed, never read as markup, and a blank one is refused (by
-  `onboard --group ' '` too, before it onboards).
+  `onboard --group ' '` too, before it onboards); `onboard --group` trims the
+  name as `group create` does, so `' work '` joins `work`.
 - **A workspace key per project** (#141). The explainability key was one per
   machine; pointing one project at another workspace meant another shell or
   swapping the file for everyone. `aisquare explainability key set [--project

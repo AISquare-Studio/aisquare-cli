@@ -166,21 +166,25 @@ def onboard(
     ] = False,
 ) -> None:
     """Pack the codebase into a snapshot and seed its context pool."""
-    if group is not None and not group.strip():
+    # Looked up by the name `create_group` would make: `' work '` found no group
+    # `work`, and making one raised "already exists" uncaught, after the onboard had
+    # committed (review of the #203 final-review fixes, F2).
+    name = group.strip() if group is not None else None
+    if name is not None and not name:
         # Refused before the onboard, as `group create` refuses it: found by no name,
         # a blank group went to `create_group`, whose ValueError escaped uncaught after
         # the onboard had committed (review of #203, round 2).
         fail("a group needs a name", error="invalid_group", ref=group)
     report = project_service.onboard(path, refresh=refresh)
-    if group:
+    if name:
         project_id = project_id_for(find_project_root(path or Path.cwd()))
         with store_session() as store:
             try:
-                target = groups_service.resolve_group(store, group)
+                target = groups_service.resolve_group(store, name)
             except KeyError:
                 # Made with its member in one transaction: made first and filled after,
                 # an add the store refused left an empty group behind (review of #203).
-                groups_service.create_group(store, group, [project_id])
+                groups_service.create_group(store, name, [project_id])
             else:
                 groups_service.add_to_group(store, target.id, [project_id])
     emit_onboard(report)

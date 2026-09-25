@@ -155,6 +155,25 @@ def test_onboard_into_a_blank_group_is_refused_before_the_onboard(
     assert "fresh" not in _names(runner, "--all"), "onboarded before the group was refused"
 
 
+def test_onboard_into_a_group_named_with_spaces_around_it_joins_that_group(
+    runner: CliRunner, projects: dict[str, str], tmp_path: Path
+) -> None:
+    """``onboard --group ' work '`` looked the name up as typed and found no ``work``;
+    ``create_group`` strips it and raised "already exists", uncaught, after the onboard
+    had committed (review of the #203 final-review fixes, F2). The name is the one
+    ``group create`` would make, so the project joins the group that has it."""
+    first, fresh = tmp_path / "first", tmp_path / "fresh"
+    first.mkdir()
+    fresh.mkdir()
+    made = runner.invoke(app, ["project", "onboard", str(first), "--group", "work"])
+    assert made.exit_code == 0, made.output
+    result = runner.invoke(app, ["project", "onboard", str(fresh), "--group", " work "])
+    assert result.exit_code == 0 and result.exception is None, (result.output, result.exception)
+    assert _names(runner, "--group", "work") == ["first", "fresh"]
+    listing = json.loads(runner.invoke(app, ["--json", "project", "group", "list"]).stdout)
+    assert [g["name"] for g in listing["groups"]] == ["work"]
+
+
 def test_a_filter_that_matches_nothing_says_so_not_that_nothing_is_registered(
     runner: CliRunner, projects: dict[str, str]
 ) -> None:

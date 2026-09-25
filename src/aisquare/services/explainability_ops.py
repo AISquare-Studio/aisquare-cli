@@ -208,26 +208,30 @@ class ResolvedTarget:
         mid-incident. The file case names the PATH rather than saying "a file",
         because the next thing anyone does with this line is go and look.
 
-        Names the SOURCE only. Whether a key is present is each surface's own
-        sentence — they already word it differently ("is NOT set", "(NOT set)")
-        and those phrasings are pinned — so folding presence in here would churn
-        three renderers to fix a provenance bug in one of them.
+        Names the SOURCE, with one exception. Whether a key is present is each
+        surface's own sentence — they already word it differently ("is NOT set",
+        "(NOT set)") and those phrasings are pinned — so folding presence in here
+        would churn three renderers to fix a provenance bug in one of them. The
+        exception is the key file that is there and reads as no key, below: it
+        is named with what is wrong with it, and each surface's own sentence
+        still follows.
 
         With nothing set anywhere there is no winning source, so it falls back
         to the variable the target NAMES: that is the thing an operator would
         populate next, and it is what every remediation line already tells them
         to export. Unless that is the default variable and the key file is
-        there, holding no key (blank, or not UTF-8: PowerShell 5.1's ``>``
-        writes UTF-16). Then the file is what its writer fixes next, and
-        naming the variable alone left every surface silent about it (review
-        of the #203 final-review fixes, EX5a).
+        there, holding no key (blank, not UTF-8 — PowerShell 5.1's ``>`` writes
+        UTF-16 — or unreadable: another owner's, or its mode). Then the file is
+        what its writer fixes next, and naming the variable alone left every
+        surface silent about it (review of the #203 final-review fixes, EX5a;
+        unreadable, round 2, F5).
         """
         if self.key_source == "project":
             return f"the project's own key ({project_key_path(self.project_id or '?')})"
         if self.key_source == "file":
             return str(key_path())
         if self.key_source == "unset" and self.api_key_env == KEY_ENV_VAR and key_path().is_file():
-            return f"{key_path()} (holds no key: blank, or not UTF-8)"
+            return f"{key_path()} (holds no key: blank, not UTF-8, or unreadable)"
         return f"${self.api_key_env}"
 
     @property
@@ -1635,14 +1639,16 @@ def _check_config(target: ResolvedTarget, *, on: bool) -> DoctorCheck:
         if target.api_key_env == KEY_ENV_VAR and key_path().is_file():
             # The key file is there and reads as no key. Its writer was told to export
             # the variable "the CLI never stores" (review of the #203 final-review
-            # fixes, EX5a).
+            # fixes, EX5a). `stored_api_key` reads a file it cannot open as no key too,
+            # which "not UTF-8" did not name (round 2, F5).
             return degrade(
                 name,
                 f"target '{target.name}' -> {target.gateway_url} ({target.gateway_source}), "
                 f"but ${target.api_key_env} is not set in this shell and {key_path()} holds no "
-                "key (blank, or not UTF-8)",
-                f"Write the workspace key into {key_path()} again, as UTF-8 text (PowerShell "
-                f"5.1's `>` writes UTF-16), export it as ${target.api_key_env}, or {other}",
+                "key (blank, not UTF-8, or unreadable)",
+                f"Write the workspace key into {key_path()} again, as UTF-8 text this user can "
+                f"read (PowerShell 5.1's `>` writes UTF-16), export it as "
+                f"${target.api_key_env}, or {other}",
             )
         return degrade(
             name,

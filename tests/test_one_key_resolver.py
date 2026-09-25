@@ -45,6 +45,7 @@ from aisquare.cli.app import app
 from aisquare.core.config import AppConfig, load_config, save_config
 from aisquare.services import explainability as service
 from aisquare.services import explainability_ops as ops
+from tests.fsperms import can_deny_reads
 
 SOURCE = Path(service.__file__)
 OPS_SOURCE = Path(ops.__file__)
@@ -170,10 +171,10 @@ def test_a_key_file_that_holds_no_key_is_named_where_the_key_is_said_missing(
     save_config(config)
     monkeypatch.delenv(service.KEY_ENV_VAR, raising=False)
     service.key_path().write_bytes(_FAKE_FILE_KEY.encode("utf-16"))
-    said = f"{service.key_path()} (holds no key: blank, or not UTF-8)"
+    said = f"{service.key_path()} (holds no key: blank, not UTF-8, or unreadable)"
 
     row = {check.name: check for check in ops.checks()}["explainability config"]
-    assert f"{service.key_path()} holds no key (blank, or not UTF-8)" in row.detail, row
+    assert f"{service.key_path()} holds no key (blank, not UTF-8, or unreadable)" in row.detail
     assert f"Write the workspace key into {service.key_path()} again" in (row.fix or ""), row
     assert "never stores it" not in (row.fix or ""), row
     status = runner.invoke(app, ["explainability", "status"])
@@ -181,6 +182,35 @@ def test_a_key_file_that_holds_no_key_is_named_where_the_key_is_said_missing(
 
     service.key_path().unlink()  # no file: the variable is the thing to set, as before
     assert ops.resolve_target(load_config().explainability).key_origin == "$EXPLAINABILITY_API_KEY"
+
+
+@pytest.mark.skipif(
+    not can_deny_reads(), reason="chmod(0) denies nothing here (root, or NTFS where it is advice)"
+)
+def test_a_key_file_this_user_cannot_read_is_said_to_be_unreadable(
+    isolated_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``stored_api_key`` reads a file it cannot open as no key, as it reads one that is not
+    UTF-8, and the doctor said only "blank, or not UTF-8" and to write it again as UTF-8
+    text: a key file left by ``sudo`` with ``HOME`` kept, or by a ``chmod``, holds a good
+    key its owner would rewrite for nothing (review of the #203 final-review fixes, round
+    2, F5). Unreadable is named, and the fix says the file must be one this user can
+    read."""
+    config = AppConfig()
+    config.explainability.enabled = True
+    config.explainability.gateway_url = "https://explainability-api.aisquare.studio"
+    save_config(config)
+    monkeypatch.delenv(service.KEY_ENV_VAR, raising=False)
+    service.store_api_key(_FAKE_FILE_KEY)
+    service.key_path().chmod(0)
+    try:
+        resolved = ops.resolve_target(load_config().explainability)
+        row = {check.name: check for check in ops.checks()}["explainability config"]
+    finally:
+        service.key_path().chmod(0o600)
+    assert resolved.key_origin.endswith("or unreadable)"), resolved.key_origin
+    assert "or unreadable)" in row.detail, row
+    assert "as UTF-8 text this user can read" in (row.fix or ""), row
 
 
 #: Allowed to resolve a key. ``resolve_target`` (in ``explainability_ops``, and

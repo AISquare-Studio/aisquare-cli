@@ -471,11 +471,13 @@ def save_setup(form: SetupForm, page: ProjectInfo | None) -> SetupOutcome:
     It ran in the button's handler, on the UI thread, where git's timeouts
     froze the whole app (review of #170, B5/G6). It returns what the handler
     used to notify, and whether a write began.
+
+    The config is read AFTER git has answered, and saved whole a few store
+    reads later. Read first, a config write made while git ran (the tab's
+    *Disable*, which the handler now disables meanwhile, or any other writer)
+    was saved over with the copy read before it: tracing stayed on after the
+    toast said it was off (review of #170's follow-ups, round 1, F1).
     """
-    try:
-        config = load_config()
-    except Exception as exc:  # a broken config.toml: say so, change nothing
-        return SetupOutcome((Notice(f"config unreadable — nothing changed: {exc}", "error"),))
     target, gateway, proxy, prefix, key_env, key = (
         form.target, form.gateway, form.proxy, form.prefix, form.key_env, form.key,
     )  # fmt: skip
@@ -483,6 +485,10 @@ def save_setup(form: SetupForm, page: ProjectInfo | None) -> SetupOutcome:
     # git, in subprocesses with 5 s timeouts, and this ran on the UI thread
     # (review of #170, B5/G6).
     owner = key_project(page) if key and form.own else None
+    try:
+        config = load_config()
+    except Exception as exc:  # a broken config.toml: say so, change nothing
+        return SetupOutcome((Notice(f"config unreadable — nothing changed: {exc}", "error"),))
     settings = config.explainability
     name = target or settings.target
     # The key FILE answers for ONE variable, the default: it holds a single
@@ -799,10 +805,12 @@ class ExplainabilityView(VerticalScroll):
         Only the form's own checks run here, on the UI thread. The rest reads
         the config, asks git which project the key is for, opens the store and
         writes files, so it runs in a worker (:func:`save_setup`), as *Register
-        roster* does, and Save is disabled until it answers. The key stays in
-        the masked field until then. It is cleared once a write has begun,
-        whatever happened after, and kept when the save was refused before
-        anything was written.
+        roster* does, and Save is disabled until it answers, and so are Enable
+        and Disable: the worker saves the whole config it read, so a switch
+        pressed meanwhile was saved over and its toast was wrong (review of
+        #170's follow-ups, round 1, F1). The key stays in the masked field
+        until then. It is cleared once a write has begun, whatever happened
+        after, and kept when the save was refused before anything was written.
         """
         target = self.query_one("#explainability-target", Input).value.strip()
         switch = self.query_one("#explainability-switch", Checkbox).value
@@ -866,7 +874,7 @@ class ExplainabilityView(VerticalScroll):
             )
             return
 
-        self.query_one("#explainability-save", Button).disabled = True
+        self._set_config_writers(disabled=True)
         form = SetupForm(
             target=target,
             switch=switch,
@@ -903,7 +911,12 @@ class ExplainabilityView(VerticalScroll):
             )
             self.refresh_status()
         if event.state in (WorkerState.SUCCESS, WorkerState.ERROR, WorkerState.CANCELLED):
-            self.query_one("#explainability-save", Button).disabled = False
+            self._set_config_writers(disabled=False)
+
+    def _set_config_writers(self, *, disabled: bool) -> None:
+        """Save, Enable and Disable, the buttons that write config.toml: off while a save runs."""
+        for name in ("save", "enable", "disable"):
+            self.query_one(f"#explainability-{name}", Button).disabled = disabled
 
     @on(Button.Pressed, "#explainability-enable")
     def _turn_tracing_on(self) -> None:

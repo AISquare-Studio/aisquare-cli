@@ -1289,6 +1289,66 @@ def test_save_setup_asks_git_and_writes_the_key_off_the_ui_thread(
     assert field == "", "cleared once the write began"
 
 
+def test_a_config_write_made_while_save_setup_runs_is_not_saved_over(
+    project: ProjectInfo, quiet_explainability: dict[str, int], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """In its worker, *Save setup* read the config, asked git (seconds), then saved the copy
+    it had read. *Disable* pressed meanwhile wrote ``enabled = false`` and said "✓ tracing
+    disabled", and the save put ``true`` back (review of #170's follow-ups, round 1, F1).
+    Enable and Disable are off while it runs, and the config is read once git has
+    answered, so another writer's change in that time (here the CLI's ``disable`` in a
+    shell) is kept."""
+    from aisquare.cli.ui.views import explainability as explainability_view
+
+    config = load_config()
+    config.explainability.enabled = True
+    save_config(config)
+    resolve = explainability_view.key_project
+    armed, asked, release = threading.Event(), threading.Event(), threading.Event()
+
+    def slow_git(page: ProjectInfo | None) -> ProjectInfo | None:
+        if armed.is_set() and threading.current_thread() is not threading.main_thread():
+            armed.clear()
+            asked.set()
+            release.wait(10)
+        return resolve(page)
+
+    monkeypatch.setattr(explainability_view, "key_project", slow_git)
+    switches = ("#explainability-enable", "#explainability-disable")
+
+    async def scenario(
+        pilot: Pilot[None], host: Host
+    ) -> tuple[list[bool], list[bool], list[tuple[str, str]]]:
+        host.query_one(ProjectView).active = "tab-explainability"
+        await settle(pilot)
+        armed.set()
+        _attach_in_setup(host, "pk-race-0123456789")
+        try:
+            for _ in range(500):
+                if asked.is_set():
+                    break
+                await pilot.pause(0.01)
+            assert asked.is_set(), "the save never asked git"
+            during = [host.query_one(switch, Button).disabled for switch in switches]
+            host.query_one("#explainability-disable", Button).press()
+            await pilot.pause()
+            elsewhere = load_config()
+            elsewhere.explainability.enabled = False
+            save_config(elsewhere)
+        finally:
+            release.set()
+        await settle(pilot)
+        after = [host.query_one(switch, Button).disabled for switch in switches]
+        return during, after, list(host.notices)
+
+    during, after, notices = drive(project, scenario)
+    assert during == [True, True], "the switches are off while the save runs"
+    assert after == [False, False], "and on again once it answered"
+    assert not any("tracing disabled" in m for m, _ in notices), notices
+    assert any(m.startswith("✓ key attached to") for m, _ in notices), notices
+    assert load_config().explainability.enabled is False, "the write made meanwhile is kept"
+
+
 def test_the_explainability_tab_has_one_key_field_and_the_box_says_whose_key(
     project: ProjectInfo, quiet_explainability: dict[str, int]
 ) -> None:

@@ -139,11 +139,18 @@ The page's mode toggle and the terminal's `--mode` agree
 
 ## 6. Every action a board event; a refusal said, never faked
 
-Say **"stop coder-1"** without having asked for it in so many words.
+`stop`, `spawn` and `restart` take `confirm=true` only when your own words
+asked for the action or confirmed it. A named request is honoured at once, and a
+vague one is asked about first.
 
-Expect: `stop` refused (`confirm=true` missing), the refusal spoken as it came
-(`refused: …`), and one `captain_action` with `ok: false` on alpha's board. Then
-**"yes, stop coder-1"** — the stop, with its receipt (`agent_exited`).
+Say **"stop it"**, with nothing named. Expect the captain to ask first, in one
+sentence, and nothing stopped. If it tried `stop` anyway, the refusal
+(`confirm=true` missing) is spoken as it came (`refused: …`) and audited as one
+`captain_action` with `ok: false` on alpha's board.
+
+Then say **"stop the coding agent in alpha"**. Your own words name the action and
+its target, so expect the stop at once, with no second yes: `stop` with
+`confirm=true`, its receipt (`agent_exited`), and the coder's claim released.
 
 ```sh
 aisquare captain log alpha --limit 4
@@ -151,7 +158,7 @@ aisquare board
 ```
 
 ```text
-⟨PASTE: the refusal audit (ok false) and the stop audit with its receipt⟩
+⟨PASTE: the captain's one-sentence question, then the stop audit (confirm true) with its receipt⟩
 ```
 
 ## 7. `make check` green
@@ -179,11 +186,16 @@ persona-train follow-up, not the captain's. Two UI tests are intermittent on
 Windows and on py3.11 (the sidebar's divider double-click; the accounts view);
 they pass on re-run. A captain PR's Windows leg is read against that base set.
 
-## After a reboot
+## After a reboot, or a tmux kill-server
 
-If the first `aisquare captain` of the morning refuses naming the fleet's
-sweep — the server is gone but its socket file is still there — run the one
-command it names, then start again:
+After a reboot the fleet's socket file is gone too, so bare `aisquare captain`
+ends the stale row and starts a fresh captain. The folder is already trusted, so
+it comes straight up.
+
+After a `kill-server` the socket file stays and nothing answers. Then
+`aisquare captain` and `aisquare captain "text"` refuse within a second, naming
+the one command that may decide the server is gone; `<home>` is the project id
+the refusal prints. Run it, then start again:
 
 ```sh
 aisquare fleet reap -P <home> --server-down

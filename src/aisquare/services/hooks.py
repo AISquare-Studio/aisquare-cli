@@ -327,13 +327,17 @@ def hand_over(session_id: str, *, reason: str | None = None) -> None:
     account actually under the line. In every case the agent stays parked with
     Claude Code's own wait intact.
 
-    A switch that goes ahead returns its receipt, and its notes are what the
-    move cost: a hand-off prompt not typed, claims not moved, an old session
-    not marked ended, a mark not taken back. By hand the CLI prints them; this
-    worker has no terminal (:func:`_detach`), so they go on the board as one
-    note beside ``switched``. Dropped, the replacement sat idle at an empty
-    prompt while the board said it had been given one (review of #203, final
-    round, FLEET-5).
+    A switch that goes ahead returns its receipt, and its ``failures`` are what
+    the move could not do: a hand-off prompt not typed, claims not moved, an old
+    session not marked ended, a mark not taken back. By hand the CLI prints them
+    with the other notes; this worker has no terminal (:func:`_detach`), so they
+    go on the board as one note beside ``switched``. Dropped, the replacement
+    sat idle at an empty prompt while the board said it had been given one
+    (review of #203, final round, FLEET-5). The receipt's other notes stay off
+    the board: every switch has them (the headroom each account had, the launch
+    replayed, the worktree kept), and posting them put a note on the feed at
+    nearly every hand-over, account advice included, for the other agents to
+    read (review of the #203 final-round fixes, F2).
     """
     with store_session() as store:
         session = store.get_session(session_id)
@@ -374,10 +378,10 @@ def hand_over(session_id: str, *, reason: str | None = None) -> None:
             session.project_id, f"{agent.label}: not switched — {exc}", session_id=session.id
         )
         return
-    if receipt.notes:
+    if receipt.failures:
         team_service.hook_note(
             session.project_id,
-            f"{agent.label}: switched — {'; '.join(receipt.notes)}",
+            f"{agent.label}: switched — {'; '.join(receipt.failures)}",
             session_id=receipt.started.session_id,
         )
 

@@ -198,6 +198,12 @@ class SwitchReceipt:
     started fresh with a hand-off prompt built from the board."""
     tmux_session: str
     notes: list[str] = field(default_factory=list)
+    failures: list[str] = field(default_factory=list)
+    """The notes that say what the switch could NOT do with its replacement up: a first
+    line not typed, claims not moved, an old session not marked ended, a hand-over mark
+    not taken back. Each is in ``notes`` too, beside the ones every switch has (the
+    headroom read, the launch replayed, the worktree kept). The automatic hand-over has
+    no terminal to print ``notes`` to and posts these alone (``services.hooks.hand_over``)."""
 
 
 @dataclass(frozen=True)
@@ -215,6 +221,10 @@ class SpawnReceipt:
     prompt_typed: bool | None = None
     """Whether the ``prompt`` asked for reached the pane: ``None`` when none was
     asked for, ``False`` when it was not typed — the notes say why."""
+    failures: list[str] = field(default_factory=list)
+    """The notes about what did NOT happen once the agent was up: the prompt not typed,
+    the claims of a hand-over not moved, the previous session not marked ended. Each
+    is in ``notes`` too; a prompt typed past the wait is typed, and is not here."""
 
 
 @dataclass(frozen=True)
@@ -1638,16 +1648,21 @@ def spawn(
         warning = auto_mode.spawn_note(evidence, role=role, label=stored.label, config=config)
         if warning is not None:
             notes.append(warning)
+    # Every note `_take_over` writes is a move that did not happen; `_type_prompt`'s are
+    # when the prompt was not typed (`SpawnReceipt.failures`).
+    moved: list[str] = []
     if takes_over is not None and identity.session_id is not None:
-        stored = _take_over(stored, takes_over, identity.session_id, notes)
+        stored = _take_over(stored, takes_over, identity.session_id, moved)
     _supersede(rows, views, stored, config)
-    typed = _type_prompt(srv, stored.pane_id, prompt, notes) if prompt else None
+    typing: list[str] = []
+    typed = _type_prompt(srv, stored.pane_id, prompt, typing) if prompt else None
     return SpawnReceipt(
         agent=stored,
         asked_label=label,
         tmux_session=tmux_session,
-        notes=notes,
+        notes=[*notes, *moved, *typing],
         prompt_typed=typed,
+        failures=[*moved, *(typing if typed is False else [])],
     )
 
 
@@ -3797,6 +3812,7 @@ def switch(
     _require_role(agent.role)  # `spawn`'s first refusal, before the stop as the task's
     current = _account_slot_of(agent, session)
     notes: list[str] = []
+    failures: list[str] = []  # the notes that say what did not happen (`SwitchReceipt`)
     # The accounts service decides, as for every launch
     # (tests/test_one_account_resolver.py): `--to` is the flag rung; without it
     # headroom decides first, with the account the agent is leaving excluded.
@@ -3867,6 +3883,7 @@ def switch(
         # (review of the #205 fold, round 2).
         if session is not None and (left := _unmark_handing_over(session)) is not None:
             notes.append(left)
+            failures.append(left)
     # The replacement is started from the row as the stop ENDED it, as `restart`
     # starts one, not from the snapshot read before the headroom lookup and the
     # grace: a task that closed meanwhile is gone from the row (rule 3), and
@@ -3896,6 +3913,7 @@ def switch(
             _abandon_handover(stopped)  # no replacement is coming for the parked claims
         raise
     notes.extend(more)
+    failures.extend(receipt.failures)
     from_name = f"slot {current}" if current is not None else "its shell's claude"
     how = _how_started(resumed, typed=bool(receipt.prompt_typed))
     why = f" ({reason})" if reason else ""
@@ -3918,6 +3936,7 @@ def switch(
         resumed=resumed,
         tmux_session=receipt.tmux_session,
         notes=notes,
+        failures=failures,
     )
 
 

@@ -10154,3 +10154,45 @@ def test_the_automatic_hand_over_puts_what_its_switch_did_not_do_on_the_board(
     [said] = [note for note in _events(project, "note") if note.startswith(f"{agent.label}: ")]
     assert said.startswith(f"{agent.label}: switched — ")
     assert "the prompt has several lines — NOT typed" in said
+    # What every switch says is not on the board: only what this one could not do.
+    assert "launched as recorded" not in said and "headroom" not in said
+
+
+def test_a_clean_automatic_hand_over_puts_no_note_beside_switched(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Review of the #203 final-round fixes, F2: ``hand_over`` posted every note on the
+    switch's receipt, and most are routine on every hand-over: the headroom each
+    account had, "launched as recorded" (every row since v18), a one-line prompt typed
+    past the wait. So nearly every automatic switch put a ``switched — …`` note on the
+    feed, account advice the other agents read included. Only what the switch could
+    not do goes on the board; a clean one is ``switched`` alone. The receipt still
+    carries every note for the CLI, which is the control."""
+    from aisquare.services import hooks as hooks_service
+
+    _two_slots_with_usage(monkeypatch, work=95, personal=10)
+    agent = fleet_service.spawn(project, "coder", worktree=False, account="2").agent
+    transcript = tmp_path / f"{agent.session_id}.jsonl"
+    transcript.write_text('{"type":"user"}\n', encoding="utf-8")
+    _with_transcript(agent, transcript)  # resumable: its one line is typed past the wait
+    real_switch = fleet_service.switch
+    receipts: list[fleet_service.SwitchReceipt] = []
+
+    def switch_and_keep(*args: Any, **kwargs: Any) -> fleet_service.SwitchReceipt:
+        receipts.append(real_switch(*args, **kwargs))
+        return receipts[-1]
+
+    monkeypatch.setattr(fleet_service, "switch", switch_and_keep)
+
+    hooks_service.hand_over(agent.session_id or "", reason="session limit")
+
+    [switched] = _events(project, "switched")
+    assert switched.endswith("(session limit) — resumed its session")
+    assert [note for note in _events(project, "note") if note.startswith(f"{agent.label}: ")] == []
+    [receipt] = receipts
+    assert any(note.startswith("launched as recorded") for note in receipt.notes)
+    assert receipt.failures == []

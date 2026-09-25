@@ -748,7 +748,7 @@ def test_the_worker_refuses_a_hand_over_in_flight_or_one_that_just_happened(
 
     def reach(project: ProjectInfo, label: str, **kwargs: Any) -> Any:
         reached.append(label)
-        return SimpleNamespace(notes=[])  # a receipt with nothing the board must hear
+        return SimpleNamespace(failures=[])  # a receipt with nothing the board must hear
 
     monkeypatch.setattr(fleet_service, "switch", reach)
     _session(work, "sess-moved-long-ago")

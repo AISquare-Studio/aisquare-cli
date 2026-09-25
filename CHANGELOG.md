@@ -6,237 +6,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Fixed
-
-- **A schemeless gateway is refused by the writer, not only by the form.** The
-  Setup form refused `stg.example`; `aisquare explainability enable
-  --gateway-url stg.example` — the runbook command, four characters short —
-  stored it, after which the proxy lane read **green and silent** over a gateway
-  nothing could reach: a host-less URL parses with the whole string as the path,
-  `is_loopback` counts an empty host as local, and the loopback-pair exemption
-  fired. `configure_target` — the one writer both surfaces go through — now
-  validates the gateway, the proxy and the identity template before it mutates
-  anything and raises with the fix; `enable` prints it as one `✗` line and
-  stores nothing. `url_problem` is the shared validator and says *which* thing
-  is wrong (unparseable, bad port, no scheme, not http(s), no host) — the form
-  used to answer `http://[::1` with "try https://http://[::1". The proxy lane
-  no longer treats a host-less gateway as a loopback pair, and `doctor`'s config
-  lane flags a stored one, so a hand-edited config or
-  `EXPLAINABILITY_GATEWAY_URL` cannot reach the stranded state either.
-- **The Setup form's deployment field no longer moves the machine.** It set
-  `settings.target` on every save, so an operator on stg correcting prod's
-  gateway had moved their machine to prod — traffic to a deployment nobody
-  chose, the headline failure from the other side — and typing *only* a
-  deployment name flipped the target while writing no entry, under a `✓ setup
-  saved` toast. The field now names the entry the settings belong to; a **make
-  active** checkbox beside it is the switch, and the toast says which target
-  the machine is on. `enable --target` keeps switching: a flag typed in a shell
-  is the explicit act the box is.
-- **A key typed for a target that names its own key variable is refused.** The
-  key file is read only for the default variable — a single unlabelled key must
-  never satisfy a prod target — so key + custom variable in one save wrote a
-  file nothing reads: `✓ setup saved` over `$MY_WORKSPACE_KEY is NOT set`. The
-  rule is judged against the variable the target will read from after the save,
-  typed today or stored last month, and the notice says where the key should go
-  instead.
-- **A braced prefix is refused, not repaired.** The first cut detected `}` and
-  stripped at `{`, so `nishil}` passed through whole, was stored as
-  `nishil}-{role}`, and every `.format` raised: `agent_names` empty, every
-  launch untraced, a success line on the screen. The second stripped at either
-  brace and stored what preceded it — a template the operator never typed
-  (`team-{env}-{role}` became `team-{role}`) while the CLI's `--identity`
-  refused the same input. The field asks for a name: a brace of either kind is
-  refused with the reason and nothing is stored, and the writer refuses any
-  template that cannot render, renders every role to one name, or renders a
-  name the launch cannot put in a header (`arbind kumar-{role}`, an `@`),
-  naming what each door takes instead: the prefix `arbind.kumar` in the form,
-  whose field refuses a template, and the template `arbind.kumar-{role}` for
-  `--identity`, which refuses a name without `{role}`.
-- **The hosted-proxy suggestion respects a deliberate top-level `proxy_url`.**
-  The form read the per-target value only, so a chosen `[explainability]
-  proxy_url` — which `_proxy_source` already reports as `config` rather than
-  `default` for exactly this reason — was shadowed by a per-target suggestion.
-  `explainability_ops.chosen_proxy` is the resolver's fold minus the shipped
-  default, which is the one value nobody picked.
-- **The two unverifiable ambers are worded by mechanism.** A loopback sidecar is
-  told *why* it may ship elsewhere — it took its destination from
-  `EXPLAINABILITY_GATEWAY_URL` when it was started — with the restart and the
-  deployment's own proxy spelled out. A hosted proxy on a host that is not the
-  gateway's may be the deployment's own behind a load balancer or CNAME, which
-  from here looks exactly like another deployment's, so it is asked the question
-  and given both answers rather than ordered to repoint. The unset-gateway amber
-  prints the gateway the proxy *does* report, with the `--gateway-url` command
-  that adopts it.
-- **`explainability status` exits 1 for a live proxy shipping to another
-  deployment, and now says so.** The exit code's documented meaning was "the
-  proxy would not take a session"; the destination check widened it without a
-  word. Both states are "the traces are not arriving where you think", which is
-  what a cutover script gating on this code asks, so the rule stands and the
-  docstring, the comments, the cutover runbook, the connecting guide and this
-  entry carry it. Amber exits 0, and `probe_severity` says which — that field
-  is now tested, with `probe_fix`.
-- **The key field is cleared even when the key write fails.** A failed
-  `store_api_key` returned before the field was cleared, leaving the plaintext
-  live in a masked `Input` for the rest of the session.
-- **Every URL this integration takes from a human now goes through one guarded
-  parse.** `urlsplit` raises `ValueError` on a malformed authority — `http://[::1`
-  (a typo'd IPv6 bracket) is reachable by typing — and two callers took it
-  unguarded: `is_loopback` off a config value, so `aisquare doctor` tracebacked
-  where `main` returns its checks normally, and `hosted_proxy_for` off a form
-  field, so a Textual `Button.Pressed` handler took the fleet UI down while every
-  other failure in that handler was caught and shown as a notice. `split_url`
-  answers `None` instead of raising and is now the module's only parser, so a new
-  caller cannot reintroduce the hazard by forgetting a `try`. An unparseable URL
-  is **not** treated as loopback: that question decides whether a workspace key
-  may be omitted. `probe_proxy` likewise answers rather than raising when
-  `/health` returns valid JSON that is not an object (`[]`, `"ok"`) — the decode
-  succeeded, so its handler was already past, and four `payload.get` reads
-  followed.
-- **The hosted-proxy suggestion is silent where it would be wrong, not merely
-  where it is unsure.** `HOSTED_PROXY_PORT` is the hosted deployments'
-  convention; the wholly-local topology's own port is the shipped `proxy_url`
-  default (9090). Suggesting 9443 for a loopback gateway repointed a self-hosted
-  adopter — the topology in this change's own measured repro — at a port with
-  nothing on it. IPv6 hosts are re-bracketed, because `urlsplit().hostname`
-  strips them and `https://::1:9443` is not a URL any client can reach.
-- **The Setup form no longer overwrites a proxy the operator chose.** It tested
-  the blank *field*, not the stored *value*, so a target with a deliberate
-  `proxy_url` whose gateway was merely corrected had its proxy silently replaced
-  — the opposite of the "a blank field changes nothing" contract printed above
-  the form and asserted one layer down in `configure_target`. It also refuses a
-  schemeless gateway (which parses with the whole string as the path, leaving no
-  host, no suggestion, and an empty host that reads as loopback and suppresses
-  the very warning that would have flagged it), refuses a prefix typed as a
-  template (`nishil-{role}` would have composed to `nishil-coder-coder`, and a
-  stray brace empties `agent_names` entirely), and can set `key_env`, which it
-  was `configure_target`'s only caller to omit.
-- **An unset gateway is no longer reported as a misroute.** `resolve_target`
-  legitimately yields `gateway_url == ""`, and an empty string equals no
-  deployment, so the comparison called every such machine misrouted — printing a
-  sentence with a blank where a URL goes, and making `explainability status` exit
-  1. Nothing is misrouted; the CLI has no second value. Amber, and it says so.
-- **A hosted proxy on a host that is not the gateway's is no longer waved
-  through** — the failure class this change exists to close, still open inside
-  it. Such a proxy fell past the amber branch (which required a *loopback* proxy)
-  to the bare green return, on the docstring's assumption that "a hosted proxy is
-  addressed at the deployment, so it cannot disagree with it". That is an
-  assumption about the operator's typing, and `hosted_proxy_for` is this module's
-  own statement that the two share a host, so the comparison was available.
-- **The proxy verdict is one severity rather than three booleans.**
-  `healthy`/`problem`/`caution` could express states that mean nothing
-  (`problem` and `caution` together), and only `doctor` read the third — so the
-  amber rendered **green** on `explainability status` and in the fleet tab.
-  `ProxyState.severity` is the `CheckStatus` vocabulary every other check already
-  speaks; `problem` is derived from it, and `healthy` — a second, independently
-  settable encoding of the same fact, which the misroute branch contradicted by
-  setting it `False` for a proxy that *is* tracing — is gone, so `status`'s exit
-  code and the fleet tab's red both branch on `problem`. Both surfaces now
-  render the amber as amber **and** print its
-  remediation, against this module's own rule that a line which is not ok without
-  its next command is half a doctor. `status --json` gains `probe_severity` and
-  `probe_fix`, so a script watching for a misroute no longer has to regex an
-  English sentence.
-
-
-- **`doctor` and `status` no longer call the proxy lane green without knowing
-  where the proxy ships.** Both rested on one `GET {proxy_url}/health`, whose
-  payload says what the process *is* — `service`, `mode`, `status` — and never
-  what it does with the traffic. So a proxy pointed at a different deployment
-  than the configured target read green everywhere. Measured on a real machine
-  with `target = stg` and a sidecar started with the SDK's own `.env` in its
-  environment: `proxy`, `gateway` and `ingest` all green, every line true, while
-  the Runs from a real Claude Code session landed on `127.0.0.1:8000` — 274
-  ingest batches in four hours, none of them where the operator was looking. The
-  reported symptom was "I ran one query and did not receive anything on stg."
-  `gateway` and `ingest` verify the *CLI's* path; the proxy carries the model
-  traffic down a second one, and nothing compared them. This is the failure
-  `_active_deployment` already records for the client lane ("Both halves looked
-  healthy. Nobody was told") — fixed there, still open here.
-  - `ProxyProbe` carries the `gateway` the proxy reports, when it reports one.
-    A proxy that predates the field is not broken, merely unverifiable, and the
-    two are now told apart rather than both rendered green.
-  - A reported gateway that disagrees with the target is **red**, and names both
-    URLs: an operator who is told only that something is wrong has to go and
-    find which of two levers moved.
-  - No reported gateway, a loopback proxy and a remote gateway is **amber** —
-    `ProxyState.caution`, the verdict this had to grow. A sidecar takes its
-    destination from whoever started it, which need not be the target this CLI
-    resolved, and that is exactly the combination that stranded the traffic
-    above. Green was a lie and red would have been one too.
-  - The topologies that *cannot* disagree stay silent: a hosted proxy is
-    addressed at the deployment, and a loopback proxy against a loopback gateway
-    is the self-hosted topology working as intended.
-  - Gateways are compared on scheme, host and port, not as strings, so a
-    trailing slash or an explicitly written default port is not a misroute.
-  - `explainability.is_loopback` is public for the second module that needs the
-    same discriminator, on the precedent `stored_api_key` set.
-- **A save keeps what another build stores inside a role's entry.**
-  `[team.profiles.<role>]` and `[fleet.roles.<role>]` are maps of settings, and
-  a save from this build replaced each map whole: a field it has no name for
-  inside an entry — `agent` from the coding-agent adapters, `persona` from
-  spawn personas — was erased by any `config set`, Settings save or `team
-  bind`, while an unknown top-level section beside them survived. Each entry
-  is now merged like a section. The model still decides which entries exist,
-  so a role removed on purpose stays removed.
-- **A credentials file saved with a UTF-8 BOM keeps its keys.** Windows
-  PowerShell 5.1's `Set-Content -Encoding UTF8` and Notepad's "UTF-8 with BOM"
-  put one in front of `~/.aisquare/credentials`, and the reader kept it, so the
-  JSON did not parse: a multi-line file read as empty, and the next write (a
-  serve token minted, a sign-in) replaced the API key and the IAM session with
-  its own key; a one-line file came back whole as the API key. The BOM is now
-  decoded away, as `state.json`'s reader already did.
-- **A `config.toml` saved with a UTF-8 BOM loads.** The same editors put one in
-  front of `~/.aisquare/config.toml`, which the TOML parser refuses: commands
-  that read the config failed on it, a launch went untraced, and a save could
-  not read the file it merges into and dropped the sections this build does
-  not know. It is decoded past the BOM like the credentials file, and written
-  back without it.
-- **`init --reinit` resets a `config.toml` that is not UTF-8.** Windows
-  PowerShell 5.1's `>` and `Out-File` write UTF-16. `doctor` reports such a file
-  as invalid and points to `aisquare init --reinit`, but the reset's save read
-  the file first to keep the keys this build does not know, and the decode
-  error escaped: the documented recovery exited 1 with a traceback. The save now
-  treats a file it cannot decode like one it cannot parse and writes the
-  defaults; `doctor` still reports the file until then.
-- **A store another line stamped 15 or 17 converges instead of failing.** Schema
-  v15-v17 were claimed by other lines of development too: #136 stamps 15 for
-  `work_brief`, #201 stamps 15 for persona columns, #113 stamps 15-17 for its
-  coding-agent columns. The ladder counts positionally, so such a store never
-  ran this line's steps below its stamp. At 15 it opened without
-  `claude_account`, and every accounts command failed with "no such table". At
-  17 it had no `onboarded_at` either, v23 failed on that column, and the store
-  stopped opening at 22. Every step from v15 on is now idempotent (`IF NOT
-  EXISTS`, columns added only when absent), and a step whose tables, indexes or
-  columns a store lacks is applied again, before the next step and after the
-  last, whatever `user_version` says. The `onboarded_at` backfill comes with its
-  column, so the projects of a store that skipped v17 stay listed. The other
-  line's tables, columns and rows are left alone, and no step is renumbered.
-  `doctor`'s database row said "context.db is readable" for a store that lacked
-  those tables. It now compares the store with the schema this build's ladder
-  makes on an empty database. For anything still missing after the open, it
-  fails and names each table, index, trigger or column. Its remedy keeps the
-  file, whose history is intact, instead of offering the corrupt-store move.
-- **A machine key file that is not UTF-8 holds no key instead of crashing.**
-  `~/.aisquare/explainability-key` written as UTF-16 — what PowerShell 5.1's
-  `>` produces — raised `UnicodeDecodeError` out of the resolver, and
-  `aisquare doctor`, `explainability status` and `ship` ended in a traceback.
-  It now reads as no key, as a project's key file already did, and `doctor`,
-  `status` and `key show` name the file and say it holds no key (blank, not
-  UTF-8, or unreadable by this user), where they said only that
-  `$EXPLAINABILITY_API_KEY` is not set.
-- **A fleet row that outlived its tmux server never acts on the pane that took
-  its id.** Pane ids are unique for one server's lifetime. After a reboot or a
-  hand-run `tmux -L asq kill-server`, the first spawn in any project starts a
-  fresh server that hands the same ids out again, and an old row, asked about by
-  id, answered with the new agent's pane — another project's manager, or a
-  newer agent of its own project. It listed as that agent's state, a board
-  write nudged that agent, and `fleet stop`, `shutdown`, `restart` and `switch`
-  of the old row typed `/exit` into it and killed its window. A server that
-  started after a row was written holds none of its panes (`#{start_time}`,
-  `TmuxServer.started_at`): the row reads `✗ lost`, a plain `reap` records it,
-  ending it touches nothing else, and its agent view and Manager tab show no
-  pane (they showed the other agent's screen and typed into it).
-
 ### Added
 - **The navigator is resizable** (#137). The line between the sidebar and the
   content is a divider: drag it (the sidebar never drops below 24 columns, the
@@ -1122,6 +891,234 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   behaviour is pinned rather than merely skipped.
 
 ### Fixed
+- **A schemeless gateway is refused by the writer, not only by the form.** The
+  Setup form refused `stg.example`; `aisquare explainability enable
+  --gateway-url stg.example` — the runbook command, four characters short —
+  stored it, after which the proxy lane read **green and silent** over a gateway
+  nothing could reach: a host-less URL parses with the whole string as the path,
+  `is_loopback` counts an empty host as local, and the loopback-pair exemption
+  fired. `configure_target` — the one writer both surfaces go through — now
+  validates the gateway, the proxy and the identity template before it mutates
+  anything and raises with the fix; `enable` prints it as one `✗` line and
+  stores nothing. `url_problem` is the shared validator and says *which* thing
+  is wrong (unparseable, bad port, no scheme, not http(s), no host) — the form
+  used to answer `http://[::1` with "try https://http://[::1". The proxy lane
+  no longer treats a host-less gateway as a loopback pair, and `doctor`'s config
+  lane flags a stored one, so a hand-edited config or
+  `EXPLAINABILITY_GATEWAY_URL` cannot reach the stranded state either.
+- **The Setup form's deployment field no longer moves the machine.** It set
+  `settings.target` on every save, so an operator on stg correcting prod's
+  gateway had moved their machine to prod — traffic to a deployment nobody
+  chose, the headline failure from the other side — and typing *only* a
+  deployment name flipped the target while writing no entry, under a `✓ setup
+  saved` toast. The field now names the entry the settings belong to; a **make
+  active** checkbox beside it is the switch, and the toast says which target
+  the machine is on. `enable --target` keeps switching: a flag typed in a shell
+  is the explicit act the box is.
+- **A key typed for a target that names its own key variable is refused.** The
+  key file is read only for the default variable — a single unlabelled key must
+  never satisfy a prod target — so key + custom variable in one save wrote a
+  file nothing reads: `✓ setup saved` over `$MY_WORKSPACE_KEY is NOT set`. The
+  rule is judged against the variable the target will read from after the save,
+  typed today or stored last month, and the notice says where the key should go
+  instead.
+- **A braced prefix is refused, not repaired.** The first cut detected `}` and
+  stripped at `{`, so `nishil}` passed through whole, was stored as
+  `nishil}-{role}`, and every `.format` raised: `agent_names` empty, every
+  launch untraced, a success line on the screen. The second stripped at either
+  brace and stored what preceded it — a template the operator never typed
+  (`team-{env}-{role}` became `team-{role}`) while the CLI's `--identity`
+  refused the same input. The field asks for a name: a brace of either kind is
+  refused with the reason and nothing is stored, and the writer refuses any
+  template that cannot render, renders every role to one name, or renders a
+  name the launch cannot put in a header (`arbind kumar-{role}`, an `@`),
+  naming what each door takes instead: the prefix `arbind.kumar` in the form,
+  whose field refuses a template, and the template `arbind.kumar-{role}` for
+  `--identity`, which refuses a name without `{role}`.
+- **The hosted-proxy suggestion respects a deliberate top-level `proxy_url`.**
+  The form read the per-target value only, so a chosen `[explainability]
+  proxy_url` — which `_proxy_source` already reports as `config` rather than
+  `default` for exactly this reason — was shadowed by a per-target suggestion.
+  `explainability_ops.chosen_proxy` is the resolver's fold minus the shipped
+  default, which is the one value nobody picked.
+- **The two unverifiable ambers are worded by mechanism.** A loopback sidecar is
+  told *why* it may ship elsewhere — it took its destination from
+  `EXPLAINABILITY_GATEWAY_URL` when it was started — with the restart and the
+  deployment's own proxy spelled out. A hosted proxy on a host that is not the
+  gateway's may be the deployment's own behind a load balancer or CNAME, which
+  from here looks exactly like another deployment's, so it is asked the question
+  and given both answers rather than ordered to repoint. The unset-gateway amber
+  prints the gateway the proxy *does* report, with the `--gateway-url` command
+  that adopts it.
+- **`explainability status` exits 1 for a live proxy shipping to another
+  deployment, and now says so.** The exit code's documented meaning was "the
+  proxy would not take a session"; the destination check widened it without a
+  word. Both states are "the traces are not arriving where you think", which is
+  what a cutover script gating on this code asks, so the rule stands and the
+  docstring, the comments, the cutover runbook, the connecting guide and this
+  entry carry it. Amber exits 0, and `probe_severity` says which — that field
+  is now tested, with `probe_fix`.
+- **The key field is cleared even when the key write fails.** A failed
+  `store_api_key` returned before the field was cleared, leaving the plaintext
+  live in a masked `Input` for the rest of the session.
+- **Every URL this integration takes from a human now goes through one guarded
+  parse.** `urlsplit` raises `ValueError` on a malformed authority — `http://[::1`
+  (a typo'd IPv6 bracket) is reachable by typing — and two callers took it
+  unguarded: `is_loopback` off a config value, so `aisquare doctor` tracebacked
+  where `main` returns its checks normally, and `hosted_proxy_for` off a form
+  field, so a Textual `Button.Pressed` handler took the fleet UI down while every
+  other failure in that handler was caught and shown as a notice. `split_url`
+  answers `None` instead of raising and is now the module's only parser, so a new
+  caller cannot reintroduce the hazard by forgetting a `try`. An unparseable URL
+  is **not** treated as loopback: that question decides whether a workspace key
+  may be omitted. `probe_proxy` likewise answers rather than raising when
+  `/health` returns valid JSON that is not an object (`[]`, `"ok"`) — the decode
+  succeeded, so its handler was already past, and four `payload.get` reads
+  followed.
+- **The hosted-proxy suggestion is silent where it would be wrong, not merely
+  where it is unsure.** `HOSTED_PROXY_PORT` is the hosted deployments'
+  convention; the wholly-local topology's own port is the shipped `proxy_url`
+  default (9090). Suggesting 9443 for a loopback gateway repointed a self-hosted
+  adopter — the topology in this change's own measured repro — at a port with
+  nothing on it. IPv6 hosts are re-bracketed, because `urlsplit().hostname`
+  strips them and `https://::1:9443` is not a URL any client can reach.
+- **The Setup form no longer overwrites a proxy the operator chose.** It tested
+  the blank *field*, not the stored *value*, so a target with a deliberate
+  `proxy_url` whose gateway was merely corrected had its proxy silently replaced
+  — the opposite of the "a blank field changes nothing" contract printed above
+  the form and asserted one layer down in `configure_target`. It also refuses a
+  schemeless gateway (which parses with the whole string as the path, leaving no
+  host, no suggestion, and an empty host that reads as loopback and suppresses
+  the very warning that would have flagged it), refuses a prefix typed as a
+  template (`nishil-{role}` would have composed to `nishil-coder-coder`, and a
+  stray brace empties `agent_names` entirely), and can set `key_env`, which it
+  was `configure_target`'s only caller to omit.
+- **An unset gateway is no longer reported as a misroute.** `resolve_target`
+  legitimately yields `gateway_url == ""`, and an empty string equals no
+  deployment, so the comparison called every such machine misrouted — printing a
+  sentence with a blank where a URL goes, and making `explainability status` exit
+  1. Nothing is misrouted; the CLI has no second value. Amber, and it says so.
+- **A hosted proxy on a host that is not the gateway's is no longer waved
+  through** — the failure class this change exists to close, still open inside
+  it. Such a proxy fell past the amber branch (which required a *loopback* proxy)
+  to the bare green return, on the docstring's assumption that "a hosted proxy is
+  addressed at the deployment, so it cannot disagree with it". That is an
+  assumption about the operator's typing, and `hosted_proxy_for` is this module's
+  own statement that the two share a host, so the comparison was available.
+- **The proxy verdict is one severity rather than three booleans.**
+  `healthy`/`problem`/`caution` could express states that mean nothing
+  (`problem` and `caution` together), and only `doctor` read the third — so the
+  amber rendered **green** on `explainability status` and in the fleet tab.
+  `ProxyState.severity` is the `CheckStatus` vocabulary every other check already
+  speaks; `problem` is derived from it, and `healthy` — a second, independently
+  settable encoding of the same fact, which the misroute branch contradicted by
+  setting it `False` for a proxy that *is* tracing — is gone, so `status`'s exit
+  code and the fleet tab's red both branch on `problem`. Both surfaces now
+  render the amber as amber **and** print its
+  remediation, against this module's own rule that a line which is not ok without
+  its next command is half a doctor. `status --json` gains `probe_severity` and
+  `probe_fix`, so a script watching for a misroute no longer has to regex an
+  English sentence.
+
+
+- **`doctor` and `status` no longer call the proxy lane green without knowing
+  where the proxy ships.** Both rested on one `GET {proxy_url}/health`, whose
+  payload says what the process *is* — `service`, `mode`, `status` — and never
+  what it does with the traffic. So a proxy pointed at a different deployment
+  than the configured target read green everywhere. Measured on a real machine
+  with `target = stg` and a sidecar started with the SDK's own `.env` in its
+  environment: `proxy`, `gateway` and `ingest` all green, every line true, while
+  the Runs from a real Claude Code session landed on `127.0.0.1:8000` — 274
+  ingest batches in four hours, none of them where the operator was looking. The
+  reported symptom was "I ran one query and did not receive anything on stg."
+  `gateway` and `ingest` verify the *CLI's* path; the proxy carries the model
+  traffic down a second one, and nothing compared them. This is the failure
+  `_active_deployment` already records for the client lane ("Both halves looked
+  healthy. Nobody was told") — fixed there, still open here.
+  - `ProxyProbe` carries the `gateway` the proxy reports, when it reports one.
+    A proxy that predates the field is not broken, merely unverifiable, and the
+    two are now told apart rather than both rendered green.
+  - A reported gateway that disagrees with the target is **red**, and names both
+    URLs: an operator who is told only that something is wrong has to go and
+    find which of two levers moved.
+  - No reported gateway, a loopback proxy and a remote gateway is **amber** —
+    `ProxyState.caution`, the verdict this had to grow. A sidecar takes its
+    destination from whoever started it, which need not be the target this CLI
+    resolved, and that is exactly the combination that stranded the traffic
+    above. Green was a lie and red would have been one too.
+  - The topologies that *cannot* disagree stay silent: a hosted proxy is
+    addressed at the deployment, and a loopback proxy against a loopback gateway
+    is the self-hosted topology working as intended.
+  - Gateways are compared on scheme, host and port, not as strings, so a
+    trailing slash or an explicitly written default port is not a misroute.
+  - `explainability.is_loopback` is public for the second module that needs the
+    same discriminator, on the precedent `stored_api_key` set.
+- **A save keeps what another build stores inside a role's entry.**
+  `[team.profiles.<role>]` and `[fleet.roles.<role>]` are maps of settings, and
+  a save from this build replaced each map whole: a field it has no name for
+  inside an entry — `agent` from the coding-agent adapters, `persona` from
+  spawn personas — was erased by any `config set`, Settings save or `team
+  bind`, while an unknown top-level section beside them survived. Each entry
+  is now merged like a section. The model still decides which entries exist,
+  so a role removed on purpose stays removed.
+- **A credentials file saved with a UTF-8 BOM keeps its keys.** Windows
+  PowerShell 5.1's `Set-Content -Encoding UTF8` and Notepad's "UTF-8 with BOM"
+  put one in front of `~/.aisquare/credentials`, and the reader kept it, so the
+  JSON did not parse: a multi-line file read as empty, and the next write (a
+  serve token minted, a sign-in) replaced the API key and the IAM session with
+  its own key; a one-line file came back whole as the API key. The BOM is now
+  decoded away, as `state.json`'s reader already did.
+- **A `config.toml` saved with a UTF-8 BOM loads.** The same editors put one in
+  front of `~/.aisquare/config.toml`, which the TOML parser refuses: commands
+  that read the config failed on it, a launch went untraced, and a save could
+  not read the file it merges into and dropped the sections this build does
+  not know. It is decoded past the BOM like the credentials file, and written
+  back without it.
+- **`init --reinit` resets a `config.toml` that is not UTF-8.** Windows
+  PowerShell 5.1's `>` and `Out-File` write UTF-16. `doctor` reports such a file
+  as invalid and points to `aisquare init --reinit`, but the reset's save read
+  the file first to keep the keys this build does not know, and the decode
+  error escaped: the documented recovery exited 1 with a traceback. The save now
+  treats a file it cannot decode like one it cannot parse and writes the
+  defaults; `doctor` still reports the file until then.
+- **A store another line stamped 15 or 17 converges instead of failing.** Schema
+  v15-v17 were claimed by other lines of development too: #136 stamps 15 for
+  `work_brief`, #201 stamps 15 for persona columns, #113 stamps 15-17 for its
+  coding-agent columns. The ladder counts positionally, so such a store never
+  ran this line's steps below its stamp. At 15 it opened without
+  `claude_account`, and every accounts command failed with "no such table". At
+  17 it had no `onboarded_at` either, v23 failed on that column, and the store
+  stopped opening at 22. Every step from v15 on is now idempotent (`IF NOT
+  EXISTS`, columns added only when absent), and a step whose tables, indexes or
+  columns a store lacks is applied again, before the next step and after the
+  last, whatever `user_version` says. The `onboarded_at` backfill comes with its
+  column, so the projects of a store that skipped v17 stay listed. The other
+  line's tables, columns and rows are left alone, and no step is renumbered.
+  `doctor`'s database row said "context.db is readable" for a store that lacked
+  those tables. It now compares the store with the schema this build's ladder
+  makes on an empty database. For anything still missing after the open, it
+  fails and names each table, index, trigger or column. Its remedy keeps the
+  file, whose history is intact, instead of offering the corrupt-store move.
+- **A machine key file that is not UTF-8 holds no key instead of crashing.**
+  `~/.aisquare/explainability-key` written as UTF-16 — what PowerShell 5.1's
+  `>` produces — raised `UnicodeDecodeError` out of the resolver, and
+  `aisquare doctor`, `explainability status` and `ship` ended in a traceback.
+  It now reads as no key, as a project's key file already did, and `doctor`,
+  `status` and `key show` name the file and say it holds no key (blank, not
+  UTF-8, or unreadable by this user), where they said only that
+  `$EXPLAINABILITY_API_KEY` is not set.
+- **A fleet row that outlived its tmux server never acts on the pane that took
+  its id.** Pane ids are unique for one server's lifetime. After a reboot or a
+  hand-run `tmux -L asq kill-server`, the first spawn in any project starts a
+  fresh server that hands the same ids out again, and an old row, asked about by
+  id, answered with the new agent's pane — another project's manager, or a
+  newer agent of its own project. It listed as that agent's state, a board
+  write nudged that agent, and `fleet stop`, `shutdown`, `restart` and `switch`
+  of the old row typed `/exit` into it and killed its window. A server that
+  started after a row was written holds none of its panes (`#{start_time}`,
+  `TmuxServer.started_at`): the row reads `✗ lost`, a plain `reap` records it,
+  ending it touches nothing else, and its agent view and Manager tab show no
+  pane (they showed the other agent's screen and typed into it).
 - **`state.json` has one reader and one writer** (`core.state_file`; review of
   #167). The board's theme, the pinned project and the navigator's width each
   carried their own read-modify-write of the file, and the copies had drifted: a

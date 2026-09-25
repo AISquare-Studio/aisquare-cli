@@ -72,6 +72,8 @@ _STALE_AFTER = timedelta(minutes=30)
 _CLAIM_ORPHAN_AFTER = timedelta(hours=4)
 
 MANAGER_ROLE = "manager"
+CAPTAIN_ROLE = "captain"
+"""The home-level captain's role (services.captain): briefed by :func:`_captain_briefing`."""
 """The one role whose ``Stop`` hook may keep it going (docs/plans/fleet-tui.md §7.3)."""
 
 CLEAR_REASON = "clear"
@@ -1458,6 +1460,11 @@ def hook_session_start(
         )
         if role is not None and known is not None and known.role != role:
             session = store.update_session(session.id, role=role)
+        if base_role(session.role) == CAPTAIN_ROLE:
+            # The captain's own briefing (T2, 13121): it has no shell, so no `aisquare
+            # task …` protocol lines, and the home board's captain_action lines are the
+            # OWNER's audit, not the captain's context.
+            return collision + _captain_briefing(project, session, persona_note)
         # Before the board is read below: the assignment may move this agent's
         # claims onto its new id, and a board read first still named the old one.
         # ``source`` plays no part — see rule 1 of the fleet-row section.
@@ -2773,6 +2780,24 @@ def _role_cycle(me: TeamSession) -> list[str]:
     seat's own comment in ``cli/launch.py`` promises it does not lose.
     """
     return harness.role_cycle(base_role(me.role), short_id(me.id))
+
+
+def _captain_briefing(project: ProjectInfo, me: TeamSession, persona_note: str | None) -> str:
+    """The captain's session-start block: who it is, its only hands, its cycle, its persona."""
+    lines = [
+        "<aisquare-team>",
+        f"You are the captain (team session {short_id(me.id)}): the owner's agent across every "
+        "project, working from the home board.",
+        "Your only hands are the captain tools (mcp__captain__*) — no shell and no files; "
+        "what you cannot do through them, you ask the owner or a project's manager to do.",
+        *_role_cycle(me),
+    ]
+    if me.persona:
+        lines += _persona_briefing(me.persona, project.root)
+    if persona_note:
+        lines.append(persona_note)
+    lines.append("</aisquare-team>")
+    return "\n".join(lines)
 
 
 def _persona_briefing(name: str, root: Path) -> list[str]:

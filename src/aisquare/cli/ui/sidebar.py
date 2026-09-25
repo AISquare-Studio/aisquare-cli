@@ -725,6 +725,45 @@ class AccountsTitle(Activatable):
         return AccountsSelected()
 
 
+class CaptainSection(Vertical):
+    """The home-level heading above the projects: the captain's row (one per home, T2).
+
+    The captain lives on the home board, which is never a project, so it never gets
+    a :class:`ProjectCard`; its row is an ordinary :class:`AgentRow` — selecting it
+    opens the same agent view, with Stop and Restart — under this heading instead.
+    """
+
+    DEFAULT_CSS = """
+    CaptainSection { height: auto; padding: 0 1; }
+    CaptainSection #captain-title { height: 1; }
+    CaptainSection #captain-empty { height: 1; color: $text-muted; }
+    """
+
+    def compose(self) -> ComposeResult:
+        yield Static(Text("Captain", style="bold"), id="captain-title")
+        yield Static(
+            Text("no captain — `aisquare captain` starts one", style="dim"), id="captain-empty"
+        )
+
+    def show(self, status: FleetAgentStatus | None) -> None:
+        """Show the captain's row, or the line saying how to start one."""
+        empty = self.query_one("#captain-empty", Static)
+        rows = list(self.query(AgentRow))
+        keep = next(
+            (row for row in rows if status and row.status.agent.id == status.agent.id), None
+        )
+        for row in rows:
+            if row is not keep:
+                row.remove()
+        empty.display = status is None
+        if status is None:
+            return
+        if keep is None:
+            self.mount(AgentRow(status))
+        else:
+            keep.show(status)
+
+
 class AccountsSection(Vertical):
     """One line of counts and one line of detail: who is signed in, or what is missing."""
 
@@ -845,6 +884,7 @@ class Sidebar(Vertical):
         with Horizontal(id="fleet-header"):
             yield Static(Text("Fleet"), id="fleet-title")
             yield AddButton()
+        yield CaptainSection(id="captain-section")
         yield Static("", id="projects-notice")
         # can_focus=False: the rows are Statics, so a mouse-down on one focuses
         # the nearest focusable ancestor. Left focusable, this scroll would take
@@ -861,6 +901,10 @@ class Sidebar(Vertical):
         yield DoctorSection(id="doctor-section")
 
     # --- data in -----------------------------------------------------------------
+
+    def show_captain(self, status: FleetAgentStatus | None) -> None:
+        """The home's captain row, above the projects (``None``: there is none)."""
+        self.query_one(CaptainSection).show(status)
 
     def show_projects(
         self,

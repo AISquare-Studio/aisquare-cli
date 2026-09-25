@@ -137,6 +137,42 @@ def size(path: Path) -> int:
         return 0
 
 
+def last_reply(path: Path, *, tail_bytes: int = _TAIL_BYTES) -> str | None:
+    """The assistant's text since the transcript's last prompt, or ``None`` when there is none.
+
+    "The last prompt" is the newest ``user`` entry whose content is text the user
+    sent — a tool result also arrives as a ``user`` entry, and it is not one. What
+    follows it is the turn that answered: every assistant text block, in order,
+    joined by newlines (a tool call's own blocks are not text). For the captain
+    (``services.captain.brain``): its reply to what the owner just said.
+    """
+    reply: list[str] = []
+    seen_prompt = False
+    for entry in _tail_entries(path, tail_bytes):
+        message = entry.get("message")
+        content = message.get("content") if isinstance(message, dict) else None
+        if entry.get("type") == "user" and _is_prompt(content):
+            reply, seen_prompt = [], True
+        elif entry.get("type") == "assistant" and seen_prompt and isinstance(content, list):
+            reply.extend(
+                str(block.get("text", ""))
+                for block in content
+                if isinstance(block, dict) and block.get("type") == "text" and block.get("text")
+            )
+    text = "\n".join(reply).strip()
+    return text or None
+
+
+def _is_prompt(content: Any) -> bool:
+    """A ``user`` entry the user typed: text, not a tool result."""
+    if isinstance(content, str):
+        return bool(content.strip())
+    if isinstance(content, list):
+        kinds = {block.get("type") for block in content if isinstance(block, dict)}
+        return "text" in kinds and "tool_result" not in kinds
+    return False
+
+
 def _is_refusal(block: Any) -> bool:
     """Whether one content block is Claude Code's refusal itself, not a quote of it."""
     if not isinstance(block, dict) or block.get("type") != "tool_result":

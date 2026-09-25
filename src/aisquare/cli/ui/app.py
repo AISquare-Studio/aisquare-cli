@@ -80,8 +80,10 @@ from aisquare.cli.ui.views.doctor import DoctorRefreshed, DoctorView
 from aisquare.cli.ui.views.onboard import OnboardFailed, OnboardView, ProjectOnboarded
 from aisquare.cli.ui.views.project import ProjectView
 from aisquare.cli.ui.views.welcome import WelcomeView
+from aisquare.core import paths
 from aisquare.core.console import stderr_console
 from aisquare.core.store import ContextStore, store_session
+from aisquare.core.workspace import project_id_for
 from aisquare.models import (
     AccountsOverview,
     CheckStatus,
@@ -165,8 +167,13 @@ class FleetSnapshot:
     taken_at: datetime = field(default_factory=datetime.now)
     stale_since: datetime | None = None
     """Set when a later refresh could not read the store and this frame was kept."""
+    home: ProjectInfo | None = None
+    """The captain's home board (T2): never one of ``projects``, but its agent — the
+    captain — is in ``agents``, so selecting, stopping and restarting it resolve here."""
 
     def project(self, project_id: str) -> ProjectInfo | None:
+        if self.home is not None and self.home.id == project_id:
+            return self.home
         return next((p for p in self.projects if p.id == project_id), None)
 
     def agent(self, project_id: str, agent_id: str) -> FleetAgentStatus | None:
@@ -557,12 +564,36 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             except Exception as exc:  # a bug in the fleet path must not take the view down
                 agents[project.id] = []
                 notices[project.id] = f"agents unavailable — {type(exc).__name__}: {exc}"
+        home, captain = self._captain()
+        if home is not None:
+            agents[home.id] = [captain] if captain is not None else []
         self.store_error = None
-        self.snapshot = FleetSnapshot(projects, agents, notices)
+        self.snapshot = FleetSnapshot(projects, agents, notices, home=home)
         sidebar.show_notice(None)
+        sidebar.show_captain(captain)
         sidebar.show_projects(projects, agents, notices=notices, groups=groups)
         self._feed_open_views(self.snapshot)
         self.refresh_accounts()
+
+    def _captain(self) -> tuple[ProjectInfo | None, FleetAgentStatus | None]:
+        """The home board and its captain's row, read without writing anything.
+
+        The home's id is computed, not registered: this runs on every refresh tick,
+        and ``captain_state.home_project()`` would write the row each time. A fleet
+        call that fails is logged and shows no captain row — the projects still show.
+        """
+        home_id = project_id_for(paths.aisquare_home().resolve())
+        try:
+            with store_session() as store:
+                home = store.get_project(home_id)
+            if home is None:
+                return None, None
+            statuses = fleet_service.list_agents(home)
+        except Exception as exc:  # a bug in the fleet path must not take the view down
+            self.log.warning(f"the captain's row could not be read: {type(exc).__name__}: {exc}")
+            return None, None
+        captain = next((s for s in statuses if s.agent.role == fleet_service.CAPTAIN_ROLE), None)
+        return home, captain
 
     def refresh_accounts(self) -> None:
         """Re-read the Claude accounts and the AISquare session; the section and the page follow.

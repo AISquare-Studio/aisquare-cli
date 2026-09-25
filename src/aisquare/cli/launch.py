@@ -109,6 +109,12 @@ def _declared_roles() -> set[str]:
         return set()
 
 
+UNSEATED = ("captain",)
+"""Roles with a standing cycle that never take a numbered seat: the captain is one per HOME
+(services.captain, T2), so ``captain1`` is not a seat of anything — and ``ROLES`` stays
+the list whose every member has a harness profile (``_SEAT`` is built from it)."""
+
+
 def _role_ok(role: str) -> bool:
     """First-class role, a numbered seat of one, or declared in config.
 
@@ -118,7 +124,7 @@ def _role_ok(role: str) -> bool:
     shapes real crews use: numbered seats, and roles the operator has already
     written down.
     """
-    return role in ROLES or bool(_SEAT.match(role)) or role in _declared_roles()
+    return role in ROLES or role in UNSEATED or bool(_SEAT.match(role)) or role in _declared_roles()
 
 
 def _check_persona(name: str, project: ProjectInfo | None) -> None:
@@ -263,7 +269,7 @@ def launch(
     ctx: typer.Context,
     role: Annotated[
         str,
-        typer.Argument(help=f"Team role for this session: {', '.join(ROLES)}."),
+        typer.Argument(help=f"Team role for this session: {', '.join((*ROLES, *UNSEATED))}."),
     ],
     command: Annotated[
         str | None,
@@ -322,7 +328,7 @@ def launch(
     """
     if not _role_ok(role):
         fail(
-            f"unknown role {role!r} — expected one of: {', '.join(ROLES)}, "
+            f"unknown role {role!r} — expected one of: {', '.join((*ROLES, *UNSEATED))}, "
             "a numbered seat of one (coder1, coder2), or a role you have "
             "bound with `aisquare team bind`",
             error="unknown_role",

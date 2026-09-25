@@ -731,7 +731,7 @@ def test_spawn_refuses_an_unknown_persona_before_any_window_worktree_or_row(
     with pytest.raises(fleet_service.FleetError) as caught:
         fleet_service.spawn(project, "coder", persona="nope")
 
-    assert "known: careful, mentor, minimalist, skeptic" in str(caught.value)
+    assert "known: captain, careful, mentor, minimalist, skeptic" in str(caught.value)
     assert tmux.spawned == []
     assert not (project.root / ".aisquare-worktrees").exists()
     with store_session() as store:
@@ -765,7 +765,7 @@ def test_a_stale_default_persona_refuses_naming_the_config_key(
         fleet_service.spawn(project, "coder")
 
     assert "[fleet.roles.coder].persona = 'retired'" in str(caught.value)
-    assert "known: careful, mentor, minimalist, skeptic" in str(caught.value)
+    assert "known: captain, careful, mentor, minimalist, skeptic" in str(caught.value)
     assert tmux.spawned == []
 
 
@@ -2158,7 +2158,7 @@ def test_attaching_an_unknown_persona_refuses_before_the_store_or_tmux(
     agent = _coder(project)
     tmux.installed = False  # from here on any tmux call would raise TmuxUnavailable instead
 
-    with pytest.raises(FleetError, match="known: careful, mentor, minimalist, skeptic"):
+    with pytest.raises(FleetError, match="known: captain, careful, mentor, minimalist, skeptic"):
         fleet_service.attach_persona(project, "coder-1", "nope")
 
     with store_session() as store:

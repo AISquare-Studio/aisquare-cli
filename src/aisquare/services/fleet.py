@@ -43,7 +43,7 @@ from types import ModuleType
 from typing import Any, Literal
 
 from aisquare.core import claude_accounts as claude_accounts_core
-from aisquare.core import codenames, harness, orchestrator, personas, selfcli
+from aisquare.core import codenames, harness, orchestrator, paths, personas, selfcli
 from aisquare.core import tmux as tmux_core
 from aisquare.core.config import FleetRoleSettings, FleetSettings, load_config
 from aisquare.core.ids import new_agent_id
@@ -56,7 +56,7 @@ from aisquare.core.tmux import (
     TmuxUnavailable,
     WindowInfo,
 )
-from aisquare.core.workspace import active_project
+from aisquare.core.workspace import active_project, project_id_for
 from aisquare.models import (
     CLOSED_STATUSES,
     FleetAgent,
@@ -76,6 +76,10 @@ FLEET_ROLES: tuple[str, ...] = ("manager", "coder", "tester", "reviewer", "valid
 """The fleet's own roles (§3.3). Any harness or ``team bind`` role is accepted too."""
 
 MANAGER_LABEL = "manager"
+CAPTAIN_ROLE = "captain"
+CAPTAIN_LABEL = "captain"
+"""The home-level captain (services.captain): one per HOME, on the home board — its role
+and its label are one word, as the manager's are (T2, 13121)."""
 """The one label the fleet reserves: exactly one manager per project."""
 
 LABEL = re.compile(r"^[a-z][a-z0-9-]{1,23}$")
@@ -540,6 +544,12 @@ def ensure_codename(project: ProjectInfo, store: ContextStore | None = None) -> 
         return assign(opened)
 
 
+def _is_home_project(project: ProjectInfo) -> bool:
+    """Whether ``project`` is the aisquare home's own row — the captain's home board."""
+    home = paths.aisquare_home().resolve()
+    return project.id == project_id_for(home)
+
+
 def next_label(
     project: ProjectInfo,
     role: str,
@@ -559,6 +569,10 @@ def next_label(
         raise FleetError(f"the label {MANAGER_LABEL!r} is reserved for the manager role")
     if role == "manager":
         return MANAGER_LABEL
+    if wanted == CAPTAIN_LABEL and role != CAPTAIN_ROLE:
+        raise FleetError(f"the label {CAPTAIN_LABEL!r} is reserved for the captain")
+    if role == CAPTAIN_ROLE:
+        return CAPTAIN_LABEL
 
     def pick(store: ContextStore) -> str:
         live = {agent.label for agent in store.fleet_agents(project.id, live_only=True)}
@@ -1211,6 +1225,7 @@ def spawn(
     spec: LaunchSpec | None = None,
     claude_code: bool = False,
     takes_over: str | None = None,
+    cwd: Path | None = None,
 ) -> SpawnReceipt:
     """Start an agent for ``project`` in the fleet's tmux server and record it.
 
@@ -1289,6 +1304,11 @@ def spawn(
     """
     config = settings()
     _require_role(role)
+    if role == CAPTAIN_ROLE and not _is_home_project(project):
+        raise FleetError(
+            "the captain lives on the home board, one per home — `aisquare captain` starts "
+            f"it; it cannot be spawned into {_name(project)}"
+        )
     replayed_args = spec is not None and not agent_args
     if spec is not None:
         # The recorded launch stands in for the role's config, argument by argument
@@ -1342,6 +1362,13 @@ def spawn(
                     f"{_name(project)} already has a manager ({existing.id}) — one per "
                     "project; `aisquare fleet stop manager` first"
                 )
+        if role == CAPTAIN_ROLE:
+            existing = next((agent for agent in live if agent.role == CAPTAIN_ROLE), None)
+            if existing is not None:
+                raise FleetError(
+                    f"the home already has a captain ({existing.id}) — one per home; "
+                    "`aisquare captain` attaches to it"
+                )
         if len(live) >= config.max_agents_per_project:
             raise FleetError(
                 f"{_name(project)} already runs {len(live)} agents "
@@ -1358,7 +1385,11 @@ def spawn(
             notes.append(f"label {label!r} is held by a live agent — using {picked!r}")
 
     use_worktree = role_config.worktree if worktree is None else worktree
-    cwd = project.root
+    # ``cwd`` is a non-worktree agent's working directory when it is not the
+    # project's root: the captain runs from its brain folder under the home, so no
+    # project's CLAUDE.md or hooks brief it as a worker (T2, 13121). The row
+    # records it and a restart replays it.
+    cwd = cwd if cwd is not None else project.root
     if use_worktree:
         if not is_git_project(project.root):
             raise FleetError(
@@ -1920,6 +1951,8 @@ def _relabel(
     """
     if agent.role == "manager":
         raise FleetError(f"{_name(project)} already has a manager — one per project")
+    if agent.role == CAPTAIN_ROLE:
+        raise FleetError("the home already has a captain — one per home")
     if agent.worktree:
         raise FleetError(
             f"label {agent.label!r} was taken while this agent was starting, and "
@@ -3942,6 +3975,7 @@ def _respawn(
         # Code whatever its binary is called, resumed or `--fresh`.
         claude_code=session is not None,
         takes_over=session.id if takes_over and resume is None and session is not None else None,
+        cwd=None if agent.worktree else agent.cwd,
     )
     notes.extend(receipt.notes)
     return receipt, resume is not None, notes
@@ -4306,6 +4340,12 @@ def _restart_prompt(agent: FleetAgent) -> str:
     ``working`` from its start hook, with no turn to end — refused the board's
     nudges for as long as that row stayed fresh (review of #163, round 2).
     """
+    if agent.role == CAPTAIN_ROLE:
+        # The captain has no shell (T2): it picks up through its own tools.
+        return (
+            "You are the captain, restarted and resumed mid-session: call attention() to see "
+            "what needs the owner now, then carry on from where you left off."
+        )
     return (
         f"You are {agent.label}, restarted and resumed mid-session: re-read `aisquare board` "
         "and `git status`, then continue exactly where you left off without redoing work "
@@ -4343,6 +4383,12 @@ def _handoff_prompt(
     short on purpose: the board and the working tree are the source of truth,
     and the prompt points at them instead of retelling them.
     """
+    if agent.role == CAPTAIN_ROLE:
+        return (
+            f"You are the captain, taking over from a previous session ({reason or 'it stopped'})."
+            " Call attention() to see what needs the owner, and since(project) for what "
+            "happened on a board while you were away; then wait for the owner."
+        )
     lines = [
         f"You are {agent.label}, taking over from a previous session of this agent "
         f"({reason or 'it stopped'}).",

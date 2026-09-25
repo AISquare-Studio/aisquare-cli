@@ -1030,7 +1030,7 @@ def test_launch_refuses_an_unknown_persona_listing_the_known_ones(
     assert as_json.exit_code == 1
     assert json.loads(as_json.stdout) == {"error": "unknown_persona", "ref": "nope"}
     assert human.exit_code == 1
-    assert "known: careful, mentor, minimalist, skeptic" in human.output
+    assert "known: captain, careful, mentor, minimalist, skeptic" in human.output
     assert spy == {}, "nothing may launch with a persona that does not exist"
 
 

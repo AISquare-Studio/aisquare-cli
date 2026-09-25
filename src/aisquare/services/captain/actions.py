@@ -765,6 +765,17 @@ def _paste(target: ProjectInfo, label: str, text: str, submit: bool = False) -> 
     if not text:
         raise Refused("nothing to paste")
     agent, _, srv = _ready(target, label)
+    try:
+        showing = screen.prompt_showing(_screen(srv, agent.pane_id))
+    except TmuxError:
+        showing = None  # unread: the fleet's word stands (_ready refused an unread working pane)
+    if showing is not None and showing.shape == "trust":
+        # A coder spawned into a folder Claude Code never trusted parks at its own trust
+        # dialog, and a paste's Enter there answers it — the coder exits (13498, 13500).
+        raise Refused(
+            f"the trust dialog is showing on {label}: trust its folder first — trusting a "
+            "folder is the owner's to answer (aisquare fleet attach) — nothing pasted"
+        )
     srv.paste(agent.pane_id, text)  # one bracketed paste: its newlines submit nothing
     if submit:
         try:

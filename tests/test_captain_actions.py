@@ -1608,6 +1608,22 @@ def test_the_real_idle_pane_is_ready_its_finished_turns_line_is_no_spinner(
     assert pane.pastes == ["next"]
 
 
+@pytest.mark.parametrize("state", ["working", "waiting", "attention"])
+def test_a_paste_never_types_into_the_trust_dialog_and_names_the_step(
+    alpha: ProjectInfo, agents: dict[str, FleetAgent], fleet_rec: Fleet, state: FleetAgentState
+) -> None:
+    """A coder spawned into a folder Claude Code never trusted parks at its OWN trust dialog
+    (13498): a paste's Enter there answers it and the coder exits. press refuses it by name
+    (13308); paste must too, whatever the fleet reads (13500)."""
+    pane = _working(fleet_rec, TRUST)
+    fleet_rec.states["coder-1"] = state
+    message = refused(
+        lambda: actions.paste("alpha", "coder-1", "run the fold's tests", submit=True)
+    )
+    assert "trust" in message and "coder-1" in message, message
+    assert pane.typed == []
+
+
 def test_a_box_drawn_mid_turn_refuses_the_paste(
     alpha: ProjectInfo, agents: dict[str, FleetAgent], fleet_rec: Fleet
 ) -> None:

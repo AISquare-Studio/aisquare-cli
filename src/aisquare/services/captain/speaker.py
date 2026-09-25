@@ -38,6 +38,7 @@ from pathlib import Path
 from typing import Protocol
 
 from aisquare.core import paths, state_file
+from aisquare.core.spawn import untraced_env
 from aisquare.services.captain import state as captain_state
 
 log = logging.getLogger(__name__)
@@ -86,6 +87,9 @@ def run_subprocess(argv: Sequence[str], stdin: str | None) -> None:
             capture_output=True,
             timeout=SPEAK_TIMEOUT_S,
             check=False,
+            # core.spawn.SEAMS: EXCLUDED and stripped — a synthesiser has no use for
+            # an identity, and powershell.exe is a shell.
+            env=untraced_env(),
         )
     except FileNotFoundError as exc:
         raise SpeakerError(f"{argv[0]} is not on PATH") from exc

@@ -148,7 +148,7 @@ function connect() {
       case 'stt': if (m.final) { interim.textContent = ''; if (m.text) say('said', m.text); } else interim.textContent = m.text; break;
       case 'utterance': break;
       case 'thinking': thinking.className = 'chip' + (m.on ? ' on' : ''); break;
-      case 'reply': say('reply', m.text); break;
+      case 'reply': if (m.text === null) say('note', '(' + m.note + ')'); else say('reply', m.text); break;
       case 'speaker': speakerBtn.textContent = 'speaker: ' + (m.on ? 'on' : 'off'); break;
       case 'error': say('note', '✗ ' + m.message + (m.fix ? ' — ' + m.fix : '')); if (m.code === 'auth_failed') setStatus('token rejected', 'bad'); break;
     }

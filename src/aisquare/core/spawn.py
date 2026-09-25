@@ -106,6 +106,10 @@ Excluded, the fleet's own plumbing (docs/plans/fleet-tui.md §3.4):
   * ``services/fleet.py::_git`` — ``git worktree`` (add, remove, list) and the
     branch queries behind ``fleet reap`` (§3.5); no model, not stripped, like
     the other git seams.
+  * ``services/captain/speaker.py::run_subprocess`` — the captain's speech
+    synthesiser (``powershell.exe`` + System.Speech, ``say``, ``spd-say``), the
+    text on stdin or as one argument; no model process, and stripped anyway:
+    a synthesiser has no use for an identity, and ``powershell.exe`` is a shell.
 
 Checked and NOT a seam, recorded so the next reader does not re-derive it:
   * ``services/project.py`` — catches ``subprocess.SubprocessError`` but starts
@@ -303,6 +307,14 @@ SEAMS: dict[str, Seam] = {
         "`git worktree add/remove/list` and `git branch --merged` for the fleet's "
         "per-coder worktrees (docs/plans/fleet-tui.md §3.5). No model process; not "
         "stripped, like the other git seams",
+    ),
+    "aisquare/services/captain/speaker.py::run_subprocess": Seam(
+        EXCLUDED,
+        "the captain's speech synthesiser (`powershell.exe` + System.Speech, `say`, "
+        "`spd-say`) with the text on stdin or as one argument (T3). No model process; "
+        "stripped anyway — a synthesiser has no use for an identity, and powershell "
+        "is a shell",
+        strips_identity=True,
     ),
 }
 

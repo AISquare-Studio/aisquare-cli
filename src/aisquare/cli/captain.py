@@ -42,6 +42,10 @@ class _SayByDefault(TyperGroup):
     ``cli/global_flags.py`` this stays on the public typer surface."""
 
     def parse_args(self, ctx: Any, args: list[str]) -> list[str]:
+        if args and args[0] == "--voice":
+            # The plan's spelling of the voice page (T3, rider 13143 (1)): the leaf,
+            # not a message to the captain that starts with "--voice".
+            args = ["voice", *args[1:]]
         if args and args[0] not in self.commands and args[0] not in ctx.help_option_names:
             args = ["say", *args]
         result: list[str] = super().parse_args(ctx, args)
@@ -59,21 +63,9 @@ captain_voice.register(app)  # `voice`: the page, in its own module (T3)
 
 
 @app.callback()
-def captain(
-    ctx: typer.Context,
-    voice: Annotated[
-        bool,
-        typer.Option(
-            "--voice",
-            help="Serve the voice page: the plan's spelling of `aisquare captain voice`.",
-        ),
-    ] = False,
-) -> None:
+def captain(ctx: typer.Context) -> None:
     """Start the home's captain, or attach to it when it is already running."""
     if ctx.invoked_subcommand is not None:
-        return
-    if voice:
-        captain_voice.voice_page()
         return
     from aisquare.cli.fleet import _exec_attach, _fail_fleet, interactive_terminal
     from aisquare.services import fleet as fleet_service

@@ -95,8 +95,12 @@ STOP_WORDS: frozenset[str] = frozenset({"stop listening"})
 #: A reply slower than this earns one spoken cue, so the owner knows the request landed.
 CUE_AFTER_S = 3.0
 CUE_TEXT = "on it"
-#: How often the thinking signal is looked at.
+#: How often the thinking signal and the mode key are looked at.
 POLL_S = 1.0
+MODE_STATE_KEY = "captain_voice_mode"
+"""state.json: the mode's single home (13179) — a plain ``"focus"`` or ``"listen"``. The
+page's toggle, the CLI's ``--mode`` and T4's TUI control all write it; every connected page
+follows it within :data:`POLL_S`."""
 AUTH_TIMEOUT_S = 5.0
 CLOSE_AUTH_FAILED = 4401
 CLOSE_AUTH_TIMEOUT = 4408
@@ -377,12 +381,45 @@ class DeliveryFailed(RuntimeError):
     """The captain did not answer: the message is what the page and the Speaker say."""
 
 
-def deliver_to_captain(text: str) -> str:
-    """The product delivery: T2's ``brain.say`` — typed into the pane, the reply read back."""
+NO_TEXT_NOTE = "the captain answered with tools alone — its pane shows what it did"
+"""Shown on the page for a turn that ended without text (contract 13175); never spoken."""
+
+
+def deliver_to_captain(text: str) -> str | None:
+    """The product delivery: T2's ``brain.say`` — typed into the pane, the reply read back.
+
+    ``None`` is a turn that ended without text (13175): the captain answered with
+    tools alone. It is not a failure and it is never a placeholder.
+    """
     try:
         return brain.say(text).text
     except brain.NoReply as exc:
         raise DeliveryFailed(str(exc)) from exc
+
+
+def voice_mode() -> Mode | None:
+    """The mode in state.json (:data:`MODE_STATE_KEY`), or ``None`` when it was never set —
+    anything else written there is said in the log and read as unset, never as a mode."""
+    from aisquare.core import state_file
+
+    raw = state_file.read_state().get(MODE_STATE_KEY)
+    if raw is None:
+        return None
+    if raw in MODES:
+        return "listen" if raw == "listen" else "focus"
+    log.warning(
+        "captain voice: state.json %s=%r is not one of %s; ignored", MODE_STATE_KEY, raw, MODES
+    )
+    return None
+
+
+def set_voice_mode(mode: Mode) -> None:
+    """Write the mode (the page's toggle, ``--mode``, T4's control): connected pages follow."""
+    from aisquare.core import state_file
+
+    if mode not in MODES:
+        raise ValueError(f"mode must be one of {MODES}, not {mode!r}")
+    state_file.update_state(MODE_STATE_KEY, mode)
 
 
 def captain_is_thinking() -> bool:
@@ -424,11 +461,13 @@ class Hooks:
     """Everything the server reaches outside itself, replaceable in one place for a test."""
 
     transcriber_factory: Callable[[], Transcriber] = transcriber
-    deliver: Callable[[str], str] = deliver_to_captain
+    deliver: Callable[[str], str | None] = deliver_to_captain
     voice: speaker_mod.Voice = field(
         default_factory=lambda: speaker_mod.Voice(speaker_mod.pick_speaker())
     )
     thinking: Callable[[], bool] = captain_is_thinking
+    voice_mode: Callable[[], Mode | None] = voice_mode
+    set_voice_mode: Callable[[Mode], None] = set_voice_mode
     home_seq: Callable[[], int] = home_seq
     spoke_since: Callable[[int], int] = spoke_since
     on_thinking: Callable[[bool], None] | None = None
@@ -493,8 +532,9 @@ class _Connection:
         self._ws = websocket
         self._token = token
         self._hooks = hooks
-        self.mode: Mode = mode
-        self.listening = mode == "listen"
+        # The key is the mode's single home (13179): it wins over the server's default.
+        self.mode: Mode = self._mode_key() or mode
+        self.listening = self.mode == "listen"
         self._transcriber: Transcriber | None = None
         self._segmenter: Segmenter | None = None
         self._in_burst = False
@@ -626,7 +666,7 @@ class _Connection:
         else:
             await self._send("error", code="bad_message", message=f"unknown frame {kind!r}")
 
-    async def _set_mode(self, mode: str) -> None:
+    async def _set_mode(self, mode: str, *, write: bool = True) -> None:
         if mode not in MODES:
             await self._send("error", code="bad_message", message=f"mode must be one of {MODES}")
             return
@@ -635,7 +675,31 @@ class _Connection:
             await self._close_burst()
         self.mode = "listen" if mode == "listen" else "focus"
         self.listening = self.mode == "listen"
+        if write:
+            # The page's toggle writes the key (13179), so the TUI and every other
+            # page agree; a switch that CAME from the key is not written back.
+            try:
+                await asyncio.to_thread(self._hooks.set_voice_mode, self.mode)
+            except Exception as exc:  # the page still switched; the key did not, said
+                log.warning("captain voice: the mode key could not be written: %s", exc)
+                await self._send(
+                    "error", code="mode_not_saved", message=f"the mode was not saved: {exc}"
+                )
         await self._send("mode", mode=self.mode, listening=self.listening)
+
+    def _mode_key(self) -> Mode | None:
+        try:
+            return self._hooks.voice_mode()
+        except Exception as exc:  # a courtesy read: the page keeps its mode, said
+            log.warning("captain voice: the mode key could not be read: %s", exc)
+            return None
+
+    async def _follow_mode_key(self) -> None:
+        """The one-second poll's other job (13179): a key another writer changed — T4's
+        control, another page, ``--mode`` — switches this page, and the page is told."""
+        wanted = await asyncio.to_thread(self._mode_key)
+        if wanted is not None and wanted != self.mode:
+            await self._set_mode(wanted, write=False)
 
     async def _set_listening(self, on: bool) -> None:
         if not on:
@@ -745,6 +809,13 @@ class _Connection:
             # captain called speak() is already audible; only a silent turn's reply
             # is spoken here, so nothing is heard twice and nothing is missed.
             spoken_by_captain = await asyncio.to_thread(self._count_spoken, since)
+            if reply is None:
+                # 13175: a turn of tools alone. The page says so in its own words and
+                # nothing is spoken — there is no reply text, and a placeholder read
+                # aloud would be the captain's words to the owner's ear.
+                await self._send("reply", text=None, spoken=False, note=NO_TEXT_NOTE)
+                await self._show_thinking()
+                return
             await self._send("reply", text=reply, spoken=spoken_by_captain == 0)
             await self._show_thinking()
             if spoken_by_captain == 0:
@@ -792,6 +863,7 @@ class _Connection:
         while True:
             await asyncio.sleep(self._hooks.poll_s)
             await self._show_thinking()
+            await self._follow_mode_key()
 
 
 @contextmanager

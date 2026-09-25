@@ -69,7 +69,7 @@ class Deliveries:
 
     def __init__(
         self,
-        reply: str = "done",
+        reply: str | None = "done",
         *,
         delay_s: float = 0.0,
         fail: str | None = None,
@@ -81,7 +81,7 @@ class Deliveries:
         self.fail = fail
         self.during = during  # what the captain does inside the turn (a speak() call)
 
-    def __call__(self, text: str) -> str:
+    def __call__(self, text: str) -> str | None:
         self.texts.append(text)
         if self.during is not None:
             self.during()
@@ -110,6 +110,8 @@ class Harness:
         self.seq = 100  # the home board's latest seq; captain_speaks() moves it
         self.speak_seqs: list[int] = []  # where the captain's speak() audits landed
         self.board_broken: str | None = None
+        self.mode_key: voice.Mode | None = None  # state.json captain_voice_mode, in memory
+        self.mode_writes: list[voice.Mode] = []
 
         def factory() -> FakeTranscriber:
             fake = FakeTranscriber(canned)
@@ -124,11 +126,17 @@ class Harness:
         def spoke_since(since: int) -> int:
             return sum(1 for seq in self.speak_seqs if seq > since)
 
+        def set_mode_key(mode: voice.Mode) -> None:
+            self.mode_key = mode
+            self.mode_writes.append(mode)
+
         self.hooks = Hooks(
             transcriber_factory=factory,
             deliver=self.deliveries,
             voice=speaker_mod.Voice(self.spoken, enabled=lambda: True),
             thinking=thinking or (lambda: self.thinking_flag),
+            voice_mode=lambda: self.mode_key,
+            set_voice_mode=set_mode_key,
             home_seq=home_seq,
             spoke_since=spoke_since,
             on_thinking=self.thinking_flips.append,
@@ -336,6 +344,19 @@ def test_the_reply_is_spoken_only_when_the_captain_made_no_speak_call_that_turn(
     assert harness.spoken.lines == ([] if captain_spoke else ["all green"])
 
 
+def test_a_turn_without_text_shows_the_pages_own_note_and_speaks_nothing() -> None:
+    """13175: ``Reply.text`` is None when the captain answered with tools alone. The page
+    says so in its own words and speaks nothing — never a placeholder in the captain's voice."""
+    harness = Harness(deliveries=Deliveries(None))
+    with TestClient(harness.app) as client:
+        for connection in _authed(client):
+            connection.send_text(json.dumps({"t": "text", "text": "stop coder-2"}))
+            reply = _until(connection, "reply")
+    assert reply == {"t": "reply", "text": None, "spoken": False, "note": voice.NO_TEXT_NOTE}
+    assert harness.spoken.lines == []
+    assert harness.deliveries.texts == ["stop coder-2"]
+
+
 def test_when_the_home_board_cannot_be_read_the_reply_is_still_spoken_and_it_is_said(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -462,6 +483,51 @@ def test_switching_modes_flushes_an_open_utterance_and_the_hello_says_which_mode
 # --- the frame around it --------------------------------------------------------------------------
 
 
+def test_the_mode_key_is_the_default_for_a_new_page_and_the_pages_toggle_writes_it() -> None:
+    """13179: state.json captain_voice_mode is the mode's single home."""
+    harness = Harness(mode="focus")
+    harness.mode_key = "listen"  # T4's control, or an earlier page, set it
+    with TestClient(harness.app) as client, client.websocket_connect("/ws") as connection:
+        connection.send_text(json.dumps({"t": "auth", "token": TOKEN}))
+        hello = json.loads(_text(connection))
+        assert (hello["t"], hello["mode"], hello["listening"]) == ("hello", "listen", True), (
+            "the key wins over the server's own default"
+        )
+        connection.send_text(json.dumps({"t": "mode", "mode": "focus"}))
+        assert _until(connection, "mode") == {"t": "mode", "mode": "focus", "listening": False}
+    assert harness.mode_writes == ["focus"], "the page's toggle wrote the key"
+
+
+def test_a_change_of_the_mode_key_switches_a_connected_page() -> None:
+    """13179's pin: T4's toggle (or another page) writes the key; this page follows within a poll
+    and is told, so its mic opens — and the switch that came from the key is not written back."""
+    harness = Harness(mode="focus")
+    with TestClient(harness.app) as client, client.websocket_connect("/ws") as connection:
+        connection.send_text(json.dumps({"t": "auth", "token": TOKEN}))
+        assert json.loads(_text(connection))["mode"] == "focus"
+        harness.mode_key = "listen"
+        switched = _until(connection, "mode")
+    assert switched == {"t": "mode", "mode": "listen", "listening": True}
+    assert harness.mode_writes == [], "a switch that came from the key is not written back"
+
+
+def test_the_mode_key_helpers_read_and_write_state_json_and_say_garbage(
+    isolated_home: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    from aisquare.core import state_file
+
+    assert voice.voice_mode() is None, "never set: no default is invented here"
+    voice.set_voice_mode("listen")
+    assert voice.voice_mode() == "listen"
+    assert state_file.read_state()[voice.MODE_STATE_KEY] == "listen", "a plain string, for T4"
+    with pytest.raises(ValueError, match=r"mode must be one of"):
+        voice.set_voice_mode("shout")  # type: ignore[arg-type]
+    state_file.update_state(voice.MODE_STATE_KEY, {"mode": "listen"})
+    with caplog.at_level(logging.WARNING, logger="aisquare.services.captain.voice"):
+        assert voice.voice_mode() is None
+    assert any("captain_voice_mode" in r.getMessage() for r in caplog.records), "said, not a mode"
+
+
 def test_a_wrong_token_is_refused_and_closed_and_a_binary_first_frame_too(harness: Harness) -> None:
     from starlette.websockets import WebSocketDisconnect
 
@@ -573,6 +639,7 @@ def test_the_default_hooks_reach_the_product_seams() -> None:
     hooks = Hooks()
     assert hooks.deliver is voice.deliver_to_captain
     assert hooks.thinking is voice.captain_is_thinking
+    assert hooks.voice_mode is voice.voice_mode and hooks.set_voice_mode is voice.set_voice_mode
     assert hooks.home_seq is voice.home_seq and hooks.spoke_since is voice.spoke_since
     assert hooks.on_thinking is None, "the CLI wires its terminal in; the library prints nothing"
     assert isinstance(hooks.voice, speaker_mod.Voice)

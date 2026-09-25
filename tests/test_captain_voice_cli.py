@@ -61,12 +61,20 @@ def test_serving_hands_the_token_mode_and_model_to_the_server(
 def test_captain_dash_dash_voice_is_the_plans_spelling_of_the_voice_leaf(
     runner: CliRunner, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """13143 (1): `aisquare captain --voice` keeps working as the alias of `captain voice`."""
-    calls: list[dict[str, Any]] = []
-    monkeypatch.setattr(captain_voice, "voice_page", lambda **kw: calls.append(kw))
-    result = runner.invoke(app, ["captain", "--voice"])
+    """13143 (1): `aisquare captain --voice` keeps working as the alias of `captain voice` —
+    also under T2's group, which hands any other leading token to `say`."""
+    served: list[dict[str, Any]] = []
+    monkeypatch.setattr("aisquare.services.captain.voice.serve", lambda **kw: served.append(kw))
+    monkeypatch.setattr(captain_voice, "voice_dependency_error", lambda: None)
+    result = runner.invoke(app, ["captain", "--voice", "--mode", "listen"])
     assert result.exit_code == 0, result.output
-    assert calls == [{}], "the leaf, with its own defaults"
+    (call,) = served
+    assert call["mode"] == "listen" and call["port"] == 8749, "the leaf, its options honoured"
+    said: list[str] = []
+    monkeypatch.setattr("aisquare.services.captain.brain.say", lambda text, **kw: said.append(text))
+    result = runner.invoke(app, ["captain", "--voice", "--show-token"])
+    assert result.exit_code == 0, result.output
+    assert "token=" in result.output and said == [], "never a message to the captain"
 
 
 def test_a_missing_extra_is_the_install_line_and_show_token_still_answers(
@@ -80,6 +88,27 @@ def test_a_missing_extra_is_the_install_line_and_show_token_still_answers(
     assert "missing websockets" in result.output and "aisquare-cli[voice]" in result.output
     result = runner.invoke(app, ["captain", "voice", "--show-token"])
     assert result.exit_code == 0 and "note: the voice extra is not installed" in result.output
+
+
+def test_dash_dash_mode_writes_the_key_and_without_it_the_key_is_the_default(
+    runner: CliRunner, isolated_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """13179: the key is the mode's single home; --mode sets it for every page, and a run
+    without --mode serves the saved mode."""
+    from aisquare.services.captain import voice
+
+    served: list[dict[str, Any]] = []
+    monkeypatch.setattr("aisquare.services.captain.voice.serve", lambda **kw: served.append(kw))
+    monkeypatch.setattr(captain_voice, "voice_dependency_error", lambda: None)
+    result = runner.invoke(app, ["captain", "voice", "--mode", "listen"])
+    assert result.exit_code == 0, result.output
+    assert voice.voice_mode() == "listen" and served[-1]["mode"] == "listen"
+    result = runner.invoke(app, ["captain", "voice"])
+    assert result.exit_code == 0, result.output
+    assert served[-1]["mode"] == "listen", "not given: the saved mode, not focus"
+    assert "mode: listen" in result.output
+    result = runner.invoke(app, ["--json", "captain", "voice", "--show-token"])
+    assert json.loads(result.stdout)["mode"] == "listen"
 
 
 def test_a_non_loopback_host_and_a_bad_mode_are_refused(

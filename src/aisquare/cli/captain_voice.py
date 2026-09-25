@@ -61,8 +61,13 @@ def voice_page(
         typer.Option("--host", help="Loopback only: the token is the only lock on this page."),
     ] = "127.0.0.1",
     mode: Annotated[
-        str, typer.Option("--mode", help="focus (hold to talk) or listen (always listening).")
-    ] = "focus",
+        str | None,
+        typer.Option(
+            "--mode",
+            help="focus (hold to talk) or listen (always listening); saved as the mode for "
+            "every page (state.json captain_voice_mode). Not given: the saved mode, else focus.",
+        ),
+    ] = None,
     speaker: Annotated[
         str | None, typer.Option("--speaker", help="on or off: whether replies are spoken.")
     ] = None,
@@ -83,7 +88,7 @@ def voice_page(
     from aisquare.services.captain import voice
     from aisquare.services.mcp_server import serve_token
 
-    if mode not in voice.MODES:
+    if mode is not None and mode not in voice.MODES:
         fail(f"--mode must be one of {', '.join(voice.MODES)}", error="bad_mode")
     if host not in voice.LOOPBACK_HOSTS:
         fail(
@@ -96,6 +101,9 @@ def voice_page(
         if speaker not in ("on", "off"):
             fail("--speaker takes on or off", error="bad_speaker")
         speaker_mod.set_speaker(speaker == "on")
+    if mode is not None:
+        voice.set_voice_mode("listen" if mode == "listen" else "focus")  # the key is its home
+    effective: voice.Mode = voice.voice_mode() or "focus"
     problem = voice_dependency_error()
     if problem is not None and not show_token:
         fail(problem, error="voice_not_installed")
@@ -105,7 +113,7 @@ def voice_page(
         "url": url,
         "port": port,
         "host": host,
-        "mode": mode,
+        "mode": effective,
         "speaker": speaker_mod.speaker_on(),
         "adb_reverse": voice.adb_reverse(port),
         "serving": not show_token,
@@ -121,7 +129,7 @@ def voice_page(
             for line in qr:
                 console.print(f"  {line}")
             console.print()
-        console.print(f"mode: {mode} · speaker: {'on' if report['speaker'] else 'off'}")
+        console.print(f"mode: {effective} · speaker: {'on' if report['speaker'] else 'off'}")
         console.print(f"Android over USB: {voice.adb_reverse(port)}, then open the same URL there")
         if problem is not None:
             console.print(f"note: {problem}")
@@ -131,7 +139,7 @@ def voice_page(
         token=token,
         port=port,
         host=host,
-        mode="listen" if mode == "listen" else "focus",
+        mode=effective,
         hooks=voice.Hooks(
             transcriber_factory=lambda: voice.transcriber(model), on_thinking=_print_thinking
         ),

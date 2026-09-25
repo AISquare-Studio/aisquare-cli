@@ -5,6 +5,7 @@ state, and ``project list --json`` exposes ``group``, ``position`` and ``pinned`
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 from typing import Any
 
@@ -114,6 +115,29 @@ def test_onboard_into_a_group_creates_it_when_new(
     assert _names(runner, "--group", "new-things") == ["fresh", "web"]
     listing = json.loads(runner.invoke(app, ["--json", "project", "group", "list"]).stdout)
     assert [g["name"] for g in listing["groups"]] == ["new-things"], "created once, reused after"
+
+
+def test_onboard_into_a_new_group_the_store_refuses_leaves_no_empty_group(
+    runner: CliRunner,
+    projects: dict[str, str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``onboard --group`` created a new group in one transaction and added the project
+    in another, so an add the store refused left an empty group behind (review of #203).
+    The group is made with its member, or not at all."""
+    from aisquare.services import project_groups
+
+    def refused(*_args: object, **_kwargs: object) -> None:
+        raise sqlite3.IntegrityError("FOREIGN KEY constraint failed")
+
+    fresh = tmp_path / "fresh"
+    fresh.mkdir()
+    monkeypatch.setattr(project_groups, "move_project", refused)
+    result = runner.invoke(app, ["project", "onboard", str(fresh), "--group", "new-things"])
+    assert result.exit_code != 0
+    listing = json.loads(runner.invoke(app, ["--json", "project", "group", "list"]).stdout)
+    assert [g["name"] for g in listing["groups"]] == [], "an empty group was left behind"
 
 
 def test_a_filter_that_matches_nothing_says_so_not_that_nothing_is_registered(

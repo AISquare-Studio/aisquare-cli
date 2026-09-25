@@ -173,8 +173,11 @@ def onboard(
             try:
                 target = groups_service.resolve_group(store, group)
             except KeyError:
-                target, _ = groups_service.create_group(store, group)
-            groups_service.add_to_group(store, target.id, [project_id])
+                # Made with its member in one transaction: made first and filled after,
+                # an add the store refused left an empty group behind (review of #203).
+                groups_service.create_group(store, group, [project_id])
+            else:
+                groups_service.add_to_group(store, target.id, [project_id])
     emit_onboard(report)
 
 

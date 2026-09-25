@@ -1335,6 +1335,38 @@ def test_a_project_key_for_a_deployment_nothing_answers_to_is_refused(
     assert path.read_text(encoding="utf-8") == "pk-prod-0123456789"
 
 
+def test_make_active_does_not_make_a_typo_a_known_deployment_for_the_key(
+    project: ProjectInfo, quiet_explainability: dict[str, int], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The known-target check ran after ``configure_target`` had made the typed name the
+    machine's target, so with 'make active' ticked a typo was in ``known`` and passed:
+    the machine moved to a target with no entry and the key was bound to it (review of
+    #170's Setup-form merge, G1). A blank field whose deployment an exported variable
+    names is the same question (G2)."""
+
+    async def scenario(pilot: Pilot[None], host: Host) -> list[tuple[str, str]]:
+        host.query_one(ProjectView).active = "tab-explainability"
+        await settle(pilot)
+        host.query_one("#explainability-switch", Checkbox).value = True
+        _attach_in_setup(host, "pk-typo-0123456789", target="prdo")
+        await settle(pilot)
+        host.query_one("#explainability-switch", Checkbox).value = False
+        host.query_one("#explainability-target", Input).value = ""
+        monkeypatch.setenv(ops.TARGET_ENV_VAR, "prdo")
+        _attach_in_setup(host, "pk-typo-0123456789")
+        await settle(pilot)
+        return list(host.notices)
+
+    notices = drive(project, scenario)
+    refused = [m for m, _ in notices if m.startswith("no target 'prdo' on this machine")]
+    assert len(refused) == 2, notices
+    assert f"named by ${ops.TARGET_ENV_VAR}" in refused[1]
+    assert load_config().explainability.target == "stg", "the machine did not move to the typo"
+    with store_session() as store:
+        assert store.project_explainability(project.id) is None
+    assert not explainability_service.project_key_path(project.id).exists()
+
+
 def test_a_project_key_lands_where_its_destination_does_and_never_over_a_minted_one(
     project: ProjectInfo, quiet_explainability: dict[str, int]
 ) -> None:

@@ -612,6 +612,15 @@ class ExplainabilityView(VerticalScroll):
             if suggested is not None:
                 proxy = suggested
         identity = f"{prefix}-{{role}}" if prefix else None
+        # The deployments a key may be bound to, judged on the config AS IT WAS:
+        # `configure_target` below makes a typed name the machine's target when
+        # 'make active' is ticked, and judged after it, a typo passed as known
+        # (review of #170's Setup-form merge, G1). A name this save gives an
+        # entry — typed with a gateway, proxy, prefix or key variable — is
+        # known once it is saved.
+        known = ops.known_targets(settings)
+        if target and any((gateway, proxy, prefix, key_env)):
+            known = sorted({*known, target})
         try:
             name = explainability_service.configure_target(
                 config,
@@ -627,19 +636,23 @@ class ExplainabilityView(VerticalScroll):
             self.notify(str(exc), severity="warning", timeout=8, markup=False)
             return
         # The project key's deployment: the one typed, else the one a launch
-        # resolves — `key set`'s default. A typed name that no target answers to
-        # after this save is refused as `key set --target` refuses it: a binding
-        # to a deployment nothing resolves traces nothing (review of #170).
+        # resolves — `key set`'s default. A name no target answers to after this
+        # save is refused as `key set` refuses it, typed or named by an exported
+        # variable: a binding to a deployment nothing configures traces nothing
+        # (review of #170). The writer refuses it too, by the same rule.
         key_target = name
         if owner is not None:
             # With the project, as `key set` resolves it: its destination (#142)
             # names the deployment its traces go to when the field does not.
-            key_target = ops.resolve_target(settings, target or None, project_id=owner.id).name
-            known = sorted({settings.target, *settings.targets})
-            if target and key_target not in known:
+            resolved = ops.resolve_target(settings, target or None, project_id=owner.id)
+            key_target = resolved.name
+            if key_target not in known:
+                named = (
+                    f", named by ${ops.TARGET_ENV_VAR}" if resolved.target_source == "env" else ""
+                )
                 self.notify(
-                    f"no target '{key_target}' on this machine (known: {', '.join(known)}) — "
-                    "give it a gateway URL here first, then attach the key",
+                    f"no target '{key_target}' on this machine{named} (known: "
+                    f"{', '.join(known)}) — give it a gateway URL here first, then attach the key",
                     severity="warning",
                     timeout=10,
                     markup=False,

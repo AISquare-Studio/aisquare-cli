@@ -520,6 +520,29 @@ def test_key_set_refuses_a_target_this_machine_does_not_have(
     )
 
 
+def test_the_writer_refuses_a_target_this_machine_does_not_have(
+    home: Path, tmp_path: Path, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The known-target rule lived in two callers that disagreed (review of #170's
+    Setup-form merge, G7): ``key set`` judged ``--target`` alone, so a deployment an
+    exported variable names was bound unchecked, and the writer judged nothing."""
+    _settings()
+    api = _project(tmp_path / "api")
+
+    with pytest.raises(ops.UnknownTarget, match="no target 'prdo' on this machine"):
+        ops.attach_project_key(api, PROJECT_KEY, target="prdo")
+    assert not service.project_key_path(api.id).exists(), "refused before anything is written"
+    with store_session() as store:
+        assert store.project_explainability(api.id) is None
+
+    monkeypatch.chdir(api.root)
+    monkeypatch.setenv(ops.TARGET_ENV_VAR, "prdo")
+    named = runner.invoke(app, ["explainability", "key", "set"], input=PROJECT_KEY + "\n")
+    assert named.exit_code != 0
+    assert f"no target 'prdo' on this machine, named by ${ops.TARGET_ENV_VAR}" in named.output
+    assert not service.project_key_path(api.id).exists()
+
+
 def test_key_set_records_the_signed_in_email_as_who_attached_it(
     home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

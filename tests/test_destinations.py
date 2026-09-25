@@ -1048,6 +1048,9 @@ def test_the_tabs_attach_asks_about_a_minted_key_inside_the_writers_own_session(
     from aisquare.core import store as store_module
 
     project = _project(tmp_path / "web")
+    # The deployment the key is bound to must be one this machine has (the
+    # writer's known-target rule): `use` creates it, without minting here.
+    _json(runner, "explainability", "use", "acme/Frontend", "--no-key")
     opened: list[int] = []
     real_open = store_module.open_store
 

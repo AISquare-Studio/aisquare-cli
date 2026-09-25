@@ -480,6 +480,37 @@ def key_owner() -> str | None:
     return os.environ.get("USER") or None
 
 
+class UnknownTarget(ValueError):
+    """A key was to be bound to a deployment this machine has no target for.
+
+    Raised by :func:`attach_project_key` before anything is written; the
+    message is the problem, and each surface adds its own way to fix it.
+    """
+
+    def __init__(self, target: str, known: Sequence[str]) -> None:
+        super().__init__(f"no target '{target}' on this machine (known: {', '.join(known)})")
+        self.target = target
+        self.known = tuple(known)
+
+
+def known_targets(settings: ExplainabilitySettings) -> list[str]:
+    """The deployments a project's key may be bound to: the machine's target and every entry.
+
+    ``resolve_target`` answers for any name, so a binding to a name nothing
+    configures (``--target prdo``, or an exported
+    ``$AISQUARE_EXPLAINABILITY_TARGET=prdo``) traces nothing and still read
+    as success (review of #170). The machine's own target counts without an
+    entry: that is the single-deployment machine ``init --explainability``
+    writes, which resolves the top-level gateway. ONE rule, used by the
+    writer (:func:`attach_project_key`) and by the two surfaces that refuse
+    earlier (``key set`` before it reads the key, the Setup form before it
+    saves). The form used to judge a name after its own save had made it
+    the machine's target, so "make active" let a typo through (review of
+    #170's Setup-form merge, G1/G7).
+    """
+    return sorted({settings.target, *settings.targets})
+
+
 class MintedKeyInPlace(Exception):
     """The project's key file holds a key the CLI minted (#142), and the caller will not replace it.
 
@@ -506,6 +537,9 @@ def attach_project_key(
     Ctrl-C between the write and the commit left the new key under the old
     binding just the same.
 
+    A ``target`` that is not one of :func:`known_targets` raises
+    :class:`UnknownTarget` before anything is written.
+
     Over a key the CLI minted (#142) the binding's commit also detaches it,
     owing its revocation (``set_project_explainability``); the caller revokes
     it once the store is closed. The minted key's OWN value attached again is
@@ -529,6 +563,9 @@ def attach_project_key(
     """
     from aisquare.core.store import store_session  # lazy, as in project_key_binding
 
+    known = known_targets(load_config().explainability)
+    if target not in known:
+        raise UnknownTarget(target, known)
     with store_session() as store:
         destination = store.project_destination(project.id)
         if refuse_minted and destination is not None and destination.key_uid:

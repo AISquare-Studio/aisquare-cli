@@ -151,22 +151,26 @@ def key_set(
     """
     project = _project_for(project_ref)
     settings = load_config().explainability
-    known = sorted({settings.target, *settings.targets})
-    if target_name is not None and target_name not in known:
-        # `resolve_target` answers for any name, so a typo (`--target prdo`)
-        # bound the key to a deployment nothing ever resolves and still printed
-        # success (review of #170). Refused before the key is read or written.
-        fail(
-            f"no target '{target_name}' on this machine (known: {', '.join(known)}) — "
-            f"create it first: aisquare explainability enable --target {target_name} "
-            "--gateway-url <url>",
-            error="unknown_target",
-            ref=target_name,
-        )
     # With the project (#142): its destination names the deployment when
     # `--target` does not, so the key lands where the project's traces are
     # resolved — the fallback `use` points at when the API will not mint one.
-    target = ops.resolve_target(settings, target_name, project_id=project.id).name
+    resolved = ops.resolve_target(settings, target_name, project_id=project.id)
+    target = resolved.name
+    known = ops.known_targets(settings)
+    if target not in known:
+        # `resolve_target` answers for any name, so a typo (`--target prdo`),
+        # or one an exported $AISQUARE_EXPLAINABILITY_TARGET names, bound the
+        # key to a deployment nothing configures and still printed success
+        # (review of #170). Refused before the key is read or written; the
+        # writer refuses it too, by the same rule.
+        named = f", named by ${ops.TARGET_ENV_VAR}" if resolved.target_source == "env" else ""
+        fail(
+            f"no target '{target}' on this machine{named} (known: {', '.join(known)}) — "
+            f"create it first: aisquare explainability enable --target {target} "
+            "--gateway-url <url>",
+            error="unknown_target",
+            ref=target,
+        )
     if from_env is not None:
         value = os.environ.get(from_env, "").strip()
         if not value:
@@ -187,7 +191,10 @@ def key_set(
     # the binding and the uid as they were. The revoke is made once the store is
     # closed, and a key it cannot revoke yet stays owed, and is said (review of
     # #172).
-    binding = ops.attach_project_key(project, value, target=target)
+    try:
+        binding = ops.attach_project_key(project, value, target=target)
+    except ops.UnknownTarget as exc:  # the config changed under this command
+        fail(str(exc), error="unknown_target", ref=target)
     revocations = dest.revoke_owed(iam.signed_in_quietly(), project_ids={project.id})
     payload = _key_payload(project, target)
     if get_state().json_output:

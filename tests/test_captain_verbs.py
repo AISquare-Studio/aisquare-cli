@@ -591,6 +591,38 @@ def test_a_leading_option_looks_past_itself_and_the_first_word_decides(
     assert last_audit()["tool"] == "next"
 
 
+def test_voice_among_the_leading_options_opens_the_page_wherever_it_sits(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """13445: the words are recorded, then T3's --voice rewrite, then say-by-default. --voice
+    is the page wherever it sits among the options before the first word, the leaf's own
+    options honoured; after ``--`` it is a word of a message."""
+    from aisquare.cli import captain_voice
+    from aisquare.services.captain import brain
+
+    served: list[dict[str, Any]] = []
+    monkeypatch.setattr("aisquare.services.captain.voice.serve", lambda **kw: served.append(kw))
+    monkeypatch.setattr(captain_voice, "voice_dependency_error", lambda: None)
+    heard: list[str] = []
+
+    def say(text: str, *, timeout: float = 180.0) -> brain.Reply:
+        heard.append(text)
+        return brain.Reply(text="all quiet")
+
+    monkeypatch.setattr(brain, "say", say)
+    for argv in (
+        ["--voice", "--mode", "listen"],
+        ["--no-color", "--voice", "--mode", "listen"],
+        ["--mode", "listen", "--voice"],  # the leaf's option's value is no word either
+    ):
+        result = runner.invoke(app, ["captain", *argv], catch_exceptions=False)
+        assert result.exit_code == 0, result.output
+    assert [call["mode"] for call in served] == ["listen"] * 3 and heard == []
+    result = runner.invoke(app, ["captain", "--", "--voice", "is", "loud"], catch_exceptions=False)
+    assert result.exit_code == 0, result.output
+    assert heard == ["--voice is loud"] and len(served) == 3
+
+
 def test_a_leading_option_alone_is_the_bare_captain_never_an_empty_say(
     runner: CliRunner, monkeypatch: pytest.MonkeyPatch
 ) -> None:

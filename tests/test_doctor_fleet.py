@@ -84,9 +84,12 @@ class FakeServer(TmuxServer):
         version_raises: bool = False,
         facts_raise: bool = False,
         absent: bool = False,
+        started: datetime | None = None,
     ) -> None:
         super().__init__(socket, conf=Path("/nonexistent/fleet-tmux.conf"))
         self._present = present
+        self._started = started
+        """What ``#{start_time}`` answers; ``None`` — tmux did not say — judges nothing."""
         self._absent = absent
         self._version = version
         self._sessions = sessions
@@ -124,6 +127,10 @@ class FakeServer(TmuxServer):
         if self._facts_raise:
             raise TmuxError("unexpected display-message output")
         return self._panes.get(pane_id)
+
+    def started_at(self) -> datetime | None:
+        self.asked.append("started_at")
+        return self._started
 
     def run(self, *args: str, stdin: bytes | None = None) -> str:
         self.asked.append(" ".join(args))
@@ -504,6 +511,33 @@ def test_fleet_check_warns_when_a_live_row_has_no_pane(home: Path, tmp_path: Pat
     assert "1 recorded live but the tmux pane is gone" in check.detail
     assert "coder-1" in check.detail and "manager" not in check.detail
     assert check.fix and "aisquare fleet reap" in check.fix
+
+
+def test_fleet_check_counts_a_row_older_than_its_server_as_gone(home: Path, tmp_path: Path) -> None:
+    """Review of the #203 final-round fixes, F4: the check asked tmux about a row's pane
+    by id alone. After a reboot the next server hands the same ids out again, so a row
+    that outlived its server counted as a healthy pane (another agent's) while
+    ``fleet ls`` read it ``✗ lost``, and the ``reap`` that records it was never
+    prescribed. A row written after the server started is the control."""
+    project = _seed(tmp_path / "repo")
+    now = datetime.now(tz=UTC)
+    stale = _agent(project.id, "manager", "%1").model_copy(
+        update={"created_at": now - timedelta(hours=1)}
+    )
+    _seed(tmp_path / "repo", stale, _agent(project.id, "coder-1", "%2"))
+    server = FakeServer(
+        sessions=("asq-amber-otter",),
+        panes={"%1": _facts("%1"), "%2": _facts("%2")},
+        started=now - timedelta(minutes=10),
+    )
+
+    check = diagnostics._check_fleet(lambda socket: server)
+
+    assert check.status is CheckStatus.warn
+    assert "1 recorded live but the tmux pane is gone" in check.detail
+    assert "manager" in check.detail and "coder-1" not in check.detail
+    assert check.fix and "aisquare fleet reap --all" in check.fix
+    assert server.asked.count("started_at") == 1  # once per socket, not per row
 
 
 def test_fleet_check_reads_empty_facts_as_a_gone_pane(home: Path, tmp_path: Path) -> None:

@@ -846,7 +846,10 @@ class AttentionQueue:
         except OSError as exc:
             raise QueueError(f"{self.path} exists but could not be read: {exc}") from exc
         try:
-            raw = data.decode("utf-8-sig")
+            # Windows writes text mode, so the file holds \r\n; the unchanged check
+            # in _write compares this against LF-serialised text, and without the
+            # normalisation every fold rewrote identical content there (13147).
+            raw = data.decode("utf-8-sig").replace("\r\n", "\n")
         except UnicodeDecodeError as exc:
             self._report_corrupt(exc)
             return _State(raw=None)

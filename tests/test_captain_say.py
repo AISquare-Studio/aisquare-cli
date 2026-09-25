@@ -155,6 +155,7 @@ from tests.captain_screens import (  # noqa: E402
     INPUT_BOX,
     REAL_IDLE_AFTER_STOP,
     REAL_TRUST,
+    REAL_WORKING,
 )
 
 
@@ -172,6 +173,10 @@ class Captain:
     turn_ends_after: float | None = 3.0
     """Seconds after the text goes in until the Stop hook marks the session waiting."""
     busy_for: float = 0.0
+    busy_screen: list[str] | None = None
+    """What the pane shows while ``busy_for`` runs, when set: a real busy Claude Code keeps
+    its box drawn with its turn above it (runner2's REAL_WORKING), and since T2b a drawn,
+    idle box is ready even while the fleet reads working."""
     reply: str = "Nothing needs you right now."
     typed: list[tuple[str, str]] = field(default_factory=list)
     started: list[str | None] = field(default_factory=list)
@@ -288,7 +293,13 @@ def captain(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Captain, C
     monkeypatch.setattr(brain, "start", start)
     monkeypatch.setattr(brain, "find", lambda: fake.row)
     monkeypatch.setattr(brain, "_bound", lambda agent: (fake.row, fake.session))
-    monkeypatch.setattr(brain, "_pane_text", lambda agent, srv: list(fake.screen))
+    monkeypatch.setattr(
+        brain,
+        "_pane_text",
+        lambda agent, srv: list(
+            fake.busy_screen if fake.busy_for > 0 and fake.busy_screen is not None else fake.screen
+        ),
+    )
     monkeypatch.setattr(fleet, "tell", tell)
     monkeypatch.setattr(
         fleet, "status_of", lambda agent: FleetAgentStatus(agent=agent, state=status_now())
@@ -382,6 +393,7 @@ def test_a_busy_captain_is_waited_for_never_sent_a_board_note(
     fake, clock = captain
     fake.present()  # type: ignore[attr-defined]
     fake.busy_for = 20.0
+    fake.busy_screen = list(REAL_WORKING)  # its turn on screen, as a real one shows it
     reply = brain.say("what is up", timeout=120)
     assert fake.told == [], "never a board note the captain is not prompted to read"
     assert fake.typed[0] == ("paste", "what is up")
@@ -429,6 +441,7 @@ def test_a_started_captain_that_never_reaches_its_prompt_is_said_at_the_deadline
 ) -> None:
     fake, _ = captain
     fake.busy_for = 10_000.0  # up, but never at its prompt
+    fake.busy_screen = list(REAL_WORKING)  # its turn on screen, as a real one shows it
     with pytest.raises(
         brain.NoReply, match="stayed working for 30s, so nothing was typed"
     ) as caught:
@@ -767,6 +780,43 @@ def test_one_message_reaches_the_captain_at_a_time(captain: tuple[Captain, Clock
 
 
 @pytest.mark.parametrize("door", ["say", "send"])
+def test_a_fresh_captain_the_fleet_still_reads_working_is_typed_into_at_its_idle_box(
+    captain: tuple[Captain, Clock], door: str
+) -> None:
+    """T2b (13399, runner2's red-before at 13398): a bare-started real captain reads WORKING
+    until its first Stop, and say waited for waiting, so the owner's first say never landed
+    ('stayed working for 120s'). The rider's rule (13313): working with the box drawn and
+    idle is ready. runner2's real idle capture, verbatim."""
+    fake, _ = captain
+    fake.present()  # type: ignore[attr-defined]
+    fake.state = "working"  # no Stop hook yet
+    fake.screen = list(REAL_IDLE_AFTER_STOP)
+    if door == "say":
+        assert brain.say("what is up", timeout=60).text == "Nothing needs you right now."
+    else:
+        brain.send("what is up", timeout=60)
+    assert fake.typed == [("paste", "what is up"), ("keys", "Enter")]
+
+
+@pytest.mark.parametrize("door", ["say", "send"])
+def test_a_captain_mid_turn_is_waited_out_never_typed_over(
+    captain: tuple[Captain, Clock], door: str
+) -> None:
+    """The box is drawn DURING a turn too: working with a live spinner above it and 'esc to
+    interrupt' in its footer is not ready. runner2's real mid-turn capture, verbatim."""
+    fake, _ = captain
+    fake.present()  # type: ignore[attr-defined]
+    fake.state = "working"
+    fake.screen = list(REAL_WORKING)
+    with pytest.raises(brain.NoReply, match="stayed working for 5s") as caught:
+        if door == "say":
+            brain.say("what is up", timeout=5)
+        else:
+            brain.send("what is up", timeout=5)
+    assert caught.value.timed_out is True and fake.typed == []
+
+
+@pytest.mark.parametrize("door", ["say", "send"])
 def test_both_doors_type_into_a_real_captain_whose_top_rule_carries_its_name(
     captain: tuple[Captain, Clock], door: str
 ) -> None:
@@ -827,6 +877,7 @@ def test_send_waits_out_a_busy_captain_then_types_never_a_board_note(
     fake, clock = captain
     fake.present()  # type: ignore[attr-defined]
     fake.busy_for = 5.0
+    fake.busy_screen = list(REAL_WORKING)  # its turn on screen, as a real one shows it
     brain.send("what is up")
     assert fake.typed == [("paste", "what is up"), ("keys", "Enter")]
     assert clock.slept >= 5.0 and fake.told == []

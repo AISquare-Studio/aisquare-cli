@@ -1168,6 +1168,24 @@ def test_logout_revokes_where_each_key_was_minted_and_keeps_owing_the_rest(
     assert service.project_key_path(stuck.id).exists(), "left on disk, bound to nothing"
 
 
+def test_logout_counts_a_minted_uid_whose_binding_was_already_gone(
+    runner: CliRunner, idp: IdentityProviderStub, signed_in: iam.Session, tmp_path: Path
+) -> None:
+    """``detach`` answered whether a binding existed, not whether a uid was detached:
+    a uid with no binding left was detached, owed and revoked, and ``logout`` said
+    it had forgotten none (review of #172's follow-ups, round 1, F5)."""
+    project = _project(tmp_path / "web")
+    workspace = dest.Workspace(id=42, uid="ws-uid-42", name="acme", role="ADMIN")
+    with store_session() as store:
+        dest.choose(
+            store, project, workspace, dest.Studio(id=301, uid="st-301", name="Frontend"), signed_in
+        )
+        store.set_project_destination_key(project.id, "key-1")  # no binding names it
+    out = _json(runner, "logout")
+    assert out["minted_keys_cleared"] == 1
+    assert idp.revoked_keys == ["key-1"]
+
+
 def test_a_revoke_whose_answer_is_cut_short_keeps_that_key_owed_after_logout(
     idp: IdentityProviderStub,
     signed_in: iam.Session,

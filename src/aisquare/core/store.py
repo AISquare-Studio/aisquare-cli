@@ -995,7 +995,7 @@ class ContextStore(Protocol):
     def project_destinations(self) -> list[TraceDestination]: ...
     def set_project_destination(self, destination: TraceDestination) -> TraceDestination: ...
     def set_project_destination_key(self, project_id: str, key_uid: str | None) -> None: ...
-    def detach_minted_key(self, project_id: str) -> ProjectExplainability | None: ...
+    def detach_minted_key(self, project_id: str) -> tuple[bool, ProjectExplainability | None]: ...
     def clear_project_destination(self, project_id: str) -> bool: ...
     # The revocations owed for keys the CLI minted (v22, #142).
     def pending_revocations(self) -> list[PendingRevocation]: ...
@@ -2949,22 +2949,25 @@ class SqliteStore:
             elif detached:
                 self._drop_binding(project_id)
 
-    def detach_minted_key(self, project_id: str) -> ProjectExplainability | None:
+    def detach_minted_key(self, project_id: str) -> tuple[bool, ProjectExplainability | None]:
         """Take the key the CLI minted off the project: its revocation owed, its binding gone.
 
         One transaction: the destination's ``key_uid`` is cleared, the uid is
         written to ``pending_revocation``, and the binding that named the key's
         file is deleted — a binding left on a key about to be revoked is a
-        project whose launches authenticate with a dead key. Returns that
-        binding, whose file the caller deletes; ``None`` when the project had no
-        minted key, or no binding for it.
+        project whose launches authenticate with a dead key. Returns whether a
+        key was detached, and that binding, whose file the caller deletes
+        (``None`` when there was none). Two facts, not one: a uid with no
+        binding left is detached all the same, and counting detachments by the
+        binding undercounted what ``logout`` forgot (review of #172's
+        follow-ups, round 1, F5).
         """
         with self._conn:
             if not self._owe_revocation(project_id):
-                return None
+                return False, None
             binding = self.project_explainability(project_id)
             self._drop_binding(project_id)
-        return binding
+        return True, binding
 
     def clear_project_destination(self, project_id: str) -> bool:
         """Forget where the project's traces land; ``False`` when nothing was recorded.

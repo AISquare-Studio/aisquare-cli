@@ -532,11 +532,11 @@ def detach(store: ContextStore, project_id: str) -> bool:
     a hand-attached key out of here: the file and the binding are the same for
     both kinds.
     """
-    binding = store.detach_minted_key(project_id)
+    detached, binding = store.detach_minted_key(project_id)
     if binding is not None and binding.key_path == project_key_path(project_id):
         with contextlib.suppress(OSError):
             clear_project_api_key(project_id)
-    return binding is not None
+    return detached
 
 
 # ── revocations owed ──────────────────────────────────────────────────────────

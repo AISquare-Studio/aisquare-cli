@@ -158,6 +158,14 @@ def test_a_test_that_reaches_the_bare_captain_fails_loudly_instead_of_spawning(
     assert "reached the real captain spawn" in str(result.exception)
 
 
+def test_the_groups_help_names_the_dash_dash_voice_spelling(runner: CliRunner) -> None:
+    """The owner's spelling (13206 (1)) is a declared flag, so --help and the documented-commands
+    guard both know it — the routing itself is the group's parse_args rewrite."""
+    result = runner.invoke(app, ["captain", "--help"])
+    assert result.exit_code == 0, result.output
+    assert "--voice" in result.output and "voice page" in result.output
+
+
 def test_the_leaf_is_implemented_and_left_uninvoked_by_the_sweeps() -> None:
     # The configured-home sweep imports the damaged-store sweep's UNINVOKED, so one entry
     # covers both; it is checked where it is defined.

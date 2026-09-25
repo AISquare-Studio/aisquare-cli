@@ -891,6 +891,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   path semantics, and Windows has no mount table — the Windows answer
   (`None`, through the existing fail-open) is asserted separately so the
   behaviour is pinned rather than merely skipped.
+- **The suite is hermetic against the variables a coding agent's shell
+  exports** (#79). Run from inside a Claude Code session, `pytest` failed on
+  a green tree: every session exports `ANTHROPIC_BASE_URL`, and
+  `tests/conftest.py` cleared six of the nine names
+  `harness.interfering_env` reads and neither of the two
+  `RESERVED_ENV_VARS` holds. So the harness and tracing tests saw an
+  operator's routing and asserted against it. The product behaved correctly;
+  the fixture never guaranteed the clean shell the tests assumed. The fix
+  makes the lists comparable, not four names longer: the suspects are
+  `harness.INTERFERING_ENV_VARS`, conftest's list is `AMBIENT_ENV_VARS`,
+  and `tests/test_conftest_is_hermetic.py` requires it to cover every name
+  the product reads. Its guard sets the variables first, so it can only pass
+  if something really removed them.
 
 ### Fixed
 - **A schemeless gateway is refused by the writer, not only by the form.** The

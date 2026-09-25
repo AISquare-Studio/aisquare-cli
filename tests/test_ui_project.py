@@ -1252,6 +1252,43 @@ def test_the_explainability_tab_attaches_a_key_to_the_active_project_without_ech
     assert "its own key for target" in status and "pk-ui" not in status
 
 
+def test_save_setup_asks_git_and_writes_the_key_off_the_ui_thread(
+    project: ProjectInfo, quiet_explainability: dict[str, int], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """*Save setup* ran ``key_project`` (``git rev-parse``, 5 s timeouts) and the key's
+    store and file writes in the button's handler, where a slow git froze the whole
+    app (review of #170, B5/G6). The form's fields are still read on the UI thread."""
+    from aisquare.cli.ui.views import explainability as explainability_view
+
+    on_ui_thread: dict[str, list[bool]] = {"git": [], "write": []}
+    resolve, write = explainability_view.key_project, ops.attach_project_key
+
+    def key_project(page: ProjectInfo | None) -> ProjectInfo | None:
+        on_ui_thread["git"].append(threading.current_thread() is threading.main_thread())
+        return resolve(page)
+
+    def attach(*args: Any, **kwargs: Any) -> Any:
+        on_ui_thread["write"].append(threading.current_thread() is threading.main_thread())
+        return write(*args, **kwargs)
+
+    monkeypatch.setattr(explainability_view, "key_project", key_project)
+    monkeypatch.setattr(ops, "attach_project_key", attach)
+
+    async def scenario(pilot: Pilot[None], host: Host) -> tuple[list[tuple[str, str]], str]:
+        host.query_one(ProjectView).active = "tab-explainability"
+        await settle(pilot)
+        _attach_in_setup(host, "pk-worker-0123456789")
+        await settle(pilot)
+        return list(host.notices), host.query_one("#explainability-key", Input).value
+
+    notices, field = drive(project, scenario)
+    # The status worker asks `key_project` too, off the UI thread; none of the asks is on it.
+    assert on_ui_thread["git"] and not any(on_ui_thread["git"]), on_ui_thread
+    assert on_ui_thread["write"] == [False]
+    assert any(m.startswith("✓ key attached to") for m, _ in notices), notices
+    assert field == "", "cleared once the write began"
+
+
 def test_the_explainability_tab_has_one_key_field_and_the_box_says_whose_key(
     project: ProjectInfo, quiet_explainability: dict[str, int]
 ) -> None:

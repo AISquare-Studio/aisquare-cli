@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import partial
 from typing import Literal
 
@@ -43,6 +43,7 @@ from aisquare.services.explainability import KEY_ENV_VAR, RESERVED_ENV_VARS
 STATUS_WORKER = "explainability-status"
 REGISTER_WORKER = "explainability-register"
 SHIP_WORKER = "explainability-ship"
+SAVE_WORKER = "explainability-save"
 SHIP_LIMIT = 500
 """Most records one press of Ship drains — the CLI's default."""
 
@@ -55,6 +56,36 @@ class Notice:
 
     message: str
     severity: Severity = "information"
+    timeout: float = 8
+    """Seconds on screen, for the notices a save returns; a refusal to read closely stays 10."""
+
+
+@dataclass(frozen=True)
+class SetupForm:
+    """What the Setup form held when *Save setup* was pressed, read on the UI thread."""
+
+    target: str
+    switch: bool
+    gateway: str
+    proxy: str
+    prefix: str
+    key_env: str
+    key: str
+    own: bool
+    """*This project only*: the key is the page's project's own (#141), not the machine's."""
+
+    @property
+    def typed(self) -> bool:
+        """Whether any field besides the deployment was filled in."""
+        return any((self.gateway, self.proxy, self.prefix, self.key_env, self.key))
+
+
+@dataclass(frozen=True)
+class SetupOutcome:
+    """A save's notices, and whether it began writing: the key field is cleared once it has."""
+
+    notices: tuple[Notice, ...]
+    began: bool = False
 
 
 @dataclass(frozen=True)
@@ -353,6 +384,165 @@ def stale_shell_export(config: AppConfig) -> str | None:
     return None
 
 
+def _refused(message: str) -> SetupOutcome:
+    """A save refused before anything was written: a warning to read, the fields kept."""
+    return SetupOutcome((Notice(message, "warning", timeout=10),))
+
+
+def save_setup(form: SetupForm, page: ProjectInfo | None) -> SetupOutcome:
+    """What *Save setup* does once the form's own checks passed, off the UI thread.
+
+    Everything here reads or writes something: the config, git (for the
+    project whose key it is, :func:`key_project`), the store and the key file.
+    It ran in the button's handler, on the UI thread, where git's timeouts
+    froze the whole app (review of #170, B5/G6). It returns what the handler
+    used to notify, and whether a write began.
+    """
+    try:
+        config = load_config()
+    except Exception as exc:  # a broken config.toml: say so, change nothing
+        return SetupOutcome((Notice(f"config unreadable — nothing changed: {exc}", "error"),))
+    target, gateway, proxy, prefix, key_env, key = (
+        form.target, form.gateway, form.proxy, form.prefix, form.key_env, form.key,
+    )  # fmt: skip
+    # The page's project is looked up here, in the worker: `team_project` asks
+    # git, in subprocesses with 5 s timeouts, and this ran on the UI thread
+    # (review of #170, B5/G6).
+    owner = key_project(page) if key and form.own else None
+    settings = config.explainability
+    name = target or settings.target
+    # The key FILE answers for ONE variable, the default: it holds a single
+    # unlabelled key, and a staging key must never satisfy a prod target
+    # (`resolve_target`; tests/test_key_never_crosses_deployments.py). So a
+    # key typed for a target that names its own variable would be written
+    # where nothing reads it -- `✓ setup saved` over `$MY_VAR is NOT set`.
+    # Judged against the variable the target will HAVE after this save (the
+    # typed one, else the stored one), not against the field alone: a
+    # target configured with `--key-env MY_VAR` last month fails the same way.
+    # A project's own key is the resolver's FIRST rung, read whatever variable
+    # the target names, so the rule is the file's alone.
+    reads_from = key_env or settings.targets.get(name, ExplainabilityTarget()).api_key_env
+    if key and owner is None and reads_from != KEY_ENV_VAR:
+        return _refused(
+            f"target '{name}' reads its key from ${reads_from}, and the key file is read "
+            f"only for ${KEY_ENV_VAR} — a key typed here would never be used. Export "
+            f"${reads_from} in the shell instead, or leave 'key variable' blank to use "
+            "the file"
+        )
+    # Offered, not imposed -- and only where nothing was CHOSEN. `chosen_proxy`
+    # is the resolver's own fold minus the shipped default: the target's
+    # proxy, else a deliberate top-level one. Testing the per-target value
+    # alone let a top-level `[explainability] proxy_url` be shadowed by a
+    # suggestion; testing the blank FIELD, before that, replaced a stored
+    # one. `hosted_proxy_for` is silent for a loopback gateway, whose own
+    # port is the shipped 9090 default and not 9443.
+    if gateway and not proxy and ops.chosen_proxy(settings, target or None) is None:
+        suggested = explainability_service.hosted_proxy_for(gateway)
+        if suggested is not None:
+            proxy = suggested
+    identity = f"{prefix}-{{role}}" if prefix else None
+    # The deployments a key may be bound to, judged on the config AS IT WAS:
+    # `configure_target` below makes a typed name the machine's target when
+    # 'make active' is ticked, and judged after it, a typo passed as known
+    # (review of #170's Setup-form merge, G1). A name this save gives an
+    # entry — typed with a gateway, proxy, prefix or key variable — is
+    # known once it is saved.
+    known = ops.known_targets(settings)
+    if target and any((gateway, proxy, prefix, key_env)):
+        known = sorted({*known, target})
+    try:
+        name = explainability_service.configure_target(
+            config,
+            target_name=target or None,
+            gateway_url=gateway or None,
+            key_env=key_env or None,
+            proxy_url=proxy or None,
+            identity=identity,
+            enable=False,
+            make_active=form.switch,
+        )
+    except ValueError as exc:  # the writer refused a URL or template; nothing changed
+        return SetupOutcome((Notice(str(exc), "warning"),))
+    # The project key's deployment: the one typed, else the one a launch
+    # resolves — `key set`'s default. A name no target answers to after this
+    # save is refused as `key set` refuses it, typed or named by an exported
+    # variable: a binding to a deployment nothing configures traces nothing
+    # (review of #170). The writer refuses it too, by the same rule.
+    key_target = name
+    if owner is not None:
+        # With the project, as `key set` resolves it: its destination (#142)
+        # names the deployment its traces go to when the field does not.
+        resolved = ops.resolve_target(settings, target or None, project_id=owner.id)
+        key_target = resolved.name
+        if key_target not in known:
+            named = f", named by ${ops.TARGET_ENV_VAR}" if resolved.target_source == "env" else ""
+            return _refused(
+                f"no target '{key_target}' on this machine{named} (known: "
+                f"{', '.join(known)}) — give it a gateway URL here first, then attach the key"
+            )
+        # The field blank, the settings go to the machine's target and the
+        # key to the project's: two deployments from one press, and the
+        # project's launches never read the gateway just typed (review of
+        # #172). Refused before a write began, so the fields keep it all.
+        if key_target != name and any((gateway, proxy, prefix, key_env)):
+            return _refused(
+                f"this project's key belongs to target '{key_target}', where its traces "
+                f"go, and the other settings would be saved for '{name}' — type a "
+                "deployment to save both to it, or save the key on its own"
+            )
+        # A key the CLI minted (#142) is the CLI's to replace, and refused
+        # here, before a write began, the field keeps what was typed. A store
+        # that cannot say is a refusal too: guessing "not minted" could
+        # overwrite one.
+        try:
+            refused = minted_key_refusal(owner)
+        except Exception as exc:
+            refused = Notice(f"the store could not be read — nothing changed: {exc}", "error")
+        if refused is not None:
+            return SetupOutcome((replace(refused, timeout=10),))
+    # From here a write has begun, and the handler clears the key field
+    # whatever happens after (`began`): a masked Input still holds its value,
+    # and a failed key write used to leave the plaintext live in the widget for
+    # the rest of the session -- against this view's own "never shown back".
+    try:
+        save_config(config)
+    except OSError as exc:  # the operator's filesystem saying no — the foreseeable failure
+        return SetupOutcome((Notice(f"could not write the config: {exc}", "error"),), began=True)
+    said: list[Notice] = []
+    # The key AFTER the config: a written key with no target to use it is
+    # inert, while a target whose key failed to land is a red check that
+    # names its own fix. The cheaper failure is the one left behind.
+    if owner is not None:
+        try:
+            attached = attach_project_key(key, owner, key_target)
+        except Exception as exc:  # the store or the filesystem said no: a notice
+            return _failed_after_save(f"the key could not be attached: {exc}")
+        said.append(attached)
+    elif key:
+        try:
+            explainability_service.store_api_key(key)
+        except OSError as exc:
+            return _failed_after_save(f"the key could not be written: {exc}")
+    active = settings.target
+    if not form.typed:
+        done = f"✓ this machine now uses target '{name}' — press Enable tracing to trace to it"
+    elif name != active:
+        done = (
+            f"✓ setup saved for target '{name}' — this machine stays on '{active}'; tick "
+            "'make active' and save again to switch"
+        )
+    else:
+        done = f"✓ setup saved for target '{name}' — press Enable tracing, then Register roster"
+    return SetupOutcome((*said, Notice(done)), began=True)
+
+
+def _failed_after_save(what: str) -> SetupOutcome:
+    """The settings were saved and the key did not land: say so, and ask for it again."""
+    return SetupOutcome(
+        (Notice(f"settings saved, but {what} — type it again", "error"),), began=True
+    )
+
+
 class ExplainabilityView(VerticalScroll):
     """Status of the tracing lanes and the buttons that change them."""
 
@@ -451,7 +641,8 @@ class ExplainabilityView(VerticalScroll):
         self.status_text = rendered.plain
         self.query_one("#explainability-status", Static).update(rendered)
 
-    # --- the switches (config writes, on the UI thread: local and immediate) -------------
+    # --- the switches (config writes, on the UI thread: local and immediate; Save setup's
+    # git, store and key writes run in a worker) ------------------------------------------
 
     def _read_config(self) -> AppConfig | None:
         try:
@@ -519,6 +710,14 @@ class ExplainabilityView(VerticalScroll):
         anything is written: one press wrote a gateway to one deployment and bound
         the key to another (review of #172). Never over a key the CLI minted
         (#142): that is refused before anything is written too.
+
+        Only the form's own checks run here, on the UI thread. The rest reads
+        the config, asks git which project the key is for, opens the store and
+        writes files, so it runs in a worker (:func:`save_setup`), as *Register
+        roster* does, and Save is disabled until it answers. The key stays in
+        the masked field until then. It is cleared once a write has begun,
+        whatever happened after, and kept when the save was refused before
+        anything was written.
         """
         target = self.query_one("#explainability-target", Input).value.strip()
         switch = self.query_one("#explainability-switch", Checkbox).value
@@ -526,13 +725,9 @@ class ExplainabilityView(VerticalScroll):
         proxy = self.query_one("#explainability-proxy", Input).value.strip()
         prefix = self.query_one("#explainability-prefix", Input).value.strip()
         key_env = self.query_one("#explainability-key-env", Input).value.strip()
-        key_field = self.query_one("#explainability-key", Input)
-        key = key_field.value.strip()
-        # The project is looked up here, on the press, as every git lookup this tab
-        # makes is kept off the page's build. A view with no page has the box
-        # disabled, and so no project to own a key.
+        key = self.query_one("#explainability-key", Input).value.strip()
+        # A view with no page has the box disabled, and so no project to own a key.
         own = self.query_one("#explainability-key-project", Checkbox).value
-        owner = key_project(self.project) if key and own else None
         typed = any((gateway, proxy, prefix, key_env, key))
         if not typed and not (target and switch):
             message = (
@@ -573,163 +768,44 @@ class ExplainabilityView(VerticalScroll):
             )
             return
 
-        config = self._read_config()
-        if config is None:
-            return
-        settings = config.explainability
-        name = target or settings.target
-        # The key FILE answers for ONE variable, the default: it holds a single
-        # unlabelled key, and a staging key must never satisfy a prod target
-        # (`resolve_target`; tests/test_key_never_crosses_deployments.py). So a
-        # key typed for a target that names its own variable would be written
-        # where nothing reads it -- `✓ setup saved` over `$MY_VAR is NOT set`.
-        # Judged against the variable the target will HAVE after this save (the
-        # typed one, else the stored one), not against the field alone: a
-        # target configured with `--key-env MY_VAR` last month fails the same way.
-        # A project's own key is the resolver's FIRST rung, read whatever variable
-        # the target names, so the rule is the file's alone.
-        reads_from = key_env or settings.targets.get(name, ExplainabilityTarget()).api_key_env
-        if key and owner is None and reads_from != KEY_ENV_VAR:
+        self.query_one("#explainability-save", Button).disabled = True
+        form = SetupForm(
+            target=target,
+            switch=switch,
+            gateway=gateway,
+            proxy=proxy,
+            prefix=prefix,
+            key_env=key_env,
+            key=key,
+            own=own,
+        )
+        self.run_worker(
+            partial(save_setup, form, self.project), name=SAVE_WORKER, group=SAVE_WORKER,
+            exclusive=True, thread=True, exit_on_error=False,
+        )  # fmt: skip
+
+    def _saved(self, event: Worker.StateChanged) -> None:
+        """What :func:`save_setup` returned, said; the key field cleared once a write began."""
+        key_field = self.query_one("#explainability-key", Input)
+        if event.state is WorkerState.SUCCESS and isinstance(event.worker.result, SetupOutcome):
+            outcome = event.worker.result
+            if outcome.began:
+                key_field.value = ""
+            for notice in outcome.notices:
+                self.notify(
+                    notice.message, severity=notice.severity, timeout=notice.timeout, markup=False
+                )
+            if outcome.began:
+                self.refresh_status()
+        elif event.state is WorkerState.ERROR:
+            # How far it got is unknown, so the key does not stay in the widget.
+            key_field.value = ""
             self.notify(
-                f"target '{name}' reads its key from ${reads_from}, and the key file is read "
-                f"only for ${KEY_ENV_VAR} — a key typed here would never be used. Export "
-                f"${reads_from} in the shell instead, or leave 'key variable' blank to use "
-                "the file",
-                severity="warning",
-                timeout=10,
-                markup=False,
+                f"save failed: {event.worker.error}", severity="error", timeout=10, markup=False
             )
-            return
-        # Offered, not imposed -- and only where nothing was CHOSEN. `chosen_proxy`
-        # is the resolver's own fold minus the shipped default: the target's
-        # proxy, else a deliberate top-level one. Testing the per-target value
-        # alone let a top-level `[explainability] proxy_url` be shadowed by a
-        # suggestion; testing the blank FIELD, before that, replaced a stored
-        # one. `hosted_proxy_for` is silent for a loopback gateway, whose own
-        # port is the shipped 9090 default and not 9443.
-        if gateway and not proxy and ops.chosen_proxy(settings, target or None) is None:
-            suggested = explainability_service.hosted_proxy_for(gateway)
-            if suggested is not None:
-                proxy = suggested
-        identity = f"{prefix}-{{role}}" if prefix else None
-        # The deployments a key may be bound to, judged on the config AS IT WAS:
-        # `configure_target` below makes a typed name the machine's target when
-        # 'make active' is ticked, and judged after it, a typo passed as known
-        # (review of #170's Setup-form merge, G1). A name this save gives an
-        # entry — typed with a gateway, proxy, prefix or key variable — is
-        # known once it is saved.
-        known = ops.known_targets(settings)
-        if target and any((gateway, proxy, prefix, key_env)):
-            known = sorted({*known, target})
-        try:
-            name = explainability_service.configure_target(
-                config,
-                target_name=target or None,
-                gateway_url=gateway or None,
-                key_env=key_env or None,
-                proxy_url=proxy or None,
-                identity=identity,
-                enable=False,
-                make_active=switch,
-            )
-        except ValueError as exc:  # the writer refused a URL or template; nothing changed
-            self.notify(str(exc), severity="warning", timeout=8, markup=False)
-            return
-        # The project key's deployment: the one typed, else the one a launch
-        # resolves — `key set`'s default. A name no target answers to after this
-        # save is refused as `key set` refuses it, typed or named by an exported
-        # variable: a binding to a deployment nothing configures traces nothing
-        # (review of #170). The writer refuses it too, by the same rule.
-        key_target = name
-        if owner is not None:
-            # With the project, as `key set` resolves it: its destination (#142)
-            # names the deployment its traces go to when the field does not.
-            resolved = ops.resolve_target(settings, target or None, project_id=owner.id)
-            key_target = resolved.name
-            if key_target not in known:
-                named = (
-                    f", named by ${ops.TARGET_ENV_VAR}" if resolved.target_source == "env" else ""
-                )
-                self.notify(
-                    f"no target '{key_target}' on this machine{named} (known: "
-                    f"{', '.join(known)}) — give it a gateway URL here first, then attach the key",
-                    severity="warning",
-                    timeout=10,
-                    markup=False,
-                )
-                return
-            # The field blank, the settings go to the machine's target and the
-            # key to the project's: two deployments from one press, and the
-            # project's launches never read the gateway just typed (review of
-            # #172). Refused before a write began, so the fields keep it all.
-            if key_target != name and any((gateway, proxy, prefix, key_env)):
-                self.notify(
-                    f"this project's key belongs to target '{key_target}', where its traces "
-                    f"go, and the other settings would be saved for '{name}' — type a "
-                    "deployment to save both to it, or save the key on its own",
-                    severity="warning",
-                    timeout=10,
-                    markup=False,
-                )
-                return
-            # A key the CLI minted (#142) is the CLI's to replace, and refused
-            # here, before a write began, the field keeps what was typed. A store
-            # that cannot say is a refusal too: this runs on the UI thread, where
-            # a raise ends the app, and guessing "not minted" could overwrite one.
-            try:
-                refused = minted_key_refusal(owner)
-            except Exception as exc:
-                refused = Notice(f"the store could not be read — nothing changed: {exc}", "error")
-            if refused is not None:
-                self.notify(refused.message, severity=refused.severity, timeout=10, markup=False)
-                return
-        # Cleared the moment a write begins, whatever happens after: a masked
-        # Input still holds its value, and a failed key write used to return
-        # before this line and leave the plaintext live in the widget for the
-        # rest of the session -- against this view's own "never shown back".
-        key_field.value = ""
-        if not self._write_config(config):
-            return
-        # The key AFTER the config: a written key with no target to use it is
-        # inert, while a target whose key failed to land is a red check that
-        # names its own fix. The cheaper failure is the one left behind.
-        if owner is not None:
-            try:
-                attached = attach_project_key(key, owner, key_target)
-            except Exception as exc:  # the store or the filesystem said no: a notice
-                self.notify(
-                    f"settings saved, but the key could not be attached: {exc} — type it again",
-                    severity="error",
-                    timeout=8,
-                    markup=False,
-                )
-                self.refresh_status()
-                return
-            self.notify(attached.message, severity=attached.severity, timeout=8, markup=False)
-        elif key:
-            try:
-                explainability_service.store_api_key(key)
-            except OSError as exc:
-                self.notify(
-                    f"settings saved, but the key could not be written: {exc} — type it again",
-                    severity="error",
-                    timeout=8,
-                    markup=False,
-                )
-                self.refresh_status()
-                return
-        active = settings.target
-        if not typed:
-            done = f"✓ this machine now uses target '{name}' — press Enable tracing to trace to it"
-        elif name != active:
-            done = (
-                f"✓ setup saved for target '{name}' — this machine stays on '{active}'; tick "
-                "'make active' and save again to switch"
-            )
-        else:
-            done = f"✓ setup saved for target '{name}' — press Enable tracing, then Register roster"
-        self.notify(done, timeout=8, markup=False)
-        self.refresh_status()
+            self.refresh_status()
+        if event.state in (WorkerState.SUCCESS, WorkerState.ERROR, WorkerState.CANCELLED):
+            self.query_one("#explainability-save", Button).disabled = False
 
     @on(Button.Pressed, "#explainability-enable")
     def _turn_tracing_on(self) -> None:
@@ -800,6 +876,9 @@ class ExplainabilityView(VerticalScroll):
 
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
         name = event.worker.name
+        if name == SAVE_WORKER:
+            self._saved(event)
+            return
         if name == STATUS_WORKER:
             if event.state is WorkerState.SUCCESS and isinstance(event.worker.result, StatusReport):
                 self._show_status(event.worker.result)

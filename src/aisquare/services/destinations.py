@@ -112,6 +112,12 @@ class Environment:
 #: ``docs/runbooks/explainability-prod-cutover.md`` (proxy listeners) and
 #: ``docs/plans/aisquare-login.md`` §2 (API hosts per environment). ``dev``
 #: keeps the legacy dotted staging gateway name on purpose — that IS its host.
+#: So is its proxy: a proxy ships to the one gateway it was started with, and
+#: each deployment's is the one beside its gateway. The runbook recorded the
+#: dotted ``:9443`` as staging's, from before that box became dev (the SDK's
+#: ``deploy-dev.yml``), and ``stg`` sent staging's model traffic and key to
+#: dev's gateway; staging's own answered at its gateway's host on 2026-09-25
+#: (final review of #203, EX4).
 ENVIRONMENTS: tuple[Environment, ...] = (
     Environment(
         name="prod",
@@ -124,7 +130,7 @@ ENVIRONMENTS: tuple[Environment, ...] = (
         name="stg",
         api_hosts=("stg-api.aisquare.studio",),
         gateway_url="https://stg-explainability-api.aisquare.studio",
-        proxy_url="https://stg-explainability.api.aisquare.studio:9443",
+        proxy_url="https://stg-explainability-api.aisquare.studio:9443",
         dashboard_url="https://stg-x.aisquare.studio",
     ),
     Environment(

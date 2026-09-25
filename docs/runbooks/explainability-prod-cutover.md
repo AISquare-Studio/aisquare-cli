@@ -891,8 +891,14 @@ hosted proxy is deployed for both deployments and answers as `claude_code`:
 
 ```
 https://explainability-api.aisquare.studio:9443/health        (prod)
-https://stg-explainability.api.aisquare.studio:9443/health    (staging)
+https://stg-explainability-api.aisquare.studio:9443/health    (staging)
 ```
+
+Each ships to the gateway on its own host. The dotted
+`stg-explainability.api.aisquare.studio:9443`, listed here as staging's until
+2026-09-25, is the dev box's (the SDK's `deploy-dev.yml`) and ships to dev's
+gateway: a staging key sent through it is checked there, and is refused or
+traced where staging cannot see it.
 
 Since 0.5.0 the CLI sends `X-AISquare-Key` alongside the identity headers, which
 is what a hosted proxy authenticates on. Pointing at one needs no local process:

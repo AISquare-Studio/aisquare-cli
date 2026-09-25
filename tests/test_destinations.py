@@ -137,6 +137,23 @@ def _destination(api_url: str, project_id: str = "p") -> TraceDestination:
     )
 
 
+def test_each_hosted_deployment_in_the_table_has_the_proxy_beside_its_own_gateway() -> None:
+    """A proxy ships to the one gateway it was started with. ``stg`` had the dev box's
+    proxy, the dotted host that is dev's gateway, so a project ``use``d on staging sent its
+    model traffic and the staging key to dev's gateway, and its proxy lane stayed amber
+    (not on the gateway's host) with a fix naming the proxy beside the gateway, which the
+    table contradicted (final review of #203, EX4). Each hosted deployment's proxy is the
+    one beside its gateway, and no two deployments share one."""
+    for environment in dest.ENVIRONMENTS:
+        if service.is_loopback(environment.gateway_url):
+            continue  # the local stack's proxy is the shipped 9090 sidecar, not 9443
+        assert environment.proxy_url == service.hosted_proxy_for(environment.gateway_url), (
+            environment.name
+        )
+    proxies = [environment.proxy_url for environment in dest.ENVIRONMENTS]
+    assert len(set(proxies)) == len(proxies), proxies
+
+
 def test_the_destinations_deployment_fills_only_what_is_empty_and_is_never_written(
     isolated_home: Path,
 ) -> None:
@@ -145,7 +162,7 @@ def test_the_destinations_deployment_fills_only_what_is_empty_and_is_never_writt
         config.explainability, _destination("https://stg-api.aisquare.studio")
     )
     assert stg.gateway_url == "https://stg-explainability-api.aisquare.studio"
-    assert stg.proxy_url == "https://stg-explainability.api.aisquare.studio:9443"
+    assert stg.proxy_url == "https://stg-explainability-api.aisquare.studio:9443"
     assert config.explainability.targets == {}, "read off the destination, never written"
     # A hand-set gateway stays, and the entry itself is not filled in.
     config.explainability.targets["prod"] = ExplainabilityTarget(gateway_url="https://mine.example")
@@ -677,7 +694,7 @@ def test_a_key_attached_for_the_destinations_deployment_never_answers_as_the_mac
         dest.choose(store, project, workspace, studio, staging)
     assert read() == (
         stg_gateway,
-        "https://stg-explainability.api.aisquare.studio:9443",
+        f"{stg_gateway}:9443",
         "project",
         "AIS_staging_hand_key",
     )

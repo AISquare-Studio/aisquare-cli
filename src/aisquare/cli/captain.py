@@ -63,9 +63,27 @@ captain_voice.register(app)  # `voice`: the page, in its own module (T3)
 
 
 @app.callback()
-def captain(ctx: typer.Context) -> None:
-    """Start the home's captain, or attach to it when it is already running."""
+def captain(
+    ctx: typer.Context,
+    voice: Annotated[
+        bool,
+        typer.Option(
+            "--voice",
+            help="Serve the voice page — the plan's spelling of `aisquare captain voice`.",
+        ),
+    ] = False,
+) -> None:
+    """Start the home's captain, or attach to it when it is already running.
+
+    ``--voice`` is declared here so ``--help`` and the documented-commands guard
+    know the owner's spelling; the group's ``parse_args`` has already rewritten
+    it to the ``voice`` leaf before this callback runs, so the flag itself is
+    never seen true here.
+    """
     if ctx.invoked_subcommand is not None:
+        return
+    if voice:  # pragma: no cover — parse_args routes --voice to the leaf first
+        captain_voice.voice_page()
         return
     from aisquare.cli.fleet import _exec_attach, _fail_fleet, interactive_terminal
     from aisquare.services import fleet as fleet_service

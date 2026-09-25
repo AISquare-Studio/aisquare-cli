@@ -107,6 +107,9 @@ class Reply:
 
     text: str | None
     ended_at: datetime | None = None
+    typed_at: datetime | None = None
+    """When the text went in (T3 counts the captain's own ``speak()`` calls from here, not
+    from before ``say`` waited for the lock or a busy captain)."""
 
 
 def _home() -> Path:
@@ -303,7 +306,9 @@ def say(text: str, *, timeout: float = SAY_TIMEOUT_S) -> Reply:
         srv = _wait_until_ready(agent, deadline, timeout, settle=started)
         typed_at = _now()
         _type(srv, agent, text)
-        return _await_reply(agent, typed_at, deadline, timeout)
+        reply = _await_reply(agent, typed_at, deadline, timeout)
+        # T3 (S3): the speak window opens when the text went in, not when say began to wait.
+        return Reply(reply.text, ended_at=reply.ended_at, typed_at=typed_at)
 
 
 def send(text: str, *, timeout: float = SEND_TIMEOUT_S) -> datetime:
@@ -429,9 +434,13 @@ def _wait_until_ready(
 
     Each poll asks the fleet first — a dead or lost captain is said at once (M2) —
     then reads the pane: a dialog is refused with what shows (13227); the input box
-    drawn with the row waiting is the positive evidence typing needs (M3). A pane
-    that cannot be read is said, never raised. A fresh captain at the trust dialog
-    has no session row yet, so the pane is read whatever the row says.
+    drawn is the positive evidence typing needs (M3), with the fleet reading waiting,
+    or reading WORKING while the box is idle (T2b, 13399: a bare-started real captain
+    reads working until its first Stop, and the owner's first say never landed; the
+    rider's rule from T1b, 13313). A box drawn mid-turn — a live spinner above it,
+    'esc to interrupt' at it — is waited out. A pane that cannot be read is said,
+    never raised. A fresh captain at the trust dialog has no session row yet, so the
+    pane is read whatever the row says.
 
     One settle goes before the text, for a NEW box only: ``settle`` (this say started
     the captain), or a read here that found no box drawn. A box drawn from the first
@@ -457,7 +466,8 @@ def _wait_until_ready(
         if showing is not None:
             raise _refuse_dialog(showing)
         drawn = input_box_at(pane) is not None
-        if state == "waiting" and drawn and fleet.pane_is_the_agent(srv, agent.pane_id):
+        ready = state == "waiting" or (state == "working" and screen.box_idle(pane))
+        if drawn and ready and fleet.pane_is_the_agent(srv, agent.pane_id):
             if settle:
                 _sleep(TYPE_SETTLE_S)
             return srv

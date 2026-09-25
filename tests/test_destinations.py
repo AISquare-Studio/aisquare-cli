@@ -1553,6 +1553,44 @@ def test_a_minted_key_the_store_cannot_record_is_revoked_and_leaves_no_file(
     assert not service.project_key_path(project.id).exists()
 
 
+def test_a_mint_whose_put_back_fails_leaves_no_revoked_key_under_the_earlier_binding(
+    runner: CliRunner,
+    idp: IdentityProviderStub,
+    signed_in: iam.Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The mint's put-back was suppressed, so when the earlier key could not be written
+    back the file kept the key just minted, revoked a moment later, under the earlier
+    binding, which may be for another deployment. ``key set``'s put-back removes the file
+    and says so (0d79f861); the mint's did not (review of #170's follow-ups, round 1, F4)."""
+    project = _project(tmp_path / "web")
+    _json(runner, "explainability", "use", "acme/Frontend")
+    earlier = service.project_key_path(project.id).read_text()
+    writes = service.store_project_api_key
+
+    def locked(*_args: object, **_kwargs: object) -> None:
+        raise sqlite3.OperationalError("database is locked")
+
+    def full_disk_for_the_put_back(project_id: str, key: str) -> Path:
+        if key == earlier:
+            raise OSError(28, "No space left on device")
+        return writes(project_id, key)
+
+    monkeypatch.setattr(SqliteStore, "set_project_explainability", locked)
+    monkeypatch.setattr(dest, "store_project_api_key", full_disk_for_the_put_back)
+    monkeypatch.setattr(ops, "store_project_api_key", full_disk_for_the_put_back)
+    with store_session() as store:
+        row = store.project_destination(project.id)
+        assert row is not None
+        with pytest.raises(sqlite3.OperationalError, match="database is locked") as refused:
+            dest.mint_key(store, project, row, signed_in)
+
+    assert idp.revoked_keys == ["key-2"], "the key recorded nowhere is revoked"
+    assert any("could not be put back" in note for note in refused.value.__notes__)
+    assert not service.project_key_path(project.id).exists(), "no revoked key under the binding"
+
+
 def test_every_write_that_takes_a_minted_uid_off_its_row_owes_it_in_the_same_commit(
     isolated_home: Path, tmp_path: Path
 ) -> None:

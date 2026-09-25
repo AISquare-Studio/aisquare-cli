@@ -629,17 +629,21 @@ def attach_project_key(
                 project.id, target=target, key_path=path, set_by=key_owner(), minted=minted
             )
         except BaseException as refused:
-            _put_back(project.id, earlier, refused)
+            put_back_project_key(project.id, earlier, refused)
             raise
 
 
-def _put_back(project_id: str, earlier: str | None, refused: BaseException) -> None:
-    """Put the project's key file back as it was before a refused attach.
+def put_back_project_key(project_id: str, earlier: str | None, refused: BaseException) -> None:
+    """Put the project's key file back as it was before a binding that was refused.
 
     ``None`` means there was no file (or none a binding named), so none is
     left. When the earlier key cannot be written back, the file is removed and
     ``refused`` gets a note. The new key must not stay under the earlier
-    binding, which may be for another deployment.
+    binding, which may be for another deployment. The two writers of a
+    project's key share it: :func:`attach_project_key` and the mint
+    (``destinations.mint_key``), which kept the key it had just minted, and
+    then revoked, under the earlier binding when its own put-back failed
+    (review of #170's follow-ups, round 1, F4).
     """
     try:
         if earlier is None:

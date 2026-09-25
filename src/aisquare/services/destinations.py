@@ -64,6 +64,7 @@ from aisquare.services.explainability_ops import (
     HttpVerdict,
     ResolvedTarget,
     _request,
+    put_back_project_key,
 )
 
 #: The backend issue that makes the key exchange work for a sign-in token.
@@ -767,7 +768,11 @@ def mint_key(
 
     A new key that cannot be recorded (the store refuses the commit) is put
     back out of the file and revoked on the spot, best effort: recorded
-    nowhere, it would be a live key this machine never knew it had.
+    nowhere, it would be a live key this machine never knew it had. The file
+    is put back as ``key set``'s is (``put_back_project_key``): when the
+    earlier key cannot be written back, the file is removed and the error says
+    so, rather than keeping the new key, revoked a moment later, under the
+    earlier binding.
     """
     binding = store.project_explainability(project.id)
     if binding is not None and not destination.key_uid and binding.key_path.is_file():
@@ -818,13 +823,8 @@ def mint_key(
             set_by=destination.set_by,
             minted=uid,
         )
-    except BaseException:
-        if earlier is None:
-            with contextlib.suppress(OSError):
-                clear_project_api_key(project.id)
-        else:
-            with contextlib.suppress(OSError):
-                store_project_api_key(project.id, earlier)
+    except BaseException as refused:
+        put_back_project_key(project.id, earlier, refused)
         if uid != UNKNOWN_KEY_UID:
             unrecorded = PendingRevocation(
                 key_uid=uid,

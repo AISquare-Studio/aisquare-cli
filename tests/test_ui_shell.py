@@ -4005,7 +4005,7 @@ def test_a_card_released_over_an_agents_pane_copies_nothing_and_ctrl_c_still_int
         await press(pilot, title, (1, 0))
         await move(pilot, pane, (5, 1), button=1)
         await release(pilot, pane, (5, 1))
-        await pilot.pause()
+        await settle(app)  # "no highlight" read before a late one lands tests nothing
         standing = pane.has_standing_selection()
         pane.focus()
         await pilot.pause()

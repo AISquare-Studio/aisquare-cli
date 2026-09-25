@@ -886,12 +886,17 @@ class TerminalPane(Widget, can_focus=True):
         *,
         server: TmuxServer | None = None,
         escape_key: str = "f12",
+        placeholder: str = NO_PANE,
         id: str | None = None,
     ) -> None:
         super().__init__(id=id)
         self.pane_id = pane_id
         self.server = server
         self.escape_key = escape_key
+        self.placeholder = placeholder
+        """What the pane says while nothing is attached. A view that shows ONE agent
+        passes :data:`PANE_GONE`: it detaches only from a row with no pane of its own
+        to show (``views.agent.shown_pane``), and "no agent selected" is false there."""
         self._version: tuple[int, int] | None = None
         """The server's version, read once per attach (``_server_version``)."""
         self._version_read = False
@@ -1415,7 +1420,9 @@ class TerminalPane(Widget, can_focus=True):
         self.lines_rendered += 1
         if self.pane_id is None:
             if y == 0:
-                return Strip([Segment(NO_PANE, base + PLACEHOLDER)]).adjust_cell_length(width, base)
+                return Strip([Segment(self.placeholder, base + PLACEHOLDER)]).adjust_cell_length(
+                    width, base
+                )
             return Strip.blank(width, base)
         strip = self._composed_strip(y)
         cursor = self._cursor

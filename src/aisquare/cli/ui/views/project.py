@@ -40,7 +40,8 @@ from textual.widgets import Button, Static, TabbedContent, TabPane
 from textual.worker import Worker, WorkerState
 
 from aisquare.cli.ui.board import BoardPanel
-from aisquare.cli.ui.terminal import TerminalPane
+from aisquare.cli.ui.terminal import PANE_GONE, TerminalPane
+from aisquare.cli.ui.views.agent import shown_pane
 from aisquare.cli.ui.views.doctor import DoctorView
 from aisquare.cli.ui.views.explainability import ExplainabilityView
 from aisquare.cli.ui.views.settings import SettingsView
@@ -175,7 +176,9 @@ class ManagerTab(Vertical):
     def compose(self) -> ComposeResult:
         yield Static(id="manager-header")
         yield Button("Start manager", id="start-manager", variant="primary")
-        yield TerminalPane(None, escape_key=self.escape_key, id="manager-pane")
+        yield TerminalPane(
+            None, escape_key=self.escape_key, placeholder=PANE_GONE, id="manager-pane"
+        )
 
     def on_mount(self) -> None:
         self.refresh_from_service()
@@ -206,7 +209,10 @@ class ManagerTab(Vertical):
         """Render ``status`` — the pane when there is a manager, the button when not.
 
         ``exited`` is the ended manager row the snapshot still lists (#138); it
-        only changes what the header above the button says.
+        only changes what the header above the button says. A ``lost`` manager
+        keeps its header and gets no pane (:func:`~aisquare.cli.ui.views.agent.shown_pane`):
+        after a reboot its id is the next server's, most often ANOTHER project's
+        manager, and this tab showed that one and typed into it.
         """
         self.status = status
         header = self.query_one("#manager-header", Static)
@@ -222,9 +228,10 @@ class ManagerTab(Vertical):
         header.update(manager_text(status))
         button.display = False
         pane.display = True
-        if pane.pane_id != status.agent.pane_id:
-            pane.server = TmuxServer(status.agent.tmux_socket)
-            pane.attach(status.agent.pane_id)
+        if (wanted := shown_pane(status)) != pane.pane_id:
+            if wanted is not None:
+                pane.server = TmuxServer(status.agent.tmux_socket)
+            pane.attach(wanted)
 
     @on(Button.Pressed, "#start-manager")
     def _start_manager(self) -> None:

@@ -188,7 +188,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   of the old row typed `/exit` into it and killed its window. A server that
   started after a row was written holds none of its panes (`#{start_time}`,
   `TmuxServer.started_at`): the row reads `✗ lost`, a plain `reap` records it,
-  and ending it touches nothing else.
+  ending it touches nothing else, and its agent view and Manager tab show no
+  pane (they showed the other agent's screen and typed into it).
 
 ### Added
 - **The navigator is resizable** (#137). The line between the sidebar and the

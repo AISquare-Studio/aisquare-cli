@@ -1154,8 +1154,9 @@ server — this ends every agent at once, so prefer `fleet stop` per agent:
 unavailable)` and `reap` reaps nothing — correctly: it cannot ask. Once any
 project spawns again, a new server is up on the socket and hands the old pane
 ids out afresh; the old rows then read `✗ lost` — never the state of the agent
-that got their id — a plain `reap` records them, and stopping, restarting or
-shutting one down ends its row without touching that agent. `shutdown`
+that got their id, whose pane the UI does not show under them either — a plain
+`reap` records them, and stopping, restarting or shutting one down ends its row
+without touching that agent. `shutdown`
 records them as lost on your word, scoped to one project or over all of them:
 
 ```sh

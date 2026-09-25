@@ -63,7 +63,7 @@ from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import device_flow, iam
 from aisquare.services import fleet as fleet_service
 from tests.pane_harness import asks_a_server, socket_of
-from tests.ui_workers import settle_workers
+from tests.ui_workers import settle_page
 
 T = TypeVar("T")
 SIZE = (140, 40)
@@ -200,8 +200,14 @@ def shown(widget: Static) -> str:
 
 
 async def settle(app: FleetApp) -> None:
-    """Wait for every worker of ours to reach a terminal state; see ``settle_workers``."""
-    await settle_workers(app)
+    """Let the page go quiet: every message queued on it handled, every worker of ours done.
+
+    Not only the workers that exist when it is called: the page starts its usage
+    reading from ``on_show``, and a ``Show`` still queued when a test settled left
+    no worker to wait for. On windows-latest the reading then landed after the
+    test had read the page, which had no usage at all. See ``settle_page``.
+    """
+    await settle_page(app)
 
 
 def fleet_app(pilot: Pilot[None]) -> FleetApp:

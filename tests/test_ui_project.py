@@ -71,7 +71,7 @@ from aisquare.services import explainability as explainability_service
 from aisquare.services import explainability_ops as ops
 from aisquare.services import fleet as fleet_service
 from aisquare.services import team as team_service
-from tests.ui_workers import settle_workers
+from tests.ui_workers import settle_page
 
 T = TypeVar("T")
 
@@ -168,27 +168,9 @@ async def settle(pilot: Pilot[None]) -> None:
     for. So it goes round — pause, then wait for what is running — until a pause
     ends with no message queued on the page and no worker of ours unfinished,
     bounded, so a page that never goes quiet fails at its assertion, not here.
+    The loop is ``settle_page``, shared with the Accounts page's tests.
     """
-    for _ in range(_SETTLE_ROUNDS):
-        await pilot.pause()
-        if not _busy(pilot.app):
-            return
-        await settle_workers(pilot.app)
-
-
-_SETTLE_ROUNDS = 20
-
-
-def _busy(app: App[Any]) -> bool:
-    """Whether a message is queued on the app or its screen, or a worker of ours runs.
-
-    The ``_loader`` group is the app's own and is left running, as ``settle_workers``
-    leaves it.
-    """
-    nodes = [app, *app.screen.walk_children(with_self=True)]
-    return any(node.message_queue_size for node in nodes) or any(
-        not worker.is_finished for worker in app.workers if worker.group != "_loader"
-    )
+    await settle_page(pilot.app)
 
 
 def shown(widget: Widget) -> str:

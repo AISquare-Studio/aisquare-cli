@@ -9,7 +9,9 @@ the narrow one nobody selects it with.
 from __future__ import annotations
 
 import os
+import shutil
 import sys
+import tempfile
 from collections.abc import Iterator
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as metadata_version
@@ -376,6 +378,44 @@ def fresh_state() -> Iterator[None]:
     reset_state()
     yield
     reset_state()
+
+
+@pytest.fixture(autouse=True)
+def private_ui_socket_root(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """A long home's ui socket folder is made in a folder of this test's own.
+
+    ``asq`` binds its ui receiver on mount (``cli/ui/receiver.py``), so every test
+    that drives the shell binds one at ``captain_state.ui_socket_path``. The
+    isolated home fits a unix socket's path on this suite's usual machines, but
+    not everywhere — a macOS ``$TMPDIR``, a long user name — and a home that does
+    not fit puts the socket in ``/tmp/aisquare-<uid>``, the machine's shared
+    folder, which no test may touch. So the short root is moved under a private
+    ``mkdtemp`` for the test's life: made on first use only, removed after.
+
+    The real root is still asked and mapped beneath the private one, not replaced,
+    so the test of where the short path lives (it must not follow the environment,
+    tests/test_captain_state.py) still sees the product's own answer move: measured,
+    a ``_short_root`` that followed ``XDG_RUNTIME_DIR`` still fails it under this fixture.
+    """
+    from aisquare.services.captain import state as captain_state
+
+    real = captain_state._short_root
+    made: list[Path] = []
+
+    def private() -> Path:
+        if not made:
+            made.append(
+                Path(
+                    tempfile.mkdtemp(prefix="asq", dir=None if sys.platform == "win32" else "/tmp")
+                )
+            )
+        root = real()
+        return made[0] / root.relative_to(root.anchor)
+
+    monkeypatch.setattr(captain_state, "_short_root", private)
+    yield
+    for folder in made:
+        shutil.rmtree(folder, ignore_errors=True)
 
 
 @pytest.fixture(autouse=True)

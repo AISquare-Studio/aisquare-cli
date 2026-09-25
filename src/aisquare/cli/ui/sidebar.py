@@ -1421,6 +1421,28 @@ class Sidebar(Vertical):
             return ahead[0] if ahead else behind[-1]
         return behind[-1] if behind else ahead[0]
 
+    def put_cursor(self, key: str) -> bool:
+        """Put the keyboard cursor on the row for ``key``; whether that row is on screen.
+
+        For a caller that hands the keyboard to a row on the user's behalf (the ui
+        receiver's ``focus_project``): ↑/↓ and Enter then go on from that row, as
+        they would had the arrows brought the cursor there. A row that is not on
+        screen — a card inside a folded group — is not one to land on (the arrows ask
+        ``_on_screen`` too), so the cursor stays where it was.
+        """
+        rows = [row for row in self.query(Activatable) if row.selection_key]
+        target = next(
+            (row for row in rows if row.selection_key == key and self._on_screen(row)), None
+        )
+        if target is None:
+            return False
+        for row in rows:
+            row.remove_class("cursor")
+        self._cursor_key = key
+        target.add_class("cursor")
+        target.scroll_visible()
+        return True
+
     def action_resize(self, delta: int | None) -> None:
         """Ask for the partition to move ``delta`` columns (``None``: reset); ``Panes`` answers."""
         self.post_message(ResizeSidebar(delta))

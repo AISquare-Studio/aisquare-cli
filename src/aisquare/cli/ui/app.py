@@ -58,6 +58,7 @@ from aisquare.cli.ui.groups import (
     TogglePin,
     UndoLayout,
 )
+from aisquare.cli.ui.receiver import listen_for_ui, stop_listening_for_ui
 from aisquare.cli.ui.sidebar import (
     ALIVE_STATES,
     AccountsSelected,
@@ -433,6 +434,8 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         self.set_interval(self.refresh_seconds, self.refresh_data)
         self.run_doctor()
         self._restore_selection()
+        # The captain's ui actions (T4): after the first frame, which they resolve against.
+        listen_for_ui(self)
 
     # --- what was open (#144) ---------------------------------------------------------
 
@@ -529,6 +532,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             self._theme_autosave.remember(theme_name)
 
     def on_unmount(self) -> None:
+        stop_listening_for_ui(self)  # first: no ui action lands on a shell that is quitting
         # Every saver — the theme's here, the divider's — started first and joined
         # against ONE deadline, so quit waits once, not once per preference.
         self.unsaved = Autosave.flush_all(self)

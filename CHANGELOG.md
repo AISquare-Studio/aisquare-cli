@@ -207,14 +207,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `use <workspace>[/<studio>] [--project P] [--no-key] [--clear]` list what the
   signed-in user can see and record the choice per project (schema v21,
   `project_destination`). The deployment the session belongs to becomes the
-  project's explainability target with its gateway and hosted proxy filled in
-  (`stg-api` → `stg`, `api` → `prod`; nothing typed, nothing enabled behind
-  your back); the one resolver consults it after `--target` and before an
-  exported `$AISQUARE_EXPLAINABILITY_TARGET` and the machine default, so `use`
-  and the project's launches name one deployment, and `status` says when the
-  variable is not in play. The CLI obtains a workspace `ingest:write` key on
-  your behalf and stores it as `key set` would — the API still refuses a sign-in
-  token there (AISquare-Studio-BE#3493), so until then the line says so and
+  explainability target for that project alone, with its gateway and hosted
+  proxy filled in (`stg-api` → `stg`, `api` → `prod`; nothing typed, nothing
+  enabled behind your back). It is read off the destination and never written
+  to `config.toml`, so no other project, `doctor` or the shipper moves. An API
+  host outside the table gets no gateway rather than the machine's, and `use`
+  says where to set one. The one resolver consults it after `--target` and
+  before an exported `$AISQUARE_EXPLAINABILITY_TARGET` and the machine
+  default, so `use` and the project's launches name one deployment, and
+  `status` says when the variable is not in play. The CLI obtains a workspace
+  `ingest:write` key on your behalf and stores it as `key set` would — the API
+  still refuses a sign-in token there (AISquare-Studio-BE#3493), so until then
+  the line says so and
   `key set` is the way in — and binds this machine's agent identities to the
   chosen studio, which is what makes spans land there. `status` shows
   `destination:` (the UI's Explainability view `lands in`) and takes
@@ -224,11 +228,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   a usage error; `whoami` gains a `traces:` line; `logout`, and
   *Sign out* on the fleet UI's Accounts page, forget every key the CLI minted
   and leave hand-attached keys alone. The key never crosses a deployment or a
-  workspace: a target `use` creates names its own key variable, a machine key
+  workspace: the destination's target names its own key variable, a machine key
   never stands in for the mint, launches take the proxy from the same target as
-  the key, `key set` binds to the destination's deployment, the CLI never mints
-  over a hand key, and a minted key that is replaced, cleared, purged with its
-  project or left behind by a move is revoked on the host that minted it — a
+  the key, neither a destination nor a project's own key bound off the
+  machine's target ever falls back to the machine's gateway or proxy (no
+  gateway known is said, and the launch goes untraced), `key set` binds to the
+  destination's deployment, the CLI never mints over a hand key, and a minted
+  key that is replaced, cleared, purged with its project or left behind by a
+  move is revoked on the host that minted it — a
   replaced one only once its replacement is recorded. Its uid is never forgotten
   before the server confirms the revoke: the commit that takes the key off its
   project records the revocation as owed (schema v22, `pending_revocation`), and
@@ -250,7 +257,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   [--before|--after|--position]`, `project list --group|--pinned` (JSON
   carries `group`, `position`, `pinned`), `project onboard --group`. One
   arranger (`services.project_groups.arrange`) decides the order every
-  surface shows; every change returns its way back.
+  surface shows; every change returns its way back and is one transaction (a
+  drop of several cards included), so a write the store refuses lands none of
+  it, and an undo it refuses stays on the stack. Group names are shown as
+  typed, never read as markup.
 - **A workspace key per project** (#141). The explainability key was one per
   machine; pointing one project at another workspace meant another shell or
   swapping the file for everyone. `aisquare explainability key set [--project
@@ -887,7 +897,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   not listed; `doctor` gains a `projects` line with the hidden count, and an
   empty `project list` and `status` say how many are hidden. The migration
   adopts the rows already used on purpose (context entries, a codename,
-  linked repos, board activity, a fleet agent, a snapshot on disk; a
+  linked repos, board activity, a fleet agent, a snapshot on disk — one in a
+  directory that cannot be read counts as none, and the store still opens; a
   forgotten row never) and hides the rest; schema v23 clears, once, the mark
   and the place in the arrangement that early cuts left on forgotten rows.
 - **The snapshot token budget is a config knob, and the failure names its
@@ -1164,7 +1175,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   announced), a resumed one is typed one line telling it to carry on, one
   whose role, task, account or binary would refuse the restart is refused
   before it is stopped, one a hand-over is already moving is refused (and so
-  is a second `fleet switch` of it), and a refused restart
+  is a second `fleet switch` of it, even one started at the same moment: the
+  hand-over's mark is a compare-and-set), and a refused restart
   leaves the 💤 row and its last screen as they were. **Stop** on an exited row
   removes the dead window, and so does spawning the same label again once the
   replacement is up (it supersedes the old window — no two rows called

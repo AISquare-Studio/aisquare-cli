@@ -1787,11 +1787,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   machine, with no error to say so. The credentials file that holds both now
   goes through one `icacls` call, run from System32 by its full path: its
   inherited entries are stripped, `Users`, `Everyone` and `Authenticated
-  Users` are removed by SID, and the owner is granted. The removal matters
-  because an explicit `BUILTIN\Users` ACE survives the obvious
-  `/inheritance:r` + `/grant:r` pairing and would have left the file readable
-  by everyone anyway. It is not a reset: an explicit grant to any other
-  principal is left in place. The DACL is read back afterwards, and such a
+  Users` are removed by SID, and the owner is granted. One call, so the file
+  is never briefly wider than it started and a failure cannot leave it wider
+  than it was. The removal matters because an explicit `BUILTIN\Users` ACE
+  survives the obvious `/inheritance:r` + `/grant:r` pairing and would have
+  left the file readable by everyone anyway. It is not a reset: an explicit
+  grant to any other principal (`INTERACTIVE`, `Domain Users`, a second local
+  account) is left in place. The DACL is read back afterwards, and such a
   grant counts as NOT restricted. `SYSTEM` and `Administrators` entries can
   remain, as root does for a 0600 file on POSIX. The single credentials
   writer reports whether the restriction actually landed, so `init`, `serve`

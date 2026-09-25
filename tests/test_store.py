@@ -265,8 +265,9 @@ def test_add_and_list_prompts(store: ContextStore, monkeypatch: pytest.MonkeyPat
     ids = iter(["prm_zzz_written_first", "prm_aaa_written_second"])
     monkeypatch.setattr(store_module, "datetime", _Frozen)
     monkeypatch.setattr(store_module, "new_prompt_id", lambda: next(ids))
-    store.add_prompt("first prompt", PROJECT.id)
-    store.add_prompt("second prompt", PROJECT.id)
+    first = store.add_prompt("first prompt", PROJECT.id)
+    second = store.add_prompt("second prompt", PROJECT.id)
+    assert second.id < first.id, "the ids agree with insertion order; `id DESC` would pass too"
     prompts = store.recent_prompts(PROJECT.id)
     assert [p.created_at for p in prompts] == [frozen, frozen], "the tick was not shared"
     assert [p.text for p in prompts] == ["second prompt", "first prompt"]  # newest first

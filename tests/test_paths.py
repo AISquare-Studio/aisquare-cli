@@ -119,6 +119,7 @@ _ME = "S-1-5-21-111-222-333-1001"
     [
         (f"D:PAI(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x12019f;;;{_ME})", _ME, True),
         (f"D:P(A;;0x12019f;;;{_ME})(A;;FR;;;IU)", _ME, False),
+        (f"D:P(A;;0x12019f;;;{_ME})(A;;FR;;;BU)", _ME, False),
         (f"D:P(A;;0x12019f;;;{_ME})(A;;FR;;;S-1-5-21-111-222-333-1002)", _ME, False),
         (f"D:P(D;;FA;;;BU)(A;;0x12019f;;;{_ME})", _ME, True),
         ("D:P(A;;FA;;;SY)(A;;0x12019f;;;LA)", "S-1-5-21-111-222-333-500", True),
@@ -129,6 +130,7 @@ _ME = "S-1-5-21-111-222-333-1001"
     ids=[
         "owner-and-privileged",
         "interactive",
+        "users",
         "another-account",
         "a-deny-narrows",
         "owner-as-LA",
@@ -142,7 +144,11 @@ def test_the_read_back_names_a_file_owner_only_only_when_it_is(
 ) -> None:
     """The judgement ``restrict_to_owner`` passes on the DACL it left, on every platform: any
     grant beyond this account, SYSTEM, Administrators and the owner placeholders is a file
-    other principals can read (review of #65, R3)."""
+    other principals can read (review of #65, R3).
+
+    Off Windows too, on purpose: ``LA`` is how a runner logged in as the built-in
+    Administrator sees its own account, a shape no desktop produces, and misreading it as
+    an intruder would make every sign-in on CI warn over a DACL that is correct."""
     assert paths._grants_only_owner(sddl, sid) is owner_only
 
 

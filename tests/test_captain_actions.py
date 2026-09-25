@@ -1866,6 +1866,7 @@ def test_a_queue_that_raises_its_own_runtime_error_is_said_as_an_error_not_a_cra
     assert message.startswith(
         "error: the attention queue failed: queue.json is locked by another process"
     )
+    assert audit(captain_state.home_project().id)[-1]["ok"] is False
 
 
 def test_the_queue_tools_hand_the_queue_seams_answer_through(

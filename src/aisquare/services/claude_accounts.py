@@ -529,7 +529,8 @@ def set_default(ref: str | None, *, project: ProjectInfo | None = None) -> Claud
             _arranged(store)  # the row must exist before it can be the default
             if project is not None:
                 if account is None:
-                    store.ensure_project(project)
+                    # A delete, which needs no row: registering the directory first
+                    # brought a forgotten project back (review of #168, round 2).
                     store.clear_project_setting(project.id, PROJECT_ACCOUNT_KEY)
                 else:
                     # Choosing the account a project launches under is choosing the

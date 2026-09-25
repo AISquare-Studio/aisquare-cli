@@ -30,6 +30,7 @@ from typing import Any, TypeVar
 
 import pytest
 from textual import Logger, events
+from textual._xterm_parser import XTermParser
 from textual.app import App, ComposeResult, ScreenStackError
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.content import Content
@@ -3978,6 +3979,40 @@ def test_a_mark_on_a_card_that_leaves_the_list_goes_with_it(
     assert layout == {"prj_a": tools.id, "prj_b": tools.id, "prj_scratch": None}, (
         "the drag moved the card the user saw, and nothing hidden with it"
     )
+
+
+@pytest.mark.parametrize(
+    ("sequence", "arrives_as"),
+    [("G", "G"), ("\x1b[103;2;71u", "G"), ("\x1b[103;2u", "shift+g")],
+    ids=["legacy", "kitty-with-text", "kitty-without-text"],
+)
+def test_shift_g_groups_the_marked_cards_as_a_terminal_sends_it(
+    tmp_path: Path, script: Script, isolated_home: Path, sequence: str, arrives_as: str
+) -> None:
+    """Final review of #203, F4. ``pilot.press("shift+g")`` sends a key name Textual's
+    parser makes only of a kitty report that carries no text. A legacy terminal sends
+    ``G``, and so does kitty at the flags Textual enables (the shift is dropped when
+    the key carries text), and with ``shift+g`` alone bound the gesture the help screen
+    names did nothing. So the key here is what the parser makes of each terminal's
+    bytes, posted to the app as the driver posts it."""
+    seed(tmp_path, ("prj_a", "api", None), ("prj_b", "cli", None))
+
+    async def go(pilot: Pilot[None]) -> tuple[list[str], list[str], str]:
+        app = fleet_app(pilot)
+        for project_id in ("prj_a", "prj_b"):
+            await _click(pilot, card_for(app, project_id).query_one(ProjectTitle), shift=True)
+        marked = app.sidebar.marked_ids()
+        app.sidebar.focus()
+        await pilot.pause()
+        keys = [token for token in XTermParser().feed(sequence) if isinstance(token, events.Key)]
+        for key in keys:
+            app.post_message(key)
+        await _through_the_app(pilot)
+        return marked, [key.key for key in keys], type(app.screen).__name__
+
+    marked, keys, screen = drive(go)
+    assert marked == ["prj_a", "prj_b"] and keys == [arrives_as], (marked, keys)
+    assert screen == GroupPicker.__name__, "shift+g opens the picker for the marked cards"
 
 
 def test_a_drop_the_store_refuses_part_way_lands_none_of_its_moves(

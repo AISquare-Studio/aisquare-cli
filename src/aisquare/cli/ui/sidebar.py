@@ -800,7 +800,12 @@ class Sidebar(Vertical):
         Binding("shift+down", "move_down", "move down", show=False),
         Binding("p", "toggle_pin", "pin", show=False),
         Binding("g", "group_picker", "group", show=False),
-        Binding("shift+g", "group_marked", "group selection", show=False),
+        # Shift+G arrives as `G` from a legacy terminal, and from the kitty
+        # protocol at the flags Textual enables (the shift is dropped when the
+        # key carries text); only a kitty report with no text is `shift+g`.
+        # Bound to `shift+g` alone, the gesture the help screen names did
+        # nothing in practically every terminal (final review of #203, F4).
+        Binding("G,shift+g", "group_marked", "group selection", show=False),
         Binding("space", "toggle_collapse", "fold", show=False),
         Binding("u", "undo_layout", "undo", show=False),
         Binding("escape", "clear_marks", "clear marks", show=False),

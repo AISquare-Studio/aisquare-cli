@@ -13,6 +13,7 @@ lost the race it closes on windows-latest.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 from typing import Any
 
@@ -40,13 +41,13 @@ async def settle_workers(app: App[Any]) -> None:
 
 
 async def settle_page(app: App[Any]) -> None:
-    """Let the page go quiet: every message queued on it handled, every worker of ours done.
+    """Let the page go quiet: nothing queued on the app or its screen, every worker of ours done.
 
     ``settle_workers`` alone waits for the workers that exist when it is called,
     and a test that pauses once after it trusts that pause for the rest. The pause's
     idle check is a guess from CPU use, which counts a thread waiting on a file as
     idle, and a bubbling message is queued on each parent behind the pause's own
-    callback, so a handler can still be pending when the pause returns. Two ways
+    callback, so a handler can still be pending when the pause returns. Three ways
     that loses:
 
     - the handler that STARTS a worker has not run yet. The Accounts page starts
@@ -56,24 +57,57 @@ async def settle_page(app: App[Any]) -> None:
       36078630575);
     - a worker that a finishing worker's state-change handler starts is not in
       the snapshot, so it is never waited for (review of the accounts stack's
-      fold, round 2, F8).
+      fold, round 2, F8);
+    - a message being HANDLED is in no queue. A handler that awaits, as the app's
+      ``on_agent_selected`` awaits the mount of the view it opens, can take its
+      message off the queue during the pause's idle check and still be running
+      when the pause returns. Every queue was empty, the test went on, and
+      ``run_test`` shut the app down under the half-mounted view
+      (``NoMatches('#agent-stop')`` with every message held 20 ms).
 
     So it goes round: pause, then wait for what is running, until a pause ends
-    with no message queued on the app or its screen and no worker of ours
-    unfinished. The rounds are bounded, so a page that never goes quiet fails at
-    its test's assertion, not here. The pauses are ``Pilot.pause``; a ``Pilot``
-    holds nothing but its app (``run_test`` builds its own the same way), so this
-    takes the app, as ``settle_workers`` does.
+    with no message queued on the app or its screen, none still in hand there,
+    and no worker of ours unfinished. The rounds are bounded, so a page that
+    never goes quiet fails at its test's assertion, not here. The screen is the
+    CURRENT one, as in Textual's own wait: a screen under a modal is not counted
+    while the modal is up, and each round reads the current screen again, so the
+    round after a dismiss covers the screen beneath. The pauses are
+    ``Pilot.pause``; a ``Pilot`` holds nothing but its app (``run_test`` builds
+    its own the same way), so this takes the app, as ``settle_workers`` does.
     """
     pilot = Pilot(app)
     for _ in range(_SETTLE_ROUNDS):
         await pilot.pause()
         if not _busy(app):
-            return
+            await _handled(app)
+            if not _busy(app):
+                return
         await settle_workers(app)
 
 
 _SETTLE_ROUNDS = 20
+_HANDLED_S = 5.0
+
+
+async def _handled(app: App[Any]) -> None:
+    """Wait until the app and every node of its screen is done with the message in hand.
+
+    A callback queued on a node runs once the node has finished what it is handling:
+    the wait ``Pilot.pause`` opens with, here without the idle guess after it, so a
+    quiet app costs next to nothing. Bounded, as Textual bounds its own wait; a node
+    that has not answered by then is left to the check after this, and to the next
+    round.
+    """
+    asked: list[asyncio.Event] = []
+    for node in [app, *app.screen.walk_children(with_self=True)]:
+        done = asyncio.Event()
+        if node.call_later(done.set):
+            asked.append(done)
+    if asked:
+        waits = [asyncio.create_task(done.wait()) for done in asked]
+        _, pending = await asyncio.wait(waits, timeout=_HANDLED_S)
+        for task in pending:
+            task.cancel()
 
 
 def _busy(app: App[Any]) -> bool:

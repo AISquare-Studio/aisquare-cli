@@ -209,7 +209,7 @@ def shown(widget: Static) -> str:
 
 
 async def settle(app: FleetApp) -> None:
-    """Let the page go quiet: every message queued on it handled, every worker of ours done.
+    """Let the page go quiet: nothing queued on the app or its screen, every worker of ours done.
 
     Not only the workers that exist when it is called: the page starts its usage
     reading from ``on_show``, and a ``Show`` still queued when a test settled left

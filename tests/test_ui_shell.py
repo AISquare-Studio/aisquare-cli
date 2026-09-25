@@ -227,7 +227,7 @@ def composited(widget: Static) -> str:
 
 
 async def settle(app: FleetApp) -> None:
-    """Let the app go quiet: every message queued on it handled, every worker of ours done.
+    """Let the app go quiet: nothing queued on it or its screen, every worker of ours done.
 
     This was ``workers.wait_for_complete()`` over the workers that existed when it
     was called, and that lost to three things a loaded runner does:
@@ -2751,13 +2751,18 @@ def test_a_drag_survives_a_right_button_and_ends_on_a_lost_release_or_a_pushed_s
 
 
 def test_a_tap_after_a_drag_keeps_the_drag_and_two_clicks_reset_and_forget_the_width(
-    tmp_path: Path, script: Script, isolated_home: Path
+    tmp_path: Path, script: Script, isolated_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Textual counts a drag's release as a click (the handle follows the pointer, so the
     release lands on the widget the press did): a tap on the handle within half a second
     read as `chain == 2`, threw the drag away and saved the reset. `pilot.click(times=2)`
     could not see it — Pilot builds `Click(chain=2)` itself, past `App.on_event`."""
     seed(tmp_path, ("prj_a", "alpha", None))
+    # The tap and the click after it are one double click, and the save is read between
+    # them: `_settled` waits out the debounce and the write. With every message held 20 ms
+    # that outlasted Textual's half-second window, and the two read as single clicks. The
+    # window's length is not what this tests, so it is wide enough for a loaded runner.
+    monkeypatch.setattr(FleetApp, "CLICK_CHAIN_TIME_THRESHOLD", 5.0)
 
     async def go(pilot: Pilot[None]) -> dict[str, object]:
         app = fleet_app(pilot)

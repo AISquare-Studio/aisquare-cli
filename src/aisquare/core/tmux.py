@@ -1240,15 +1240,32 @@ class TmuxServer:
                 self.run("delete-buffer", "-b", buffer_name)
             raise
 
-    def show_buffer(self) -> str | None:
-        """The newest paste buffer's text, or ``None`` when the server holds none.
+    def list_buffers(self) -> list[str]:
+        """The server's paste buffers by name, the most recently written first.
 
-        ``show-buffer`` without ``-b`` prints the most recently used buffer, as
-        the program wrote it. A server with no buffers answers ``no buffers`` and
-        exits 1 — an answer, not a failure; every other error is raised.
+        A copy that names no buffer — copy mode's, a program's OSC 52,
+        ``set-buffer`` or ``load-buffer`` without ``-b`` — makes a NEW buffer,
+        ``buffer<N>`` with ``N`` never reused while the server runs, even when
+        it holds the text the newest one already does (measured on 3.7c). So a
+        name this list did not have before is a copy made since, and the text
+        cannot say that: the same words copied twice read as no copy at all
+        (``test_live_every_copy_is_a_new_buffer_even_with_the_same_text``).
+        A server with no buffers lists none, with exit 0.
+        """
+        return [
+            name for name in self.run("list-buffers", "-F", "#{buffer_name}").splitlines() if name
+        ]
+
+    def show_buffer(self, name: str) -> str | None:
+        """The text of the paste buffer ``name``, or ``None`` when the server holds no such buffer.
+
+        Printed as the program wrote it. A buffer that is not there answers
+        ``no buffer <name>`` and exits 1 — an answer, not a failure: one listed a
+        moment ago may be gone, as a paste's own buffer is once ``paste-buffer
+        -d`` ran. Every other error is raised.
         """
         try:
-            return self.run("show-buffer")
+            return self.run("show-buffer", "-b", name)
         except TmuxError as exc:
             if "no buffer" in str(exc).lower():
                 return None

@@ -21,6 +21,7 @@ the code that runs.
 
 from __future__ import annotations
 
+import itertools
 import re
 import sys
 from collections.abc import Callable, Sequence
@@ -109,7 +110,8 @@ class FakeTmux:
         """``capture-pane -F`` calls — the frames that carried tmux's wrap flags."""
         self.input: list[tuple[str, ...]] = []
         """``("send-keys", pane, *args)``, ``("load-buffer", text)``,
-        ``("paste-buffer", pane)``, ``("resize-window", pane, w, h)`` in order."""
+        ``("paste-buffer", pane)``, ``("resize-window", pane, w, h)``,
+        ``("list-buffers",)``, ``("show-buffer", name)`` in order."""
         self.before_capture: Callable[[FakePane], None] | None = None
         """A hook to script a screen that changes under the widget."""
         self.apply_resize = True
@@ -125,13 +127,30 @@ class FakeTmux:
         self.record = record
         """Every argv this fake was asked to run, when a caller wants them — the
         shell tests' socket guard reads them after the test."""
-        self.buffer: str | None = None
-        """The newest tmux paste buffer — what ``show-buffer`` prints; ``None`` is
-        a server with no buffers (``no buffers``, exit 1)."""
+        self.buffers: list[tuple[str, str]] = []
+        """The server's paste buffers as ``(name, text)``, the newest first — what
+        ``list-buffers`` lists and ``show-buffer`` prints. Assign :attr:`buffer`
+        to write one the way a program's copy does."""
+        self._buffer_index = itertools.count()
         # A new fake server is a new machine: the pane caches `tmux -V` per
         # socket, and every fake here is socket "fake", so a test that sets
         # `version` must not read the last test's answer.
         terminal_module.forget_server_versions()
+
+    @property
+    def buffer(self) -> str | None:
+        """The newest paste buffer's text; ``None`` is a server with no buffers."""
+        return self.buffers[0][1] if self.buffers else None
+
+    @buffer.setter
+    def buffer(self, text: str | None) -> None:
+        """A copy that names no buffer — Claude Code's, copy mode's, an OSC 52 — as
+        tmux takes it: a NEW buffer ``bufferN`` every time, even for the text the
+        newest one already holds (measured on 3.7c). ``None`` empties the server."""
+        if text is None:
+            self.buffers = []
+        else:
+            self.buffers.insert(0, (f"buffer{next(self._buffer_index)}", text))
 
     def server(self, tmp_path: Path, socket: str = "fake") -> TmuxServer:
         # ``binary`` must resolve through ``shutil.which`` on a machine WITHOUT
@@ -176,11 +195,17 @@ class FakeTmux:
         if name == "load-buffer":
             self.input.append((name, (stdin or b"").decode("utf-8")))
             return Completed(0, "", "")
-        if name == "show-buffer":
+        if name == "list-buffers":
+            assert group[1:] == ["-F", "#{buffer_name}"], group
             self.input.append((name,))
-            if self.buffer is None:
-                return Completed(1, "", "no buffers\n")
-            return Completed(0, self.buffer, "")
+            return Completed(0, "".join(f"{buffer_name}\n" for buffer_name, _ in self.buffers), "")
+        if name == "show-buffer":
+            wanted = self._flag(group, "-b")
+            self.input.append((name, wanted))
+            for buffer_name, text in self.buffers:
+                if buffer_name == wanted:
+                    return Completed(0, text, "")
+            return Completed(1, "", f"no buffer {wanted}\n")
         pane_id = self._flag(group, "-t")
         pane = self.panes.get(pane_id)
         if pane is None or pane.gone:

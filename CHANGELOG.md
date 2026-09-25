@@ -1172,9 +1172,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   alt 8, ctrl 16 — so ctrl+click opens a link), X10 when that is what it asked
   for; the UI's own drag-select stands down while the program owns the mouse,
   **shift+drag** always selects locally and copies on release, and after a
-  left-button release the UI mirrors a changed tmux paste buffer — what Claude
-  Code's copy-on-select writes inside tmux when the agent's environment has no
-  display — to your clipboard. Documented in `docs/fleet.md`, with the note that
+  left-button release the UI mirrors a tmux paste buffer written since the
+  press — what Claude Code's copy-on-select writes inside tmux when the agent's
+  environment has no display, the same words copied twice included — to your
+  clipboard. Documented in `docs/fleet.md`, with the note that
   Claude Code's selection is copy-only by design.
 - **Tapping a key with nothing to type in an agent pane no longer pops a
   warning toast** (#151). Terminals speaking the kitty keyboard protocol

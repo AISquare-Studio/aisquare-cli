@@ -1033,8 +1033,10 @@ transcript to select *in Claude Code*, which copies on release by itself
 (double- and triple-click are its word and line selection). Claude's own copy
 runs `wl-copy`/`xclip` in the agent's environment — the tmux server's, which may
 have no display — and inside tmux writes the tmux paste buffer, so after a
-left-button release the UI reads that buffer and mirrors a changed one to your
-clipboard (OSC 52), the same way its own copies arrive. Claude Code's selection
+left-button release the UI reads tmux's buffers and mirrors one written since the
+press to your clipboard (OSC 52), the same way its own copies arrive — the same
+words selected twice included, and a copy that lands as late as about 0.65 s
+after the release, unless you press a mouse button first. Claude Code's selection
 is copy-only by design: there is no "select in the prompt and paste over it"
 in Claude Code in any terminal. While such a program owns the mouse the UI's
 own drag-select stands down; **shift+drag** is the one gesture that always

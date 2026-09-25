@@ -1171,6 +1171,13 @@ def identity_problem(template: str) -> str | None:
     ``ValueError: Single '}'``), and one that renders every role to the same
     name because ``{role}`` is not in it. Rendered twice with different roles
     rather than searched for the literal, so ``{role!s}`` and friends count.
+
+    And a third that ends the same way with the identities listed: a name
+    :data:`_SAFE_ROLE` refuses, which ``wire_session`` will not put in a header.
+    ``arbind kumar-{role}`` — a full name in the form's prefix field — was
+    stored, ``status``, the tab and the doctor listed ``arbind kumar-planner``
+    and the rest, and every launch went untraced as not header-safe (final
+    review of #203, EX3).
     """
     try:
         one, two = template.format(role="planner"), template.format(role="coder")
@@ -1180,6 +1187,13 @@ def identity_problem(template: str) -> str | None:
         return (
             f"identity template {template!r} has no {{role}} in it, so every agent would "
             "share one name — try 'name-{role}'"
+        )
+    unsafe = next((name for name in (one, two) if not _SAFE_ROLE.match(name)), None)
+    if unsafe is not None:
+        return (
+            f"identity template {template!r} names agents like {unsafe!r}, which cannot "
+            "travel in a header, so every launch would go untraced — letters, digits, '.', "
+            "'_' and '-' only: try 'name-{role}'"
         )
     return None
 

@@ -47,7 +47,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (`team-{env}-{role}` became `team-{role}`) while the CLI's `--identity`
   refused the same input. The field asks for a name: a brace of either kind is
   refused with the reason and nothing is stored, and the writer refuses any
-  template that cannot render or renders every role to one name.
+  template that cannot render, renders every role to one name, or renders a
+  name the launch cannot put in a header (`arbind kumar-{role}`, an `@`).
 - **The hosted-proxy suggestion respects a deliberate top-level `proxy_url`.**
   The form read the per-target value only, so a chosen `[explainability]
   proxy_url` — which `_proxy_source` already reports as `config` rather than

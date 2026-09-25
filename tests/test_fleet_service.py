@@ -209,6 +209,18 @@ class FakeTmux(TmuxServer):
         except TmuxError:
             return False
 
+    def server_absent(self) -> bool:
+        """Faithful to :meth:`aisquare.core.tmux.TmuxServer.server_absent`: True only on
+        tmux's OWN word that no server is behind the socket (``running = False`` is the
+        shape ``kill-server`` and a swept ``/tmp`` leave); a question that could not be
+        put — no client, an unrunnable one, a denied socket, a wedged server — is no
+        evidence of absence and answers False, as the real one does."""
+        if not self.installed or self.exec_unavailable or self.answers_raises is not None:
+            return False
+        if self.socket_denied:
+            return False
+        return not self.running
+
     def _read(self) -> bool:
         """What a LENIENT read sees: True when the server answered this query.
 

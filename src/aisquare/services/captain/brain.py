@@ -35,12 +35,13 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Literal
 
 from aisquare.core import paths, transcripts
 from aisquare.core.atomic import write_replacing
 from aisquare.core.locking import lock_exclusive, unlock
 from aisquare.core.store import store_session
-from aisquare.core.tmux import TmuxError, TmuxServer
+from aisquare.core.tmux import TmuxError, TmuxServer, TmuxUnavailable
 from aisquare.models import FleetAgent, TeamSession
 from aisquare.services import fleet
 from aisquare.services.captain import state as captain_state
@@ -58,6 +59,17 @@ _sleep: Callable[[float], None] = time.sleep
 
 
 _LOCK_HELD = {errno.EAGAIN, errno.EWOULDBLOCK, errno.EACCES}
+
+
+class Unreachable(fleet.FleetError):
+    """The captain's row is live but its tmux server does not answer, and nothing here may
+    end the row: the socket file is still there, or the question could not be put.
+
+    The message names the one command that may (``aisquare fleet reap -P <home>
+    --server-down``): a silent socket alone is not a dead server — a server alive
+    under another ``TMUX_TMPDIR`` looks the same from here (the fleet's rule, and
+    the manager's at 13189).
+    """
 
 
 class NoReply(Exception):
@@ -157,8 +169,58 @@ def find() -> FleetAgent | None:
             fleet.reap(home)
             with store_session() as store:
                 return store.fleet_agent_by_label(home.id, fleet.CAPTAIN_LABEL, live_only=True)
+        # A fresh board row wins over pane facts, so a captain whose tmux SERVER is
+        # gone still reads `waiting` here — after a reboot the row said "already
+        # running" and `say` waited its whole timeout (13185, 13189). Ask the server.
+        state, why = _server_state(agent)
+        if state == "gone":
+            # Provably gone: no socket file where the fleet resolves it, which is what
+            # a reboot leaves. The fleet's own sweep ends the row, on tmux's word, as
+            # `fleet reap --server-down` would; the next start replaces it.
+            fleet.reap(home, server_down=True)
+            with store_session() as store:
+                remaining = store.fleet_agent_by_label(home.id, fleet.CAPTAIN_LABEL, live_only=True)
+            if remaining is None:
+                return None
+            why = f"{why}, and the fleet's sweep did not end the row"
+            state = "silent"
+        if state == "silent":
+            raise Unreachable(
+                f"the captain's row ({agent.id}) is live but its tmux server does not answer "
+                f"— {why}. If that server is really gone (a kill-server; a reboot elsewhere), "
+                f"run `aisquare fleet reap -P {home.id} --server-down`, then `aisquare captain` "
+                "starts a fresh captain"
+            )
         return agent
     return None
+
+
+def _server_state(agent: FleetAgent) -> tuple[Literal["up", "gone", "silent"], str]:
+    """Whether the captain's tmux server is up, provably gone, or merely not answering.
+
+    ``reachable`` is the one question that separates every state: True is a server
+    that answered; False is tmux's own word that no server is behind the socket;
+    a client that could not run, a denied socket or a wedged server RAISE, and
+    that is no evidence either way. "No server" is ``gone`` only when the socket
+    file is absent where the fleet resolves it (13189: a swept ``/tmp``); a file
+    with nothing behind it is ``silent`` — a kill-server leaves the file, and so
+    does a server alive under another ``TMUX_TMPDIR``.
+    """
+    srv = fleet.server_for(agent.tmux_socket)
+    try:
+        if srv.reachable():
+            return "up", ""
+    except TmuxUnavailable as exc:
+        return "silent", f"tmux could not be run ({exc})"
+    except TmuxError as exc:
+        return "silent", f"tmux could not be asked ({exc})"
+    try:
+        path = srv.socket_path()
+    except TmuxError as exc:
+        return "silent", str(exc)
+    if not path.exists():
+        return "gone", f"no socket file at {path}"
+    return "silent", f"nothing answers on {path}"
 
 
 def start(prompt: str | None = None, *, size: tuple[int, int] | None = None) -> fleet.SpawnReceipt:
@@ -196,7 +258,11 @@ def say(text: str, *, timeout: float = SAY_TIMEOUT_S) -> Reply:
         raise ValueError("nothing to say")
     deadline = _now() + timedelta(seconds=timeout)
     with _one_at_a_time(deadline, timeout):
-        agent = find()
+        try:
+            agent = find()
+        except Unreachable as exc:
+            # 13189: said at once, never waited out — the same words the bare command says.
+            raise NoReply(str(exc), timed_out=False) from exc
         if agent is None:
             typed_at = _now()
             receipt = start(prompt=text)

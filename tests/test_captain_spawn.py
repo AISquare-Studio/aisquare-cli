@@ -15,7 +15,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from typer.testing import CliRunner
 
+from aisquare.cli.app import app
 from aisquare.core import paths
 from aisquare.core.harness import role_cycle
 from aisquare.core.store import store_session
@@ -233,6 +235,98 @@ def test_an_exited_captain_is_not_found_and_a_bare_start_replaces_it(
     with store_session() as store:
         ended = store.get_fleet_agent(first.id)
     assert ended is not None and ended.ended_at is not None
+
+
+def _captain_at_its_prompt(
+    tmux: FakeTmux, monkeypatch: pytest.MonkeyPatch
+) -> tuple[FleetAgent, Path]:
+    """A captain started bare, its session registered and waiting — the state a reboot
+    leaves in the store — and where the fleet resolves its socket file."""
+    agent = brain.start().agent
+    assert agent.session_id is not None
+    _captain_window_env(monkeypatch, agent.id)
+    team_service.hook_session_start(agent.session_id, brain.brain_dir(), "startup")
+    tmp = Path(str(brain.brain_dir().parent / "tmux-tmp"))
+    monkeypatch.setenv("TMUX_TMPDIR", str(tmp))
+    socket = fleet_service.server_for(agent.tmux_socket).socket_path()
+    return agent, socket
+
+
+def test_after_a_reboot_swept_the_socket_a_bare_captain_starts_fresh(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    runner: CliRunner,
+) -> None:
+    """13189: the server is provably gone — no socket file where the fleet resolves it,
+    which is what a reboot leaves — so the stale row is ended and the owner's first
+    `aisquare captain` starts a fresh captain. Never "already running"."""
+    agent, socket = _captain_at_its_prompt(tmux, monkeypatch)
+    tmux.running = False  # the server died with the machine
+    assert not socket.exists(), "the premise: /tmp was swept"
+    assert brain.find() is None
+    with store_session() as store:
+        old = store.get_fleet_agent(agent.id)
+    assert old is not None and old.ended_at is not None, "the stale row is ended, as lost"
+    result = runner.invoke(app, ["captain"])
+    assert result.exit_code == 0, result.output
+    assert "started the captain" in result.output and "already running" not in result.output
+    with store_session() as store:
+        live = store.fleet_agents(captain_state.home_project().id, live_only=True)
+    assert [row.role for row in live] == ["captain"] and live[0].id != agent.id
+
+
+def test_a_silent_server_with_its_socket_present_is_refused_fast_naming_reap(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    runner: CliRunner,
+) -> None:
+    """13189: the socket file is there but nothing answers (a `kill-server` leaves exactly
+    this; so does a server alive under another TMUX_TMPDIR). That is the fleet's call to
+    make with `reap --server-down`, not the captain's: bare `aisquare captain` and `say`
+    both fail at once, naming the command. Never a silent wait."""
+    agent, socket = _captain_at_its_prompt(tmux, monkeypatch)
+    tmux.running = False
+    socket.parent.mkdir(parents=True, exist_ok=True)
+    socket.touch()
+    home = captain_state.home_project()
+    with pytest.raises(brain.Unreachable, match=f"aisquare fleet reap -P {home.id} --server-down"):
+        brain.find()
+    spawned_before = len(tmux.spawned)
+    result = runner.invoke(app, ["captain"])
+    assert result.exit_code == 1, result.output
+    assert "reap -P" in result.output and "already running" not in result.output
+    assert len(tmux.spawned) == spawned_before, "nothing was started over a row that may be alive"
+    slept: list[float] = []
+    monkeypatch.setattr(brain, "_sleep", slept.append)
+    with pytest.raises(brain.NoReply, match="reap -P") as caught:
+        brain.say("what is up", timeout=60)
+    assert caught.value.timed_out is False and slept == [], "said at once, not waited out"
+    with store_session() as store:
+        row = store.get_fleet_agent(agent.id)
+    assert row is not None and row.ended_at is None, "no evidence, so the row stands"
+
+
+@pytest.mark.parametrize("shape", ["no client", "denied socket"])
+def test_a_tmux_that_cannot_be_asked_is_refused_not_recovered(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    shape: str,
+) -> None:
+    """A question that could not be put is no evidence of absence (the fleet's rule):
+    the row stands and the owner is told what to run, not handed a second captain."""
+    agent, _ = _captain_at_its_prompt(tmux, monkeypatch)
+    if shape == "no client":
+        tmux.installed = False
+    else:
+        tmux.socket_denied = True
+    with pytest.raises(brain.Unreachable, match=r"tmux could not be (run|asked) .*reap -P"):
+        brain.find()  # said as a question that could not be put, not as a missing socket
+    with store_session() as store:
+        row = store.get_fleet_agent(agent.id)
+    assert row is not None and row.ended_at is None
 
 
 def test_a_dead_captain_the_listing_could_not_end_is_still_not_found(

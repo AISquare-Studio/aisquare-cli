@@ -7128,6 +7128,41 @@ def test_fleet_switch_command_reports_the_move_and_its_json(
     assert json.loads(refused.stdout)["error"] in ("no_such_agent", "fleet")
 
 
+@pytest.mark.parametrize("command", ["restart", "switch"])
+def test_restart_and_switch_say_in_their_headline_that_the_first_line_was_not_typed(
+    command: str,
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    runner: CliRunner,
+    tmp_path: Path,
+) -> None:
+    """The board's ``restarted`` and ``switched`` lines say whether the replacement's first
+    line reached its pane (FLEET-5), but the commands' own headline still said "started
+    fresh with a hand-off prompt", above a note saying the prompt was NOT typed (review of
+    the side/ff-fleet fold). The headline is the board's words, and ``--json`` carries
+    ``prompt_typed``."""
+    _two_slots_with_usage(monkeypatch, work=95, personal=10)
+    agent = fleet_service.spawn(project, "coder", worktree=False, account="2").agent
+    _with_transcript(agent, tmp_path / "missing.jsonl")  # named, not on disk: a fresh start
+    # The fake's new pane never comes up, so the hand-off prompt is past its wait.
+
+    result = runner.invoke(app, ["fleet", command, agent.label, "--project", project.id])
+
+    assert result.exit_code == 0, result.output
+    [headline] = [line for line in result.stdout.splitlines() if line.startswith("✓ ")]
+    assert headline.split(" — ", 1)[1].startswith(
+        "started fresh, but its hand-off prompt was NOT typed"
+    ), headline
+    assert "with a hand-off prompt" not in headline
+
+    again = runner.invoke(app, ["--json", "fleet", command, agent.label, "--project", project.id])
+    assert again.exit_code == 0, again.output
+    payload = json.loads(again.stdout)
+    assert (payload["resumed"], payload["prompt_typed"]) == (False, False)
+
+
 @pytest.mark.parametrize(
     ("seen_ago", "printed_ago"),
     [

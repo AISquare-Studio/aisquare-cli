@@ -318,8 +318,7 @@ class AgentView(Vertical):
         else:
             receipt = event.worker.result
             if isinstance(receipt, fleet_service.RestartReceipt):
-                how = "resumed its session" if receipt.resumed else "started fresh"
-                self.notify(f"✓ restarted {label} — {how}", timeout=6, markup=False)
+                self.notify(f"✓ restarted {label} — {receipt.how}", timeout=6, markup=False)
                 for note in receipt.notes:
                     self.notify(note, severity="warning", timeout=8, markup=False)
                 self.post_message(AgentRestarted(receipt.started))

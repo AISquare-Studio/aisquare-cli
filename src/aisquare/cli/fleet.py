@@ -321,6 +321,7 @@ def restart(
                     "replaced": receipt.replaced.model_dump(mode="json"),
                     "started": receipt.started.model_dump(mode="json"),
                     "resumed": receipt.resumed,
+                    "prompt_typed": receipt.prompt_typed,
                     "was_running": receipt.was_running,
                     "tmux_session": receipt.tmux_session,
                     "notes": receipt.notes,
@@ -329,10 +330,9 @@ def restart(
         )
         return
     console = stdout_console()
-    how = "resumed its session" if receipt.resumed else "started fresh with a hand-off prompt"
     before = "stopped and " if receipt.was_running else ""
     console.print(
-        f"✓ {label}: {before}restarted — {how} "
+        f"✓ {label}: {before}restarted — {receipt.how} "
         f"({receipt.started.pane_id} in {receipt.tmux_session})",
         markup=False,
     )
@@ -396,6 +396,7 @@ def switch(
                     "from_slot": receipt.from_slot,
                     "to_slot": receipt.to_slot,
                     "resumed": receipt.resumed,
+                    "prompt_typed": receipt.prompt_typed,
                     "tmux_session": receipt.tmux_session,
                     "notes": receipt.notes,
                 }
@@ -404,9 +405,8 @@ def switch(
         return
     console = stdout_console()
     origin = f"slot {receipt.from_slot}" if receipt.from_slot is not None else "its shell's claude"
-    how = "resumed its session" if receipt.resumed else "started fresh with a hand-off prompt"
     console.print(
-        f"✓ {label}: moved from {origin} to slot {receipt.to_slot} — {how} "
+        f"✓ {label}: moved from {origin} to slot {receipt.to_slot} — {receipt.how} "
         f"({receipt.started.pane_id} in {receipt.tmux_session})",
         markup=False,
     )

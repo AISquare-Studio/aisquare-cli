@@ -204,6 +204,15 @@ class SwitchReceipt:
     not taken back. Each is in ``notes`` too, beside the ones every switch has (the
     headroom read, the launch replayed, the worktree kept). The automatic hand-over has
     no terminal to print ``notes`` to and posts these alone (``services.hooks.hand_over``)."""
+    prompt_typed: bool = True
+    """Whether the replacement's first line reached its pane: the line telling a resumed
+    session to continue, or a fresh one's hand-off prompt. ``False`` leaves it idle at an
+    empty prompt, and ``notes`` say why."""
+
+    @property
+    def how(self) -> str:
+        """How the replacement began, in the words of the board's ``switched`` line."""
+        return _how_started(self.resumed, typed=self.prompt_typed)
 
 
 @dataclass(frozen=True)
@@ -3937,6 +3946,7 @@ def switch(
         tmux_session=receipt.tmux_session,
         notes=notes,
         failures=failures,
+        prompt_typed=bool(receipt.prompt_typed),
     )
 
 
@@ -4078,6 +4088,13 @@ class RestartReceipt:
     """True when the agent was still alive and had to be stopped first."""
     tmux_session: str
     notes: list[str] = field(default_factory=list)
+    prompt_typed: bool = True
+    """Whether the replacement's first line reached its pane, as on :class:`SwitchReceipt`."""
+
+    @property
+    def how(self) -> str:
+        """How the replacement began, in the words of the board's ``restarted`` line."""
+        return _how_started(self.resumed, typed=self.prompt_typed)
 
 
 def restart(
@@ -4291,6 +4308,7 @@ def restart(
         was_running=was_running,
         tmux_session=receipt.tmux_session,
         notes=notes,
+        prompt_typed=bool(receipt.prompt_typed),
     )
 
 
@@ -4395,6 +4413,12 @@ def _abandon_handover(stopped: FleetAgent) -> None:
 
 def _how_started(resumed: bool, *, typed: bool) -> str:
     """How a replacement began, for the board's ``switched`` and ``restarted`` lines.
+
+    And for every surface that reports the receipt (``RestartReceipt.how``,
+    ``SwitchReceipt.how``). ``fleet restart`` and ``fleet switch`` printed
+    "started fresh with a hand-off prompt" above a note saying it was NOT
+    typed, and the agent view's toast said "started fresh" (review of the
+    side/ff-fleet fold).
 
     Worded from what reached its pane as well as from how it was launched. A
     replacement whose first line was not typed — up too slowly for a multi-line

@@ -426,7 +426,9 @@ def _check_config() -> DoctorCheck:
         load_config()
     except Exception as exc:  # diagnostics must never crash
         return _fail(
-            "config", f"config.toml is invalid: {exc}", "Fix or reset: aisquare init --reinit"
+            "config",
+            f"config.toml is invalid: {exc}",
+            "Fix it, or reset it to the defaults: aisquare init --reinit --yes",
         )
     return _ok("config", "config.toml is valid")
 

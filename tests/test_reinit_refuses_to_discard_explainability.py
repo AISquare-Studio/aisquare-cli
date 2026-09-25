@@ -22,15 +22,19 @@ WHY REFUSE RATHER THAN PRESERVE OR WARN:
   intact for anyone who means it. It reuses ``--yes``, which already exists and
   is documented as answering every prompt, rather than inventing a second flag.
 
-And it does not break the documented recovery path: ``doctor`` tells an operator
-with an invalid config to "reset: aisquare init --reinit". If the file cannot be
-read there is no configured section to see, so the refusal cannot fire and the
-reset proceeds — pinned below, because that is the case where refusing would
-strand someone.
+A file it cannot read is refused too. That once looked like the case where
+refusing would strand someone: ``doctor`` sends an operator with an invalid
+config to the reset, and a section nobody can read seemed to have nothing to
+protect. It did. A config.toml PowerShell 5.1 saved as UTF-16 holds everything
+the operator configured, and a plain ``--reinit`` replaced it with the defaults
+(review of the #203 final-review fixes). Such a file is read now, and refused
+like any other. One this build still cannot read needs ``--yes``, and
+``doctor``'s fix says so, so its recovery is still one command.
 """
 
 from __future__ import annotations
 
+import codecs
 from pathlib import Path
 
 import pytest
@@ -108,34 +112,75 @@ def test_reinit_is_unchanged_on_a_machine_with_nothing_configured(
     assert result.exit_code == 0, result.output
 
 
-def test_an_unreadable_config_still_resets(runner: CliRunner) -> None:
-    """The documented recovery path, and the case where refusing would strand someone.
+#: How Windows writes a config.toml an operator edited there: PowerShell 5.1's ``>`` and
+#: ``Out-File`` (UTF-16, little-endian, with its mark), its ``Set-Content -Encoding
+#: UTF8`` and Notepad's "UTF-8 with BOM", and UTF-16 big-endian for completeness.
+WINDOWS_ENCODINGS = {
+    "utf-16-le-bom": lambda text: codecs.BOM_UTF16_LE + text.encode("utf-16-le"),
+    "utf-16-be-bom": lambda text: codecs.BOM_UTF16_BE + text.encode("utf-16-be"),
+    "utf-8-bom": lambda text: text.encode("utf-8-sig"),
+}
 
-    ``doctor`` sends an operator here when config.toml is invalid. If it cannot
-    be parsed there is no configured section to protect, so the reset proceeds.
-    """
+
+@pytest.mark.parametrize("encoding", sorted(WINDOWS_ENCODINGS))
+def test_reinit_refuses_to_discard_a_cutover_saved_by_windows(
+    runner: CliRunner, encoding: str
+) -> None:
+    """A config.toml PowerShell 5.1 saved as UTF-16 could not be read, so the refusal
+    could not see its explainability section, and the reset replaced it with the defaults:
+    exit 0 and the targets table gone (review of the #203 final-review fixes). Read in
+    the encoding its mark names, it is refused like any other, and left as it was."""
     runner.invoke(app, ["init", "--yes"], catch_exceptions=False)
-    paths.config_path().write_text("this is not [valid toml", encoding="utf-8")
+    _configured_cutover()
+    config = paths.config_path()
+    saved = WINDOWS_ENCODINGS[encoding](config.read_text(encoding="utf-8"))
+    config.write_bytes(saved)
 
     result = runner.invoke(app, ["init", "--reinit"], catch_exceptions=False)
 
-    assert result.exit_code == 0, result.output
+    assert result.exit_code != 0, result.output
+    assert "explainability" in result.output.lower() and "prod" in result.output
+    assert config.read_bytes() == saved, "the refusal must not half-apply"
+    surviving = load_config().explainability
+    assert surviving.enabled is True
+    assert surviving.targets["prod"].gateway_url == "https://gateway.invalid"
+
+    consented = runner.invoke(app, ["init", "--reinit", "--yes"], catch_exceptions=False)
+
+    assert consented.exit_code == 0, consented.output
     assert load_config().explainability.targets == {}
+    config.read_bytes().decode("utf-8")  # written back as UTF-8
 
 
-def test_a_config_that_is_not_utf8_still_resets(runner: CliRunner) -> None:
-    """The same recovery for a file ``doctor`` reports as undecodable rather than invalid.
-
-    Windows PowerShell 5.1's ``>`` and ``Out-File`` write UTF-16. The reset's save
-    reads the file it replaces to keep unknown keys, and a decode error escaped it:
-    ``--reinit`` exited 1 with a traceback (review of the #203 store fixes, round 2).
-    """
+@pytest.mark.parametrize(
+    "raw",
+    [
+        b"this is not [valid toml",
+        # UTF-16 WITHOUT its mark: nothing says how to decode it.
+        'profile = "work"\n'.encode("utf-16-le"),
+    ],
+    ids=["invalid-toml", "utf-16-without-a-mark"],
+)
+def test_a_config_it_cannot_read_is_reset_only_with_consent(runner: CliRunner, raw: bytes) -> None:
+    """``doctor`` sends an operator with a config.toml it cannot read to the reset. The
+    reset replaced such a file on a plain ``--reinit``, on the grounds that a section
+    nobody can read has nothing to protect, which is how a UTF-16 cutover was lost. What
+    the file holds cannot be seen, so ``--reinit`` refuses, names ``--yes``, and leaves
+    it; ``--reinit --yes`` replaces it with the defaults and says so."""
     runner.invoke(app, ["init", "--yes"], catch_exceptions=False)
-    paths.config_path().write_bytes('profile = "work"\n'.encode("utf-16"))
+    config = paths.config_path()
+    config.write_bytes(raw)
 
-    result = runner.invoke(app, ["init", "--reinit"], catch_exceptions=False)
+    refused = runner.invoke(app, ["init", "--reinit"], catch_exceptions=False)
 
-    assert result.exit_code == 0, result.output
+    assert refused.exit_code != 0, refused.output
+    assert "--yes" in refused.output and "cannot be read" in " ".join(refused.output.split())
+    assert config.read_bytes() == raw, "a refusal leaves the file as it was"
+
+    consented = runner.invoke(app, ["init", "--reinit", "--yes"], catch_exceptions=False)
+
+    assert consented.exit_code == 0, consented.output
+    assert "could not read" in " ".join(consented.output.split())
     assert load_config() == AppConfig()
 
 

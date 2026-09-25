@@ -1480,7 +1480,7 @@ def checks(
             _warn(
                 "explainability",
                 f"could not read the config: {exc}",
-                "Fix or reset it: aisquare init --reinit",
+                "Fix it, or reset it to the defaults: aisquare init --reinit --yes",
             )
         ]
 
@@ -2395,7 +2395,10 @@ def apply_fixes(
     try:
         config = load_config()
     except Exception as exc:  # never crash the doctor we are called from
-        return [f"could not read the config ({exc}) — fix it first: aisquare init --reinit"]
+        return [
+            f"could not read the config ({exc}) — fix it first, or reset it to the "
+            "defaults: aisquare init --reinit --yes"
+        ]
 
     if not config.explainability.enabled:
         config.explainability.enabled = True

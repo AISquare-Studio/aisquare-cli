@@ -6,7 +6,7 @@ stubbed. Unknown keys in the file are ignored so old configs keep loading.
 
 from __future__ import annotations
 
-import contextlib
+import codecs
 import errno
 import os
 import tomllib
@@ -414,21 +414,34 @@ def _keep_unknown(existing: Any, dumped: Any, model: Any) -> Any:
     return merged
 
 
+#: The byte-order marks UTF-16 opens with, little-endian first: Windows PowerShell
+#: 5.1's ``>``, ``Out-File`` and ``Set-Content -Encoding Unicode`` write ``FF FE``.
+_UTF16_BOMS = (codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)
+
+
 def _parse_toml(raw: bytes) -> dict[str, Any]:
-    """The TOML document in ``raw``, read past a UTF-8 BOM if it starts with one.
+    """The TOML document in ``raw``, decoded by the byte-order mark it opens with.
 
     ``tomllib`` refuses a leading U+FEFF ("Invalid statement (at line 1,
     column 1)"), so a config saved by Windows PowerShell 5.1's ``Set-Content
     -Encoding UTF8`` or Notepad's "UTF-8 with BOM" made ``load_config`` raise
-    for every command, and ``save_config``'s merge read failed open and
-    dropped the unknown keys it exists to keep. Decoded as ``utf-8-sig``, as
-    ``core.credentials`` and ``core.state_file`` read theirs; a file without
-    a BOM reads exactly as before, and one that is not UTF-8 still raises
-    ``UnicodeDecodeError`` as ``tomllib.load`` did (review of the #203 store
-    fixes, round 1): ``load_config`` reports it, and ``save_config``'s merge
-    read fails open on it as on a ``TOMLDecodeError``.
+    for every command, and ``save_config``'s merge read dropped the unknown
+    keys it exists to keep. Decoded as ``utf-8-sig``, as ``core.credentials``
+    and ``core.state_file`` read theirs; a file without a BOM reads exactly as
+    before (review of the #203 store fixes, round 1).
+
+    A file that opens with a UTF-16 mark is decoded as UTF-16. PowerShell 5.1's
+    ``>`` and ``Out-File`` write that, and ``load_config`` refused it, so
+    ``init --reinit`` could not see the explainability section in it, took it
+    for a file with nothing to protect, and replaced it with the defaults
+    without the refusal a readable one gets (review of the #203 final-review
+    fixes). Read, it is protected like any other, and a save writes it back as
+    UTF-8. Anything else that is not UTF-8 still raises ``UnicodeDecodeError``,
+    as ``tomllib.load`` did: ``load_config`` reports it, and ``save_config``
+    will not write over it unless told to discard it.
     """
-    loaded: dict[str, Any] = tomllib.loads(raw.decode("utf-8-sig"))
+    encoding = "utf-16" if raw.startswith(_UTF16_BOMS) else "utf-8-sig"
+    loaded: dict[str, Any] = tomllib.loads(raw.decode(encoding))
     return loaded
 
 
@@ -445,10 +458,22 @@ def load_config(path: Path | None = None) -> AppConfig:
     return AppConfig.model_validate(data)
 
 
-def save_config(config: AppConfig, path: Path | None = None) -> Path:
+def save_config(
+    config: AppConfig, path: Path | None = None, *, discard_unreadable: bool = False
+) -> Path:
     """Write ``config`` as TOML to ``path`` (default: the standard location).
 
     Parent directories are created on demand. Returns the written path.
+
+    **A file already there that cannot be read is not written over** unless
+    ``discard_unreadable`` says to: its read error is raised and the file is
+    left as it was. The save keeps what the file holds that ``config`` does
+    not know (:func:`_keep_unknown`), and a file it cannot read could hold
+    anything, a configured explainability section included, which nothing
+    would report missing afterwards. ``init --reinit --yes`` is the one caller
+    that passes it: the operator asked for the defaults over whatever is
+    there. Every other writer loads the file first, and ``load_config``
+    raises on the same file.
 
     ``exclude_none`` because **TOML has no null**: ``tomli_w`` raises
     ``TypeError`` on ``None`` rather than writing anything, so an optional
@@ -524,15 +549,15 @@ def save_config(config: AppConfig, path: Path | None = None) -> Path:
     dumped = config.model_dump(mode="json", exclude_none=True)
     if written.exists():
         # Keys this build has never heard of belong to whoever wrote them; see
-        # _keep_unknown. Reading fails open on purpose — a config we cannot parse
-        # is exactly the state a write is most likely trying to repair, and
-        # refusing to write would strand the operator with the broken file. One
-        # we cannot DECODE is the same case: Windows PowerShell 5.1's `>` and
-        # `Out-File` write UTF-16, `doctor` reports that file as invalid and
-        # sends the operator to `init --reinit`, and the `UnicodeDecodeError`
-        # this read let escape made that reset crash on the file it replaces
-        # (review of the #203 store fixes, round 2). `load_config` still raises
-        # on it, so `doctor` still reports it.
+        # _keep_unknown. A file this read cannot parse or decode is written over
+        # only when the caller says to discard it (see the docstring). Reading
+        # failed open here: a config we cannot parse is the state a reset repairs.
+        # But the reset is the operator's call, and failing open made it for them.
+        # A config.toml PowerShell 5.1 saved as UTF-16 was replaced by
+        # `init --reinit` with no `--yes`, explainability targets and all,
+        # because nothing could read the section that would have refused it
+        # (review of the #203 final-review fixes). `init` now refuses that reset
+        # without `--yes`, and passes `discard_unreadable` with it.
         #
         # THROUGH THE RETRY, like the rename in `write_replacing` below and
         # `load_config` above. A `PermissionError` IS an `OSError`, so under the
@@ -540,10 +565,15 @@ def save_config(config: AppConfig, path: Path | None = None) -> Path:
         # the unknown-key preservation — and `_keep_unknown`'s own docstring says
         # what that costs: "exit 0, no warning, and because the tracing seam is
         # fail-open the result is a green-looking machine with no tracing".
-        # Failing open is right for a config we cannot PARSE; it is not right for
-        # one that is busy for 40 microseconds.
-        with contextlib.suppress(OSError, tomllib.TOMLDecodeError, UnicodeDecodeError):
+        # A file that is busy for 40 microseconds is not one we cannot read.
+        try:
             existing = _parse_toml(despite_windows_contention(written.read_bytes))
+        except FileNotFoundError:
+            pass  # gone since `exists()`: nothing is left to keep
+        except (OSError, tomllib.TOMLDecodeError, UnicodeDecodeError):
+            if not discard_unreadable:
+                raise
+        else:
             dumped = _keep_unknown(existing, dumped, config)
     payload = tomli_w.dumps(dumped)
 

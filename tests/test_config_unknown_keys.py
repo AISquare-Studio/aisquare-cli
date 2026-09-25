@@ -26,6 +26,8 @@ from __future__ import annotations
 import tomllib
 from pathlib import Path
 
+import pytest
+
 from aisquare.core.config import AppConfig, RoleLaunchProfile, load_config, save_config
 
 
@@ -102,20 +104,29 @@ def test_the_model_still_wins_for_fields_it_owns(tmp_path: Path) -> None:
     )
 
 
-def test_an_unparseable_existing_file_does_not_block_the_write(tmp_path: Path) -> None:
-    """Reading the old file fails open, because a broken config is repairable.
+def test_an_unparseable_existing_file_is_written_over_only_when_discarded(
+    tmp_path: Path,
+) -> None:
+    """A broken config is repairable, by the reset that means to discard it.
 
-    A write is the most likely thing to be REPAIRING a corrupt file, so refusing
-    to write when the old one cannot be parsed would strand the operator with
-    exactly the state they are trying to leave.
+    Reading the old file failed open, on the grounds that a write is the most
+    likely thing to be repairing a corrupt file. But a file this cannot read may
+    hold what the operator configured, and ``init --reinit`` without ``--yes``
+    replaced a UTF-16 cutover that way (review of the #203 final-review fixes).
+    The repair is still one call: ``discard_unreadable``, which ``init --reinit
+    --yes`` passes.
 
-    A REGRESSION GUARD too: before the fix there was no read at all, so it could
-    not fail. It exists because the fix ADDED a read that could.
+    A REGRESSION GUARD too: before the merge read there was no read at all, so
+    it could not fail. It exists because that fix ADDED a read that could.
     """
     target = tmp_path / "config.toml"
     _write(target, "this is not [ valid toml\n")
 
-    save_config(AppConfig(), target)
+    with pytest.raises(tomllib.TOMLDecodeError):
+        save_config(AppConfig(), target)
+    assert target.read_text(encoding="utf-8") == "this is not [ valid toml\n"
+
+    save_config(AppConfig(), target, discard_unreadable=True)
 
     assert load_config(target).profile == "default"
 

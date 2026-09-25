@@ -80,6 +80,14 @@ def init(
                 assume_yes=yes,
                 explainability=_explainability_decision(explainability),
             )
+    except lifecycle_service.UnreadableConfigResetRefused as refused:
+        fail(
+            f"--reinit would replace config.toml, which cannot be read ({refused.summary}), "
+            "so whether it holds this machine's explainability configuration cannot be "
+            "checked. Fix the file, or re-run with --yes to replace it with the defaults.",
+            error="reinit_would_discard_unreadable_config",
+            hint="aisquare init --reinit --yes",
+        )
     except lifecycle_service.ExplainabilityResetRefused as refused:
         fail(
             f"--reinit would discard this machine's explainability configuration "

@@ -19,6 +19,7 @@ from typing import Annotated, Any
 import typer
 from typer.core import TyperGroup
 
+from aisquare.cli import captain_voice
 from aisquare.cli.common import fail
 from aisquare.cli.serve import dependency_error
 from aisquare.core.console import stderr_console, stdout_console
@@ -41,6 +42,10 @@ class _SayByDefault(TyperGroup):
     ``cli/global_flags.py`` this stays on the public typer surface."""
 
     def parse_args(self, ctx: Any, args: list[str]) -> list[str]:
+        if args and args[0] == "--voice":
+            # The plan's spelling of the voice page (T3, rider 13143 (1)): the leaf,
+            # not a message to the captain that starts with "--voice".
+            args = ["voice", *args[1:]]
         if args and args[0] not in self.commands and args[0] not in ctx.help_option_names:
             args = ["say", *args]
         result: list[str] = super().parse_args(ctx, args)
@@ -54,6 +59,7 @@ app = typer.Typer(
     invoke_without_command=True,
     no_args_is_help=False,
 )
+captain_voice.register(app)  # `voice`: the page, in its own module (T3)
 
 
 @app.callback()

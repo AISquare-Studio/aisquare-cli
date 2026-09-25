@@ -166,23 +166,31 @@ def onboard(
     ] = False,
 ) -> None:
     """Pack the codebase into a snapshot and seed its context pool."""
-    if group is not None and not group.strip():
+    # Looked up as `create_group` stores it: ' team ' found no group, and the create,
+    # which strips, collided with `team` after the onboard (review of #203, round 3).
+    name = group.strip() if group is not None else None
+    if group is not None and not name:
         # Refused before the onboard, as `group create` refuses it: found by no name,
         # a blank group went to `create_group`, whose ValueError escaped uncaught after
         # the onboard had committed (review of #203, round 2).
         fail("a group needs a name", error="invalid_group", ref=group)
     report = project_service.onboard(path, refresh=refresh)
-    if group:
+    if name:
         project_id = project_id_for(find_project_root(path or Path.cwd()))
-        with store_session() as store:
-            try:
-                target = groups_service.resolve_group(store, group)
-            except KeyError:
-                # Made with its member in one transaction: made first and filled after,
-                # an add the store refused left an empty group behind (review of #203).
-                groups_service.create_group(store, group, [project_id])
-            else:
-                groups_service.add_to_group(store, target.id, [project_id])
+        try:
+            with store_session() as store:
+                try:
+                    target = groups_service.resolve_group(store, name)
+                except KeyError:
+                    # Made with its member in one transaction: made first and filled
+                    # after, an add the store refused left an empty group behind
+                    # (review of #203).
+                    groups_service.create_group(store, name, [project_id])
+                else:
+                    groups_service.add_to_group(store, target.id, [project_id])
+        except ValueError as exc:
+            # Refused as `group create` refuses it (one made meanwhile by that name).
+            fail(str(exc), error="invalid_group", ref=group)
     emit_onboard(report)
 
 

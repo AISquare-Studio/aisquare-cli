@@ -155,6 +155,38 @@ def test_onboard_into_a_blank_group_is_refused_before_the_onboard(
     assert "fresh" not in _names(runner, "--all"), "onboarded before the group was refused"
 
 
+def test_onboard_into_a_group_named_with_spaces_joins_the_group_of_that_name(
+    runner: CliRunner,
+    projects: dict[str, str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``onboard --group ' team '`` looked the group up as typed and found none, and
+    ``create_group``, which strips, collided with ``team``: its ``ValueError`` escaped
+    uncaught after the onboard had committed (review of #203, round 3). The name is read
+    as ``group create`` stores it, so the project joins ``team``. A group the store still
+    refuses to create (made meanwhile by another command) is ``invalid_group``, as
+    ``group create`` says it, not a traceback."""
+    from aisquare.services import project_groups
+
+    assert runner.invoke(app, ["project", "group", "create", "team"]).exit_code == 0
+    fresh = tmp_path / "fresh"
+    fresh.mkdir()
+    result = runner.invoke(app, ["--json", "project", "onboard", str(fresh), "--group", " team "])
+    assert result.exit_code == 0, result.output
+    assert _names(runner, "--group", "team") == ["fresh"]
+
+    def made_meanwhile(_store: object, ref: str) -> None:
+        raise KeyError(ref)
+
+    monkeypatch.setattr(project_groups, "resolve_group", made_meanwhile)
+    again = runner.invoke(
+        app, ["--json", "project", "onboard", str(tmp_path / "web"), "--group", "team"]
+    )
+    assert again.exit_code == 1 and isinstance(again.exception, SystemExit), again.output
+    assert json.loads(again.stdout)["error"] == "invalid_group"
+
+
 def test_a_filter_that_matches_nothing_says_so_not_that_nothing_is_registered(
     runner: CliRunner, projects: dict[str, str]
 ) -> None:

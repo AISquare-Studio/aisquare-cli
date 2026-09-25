@@ -35,7 +35,7 @@ from textual.pilot import Pilot
 from textual.widget import Widget
 
 from aisquare.cli.ui import terminal as terminal_module
-from aisquare.core.tmux import Completed, TmuxServer
+from aisquare.core.tmux import Completed, TmuxServer, parse_version
 
 # --- the fake tmux --------------------------------------------------------------------
 
@@ -119,8 +119,14 @@ class FakeTmux:
         the pane at its size — the window between a ``Resize`` and its debounced
         ``resize-window``, or a tmux that refused the resize."""
         self.version = "tmux 3.7c"
-        """What ``tmux -V`` answers. Below 3.5 tmux TYPES the extended chords'
-        names into the pane, so the widget must drop them there (core.keys)."""
+        """The tmux the SERVER runs: its ``#{version}``, and what ``tmux -V`` answers
+        unless ``client_version`` says otherwise. Below 3.5 tmux TYPES the extended
+        chords' names into the pane, so the widget must drop them there
+        (core.keys); below 3.7 it refuses ``capture-pane -F`` and the whole frame."""
+        self.client_version: str | None = None
+        """What ``tmux -V`` answers when the binary on PATH is not the one the server
+        runs — the package upgraded in place under a running server. ``None``: the
+        same binary."""
         self.fail_resizes = 0
         """How many ``resize-window`` calls fail like a killed window first. The
         attempt is still recorded: a test counts the retries."""
@@ -132,9 +138,9 @@ class FakeTmux:
         ``list-buffers`` lists and ``show-buffer`` prints. Assign :attr:`buffer`
         to write one the way a program's copy does."""
         self._buffer_index = itertools.count()
-        # A new fake server is a new machine: the pane caches `tmux -V` per
-        # socket, and every fake here is socket "fake", so a test that sets
-        # `version` must not read the last test's answer.
+        # A new fake server is a new machine: the pane caches the server's
+        # version per socket, and every fake here is socket "fake", so a test
+        # that sets `version` must not read the last test's answer.
         terminal_module.forget_server_versions()
 
     @property
@@ -156,7 +162,7 @@ class FakeTmux:
         # ``binary`` must resolve through ``shutil.which`` on a machine WITHOUT
         # tmux: an absolute executable path does, and is never run. ``socket``
         # names the server: two fakes standing for two SERVERS take two sockets,
-        # as two servers do (the widget caches ``tmux -V`` and keys its
+        # as two servers do (the widget caches the server's version and keys its
         # too-old notice by socket).
         return TmuxServer(socket, binary=sys.executable, conf=tmp_path / "fake.conf", runner=self)
 
@@ -169,7 +175,7 @@ class FakeTmux:
         if self.record is not None:
             self.record.append(tuple(args))
         if args[1:] == ["-V"]:
-            return Completed(0, f"{self.version}\n", "")
+            return Completed(0, f"{self.client_version or self.version}\n", "")
         # <binary> -L <socket> -f <conf> <command...>
         command = args[5:]
         groups: list[list[str]] = [[]]
@@ -206,11 +212,18 @@ class FakeTmux:
                 if buffer_name == wanted:
                     return Completed(0, text, "")
             return Completed(1, "", f"no buffer {wanted}\n")
+        if name == "display-message" and group[-1] == "#{version}":
+            # The server's own version, as tmux prints it: ``3.7c``, no name.
+            return Completed(0, self.version.removeprefix("tmux ") + "\n", "")
         pane_id = self._flag(group, "-t")
         pane = self.panes.get(pane_id)
         if pane is None or pane.gone:
             return Completed(1, "", f"can't find pane: {pane_id}\n")
         if name == "capture-pane":
+            if "-F" in group and (parse_version(self.version) or (0, 0)) < (3, 7):
+                # tmux parses flags in the server: one older than 3.7 refuses the
+                # whole command, whatever the client on PATH knows.
+                return Completed(1, "", "command capture-pane: unknown flag -F\n")
             if self.before_capture is not None:
                 self.before_capture(pane)
             scrollback = -int(self._flag(group, "-S"))
@@ -274,9 +287,9 @@ def socket_of(argv: Sequence[str]) -> str | None:
 def asks_a_server(argv: Sequence[str]) -> bool:
     """Whether a tmux argv reaches a SERVER at all.
 
-    ``tmux -V`` asks the binary its version and touches no socket — the pane
-    reads it once per attach to decide which flags the server knows (extended
-    chords, ``capture-pane -F``) — so it can address no fleet, ours or anyone's.
+    ``tmux -V`` asks the binary its version and touches no socket — ``require``
+    reads it before a server is started, and ``doctor`` reports it — so it can
+    address no fleet, ours or anyone's.
     The guard that every other argv must name the test's private socket leaves
     it alone; a copy of that guard per test module drifted on exactly this
     (the shell tests and the accounts tests each carried one).

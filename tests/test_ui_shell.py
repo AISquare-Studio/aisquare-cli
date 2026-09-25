@@ -30,6 +30,7 @@ from typing import Any, TypeVar
 
 import pytest
 from textual import Logger, events
+from textual._xterm_parser import XTermParser
 from textual.app import App, ComposeResult, ScreenStackError
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.content import Content
@@ -2682,6 +2683,44 @@ def test_a_drag_survives_a_right_button_and_ends_on_a_lost_release_or_a_pushed_s
     )
 
 
+def test_a_divider_drag_whose_release_was_lost_ends_at_the_next_press_where_no_motion_reports_it(
+    tmp_path: Path, script: Script, isolated_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Final review of #203, F3: the divider's side of the card handle's round-2 fix. A
+    terminal that reports no motion without a button never sends the move that ends a
+    lost release; the next report is the next press, long past DUPLICATE_PRESS_WINDOW.
+    The divider still held the mouse, so that press came to it and armed a new drag,
+    and the release, over a title at the left edge, set the width: the navigator went
+    to its floor, the floor was saved, and api did not open. The press ends the old
+    drag where it got to instead, and the click is api's."""
+    seed(tmp_path, ("prj_a", "api", None), ("prj_b", "cli", None))
+    now = {"t": 100.0}
+    monkeypatch.setattr("aisquare.cli.ui.terminal._monotonic", lambda: now["t"])
+
+    async def go(pilot: Pilot[None]) -> tuple[int, object, int, object, str | None, object]:
+        app = fleet_app(pilot)
+        await _mouse(pilot, events.MouseDown, app.sidebar.outer_size.width, 5)
+        await _mouse(pilot, events.MouseMove, 60, 5)
+        held = app.sidebar.outer_size.width, app.mouse_captured
+        now["t"] += DUPLICATE_PRESS_WINDOW + 1.0  # let go outside; nothing reported it
+        await _click(pilot, card_for(app, "prj_a").query_one(ProjectTitle))
+        await _settled(pilot)
+        view = app.current_view()
+        return (
+            *held,
+            app.sidebar.outer_size.width,
+            app.mouse_captured,
+            view.id if view is not None else None,
+            _state(isolated_home).get(SIDEBAR_WIDTH_KEY),
+        )
+
+    width, captured, after, released, opened, saved = drive(go)
+    assert width == 60 and isinstance(captured, Divider), "the premise: a drag still held"
+    assert after == 60 and saved == 60, "the drag ended where it got to, and that is saved"
+    assert released is None, "the divider let the mouse go"
+    assert opened == "project-prj_a", "the click is the click it was"
+
+
 def test_a_tap_after_a_drag_keeps_the_drag_and_two_clicks_reset_and_forget_the_width(
     tmp_path: Path, script: Script, isolated_home: Path
 ) -> None:
@@ -3821,6 +3860,199 @@ def test_dragging_a_card_onto_a_group_header_groups_it_and_the_picker_groups_a_s
     with store_session() as store:
         names = {g.name for g in store.project_groups()}
     assert names == {"tools", "web"}
+
+
+def test_a_drag_on_a_card_or_a_group_header_selects_no_text(
+    tmp_path: Path, script: Script, isolated_home: Path
+) -> None:
+    """Final review of #203, F1. The screen opens a text selection on the press BEFORE
+    it forwards it, so the capture a handle takes in ``on_mouse_down`` is too late to
+    stop one: every drag of a title or a group header also drag-selected, and a regroup
+    left the rows from the pressed title to the header highlighted across the sidebar.
+    A drag handle is not text, as the divider is not."""
+    seed(tmp_path, ("prj_a", "api", None), ("prj_b", "cli", None), ("prj_c", "docs", None))
+    with store_session() as store:
+        groups_service.create_group(store, "tools", ["prj_b"])
+        groups_service.create_group(store, "web", ["prj_a"])
+
+    async def go(
+        pilot: Pilot[None],
+    ) -> tuple[list[str], list[Widget], str | None, list[str], list[Widget]]:
+        app = fleet_app(pilot)
+        tools = app.sidebar.query_one("#group-" + group_id("tools"), GroupHeader)
+        web = app.sidebar.query_one("#group-" + group_id("web"), GroupHeader)
+        title = card_for(app, "prj_c").query_one(ProjectTitle)
+        await _drag_onto(pilot, title, tools, offset=(3, 0))
+        carded = _cards(app), list(app.screen.selections), app.screen.get_selected_text()
+        await _drag_onto(pilot, web, tools, offset=(3, 0))
+        return (*carded, _cards(app), list(app.screen.selections))
+
+    def group_id(name: str) -> str:
+        with store_session() as store:
+            return groups_service.resolve_group(store, name).id
+
+    carded, card_selections, selected, headed, header_selections = drive(go)
+    # The premise: both drags did what a drag does.
+    assert carded == ["group:tools", "prj_b", "prj_c", "group:web", "prj_a"], carded
+    assert headed == ["group:web", "prj_a", "group:tools", "prj_b", "prj_c"], headed
+    assert card_selections == [] and selected is None, "a card's drag selects no text"
+    assert header_selections == [], "nor does a group header's"
+
+
+@_needs_tmux
+def test_a_card_released_over_an_agents_pane_copies_nothing_and_ctrl_c_still_interrupts(
+    tmp_path: Path,
+    script: Script,
+    no_real_tmux: list[tuple[str, ...]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Final review of #203, F1, where it costs the most. The drag-select a card's press
+    opened reached into the pane it was released over: the pane copied its rows to the
+    clipboard with a toast, and the highlight stood, so the pane's next ctrl+c copied
+    again instead of interrupting the agent. A card let go over a pane snaps back and
+    touches nothing else."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+    script["prj_a"] = [status("prj_a", "coder-auth", "coder", "working")]
+    tmux = scripted_pane(no_real_tmux, ["red plain", "second row", "third row"])
+    monkeypatch.setattr(tmux_core, "_tmux", tmux)
+
+    async def go(pilot: Pilot[None]) -> tuple[str, int, bool, list[tuple[str, ...]]]:
+        app = fleet_app(pilot)
+        pane, _header = await _agent_pane(pilot)
+        title = card_for(app, "prj_a").query_one(ProjectTitle)
+        await press(pilot, title, (1, 0))
+        await move(pilot, pane, (5, 1), button=1)
+        await release(pilot, pane, (5, 1))
+        await pilot.pause()
+        standing = pane.has_standing_selection()
+        pane.focus()
+        await pilot.pause()
+        await pilot.press("ctrl+c")
+        await pilot.pause()
+        return app.clipboard, len(app._notifications), standing, tmux.sent()
+
+    clipboard, toasts, standing, sent = drive(go, notifications=True)
+    assert clipboard == "" and toasts == 0, "a card let go over a pane copies nothing"
+    assert not standing, "and leaves no highlight there"
+    assert sent == [("C-c",)], "so ctrl+c in the pane is the agent's interrupt"
+
+
+def test_a_mark_on_a_card_that_leaves_the_list_goes_with_it(
+    tmp_path: Path, script: Script, isolated_home: Path
+) -> None:
+    """Final review of #203, F5. A mark's highlight goes with its card, and the mark
+    stayed: a project forgotten from a shell refused the next drag of the selection
+    as a whole ("nothing to do: 'prj_c' is gone"), and a captured directory hidden
+    again with `a` was moved into the group with the card the user dragged, without
+    a word. The frame keeps only the marks on projects it lists."""
+    seed(tmp_path, ("prj_a", "api", None), ("prj_b", "cli", None), ("prj_c", "docs", None))
+    with store_session() as store:
+        store.ensure_project(ProjectInfo(id="prj_scratch", root=tmp_path / "scratch"))  # a hook
+        tools, _ = groups_service.create_group(store, "tools", ["prj_b"])
+
+    async def go(pilot: Pilot[None]) -> tuple[list[str], list[str], list[str]]:
+        app = fleet_app(pilot)
+        app.sidebar.focus()
+        await pilot.press("a")  # the captured directory is a card now
+        await pilot.pause()
+        for project_id in ("prj_a", "prj_c", "prj_scratch"):
+            await _click(pilot, card_for(app, project_id).query_one(ProjectTitle), shift=True)
+        marked = app.sidebar.marked_ids()
+        with store_session() as store:
+            store.forget_project("prj_c")
+        app.sidebar.focus()
+        await pilot.press("a")  # hidden again; the refresh also drops the forgotten docs
+        await pilot.pause()
+        kept = app.sidebar.marked_ids()
+        header = app.sidebar.query_one(GroupHeader)
+        await _drag_onto(pilot, card_for(app, "prj_a").query_one(ProjectTitle), header, (3, 0))
+        await pilot.pause()
+        toasts = [str(n.message) for n in app._notifications]
+        return marked, kept, toasts
+
+    marked, kept, toasts = drive(go, notifications=True)
+    assert marked == ["prj_a", "prj_c", "prj_scratch"], "the premise: three marks"
+    assert kept == ["prj_a"], "only the mark on a card still listed"
+    assert not [t for t in toasts if "is gone" in t], toasts
+    with store_session() as store:
+        layout = {p.id: p.group_id for p in store.list_projects(all=True)}
+    assert layout == {"prj_a": tools.id, "prj_b": tools.id, "prj_scratch": None}, (
+        "the drag moved the card the user saw, and nothing hidden with it"
+    )
+
+
+@pytest.mark.parametrize(
+    ("sequence", "arrives_as"),
+    [("G", "G"), ("\x1b[103;2;71u", "G"), ("\x1b[103;2u", "shift+g")],
+    ids=["legacy", "kitty-with-text", "kitty-without-text"],
+)
+def test_shift_g_groups_the_marked_cards_as_a_terminal_sends_it(
+    tmp_path: Path, script: Script, isolated_home: Path, sequence: str, arrives_as: str
+) -> None:
+    """Final review of #203, F4. ``pilot.press("shift+g")`` sends a key name Textual's
+    parser makes only of a kitty report that carries no text. A legacy terminal sends
+    ``G``, and so does kitty at the flags Textual enables (the shift is dropped when
+    the key carries text), and with ``shift+g`` alone bound the gesture the help screen
+    names did nothing. So the key here is what the parser makes of each terminal's
+    bytes, posted to the app as the driver posts it."""
+    seed(tmp_path, ("prj_a", "api", None), ("prj_b", "cli", None))
+
+    async def go(pilot: Pilot[None]) -> tuple[list[str], list[str], str]:
+        app = fleet_app(pilot)
+        for project_id in ("prj_a", "prj_b"):
+            await _click(pilot, card_for(app, project_id).query_one(ProjectTitle), shift=True)
+        marked = app.sidebar.marked_ids()
+        app.sidebar.focus()
+        await pilot.pause()
+        keys = [token for token in XTermParser().feed(sequence) if isinstance(token, events.Key)]
+        for key in keys:
+            app.post_message(key)
+        await _through_the_app(pilot)
+        return marked, [key.key for key in keys], type(app.screen).__name__
+
+    marked, keys, screen = drive(go)
+    assert marked == ["prj_a", "prj_b"] and keys == [arrives_as], (marked, keys)
+    assert screen == GroupPicker.__name__, "shift+g opens the picker for the marked cards"
+
+
+def test_m_marks_the_card_under_the_cursor_so_a_selection_needs_no_shift_click(
+    tmp_path: Path, script: Script, isolated_home: Path
+) -> None:
+    """Final review of #203, F7. Shift+click was the only way to mark a card, and most
+    terminals keep it for their own text selection while an app reports the mouse, so
+    it never reached the card there: nothing could be marked, and shift+g and a drag of
+    several cards had nothing to carry. `m` marks (and unmarks) the card under the
+    cursor, an agent row's card included, and opens nothing."""
+    seed(tmp_path, ("prj_a", "api", None), ("prj_b", "cli", None), ("prj_c", "docs", None))
+    script["prj_c"] = [status("prj_c", "coder-1", "coder", "working")]
+
+    async def go(pilot: Pilot[None]) -> tuple[list[str], list[str], str | None, list[str]]:
+        app = fleet_app(pilot)
+        app.sidebar.focus()
+        for key in ("project:prj_a", "project:prj_b", "agent:agt_c_coder-1", "project:prj_b"):
+            app.sidebar.select(key)  # the cursor's anchor
+            await pilot.press("m")  # cli twice: marked, then unmarked
+        await pilot.pause()
+        marked = app.sidebar.marked_ids()
+        highlighted = sorted(c.project.id for c in app.query(ProjectCard) if c.has_class("marked"))
+        view = app.current_view()
+        await pilot.press("G")  # what a terminal sends for Shift+G
+        await pilot.pause()
+        assert isinstance(app.screen, GroupPicker), type(app.screen).__name__
+        await pilot.press("end")  # … the last option is Ungroup; New group… is just above it
+        await pilot.press("up")
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.press(*"web")
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+        return marked, highlighted, view.id if view is not None else None, _cards(app)
+
+    marked, highlighted, opened, grouped = drive(go)
+    assert marked == ["prj_a", "prj_c"] and highlighted == marked, (marked, highlighted)
+    assert opened == "welcome", "a mark opens nothing"
+    assert grouped == ["group:web", "prj_a", "prj_c", "prj_b"], grouped
 
 
 def test_a_drop_the_store_refuses_part_way_lands_none_of_its_moves(

@@ -1464,13 +1464,14 @@ def _check_fleet_terminal(
     Three facts an operator otherwise learns one broken chord at a time: whether
     the terminal this shell runs in speaks the kitty keyboard protocol (without
     it shift+enter arrives as enter and the UI never fakes it), whether the tmux
-    here carries extended keys (3.5+; below it shift+enter travels as ``C-j``,
-    the same newline to Claude Code), and — only when the private server is
-    already running, never started for this — whether that server still has a
-    prefix key (a server started with the pre-#147 conf keeps ``C-b``, Claude
-    Code's background-tasks chord, in ``fleet attach``) and which of the desktop
-    variables it holds stale (each new spawn carries this shell's, agents
-    already running keep the server's).
+    the keys cross carries extended keys (3.5+; below it shift+enter travels as
+    ``C-j``, the same newline to Claude Code; the running server's version, which
+    an in-place upgrade leaves older than the binary here, else the binary's),
+    and — only when the private server is already running, never started for
+    this — whether that server still has a prefix key (a server started with the
+    pre-#147 conf keeps ``C-b``, Claude Code's background-tasks chord, in
+    ``fleet attach``) and which of the desktop variables it holds stale (each new
+    spawn carries this shell's, agents already running keep the server's).
 
     ``ok`` for everything but the stale prefix, which only a server restart
     fixes and which eats a documented Claude Code key.
@@ -1502,10 +1503,26 @@ def _check_fleet_terminal(
         srv = server or _fleet_server(fleet_service.settings().tmux_socket)
         if not srv.available():
             return _ok(name, f"{outer}; tmux not installed (see the tmux check)")
-        parts = [outer, _extended_keys_note(srv.version())]
+        client = srv.version()
         if srv.server_absent():
-            parts.append("fleet server not running (nothing to compare)")
+            parts = [
+                outer,
+                _extended_keys_note(client),
+                "fleet server not running (nothing to compare)",
+            ]
             return _ok(name, "; ".join(parts))
+        # The keys cross the RUNNING server, which parses them, and after an
+        # in-place upgrade it still runs the binary it started with: the note
+        # is about its version, as the pane's gate is. Read off ``tmux -V``, a
+        # 3.4 server was "tmux 3.7 carries extended keys" (final review of
+        # #203, F2).
+        running = srv.server_version()
+        parts = [outer, _extended_keys_note(running or client)]
+        if running is not None and client is not None and running != client:
+            parts.append(
+                f"this shell's tmux is {client[0]}.{client[1]}; the running server keeps "
+                f"{running[0]}.{running[1]} until it restarts"
+            )
         prefix = srv.run("show-options", "-gv", "prefix").strip()
         stale = _stale_server_environment(srv, env)
         if stale:

@@ -768,11 +768,14 @@ card or group does not drag at all: its place is the pin order, which `p` sets
 sidebar focused, `shift+↑` / `shift+↓` move the project (or group) under the
 cursor one step, `g` opens the group picker (an existing group, *New group…*,
 or *Ungroup*), `p` pins or unpins, `space` folds a group (or a card), and `u`
-undoes the last gesture — a toast says what was undone. `shift+click` marks
-several cards; `shift+g` then moves the whole set, and a drag its unpinned
-cards. Pinned projects and groups sit in a **📌 Pinned** section at the top, in
-pin order; a group header carries the roll-up of its members' agents, so a
-folded group still tells you something is running. A group shares **nothing**:
+undoes the last gesture — a toast says what was undone. `m` marks the card
+under the cursor, and `shift+click` marks the card clicked where the terminal
+passes it on (most keep Shift+click for their own text selection); `shift+g`
+then moves every marked card, a drag of a marked card moves the unpinned ones,
+and `Esc` clears the marks. Pinned projects and groups sit in a **📌 Pinned**
+section at the top, in pin order; a group header carries the roll-up of its
+members' agents, so a folded group still tells you something is running. A
+group shares **nothing**:
 context, prompts, snapshots, boards and explainability settings stay per
 project, and deleting a group never deletes a project. Forgetting a project
 takes it out of its group and off the pin: added again, it comes back loose, at
@@ -965,8 +968,10 @@ Code, and `aisquare fleet attach` sends them through a raw tmux client instead.
 The table is generated from the translation table itself and pinned by
 `tests/test_keys.py` (one row per documented shortcut, plus the two-key
 sequences in order); `aisquare doctor` prints the `fleet terminal` line —
-which outer terminal it recognises, whether your tmux carries extended keys,
-and whether the running fleet server still has a prefix key.
+which outer terminal it recognises, whether the tmux the keys cross carries
+extended keys (the running fleet server's, which a tmux upgraded in place
+leaves on the old version until it restarts; yours when none runs), and
+whether the running fleet server still has a prefix key.
 
 | Claude Code shortcut | Sent to tmux (3.5+) | tmux 3.2–3.4 | Outer terminal |
 | --- | --- | --- | --- |

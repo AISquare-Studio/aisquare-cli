@@ -341,6 +341,17 @@ class DragHandle(Activatable):
     between its events, so the suite never saw it).
     """
 
+    ALLOW_SELECT: ClassVar[bool] = False
+    """A drag handle is not text, as the divider is not (``divider.py`` says why).
+
+    The screen opens a text selection on the press BEFORE it forwards it, so the
+    capture ``on_mouse_down`` takes is too late to stop it, and every move of
+    the drag extended it: a regroup left a highlight across the sidebar, and a
+    card released over an agent's pane copied the pane's rows and left them
+    standing, so the pane's next ctrl+c copied instead of interrupting the
+    agent (final review of #203, F1).
+    """
+
     _dragged = False
     """Whether the gesture that just ended here was a drag (so its Click is not a click)."""
 
@@ -789,7 +800,13 @@ class Sidebar(Vertical):
         Binding("shift+down", "move_down", "move down", show=False),
         Binding("p", "toggle_pin", "pin", show=False),
         Binding("g", "group_picker", "group", show=False),
-        Binding("shift+g", "group_marked", "group selection", show=False),
+        # Shift+G arrives as `G` from a legacy terminal, and from the kitty
+        # protocol at the flags Textual enables (the shift is dropped when the
+        # key carries text); only a kitty report with no text is `shift+g`.
+        # Bound to `shift+g` alone, the gesture the help screen names did
+        # nothing in practically every terminal (final review of #203, F4).
+        Binding("G,shift+g", "group_marked", "group selection", show=False),
+        Binding("m", "toggle_mark", "mark", show=False),
         Binding("space", "toggle_collapse", "fold", show=False),
         Binding("u", "undo_layout", "undo", show=False),
         Binding("escape", "clear_marks", "clear marks", show=False),
@@ -807,7 +824,7 @@ class Sidebar(Vertical):
         self.arrangement: Arrangement | None = None
         """The order the last frame was painted in (groups, pins, loose) — #140."""
         self._marked: list[str] = []
-        """Project ids shift+clicked into a multi-selection, in click order."""
+        """Project ids marked into a multi-selection (shift+click or ``m``), in marking order."""
         self._drag: DragState | None = None
         self._drag_source: DragHandle | None = None
         self._drop_target: Widget | None = None
@@ -855,6 +872,14 @@ class Sidebar(Vertical):
         reconciled into that order by id, so a frame costs moves, not rebuilds.
         """
         notices = notices or {}
+        # A mark is on a card the user can see. One whose project left the list
+        # (forgotten from a shell, a captured directory hidden again with `a`)
+        # lost its highlight with its card, and the next drag, `g` or shift+g
+        # still carried it: a forgotten id refused the whole drop, and a hidden
+        # directory was moved into the group without a word (final review of
+        # #203, F5). A card folded away in its group is still listed, and keeps it.
+        listed = {project.id for project in projects}
+        self._marked = [pid for pid in self._marked if pid in listed]
         arrangement = arrange(projects, groups or [])
         self.arrangement = arrangement
         holder = self.query_one("#projects", VerticalScroll)
@@ -944,13 +969,26 @@ class Sidebar(Vertical):
         return {entry.id for entry in pinned if isinstance(entry, ProjectInfo)}
 
     def toggle_mark(self, project_id: str) -> None:
-        """shift+click: add the card to (or drop it from) the multi-selection."""
+        """shift+click or ``m``: add the card to (or drop it from) the multi-selection."""
         if project_id in self._marked:
             self._marked.remove(project_id)
         else:
             self._marked.append(project_id)
         for card in self.query(ProjectCard):
             card.set_class(card.project.id in self._marked, "marked")
+
+    def action_toggle_mark(self) -> None:
+        """``m``: shift+click's twin, on the card under the cursor (or the card of its row).
+
+        Most terminals keep Shift+click for their own text selection while an
+        app reports the mouse (kitty, the VTE terminals, Konsole, Alacritty,
+        WezTerm, xterm, Windows Terminal), so there the click never reached the
+        card and nothing could be marked: shift+g and a drag of several cards
+        had nothing to carry (final review of #203, F7).
+        """
+        target = self._cursor_target()
+        if target is not None and target[0] == "project":
+            self.toggle_mark(target[1])
 
     def action_clear_marks(self) -> None:
         self._marked.clear()

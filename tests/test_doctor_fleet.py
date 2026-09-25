@@ -78,6 +78,7 @@ class FakeServer(TmuxServer):
         *,
         present: bool = True,
         version: tuple[int, int] | None = (3, 7),
+        running: tuple[int, int] | None = None,
         sessions: tuple[str, ...] = (),
         panes: dict[str, PaneFacts | None] | None = None,
         socket: str = "asq",
@@ -92,6 +93,8 @@ class FakeServer(TmuxServer):
         """What ``#{start_time}`` answers; ``None`` — tmux did not say — judges nothing."""
         self._absent = absent
         self._version = version
+        self._running = running
+        """The running server's own version; ``None``: the binary's (no upgrade under it)."""
         self._sessions = sessions
         self._panes = panes or {}
         self._version_raises = version_raises
@@ -113,6 +116,10 @@ class FakeServer(TmuxServer):
         if self._version_raises:
             raise RuntimeError("tmux -V hung")
         return self._version
+
+    def server_version(self) -> tuple[int, int] | None:
+        self.asked.append("server_version")
+        return self._running if self._running is not None else self._version
 
     def list_sessions(self) -> list[str]:
         self.asked.append("list_sessions")
@@ -1161,6 +1168,27 @@ def test_the_fleet_terminal_row_names_the_outer_terminal_tmux_and_the_server() -
     assert "outer terminal kitty (kitty keyboard protocol" in check.detail
     assert "tmux 3.7 carries extended keys" in check.detail
     assert "server prefix None" in check.detail and "stale" not in check.detail
+
+
+def test_the_fleet_terminal_row_names_the_running_servers_tmux_not_the_binary_on_path() -> None:
+    """Final review of #203, F2. The keys cross the running server, which parses them,
+    and after an in-place upgrade it still runs the binary it started with. The row
+    read ``tmux -V`` and said "tmux 3.7 carries extended keys" over a 3.4 server,
+    which types ``S-Enter`` out and to which the pane now sends ctrl+j."""
+    server = FakeServer(version=(3, 7), running=(3, 4), absent=False)
+    server.scripted = {
+        ("show-options", "-gv", "prefix"): "None\n",
+        ("show-environment", "-g"): "",
+    }
+
+    check = _terminal_row(server, {"KITTY_WINDOW_ID": "3"})
+
+    assert check.status is CheckStatus.ok
+    assert "tmux 3.4 has no extended keys" in check.detail and "ctrl+j" in check.detail
+    assert "carries extended keys" not in check.detail
+    assert "this shell's tmux is 3.7; the running server keeps 3.4 until it restarts" in (
+        check.detail
+    )
 
 
 def test_the_fleet_terminal_row_warns_about_a_kept_prefix_and_lists_stale_vars() -> None:

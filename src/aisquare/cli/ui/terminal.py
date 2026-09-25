@@ -327,11 +327,11 @@ def _extract(selection: Selection, rows: list[DisplayedRow], width: int) -> str:
 
 
 _SERVER_VERSIONS: dict[str, tuple[int, int]] = {}
-"""``tmux -V`` answers by socket — see :meth:`TerminalPane._server_version`."""
+"""The servers' own versions, by socket — see :meth:`TerminalPane._server_version`."""
 
 
 def forget_server_versions() -> None:
-    """Drop every cached ``tmux -V`` answer — a new server is a new machine (tests)."""
+    """Drop every cached server version — a new server is a new machine (tests)."""
     _SERVER_VERSIONS.clear()
 
 
@@ -995,12 +995,19 @@ class TerminalPane(Widget, can_focus=True):
     def _server_version(self) -> tuple[int, int] | None:
         """The server's version, asked once per SERVER; ``None`` when it will not say.
 
+        Asked of the SERVER (:meth:`~aisquare.core.tmux.TmuxServer.server_version`),
+        not of the binary on PATH: tmux parses flags and key names in the
+        server, and after an in-place upgrade ``tmux -V`` said 3.7 to a 3.4
+        server that refused ``capture-pane -F`` on every frame, so every pane
+        read ``(pane gone)``, and was sent ``S-Enter``, which it typed into the
+        agent (final review of #203, F2).
+
         Cached by SOCKET across attaches: ``_wrap_flags`` needs the answer for
-        the FIRST frame, and asking per attach put a blocking ``tmux -V``
-        subprocess on the UI thread at every project switch, tab activation and
-        re-mounted view (round 8 of #203). The server behind a socket is what
-        the answer is about, and it does not change on an attach. Only an answer
-        is cached — a server that will not say is asked again next time.
+        the FIRST frame, and asking per attach put a blocking subprocess on the
+        UI thread at every project switch, tab activation and re-mounted view
+        (round 8 of #203). The server behind a socket is what the answer is
+        about, and it does not change on an attach. Only an answer is cached — a
+        server that will not say is asked again next time.
         """
         if not self._version_read:
             self._version = None
@@ -1010,7 +1017,7 @@ class TerminalPane(Widget, can_focus=True):
                     self._version = _SERVER_VERSIONS[key]
                 else:
                     with contextlib.suppress(TmuxError):
-                        self._version = self.server.version()
+                        self._version = self.server.server_version()
                     if self._version is not None:
                         _SERVER_VERSIONS[key] = self._version
             self._version_read = True
@@ -1023,7 +1030,7 @@ class TerminalPane(Widget, can_focus=True):
         chords' names into the agent (measured on 3.3a/3.4), so ``translate``
         refuses them there, sending shift+enter as ``C-j`` instead
         (:data:`~aisquare.core.keys.LEGACY_FALLBACK`). Fail-open to True when
-        the version cannot be read: ``tmux -V`` answers on anything alive, and
+        the version cannot be read: a live server answers the question, and
         refusing the extended chords on every modern server to guard a
         hypothetical mute one inverts the trade.
         """
@@ -1093,8 +1100,8 @@ class TerminalPane(Widget, can_focus=True):
         # A new attach may be a new server — ``ManagerTab`` assigns ``server``
         # then calls this — and a cached "extended chords are fine" from a 3.7
         # server would TYPE ``S-Enter`` into an agent on a 3.4 one, as a cached
-        # "-F is known" would fail every frame. Re-read lazily: one ``tmux -V``
-        # per attach at most. The notices are NOT cleared with it: an attach is
+        # "-F is known" would fail every frame. Re-read lazily: one version
+        # question per server at most. The notices are NOT cleared with it: an attach is
         # as often a restarted agent or a sign-in on the SAME server, and the
         # one line that names a server is deduped per server by ``_warn_once``
         # (reviews of #161, rounds 6-7).

@@ -18,7 +18,7 @@ from aisquare.core.store import (
     open_store,
     store_session,
 )
-from aisquare.models import ContextEntry, Pool, ProjectInfo
+from aisquare.models import CheckStatus, ContextEntry, Pool, ProjectInfo
 
 PROJECT = ProjectInfo(id="prj_test", root=Path("/tmp/example-project"), linked_repos=[])
 
@@ -852,6 +852,8 @@ INSERT INTO team_session (id, project_id, started_at, last_seen_at, agent, nativ
 
 # Two projects every cohort's store holds: one used on purpose (a context entry), which
 # the v17 backfill adopts, and one only ever captured (a prompt), which it leaves hidden.
+# The used one has a live fleet agent: a fleet read of it is what raised "no such
+# column: account_slot" on a store that skipped v15 (review of #203).
 _TWO_PROJECTS = """
 INSERT INTO project (id, root, name, linked_repos, created_at) VALUES
     ('prj_used', '/w/used', 'used', '[]', '2026-09-01T00:00:00+00:00'),
@@ -861,6 +863,9 @@ INSERT INTO entry (id, pool, project_id, text, tags, source, created_at, updated
             '2026-09-01T00:00:00+00:00', '2026-09-01T00:00:00+00:00');
 INSERT INTO prompt (id, project_id, text, source, created_at)
     VALUES ('prm_1', 'prj_seen', 'hello', 'claude-code', '2026-09-01T00:00:00+00:00');
+INSERT INTO fleet_agent (id, project_id, label, role, pane_id, cwd, created_at)
+    VALUES ('agt_1', 'prj_used', 'manager', 'manager', '%0', '/w/used',
+            '2026-09-01T00:00:00+00:00');
 """
 
 # (label, what the line's steps left, the stamp, a query over it, what it must still read)
@@ -879,12 +884,15 @@ _FOREIGN_COHORTS: tuple[tuple[str, str, int, str, list[tuple[object, ...]]], ...
         "SELECT persona FROM team_session",
         [("architect",)],
     ),
+    # The maintainer's own store is this cohort: a backup of it (31 projects) holds
+    # exactly these tables, indexes, triggers and columns, object for object.
     (
         "#113 at 17: coding-agent columns",
         CODING_AGENTS_AT_17,
         17,
-        "SELECT agent, native_session_id FROM team_session",
-        [("codex", "nat_1")],
+        "SELECT session.agent, session.native_session_id, agent.agent"
+        " FROM team_session AS session, fleet_agent AS agent",
+        [("codex", "nat_1", "claude-code")],
     ),
 )
 
@@ -919,9 +927,26 @@ def _built(steps: int, after: str = "") -> set[tuple[str, str]]:
         conn.close()
 
 
+def _contents(db: Path) -> tuple[list[tuple[object, ...]], dict[str, list[tuple[object, ...]]]]:
+    """``db``'s whole schema, SQL included, and every row of every table, with its version."""
+    raw = sqlite3.connect(str(db))
+    try:
+        schema = raw.execute("SELECT type, name, tbl_name, sql FROM sqlite_master").fetchall()
+        rows = {
+            name: sorted(raw.execute(f"SELECT * FROM {name}").fetchall(), key=repr)
+            for kind, name, _, _ in schema
+            if kind == "table"
+        }
+        rows["PRAGMA user_version"] = raw.execute("PRAGMA user_version").fetchall()
+        return sorted(schema, key=repr), rows
+    finally:
+        raw.close()
+
+
 def _open_a_foreign_cohort(db: Path, query: str) -> dict[str, object]:
     """Open ``db`` with this build, write through the store to the tables whose absence
-    was "no such table", and read back what :func:`_converged` says it must hold."""
+    was "no such table", read from the ones a fleet read and ``accounts list`` failed
+    on, open it once more, and read back what :func:`_converged` says it must hold."""
     store = open_store()  # a wedge raises out of here
     try:
         store.upsert_claude_account(1, Path("/h/.claude"))
@@ -930,9 +955,19 @@ def _open_a_foreign_cohort(db: Path, query: str) -> dict[str, object]:
             "listed": [p.id for p in store.list_projects()],
             "listed with --all": sorted(p.id for p in store.list_projects(all=True)),
             "account setting": store.project_setting("prj_used", "claude_account"),
+            "accounts": [(r.slot, r.config_dir) for r in store.claude_accounts()],
+            "fleet": [(a.id, a.account_slot) for a in store.fleet_agents("prj_used")],
+            "live fleet": [a.id for a in store.fleet_agents("prj_used", live_only=True)],
+            "missing": store.missing_schema(),
         }
     finally:
         store.close()
+    schema, rows = _contents(db)
+    open_store().close()
+    schema_again, rows_again = _contents(db)
+    read["a second open changed"] = sorted(
+        name for name in rows.keys() | rows_again.keys() if rows.get(name) != rows_again.get(name)
+    ) + (["the schema"] if schema_again != schema else [])
     raw = sqlite3.connect(str(db))
     try:
         read["version"] = raw.execute("PRAGMA user_version").fetchone()[0]
@@ -945,14 +980,20 @@ def _open_a_foreign_cohort(db: Path, query: str) -> dict[str, object]:
 
 def _converged(ddl: str, their_rows: list[tuple[object, ...]]) -> dict[str, object]:
     """What a foreign store reads once this build has opened it: the project used on
-    purpose listed (the v17 backfill ran) and the captured one not, every table, index
-    and column of this build and of the other line and nothing else, and the other
-    line's rows as it left them."""
+    purpose listed (the v17 backfill ran) and the captured one not, the account and the
+    fleet agent read back, nothing ``doctor`` would report missing, a second open that
+    changes no row and no schema, every table, index and column of this build and of
+    the other line and nothing else, and the other line's rows as it left them."""
     theirs = _built(14, _TWO_PROJECTS + ddl) - _built(14, _TWO_PROJECTS)
     return {
         "listed": ["prj_used"],
         "listed with --all": ["prj_seen", "prj_used"],
         "account setting": "1",
+        "accounts": [(1, Path("/h/.claude"))],
+        "fleet": [("agt_1", None)],
+        "live fleet": ["agt_1"],
+        "missing": [],
+        "a second open changed": [],
         "version": SCHEMA_VERSION,
         "shape": _built(SCHEMA_VERSION) | theirs,
         "their rows": their_rows,
@@ -1007,6 +1048,71 @@ def test_a_foreign_store_a_build_without_the_pass_carried_on_converges_too(
     assert "claude_account" not in tables, "the fixture is the store that build left"
 
     assert _open_a_foreign_cohort(db, query) == _converged(ddl, expected), label
+
+
+# --- doctor's database row reads the schema, not only the file (review of #203) ---------------
+
+
+def test_doctor_names_what_a_store_lacks_instead_of_calling_it_readable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Measured on #203 by the crew: a store #201 stamped 15, opened by a build that
+    trusted the stamp, reached the current version with no ``claude_account`` and no
+    ``fleet_agent.account_slot``. Every fleet read failed on the column, and doctor's
+    database row said "context.db is readable". That build is this one with the
+    presence pass taken out. The row fails and names each thing missing once (the
+    table, not its indexes as well). Its remedy is not the corrupt-store move: the
+    history in the file is intact."""
+    from aisquare.services import diagnostics
+
+    _at_version(14, after=_TWO_PROJECTS + PERSONAS_AT_15, stamp=15)
+    monkeypatch.setattr(store_module, "_converge_by_presence", lambda connection, below: None)
+    with store_session() as store, pytest.raises(sqlite3.OperationalError, match="account_slot"):
+        store.fleet_agents("prj_used")
+
+    row = diagnostics._check_database()
+
+    assert row.status is CheckStatus.fail, row
+    assert (
+        "schema: column fleet_agent.account_slot, table claude_account, table project_setting;"
+        in row.detail
+    ), row.detail
+    assert "claude_account_alias" not in row.detail, "an index of a missing table is noise"
+    assert "persona" not in row.detail, "another line's columns are not this build's to report"
+    assert row.fix is not None and f"cp {_db_path()}" in row.fix, row.fix
+    assert "mv " not in row.fix, "the corrupt-store move would drop an intact history"
+
+
+def test_doctor_fails_on_what_no_step_of_this_build_puts_back() -> None:
+    """The open restores only what a step from v15 on makes. A table or an index from
+    before that, gone from a store another build or a hand edit changed, stays gone
+    whatever the open does, and doctor's database row is where it shows. It names six
+    and counts the rest, so the row stays one line an operator can read."""
+    from aisquare.services import diagnostics
+
+    indexes = (
+        "entry_pool_project",
+        "metric_open_session",
+        "metric_project_started",
+        "team_event_project_seq",
+        "team_session_project",
+        "team_task_project_status",
+    )
+    open_store().close()
+    raw = sqlite3.connect(str(_db_path()))
+    try:
+        raw.executescript("DROP TABLE prompt;" + "".join(f"DROP INDEX {i};" for i in indexes))
+    finally:
+        raw.close()
+
+    with store_session() as store:
+        missing = store.missing_schema()
+    row = diagnostics._check_database()
+
+    assert missing[0] == "table prompt", "a missing table is named before any index"
+    assert sorted(missing[1:]) == [f"index {i}" for i in indexes], missing
+    assert row.status is CheckStatus.fail, row
+    assert f"schema: {', '.join(missing[:6])} and 1 more;" in row.detail, row.detail
 
 
 def test_each_step_from_v15_on_declares_what_it_builds_and_builds_nothing_twice() -> None:

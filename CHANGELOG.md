@@ -178,6 +178,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   last, whatever `user_version` says. The `onboarded_at` backfill comes with its
   column, so the projects of a store that skipped v17 stay listed. The other
   line's tables, columns and rows are left alone, and no step is renumbered.
+  `doctor`'s database row said "context.db is readable" for a store that lacked
+  those tables. It now compares the store with the schema this build's ladder
+  makes on an empty database. For anything still missing after the open, it
+  fails and names each table, index, trigger or column. Its remedy keeps the
+  file, whose history is intact, instead of offering the corrupt-store move.
 
 ### Added
 - **The navigator is resizable** (#137). The line between the sidebar and the

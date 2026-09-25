@@ -459,6 +459,11 @@ def _uncreated_home(name: str) -> DoctorCheck | None:
     return _ok(name, "not created yet — set it up: aisquare init")
 
 
+#: How many missing tables, columns, indexes or triggers the database row names before
+#: "and N more".
+_MISSING_SHOWN = 6
+
+
 def _check_database() -> DoctorCheck:
     absent = _uncreated_home("database")
     if absent is not None:
@@ -466,6 +471,7 @@ def _check_database() -> DoctorCheck:
     try:
         with store_session() as store:
             count = len(store.entries("user"))
+            missing = store.missing_schema()
     except Exception as exc:  # diagnostics must never crash
         # "Re-initialise: aisquare init" was measured CRASHING on every state
         # that reaches this line — 59 lines of traceback on a corrupt file, 72
@@ -477,6 +483,31 @@ def _check_database() -> DoctorCheck:
         # error the CLI prints, so the two cannot drift apart again — a
         # remediation nobody re-runs is how this one rotted.
         return _fail("database", f"context.db is unreadable: {exc}", damaged_store_recovery())
+    if missing:
+        # Readable is not usable. A store another line stamped 15, opened by a
+        # build that trusted the stamp, reached the current version with no
+        # `claude_account` and no `fleet_agent.account_slot`. Every fleet read and
+        # every accounts command then failed with "no such table/column" while
+        # this row said "context.db is readable" (review of #203, measured on a
+        # hackathon-build store). The open above converges what this build can,
+        # so what is still missing it cannot, and the row fails naming it. The
+        # history in the file is intact, so the remedy is not the corrupt-store
+        # move.
+        shown = ", ".join(missing[:_MISSING_SHOWN])
+        if len(missing) > _MISSING_SHOWN:
+            shown += f" and {len(missing) - _MISSING_SHOWN} more"
+        database = paths.db_path()
+        return _fail(
+            "database",
+            f"context.db opens ({count} user entries) but lacks part of this build's "
+            f"schema: {shown}; a command that reads a missing table or column fails "
+            "with 'no such table' or 'no such column'",
+            "The open that just ran adds back the tables and columns this build knows "
+            "another line can skip, and these are not among them: another build or a "
+            "hand edit changed the store in a way this build does not know. The history "
+            f"in it is intact, so do not move it aside: keep a copy (cp {database} "
+            f"{database}.bak) and report this line with the output of `aisquare --version`",
+        )
     marker = paths.truncation_marker_path()
     if marker.exists():
         # The store opens and is perfectly valid — it is simply not the one this

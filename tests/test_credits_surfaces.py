@@ -307,19 +307,34 @@ def test_a_truncated_answer_is_a_reason_on_the_row_not_a_traceback(
     """Review of #173, round 1: ``http.client`` raises what ``urllib`` does not
     wrap — ``IncompleteRead`` for a body shorter than its Content-Length — and it
     left ``status`` and ``whoami`` with exit 1 and a traceback. ``whoami`` made
-    no request at all before #143; a balance must never cost it the answer."""
-    real = iam._http
+    no request at all before #143; a balance must never cost it the answer.
 
-    def http(method: str, url: str, **kwargs: Any) -> iam.HttpResult:
-        if url.endswith("/api/v2/credits/balance/"):
-            raise IncompleteRead(b'{"period": "2026-', 40)
-        return real(method, url, **kwargs)
+    Cut short where it happens, in the answer ``urlopen`` hands back: a stub of
+    ``iam._http`` raised what the real one stopped letting out, and exercised only
+    a branch ``fetch`` no longer has (review of the accounts stack's fold, round 2,
+    F4). The row says the server answered, not that it could not be reached."""
+    import urllib.request
 
-    monkeypatch.setattr(iam, "_http", http)
+    real = urllib.request.urlopen
+
+    def urlopen(request: urllib.request.Request, timeout: float) -> Any:
+        response = real(request, timeout=timeout)
+        if request.full_url.endswith("/api/v2/credits/balance/"):
+
+            def cut_short(*args: object) -> bytes:
+                raise IncompleteRead(b'{"period": "2026-', 40)
+
+            response.read = cut_short
+        return response
+
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
     status = runner.invoke(app, ["explainability", "status"])
     assert status.exit_code == 0, status.output
-    assert "credits:  acme: credits unavailable — could not read the balance" in status.output
-    assert "IncompleteRead(" in status.output
+    assert "credits:  acme: credits unavailable — http://" in status.output, status.output
+    assert (
+        "/api/v2/credits/balance/ answered HTTP 200, but the answer was cut short "
+        "(IncompleteRead(17 bytes read, 40 more expected))."
+    ) in status.output, status.output
     who = runner.invoke(app, ["whoami"])
     assert who.exit_code == 0, who.output
     assert "credits: acme: credits unavailable" in who.output

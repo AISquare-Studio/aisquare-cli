@@ -201,12 +201,12 @@ def fetch(
     documented shape — else the id); the API answers 400 without a usable
     header, which is reported as a reason rather than treated as a session
     problem. A 401 here IS a session problem (the endpoint takes the token),
-    so ``iam.request``'s own reading of it stands.
+    so ``iam.request``'s own reading of it stands. An answer ``http.client``
+    cannot read — ``IncompleteRead`` for a body shorter than its Content-Length,
+    ``LineTooLong`` — is ``iam``'s ``unreachable`` like any transport error, and
+    a reason on the row like one (review of #173, round 1; ``iam._http`` has
+    caught them since the accounts stack's fold).
     """
-    # Here, not at module scope: http.client pulls in what the import-time
-    # ratchet keeps out of every command that never asks the network.
-    from http.client import HTTPException
-
     moment = now or datetime.now(tz=UTC)
     try:
         result = iam.request(
@@ -218,18 +218,6 @@ def fetch(
         )
     except iam.IamError as exc:
         return WorkspaceCredits(workspace_id, workspace_name, available=False, reason=exc.message)
-    except HTTPException as exc:
-        # What `urllib` raises from `http.client` rather than wrapping, and
-        # `iam._http` does not catch: `IncompleteRead` for a body shorter than
-        # its Content-Length, `LineTooLong`, a bad status line. It used to
-        # escape to `status` and `whoami` as a traceback (review of #173,
-        # round 1; ccf4ac8 closed the same hole on the root post).
-        return WorkspaceCredits(
-            workspace_id,
-            workspace_name,
-            available=False,
-            reason=f"could not read the balance: {exc!r}",
-        )
     if result.status != 200:
         detail = None
         if isinstance(result.body, dict):

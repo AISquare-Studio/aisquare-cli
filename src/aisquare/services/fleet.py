@@ -4101,6 +4101,10 @@ def restart(
     notes = [f"accounts: {note}" for note in choice.notes] if account is not None else []
     was_running = False
     handed_over: StopReceipt | None = None
+    # Set when THIS restart ended a dead or vanished pane's row with the manager's
+    # wake-up held back for the replacement (below): a replacement that then never
+    # starts owes the manager that wake-up.
+    held_back = False
     if agent.ended_at is None:
         # Measured BEFORE anything is done, so the operator does not read
         # "stopped and restarted" for an agent that was not running.
@@ -4150,6 +4154,7 @@ def restart(
                     # session is one a fresh replacement cannot take back until its
                     # lease lapses.
                     notes.append(f"claims: {stopped.release_failed}")
+            held_back = True
     # An exited agent's dead window is NOT removed here: `spawn` supersedes it
     # once the replacement is up and recorded, so a restart that is refused on
     # the way (tmux, a parallel spawn) leaves the 💤 row and its last screen as
@@ -4173,6 +4178,11 @@ def restart(
     except Exception:
         if handed_over is not None and handed_over.withheld:
             _abandon_handover(handed_over.agent)  # no replacement is coming for the parked claims
+        elif held_back:
+            # The exit went out with its wake-up held back for a replacement that has
+            # now failed to start: left unwoken, a waiting manager never hears of the
+            # agent it lost, as the hand-over's `_abandon_handover` wakes it for its own.
+            nudge_manager(project.id, reason=f"{label} exited")
         raise
     notes.extend(more)
     how = "resumed its session" if resumed else "started fresh with a hand-off prompt"

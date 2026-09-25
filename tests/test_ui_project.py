@@ -72,7 +72,7 @@ from aisquare.services import explainability as explainability_service
 from aisquare.services import explainability_ops as ops
 from aisquare.services import fleet as fleet_service
 from aisquare.services import team as team_service
-from tests.ui_workers import settle_workers
+from tests.ui_workers import settle_page
 
 T = TypeVar("T")
 
@@ -160,10 +160,18 @@ async def settle(pilot: Pilot[None]) -> None:
     slow: on windows-latest the Explainability tab read the status from before
     its key was attached ("no key of its own"). Measured here with that worker
     held 0.3 s: both tests that attach a key then read the row failed the same way.
+
+    One pause and one wait did not close it (review of the accounts stack's fold,
+    round 2, F8). The pause's idle check is a guess from CPU use, and a bubbling
+    ``Pressed`` is queued on each parent behind the pause's own callback, so the
+    handler can still be pending when the pause returns; and the wait snapshots
+    the workers once, so one a finishing worker's handler starts is never waited
+    for. So it goes round — pause, then wait for what is running — until a pause
+    ends with no message queued on the page and no worker of ours unfinished,
+    bounded, so a page that never goes quiet fails at its assertion, not here.
+    The loop is ``settle_page``, shared with the Accounts page's tests.
     """
-    await pilot.pause()
-    await settle_workers(pilot.app)
-    await pilot.pause()
+    await settle_page(pilot.app)
 
 
 def shown(widget: Widget) -> str:

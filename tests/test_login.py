@@ -608,6 +608,53 @@ def test_an_answer_http_client_cannot_read_is_unreachable_and_an_error_keeps_its
     assert result.status == 503 and result.body == '{"detail": "unava'
 
 
+def test_a_success_whose_answer_is_cut_short_says_the_server_answered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 2xx whose body will not read is ``unreachable`` still — every caller that
+    tolerates one stays as it was — but it was SAID as "Could not reach", for a server
+    that answered and may have done what was asked: a mint's key exists with its uid
+    never read, and the message invited a retry that mints another (review of the
+    accounts stack's fold, round 2, F3). A read that times out mid-body is the same."""
+    import urllib.request
+    from http.client import IncompleteRead
+
+    failure: BaseException = IncompleteRead(b'{"uid": "k-', expected=30)
+
+    class Answered:
+        status = 201
+
+        def __init__(self) -> None:
+            self.headers: dict[str, str] = {}
+
+        def __enter__(self) -> Answered:
+            return self
+
+        def __exit__(self, *exc: object) -> None:
+            return None
+
+        def read(self, *args: object) -> bytes:
+            raise failure
+
+    monkeypatch.setattr(urllib.request, "urlopen", lambda request, timeout: Answered())
+    url = "https://api.example.com/api/v2/iam/workspace-api-key/"
+    with pytest.raises(iam.IamError) as caught:
+        iam._http("POST", url, json_body={"workspace_id": 7})
+    assert caught.value.code == "unreachable"
+    assert caught.value.message == (
+        f"{url} answered HTTP 201, but the answer was cut short "
+        "(IncompleteRead(11 bytes read, 30 more expected)); the request may have been "
+        "carried out."
+    )
+    failure = TimeoutError("timed out")
+    with pytest.raises(iam.IamError) as caught:
+        iam._http("GET", url)
+    assert caught.value.code == "unreachable"
+    assert caught.value.message == (
+        f"{url} answered HTTP 201, but the answer was cut short (TimeoutError('timed out'))."
+    )
+
+
 # ------------------------------------------------------ the token never leaves in the clear
 
 

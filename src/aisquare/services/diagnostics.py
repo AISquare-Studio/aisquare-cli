@@ -2417,6 +2417,14 @@ def _check_fleet(
     socket IT was spawned on — the socket is a default the user may change
     (§3.10), and a row must not read as lost because the config moved after it.
     ``server_for`` builds the server for a socket; tests hand in fakes.
+
+    A pane that answers is the row's only on a server that was already running
+    when the row was written (``fleet._outlived``): after a reboot the next
+    server hands the same ids out again, and the row that outlived its server
+    counted as a healthy pane — another agent's — while ``fleet ls`` read it
+    ``✗ lost`` and this check never prescribed the ``reap`` that records it
+    (review of the #203 final-round fixes, F4). The server is asked when it
+    started once per socket, and only once a pane there has answered.
     """
     absent = _uncreated_home("fleet")
     if absent is not None:
@@ -2436,15 +2444,25 @@ def _check_fleet(
             live = [a for p in projects for a in store.fleet_agents(p.id, live_only=True)]
         gone: list[FleetAgent] = []
         exited: list[FleetAgent] = []
+        started: dict[str, datetime | None] = {}
         for agent in live:
             server = servers.setdefault(agent.tmux_socket, server_for(agent.tmux_socket))
             try:
                 facts = server.pane_facts(agent.pane_id)
             except tmux_core.TmuxError:
                 facts = None
+            if facts is not None and agent.tmux_socket not in started:
+                try:
+                    started[agent.tmux_socket] = server.started_at()
+                except tmux_core.TmuxError:
+                    started[agent.tmux_socket] = None  # judges nothing, as in the fleet
             # tmux 3.7c answers a vanished target with exit 0 and every field
             # empty, so "gone" is "no facts OR facts about no pane", not only None.
-            if facts is None or facts.pane_id != agent.pane_id:
+            if (
+                facts is None
+                or facts.pane_id != agent.pane_id
+                or fleet_service._outlived(agent, started[agent.tmux_socket])
+            ):
                 gone.append(agent)
             elif facts.dead:
                 exited.append(agent)

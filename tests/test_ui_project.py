@@ -541,6 +541,44 @@ def test_the_manager_tab_says_the_manager_exited_and_how_to_bring_it_back(
     assert "has no manager yet" in without and "exited" not in without  # the control
 
 
+def test_a_lost_manager_keeps_its_header_and_is_never_shown_or_typed_into(
+    project: ProjectInfo, monkeypatch: pytest.MonkeyPatch, no_real_tmux: NoTmux
+) -> None:
+    """Review of the #203 final-round fixes, F1: a manager row that outlived its tmux
+    server reads ``lost``, and the tab still attached its pane by id. After a reboot
+    that id is the next server's, most often ANOTHER project's manager: the tab showed
+    that manager under this one's ``✗ lost`` header and forwarded every key into it. A
+    lost manager keeps its header and gets no pane, from the tab's own read at mount as
+    from the shell's push; the working manager beside it is the control."""
+    manager = fake_agent(project, pane_id="%1")
+    lost = FleetAgentStatus(agent=manager, state="lost", detail="pane gone")
+    monkeypatch.setattr(fleet_service, "manager_of", lambda target: manager)
+    monkeypatch.setattr(fleet_service, "status_of", lambda agent: lost)
+
+    async def scenario(
+        pilot: Pilot[None], host: Host
+    ) -> tuple[str | None, str, list[str], str | None, str | None, str, bool]:
+        view = host.query_one(ProjectView)
+        pane = host.query_one("#manager-pane", TerminalPane)
+        at_mount, header = pane.pane_id, shown(host.query_one("#manager-header"))
+        built = list(no_real_tmux.sockets)
+        view.refresh_status([FleetAgentStatus(agent=manager, state="working")])
+        await pilot.pause()
+        working = pane.pane_id
+        view.refresh_status([lost])
+        await pilot.pause()
+        width, height = pane.content_size
+        first_row = pane.render_lines(Region(0, 0, width, height))[0].text.rstrip()
+        return at_mount, header, built, working, pane.pane_id, first_row, pane.display
+
+    at_mount, header, built, working, after, first_row, displayed = drive(project, scenario)
+    assert at_mount is None and built == []  # never attached, no server even built
+    assert "✗ lost" in header and "pane gone" in header  # the header still says what it is
+    assert working == "%1"  # the control: a manager that is there is shown
+    assert after is None  # …and detached once it reads lost
+    assert first_row == "(pane gone)" and displayed is True  # not "no agent selected"
+
+
 def test_refresh_routes_a_snapshot_and_a_bare_refresh_only_repaints(project: ProjectInfo) -> None:
     """The plan spells the push ``refresh(snapshot)``; Textual's own ``refresh()`` must survive."""
     manager = fake_agent(project, pane_id="%21")

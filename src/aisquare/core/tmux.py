@@ -78,6 +78,7 @@ import shutil
 import subprocess
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 
 from aisquare.core import paths
@@ -798,6 +799,29 @@ class TmuxServer:
         if completed.returncode == 0:
             return False
         return _ABSENT.search(completed.stderr) is not None
+
+    def started_at(self) -> datetime | None:
+        """When the server on this socket started (``#{start_time}``), to the whole second.
+
+        A pane id names a pane of ONE server's lifetime: the next server on the
+        socket numbers its panes from ``%0`` again (measured on 3.7c,
+        ``test_live_a_new_server_reuses_pane_ids_and_says_when_it_started``). So an
+        id recorded earlier is only worth asking about once the server answering
+        is known to be the one it was recorded on, and this is what tells them
+        apart. tmux reports the start in whole seconds, rounded down.
+
+        ``None`` when no server is listening (:data:`_ABSENT`), or when the
+        answer is not a number. A question that could not be put — a denied
+        socket, a wedged server's timeout — raises :class:`TmuxError`, as the
+        strict reads do.
+        """
+        completed = self._runner(self.argv("display-message", "-p", "#{start_time}"), None)
+        if completed.returncode != 0:
+            if _ABSENT.search(completed.stderr):
+                return None
+            raise TmuxError(completed.stderr.strip() or "tmux display-message could not be reached")
+        epoch = completed.stdout.strip()
+        return datetime.fromtimestamp(int(epoch), tz=UTC) if epoch.isdigit() else None
 
     def spawn_window(
         self,

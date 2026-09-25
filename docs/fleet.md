@@ -530,18 +530,25 @@ c1/c2/c3 shell aliases people write by hand, owned by the tool instead.
   board naming `aisquare fleet switch <label>`, and the manager is woken. Claude
   Code's own wait-and-continue at the reset is left running. `fleet switch`
   stops the agent as `fleet stop` would and starts it again under the same
-  label, task and worktree on the account with the most headroom (`--to` names
+  label and task, in its worktree as it stands (the branch it was on, any
+  uncommitted work), on the account with the most headroom (`--to` names
   one), **resuming its session** from its transcript (`claude --resume
   <path>`) when that file is on disk — the resumed agent keeps its task claims
   and is told in one line to continue, and no exit is announced for it —
   `--fresh` (or a transcript that is not on disk) starts new with a hand-off
   prompt built from the board instead; that agent takes the claims over too,
-  on its new session, and no exit is announced for it either.
+  on its new session, and no exit is announced for it either. An agent whose
+  role, task (done or dropped) or binary would refuse the replacement is
+  refused before it is stopped, and a task that closes while it is being
+  stopped is left off the replacement.
   With `on_limit = "switch"` (*on a usage limit* on the Settings tab) the fleet
   does this by itself when the limit lifts more than
   `wait_if_reset_within_minutes` away, in a worker detached from the agent's
   own hook; a hand-over that finds no headroom leaves the agent parked, its
-  own wait intact, and says so on the board. `doctor` lists parked agents; `doctor --live` warns when every account
+  own wait intact, and says so on the board. One that goes ahead says on the
+  board what it could not do (a first line it could not type, claims it could
+  not move) in a note beside `switched`, and `switched` itself says whether
+  the replacement's first line reached it. `doctor` lists parked agents; `doctor --live` warns when every account
   is over the line.
 
 Nothing on this page writes into Claude Code's own files: the email and plan
@@ -1146,7 +1153,12 @@ aisquare fleet reap --all --server-down
 To stop everything the fleet ever started, on every project, kill the private
 server — this ends every agent at once, so prefer `fleet stop` per agent:
 **The server was stopped outside the CLI.** Rows read `unknown (tmux
-unavailable)` and `reap` reaps nothing — correctly: it cannot ask. `shutdown`
+unavailable)` and `reap` reaps nothing — correctly: it cannot ask. Once any
+project spawns again, a new server is up on the socket and hands the old pane
+ids out afresh; the old rows then read `✗ lost` — never the state of the agent
+that got their id, whose pane the UI does not show under them either — a plain
+`reap` records them, and stopping, restarting or shutting one down ends its row
+without touching that agent. `shutdown`
 records them as lost on your word, scoped to one project or over all of them:
 
 ```sh
@@ -1165,8 +1177,9 @@ the dead window (`remain-on-exit`) so the last screen stays readable, and the
 row stays on the sidebar as **💤 exited** for a day while that window is
 there. Its row now records the exit the moment any listing sees the dead pane
 — no `reap` needed — so `aisquare fleet spawn manager` is not refused any more,
-and the row itself offers **Restart**: same label, role, task, worktree and
-account, and the SAME session resumed from its transcript when that file is
+and the row itself offers **Restart**: same label, role, task, worktree (as it
+stands, on the branch the agent was on — whatever its task or the codename says
+now) and account, and the SAME session resumed from its transcript when that file is
 on disk, so the manager comes back knowing its intake, its contracts and its
 coders (`--fresh` in the command, or a missing transcript, starts new with a
 hand-off prompt built from the board). From a shell: `aisquare fleet restart

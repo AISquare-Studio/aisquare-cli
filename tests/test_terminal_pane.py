@@ -4028,6 +4028,53 @@ def test_agent_view_refreshes_its_header_and_reattaches_on_a_new_pane(
     assert "working" in working and "waiting" not in working
 
 
+def test_agent_view_shows_and_types_into_no_pane_for_a_lost_row(
+    fake: FakeTmux, tmp_path: Path
+) -> None:
+    """Review of the #203 final-round fixes, F1: a row that outlived its tmux server
+    reads ``lost``, and its id is the next server's — another agent's pane, here the
+    fake's ``%1``. The view attached it by id whatever the state: it showed that
+    agent's screen under the row's ``✗ lost`` header and forwarded every key into it.
+    A lost row gets no pane, whether it was lost when the view was built or turned lost
+    under it; the same row working is the control, keys and all."""
+    server = fake.server(tmp_path)
+
+    class ViewHost(App[None]):
+        def compose(self) -> ComposeResult:
+            yield AgentView(_status(state="lost"), server=server, escape_key="f12", id="lost")
+
+    async def drive() -> tuple[str | None, str, str, list[list[tuple[str, ...]]], str | None]:
+        host = ViewHost()
+        async with host.run_test(size=(60, 8)) as pilot:
+            view = host.query_one("#lost", AgentView)
+            view.pane.focus()
+            await pilot.pause()
+            await pilot.press("h", "i", "enter")
+            await pilot.pause()
+            built_lost, first = view.pane.pane_id, screen_text(view.pane)[0]
+            header = str(host.query_one("#agent-header", Static).content)
+            typed = [fake.sent()]
+            view.refresh_status(_status(state="working"))
+            await wait_until(pilot, lambda: view.pane.frames >= 1)
+            await pilot.press("y")
+            await pilot.pause()
+            typed.append(fake.sent())
+            view.refresh_status(_status(state="lost"))
+            await pilot.pause()
+            await pilot.press("x", "enter")
+            await pilot.pause()
+            typed.append(fake.sent())
+            return built_lost, first, header, typed, view.pane.pane_id
+
+    built_lost, first, header, typed, turned_lost = run(drive())
+    assert built_lost is None and first == "(pane gone)"  # not "no agent selected"
+    assert "✗ lost" in header  # the header says what the row is
+    lost_at_build, working, lost_later = typed
+    assert lost_at_build == []  # nothing typed anywhere
+    assert working == [("-l", "--", "y")]  # the control: a row that is there gets the key
+    assert turned_lost is None and lost_later == working  # detached, and deaf, once lost
+
+
 # --- mouse buttons (#148) ---------------------------------------------------------------------
 
 

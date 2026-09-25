@@ -25,7 +25,7 @@ from textual.worker import Worker, WorkerState
 
 from aisquare.cli import fleet as fleet_cli
 from aisquare.cli.ui.sidebar import ROLE_ICON, STATE_CHIP
-from aisquare.cli.ui.terminal import TerminalPane
+from aisquare.cli.ui.terminal import PANE_GONE, TerminalPane
 from aisquare.core.tmux import TmuxServer
 from aisquare.models import FleetAgent, FleetAgentStatus
 from aisquare.services import claude_accounts as accounts_service
@@ -84,6 +84,24 @@ def header_text(status: FleetAgentStatus, labels: Mapping[int, str] | None = Non
     if agent.exit_status is not None:
         text.append(SEPARATOR + f"exited {agent.exit_status}", style="bold red")
     return text
+
+
+def shown_pane(status: FleetAgentStatus) -> str | None:
+    """The pane a view of ``status`` shows and types into — ``None`` for a ``lost`` row.
+
+    ``lost`` is the listing's word for a live row it found no pane of its own
+    for, and one way to be lost leaves ANOTHER agent's pane under the row's
+    id: a row that outlived its tmux server (a reboot, a hand-run
+    ``kill-server``) keeps an id the next server hands out again
+    (``services.fleet._outlived``). The service stopped acting on that pane,
+    but a view attached by id still showed that agent's screen under the
+    row's ``✗ lost`` header and forwarded every key typed there into it —
+    another project's manager, typed at from this one's tab (review of the
+    #203 final-round fixes, F1). The other way to be lost, a pane that is
+    simply gone, has nothing to show either. ``unknown`` — tmux could not be
+    asked — keeps the pane: that is no verdict about it.
+    """
+    return None if status.state == "lost" else status.agent.pane_id
 
 
 STOP_WORKER = "agent-stop"
@@ -172,9 +190,10 @@ class AgentView(Vertical):
             yield Button("Stop", id="agent-stop", compact=True)
             yield Button("Restart", id="agent-restart", compact=True, variant="primary")
         yield TerminalPane(
-            self.status.agent.pane_id,
+            shown_pane(self.status),
             server=self.server,
             escape_key=self.escape_key,
+            placeholder=PANE_GONE,
             id="agent-pane",
         )
 
@@ -187,16 +206,19 @@ class AgentView(Vertical):
         return self.query_one("#agent-pane", TerminalPane)
 
     def refresh_status(self, status: FleetAgentStatus) -> None:
-        """New facts about the same agent: redraw the header, re-attach on a new pane."""
-        previous = self.status
+        """New facts about the same agent: redraw the header, re-attach on a new pane.
+
+        Detached from a row that turned ``lost`` (:func:`shown_pane`), whose id may
+        name another agent's pane by now.
+        """
         self.status = status
         if not self.is_mounted:
             return
         self.query_one("#agent-header", Static).update(header_text(status, self._labels))
         self._paint_actions()
         self._refresh_labels()
-        if status.agent.pane_id != previous.agent.pane_id:
-            self.pane.attach(status.agent.pane_id)
+        if (wanted := shown_pane(status)) != self.pane.pane_id:
+            self.pane.attach(wanted)
 
     def _paint_actions(self) -> None:
         """Stop while there is a process or a dead window; Restart always (an exited row is

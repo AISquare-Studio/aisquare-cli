@@ -147,6 +147,13 @@ class FakeTmux(TmuxServer):
         self.pids: dict[str, int] = {}
         """The pid tmux started in each pane — what ``pane_pid`` answers. Unset
         means tmux cannot say, which the identity check reads as "cannot tell"."""
+        self.started: datetime | None = None
+        """When the server started — what ``#{start_time}`` answers. The server the
+        fake begins with never says, so ids alone decide as they did before the
+        question was asked; a spawn that brings a server up on a socket with none
+        (a reboot, a hand-run `kill-server`) sets it, as the real one's
+        `new-session` starts a new server. Kept to the microsecond where tmux
+        rounds down to the second, so a test never waits out a second boundary."""
         self.spawned: list[dict[str, object]] = []
         self.refuse_resize: str | None = None
         """What tmux says when it refuses the resize ``spawn_window`` makes after
@@ -289,6 +296,8 @@ class FakeTmux(TmuxServer):
         # listening and exits 0 — so "the next asq / fleet spawn starts a fresh
         # server", stated in the command's docstring and in docs/fleet.md, is
         # exercisable rather than merely claimed.
+        if not self.running:
+            self.started = datetime.now(tz=UTC)
         self.running = True
         self._counter += 1
         pane_id = f"%{self._counter}"
@@ -345,8 +354,8 @@ class FakeTmux(TmuxServer):
     # the server could not be asked, and that single distinction is `reachable()`
     # already — it raises for a denied socket (`socket_denied`), a wedged one
     # (`answers_raises`) and an unrunnable client (`exec_unavailable`), and is
-    # False (never raises) for a server that is simply not running. Deriving all
-    # four from it keeps the fake from drifting from the real contract.
+    # False (never raises) for a server that is simply not running. Deriving every
+    # one from it (the start time too) keeps the fake from drifting from the real contract.
     def sessions_or_raise(self) -> list[str]:
         self.reachable()
         return self.list_sessions()
@@ -362,6 +371,10 @@ class FakeTmux(TmuxServer):
     def pane_facts_or_raise(self, pane_id: str) -> PaneFacts | None:
         self.reachable()
         return self.pane_facts(pane_id)
+
+    def started_at(self) -> datetime | None:
+        self.reachable()
+        return self.started if self._read() else None
 
     def pane_pid(self, pane_id: str) -> int | None:
         self.binary()
@@ -8200,8 +8213,9 @@ def test_restarting_a_running_agent_hands_its_claims_to_the_replacement_and_anno
     assert held.status == "doing" and held.claimed_by == new
     assert nudges == []
     assert _events(project, "agent_exited") == [] and _events(project, "task_released") == []
+    # The replacement never came up in the fake, so its hand-off prompt was not typed.
     assert _events(project, "restarted") == [
-        f"{agent.label} restarted — started fresh with a hand-off prompt"
+        f"{agent.label} restarted — started fresh, but its hand-off prompt was NOT typed"
     ]
 
     # The replacement runs and holds the task. Restarted again, its spawn is refused
@@ -8220,6 +8234,41 @@ def test_restarting_a_running_agent_hands_its_claims_to_the_replacement_and_anno
     assert freed.claimed_by is None and freed.status == "todo"
     assert _events(project, "agent_exited") == [f"{agent.label} exited (0)"]
     assert nudges == [f"{agent.label} exited"]
+
+
+def test_restart_hands_over_a_running_agent_whose_server_will_not_say_when_it_started(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of the #203 final-round fixes, F5: ``_pane_alive`` asked the server when it
+    started as a second, strict tmux call and read its ``TmuxError`` as "not running".
+    One refusal there (a wedged server's timeout, an OS refusal) after the pane had
+    answered alive sent the restart of a RUNNING agent down the other branch: stopped
+    as ``fleet stop`` stops it, its task back in the pool and its exit announced, the
+    replacement started with no hand-over. A start that cannot be read judges nothing:
+    the pane answered alive, so the agent is handed over."""
+    mine = _task(project, "the task this coder is for")
+    agent, first = _spawned(project, "coder", mine.id, tmux, monkeypatch)
+    team_service.hook_session_start(first, project.root, "startup")
+    team_service.claim_task(mine.id, session_ref=first)
+    nudges = _recorded_nudges(monkeypatch)
+    real_started_at = tmux.started_at
+    refusals = [TmuxError("display-message timed out (fake)")]
+
+    def refused_once() -> datetime | None:
+        if refusals:
+            raise refusals.pop()
+        return real_started_at()
+
+    monkeypatch.setattr(tmux, "started_at", refused_once)
+
+    receipt = fleet_service.restart(project, agent.label)
+
+    assert refusals == []  # the refusal was met, and it was the first question
+    assert receipt.was_running is True
+    held = _task_now(mine.id)
+    assert held.status == "doing" and held.claimed_by == receipt.started.session_id
+    assert _events(project, "agent_exited") == [] and _events(project, "task_released") == []
+    assert nudges == []
 
 
 def test_a_resumed_replacement_that_dies_before_its_first_hook_is_ended_like_any_dead_row(
@@ -9854,3 +9903,331 @@ def test_a_row_spawned_before_the_launch_spec_is_refused_its_replay_before_the_s
         session = store.get_session(agent.session_id or "")
     assert live is not None and live.id == agent.id and live.launch_spec is None
     assert session is not None and session.state == "working", "the session is not marked"
+
+
+# --- the final review of #203 ------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("act", ["stop", "shutdown --force", "restart"])
+def test_a_row_that_outlived_its_server_never_acts_on_another_projects_pane(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    plain_project: ProjectInfo,
+    act: str,
+) -> None:
+    """Review of #203, final round, FLEET-1: a pane id is unique for one SERVER's
+    lifetime. A reboot or a hand-run `kill-server` leaves A's rows live, and B's first
+    spawn starts a fresh server that numbers its panes from the start again, so B's
+    manager took the id A's manager had. Asked about by id, B's pane answered for A's
+    row: A's dead manager listed as `waiting`, a board write in A nudged B's manager,
+    and stopping, shutting down or restarting A's manager typed `/exit` into B's and
+    killed its window. A server that started after the row was written holds none of
+    the row's panes: the row is lost, and ending it touches nothing of B's."""
+    a_manager = fleet_service.spawn(project, "manager").agent
+    _board_session(a_manager, "waiting")
+    tmux.kill_server()
+    tmux._counter = 0  # the next server numbers from the start again
+    b_manager = fleet_service.spawn(plain_project, "manager").agent
+    assert b_manager.pane_id == a_manager.pane_id  # the shape under test
+    tmux.set_command(b_manager.pane_id, "claude")  # B's agent is up and reads input
+
+    [listed] = fleet_service.list_agents(project)
+    assert (listed.agent.id, listed.state, listed.detail) == (a_manager.id, "lost", "pane gone")
+    assert fleet_service.nudge_manager(project.id, reason="a board write in A") is False
+
+    if act == "stop":
+        ended = fleet_service.stop(project, "manager").agent
+        assert ended.id == a_manager.id and ended.ended_at is not None
+    elif act == "shutdown --force":
+        report = fleet_service.shutdown(project, force=True)
+        assert [row.id for row in report.stopped] == [a_manager.id] and report.failed == []
+    else:
+        restarted = fleet_service.restart(project, "manager")
+        assert restarted.replaced.id == a_manager.id and not restarted.was_running
+        assert restarted.started.pane_id != b_manager.pane_id
+
+    assert [typed for typed in tmux.typed if typed[0] == b_manager.pane_id] == []
+    assert b_manager.pane_id not in tmux.killed and b_manager.pane_id in tmux.facts
+    [b_listed] = fleet_service.list_agents(plain_project)
+    assert (b_listed.agent.id, b_listed.state) == (b_manager.id, "waiting")
+
+
+def test_a_row_that_outlived_its_server_is_not_its_own_projects_newer_agent(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """The same reuse inside ONE project reaches the row through its own session's
+    window list, before any lookup by id alone: after the restart of the server, the
+    project's next spawn (coder-2, as the stale coder-1 still holds its label) took the
+    stale manager's id in the project's own session, and the manager's restart typed
+    its `/exit` into coder-2. Neither name tmux keeps tells them apart — a relabelled
+    window keeps its first name — the server's start does."""
+    manager = fleet_service.spawn(project, "manager").agent
+    coder = _coder(project)
+    tmux.kill_server()
+    tmux._counter = 0
+    newer = _coder(project)
+    assert newer.label == "coder-2" and newer.pane_id == manager.pane_id
+
+    states = {s.agent.label: s.state for s in fleet_service.list_agents(project)}
+    assert states == {"manager": "lost", "coder-1": "lost", "coder-2": "waiting"}
+
+    restarted = fleet_service.restart(project, "manager")
+    assert restarted.replaced.id == manager.id and not restarted.was_running
+    # The replacement takes the stale coder-1's id in turn — and is not coder-1's either.
+    assert restarted.started.pane_id == coder.pane_id
+    fleet_service.stop(project, "coder-1")
+
+    touched = {pane for pane, _, _ in tmux.typed} | set(tmux.killed)
+    assert newer.pane_id not in touched, "coder-2 was never typed into nor killed"
+    assert coder.pane_id not in tmux.killed, "the new manager was not stopped for coder-1"
+    states = {s.agent.label: s.state for s in fleet_service.list_agents(project)}
+    assert states == {"coder-2": "waiting", "manager": "waiting"}
+
+
+@pytest.mark.parametrize(
+    ("verb", "since"),
+    [("restart", "its task closed"), ("switch", "its task closed"), ("restart", "fleet rename")],
+)
+def test_a_replacement_keeps_its_agents_worktree_as_it_stands(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    verb: str,
+    since: str,
+) -> None:
+    """Review of #203, final round, FLEET-2: ``restart`` and ``switch`` rebuilt a
+    worktree agent's branch from its row's task and the codename, and neither is what
+    it was at the spawn: rule 3 forgets a task once it closes, and ``fleet rename``
+    changes the codename. The replacement then asked for another branch — a tree
+    holding uncommitted work was refused AFTER the agent had been stopped (lost, its
+    claims released), and a clean one was moved to a branch the agent never worked
+    on. The replacement is the same agent carrying on, in its tree as it stands."""
+    _two_slots_with_usage(monkeypatch, work=95, personal=10)
+    task = _add_task(project, "Wire the auth flow")
+    coder = fleet_service.spawn(project, "coder", task_id=task.id, account="2").agent
+    assert coder.worktree
+    branch = _git("rev-parse", "--abbrev-ref", "HEAD", cwd=coder.cwd)
+    dirty = since == "its task closed"
+    if dirty:
+        with store_session() as store:
+            store.set_task_status(task.id, "done")
+            assert store.retire_fleet_assignments(task.id) == 1
+        (coder.cwd / "wip.txt").write_text("half a change\n", encoding="utf-8")
+    else:
+        fleet_service.rename(project, "quiet-heron")
+
+    if verb == "restart":
+        started = fleet_service.restart(project, coder.label).started
+    else:
+        started = fleet_service.switch(project, coder.label).started
+
+    assert started.label == coder.label and started.cwd == coder.cwd
+    assert _git("rev-parse", "--abbrev-ref", "HEAD", cwd=coder.cwd) == branch
+    assert (coder.cwd / "wip.txt").exists() is dirty, "the work is where the agent left it"
+    live = fleet_service.list_agents(project)
+    assert [status.agent.id for status in live] == [started.id]
+
+
+def test_a_switch_whose_task_closes_during_the_stop_starts_the_replacement_without_it(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #203, final round, FLEET-3: ``switch`` started the replacement from the
+    row it read before the headroom lookup and the stop's grace. A task closed in that
+    window is forgotten by the live row (rule 3), but the snapshot still named it, so
+    ``spawn`` refused it — "task … is dropped" — with the agent already stopped, and
+    nothing started. The replacement comes from the row the stop ended, as ``restart``'s
+    does, and its hand-off prompt no longer sets it on the closed task."""
+    _two_slots_with_usage(monkeypatch, work=95, personal=10)
+    task = _add_task(project, "Ship auth")
+    agent = fleet_service.spawn(
+        project, "coder", worktree=False, task_id=task.id, account="2"
+    ).agent
+    _with_transcript(agent, None)  # nothing to resume: a hand-off prompt
+    original_spawn = tmux.spawn_window
+
+    def ready_spawn(*args: Any, **kwargs: Any) -> WindowInfo:
+        window = original_spawn(*args, **kwargs)
+        tmux.set_command(window.pane_id, "claude")
+        return window
+
+    real_kill = tmux.kill_window
+
+    def dropped_in_the_grace(pane_id: str) -> None:
+        if pane_id == agent.pane_id:
+            team_service.drop_task(task.id)  # the manager drops it meanwhile
+        real_kill(pane_id)
+
+    monkeypatch.setattr(tmux, "spawn_window", ready_spawn)
+    monkeypatch.setattr(tmux, "kill_window", dropped_in_the_grace)
+
+    receipt = fleet_service.switch(project, agent.label)
+
+    assert receipt.stopped.task_id is None and receipt.started.task_id is None
+    [prompt] = [text for _pane, kind, text in tmux.typed if kind == "paste"]
+    assert "Ship auth" not in prompt and task.id not in prompt
+    live = fleet_service.list_agents(project)
+    assert [status.agent.id for status in live] == [receipt.started.id]
+
+
+@pytest.mark.parametrize("refused", ["a closed task", "an unknown role"])
+def test_a_switch_that_spawn_would_refuse_is_refused_before_the_stop(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    refused: str,
+) -> None:
+    """``restart`` asks spawn's refusals for the role and the task before it stops
+    anything; ``switch`` asked neither, and ``spawn`` gave them after the stop, so the
+    agent was stopped for a replacement that never started. A row spawned before rule
+    3 names its closed task until its next briefing, so switching one always lost it
+    (review of #203, final round, FLEET-3)."""
+    _two_slots_with_usage(monkeypatch, work=95, personal=10)
+    task = _add_task(project, "Ship auth")
+    agent = fleet_service.spawn(
+        project, "coder", worktree=False, task_id=task.id, account="2"
+    ).agent
+    _with_transcript(agent, None)
+    if refused == "a closed task":
+        with store_session() as store:
+            store.set_task_status(task.id, "done")  # no rule 3: the row still names it
+        why = f"task {task.id} is done"
+    else:
+        # A role whose declaration left the config after the agent started.
+        monkeypatch.setattr(fleet_service, "_role_ok", lambda role: False)
+        why = "unknown role 'coder'"
+
+    with pytest.raises(FleetError, match=why):
+        fleet_service.switch(project, agent.label)
+
+    assert tmux.typed == [] and tmux.killed == [], "no /exit typed, no window killed"
+    assert len(tmux.spawned) == 1
+    with store_session() as store:
+        live = store.fleet_agent_by_label(project.id, agent.label, live_only=True)
+    assert live is not None and live.id == agent.id
+    assert _session_state(agent.session_id or "") == "working", "the session is not marked"
+
+
+@pytest.mark.parametrize("verb", ["switch", "restart"])
+def test_a_replacement_whose_prompt_poll_tmux_will_not_answer_keeps_the_claims(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    verb: str,
+) -> None:
+    """Review of #203, final round, FLEET-4: ``_type_prompt`` polls the new pane with
+    ``pane_facts``, which raises on a wedged server's timeout, and it runs after the
+    replacement's row is recorded. ``switch`` and ``restart`` read any raise out of
+    ``spawn`` as "no replacement started": a resumed replacement that was up on the
+    same session had its task put back in the pool, its exit announced and the manager
+    woken for a second worker, and the TmuxError went on to the caller (a traceback on
+    the CLI; the automatic worker died without a note). The poll is a note now, like
+    the paste it guards, and the hand-over completes."""
+    _two_slots_with_usage(monkeypatch, work=95, personal=10)
+    agent = fleet_service.spawn(project, "coder", worktree=False, account="2").agent
+    transcript = tmp_path / f"{agent.session_id}.jsonl"
+    transcript.write_text('{"type":"user"}\n', encoding="utf-8")
+    _with_transcript(agent, transcript)
+    task = _add_task(project, "Keep it")
+    assert team_service.claim_task(task.id, session_ref=agent.session_id or "").status == "doing"
+    before = set(tmux.facts)
+    real_facts = tmux.pane_facts
+
+    def wedged_for_the_newcomer(pane_id: str) -> PaneFacts | None:
+        if pane_id not in before:
+            raise TmuxError("tmux did not answer within 30s: display-message -p -t …")
+        return real_facts(pane_id)
+
+    monkeypatch.setattr(tmux, "pane_facts", wedged_for_the_newcomer)
+    if verb == "switch":
+        receipt: Any = fleet_service.switch(project, agent.label)
+    else:
+        receipt = fleet_service.restart(project, agent.label)
+    monkeypatch.setattr(tmux, "pane_facts", real_facts)
+
+    assert receipt.resumed and receipt.started.session_id == agent.session_id
+    assert any("could not be asked whether the agent is up" in note for note in receipt.notes)
+    with store_session() as store:
+        kept = store.get_task(task.id)
+    assert kept is not None and (kept.status, kept.claimed_by) == ("doing", agent.session_id)
+    assert _events(project, "task_released") == [] and _events(project, "agent_exited") == []
+    live = fleet_service.list_agents(project)
+    assert [status.agent.id for status in live] == [receipt.started.id]
+
+
+def test_the_automatic_hand_over_puts_what_its_switch_did_not_do_on_the_board(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Review of #203, final round, FLEET-5: ``hooks.hand_over`` threw away the
+    ``SwitchReceipt``, and the worker has no terminal, so every note about what the
+    switch did NOT do reached no one. And ``switched`` was worded from ``resumed``
+    alone. A fresh replacement too slow to come up for its multi-line hand-off prompt
+    sat idle at an empty prompt while the board said it "started fresh with a hand-off
+    prompt". The line now says what reached the pane, and the notes go on the board."""
+    from aisquare.services import hooks as hooks_service
+
+    _two_slots_with_usage(monkeypatch, work=95, personal=10)
+    agent = fleet_service.spawn(project, "coder", worktree=False, account="2").agent
+    _with_transcript(agent, tmp_path / "missing.jsonl")  # named, not on disk: a fresh start
+    # The fake's new pane never comes up, so the hand-off prompt is past its wait.
+
+    hooks_service.hand_over(agent.session_id or "", reason="session limit")
+
+    assert [text for _pane, kind, text in tmux.typed if kind == "paste"] == []
+    [switched] = _events(project, "switched")
+    assert switched.endswith(
+        "(session limit) — started fresh, but its hand-off prompt was NOT typed"
+    )
+    [said] = [note for note in _events(project, "note") if note.startswith(f"{agent.label}: ")]
+    assert said.startswith(f"{agent.label}: switched — ")
+    assert "the prompt has several lines — NOT typed" in said
+    # What every switch says is not on the board: only what this one could not do.
+    assert "launched as recorded" not in said and "headroom" not in said
+
+
+def test_a_clean_automatic_hand_over_puts_no_note_beside_switched(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Review of the #203 final-round fixes, F2: ``hand_over`` posted every note on the
+    switch's receipt, and most are routine on every hand-over: the headroom each
+    account had, "launched as recorded" (every row since v18), a one-line prompt typed
+    past the wait. So nearly every automatic switch put a ``switched — …`` note on the
+    feed, account advice the other agents read included. Only what the switch could
+    not do goes on the board; a clean one is ``switched`` alone. The receipt still
+    carries every note for the CLI, which is the control."""
+    from aisquare.services import hooks as hooks_service
+
+    _two_slots_with_usage(monkeypatch, work=95, personal=10)
+    agent = fleet_service.spawn(project, "coder", worktree=False, account="2").agent
+    transcript = tmp_path / f"{agent.session_id}.jsonl"
+    transcript.write_text('{"type":"user"}\n', encoding="utf-8")
+    _with_transcript(agent, transcript)  # resumable: its one line is typed past the wait
+    real_switch = fleet_service.switch
+    receipts: list[fleet_service.SwitchReceipt] = []
+
+    def switch_and_keep(*args: Any, **kwargs: Any) -> fleet_service.SwitchReceipt:
+        receipts.append(real_switch(*args, **kwargs))
+        return receipts[-1]
+
+    monkeypatch.setattr(fleet_service, "switch", switch_and_keep)
+
+    hooks_service.hand_over(agent.session_id or "", reason="session limit")
+
+    [switched] = _events(project, "switched")
+    assert switched.endswith("(session limit) — resumed its session")
+    assert [note for note in _events(project, "note") if note.startswith(f"{agent.label}: ")] == []
+    [receipt] = receipts
+    assert any(note.startswith("launched as recorded") for note in receipt.notes)
+    assert receipt.failures == []

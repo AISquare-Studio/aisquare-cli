@@ -241,7 +241,8 @@ def hand_over(
     Not a Claude Code hook: ``stop-failure`` starts this in a worker of its own
     session, because the hook itself is a child of the pane ``fleet switch``
     kills (#146; review of #205, finding 1). Silent like every hook; the
-    board carries a refusal (``not switched — …``).
+    board carries a refusal (``not switched — …``), and what a switch that went
+    ahead could not do (``switched — …``).
     """
     try:
         hooks_service.hand_over(session_id, reason=reason)

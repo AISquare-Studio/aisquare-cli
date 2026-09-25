@@ -198,6 +198,12 @@ class SwitchReceipt:
     started fresh with a hand-off prompt built from the board."""
     tmux_session: str
     notes: list[str] = field(default_factory=list)
+    failures: list[str] = field(default_factory=list)
+    """The notes that say what the switch could NOT do with its replacement up: a first
+    line not typed, claims not moved, an old session not marked ended, a hand-over mark
+    not taken back. Each is in ``notes`` too, beside the ones every switch has (the
+    headroom read, the launch replayed, the worktree kept). The automatic hand-over has
+    no terminal to print ``notes`` to and posts these alone (``services.hooks.hand_over``)."""
 
 
 @dataclass(frozen=True)
@@ -212,6 +218,13 @@ class SpawnReceipt:
     branch it was put on), a prompt that could not be typed, an agent that will not
     join the board. NOT a permission-mode fallback — there is none: the mode is the
     flag, then the role's config, then ``auto``, and nothing here rewrites it."""
+    prompt_typed: bool | None = None
+    """Whether the ``prompt`` asked for reached the pane: ``None`` when none was
+    asked for, ``False`` when it was not typed — the notes say why."""
+    failures: list[str] = field(default_factory=list)
+    """The notes about what did NOT happen once the agent was up: the prompt not typed,
+    the claims of a hand-over not moved, the previous session not marked ended. Each
+    is in ``notes`` too; a prompt typed past the wait is typed, and is not here."""
 
 
 @dataclass(frozen=True)
@@ -726,6 +739,7 @@ def _ensure_worktree(
     notes: list[str],
     *,
     refuse_if_taken: Callable[[], None] | None = None,
+    own: Path | None = None,
 ) -> Path:
     """``<root>/<worktree_dir>/<label>`` on ``branch``, created or reused.
 
@@ -736,6 +750,17 @@ def _ensure_worktree(
     the branch THIS spawn asked for (see :func:`_reuse_worktree`), never handed
     over on whatever branch the last agent left it on.
 
+    Except the tree ``own`` names: that is the one a restarted or switched
+    agent worked in (:func:`_respawn`), and the replacement is the same agent
+    carrying on, so it is taken as it stands. ``branch`` is rebuilt from the
+    row's task and the codename, and neither is what it was at the spawn: a
+    task that closed is forgotten by the row (rule 3,
+    ``retire_fleet_assignments``), and ``fleet rename`` changes the codename.
+    Put on that branch, a tree holding uncommitted work was refused AFTER
+    ``restart`` or ``switch`` had stopped its agent — lost, its claims released
+    — and a clean one was moved to a branch the agent never worked on (review
+    of #203, final round, FLEET-2).
+
     ``refuse_if_taken`` reaches :func:`_reuse_worktree`, which asks it once more
     before switching branches; a tree this call CREATES cannot be another
     agent's, because ``git worktree add`` refuses an existing directory.
@@ -743,6 +768,9 @@ def _ensure_worktree(
     path = root / worktree_dir / label
     if path.exists():
         if (path / ".git").exists():
+            if own is not None and path.resolve() == own.resolve():
+                notes.append(f"kept the agent's worktree at {path} as it stands")
+                return path
             _reuse_worktree(root, path, branch, notes, refuse_if_taken=refuse_if_taken)
             return path
         # A `git worktree add` still in flight has made the directory and not
@@ -906,10 +934,35 @@ def _server_answers(srv: TmuxServer) -> bool:
     return srv.answers()
 
 
+def _outlived(agent: FleetAgent, server_started: datetime | None) -> bool:
+    """Whether ``agent``'s row was written before its server started — so no pane there is its.
+
+    A pane id names a pane of one server's lifetime only: the next server on
+    the socket numbers from ``%0`` again. A reboot or a hand-run ``tmux -L asq
+    kill-server`` leaves live rows behind, and the first spawn in ANY project
+    starts a fresh server on the shared socket, whose panes take those rows'
+    ids: another project's manager, or a newer agent of the row's own project.
+    Asked about by id, that pane answered for the stale row, and ``stop``,
+    ``shutdown``, ``restart`` and ``switch`` typed ``/exit`` into it and killed
+    it (review of #203, final round, FLEET-1).
+
+    The row is written after its window exists (``_record``), so the server
+    that holds its pane was already running at ``created_at``; a server that
+    started later holds none of its panes. tmux reports the start rounded down
+    to the second, which can only err toward the row. Neither name tmux keeps
+    could say this: both projects' managers are called ``manager``, a
+    relabelled agent's window keeps its first name (:func:`_relabel`), and a
+    codename ``rename`` that tmux never heard of leaves the row's own panes
+    under another session's name. ``None`` — tmux did not say when it started —
+    judges nothing, and the id alone decides as it did before.
+    """
+    return server_started is not None and server_started > agent.created_at
+
+
 def _observe(
     srv: TmuxServer, tmux_session: str | None, agents: Sequence[FleetAgent]
 ) -> dict[str, _PaneView] | None:
-    """Pane facts for every live agent, or ``None`` when tmux cannot be asked at all.
+    """Row id → the facts of that row's pane, or ``None`` when tmux cannot be asked at all.
 
     One ``list-panes`` per project answers for every window in the session; a
     pane missing there is asked about individually, because a codename rename
@@ -921,8 +974,15 @@ def _observe(
     answers every one of those queries with an empty answer and no exception, so
     an empty result set is never taken as "every pane is gone" until
     :func:`_server_answers` has heard the server speak. That probe runs only in
-    the one case it can change — no pane answered at all — so the ordinary
-    listing still costs the same two commands.
+    the one case it can change — no pane answered at all.
+
+    Keyed by the ROW, not by the pane id, because an id alone does not name the
+    row's pane: a row that outlived its server holds an id the next server gives
+    to another agent (:func:`_outlived`). Such a row is given no view, so it
+    reads ``lost`` and not as the other agent's state, and nothing that acts on
+    a view — a listing's reconcile, ``reap``, a restart — takes that agent's
+    pane for the row's. The server is asked when it started only once some pane
+    has answered: with nothing to judge, the question is not asked.
     """
     try:
         windows = (
@@ -936,7 +996,7 @@ def _observe(
         for agent in agents:
             window = windows.get(agent.pane_id)
             if window is not None:
-                seen[agent.pane_id] = _PaneView(
+                seen[agent.id] = _PaneView(
                     window.dead,
                     window.dead_status,
                     window.current_command,
@@ -951,7 +1011,7 @@ def _observe(
                 continue
             facts = srv.pane_facts(agent.pane_id)
             if facts is not None:
-                seen[agent.pane_id] = _PaneView(
+                seen[agent.id] = _PaneView(
                     facts.dead,
                     facts.dead_status,
                     facts.current_command,
@@ -959,6 +1019,13 @@ def _observe(
                 )
         if live and not seen and not _server_answers(srv):
             return None
+        if seen:
+            started = srv.started_at()
+            seen = {
+                agent.id: seen[agent.id]
+                for agent in agents
+                if agent.id in seen and not _outlived(agent, started)
+            }
         return seen
     except TmuxError:
         return None
@@ -1089,7 +1156,7 @@ def _status(
     tmux_session: str | None,
     now: datetime,
 ) -> FleetAgentStatus:
-    pane = observed.get(agent.pane_id) if observed is not None else None
+    pane = observed.get(agent.id) if observed is not None else None
     state, detail = _derive(agent, session, pane, observed=observed is not None, now=now)
     return FleetAgentStatus(
         agent=agent, state=state, detail=detail, session=session, tmux_session=tmux_session
@@ -1202,6 +1269,7 @@ def spawn(
     takes_over: str | None = None,
     onboard: bool = True,
     bin_flag: bool = True,
+    own_worktree: Path | None = None,
 ) -> SpawnReceipt:
     """Start an agent for ``project`` in the fleet's tmux server and record it.
 
@@ -1219,7 +1287,11 @@ def spawn(
     are not replayed and that fallback may land on ``claude``. ``bin_flag`` is
     whether the caller takes ``--bin``: a replacement :func:`_respawn` starts
     for ``restart`` or ``switch`` does not, so a refusal of its binary names
-    ways out those commands have (:func:`_launch_binary`).
+    ways out those commands have (:func:`_launch_binary`). ``own_worktree`` is
+    such a replacement's too: the tree the agent it replaces worked in, which
+    is taken as it stands — branch, uncommitted work and all — when it is the
+    tree this spawn lands in (:func:`_ensure_worktree`), never put on the
+    branch today's task and codename would name.
 
     Every ``None`` means "the role's default" (config, then built-in). Refuses
     past ``max_agents_per_project``, a second manager, a worktree in a non-git
@@ -1407,6 +1479,7 @@ def spawn(
             branch,
             notes,
             refuse_if_taken=refuse_if_taken,
+            own=own_worktree,
         )
     notes.extend(f"accounts: {note}" for note in choice.notes)
     # A replayed spec already holds the role's arguments as they were at spawn;
@@ -1575,12 +1648,22 @@ def spawn(
         warning = auto_mode.spawn_note(evidence, role=role, label=stored.label, config=config)
         if warning is not None:
             notes.append(warning)
+    # Every note `_take_over` writes is a move that did not happen; `_type_prompt`'s are
+    # when the prompt was not typed (`SpawnReceipt.failures`).
+    moved: list[str] = []
     if takes_over is not None and identity.session_id is not None:
-        stored = _take_over(stored, takes_over, identity.session_id, notes)
+        stored = _take_over(stored, takes_over, identity.session_id, moved)
     _supersede(rows, views, stored, config)
-    if prompt:
-        _type_prompt(srv, stored.pane_id, prompt, notes)
-    return SpawnReceipt(agent=stored, asked_label=label, tmux_session=tmux_session, notes=notes)
+    typing: list[str] = []
+    typed = _type_prompt(srv, stored.pane_id, prompt, typing) if prompt else None
+    return SpawnReceipt(
+        agent=stored,
+        asked_label=label,
+        tmux_session=tmux_session,
+        notes=[*notes, *moved, *typing],
+        prompt_typed=typed,
+        failures=[*moved, *(typing if typed is False else [])],
+    )
 
 
 def _launch_binary(
@@ -1964,8 +2047,10 @@ def _verify_cap(store: ContextStore, stored: FleetAgent, cap: int) -> None:
     )
 
 
-def _type_prompt(srv: TmuxServer, pane_id: str, prompt: str, notes: list[str]) -> None:
+def _type_prompt(srv: TmuxServer, pane_id: str, prompt: str, notes: list[str]) -> bool:
     """Wait (bounded) for the agent to come up, then paste the prompt and press Enter.
+
+    Returns whether it was typed; when it was not, a note says why.
 
     Ready means the pane's foreground process is no longer our launcher (or it
     has produced scrollback). Past :data:`PROMPT_TIMEOUT` a SINGLE-LINE prompt
@@ -1979,14 +2064,29 @@ def _type_prompt(srv: TmuxServer, pane_id: str, prompt: str, notes: list[str]) -
     has requested nothing — so tmux replaces every LF with a CR and the agent
     reads N submitted messages instead of one. That is not a slow start's cost
     to pay silently, so it is not typed; the note says what to do instead.
+
+    Never raises: it runs after the row is recorded, and ``restart`` and
+    ``switch`` read a raise out of ``spawn`` as "no replacement started" — they
+    gave the claims parked for a replacement that was up back to the pool,
+    announced its exit and woke the manager for a second worker (review of
+    #203, final round, FLEET-4). So a poll tmux will not answer (a wedged
+    server's timeout, an OS refusal) is a note, as a refused paste already was.
     """
     deadline = _monotonic() + PROMPT_TIMEOUT
     ready = False
     while True:
-        facts = srv.pane_facts(pane_id)
+        try:
+            facts = srv.pane_facts(pane_id)
+        except TmuxError as exc:
+            notes.append(
+                f"tmux could not be asked whether the agent is up ({exc}) — the prompt was "
+                "NOT typed. Send it once the agent is up: `aisquare fleet tell <label> …`, "
+                "or `aisquare fleet attach`"
+            )
+            return False
         if facts is None or facts.dead:
             notes.append("the agent exited before the prompt could be typed")
-            return
+            return False
         if _agent_running(facts.current_command) or facts.history_size > 0:
             ready = True
             break
@@ -2003,7 +2103,7 @@ def _type_prompt(srv: TmuxServer, pane_id: str, prompt: str, notes: list[str]) -
             "as its own message. Send it once the agent is up: `aisquare fleet tell "
             "<label> …`, or `aisquare fleet attach`"
         )
-        return
+        return False
     else:
         notes.append(
             f"the agent did not come up within {PROMPT_TIMEOUT:.0f} s — prompt typed anyway"
@@ -2013,6 +2113,8 @@ def _type_prompt(srv: TmuxServer, pane_id: str, prompt: str, notes: list[str]) -
         srv.send_keys(pane_id, "Enter")
     except TmuxError as exc:
         notes.append(f"could not type the prompt: {exc}")
+        return False
+    return True
 
 
 #: How long after its end an agent whose window is still on the tmux server stays in
@@ -2158,7 +2260,7 @@ def _end_dead_rows(
         for agent in agents
         if agent.ended_at is None
         and (observed := views.get(agent.tmux_socket)) is not None
-        and (pane := observed.get(agent.pane_id)) is not None
+        and (pane := observed.get(agent.id)) is not None
         and pane.dead
     ]
     if not dead:
@@ -2216,7 +2318,7 @@ def _lingering_windows(
     owners: dict[tuple[str, str], FleetAgent] = {}
     for agent in agents:
         observed = views.get(agent.tmux_socket)
-        pane = observed.get(agent.pane_id) if observed else None
+        pane = observed.get(agent.id) if observed else None
         if pane is None or not pane.dead:
             continue
         key = (agent.tmux_socket, agent.pane_id)
@@ -2494,12 +2596,18 @@ def _stop_row(
         was already safe — ``_tmux`` raises on the timeout, through either twin
         — so what changes here is the answered-but-refused case, which now
         raises and lands in ``_verify_gone``'s "could not be asked" branch.
+
+        Either read finds a pane by its id, and on a server that started after
+        the row was written that pane is another agent's (:func:`_outlived`):
+        the row's own is gone with the server it ran on, which is what ``None``
+        says. Asked of tmux only once a pane has answered, and strictly, as the
+        reads before it.
         """
         for window in srv.windows_or_raise(session):
             if window.pane_id == agent.pane_id:
-                return window
+                return None if _outlived(agent, srv.started_at()) else window
         facts = srv.pane_facts_or_raise(agent.pane_id)
-        if facts is None:
+        if facts is None or _outlived(agent, srv.started_at()):
             return None
         return WindowInfo(
             session=session,
@@ -2551,7 +2659,11 @@ def _stop_row(
         # agent's claims to the next worker (review of #121, round 9). The comment
         # it carried, "already gone — which is what the kill wanted", is still true
         # for a pane that really is gone: `_verify_gone` looks again and says so.
-        srv.kill_window(agent.pane_id)
+        # A window `_window` did not find is not killed at all: gone is what the kill
+        # wanted, and on a server younger than the row the id names ANOTHER agent's
+        # pane (`_outlived`), whose window a `--force` stop or a shutdown killed.
+        if window is not None:
+            srv.kill_window(agent.pane_id)
     except TmuxError as exc:
         confirmed = _verify_gone(_window, agent.label, exc)
         # …but never at the cost of a status already READ: a pane seen dead with
@@ -3666,9 +3778,11 @@ def switch(
     written under one ``CLAUDE_CONFIG_DIR`` from another. The path form is
     documented and the id is preserved, but this machine has one login, so the
     cross-account leg is unverified; a resume that fails leaves a pane whose
-    error is visible, and ``--fresh`` is the documented way around it. A
-    replay that cannot start (:func:`_refuse_a_replay_that_cannot_start`) is
-    refused before the agent is stopped.
+    error is visible, and ``--fresh`` is the documented way around it. What
+    ``spawn`` would refuse without the stop — a replay that cannot start
+    (:func:`_refuse_a_replay_that_cannot_start`), the role, a task that is
+    closed — is refused before the agent is stopped, as :func:`restart`
+    refuses it.
     """
     with store_session() as store:
         agent = _live_agent(store, project, label)
@@ -3681,7 +3795,12 @@ def switch(
             # own row, and its take-back wrote a stale state over the second's mark
             # (review of #163, round 2).
             raise _in_hand_over("switch", label)
-        task = store.get_task(agent.task_id) if agent.task_id else None
+        # `spawn`'s refusal for the task (done, dropped, gone from the board), asked
+        # before anything is stopped, as `restart` asks it. After the stop it left the
+        # agent stopped and nothing started: a row spawned before rule 3 still names
+        # its closed task until its next briefing, and switching one always lost it
+        # (review of #203, final round, FLEET-3).
+        task = _task_for(store, project, agent.task_id)
         # The session's own newest entries (oldest first), not the project's last
         # 60 filtered down: on a busy board those all belonged to other agents
         # and the prompt lost its "last board entries" (review of #205, third round).
@@ -3690,8 +3809,10 @@ def switch(
             if agent.session_id is not None
             else []
         )
+    _require_role(agent.role)  # `spawn`'s first refusal, before the stop as the task's
     current = _account_slot_of(agent, session)
     notes: list[str] = []
+    failures: list[str] = []  # the notes that say what did not happen (`SwitchReceipt`)
     # The accounts service decides, as for every launch
     # (tests/test_one_account_resolver.py): `--to` is the flag rung; without it
     # headroom decides first, with the account the agent is leaving excluded.
@@ -3762,11 +3883,17 @@ def switch(
         # (review of the #205 fold, round 2).
         if session is not None and (left := _unmark_handing_over(session)) is not None:
             notes.append(left)
+            failures.append(left)
+    # The replacement is started from the row as the stop ENDED it, as `restart`
+    # starts one, not from the snapshot read before the headroom lookup and the
+    # grace: a task that closed meanwhile is gone from the row (rule 3), and
+    # `spawn` refused the snapshot's closed task with the agent already stopped
+    # (review of #203, final round, FLEET-3).
     stopped = handed_over.agent
     try:
         receipt, resumed, more = _respawn(
             project,
-            agent,
+            stopped,
             session,
             task,
             recent,
@@ -3775,7 +3902,7 @@ def switch(
             # What a FRESH replacement is told it takes over from: the account move is
             # the one thing it cannot read off the board.
             reason=f"it stopped on {reason or 'a usage limit'} under another Claude account",
-            resume_prompt=_resume_prompt(agent, reason),
+            resume_prompt=_resume_prompt(stopped, reason),
             takes_over=True,
             spawned_by=spawned_by,
             # The hook's hand-over is nobody's add (#139): `spawn`'s `onboard`.
@@ -3786,8 +3913,9 @@ def switch(
             _abandon_handover(stopped)  # no replacement is coming for the parked claims
         raise
     notes.extend(more)
+    failures.extend(receipt.failures)
     from_name = f"slot {current}" if current is not None else "its shell's claude"
-    how = "resumed its session" if resumed else "started fresh with a hand-off prompt"
+    how = _how_started(resumed, typed=bool(receipt.prompt_typed))
     why = f" ({reason})" if reason else ""
     # The suppression is entered FIRST: a store that cannot be opened is the courtesy
     # lost too, never a moved agent reported as not moved (review of #205, fourth round).
@@ -3808,6 +3936,7 @@ def switch(
         resumed=resumed,
         tmux_session=receipt.tmux_session,
         notes=notes,
+        failures=failures,
     )
 
 
@@ -3847,9 +3976,17 @@ def _respawn(
     The replacement replays the row's launch spec (#144; ``spawn(spec=…)``);
     ``permission_mode`` is a restart's explicit one, which wins over the spec
     as an explicit argument wins over the config, and is what the
-    replacement's spec records. ``onboard`` is :func:`spawn`'s.
+    replacement's spec records. ``onboard`` is :func:`spawn`'s. A worktree
+    agent's replacement works in the same tree, as it stands: its branch is
+    the one the agent was on, whatever its task or the codename says now
+    (``spawn(own_worktree=…)``).
     """
     notes: list[str] = []
+    if task is not None and agent.task_id != task.id:
+        # Read before the stop, and closed during it: the row the stop ended no longer
+        # names it (rule 3), and a hand-off prompt naming it set the replacement on
+        # finished work.
+        task = None
     transcript = (
         Path(session.transcript_path) if session is not None and session.transcript_path else None
     )
@@ -3883,6 +4020,7 @@ def _respawn(
         # Asked again here, after a stop that can outlast the binary (a relink in the
         # grace): the refusal names no `--bin`, which no command that gets here takes.
         bin_flag=False,
+        own_worktree=agent.cwd if agent.worktree else None,
     )
     if agent.launch_spec is not None:
         # Said once the replacement is up, for what it really took from the row: a
@@ -4135,7 +4273,7 @@ def restart(
             nudge_manager(project.id, reason=f"{label} exited")
         raise
     notes.extend(more)
-    how = "resumed its session" if resumed else "started fresh with a hand-off prompt"
+    how = _how_started(resumed, typed=bool(receipt.prompt_typed))
     # The suppression is entered FIRST, as in `switch`: a store that cannot be opened
     # costs the courtesy, never a restarted agent reported as not restarted.
     with contextlib.suppress(Exception), store_session() as store:  # the courtesy, not the record
@@ -4157,12 +4295,29 @@ def restart(
 
 
 def _pane_alive(agent: FleetAgent) -> bool:
-    """Whether the row's pane exists and has not died — ``False`` when tmux cannot say."""
+    """Whether the row's pane exists and has not died — ``False`` when tmux cannot say.
+
+    A pane under the row's id on a server younger than the row is another
+    agent's (:func:`_outlived`), so it is not the row's pane alive. When the
+    server started is a second question, put once the pane has answered alive,
+    and a refusal of that one judges nothing, as a start tmux does not report
+    does. Read as "cannot say", it sent the restart of a RUNNING agent down
+    the other branch: stopped as ``fleet stop`` stops it, its claims released
+    and its exit announced, then replaced with no hand-over (review of the
+    #203 final-round fixes, F5).
+    """
+    srv = server_for(agent.tmux_socket)
     try:
-        facts = server_for(agent.tmux_socket).pane_facts(agent.pane_id)
+        facts = srv.pane_facts(agent.pane_id)
     except TmuxError:
         return False
-    return facts is not None and not facts.dead
+    if facts is None or facts.dead:
+        return False
+    try:
+        started = srv.started_at()
+    except TmuxError:
+        started = None
+    return not _outlived(agent, started)
 
 
 def project_of(agent: FleetAgent) -> ProjectInfo:
@@ -4236,6 +4391,25 @@ def _abandon_handover(stopped: FleetAgent) -> None:
         _team().release_agent_claims(store, stopped, why="hand-over failed")
         _emit_exit(store, stopped)
     nudge_manager(stopped.project_id, reason=f"{stopped.label} exited")
+
+
+def _how_started(resumed: bool, *, typed: bool) -> str:
+    """How a replacement began, for the board's ``switched`` and ``restarted`` lines.
+
+    Worded from what reached its pane as well as from how it was launched. A
+    replacement whose first line was not typed — up too slowly for a multi-line
+    paste, gone before it, refused by tmux — sits idle at an empty prompt, and
+    the line said "started fresh with a hand-off prompt" over it. On the
+    automatic hand-over that line was the only account anyone got (review of
+    #203, final round, FLEET-5); the receipt's notes say why it was not typed.
+    """
+    if resumed:
+        if typed:
+            return "resumed its session"
+        return "resumed its session, but the line telling it to continue was NOT typed"
+    if typed:
+        return "started fresh with a hand-off prompt"
+    return "started fresh, but its hand-off prompt was NOT typed"
 
 
 def _restart_prompt(agent: FleetAgent) -> str:
@@ -4367,7 +4541,7 @@ def reap(project: ProjectInfo | None = None, *, server_down: bool = False) -> Re
                     observed = views.get(agent.tmux_socket)
                     if observed is None:
                         continue  # that socket could not be asked: nothing is marked
-                    pane = observed.get(agent.pane_id)
+                    pane = observed.get(agent.id)
                     if (pane is None or pane.dead) and _handed_over(
                         agent,
                         store.get_session(agent.session_id) if agent.session_id else None,
@@ -4549,6 +4723,8 @@ def nudge_manager(project_id: str, *, reason: str) -> bool:
             facts = srv.pane_facts(manager.pane_id)
             if facts is None or facts.dead or not _agent_running(facts.current_command):
                 return False
+            if _outlived(manager, srv.started_at()):
+                return False  # the id is another agent's on a newer server
             pane = _PaneView(
                 facts.dead,
                 facts.dead_status,

@@ -224,6 +224,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `status` and `key show` name the file and say it holds no key (blank, not
   UTF-8, or unreadable by this user), where they said only that
   `$EXPLAINABILITY_API_KEY` is not set.
+- **A fleet row that outlived its tmux server never acts on the pane that took
+  its id.** Pane ids are unique for one server's lifetime. After a reboot or a
+  hand-run `tmux -L asq kill-server`, the first spawn in any project starts a
+  fresh server that hands the same ids out again, and an old row, asked about by
+  id, answered with the new agent's pane — another project's manager, or a
+  newer agent of its own project. It listed as that agent's state, a board
+  write nudged that agent, and `fleet stop`, `shutdown`, `restart` and `switch`
+  of the old row typed `/exit` into it and killed its window. A server that
+  started after a row was written holds none of its panes (`#{start_time}`,
+  `TmuxServer.started_at`): the row reads `✗ lost`, a plain `reap` records it,
+  ending it touches nothing else, and its agent view and Manager tab show no
+  pane (they showed the other agent's screen and typed into it).
 
 ### Added
 - **The navigator is resizable** (#137). The line between the sidebar and the
@@ -388,15 +400,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `switched` join its wake kinds); other API errors end the turn as `waiting`
   with a `turn_failed` line. `aisquare fleet switch <label> [--to A] [--fresh]`
   stops the agent as `fleet stop` would and starts it again under the same
-  label, task and worktree on the account with the most headroom, **resuming
+  label and task, in its worktree as it stands, on the account with the most
+  headroom, **resuming
   the same session** from its transcript (`claude --resume <path>`) when it is
   on disk, else — or with `--fresh` — with a hand-off prompt built from the
-  board, the old session's claims moving onto the new session with its row. With
+  board, the old session's claims moving onto the new session with its row; an
+  agent whose role, task or binary would refuse the replacement is refused
+  before it is stopped, and a task that closes during the stop is left off the
+  replacement. With
   `on_limit = switch` the fleet does that by itself when the limit lifts more
   than `wait_if_reset_within_minutes` (15) away — in a worker detached from
   the agent's own hook, so the window kill cannot take the hand-over down; a
   hand-over that finds no headroom leaves the agent parked with Claude Code's
-  own wait-and-continue intact. A moved agent keeps its task claims (its
+  own wait-and-continue intact, and one that goes ahead puts what it could not
+  do (a hand-off prompt not typed, claims not moved) on the board beside
+  `switched`, whose wording, like `restarted`'s, says whether the
+  replacement's first line was typed. A moved agent keeps its task claims (its
   session parks them, as a `/clear` does, for the same id when it resumes and
   for the new one when it starts fresh), a resumed one is told in one line to
   continue, and no `agent_exited` goes out for either; every reset a surface
@@ -1238,7 +1257,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   view gains **Stop** and **Restart**.
   `aisquare fleet restart <label> [--fresh]` — and the button — starts the
   agent again under its own label with the same role, task, worktree and
-  account, **resuming its session** from its transcript when that is on disk
+  account — the worktree as it stands, on the branch the agent was on, even
+  after its task closed or `fleet rename` — **resuming its session** from its transcript when that is on disk
   (`claude --resume <transcript>`), else fresh with a hand-off prompt from the
   board; a running agent is stopped first and handed over as `fleet switch`
   hands one over (its claims wait for the replacement and no exit is

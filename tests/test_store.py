@@ -1081,6 +1081,7 @@ def test_doctor_names_what_a_store_lacks_instead_of_calling_it_readable(
     assert "persona" not in row.detail, "another line's columns are not this build's to report"
     assert row.fix is not None and f"cp {_db_path()}" in row.fix, row.fix
     assert "mv " not in row.fix, "the corrupt-store move would drop an intact history"
+    assert "github.com/AISquare-Studio/aisquare-cli/issues" in row.fix, "report it where?"
 
 
 def test_doctor_fails_on_what_no_step_of_this_build_puts_back() -> None:
@@ -1113,6 +1114,66 @@ def test_doctor_fails_on_what_no_step_of_this_build_puts_back() -> None:
     assert sorted(missing[1:]) == [f"index {i}" for i in indexes], missing
     assert row.status is CheckStatus.fail, row
     assert f"schema: {', '.join(missing[:6])} and 1 more;" in row.detail, row.detail
+
+
+@pytest.mark.parametrize(
+    ("named", "script"),
+    [
+        ("table entry", "DROP TABLE entry;"),
+        (
+            "column entry.deleted_at",
+            "DROP INDEX entry_pool_project; ALTER TABLE entry DROP COLUMN deleted_at;",
+        ),
+    ],
+)
+def test_doctor_names_a_store_without_its_notes_table_instead_of_calling_it_unreadable(
+    named: str, script: str
+) -> None:
+    """The row counted the notes before it read the schema, and the count reads
+    ``entry``. A store without that table, or a column of it, raised "no such table:
+    entry" there and read as unreadable, with the corrupt-store move for its remedy: an
+    intact history moved aside over a table the file merely lacks. The schema is read
+    first, the count is left out when ``entry`` is what is missing, and the row names
+    the gap like any other."""
+    from aisquare.services import diagnostics
+
+    open_store().close()
+    raw = sqlite3.connect(str(_db_path()))
+    try:
+        raw.executescript(script)
+    finally:
+        raw.close()
+
+    row = diagnostics._check_database()
+
+    assert row.status is CheckStatus.fail, row
+    assert row.detail.startswith(
+        f"context.db opens but lacks part of this build's schema: {named}"
+    ), row.detail
+    assert row.fix is not None and "mv " not in row.fix, row.fix
+
+
+@pytest.mark.parametrize("script", ["DROP TRIGGER entry_ai;", "DROP INDEX fleet_agent_live_label;"])
+def test_doctor_says_a_missing_index_or_trigger_fails_nothing(script: str) -> None:
+    """A missing table or column fails its readers with "no such table" or "no such
+    column", and the row said that of every gap. Nothing raises on a missing index or
+    trigger: a unique index stops refusing duplicates, a note trigger stops keeping
+    search in step with the notes. Said of those alone, the row warned of a failure
+    the operator would never see and not of the one they had."""
+    from aisquare.services import diagnostics
+
+    open_store().close()
+    raw = sqlite3.connect(str(_db_path()))
+    try:
+        raw.executescript(script)
+    finally:
+        raw.close()
+
+    row = diagnostics._check_database()
+
+    assert row.status is CheckStatus.fail, row
+    assert "a missing index or trigger fails nothing" in row.detail, row.detail
+    assert "no such" not in row.detail, row.detail
 
 
 def test_each_step_from_v15_on_declares_what_it_builds_and_builds_nothing_twice() -> None:

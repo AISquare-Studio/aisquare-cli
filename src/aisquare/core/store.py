@@ -4008,9 +4008,10 @@ def _ladder_schema() -> _Schema:
 def _missing_from(connection: sqlite3.Connection, expected: _Schema) -> list[str]:
     """``expected``'s tables, columns, indexes and triggers that ``connection`` lacks.
 
-    In the order the ladder made them. A missing table is named once, not with
-    each of its columns and indexes. Only reads, and only this build's tables:
-    another line's are not looked at.
+    Tables first, in the order the ladder made them, each followed by its missing
+    columns by name; then indexes and triggers, again in the ladder's order. A
+    missing table is named once, not with each of its columns and indexes. Only
+    reads, and only this build's tables: another line's are not looked at.
     """
     present = {row[0] for row in connection.execute("SELECT name FROM sqlite_master")}
     missing: list[str] = []

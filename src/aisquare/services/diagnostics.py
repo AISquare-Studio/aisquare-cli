@@ -463,6 +463,9 @@ def _uncreated_home(name: str) -> DoctorCheck | None:
 #: "and N more".
 _MISSING_SHOWN = 6
 
+#: Where the database row sends a schema gap this build cannot close (``project.urls``).
+_ISSUES_URL = "https://github.com/AISquare-Studio/aisquare-cli/issues"
+
 
 def _check_database() -> DoctorCheck:
     absent = _uncreated_home("database")
@@ -470,8 +473,14 @@ def _check_database() -> DoctorCheck:
         return absent
     try:
         with store_session() as store:
-            count = len(store.entries("user"))
             missing = store.missing_schema()
+            # The count reads `entry`, so it waits for the schema. Counted first, a store
+            # without that table (or a column of it) raised "no such table: entry" here
+            # and was sent the corrupt-store move below, its intact history with it.
+            lacks_entry = any(
+                item == "table entry" or item.startswith("column entry.") for item in missing
+            )
+            count = None if lacks_entry else len(store.entries("user"))
     except Exception as exc:  # diagnostics must never crash
         # "Re-initialise: aisquare init" was measured CRASHING on every state
         # that reaches this line — 59 lines of traceback on a corrupt file, 72
@@ -496,17 +505,32 @@ def _check_database() -> DoctorCheck:
         shown = ", ".join(missing[:_MISSING_SHOWN])
         if len(missing) > _MISSING_SHOWN:
             shown += f" and {len(missing) - _MISSING_SHOWN} more"
+        # What the gap costs depends on what is missing. A table or column fails its
+        # readers loudly; an index or trigger fails nothing, and what it did just stops.
+        costs: list[str] = []
+        if any(item.startswith(("table ", "column ")) for item in missing):
+            costs.append(
+                "a command that reads a missing table or column fails with 'no such "
+                "table' or 'no such column'"
+            )
+        if any(item.startswith(("index ", "trigger ")) for item in missing):
+            costs.append(
+                "a missing index or trigger fails nothing, so what it did stops unseen: "
+                "a unique index refusing duplicates, a note trigger keeping `aisquare "
+                "context search` in step with the notes, any index keeping reads fast"
+            )
+        counted = "" if count is None else f" ({count} user entries)"
         database = paths.db_path()
         return _fail(
             "database",
-            f"context.db opens ({count} user entries) but lacks part of this build's "
-            f"schema: {shown}; a command that reads a missing table or column fails "
-            "with 'no such table' or 'no such column'",
+            f"context.db opens{counted} but lacks part of this build's schema: {shown}; "
+            + "; ".join(costs),
             "The open that just ran adds back the tables and columns this build knows "
             "another line can skip, and these are not among them: another build or a "
             "hand edit changed the store in a way this build does not know. The history "
             f"in it is intact, so do not move it aside: keep a copy (cp {database} "
-            f"{database}.bak) and report this line with the output of `aisquare --version`",
+            f"{database}.bak) and report this line, with the output of `aisquare "
+            f"--version`, at {_ISSUES_URL}",
         )
     marker = paths.truncation_marker_path()
     if marker.exists():

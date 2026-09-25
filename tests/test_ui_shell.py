@@ -3225,9 +3225,12 @@ def test_a_width_the_file_already_has_is_not_rewritten_and_a_save_due_at_quit_is
     tmp_path: Path, script: Script, isolated_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     seed(tmp_path, ("prj_a", "alpha", None))
-    # `<` then `>` must both land inside one debounce; the default left a margin of a few ms
-    # against a loaded runner, so this test's debounce is a generous one.
-    monkeypatch.setattr(Autosave, "DEBOUNCE", 0.5)
+    # `<` then `>` must both land inside one debounce, and no length of debounce promises
+    # that: a key press waits for the process to look idle, up to a second twice over, and on
+    # two ambient legs of #203 (runs 36184588899 and 36184598254) a 0.5 s debounce ran out
+    # between the keys and 30 was written. So this test's debounce never ends on its own. The
+    # test ends it with the call the timer makes (`wake`), once the saver holds the width.
+    monkeypatch.setattr(Autosave, "DEBOUNCE", 3600.0)
     rewrites: list[object] = []
 
     def spy(target: Path, body: str, *, keep_mode: bool = True, durable: bool = True) -> None:
@@ -3239,12 +3242,21 @@ def test_a_width_the_file_already_has_is_not_rewritten_and_a_save_due_at_quit_is
     async def go(pilot: Pilot[None]) -> int:
         app = fleet_app(pilot)
         declared = _declared(app)
+        saver = app.query_one(Divider)._autosave
+        assert saver is not None
+
+        async def debounce_ends(width: int) -> None:
+            await _asked(pilot, width)
+            saver.wake()
+            await _settled(pilot)
+
         app.sidebar.focus()
         await pilot.press("greater_than_sign")
-        await _settled(pilot)  # one write: 34
-        await pilot.press("less_than_sign")  # 30 queued...
+        await debounce_ends(declared + RESIZE_STEP)  # one write: 34
+        await pilot.press("less_than_sign")
+        await _asked(pilot, declared)  # 30 queued...
         await pilot.press("greater_than_sign")  # ...and back to what the file says: handed
-        await _settled(pilot)  # over, not rewritten — the file decides, under its lock
+        await debounce_ends(declared + RESIZE_STEP)  # over, not rewritten — the file decides
         await pilot.press("greater_than_sign")  # 38 queued — and the app quits inside the debounce
         await _asked(pilot, declared + 2 * RESIZE_STEP)
         return declared

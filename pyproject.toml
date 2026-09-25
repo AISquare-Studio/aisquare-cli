@@ -94,6 +94,22 @@ explainability = [
   # join the proxy's Run instead of fragmenting into one Run per drain.
   "aisquare[explainability]>=1.1",
 ]
+voice = [
+  # `aisquare captain voice`: the captain's voice page — one static page and one
+  # websocket on 8749, served the way `serve` and cliXR's `xr` serve theirs.
+  # starlette + uvicorn are the pair `serve` already reaches for (mcp brings
+  # them in); websockets is on the list because uvicorn serves HTTP happily
+  # without it and answers every websocket handshake with 404 — the page would
+  # load and the mic would never connect. faster-whisper is the transcriber,
+  # imported lazily inside the factory (services/captain/voice.py says why);
+  # segno draws the QR for the phone and has no dependencies of its own.
+  # Floors, not ceilings: the same pins cliXR measured for its [xr] extra.
+  "starlette>=0.37",
+  "uvicorn>=0.30",
+  "websockets>=12",
+  "faster-whisper>=1.0",
+  "segno>=1.6",
+]
 tui = [
   # Kept as a no-op alias for one release: `pipx install 'aisquare-cli[tui]'`
   # was the documented way to get the board TUI before textual became core.
@@ -129,6 +145,11 @@ dev = [
   # Same bounds as the core dependency: the dev env must resolve the major the
   # UI code actually targets, not merely "some textual".
   "textual>=8.2,<9",
+  # The captain's voice page under test: starlette and uvicorn ride in with mcp
+  # already; websockets is what lets starlette's TestClient open the websocket,
+  # and segno what draws the QR the CLI prints (tests pin its absence too).
+  "websockets>=12",
+  "segno>=1.6",
   # The CI test bed validates what it EMITS against the server's vendored JSON
   # Schemas (tests/fixtures/ci_contract/v2/schemas), not against a mirror it
   # wrote itself — a scorer with its own predicate can only ever agree with
@@ -181,3 +202,10 @@ files = ["src", "tests"]
 strict = true
 pretty = true
 plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+# The captain's transcriber imports these lazily, inside the factory, and the plain
+# dev extra does not install them (faster-whisper drags in ctranslate2 and av); mypy
+# still walks the import lines. Untyped here, checked for real under [voice].
+module = ["faster_whisper", "faster_whisper.*", "numpy", "segno"]
+ignore_missing_imports = true

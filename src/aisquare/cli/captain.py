@@ -19,6 +19,7 @@ from typing import Annotated, Any
 import typer
 from typer.core import TyperGroup
 
+from aisquare.cli import captain_voice
 from aisquare.cli.common import fail
 from aisquare.cli.serve import dependency_error
 from aisquare.core.console import stderr_console, stdout_console
@@ -41,6 +42,10 @@ class _SayByDefault(TyperGroup):
     ``cli/global_flags.py`` this stays on the public typer surface."""
 
     def parse_args(self, ctx: Any, args: list[str]) -> list[str]:
+        if args and args[0] == "--voice":
+            # The plan's spelling of the voice page (T3, rider 13143 (1)): the leaf,
+            # not a message to the captain that starts with "--voice".
+            args = ["voice", *args[1:]]
         if args and args[0] not in self.commands and args[0] not in ctx.help_option_names:
             args = ["say", *args]
         result: list[str] = super().parse_args(ctx, args)
@@ -54,12 +59,31 @@ app = typer.Typer(
     invoke_without_command=True,
     no_args_is_help=False,
 )
+captain_voice.register(app)  # `voice`: the page, in its own module (T3)
 
 
 @app.callback()
-def captain(ctx: typer.Context) -> None:
-    """Start the home's captain, or attach to it when it is already running."""
+def captain(
+    ctx: typer.Context,
+    voice: Annotated[
+        bool,
+        typer.Option(
+            "--voice",
+            help="Serve the voice page — the plan's spelling of `aisquare captain voice`.",
+        ),
+    ] = False,
+) -> None:
+    """Start the home's captain, or attach to it when it is already running.
+
+    ``--voice`` is declared here so ``--help`` and the documented-commands guard
+    know the owner's spelling; the group's ``parse_args`` has already rewritten
+    it to the ``voice`` leaf before this callback runs, so the flag itself is
+    never seen true here.
+    """
     if ctx.invoked_subcommand is not None:
+        return
+    if voice:  # pragma: no cover — parse_args routes --voice to the leaf first
+        captain_voice.voice_page()
         return
     from aisquare.cli.fleet import _exec_attach, _fail_fleet, interactive_terminal
     from aisquare.services import fleet as fleet_service

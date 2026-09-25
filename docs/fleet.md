@@ -787,7 +787,8 @@ aisquare project onboard ~/work/new --group tools   # created if new
 Code session runs in is *captured* — registered so that its prompt history and
 injected memory work — but the sidebar and `aisquare project list` show only
 the projects added **on purpose**: `aisquare init`, `project onboard`,
-`project link`, `project switch`, the sidebar's `+`, `team on`, a fleet spawn,
+`project link`, `project switch`, the sidebar's `+`, `team on`, a fleet spawn
+that starts (not a refused one, and not the automatic usage-limit hand-over),
 or a fact written by hand with `context add --project` (#139). A captured
 directory stays out of the way until one of those happens; `a` in the sidebar
 shows the captured ones too (marked *captured*), `project list --all` lists

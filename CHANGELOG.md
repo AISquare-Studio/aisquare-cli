@@ -860,8 +860,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   *capture* (a row exists, prompt history and injection work, nothing is
   shown), while `init`, `project onboard`, `project link`, `project switch`,
   the sidebar's `+`, `team on` (and `serve` or a role `launch`, which turn it
-  on), a fleet spawn (a `restart` or `switch` too, codename or not) or `fleet
-  rename`, a project's account default (`accounts default <slot> --project`),
+  on), a fleet spawn that starts (a `restart` or `switch` by hand too, codename
+  or not; not a refused spawn, `fleet attach`, or the automatic usage-limit
+  hand-over) or `fleet rename`, a project's account default (`accounts default
+  <slot> --project`; clearing it adds nothing),
   and a fact written by hand (`context add --project`, `context import`) add a
   project **on purpose**. The sidebar
   and `project list` show onboarded projects only; `a` in the sidebar and

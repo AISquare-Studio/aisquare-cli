@@ -279,12 +279,15 @@ def test_powershell_reads_its_text_as_utf8_and_the_runner_sends_utf8() -> None:
     assert calls[0]["encoding"] == "utf-8" and calls[0]["input"] == "Nothing needs you — em dash"
 
 
-def test_the_real_runner_delivers_non_ascii_text_intact() -> None:
+def test_the_real_runner_delivers_non_ascii_text_intact(tmp_path: Path) -> None:
     """A child that decodes its stdin as UTF-8 must read the em dash the runner sent."""
-    check = (
-        "import sys; sys.exit(0 if sys.stdin.read() == 'Nothing needs you \u2014 em dash' else 3)"
+    heard = tmp_path / "heard.txt"
+    echo = (
+        "import pathlib, sys; "
+        f"pathlib.Path({str(heard)!r}).write_text(sys.stdin.read(), encoding='utf-8')"
     )
-    spk.run_subprocess([sys.executable, "-X", "utf8", "-c", check], "Nothing needs you — em dash")
+    spk.run_subprocess([sys.executable, "-X", "utf8", "-c", echo], "Nothing needs you — em dash")
+    assert heard.read_text(encoding="utf-8") == "Nothing needs you — em dash"
 
 
 def test_the_real_runner_says_a_synthesiser_it_cannot_run(tmp_path: Path) -> None:

@@ -103,6 +103,10 @@ def voice_page(
         chosen = speaker_mod.machine_voice()  # a bad [captain] speaker: one line, no traceback
     except ValueError as exc:
         fail(str(exc), error="bad_speaker_config")
+    try:
+        wake_word = voice.configured_wake_word()  # a bad [captain] wake_word: the same
+    except ValueError as exc:
+        fail(str(exc), error="bad_wake_word_config")
     problem = voice_dependency_error()
     if problem is not None and not show_token:
         fail(problem, error="voice_not_installed")
@@ -120,6 +124,7 @@ def voice_page(
         "host": host,
         "mode": effective,
         "speaker": speaker_mod.speaker_on(),
+        "wake_word": wake_word,
         "adb_reverse": voice.adb_reverse(port),
         "serving": not show_token,
     }
@@ -134,7 +139,10 @@ def voice_page(
             for line in qr:
                 console.print(f"  {line}")
             console.print()
-        console.print(f"mode: {effective} · speaker: {'on' if report['speaker'] else 'off'}")
+        console.print(
+            f"mode: {effective} · speaker: {'on' if report['speaker'] else 'off'}"
+            f" · wake word: {wake_word or 'off'} (listen mode)"
+        )
         console.print(f"Android over USB: {voice.adb_reverse(port)}, then open the same URL there")
         if problem is not None:
             console.print(f"note: {problem}")
@@ -149,6 +157,7 @@ def voice_page(
             transcriber_factory=lambda: voice.transcriber(model),
             on_thinking=_print_thinking,
             voice=chosen,
+            wake_word=wake_word,
         ),
     )
 

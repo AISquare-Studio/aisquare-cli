@@ -12,7 +12,6 @@ a fake — the shape T1's tests and cliXR's took.
 
 from __future__ import annotations
 
-import contextlib
 import json
 import logging
 import socket
@@ -115,6 +114,8 @@ class Harness:
         thinking: Callable[[], bool] | None = None,
         cue_after_s: float = 60.0,
         mode: voice.Mode = "focus",
+        wake_word: str = "",
+        wake_window_s: float = 5.0,
     ) -> None:
         self.transcribers: list[FakeTranscriber] = []
         self.spoken = Spoken()
@@ -160,6 +161,8 @@ class Harness:
             on_thinking=self.thinking_flips.append,
             cue_after_s=cue_after_s,
             poll_s=0.02,
+            wake_word=wake_word,
+            wake_window_s=wake_window_s,
         )
         self.app = build_app(token=TOKEN, hooks=self.hooks, mode=mode)
 
@@ -189,6 +192,16 @@ def _text(connection: Any) -> str:
             f"no frame within {RECEIVE_TIMEOUT_S:.0f}s — the server stopped sending"
         )
     return received[0]
+
+
+def _spoken(harness: Harness, count: int) -> None:
+    """Wait, inside the connection, for ``count`` spoken lines.
+
+    Speech follows the reply frame on a worker thread; a test that left the socket right
+    after the reply raced it, and lost once under a loaded box."""
+    deadline = time.monotonic() + 5
+    while len(harness.spoken.lines) < count and time.monotonic() < deadline:
+        time.sleep(0.005)
 
 
 def _until(connection: Any, kind: str) -> dict[str, Any]:
@@ -285,6 +298,7 @@ def test_focus_a_held_burst_is_interim_then_final_then_delivered_and_the_reply_i
             final = _until(connection, "stt")
             utterance = _until(connection, "utterance")
             reply = _until(connection, "reply")
+            _spoken(harness, 1)
     assert interim == {"t": "stt", "text": "approve the deploy", "final": False}
     assert final == {"t": "stt", "text": "approve the deploy", "final": True}
     assert utterance["text"] == "approve the deploy"
@@ -358,6 +372,7 @@ def test_the_reply_is_spoken_only_when_the_captain_made_no_speak_call_that_turn(
         for connection in _authed(client):
             connection.send_text(json.dumps({"t": "text", "text": "how is the fold"}))
             reply = _until(connection, "reply")
+            _spoken(harness, 0 if captain_spoke else 1)
     assert reply == {"t": "reply", "text": "all green", "spoken": not captain_spoke}
     assert harness.spoken.lines == ([] if captain_spoke else ["all green"])
 
@@ -448,6 +463,7 @@ def test_a_delivery_error_of_any_kind_is_said_and_clears_thinking_and_the_cue(
             harness.deliveries.raises = None
             connection.send_text(json.dumps({"t": "text", "text": "again"}))
             reply = _until(connection, "reply")
+            _spoken(harness, 1)
     assert error["code"] == "internal" and "disk is on fire" in error["message"]
     assert off["on"] is False, "thinking is off again after the failure"
     assert harness.spoken.lines == ["done"], "no cue and no line for the failed turn"
@@ -480,6 +496,7 @@ def test_a_speak_from_the_wait_before_the_text_was_typed_does_not_mute_this_repl
         for connection in _authed(client):
             connection.send_text(json.dumps({"t": "text", "text": "how is the fold"}))
             reply = _until(connection, "reply")
+            _spoken(harness, 1)
     assert reply["spoken"] is True and harness.spoken.lines == ["all green"]
 
 
@@ -495,6 +512,7 @@ def test_when_the_home_board_cannot_be_read_the_reply_is_still_spoken_and_it_is_
         for connection in _authed(client):
             connection.send_text(json.dumps({"t": "text", "text": "hello"}))
             reply = _until(connection, "reply")
+            _spoken(harness, 1)
     assert reply["spoken"] is True and harness.spoken.lines == ["done"], "audible beats silent"
     assert any("disk is on fire" in r.getMessage() for r in caplog.records), "never quietly"
 
@@ -505,6 +523,7 @@ def test_a_slow_reply_earns_one_spoken_cue_before_it_arrives() -> None:
         for connection in _authed(client):
             _burst(connection)
             _until(connection, "reply")
+            _spoken(harness, 2)
     assert harness.spoken.lines == ["on it", "here it is"]
 
 
@@ -514,6 +533,7 @@ def test_a_quick_reply_earns_no_cue() -> None:
         for connection in _authed(client):
             _burst(connection)
             _until(connection, "reply")
+            _spoken(harness, 1)
     assert harness.spoken.lines == ["quick"]
 
 
@@ -526,6 +546,7 @@ def test_no_reply_is_an_error_frame_and_a_spoken_line_never_a_crash() -> None:
             assert error["code"] == "no_reply" and "180s" in error["message"]
             connection.send_text(json.dumps({"t": "text", "text": "still alive?"}))
             _until(connection, "error")  # the socket is still open and answering
+            _spoken(harness, 2)
     assert harness.spoken.lines == ["the captain did not answer"] * 2
 
 
@@ -564,6 +585,265 @@ def test_listen_splits_two_utterances_on_silence_and_delivers_each() -> None:
     assert harness.deliveries.texts == ["spawn a coder", "and tell the manager"]
     assert harness.transcribers[0].finished == 2
     assert bytes(harness.transcribers[0].fed).count(LOUD) == 2 * FRAMES_PER_SECOND
+
+
+def _say(connection: Any) -> None:
+    """One spoken utterance in listen mode: a second of speech, then the silence that ends it."""
+    for _ in range(FRAMES_PER_SECOND):
+        connection.send_bytes(LOUD)
+    for _ in range(FRAMES_OF_SILENCE):
+        connection.send_bytes(QUIET)
+
+
+def test_listen_delivers_only_what_follows_the_wake_word_and_strips_it() -> None:
+    """The owner's request (13284): 'captain, find me this' activates it. The wake word is
+    matched on the final transcript — case, punctuation and whisper's near-spellings
+    normalised — stripped, and the rest delivered."""
+    harness = Harness(
+        canned=["Captain, find me this", "Kaptain. spawn a coder", "captain,tell the manager"],
+        mode="listen",
+        wake_word="captain",
+    )
+    with TestClient(harness.app) as client:
+        for connection in _authed(client):
+            for _ in range(3):
+                _say(connection)
+                assert _until(connection, "reply")["text"] == "done"
+    assert harness.deliveries.texts == ["find me this", "spawn a coder", "tell the manager"]
+
+
+def test_listen_drops_an_utterance_without_the_wake_word_never_delivered_never_spoken() -> None:
+    """The owner is in meetings: speech without the wake word never reaches the captain."""
+    harness = Harness(
+        canned=["spawn a coder", "Captain, what is up"], mode="listen", wake_word="captain"
+    )
+    with TestClient(harness.app) as client:
+        for connection in _authed(client):
+            _say(connection)
+            final = _until(connection, "stt")
+            while not final["final"]:
+                final = _until(connection, "stt")
+            assert final == {"t": "stt", "text": "", "final": True, "dropped": "no wake word"}, (
+                "not kept: the text never leaves the server"
+            )
+            _say(connection)
+            reply = _until(connection, "reply")
+            _spoken(harness, 1)
+    assert reply["text"] == "done"
+    assert harness.deliveries.texts == ["what is up"], "only the woken request was delivered"
+    assert harness.spoken.lines == ["done"], "nothing spoken for the dropped one"
+
+
+def test_the_wake_word_alone_opens_a_short_window_for_the_next_utterance() -> None:
+    """'Captain' alone: the awake frame (the page shows listening and plays its tone) and the
+    next utterance is delivered without the wake word; after the window it is dropped again.
+    Nothing is spoken for the window: the machine's voice would be heard inside it."""
+    harness = Harness(
+        canned=["Captain", "find me this", "Captain.", "too late"],
+        mode="listen",
+        wake_word="captain",
+        wake_window_s=0.4,
+    )
+    with TestClient(harness.app) as client:
+        for connection in _authed(client):
+            _say(connection)
+            awake = _until(connection, "awake")
+            assert awake["on"] is True and awake["seconds"] == 0.4
+            _say(connection)
+            assert _until(connection, "awake")["on"] is False, (
+                "taken: the window closes as the request goes in"
+            )
+            assert _until(connection, "reply")["text"] == "done"
+            _say(connection)  # "Captain." again — the window opens again
+            assert _until(connection, "awake")["on"] is True
+            assert _until(connection, "awake")["on"] is False, (
+                "silence: the window closes on its own"
+            )
+            time.sleep(0.2)  # and stays closed
+            _say(connection)
+            final = _until(connection, "stt")
+            while not final["final"]:
+                final = _until(connection, "stt")
+            _spoken(harness, 1)
+            assert final == {"t": "stt", "text": "", "final": True, "dropped": "no wake word"}, (
+                "past the window: dropped"
+            )
+    assert harness.deliveries.texts == ["find me this"]
+    assert harness.spoken.lines == ["done"], "the reply, and no spoken cue"
+
+
+def test_the_stop_word_after_the_wake_word_is_the_stop_word_never_a_request() -> None:
+    harness = Harness(canned=["Captain, stop listening."], mode="listen", wake_word="captain")
+    with TestClient(harness.app) as client:
+        for connection in _authed(client):
+            _say(connection)
+            off = _until(connection, "listening")
+    assert off == {"t": "listening", "on": False, "why": "stop word"}
+    assert harness.deliveries.texts == []
+
+
+def test_the_stop_word_closes_an_open_window_so_an_unmute_never_delivers_bare() -> None:
+    """A window that outlived the mute would hand the first utterance after the unmute —
+    the owner back in their meeting — to the captain."""
+    harness = Harness(
+        canned=["Captain", "stop listening", "spawn a coder"],
+        mode="listen",
+        wake_word="captain",
+        wake_window_s=30.0,
+    )
+    with TestClient(harness.app) as client:
+        for connection in _authed(client):
+            _say(connection)
+            assert _until(connection, "awake")["on"] is True
+            _say(connection)
+            assert _until(connection, "awake")["on"] is False, "the stop word closes the window"
+            assert _until(connection, "listening")["on"] is False
+            connection.send_text(json.dumps({"t": "listen", "on": True}))
+            assert _until(connection, "listening")["on"] is True
+            _say(connection)
+            final = _until(connection, "stt")
+            while not final["final"]:
+                final = _until(connection, "stt")
+    assert final == {"t": "stt", "text": "", "final": True, "dropped": "no wake word"}
+    assert harness.deliveries.texts == []
+
+
+@pytest.mark.parametrize(
+    ("off", "on"),
+    [
+        ({"t": "listen", "on": False}, {"t": "listen", "on": True}),
+        ({"t": "mode", "mode": "focus"}, {"t": "mode", "mode": "listen"}),
+    ],
+    ids=["mute", "mode-switch"],
+)
+def test_a_mute_or_a_mode_switch_closes_an_open_window_too(
+    off: dict[str, Any], on: dict[str, Any]
+) -> None:
+    harness = Harness(
+        canned=["Captain", "spawn a coder"], mode="listen", wake_word="captain", wake_window_s=30.0
+    )
+    with TestClient(harness.app) as client:
+        for connection in _authed(client):
+            _say(connection)
+            assert _until(connection, "awake")["on"] is True
+            connection.send_text(json.dumps(off))
+            assert _until(connection, "awake")["on"] is False
+            connection.send_text(json.dumps(on))
+            _until(connection, str(on["t"]) if on["t"] == "mode" else "listening")
+            _say(connection)
+            final = _until(connection, "stt")
+            while not final["final"]:
+                final = _until(connection, "stt")
+    assert final == {"t": "stt", "text": "", "final": True, "dropped": "no wake word"}
+    assert harness.deliveries.texts == []
+
+
+def test_typed_text_in_listen_mode_needs_no_wake_word() -> None:
+    """The wake word gates what the mic hears; a typed line is the owner's on purpose."""
+    harness = Harness(mode="listen", wake_word="captain")
+    with TestClient(harness.app) as client:
+        for connection in _authed(client):
+            connection.send_text(json.dumps({"t": "text", "text": "spawn a coder"}))
+            assert _until(connection, "reply")["text"] == "done"
+    assert harness.deliveries.texts == ["spawn a coder"]
+
+
+def test_the_stop_word_still_works_bare_with_the_wake_word_on() -> None:
+    harness = Harness(canned=["stop listening"], mode="listen", wake_word="captain")
+    with TestClient(harness.app) as client:
+        for connection in _authed(client):
+            _say(connection)
+            off = _until(connection, "listening")
+    assert off == {"t": "listening", "on": False, "why": "stop word"}
+    assert harness.deliveries.texts == []
+
+
+def test_an_empty_wake_word_delivers_everything_as_before_and_focus_mode_is_unchanged() -> None:
+    harness = Harness(canned=["spawn a coder"], mode="listen", wake_word="")
+    with TestClient(harness.app) as client:
+        for connection in _authed(client):
+            _say(connection)
+            assert _until(connection, "reply")["text"] == "done"
+    assert harness.deliveries.texts == ["spawn a coder"]
+    focus = Harness(canned="spawn a coder", mode="focus", wake_word="captain")
+    with TestClient(focus.app) as client:
+        for connection in _authed(client):
+            _burst(connection)
+            assert _until(connection, "reply")["text"] == "done"
+    assert focus.deliveries.texts == ["spawn a coder"], "hold to talk never needs the wake word"
+
+
+def test_the_hello_carries_the_wake_word_and_the_product_default_is_captain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = Harness(mode="listen", wake_word="captain")
+    with TestClient(harness.app) as client, client.websocket_connect("/ws") as connection:
+        connection.send_text(json.dumps({"t": "auth", "token": TOKEN}))
+        assert json.loads(_text(connection))["wake_word"] == "captain"
+    read = voice.configured_wake_word
+    monkeypatch.setattr(voice, "configured_wake_word", lambda: read(Path("/nonexistent/c.toml")))
+    assert Hooks().wake_word == "captain", "on by default"
+    monkeypatch.setattr(voice, "configured_wake_word", lambda: "")
+    assert Hooks().wake_word == "", "[captain] wake_word = '' switches it off"
+
+
+def test_the_wake_word_is_read_from_config_and_an_empty_string_switches_it_off(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    config = tmp_path / "config.toml"
+    assert voice.configured_wake_word(config) == "captain", "no file: the product default"
+    config.write_text('[captain]\nspeaker = "spd-say"\n', encoding="utf-8")
+    assert voice.configured_wake_word(config) == "captain", "no key: the product default"
+    config.write_text('[captain]\nwake_word = " Hey  Skipper "\n', encoding="utf-8")
+    assert voice.configured_wake_word(config) == "hey skipper"
+    config.write_text('[captain]\nwake_word = ""\n', encoding="utf-8")
+    assert voice.configured_wake_word(config) == "", "'' switches the wake word off"
+    with caplog.at_level(logging.WARNING, logger="aisquare.services.captain"):
+        config.write_text("[captain\nwake_word = ", encoding="utf-8")
+        assert voice.configured_wake_word(config) == "captain"
+    assert any("does not parse" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.parametrize("bad", ["3", "c@ptain", "capitán", "hey-captain", "1"])
+def test_a_wake_word_that_is_not_words_is_refused_never_read_as_off(
+    tmp_path: Path, bad: str
+) -> None:
+    """A typo must not switch the gate off: the owner's meetings must never reach the captain."""
+    config = tmp_path / "config.toml"
+    value = bad if bad == "3" else f'"{bad}"'
+    config.write_text(f"[captain]\nwake_word = {value}\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="letters and spaces"):
+        voice.configured_wake_word(config)
+
+
+def test_a_wake_word_of_two_words_matches_both_in_order() -> None:
+    wake = voice.WakeWord("hey captain")
+    assert wake.word == "hey captain"
+    assert wake.match("Hey, Kaptain, find me this") == (True, "find me this")
+    assert wake.match("hey captain") == (True, "")
+    assert wake.match("hey there, find me this") == (False, "")
+    assert wake.match("Captain, find me this") == (False, "")
+
+
+@pytest.mark.parametrize(
+    ("text", "woke", "rest"),
+    [
+        ("Captain, find me this", True, "find me this"),
+        ("captain.", True, ""),
+        ("Kaptain find me this", True, "find me this"),
+        ("Captian: what is up", True, "what is up"),
+        ("the captain should find me this", False, ""),
+        ("Captains, we need to talk", False, ""),
+        ("Captain's log is late", False, ""),
+        ("Captain… find me this", True, "find me this"),
+        ("spawn a coder", False, ""),
+        ("", False, ""),
+    ],
+)
+def test_the_wake_word_match_normalises_case_punctuation_and_near_spellings(
+    text: str, woke: bool, rest: str
+) -> None:
+    assert voice.WakeWord("captain").match(text) == (woke, rest)
 
 
 def test_listen_the_stop_word_turns_the_mic_off_and_is_not_delivered() -> None:
@@ -623,31 +903,16 @@ def test_the_pages_own_mode_switch_is_not_bounced_back_by_the_key_poll() -> None
     with TestClient(harness.app) as client:
         for connection in _authed(client):
             connection.send_text(json.dumps({"t": "mode", "mode": "listen"}))
-            frames = [_until(connection, "mode")]
-            deadline = time.monotonic() + 0.6
-            while time.monotonic() < deadline:
-                with contextlib.suppress(TimeoutError):
-                    frames.append(_until_within(connection, "mode", 0.1))
+            time.sleep(0.6)  # the slow write (0.3 s) lands, some thirty polls (0.02 s) pass
+            # A round trip: every frame the server sent before its answer is read first,
+            # so a bounce cannot hide in a reader that timed out (the old helper's hole).
+            connection.send_text(json.dumps({"t": "listen"}))
+            frames = []
+            while (frame := json.loads(_text(connection)))["t"] != "listening":
+                if frame["t"] == "mode":
+                    frames.append(frame)
     assert [f["mode"] for f in frames] == ["listen"], f"the page was bounced: {frames}"
     assert harness.mode_writes == ["listen"]
-
-
-def _until_within(connection: Any, kind: str, seconds: float) -> dict[str, Any]:
-    """Like ``_until``, bounded by ``seconds`` instead of the receive timeout."""
-    received: list[str] = []
-
-    def read() -> None:
-        received.append(connection.receive_text())
-
-    worker = threading.Thread(target=read, daemon=True)
-    worker.start()
-    worker.join(seconds)
-    if not received:
-        raise TimeoutError
-    frame = json.loads(received[0])
-    if frame["t"] != kind:
-        return _until_within(connection, kind, seconds)
-    return dict(frame)
 
 
 def test_switching_modes_flushes_an_open_utterance_and_the_hello_says_which_mode() -> None:
@@ -656,7 +921,7 @@ def test_switching_modes_flushes_an_open_utterance_and_the_hello_says_which_mode
         connection.send_text(json.dumps({"t": "auth", "token": TOKEN}))
         hello = json.loads(_text(connection))
         assert hello["mode"] == "listen" and hello["listening"] is True
-        assert set(hello) == {"t", "mode", "listening", "speaker", "thinking"}
+        assert set(hello) == {"t", "mode", "listening", "speaker", "thinking", "wake_word"}
         for _ in range(FRAMES_PER_SECOND):
             connection.send_bytes(LOUD)
         _until(connection, "stt")

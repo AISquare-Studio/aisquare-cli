@@ -46,6 +46,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import re
 import time
 from array import array
 from collections.abc import Callable, Iterator
@@ -53,6 +54,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from math import sqrt
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
 from aisquare.core.version import DISTRIBUTION
@@ -93,6 +95,12 @@ MAX_AUDIO_BYTES = int(BYTES_PER_SECOND * MAX_UTTERANCE_S)
 #: What turns the mic off in always-listening mode instead of being delivered (matched on
 #: the whole final transcript, case and trailing punctuation aside).
 STOP_WORDS: frozenset[str] = frozenset({"stop listening"})
+WAKE_WORD = "captain"
+"""Listen mode's wake word (the owner's request, 13284): only an utterance that begins with it
+is delivered, stripped of it; ``[captain] wake_word`` in config.toml changes it, ``''`` turns
+it off. Focus mode (hold to talk) never needs it."""
+WAKE_WINDOW_S = 5.0
+"""How long the wake word ALONE keeps the mic open for the next utterance, delivered bare."""
 #: A reply slower than this earns one spoken cue, so the owner knows the request landed.
 CUE_AFTER_S = 3.0
 CUE_TEXT = "on it"
@@ -370,6 +378,88 @@ class Segmenter:
         return self._transcriber.finish()
 
 
+WAKE_WORD_SHAPE = re.compile(r"[a-z]+(?: [a-z]+)*")
+
+
+def configured_wake_word(config_path: Path | None = None) -> str:
+    """``[captain] wake_word`` from config.toml: ``''`` switches it off; absent, the default.
+
+    A to z letters and spaces, one word or a few ('captain', 'hey captain'). Anything else
+    raises ValueError, which the CLI refuses in one line like a bad speaker name: a typo
+    must never read as 'off', since the owner's meetings must never reach the captain. A
+    file that does not parse is said in the log and reads as the default, as for the speaker.
+    """
+    value = speaker_mod.captain_table(config_path).get("wake_word")
+    if value is None:
+        return WAKE_WORD
+    shape = "a to z letters and spaces, e.g. \"captain\"; '' switches it off"
+    if not isinstance(value, str):
+        raise ValueError(f"[captain] wake_word = {value!r} in config.toml is not text: {shape}")
+    word = " ".join(value.lower().split())
+    if word and not WAKE_WORD_SHAPE.fullmatch(word):
+        raise ValueError(f"[captain] wake_word = {value!r} in config.toml: {shape}")
+    return word
+
+
+_NOT_LETTERS = re.compile(r"[^a-z]+")
+
+
+def _one_edit_apart(a: str, b: str) -> bool:
+    """Whether ``a`` and ``b`` differ by one substitution, insertion, deletion or swap — whisper's
+    near-spellings of a word ('kaptain', 'captian', 'captin')."""
+    if a == b:
+        return True
+    if abs(len(a) - len(b)) > 1:
+        return False
+    if len(a) == len(b):
+        diffs = [index for index, (x, y) in enumerate(zip(a, b, strict=True)) if x != y]
+        if len(diffs) == 1:
+            return True
+        return (
+            len(diffs) == 2
+            and diffs[1] == diffs[0] + 1
+            and a[diffs[0]] == b[diffs[1]]
+            and a[diffs[1]] == b[diffs[0]]
+        )
+    short, long = (a, b) if len(a) < len(b) else (b, a)
+    return any(long[:index] + long[index + 1 :] == short for index in range(len(long)))
+
+
+def _near(token: str, expected: str) -> bool:
+    """One word of the wake word, as whisper may spell it: exact under four letters, else one
+    edit away — but never the plural or the possessive ('captains', "captain's"), which are
+    other words a meeting says."""
+    if token == expected:
+        return True
+    if len(expected) < 4 or token == expected + "s":
+        return False
+    return _one_edit_apart(token, expected)
+
+
+class WakeWord:
+    """The wake word's match on a final transcript: (woke, the rest to deliver)."""
+
+    def __init__(self, word: str) -> None:
+        self.words = tuple(re.findall(r"[a-z]+", word.lower()))
+        self.word = " ".join(self.words)
+
+    def __bool__(self) -> bool:
+        return bool(self.words)
+
+    def match(self, text: str) -> tuple[bool, str]:
+        """Whether ``text`` begins with the wake word, each of its words forgiven case,
+        punctuation and one misspelling (:func:`_near`), and what follows it, stripped."""
+        if not self.words:
+            return False, ""
+        rest = text
+        for expected in self.words:
+            head = re.match(r"^[\W_]*([A-Za-z']+)(.*)$", rest, re.S)
+            if head is None or not _near(_NOT_LETTERS.sub("", head.group(1).lower()), expected):
+                return False, ""
+            rest = head.group(2)
+        return True, re.sub(r"^[\W_]+", "", rest).strip()
+
+
 def is_stop_word(text: str) -> bool:
     """Whether a final transcript is the stop word, case and trailing punctuation aside."""
     return " ".join(text.lower().split()).strip(" .!?,") in STOP_WORDS
@@ -502,6 +592,10 @@ class Hooks:
     clock: Callable[[], float] = time.monotonic
     cue_after_s: float = CUE_AFTER_S
     poll_s: float = POLL_S
+    # Late-bound, so the config is read as the server starts; the CLI reads it first, to
+    # refuse a bad value in one line (configured_wake_word raises).
+    wake_word: str = field(default_factory=lambda: configured_wake_word())
+    wake_window_s: float = WAKE_WINDOW_S
 
 
 # --- the page -------------------------------------------------------------------------------------
@@ -570,6 +664,10 @@ class _Connection:
         self._deliveries = asyncio.Lock()
         self._turns: set[asyncio.Task[None]] = set()
         self._mode_writing = 0
+        self._wake = WakeWord(hooks.wake_word)
+        self._awake_until: float | None = None
+        """When the window the wake word alone opened closes (``hooks.clock``), or None."""
+        self._window_timer: asyncio.Task[None] | None = None
         self._shown_thinking: bool | None = None
         self._send_lock = asyncio.Lock()
 
@@ -586,6 +684,7 @@ class _Connection:
             listening=self.listening,
             speaker=speaker_mod.speaker_on(),
             thinking=self._shown_thinking,
+            wake_word=self._wake.word,
         )
         poller = asyncio.create_task(self._thinking_loop())
         try:
@@ -594,6 +693,11 @@ class _Connection:
             poller.cancel()
             with _swallow_cancel():
                 await poller
+            timer = self._window_timer
+            self._cancel_window_timer()
+            if timer is not None:
+                with _swallow_cancel():
+                    await timer
             # A turn in flight is AWAITED, not cancelled: the owner who closed the tab is
             # still in the room, and the reply is still theirs to hear. Its frames go to
             # a socket that is gone, which _send swallows.
@@ -694,8 +798,7 @@ class _Connection:
         elif kind == "text":
             text = str(message.get("text", "")).strip()
             if text and self.mode == "listen" and is_stop_word(text):
-                self.listening = False  # typed, the stop word is the stop word
-                await self._send("listening", on=False, why="stop word")
+                await self._heard_stop_word()  # typed, the stop word is the stop word
             elif text:
                 self._start_delivery(text)
         elif kind == "speaker":
@@ -713,6 +816,8 @@ class _Connection:
             await self._close_burst()
         self.mode = "listen" if mode == "listen" else "focus"
         self.listening = self.mode == "listen"
+        if self._awake_until is not None:
+            await self._close_window()
         if write:
             # The page's toggle writes the key (13179), so the TUI and every other
             # page agree; a switch that CAME from the key is not written back. While
@@ -750,6 +855,8 @@ class _Connection:
         if not on:
             await self._flush_listen()
         self.listening = on and self.mode == "listen"
+        if not self.listening and self._awake_until is not None:
+            await self._close_window()
         await self._send("listening", on=self.listening)
 
     async def _flush_listen(self) -> None:
@@ -819,18 +926,90 @@ class _Connection:
             await self._final(final)
 
     async def _final(self, text: str) -> None:
-        """A finished utterance: shown, then delivered — or, as the stop word, the mic off."""
-        text = text.strip()
-        await self._send("stt", text=text, final=True)
-        if not text:
-            return
-        if self.mode == "listen" and is_stop_word(text):
-            self.listening = False
-            await self._send("listening", on=False, why="stop word")
-            return
-        self._start_delivery(text)
+        """A finished utterance: shown, then delivered — or, as the stop word, the mic off.
 
-    # -- delivery, and the thinking signal
+        In listen mode the wake word, when set, decides first (:meth:`_gate`). The bare
+        stop word goes before it: the safety never needs the wake word.
+        """
+        text = text.strip()
+        if text and self.mode == "listen" and is_stop_word(text):
+            await self._send("stt", text=text, final=True)
+            await self._heard_stop_word()
+            return
+        if text and self.mode == "listen" and self._wake:
+            await self._gate(text)
+            return
+        await self._send("stt", text=text, final=True)
+        if text:
+            self._start_delivery(text)
+
+    async def _gate(self, text: str) -> None:
+        """Listen mode's wake word (13284). An utterance that begins with it is delivered
+        stripped of it; the word alone opens a short window in which the next utterance
+        goes through bare; anything else is dropped — never delivered, never spoken, and
+        not kept: its text never leaves this function, the page only clears its interim.
+        """
+        woke, rest = self._wake.match(text)
+        in_window = self._awake_until is not None and self._hooks.clock() < self._awake_until
+        if not woke and not in_window:
+            if self._awake_until is not None:
+                await self._close_window()
+            await self._send("stt", text="", final=True, dropped="no wake word")
+            return
+        await self._send("stt", text=text, final=True)
+        if woke and not rest:
+            await self._open_window()
+            return
+        if self._awake_until is not None:
+            await self._close_window()
+        request = rest if woke else text
+        if is_stop_word(request):  # "Captain, stop listening" is the stop word too
+            await self._heard_stop_word()
+            return
+        self._start_delivery(request)
+
+    async def _heard_stop_word(self) -> None:
+        """The stop word, spoken or typed: the mic goes off, and an open window with it — a
+        window that outlived the mute would deliver the first utterance after an unmute."""
+        self.listening = False
+        if self._awake_until is not None:
+            await self._close_window()
+        await self._send("listening", on=False, why="stop word")
+
+    async def _open_window(self) -> None:
+        """The wake word alone: the next utterance goes through bare for ``wake_window_s``.
+
+        The ``awake`` frame is the cue: the page shows 'listening' and plays a short tone.
+        Nothing is spoken here — the machine's voice would reach the mic inside the window
+        and be delivered as the request; the page's own tone is taken out of the mic.
+        """
+        self._awake_until = self._hooks.clock() + self._hooks.wake_window_s
+        self._cancel_window_timer()
+        self._window_timer = asyncio.create_task(self._close_window_when_due())
+        await self._send("awake", on=True, seconds=self._hooks.wake_window_s)
+
+    async def _close_window(self) -> None:
+        self._awake_until = None
+        self._cancel_window_timer()
+        await self._send("awake", on=False)
+
+    async def _close_window_when_due(self) -> None:
+        """Silence after the wake word: the window closes on its own, and the page's
+        'listening' goes back to 'say Captain'."""
+        while self._awake_until is not None:
+            remaining = self._awake_until - self._hooks.clock()
+            if remaining <= 0:
+                break
+            await asyncio.sleep(remaining)
+        if self._awake_until is not None:
+            self._awake_until = None
+            self._window_timer = None
+            await self._send("awake", on=False)
+
+    def _cancel_window_timer(self) -> None:
+        timer, self._window_timer = self._window_timer, None
+        if timer is not None:
+            timer.cancel()
 
     def _start_delivery(self, text: str) -> None:
         """A turn runs as its own task, never inside the read loop (coderp's B1): with the

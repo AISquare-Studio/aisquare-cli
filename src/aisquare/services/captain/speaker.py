@@ -165,31 +165,34 @@ def is_wsl(proc_version: Path = Path("/proc/version")) -> bool:
         return False
 
 
-def configured_speaker(config_path: Path | None = None) -> str | None:
-    """``[captain] speaker = "..."`` from config.toml, or ``None``; a bad file is said, not fatal.
+def captain_table(config_path: Path | None = None) -> dict[str, object]:
+    """The ``[captain]`` table of config.toml, or ``{}``; a bad file is said, not fatal.
 
-    Read raw, like ``actions.action_list``: a broken config.toml costs the adapter choice,
-    never the page.
+    Read raw, like ``actions.action_list``: a broken config.toml costs the captain's
+    settings (the speaker's name, the wake word), never the page.
     """
     path = config_path if config_path is not None else paths.config_path()
     try:
         raw = path.read_bytes()
     except FileNotFoundError:
-        return None
+        return {}
     except OSError as exc:
         log.warning(
-            "captain speaker: %s could not be read, using the platform's adapter: %s", path, exc
+            "captain: %s could not be read, its [captain] settings stand down: %s", path, exc
         )
-        return None
+        return {}
     try:
         loaded = tomllib.loads(raw.decode("utf-8-sig"))
     except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
-        log.warning(
-            "captain speaker: %s does not parse, using the platform's adapter: %s", path, exc
-        )
-        return None
+        log.warning("captain: %s does not parse, its [captain] settings stand down: %s", path, exc)
+        return {}
     captain = loaded.get("captain")
-    value = captain.get("speaker") if isinstance(captain, dict) else None
+    return dict(captain) if isinstance(captain, dict) else {}
+
+
+def configured_speaker(config_path: Path | None = None) -> str | None:
+    """``[captain] speaker = "..."`` from config.toml, or ``None`` for the platform's adapter."""
+    value = captain_table(config_path).get("speaker")
     return value if isinstance(value, str) and value else None
 
 

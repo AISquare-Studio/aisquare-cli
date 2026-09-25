@@ -1119,6 +1119,10 @@ def test_doctor_fails_on_what_no_step_of_this_build_puts_back() -> None:
     assert row.status is CheckStatus.fail, row
     assert f"schema: {', '.join(missing[:6])} and 1 more;" in row.detail, row.detail
     assert row.detail.startswith("context.db opens (1 user entries) but"), row.detail
+    assert row.detail.endswith(
+        "; a command that reads a missing table or column fails with 'no such table' or "
+        "'no such column'; a missing index that is not unique only slows the reads it served"
+    ), row.detail
 
 
 def test_a_store_without_its_full_text_index_lacks_one_table_not_five() -> None:
@@ -1143,10 +1147,70 @@ def test_a_store_without_its_full_text_index_lacks_one_table_not_five() -> None:
     assert missing == ["table entry_fts", "index team_session_project"], missing
     assert row.status is CheckStatus.fail, row
     assert f"schema: {', '.join(missing)};" in row.detail, row.detail
-    assert row.detail.endswith(
-        "; a command that reads a missing table or column fails with 'no such table' or "
-        "'no such column'; a missing index that is not unique only slows the reads it served"
+
+
+@pytest.mark.parametrize(
+    "shadow", ["entry_fts_data", "entry_fts_idx", "entry_fts_docsize", "entry_fts_config"]
+)
+def test_doctor_fails_on_a_full_text_index_that_lost_a_shadow_table(shadow: str) -> None:
+    """A shadow table gone with ``entry_fts`` is that table's absence, named once. Gone
+    alone, the index is damaged: no note can be added, and SQLite's answer reads as a
+    damaged store. Left out of this build's schema whatever else was there, a store
+    without ``entry_fts_data`` lacked nothing and doctor's row said "context.db is
+    readable"; without ``entry_fts_config`` the row's own column read raised and called
+    the store unreadable, with the corrupt-store move (review of the #203 side merges,
+    R2-F1). The row fails naming the shadow table, says what it costs, and still counts
+    the notes, which are intact."""
+    from aisquare.services import diagnostics
+
+    with store_session() as store:
+        store.add(_entry())
+    raw = sqlite3.connect(str(_db_path()))
+    try:
+        raw.executescript(f"DROP TABLE {shadow};")
+    finally:
+        raw.close()
+
+    with store_session() as store:
+        missing = store.missing_schema()
+        with pytest.raises(sqlite3.DatabaseError):
+            store.add(_entry())
+    row = diagnostics._check_database()
+
+    assert missing == [f"shadow table {shadow}"], missing
+    assert row.status is CheckStatus.fail, row
+    assert row.detail == (
+        "context.db opens (1 user entries) but lacks part of this build's schema: shadow "
+        f"table {shadow}; without a shadow table the notes' full-text index can be neither "
+        "written nor searched: adding a note and `aisquare context search` fail with an "
+        "error that reads as a damaged store, though the notes are intact"
     ), row.detail
+
+
+def test_a_table_named_after_the_full_text_index_is_not_taken_for_its_shadow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Shadow tables are told apart by FTS5's suffixes (``_data``, ``_idx`` …). Told apart
+    by the prefix ``entry_fts_`` alone, a table of this build's named that way was left
+    out of its schema and never reported missing (review of the #203 side merges,
+    R2-F3). A step that makes ``entry_fts_meta`` stands in for one."""
+    ladder = store_module._MIGRATIONS
+    monkeypatch.setattr(
+        store_module,
+        "_MIGRATIONS",
+        (*ladder[:-1], ladder[-1] + "CREATE TABLE entry_fts_meta (note TEXT);"),
+    )
+    open_store().close()
+    raw = sqlite3.connect(str(_db_path()))
+    try:
+        raw.executescript("DROP TABLE entry_fts; DROP TABLE entry_fts_meta;")
+    finally:
+        raw.close()
+
+    with store_session() as store:
+        missing = store.missing_schema()
+
+    assert missing == ["table entry_fts", "table entry_fts_meta"], missing
 
 
 def test_doctor_says_what_a_trigger_it_only_counts_costs() -> None:

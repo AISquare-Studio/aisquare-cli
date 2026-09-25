@@ -1116,8 +1116,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `doctor`'s database row said "context.db is readable" for a store that lacked
   those tables. It now compares the store with the schema this build's ladder
   makes on an empty database. For anything still missing after the open, it
-  fails and names each table, index, trigger or column. Its remedy keeps the
-  file, whose history is intact, instead of offering the corrupt-store move.
+  fails and names each table, index, trigger or column, and each shadow table
+  the notes' full-text index lost, without which no note can be added. Its
+  remedy keeps the file, whose history is intact, instead of offering the
+  corrupt-store move.
 - **A machine key file that is not UTF-8 holds no key instead of crashing.**
   `~/.aisquare/explainability-key` written as UTF-16 — what PowerShell 5.1's
   `>` produces — raised `UnicodeDecodeError` out of the resolver, and

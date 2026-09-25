@@ -541,13 +541,23 @@ def _check_database() -> DoctorCheck:
         # with the corrupt-store move (measured: `context add`, then `context remove`
         # or `project forget --purge`). Warned here, the operator who meets it knows
         # the notes are intact. Without `entry_au` or `entry_ad` nothing fails; search
-        # only goes stale.
+        # only goes stale. A shadow table is where FTS5 keeps the notes' index, and
+        # without one no note can be added and nothing searched: SQLite answers "fts5:
+        # corruption found", "database disk image is malformed" or, without
+        # `entry_fts_config`, "vtable constructor failed" (measured: `context add`,
+        # `remember`, `context search`), while `context list` reads every note.
         kinds = {item.rsplit(" ", 1)[0] for item in missing}
         costs: list[str] = []
         if kinds & {"table", "column"}:
             costs.append(
                 "a command that reads a missing table or column fails with 'no such "
                 "table' or 'no such column'"
+            )
+        if "shadow table" in kinds:
+            costs.append(
+                "without a shadow table the notes' full-text index can be neither written "
+                "nor searched: adding a note and `aisquare context search` fail with an "
+                "error that reads as a damaged store, though the notes are intact"
             )
         costs += [
             cost for trigger, cost in _TRIGGER_COSTS.items() if f"trigger {trigger}" in missing

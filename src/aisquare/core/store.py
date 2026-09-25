@@ -3672,10 +3672,10 @@ class SqliteStore:
         The open has already converged what it can (:func:`_migrate`), so this is
         what it could not: an object no step from v15 on produces, missing from a
         store another build or a hand edit changed. Each is named for the operator,
-        ``table claude_account``, ``column fleet_agent.account_slot`` or ``unique index
-        project_codename``. Empty for a store that holds this build's whole schema;
-        tables and columns of another line's are not this build's and are never
-        reported.
+        ``table claude_account``, ``column fleet_agent.account_slot``, ``unique index
+        project_codename`` or ``shadow table entry_fts_data``. Empty for a store that
+        holds this build's whole schema; tables and columns of another line's are not
+        this build's and are never reported.
         """
         return _missing_from(self._conn, _ladder_schema())
 
@@ -3970,14 +3970,22 @@ def _migrate(connection: sqlite3.Connection) -> None:
         raise
 
 
+#: The suffixes of the shadow tables FTS5 keeps a table's index in, ``entry_fts_data``
+#: and so on (sqlite.org/fts5.html). Which of them a table has depends on its options:
+#: ``entry_fts`` reads its text from ``entry`` and has no ``_content``.
+_FTS5_SHADOWS = ("data", "idx", "content", "docsize", "config")
+
+
 class _Schema(NamedTuple):
     """A database's schema by name, as :func:`_missing_from` compares it."""
 
     tables: dict[str, frozenset[str]]
-    """Each table, ordinary or virtual, with its columns."""
+    """Each table, ordinary, virtual or shadow, with its columns."""
     objects: dict[str, tuple[str, str]]
     """Each index and trigger: its kind (``index``, ``unique index`` or ``trigger``) and
     the table it belongs to."""
+    shadows: dict[str, str]
+    """Each FTS5 shadow table among :attr:`tables` and the virtual table it belongs to."""
 
 
 def _ladder_schema() -> _Schema:
@@ -3986,30 +3994,31 @@ def _ladder_schema() -> _Schema:
     Built, not listed, so it cannot drift from the steps: every step from v1 on,
     run by :func:`_migrate` itself in memory (a few milliseconds). SQLite's own
     objects (``sqlite_sequence``, automatic indexes) come and go with the tables
-    that cause them and are left out. So do a virtual table's shadow tables
-    (``entry_fts_data``, ``entry_fts_idx`` …), the module's own storage, made and
-    dropped with it: counted as tables, a store without ``entry_fts`` lacked five,
-    and they took five of the six names doctor's database row shows.
+    that cause them and are left out. FTS5's shadow tables are the module's own
+    storage, made and dropped with their virtual table, and are kept with it: a
+    store without ``entry_fts`` lacks one table, not five, and one that lost only
+    ``entry_fts_data`` lacks that, without which no note can be added. Told apart
+    by FTS5's suffixes, not by the virtual table's name alone, so a table of this
+    build's named ``entry_fts_…`` is not taken for one.
     """
     connection = sqlite3.connect(":memory:")
     try:
         _migrate(connection)
         tables: dict[str, frozenset[str]] = {}
         objects: dict[str, tuple[str, str]] = {}
-        virtual = [
-            name
-            for (name,) in connection.execute(
+        shadows = {
+            f"{owner}_{suffix}": owner
+            for (owner,) in connection.execute(
                 "SELECT name FROM sqlite_master "
-                "WHERE type = 'table' AND sql LIKE 'CREATE VIRTUAL TABLE%'"
-            )
-        ]
+                "WHERE type = 'table' AND sql LIKE 'CREATE VIRTUAL TABLE %USING fts5%'"
+            ).fetchall()
+            for suffix in _FTS5_SHADOWS
+        }
         for kind, name, table in connection.execute(
             "SELECT type, name, tbl_name FROM sqlite_master "
             "WHERE name NOT GLOB 'sqlite_*' ORDER BY rowid"
         ).fetchall():
             if kind == "table":
-                if any(name.startswith(f"{owner}_") for owner in virtual):
-                    continue  # a shadow table
                 columns = connection.execute(f"PRAGMA table_info({name})").fetchall()
                 tables[name] = frozenset(column[1] for column in columns)
             elif kind == "index":
@@ -4021,7 +4030,9 @@ def _ladder_schema() -> _Schema:
                 objects[name] = ("unique index" if unique else kind, table)
             elif kind == "trigger":
                 objects[name] = (kind, table)
-        return _Schema(tables, objects)
+        return _Schema(
+            tables, objects, {name: owner for name, owner in shadows.items() if name in tables}
+        )
     finally:
         connection.close()
 
@@ -4031,14 +4042,28 @@ def _missing_from(connection: sqlite3.Connection, expected: _Schema) -> list[str
 
     Tables first, in the order the ladder made them, each followed by its missing
     columns by name; then indexes and triggers, again in the ladder's order. A
-    missing table is named once, not with each of its columns and indexes. Only
-    reads, and only this build's tables: another line's are not looked at.
+    missing table is named once, not with each of its columns and indexes, and a
+    missing FTS5 table not with its shadow tables. A shadow table missing beside
+    its FTS5 table is named ``shadow table …``, since it costs something of its
+    own: the index can be neither written nor searched. Only reads, and only this
+    build's tables: another line's are not looked at.
     """
     present = {row[0] for row in connection.execute("SELECT name FROM sqlite_master")}
     missing: list[str] = []
     for table, columns in expected.tables.items():
+        owner = expected.shadows.get(table)
+        if owner is not None:
+            # Its layout is the module's, so only its presence is compared.
+            if owner in present and table not in present:
+                missing.append(f"shadow table {table}")
+            continue
         if table not in present:
             missing.append(f"table {table}")
+            continue
+        if any(shadow not in present for shadow, of in expected.shadows.items() if of == table):
+            # Listing an FTS5 table's columns opens it, and the module reads its
+            # `_config` shadow to do that: without it this read raised "vtable
+            # constructor failed", which doctor's row took for an unreadable store.
             continue
         found = {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
         missing += [f"column {table}.{column}" for column in sorted(columns - found)]

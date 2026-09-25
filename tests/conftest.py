@@ -377,7 +377,8 @@ def fresh_state() -> Iterator[None]:
 
 @pytest.fixture(autouse=True)
 def isolated_agent_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Point agent detection at a temp home so tests never read ``~/.claude*``.
+    """Point agent detection and the Claude accounts at a temp home so tests never read
+    ``~/.claude*``.
 
     ``core.agents._home`` is the indirection its own docstring offers for this.
     Without it the claude-code doctor row read the developer's REAL
@@ -388,9 +389,21 @@ def isolated_agent_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path
     and red on a hooked laptop, or the reverse. Tests that want Claude Code
     detected build the tree under their own fixture (``fake_home`` in
     test_agents.py) and re-point ``_home`` at it, which overrides this.
+
+    ``core.claude_accounts._home`` is the same indirection for slot 1, the
+    plain ``claude``: its ``~/.claude`` and ``~/.claude.json``. Left alone, a
+    developer's signed-in login was slot 1 in every test, and ``doctor --live``'s
+    headroom row and the Accounts page sent that login's OAuth token to
+    Anthropic's usage endpoint from inside the suite: ten requests from seven
+    tests whenever that token was live (final review of #203, tests-ci TC1),
+    and a wait on the request's timeout where the network is firewalled. The suite
+    already keeps ``accounts usage`` out of its command sweeps for that reason
+    (``tests/test_no_traceback_on_a_damaged_store.py``). CI could not see it:
+    the runners have no login in ``~``.
     """
     home = tmp_path / "agent-home"
     monkeypatch.setattr("aisquare.core.agents._home", lambda: home)
+    monkeypatch.setattr("aisquare.core.claude_accounts._home", lambda: home)
     return home
 
 

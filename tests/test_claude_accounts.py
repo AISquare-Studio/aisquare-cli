@@ -552,6 +552,49 @@ def test_the_default_fetch_is_urllib_and_is_imported_lazily() -> None:
     assert service._http_get.__name__ == "_http_get"
 
 
+def test_the_suite_never_sends_a_login_in_the_developers_own_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Final review of #203, tests-ci TC1: the suite moved ``core.agents._home`` and not this
+    module's, so slot 1 was the developer's own ``~/.claude`` in every test, and ``doctor
+    --live``'s headroom row (and the Accounts page) sent that login's OAuth token to the
+    usage endpoint from inside the suite. Here the "developer's home" is a live login at
+    ``Path.home()``, which the suite never moves, and no fixture of this file is used:
+    what isolates it is conftest's alone."""
+    developer = tmp_path / "developers-home"
+    (developer / ".claude").mkdir(parents=True)
+    (developer / ".claude.json").write_text(
+        json.dumps({"oauthAccount": {"emailAddress": "dev@example.com"}}), encoding="utf-8"
+    )
+    expires = datetime.now(tz=UTC) + timedelta(days=30)
+    (developer / ".claude" / ".credentials.json").write_text(
+        json.dumps(
+            {
+                "claudeAiOauth": {
+                    "accessToken": "developers-own-token",
+                    "expiresAt": int(expires.timestamp() * 1000),
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: developer))
+    monkeypatch.setattr(core, "keychain_platform", lambda: False)  # the file is the login
+    sent: list[str] = []
+
+    def record(url: str, headers: Mapping[str, str], timeout: float) -> tuple[int, bytes]:
+        sent.append(headers.get("Authorization", ""))
+        return 401, b""
+
+    monkeypatch.setattr(service, "_http_get", record)
+    service.list_accounts()  # the registry exists, as on any machine that has used accounts
+
+    diagnostics._claude_account_headroom_check()
+
+    assert sent == [], "the suite sent the developer's own Claude token"
+    assert not core.signed_in(core.default_account())
+
+
 # --------------------------------------------------------------------------- service: the flows
 
 

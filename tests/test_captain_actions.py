@@ -53,7 +53,7 @@ from aisquare.models import (
 )
 from aisquare.services import fleet, mcp_server
 from aisquare.services import team as team_service
-from aisquare.services.captain import actions, errors
+from aisquare.services.captain import actions
 from aisquare.services.captain import queue as captain_queue
 from aisquare.services.captain import state as captain_state
 from tests.rendered import plain
@@ -981,6 +981,16 @@ def test_read_pane_returns_the_tail_without_escapes_and_marks_it_untrusted(
     assert ok(actions.read_pane("alpha", "coder-1", lines=500))["lines"][0] == "old 0"
 
 
+def test_read_pane_strips_a_hyperlink_ended_by_st(
+    alpha: ProjectInfo, agents: dict[str, FleetAgent], fleet_rec: Fleet
+) -> None:
+    """coderp's S1 on #219: T1's pattern stripped a hyperlink ended by ST (ESC and one
+    backslash). The shared one must too, or read_pane hands the captain link targets."""
+    pane = fleet_rec.panes["%1"]
+    pane.screen = ["see \x1b]8;;https://example.com/pr/219\x1b\\the PR\x1b]8;;\x1b\\ now", ""]
+    assert ok(actions.read_pane("alpha", "coder-1", lines=5))["lines"][-1] == "see the PR now"
+
+
 def test_read_pane_refuses_an_agent_that_is_not_there(
     alpha: ProjectInfo, agents: dict[str, FleetAgent], fleet_rec: Fleet
 ) -> None:
@@ -1817,48 +1827,19 @@ def test_a_malformed_config_action_refuses_itself_only(
 # --- attention: the T7 seam -------------------------------------------------------------
 
 
-def test_the_queue_tools_say_the_queue_is_not_built_yet(projects: dict[str, ProjectInfo]) -> None:
-    for call in (
-        lambda: actions.attention(),
-        lambda: actions.next_item(),
-        lambda: actions.resolve("q1", "told coder-1"),
-        lambda: actions.snooze("q1", 10),
-    ):
-        assert refused(call).startswith("refused: the attention queue lands with T7")
-
-
-def test_a_queue_that_drops_the_stubs_class_still_refuses_in_words(
-    projects: dict[str, ProjectInfo], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """T7 replaces queue.py whole. A refusal is errors.Refused, which T7 raises too — the
-    actions side must not name a class only the stub defines (13038 item 5)."""
-    monkeypatch.delattr(captain_queue, "QueueUnavailable")
-
-    def unknown(item_id: str, how: str) -> dict[str, object]:
-        raise errors.Refused(f"no open item {item_id}")
-
-    monkeypatch.setattr(captain_queue, "resolve", unknown)
-    assert refused(lambda: actions.resolve("q9", "said yes")).startswith("refused: no open item q9")
-
-
-def test_a_queue_that_raises_its_own_runtime_error_is_said_as_an_error_not_a_crash(
-    projects: dict[str, ProjectInfo], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """T7's queue raises a RuntimeError of its own on a held lock (13046): it is a failure
-    the owner hears, audited like any other, never a crashed tool."""
-
-    class HeldLock(RuntimeError):
-        pass
-
-    def locked(limit: int) -> list[dict[str, object]]:
-        raise HeldLock("queue.json is locked by another process")
-
-    monkeypatch.setattr(captain_queue, "ranked", locked)
-    message = refused(lambda: actions.attention())
-    assert message.startswith(
-        "error: the attention queue failed: queue.json is locked by another process"
+def test_the_queue_tools_answer_from_the_real_queue(projects: dict[str, ProjectInfo]) -> None:
+    """With T7 in, the four tools read the home's queue: an empty home is an empty list (the
+    truth, now that there is a queue to read), and an unknown item is refused in the queue's
+    own words through the same frame. The T1 stub's refusal ("lands with T7") is gone."""
+    result = ok(actions.attention())
+    assert result["items"] == [] and result["action_seq"] > 0
+    assert ok(actions.next_item())["item"] is None
+    assert refused(lambda: actions.resolve("q1", "told coder-1")).startswith(
+        "refused: no queue item matches 'q1'"
     )
-    assert audit(captain_state.home_project().id)[-1]["ok"] is False
+    assert refused(lambda: actions.snooze("q1", 10)).startswith(
+        "refused: no queue item matches 'q1'"
+    )
 
 
 def test_the_queue_tools_hand_the_queue_seams_answer_through(

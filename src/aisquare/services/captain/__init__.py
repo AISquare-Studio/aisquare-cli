@@ -5,5 +5,6 @@
   ``captain_action`` board event per call.
 - :mod:`.state` — the runtime state the server, the CLI verbs, the voice page
   and the TUI share across processes.
-- :mod:`.queue` — the attention queue's seam (filled by the queue card).
+- :mod:`.queue` — the attention queue: what needs the owner across every
+  project, deduplicated, ranked and resolved one by one (T7).
 """

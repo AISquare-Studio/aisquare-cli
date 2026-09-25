@@ -44,6 +44,7 @@ from aisquare.core.store import store_session
 from aisquare.core.tmux import TmuxError, TmuxServer, TmuxUnavailable
 from aisquare.models import FleetAgent, TeamSession
 from aisquare.services import fleet
+from aisquare.services.captain import screen
 from aisquare.services.captain import state as captain_state
 
 PERSONA = "captain"
@@ -51,6 +52,9 @@ SERVER = "captain"
 """The MCP server's name in ``mcp.json``: Claude Code calls its tools ``mcp__captain__<tool>``."""
 
 SAY_TIMEOUT_S = 180.0
+SEND_TIMEOUT_S = 30.0
+"""How long :func:`send` waits for the captain to be ready (or for a say still waiting for
+its reply) before it says so. Its callers are buttons: a short wait, then a sentence."""
 _POLL_S = 1.0
 
 # Indirection so a test runs a wait on a fake clock.
@@ -59,6 +63,14 @@ _sleep: Callable[[float], None] = time.sleep
 
 
 _LOCK_HELD = {errno.EAGAIN, errno.EWOULDBLOCK, errno.EACCES}
+
+TYPE_SETTLE_S = 2.0
+"""One settle between the prompt appearing and the text going in — the fleet's own
+first-prompt typing settles the same way (``fleet._PROMPT_SETTLE``): a prompt that has
+just been drawn may not have bracketed paste on yet, and a multi-line text would become
+N messages (coderp's M3)."""
+PANE_ESCAPES = screen.PANE_ESCAPES
+"""One pattern for every captured pane (coderp's M4) — ``services.captain.screen``'s."""
 
 
 class Unreachable(fleet.FleetError):
@@ -246,7 +258,8 @@ def start(prompt: str | None = None, *, size: tuple[int, int] | None = None) -> 
 def say(text: str, *, timeout: float = SAY_TIMEOUT_S) -> Reply:
     """Deliver ``text`` to the captain and wait for its reply (contract 13121, item 5).
 
-    - No live captain: it is started with ``text`` as its first prompt.
+    - No live captain: it is started bare, and ``text`` is typed once its prompt shows
+      (never into a dialog — 13227).
     - A captain waiting at its prompt: ``text`` is typed (one bracketed paste, one
       Enter).
     - A BUSY captain: waited for until its turn ends, then typed. Never a board
@@ -266,23 +279,50 @@ def say(text: str, *, timeout: float = SAY_TIMEOUT_S) -> Reply:
         except Unreachable as exc:
             # 13189: said at once, never waited out — the same words the bare command says.
             raise NoReply(str(exc), timed_out=False) from exc
+        started = agent is None
         if agent is None:
-            typed_at = _now()
-            receipt = start(prompt=text)
-            if not receipt.prompt_typed:
-                why = "; ".join(receipt.notes) or "the fleet did not say why"
-                raise NoReply(
-                    f"the captain was started but the message never reached it ({why}) — "
-                    "`aisquare captain` shows its pane",
-                    timed_out=False,
-                )
-            agent = receipt.agent
-        else:
-            srv = _wait_until_ready(agent, deadline, timeout)
-            typed_at = _now()
-            _type(srv, agent, text)
+            # Started BARE, not with the text as its first prompt (13227): the fleet's
+            # first-prompt typing reads the pane's process, not its text, and would
+            # type into the trust dialog a fresh captain parks at. The text goes in
+            # below, through the same guarded path, once the prompt shows.
+            agent = start().agent
+        srv = _wait_until_ready(agent, deadline, timeout, settle=started)
+        typed_at = _now()
+        _type(srv, agent, text)
         reply = _await_reply(agent, typed_at, deadline, timeout)
+        # T3 (S3): the speak window opens when the text went in, not when say began to wait.
         return Reply(reply.text, ended_at=reply.ended_at, typed_at=typed_at)
+
+
+def send(text: str, *, timeout: float = SEND_TIMEOUT_S) -> datetime:
+    """Type ``text`` into the running captain through the one guarded door, and return as
+    soon as it is typed: no reply is waited for (13325). Returns when it was typed.
+
+    For whatever types into the captain without reading an answer — T4's What's up, the
+    first. Never ``fleet.tell``: it reads no screen, and its Enter at a fresh captain's
+    trust dialog picks "No, exit". The guard is :func:`say`'s: one delivery at a time
+    (a send never types while a say waits for its reply), the fleet asked first, the
+    pane read by structure, any dialog refused by name (13227), the drawn box as the
+    evidence typing needs. A captain that is not running is said, not started — starting
+    is the bare command's and ``say``'s. Every refusal is a :class:`NoReply`.
+    """
+    if not text.strip():
+        raise ValueError("nothing to send")
+    deadline = _now() + timedelta(seconds=timeout)
+    with _one_at_a_time(deadline, timeout):
+        try:
+            agent = find()
+        except Unreachable as exc:
+            raise NoReply(str(exc), timed_out=False) from exc
+        if agent is None:
+            raise NoReply(
+                "the captain is not running — `aisquare captain` starts it; nothing was typed",
+                timed_out=False,
+            )
+        srv = _wait_until_ready(agent, deadline, timeout, settle=False)
+        typed_at = _now()
+        _type(srv, agent, text)
+        return typed_at
 
 
 @contextlib.contextmanager
@@ -339,20 +379,82 @@ def _type(srv: TmuxServer, agent: FleetAgent, text: str) -> None:
         ) from exc
 
 
-def _wait_until_ready(agent: FleetAgent, deadline: datetime, timeout: float) -> TmuxServer:
+def _pane_text(agent: FleetAgent, srv: TmuxServer) -> list[str]:
+    """The captain's live screen, escapes stripped, blank tail dropped — what the owner sees."""
+    return screen.strip_escapes(srv.capture(agent.pane_id).lines)
+
+
+def input_box_at(lines: list[str]) -> int | None:
+    """Where Claude Code's input box starts — ``services.captain.screen``'s reader (13278)."""
+    return screen.input_box_at(lines)
+
+
+def modal_showing(lines: list[str]) -> str | None:
+    """What the pane shows that ``say`` must not type into — ``services.captain.screen``'s
+    view of the one reader (13227, 13264, 13278)."""
+    return screen.modal_showing(lines)
+
+
+def _refuse_dialog(showing: str) -> NoReply:
+    """The refusal for a pane that shows a dialog: what shows, and the one thing to do."""
+    if showing == "the trust dialog":
+        return NoReply(
+            f"the captain is waiting for you to trust its folder {brain_dir()}: run "
+            "`aisquare captain` and choose Yes, I trust this folder (once)",
+            timed_out=False,
+        )
+    return NoReply(
+        f"the captain's pane shows {showing}; nothing was typed — `aisquare captain` attaches, "
+        "answer it there",
+        timed_out=False,
+    )
+
+
+def _wait_until_ready(
+    agent: FleetAgent, deadline: datetime, timeout: float, *, settle: bool
+) -> TmuxServer:
+    """Wait until the captain can take a line: at its prompt, with the prompt DRAWN.
+
+    Each poll asks the fleet first — a dead or lost captain is said at once (M2) —
+    then reads the pane: a dialog is refused with what shows (13227); the input box
+    drawn with the row waiting is the positive evidence typing needs (M3). A pane
+    that cannot be read is said, never raised. A fresh captain at the trust dialog
+    has no session row yet, so the pane is read whatever the row says.
+
+    One settle goes before the text, for a NEW box only: ``settle`` (this say started
+    the captain), or a read here that found no box drawn. A box drawn from the first
+    read is typed into at once — a settle there cost every voice turn 2 s (13294).
+    """
     srv = fleet.server_for(agent.tmux_socket)
     while True:
         state = fleet.status_of(agent).state
-        if state == "waiting" and fleet.pane_is_the_agent(srv, agent.pane_id):
-            return srv
         if state in ("exited", "lost"):
             raise NoReply(
                 f"the captain is {state} — `aisquare captain` starts it again; nothing was typed",
                 timed_out=False,
             )
-        if _now() >= deadline:
+        try:
+            pane = _pane_text(agent, srv)
+        except TmuxError as exc:
             raise NoReply(
-                f"the captain stayed {state} for {timeout:g}s, so nothing was typed — "
+                f"could not read the captain's pane ({exc}); nothing was typed — "
+                "`aisquare captain` shows it",
+                timed_out=False,
+            ) from exc
+        showing = modal_showing(pane)
+        if showing is not None:
+            raise _refuse_dialog(showing)
+        drawn = input_box_at(pane) is not None
+        if state == "waiting" and drawn and fleet.pane_is_the_agent(srv, agent.pane_id):
+            if settle:
+                _sleep(TYPE_SETTLE_S)
+            return srv
+        if not drawn:
+            settle = True  # the box is not up yet: once it is, it gets its settle
+        if _now() >= deadline:
+            what = f"stayed {state}" if state != "waiting" else "never drew its prompt"
+            raise NoReply(
+                f"the captain {what} for {timeout:g}s, so nothing was typed — "
                 "`aisquare captain` shows what it is doing"
             )
         _sleep(_POLL_S)

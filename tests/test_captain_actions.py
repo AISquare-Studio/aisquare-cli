@@ -127,8 +127,18 @@ class Pane:
 class FakeServer:
     """The tmux server behind the fleet: routes each call to the pane it names."""
 
-    def __init__(self, panes: dict[str, Pane]) -> None:
+    def __init__(
+        self, panes: dict[str, Pane], *, up: bool = True, socket: Path | None = None
+    ) -> None:
         self._panes = panes
+        self._up = up
+        self._socket = socket
+
+    def reachable(self) -> bool:
+        return self._up
+
+    def socket_path(self) -> Path:
+        return self._socket if self._socket is not None else Path("/nonexistent/tmux-0/asq")
 
     def send_keys(self, pane_id: str, *keys: str) -> None:
         self._panes[pane_id].keys.append(keys)
@@ -170,7 +180,17 @@ class Fleet:
         for name in ("tell", "spawn", "stop", "restart", "attach_persona", "list_agents"):
             monkeypatch.setattr(fleet, name, getattr(self, name))
         monkeypatch.setattr(fleet, "status_of", self.status_of)
-        monkeypatch.setattr(fleet, "server_for", lambda socket, config=None: FakeServer(self.panes))
+        self.server_up = True
+        """False stands for a tmux server that does not answer (kill-server, a reboot)."""
+        self.socket_file: Path | None = None
+        """Where the server's socket is; ``None`` stands for no socket file at all."""
+        monkeypatch.setattr(
+            fleet,
+            "server_for",
+            lambda socket, config=None: FakeServer(
+                self.panes, up=self.server_up, socket=self.socket_file
+            ),
+        )
 
     def names(self) -> list[str]:
         return [name for name, _ in self.calls]
@@ -2421,6 +2441,43 @@ def test_a_captain_claim_or_done_that_lands_but_errors_is_still_on_the_undo_list
     monkeypatch.setattr(team_service, "finish_task", finish)
     entry = captain_state.pop_undo()
     assert entry is not None and (entry.kind, entry.task_id) == ("done", earlier.id)
+
+
+@pytest.mark.parametrize(
+    ("shape", "why"),
+    [
+        ("kill -9", "coder-1's pane has exited"),
+        ("kill-server", "coder-1's tmux server does not answer (nothing answers on"),
+        ("no socket file", "coder-1's tmux server is gone (no socket file at"),
+    ],
+)
+def test_bt_never_reclaims_for_an_agent_whose_pane_or_server_is_gone(
+    alpha: ProjectInfo,
+    agents: dict[str, FleetAgent],
+    fleet_rec: Fleet,
+    tmp_path: Path,
+    shape: str,
+    why: str,
+) -> None:
+    """13363 B1, 13371: an open session is not a live agent. A pane killed without a
+    SessionEnd, or a reboot's dead server (the row still reads waiting), leaves the card in
+    the pool — a claim there locks it 'doing' for a lease nobody works — and says why."""
+    old = add_task(alpha, "the old job")
+    new = add_task(alpha, "the new job")
+    team_service.claim_task(old.id, session_ref="sess-coder-1")
+    ok(actions.wololo("alpha", "coder-1", new.id))
+    if shape == "kill -9":
+        fleet_rec.states["coder-1"] = "exited"
+    else:
+        fleet_rec.server_up = False
+        if shape == "kill-server":  # the socket file is left behind
+            fleet_rec.socket_file = tmp_path / "asq"
+            fleet_rec.socket_file.touch()
+    result = ok(actions.bt())
+    assert (task_now(old.id).status, task_now(old.id).claimed_by) == ("todo", None)
+    assert f"{old.id} left in the pool: {why}" in result["said"], result["said"]
+    assert result["undid"]["restored"] == []
+    assert task_now(new.id).status == "todo", "the new card is still given back"
 
 
 def test_bt_after_a_wololo_ends_its_line_without_a_stray_card_id(

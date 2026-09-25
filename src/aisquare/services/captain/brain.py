@@ -35,13 +35,12 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Literal
 
 from aisquare.core import paths, transcripts
 from aisquare.core.atomic import write_replacing
 from aisquare.core.locking import lock_exclusive, unlock
 from aisquare.core.store import store_session
-from aisquare.core.tmux import TmuxError, TmuxServer, TmuxUnavailable
+from aisquare.core.tmux import TmuxError, TmuxServer
 from aisquare.models import FleetAgent, TeamSession
 from aisquare.services import fleet
 from aisquare.services.captain import screen
@@ -184,7 +183,7 @@ def find() -> FleetAgent | None:
         # A fresh board row wins over pane facts, so a captain whose tmux SERVER is
         # gone still reads `waiting` here — after a reboot the row said "already
         # running" and `say` waited its whole timeout (13185, 13189). Ask the server.
-        state, why = _server_state(agent)
+        state, why = fleet.server_state(agent)
         if state == "gone":
             # Provably gone: no socket file where the fleet resolves it, which is what
             # a reboot leaves. The fleet's own sweep ends the row, on tmux's word, as
@@ -205,34 +204,6 @@ def find() -> FleetAgent | None:
             )
         return agent
     return None
-
-
-def _server_state(agent: FleetAgent) -> tuple[Literal["up", "gone", "silent"], str]:
-    """Whether the captain's tmux server is up, provably gone, or merely not answering.
-
-    ``reachable`` is the one question that separates every state: True is a server
-    that answered; False is tmux's own word that no server is behind the socket;
-    a client that could not run, a denied socket or a wedged server RAISE, and
-    that is no evidence either way. "No server" is ``gone`` only when the socket
-    file is absent where the fleet resolves it (13189: a swept ``/tmp``); a file
-    with nothing behind it is ``silent`` — a kill-server leaves the file, and so
-    does a server alive under another ``TMUX_TMPDIR``.
-    """
-    srv = fleet.server_for(agent.tmux_socket)
-    try:
-        if srv.reachable():
-            return "up", ""
-    except TmuxUnavailable as exc:
-        return "silent", f"tmux could not be run ({exc})"
-    except TmuxError as exc:
-        return "silent", f"tmux could not be asked ({exc})"
-    try:
-        path = srv.socket_path()
-    except TmuxError as exc:
-        return "silent", str(exc)
-    if not path.exists():
-        return "gone", f"no socket file at {path}"
-    return "silent", f"nothing answers on {path}"
 
 
 def start(prompt: str | None = None, *, size: tuple[int, int] | None = None) -> fleet.SpawnReceipt:

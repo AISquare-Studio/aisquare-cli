@@ -964,6 +964,34 @@ def _undo(entry: captain_state.Undo) -> tuple[dict[str, Any], _Found]:
     return {**undid, "how": how}, found
 
 
+def _why_not_live(project: ProjectInfo, session: str, label: str) -> str | None:
+    """Why a converted agent cannot take its cards back, or ``None`` when it can (13371).
+
+    Three things must read live: its board session is open, its tmux server answers
+    (``fleet.server_state``, T2's reboot rule — asked before the row, which asks tmux),
+    and its fleet row is neither exited nor lost. An open session alone is not a live
+    agent: a pane killed without a SessionEnd, or a reboot's dead server, leaves it open
+    and the row reading waiting (13363, 13367).
+    """
+    with store_session() as store:
+        row = store.get_session(session) if session else None
+        agents = [a for a in store.fleet_agents(project.id) if a.session_id == session]
+    if row is None or row.ended_at is not None:
+        return f"{label}'s session has ended"
+    if not agents:
+        return f"{label} has no fleet row"
+    agent = agents[-1]
+    server, why = fleet.server_state(agent)
+    if server == "gone":
+        return f"{label}'s tmux server is gone ({why})"
+    if server != "up":
+        return f"{label}'s tmux server does not answer ({why})"
+    state = fleet.status_of(agent).state
+    if state in ("exited", "lost"):
+        return f"{label}'s pane has {'exited' if state == 'exited' else 'been lost'}"
+    return None
+
+
 def _held_by(task_id: str, session: str | None) -> bool:
     """Whether the card reads back as ``session``'s claim now (a write that raised may have
     landed: team.py commits before it writes the event)."""
@@ -999,18 +1027,16 @@ def _undo_wololo(
             said.append(f"{card.id} is {card.status} and no longer {label}'s claim, left as it is")
             kinds = ()
         restored: list[str] = []
-        with store_session() as store:
-            row = store.get_session(session) if session else None
-        alive = row is not None and row.ended_at is None
+        dead = _why_not_live(project, session, label)
         for old_id in entry.released:
             with store_session() as store:
                 old = store.get_task(old_id)
             if old is None:
                 said.append(f"{old_id} is gone")
-            elif old.status == "todo" and old.claimed_by is None and not alive:
-                # A claim for a session that has ended would lock the card 'doing' for its
-                # whole lease with nobody working it (13295 S2): it stays in the pool.
-                said.append(f"{old_id} left in the pool: {label}'s session has ended")
+            elif old.status == "todo" and old.claimed_by is None and dead is not None:
+                # A claim for an agent that cannot work would lock the card 'doing' for its
+                # whole lease with nobody on it (13295 S2, 13363 B1): it stays in the pool.
+                said.append(f"{old_id} left in the pool: {dead}")
             elif old.status == "todo" and old.claimed_by is None:
                 try:
                     team_service.claim_task(old.id, session_ref=session)

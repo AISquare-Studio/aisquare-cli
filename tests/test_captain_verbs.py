@@ -533,6 +533,37 @@ def test_the_utterance_is_the_argv_as_typed(
     assert last_audit()["utterance"] == "aisquare captain next --json"
 
 
+def test_the_one_captain_group_records_the_words_before_it_routes_a_message_to_say(
+    runner: CliRunner, alpha: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """13350: one group for T2's say-by-default and T5's audit. The words are kept as typed
+    BEFORE the rewrite to ``say`` (a later ``--voice`` rewrite goes after it too), a verb's
+    name is never taken for a message, and ``say`` and ``chat`` still route."""
+    from aisquare.services.captain import brain
+
+    heard: list[tuple[str, tuple[str, ...]]] = []
+
+    def say(text: str, *, timeout: float = 180.0) -> brain.Reply:
+        heard.append((text, captain_verbs.TYPED.get()))
+        return brain.Reply(text="all quiet")
+
+    monkeypatch.setattr(brain, "say", say)
+    for argv in (["what is up"], ["say", "what", "is", "up"], ["--timeout", "30", "hi"]):
+        result = runner.invoke(app, ["captain", *argv], catch_exceptions=False)
+        assert result.exit_code == 0 and "all quiet" in result.output, result.output
+    result = runner.invoke(app, ["captain", "chat"], input="one\n\ntwo\n", catch_exceptions=False)
+    assert result.exit_code == 0
+    assert heard[:3] == [
+        ("what is up", ("what is up",)),
+        ("what is up", ("say", "what", "is", "up")),
+        ("hi", ("--timeout", "30", "hi")),
+    ]
+    assert [text for text, _ in heard[3:]] == ["one", "two"]
+    code, _ = run(runner, "attention")
+    assert code == 0 and last_audit()["tool"] == "attention", "a verb is never a message"
+    assert last_audit()["utterance"] == "aisquare captain attention"
+
+
 def test_the_verbs_need_no_mcp_sdk(runner: CliRunner, monkeypatch: pytest.MonkeyPatch) -> None:
     """A base install (no [serve] extra) drives the captain from the terminal all the same."""
     for name in list(sys.modules):

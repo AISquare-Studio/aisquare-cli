@@ -780,10 +780,38 @@ def test_a_corrupt_queue_file_reads_as_empty_and_says_so(
     with caplog.at_level(logging.WARNING, logger="aisquare.services.captain.queue"):
         queue = fx.queue()
         assert queue.items() == []
-    assert any("queue.json" in record.getMessage() for record in caplog.records)
+    corrupt = [r for r in caplog.records if "is not a queue file" in r.getMessage()]
+    assert len(corrupt) == 1, "said once per process, not on every read"
+    with caplog.at_level(logging.WARNING, logger="aisquare.services.captain.queue"):
+        queue.items()
+        queue.attention()
+    corrupt = [r for r in caplog.records if "is not a queue file" in r.getMessage()]
+    assert len(corrupt) == 1
     _seed_three_projects(fx)
     queue.refresh()
     assert len(queue.items()) == 3
+    # Corrupted again after a write: news again, exactly once.
+    fx.path.write_text("[]", encoding="utf-8")
+    with caplog.at_level(logging.WARNING, logger="aisquare.services.captain.queue"):
+        queue.items()
+        queue.items()
+    corrupt = [r for r in caplog.records if "is not a queue file" in r.getMessage()]
+    assert len(corrupt) == 2
+
+
+@pytest.mark.parametrize("body", [b"", b"   \n", b"\x00\x00\x00"])
+def test_a_blank_queue_file_is_nothing_yet_not_corrupt(
+    fx: Fixture, caplog: pytest.LogCaptureFixture, body: bytes
+) -> None:
+    """A ``touch``ed or crash-truncated file has nothing in it to protect (runner2, seq 13051)."""
+    fx.path.parent.mkdir(parents=True)
+    fx.path.write_bytes(body)
+    with caplog.at_level(logging.WARNING, logger="aisquare.services.captain.queue"):
+        queue = fx.queue()
+        assert queue.items() == []
+        queue.refresh()
+    assert not [r for r in caplog.records if "queue.json" in r.getMessage()]
+    assert json.loads(fx.path.read_text(encoding="utf-8"))["version"] == 1
 
 
 def test_a_held_lock_is_a_refusal_the_owner_can_retry_and_a_write_failure_is_an_error(

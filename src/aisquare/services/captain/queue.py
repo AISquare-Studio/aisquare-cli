@@ -105,6 +105,14 @@ EVENT_LIMIT = 500
 FILE_VERSION = 1
 #: How long a writer waits for the queue's lock before giving up.
 LOCK_WAIT_S = 2.0
+#: What an empty queue file may hold and still mean "nothing yet": whitespace, or the
+#: NULs a crash leaves when the size reached the disk and the data did not — the same
+#: reading ``core.state_file`` gives ``state.json``.
+_BLANK = " \t\r\n\x00"
+#: Paths already reported as corrupt this process, so a read-only path (``attention``
+#: under T1's server, several times a minute) says it once, not on every read; the
+#: next write replaces the file and the report is done with.
+_REPORTED_CORRUPT: set[Path] = set()
 
 #: What :func:`normalise` strips before texts are compared: task, project, agent
 #: and event ids, UUIDs and hex ids (session prefixes, shas), event seqs and
@@ -702,6 +710,8 @@ class AttentionQueue:
         except OSError as exc:
             log.warning("captain queue: %s could not be read, starting empty: %s", self.path, exc)
             return _State()
+        if not raw.strip(_BLANK):
+            return _State()  # nothing in it to protect: a fresh file, or a crash's NULs
         try:
             body = json.loads(raw)
             if not isinstance(body, dict):
@@ -714,8 +724,13 @@ class AttentionQueue:
             cursors = {str(key): int(value) for key, value in cursors_raw.items()}
         except (ValueError, TypeError, ValidationError) as exc:
             # Said, never silent: a corrupt queue costs the owner its history,
-            # and the file is rewritten whole on the next write.
-            log.warning("captain queue: %s is not a queue file, starting empty: %s", self.path, exc)
+            # and the file is rewritten whole on the next write. Once per path
+            # per process: reads cannot mend the file and would say it forever.
+            if self.path not in _REPORTED_CORRUPT:
+                _REPORTED_CORRUPT.add(self.path)
+                log.warning(
+                    "captain queue: %s is not a queue file, starting empty: %s", self.path, exc
+                )
             return _State()
         return _State(items={item.key: item for item in items}, cursors=cursors)
 
@@ -729,6 +744,7 @@ class AttentionQueue:
             write_replacing(self.path, json.dumps(body, indent=1, sort_keys=True) + "\n")
         except OSError as exc:
             raise QueueError(f"{self.path} could not be written: {exc}") from exc
+        _REPORTED_CORRUPT.discard(self.path)  # whole again; a later corruption is news
 
     @contextlib.contextmanager
     def _locked(self) -> Iterator[None]:

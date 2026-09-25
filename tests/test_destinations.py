@@ -19,6 +19,7 @@ import sqlite3
 import stat
 import sys
 from collections.abc import Iterator
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -122,24 +123,108 @@ def test_the_session_host_names_the_deployment() -> None:
     assert dest.environment_name("https://api.example.org:8443") == "api.example.org"
 
 
-def test_ensure_target_fills_only_what_is_empty_and_never_enables(isolated_home: Path) -> None:
+def test_ensure_target_creates_a_missing_target_and_leaves_an_existing_one_alone(
+    isolated_home: Path,
+) -> None:
+    """A created target is the destination's (marked so, its own key variable, the
+    environment's gateway and proxy); an existing one is the operator's, empty fields
+    and all — filling them moved every project resolving the machine default (crew
+    gate on #203, finding 1). Picking a destination never starts tracing."""
     config = AppConfig()
     name, changed = dest.ensure_target(config, "https://stg-api.aisquare.studio")
     stg = config.explainability.targets["stg"]
     assert (name, changed) == ("stg", True)
     assert stg.gateway_url == "https://stg-explainability-api.aisquare.studio"
     assert stg.proxy_url == "https://stg-explainability.api.aisquare.studio:9443"
+    assert stg.destination is True
     assert config.explainability.enabled is False, "picking a destination does not start tracing"
-    # A hand-set gateway stays; a second call changes nothing.
+    # A hand-set target stays exactly as written: the empty proxy is NOT filled.
     config.explainability.targets["prod"] = ExplainabilityTarget(gateway_url="https://mine.example")
-    name, changed = dest.ensure_target(config, "https://api.aisquare.studio")
-    assert (name, changed) == ("prod", True), "the proxy was empty and is filled"
-    assert config.explainability.targets["prod"].gateway_url == "https://mine.example"
     assert dest.ensure_target(config, "https://api.aisquare.studio") == ("prod", False)
-    # An unknown host: a target by host name, nothing filled in.
+    prod = config.explainability.targets["prod"]
+    assert (prod.gateway_url, prod.proxy_url, prod.destination) == (
+        "https://mine.example",
+        None,
+        False,
+    )
+    # An unknown host: a target by host name, nothing filled in, and no borrowing.
     name, changed = dest.ensure_target(config, "https://api.example.org")
     assert (name, changed) == ("api.example.org", True)
-    assert config.explainability.targets["api.example.org"].gateway_url == ""
+    created = config.explainability.targets["api.example.org"]
+    assert created.gateway_url == "" and created.proxy_url is None and created.destination
+
+
+def test_use_for_one_project_leaves_a_project_without_a_destination_exactly_as_it_was(
+    isolated_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Crew gate on #203, finding 1, measured: a prod machine (`init --explainability`:
+    top-level gateway and the key file, no target, the default target NAME "stg"),
+    `use` for one project signed in to stg-api, and every project without a
+    destination resolved staging with no key. The machine default never resolves a
+    target `use` wrote; the operator taking it over (`enable --target stg`) does."""
+    monkeypatch.delenv(service.KEY_ENV_VAR, raising=False)
+    config = AppConfig()
+    config.explainability.gateway_url = "https://explainability-api.aisquare.studio"
+    service.store_api_key("sk-machine")
+    settings = config.explainability
+
+    def machine_default() -> tuple[str, str, str, str, str, str]:
+        r = ops.resolve_target(settings)
+        return r.name, r.gateway_url, r.proxy_url, r.api_key_env, r.key_source, r.gateway_source
+
+    before = machine_default()
+    assert before[1:3] == ("https://explainability-api.aisquare.studio", settings.proxy_url)
+    assert before[4] == "file"
+
+    name, changed = dest.ensure_target(config, "https://stg-api.aisquare.studio")
+    assert (name, changed) == ("stg", True) and settings.target == "stg"  # the SAME name
+
+    assert machine_default() == before, "use for one project moved every other project"
+    chosen = ops.resolve_target(settings, "stg")  # the destination's own resolution
+    assert chosen.gateway_url == "https://stg-explainability-api.aisquare.studio"
+    assert chosen.api_key_env == "EXPLAINABILITY_STG_API_KEY" and chosen.key_source == "unset"
+    # The operator takes the target over: now it IS the machine default.
+    service.configure_target(config, target_name="stg", make_active=True, enable=False)
+    assert settings.targets["stg"].destination is False
+    assert machine_default()[1] == "https://stg-explainability-api.aisquare.studio"
+
+
+def test_an_unknown_hosts_destination_resolves_to_no_gateway_never_to_the_machines(
+    isolated_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Crew gate on #203, finding 2, measured: a prod machine, `use` signed in to a
+    self-hosted API, and the project's minted key was posted against prod's gateway
+    and proxy. A destination's target borrows nothing from the machine: no gateway
+    known is said as unset, and `status` prints "(no gateway known)"."""
+    monkeypatch.setenv(ops.GATEWAY_ENV_VAR, "https://exported.example")
+    config = AppConfig()
+    config.explainability.gateway_url = "https://explainability-api.aisquare.studio"
+    config.explainability.proxy_url = "https://explainability-api.aisquare.studio:9443"
+    settings = config.explainability
+    name, _ = dest.ensure_target(config, "https://api.acme-selfhosted.example")
+
+    explicit = ops.resolve_target(settings, name)
+    assert (explicit.gateway_url, explicit.gateway_source) == ("", "unset")
+    assert (explicit.proxy_url, explicit.proxy_source) == ("", "unset")
+    # …and through the destination row, the way a launch resolves it.
+    with store_session() as store:
+        project = ProjectInfo(id="prj_self", root=isolated_home / "self", linked_repos=[])
+        store.ensure_project(project)
+        store.set_project_destination(
+            TraceDestination(
+                project_id=project.id,
+                api_url="https://api.acme-selfhosted.example",
+                environment=name,
+                workspace_id=1,
+                workspace_name="acme",
+                set_at=datetime.now(tz=UTC),
+            )
+        )
+    by_destination = ops.resolve_target(settings, project_id="prj_self")
+    assert by_destination.name == name
+    assert (by_destination.gateway_url, by_destination.proxy_url) == ("", "")
+    # The machine itself still resolves its own deployment, env var and all.
+    assert ops.resolve_target(settings).gateway_url == "https://exported.example"
 
 
 # --- listing through the session ---------------------------------------------------------------

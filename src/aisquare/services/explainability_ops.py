@@ -160,7 +160,7 @@ class ResolvedTarget:
     #: not in play.
     key_source: str
     proxy_url: str
-    proxy_source: str  # "config" | "default" — the default is unreachable ON PURPOSE
+    proxy_source: str  # "config" | "default" | "unset" — the default is unreachable ON PURPOSE
     agent_name_template: str
     studio_id: str
     roles: tuple[str, ...]
@@ -321,18 +321,33 @@ def resolve_target(
     # explicit ``--target`` or the environment variable still wins, because
     # both are someone saying so right now.
     destination = _project_destination(project_id)
+    explicit = name or environ.get(TARGET_ENV_VAR)
+    from_destination = not explicit and destination is not None
     chosen = (
-        name
-        or environ.get(TARGET_ENV_VAR)
+        explicit
         or (destination.environment if destination is not None else None)
         or settings.target
     )
     target = settings.targets.get(chosen, ExplainabilityTarget())
+    if target.destination and not explicit and not from_destination:
+        # The machine default's NAME is a target `use` wrote for a destination —
+        # the default name is "stg", and so is staging's — and that target is the
+        # destination's, not the machine's. A project without a destination
+        # resolves exactly what it did before `use` ran: the top level, and the
+        # machine key (crew gate on #203, finding 1).
+        target = ExplainabilityTarget()
+    # A destination's target borrows nothing from the machine. The top-level
+    # gateway and proxy, and $EXPLAINABILITY_GATEWAY_URL, belong to the
+    # machine's own deployment; a target `use` wrote for another one — or the
+    # one a destination chose — must not post that deployment's key to them.
+    # An API host the CLI cannot place therefore resolves to NO gateway, said
+    # as "unset", never to prod's (crew gate on #203, finding 2).
+    borrows = not (target.destination or from_destination)
 
     gateway_url, source = target.gateway_url, "config"
-    if not gateway_url:
+    if not gateway_url and borrows:
         gateway_url, source = environ.get(GATEWAY_ENV_VAR, ""), "env"
-    if not gateway_url:
+    if not gateway_url and borrows:
         gateway_url, source = settings.gateway_url, "config"
     if not gateway_url:
         source = "unset"
@@ -353,8 +368,8 @@ def resolve_target(
         api_key_env=target.api_key_env,
         api_key=api_key,
         key_source=key_source,
-        proxy_url=target.proxy_url or settings.proxy_url,
-        proxy_source=_proxy_source(settings, target),
+        proxy_url=target.proxy_url or (settings.proxy_url if borrows else ""),
+        proxy_source=_proxy_source(settings, target) if borrows or target.proxy_url else "unset",
         agent_name_template=target.agent_name_template or settings.agent_name_template,
         studio_id=target.studio_id,
         roles=tuple(roles),
@@ -1343,6 +1358,22 @@ def proxy_state(
     # Resolved here rather than bound as a default argument, so a test (or a
     # caller) can substitute a prober by patching this module.
     ask = prober or probe_proxy
+    if not target.proxy_url:
+        # A destination's target with no proxy of its own borrows none from the
+        # machine (crew gate on #203, finding 2): launches under it run
+        # unproxied, so their model traffic is untraced. Red only while tracing
+        # is on — off, nothing is traced anyway — and nothing is dialled: there
+        # is no address to ask.
+        return ProxyState(
+            summary=(
+                f"no proxy known for the {target.name} deployment — launches under it run "
+                "unproxied, so their model traffic is not traced"
+            ),
+            severity=CheckStatus.warn if on else CheckStatus.ok,
+            remediation=(
+                f"aisquare explainability enable --target {target.name} --proxy-url <url>"
+            ),
+        )
     if not on:
         if target.proxy_source == "default":
             # Never dialled, --live or not: nobody asked about this address.
@@ -1886,6 +1917,8 @@ def apply_fixes(
         config.explainability.enabled = True
         if target:
             config.explainability.target = target
+            if target in config.explainability.targets:
+                config.explainability.targets[target].destination = False  # the operator's now
         try:
             save_config(config)
             actions.append("enabled explainability tracing for this machine")

@@ -1263,8 +1263,13 @@ def configure_target(
     name = target_name or settings.target
     if target_name and make_active:
         settings.target = target_name
+        if target_name in settings.targets:
+            # Chosen by the operator: no longer a destination's alone — the machine
+            # default resolves it, and it may borrow the machine's gateway again.
+            settings.targets[target_name].destination = False
     if gateway_url or key_env or proxy_url or identity:
         target = settings.targets.get(name, ExplainabilityTarget())
+        target.destination = False  # a setting written for it makes it the operator's
         # Stored as VALIDATED: stripped, no trailing slash. `url_problem` judged
         # that spelling, and every comparison downstream (`_proxy_source`
         # against the shipped default, `chosen_proxy`, the remediation lines)

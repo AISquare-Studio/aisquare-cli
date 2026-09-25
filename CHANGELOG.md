@@ -7,6 +7,25 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Fixed
+
+- **`explainability use` for one project no longer re-points every project
+  without a destination** (crew gate on #203, finding 1). On the machine
+  `init --explainability` produces — a top-level gateway and the key file, no
+  target — the default target NAME is `stg`, and so is staging's: `use` for one
+  project signed in to `stg-api` created `targets.stg`, and every other
+  project's launches, the doctor and the shipper resolved staging with no key.
+  A target `use` writes is marked the destination's (`destination = true`): the
+  machine default never resolves it, and `ensure_target` creates a missing
+  target only — it no longer fills an existing target's empty fields, which
+  moved whoever resolved it. `enable --target`, the Setup form's *make active*
+  or any setting written for it makes the target the operator's again.
+- **An API host the CLI cannot place no longer resolves to prod's gateway and
+  proxy** (crew gate on #203, finding 2). A destination on a self-hosted API
+  (or `http://[::1]`) got a target with no gateway, which fell back to the
+  top-level one — prod's, on a prod machine — so the key minted for that
+  deployment was posted to another. A destination's target borrows nothing
+  from the machine: no gateway means `gateway_source = unset`, `status` prints
+  `(no gateway known)`, and shipping refuses rather than misroutes.
 - **The documented-commands guard no longer fails the checkout that runs the
   fleet.** `test_the_document_list_has_not_gone_stale` walks the whole
   repository for markdown with commands in a fenced block, and a root checkout

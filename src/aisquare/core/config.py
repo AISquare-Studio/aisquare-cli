@@ -51,6 +51,14 @@ class ExplainabilityTarget(BaseModel):
     proxy_url: str | None = None
     agent_name_template: str | None = None
     roles: list[str] | None = None
+    #: Written by ``explainability use`` for a destination (``destinations.ensure_target``)
+    #: and not yet taken over by the operator. The machine default never resolves such
+    #: a target — ``use`` for one project must change nothing for a project without a
+    #: destination — and it borrows no gateway or proxy from the machine, so a key
+    #: minted for a deployment the CLI cannot place is never posted to another one
+    #: (crew gate on #203, findings 1 and 2). ``enable --target``, the Setup form's
+    #: "make active" or any setting written for it makes it the operator's and clears this.
+    destination: bool = False
 
 
 class ExplainabilitySettings(BaseModel):

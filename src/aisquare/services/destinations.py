@@ -188,38 +188,46 @@ def _machine_key_serves(settings: ExplainabilitySettings, environment: Environme
 def ensure_target(config: AppConfig, api_url: str) -> tuple[str, bool]:
     """Make sure the deployment the session belongs to exists as an explainability target.
 
-    Fills ONLY what is empty: a gateway or proxy an operator set by hand stays.
-    Returns the target name and whether the config changed. Does not flip
-    ``enabled`` — that is ``explainability enable``'s one job, and a command
-    that picks a destination must not silently start tracing.
+    CREATES the target when it is missing, and only then: an existing one is
+    the operator's, whatever it holds. The first cut filled an existing
+    target's empty fields, and filling the machine default's proxy moved every
+    project that resolves it (crew gate on #203, finding 1). Returns the target
+    name and whether the config changed. Does not flip ``enabled`` — that is
+    ``explainability enable``'s one job, and a command that picks a destination
+    must not silently start tracing.
 
-    A target CREATED here names a key variable of its own
-    (:func:`key_env_for`). With the default one, the unlabelled machine key —
-    ``~/.aisquare/explainability-key`` or ``$EXPLAINABILITY_API_KEY`` — would
-    answer for every deployment anyone signs in to, and ``use`` would bind the
-    roster and every launch would authenticate with a key issued for somewhere
-    else: the hazard ``tests/test_key_never_crosses_deployments.py`` pins.
-    The one exception is the machine whose top-level gateway already is this
-    deployment's, where that key is exactly the right one and a new variable
-    would only take it away.
+    A target created here is marked ``destination`` (:class:`ExplainabilityTarget`):
+    the machine default never resolves it, so ``use`` for one project changes
+    nothing for a project without a destination — the default target NAME is
+    ``stg``, and so is staging's, which is how one project's ``use`` used to
+    re-point every other project to staging with no key — and it borrows no
+    gateway or proxy from the machine, so an API host the CLI cannot place
+    resolves to no gateway rather than to prod's (finding 2).
+
+    It also names a key variable of its own (:func:`key_env_for`). With the
+    default one, the unlabelled machine key — ``~/.aisquare/explainability-key``
+    or ``$EXPLAINABILITY_API_KEY`` — would answer for every deployment anyone
+    signs in to, and ``use`` would bind the roster and every launch would
+    authenticate with a key issued for somewhere else: the hazard
+    ``tests/test_key_never_crosses_deployments.py`` pins. The one exception is
+    the machine whose top-level gateway already is this deployment's, where
+    that key is exactly the right one and a new variable would only take it
+    away.
     """
     name = environment_name(api_url)
-    environment = environment_for(api_url)
     settings = config.explainability
-    target = settings.targets.get(name, ExplainabilityTarget())
-    changed = name not in settings.targets
-    if changed and not _machine_key_serves(settings, environment):
+    if name in settings.targets:
+        return name, False
+    environment = environment_for(api_url)
+    target = ExplainabilityTarget(destination=True)
+    if not _machine_key_serves(settings, environment):
         target.api_key_env = key_env_for(name)
     if environment is not None:
-        if not target.gateway_url:
-            target.gateway_url = environment.gateway_url
-            changed = True
-        if not target.proxy_url and environment.proxy_url:
+        target.gateway_url = environment.gateway_url
+        if environment.proxy_url:
             target.proxy_url = environment.proxy_url
-            changed = True
-    if changed:
-        settings.targets[name] = target
-    return name, changed
+    settings.targets[name] = target
+    return name, True
 
 
 # ── what the signed-in user can see ────────────────────────────────────────────

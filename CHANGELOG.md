@@ -1109,7 +1109,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   manager and its coders were refused from their first shell command. The fix
   is the proxy's (AISquare-Explainability-SDK#1144); meanwhile: `aisquare
   doctor` gains `explainability auto-mode` — present when a fleet role runs
-  `auto` behind a configured proxy, it reads the first-turn size of recent
+  `auto` behind a configured proxy, or a running agent was launched in `auto`
+  (named, since a restart replays its mode whatever the role says now), it reads the first-turn size of recent
   sessions from their transcripts and warns above ~100k tokens or when a
   recent session was refused three times or more; `fleet spawn` carries the
   same warning on its receipt, and so do `fleet restart` and `fleet switch`,

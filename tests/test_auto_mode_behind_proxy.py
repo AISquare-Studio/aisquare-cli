@@ -41,7 +41,7 @@ from aisquare.core.config import (
 )
 from aisquare.core.orchestrator import team_project
 from aisquare.core.store import store_session
-from aisquare.models import CheckStatus, FleetAgent, ProjectInfo, TeamSession
+from aisquare.models import CheckStatus, FleetAgent, LaunchSpec, ProjectInfo, TeamSession
 from aisquare.services import auto_mode, diagnostics
 from aisquare.services import fleet as fleet_service
 from aisquare.services import hooks as hooks_service
@@ -365,6 +365,50 @@ def test_the_doctor_line_exists_only_for_auto_mode_behind_a_configured_proxy(
     assert "AISquare-Explainability-SDK/issues/1144" in check.fix
     assert "explainability disable" in check.fix
     assert _doctor_row() is not None, "it reaches the real doctor"
+
+
+def test_the_doctor_line_names_the_agents_still_running_in_auto(
+    isolated_home: Path, tmp_path: Path
+) -> None:
+    """Review of #169, round 1: a restart replays the mode an agent was launched with
+    (#144), so moving every role off ``auto`` does not take a running agent off it. The
+    line read the roles alone and went quiet while such an agent still ran ``auto``, and
+    replayed it on every restart and switch. It names the agent now, with the restart
+    that moves it, and no role step, since every role is already off ``auto``."""
+    paths.ensure_home()
+    _configure(tracing=True, modes={role: "acceptEdits" for role in auto_mode.auto_roles()})
+    project = _project(tmp_path / "repo")
+    _session(project, "s-big", _sized(tmp_path / "t" / "big.jsonl", 141_000))
+    now = datetime.now(tz=UTC)
+
+    def agent(label: str, mode: str | None, *, ended: bool = False) -> None:
+        with store_session() as store:
+            store.upsert_fleet_agent(
+                FleetAgent(
+                    id=f"agt_{label}",
+                    project_id=project.id,
+                    label=label,
+                    role="coder",
+                    pane_id=f"%{label}",
+                    cwd=project.root,
+                    created_at=now,
+                    ended_at=now if ended else None,
+                    launch_spec=LaunchSpec(binary="claude", permission_mode=mode),
+                )
+            )
+
+    agent("coder-edits", "acceptEdits")
+    agent("coder-done", "auto", ended=True)
+    assert auto_mode.doctor_check() is None, "nothing running uses the classifier"
+    agent("coder-auto", "auto")
+
+    check = auto_mode.doctor_check()
+
+    assert check is not None and check.status is CheckStatus.warn, check
+    assert check.detail.startswith("the running agent coder-auto (repo) runs in auto mode")
+    assert "141k" in check.detail
+    assert check.fix and "aisquare fleet restart <label> --permission-mode acceptEdits" in check.fix
+    assert "config set" not in check.fix and "[fleet.roles" not in check.fix
 
 
 _TABLE_STEP = re.compile(r"add a `(\[fleet\.roles\.[\w-]+\])` table with `([^`]+)`")

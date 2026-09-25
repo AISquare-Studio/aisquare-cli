@@ -506,8 +506,9 @@ coders alike; probes at ~98k passed. `/compact` does not help a fresh agent —
 the baseline cannot be compacted.
 
 **What the CLI tells you.** `aisquare doctor` gains an `explainability
-auto-mode` line whenever a fleet role runs `auto` behind a configured proxy: it
-reads the first-turn size of your recent sessions from their transcripts and
+auto-mode` line whenever a fleet role runs `auto` behind a configured proxy, or
+a running agent was launched in `auto` (a restart replays that mode, whatever
+the role says now, so the line names the agent): it reads the first-turn size of your recent sessions from their transcripts and
 warns when that size is above ~100k tokens, or when a recent session was
 refused three times or more (one or two can be a real transient 5xx). `fleet
 spawn` puts the same warning on its receipt. A running session that was

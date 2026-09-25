@@ -1127,13 +1127,24 @@ class TerminalPane(Widget, can_focus=True):
         self._schedule(self.FAST_INTERVAL)
 
     def on_hide(self) -> None:
-        """A tab went behind another: its highlight goes with it.
+        """A tab went behind another: its highlight goes with it, and so does a gesture it ran.
 
         A hidden pane is not captured, so whatever it highlights can change
         unseen — and its entry stayed in ``screen.selections``, where the copy
         key outside a pane found it, extracted nothing from a 0x0 widget, and
         wiped the clipboard with an empty OSC 52 (review of #135, finding 10).
+
+        A press forwarded to the program and a shift+drag hold the pointer
+        until this widget's own release, and a view switched mid-gesture left
+        a hidden widget holding it. Textual delivers no mouse event at all
+        while the pointer's holder is off screen: the moves, the release and
+        every click after them were dropped, so the view in front took no click
+        until this tab came back — and then the gesture was still running, the
+        program's press open, and every bare move went to it as a drag or
+        dragged the shift+drag's highlight (#207 follow-up). The gesture ends
+        at the hide (:meth:`_interrupt_gesture`).
         """
+        self._interrupt_gesture()
         if self.text_selection is not None:
             self._clear_own_selection()
 
@@ -2213,7 +2224,8 @@ class TerminalPane(Widget, can_focus=True):
         says why not at the app's routing). A release where the press was is a
         click, which selects nothing. A forwarded left release arms the
         paste-buffer mirror. A release that never comes is
-        :meth:`gesture_release_lost`.
+        :meth:`gesture_release_lost`; one that goes elsewhere, because a hide or
+        a screen took the pointer first, is :meth:`_interrupt_gesture`.
         """
         if self._shift_drag is not None:
             event.stop()
@@ -2260,15 +2272,65 @@ class TerminalPane(Widget, can_focus=True):
         and a left one arms the paste-buffer mirror, since the program copies
         on that release. A shift+drag ends with its highlight where it got to,
         copied as its own release would have copied it (:meth:`_end_shift_drag`).
+
+        The second half is queued BEFORE the pointer is let go. Letting go
+        posts this widget a ``MouseRelease``, which :meth:`on_mouse_release`
+        reads as the pointer taken mid-gesture; queued ahead of this end, it
+        stopped a shift+drag uncopied, as an interruption does.
         """
-        self.release_mouse()
         self.call_later(self._end_lost_gesture)
+        self.release_mouse()
 
     def _end_lost_gesture(self) -> None:
         """:meth:`gesture_release_lost`'s second half, after this widget's queued events."""
-        self.release_mouse()
         if self._shift_drag is not None:
             self._end_shift_drag(self._own_selection())
+        self._end_forwarded_press()
+
+    def on_mouse_release(self, event: events.MouseRelease) -> None:
+        """The pointer was taken from this widget: end a gesture that still held it.
+
+        Textual posts this when a capture ends, and a screen pushed or switched
+        to mid-press ends it (``App.push_screen``); the release then goes to
+        that screen, never here. Unhandled, the program's press stayed open:
+        after the dialog closed, every bare move over the pane reached the
+        program as a drag, and a shift+drag's highlight followed the pointer
+        (#207 follow-up). It ends as a hide ends it (:meth:`_interrupt_gesture`).
+
+        This widget's own ``release_mouse`` posts one too, which arrives after
+        the gesture it ended — and, in a burst, after the NEXT press has taken
+        the pointer again. The pointer is this widget's then, and the gesture
+        now running is left alone: read as taken, a click followed at once by
+        a drag had the drag released under it.
+        """
+        if self.app.mouse_captured is self:
+            return
+        self._interrupt_gesture()
+
+    def _interrupt_gesture(self) -> None:
+        """End what this widget runs itself, the pointer taken mid-gesture by a hide or a screen.
+
+        The user has not let go, and the release will reach whatever is under
+        the pointer then, never this widget. The program is owed the release
+        to its press all the same — a program left with a button down reads
+        every later motion as a drag — so it gets it where the drag got to, as
+        at a lost release (:meth:`_end_forwarded_press`). A shift+drag stops
+        where it got to, uncopied: nothing asked for a copy yet, and Textual's
+        own drag-select, interrupted by a screen, copies nothing either
+        (``test_a_modal_pushed_mid_drag_leaves_no_gesture_behind``).
+        """
+        self._shift_drag = None
+        self._end_forwarded_press()
+
+    def _end_forwarded_press(self) -> None:
+        """Let go of the pointer, and end a press forwarded to the program with its release.
+
+        Sent where the drag got to — the last cell the program was sent, with
+        that report's modifier bits — as it would have been had the release
+        come there; a left one arms the paste-buffer mirror, since the program
+        copies on that release.
+        """
+        self.release_mouse()
         if self._forwarding is None:
             return
         button, self._forwarding = self._forwarding, None
@@ -2644,8 +2706,13 @@ class TerminalPane(Widget, can_focus=True):
             return
         # The pane may be taller than the widget between a Resize and its
         # debounced resize-window: the widget shows the pane's LAST rows, so a
-        # widget row maps to a pane row that many lines further down.
-        offset = max(0, facts.height - self.content_size.height)
+        # widget row maps to a pane row that many lines further down. A hidden
+        # widget shows no rows at all — the release a hide owes the program is
+        # queued then (``_interrupt_gesture``) — and maps one to one, as the
+        # widget the pane was last sized to; measured from no rows, that
+        # release landed a whole pane below the drag.
+        height = self.content_size.height
+        offset = max(0, facts.height - height) if height else 0
         self._mouse_queue.append((kind, code, x + 1, y + 1 + offset))
         if self._mouse_timer is None:
             # One tmux client per FLUSH, not per event: a trackpad flick is 20-50

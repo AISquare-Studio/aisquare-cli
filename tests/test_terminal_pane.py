@@ -4607,6 +4607,188 @@ def test_an_attach_mid_drag_gives_the_pointer_back(fake: FakeTmux, tmp_path: Pat
     assert after == ""
 
 
+def test_a_view_switch_mid_press_gives_the_program_its_release_and_the_pointer_back(
+    fake: FakeTmux, tmp_path: Path
+) -> None:
+    """#207 follow-up. A forwarded press holds the pointer until the pane's own
+    release, and a view switched mid-press left it held by a pane nobody could
+    see. Textual delivers no mouse event while the pointer's holder is off
+    screen, so the drag's moves, its release and the clicks after it were all
+    dropped — the view in front took no click — and the program's press stayed
+    open. Hidden, the pane ends the gesture as a lost release does: the program
+    gets its release where the drag got to (measured from a widget with no
+    rows, it landed a pane's height below), and the pointer is free."""
+    pane = fake.panes["%1"]
+    pane.alternate_on = pane.mouse_on = pane.mouse_sgr = pane.mouse_drag = True
+    fake.panes["%2"] = FakePane(screen=["other agent"], cursor=(0, 0))
+
+    async def drive() -> tuple[Widget | None, str]:
+        host = SwitcherHost(fake.server(tmp_path))
+        async with host.run_test(size=(40, 6)) as pilot:
+            first = host.query_one("#first", TerminalPane)
+            second = host.query_one("#second", TerminalPane)
+            await wait_until(pilot, lambda: synced(first))
+            await press(pilot, first, (3, 2))
+            await move(pilot, first, (5, 2), button=1)
+            host.tabs.current = "second"
+            await wait_until(pilot, lambda: synced(second))
+            captured = host.mouse_captured
+            await move(pilot, second, (7, 3), button=1)
+            await release(pilot, second, (7, 3))
+            await pilot.pause(0.1)
+            return captured, _literals(fake)
+
+    captured, forwarded = run(drive())
+    assert captured is None, "the hidden pane kept the pointer"
+    assert forwarded == "\x1b[<0;4;3M\x1b[<32;6;3M\x1b[<0;6;3m", repr(forwarded)
+
+
+def test_a_view_switch_mid_shift_drag_leaves_nothing_on_the_hidden_pane(
+    fake: FakeTmux, tmp_path: Path
+) -> None:
+    """The local half of the same follow-up. A shift+drag holds the pointer too,
+    and hidden mid-drag it kept it, with the same dead mouse, and a drag still
+    running when the tab came back. The drag ends at the hide, uncopied: the
+    button is still down, and nothing has asked for a copy. Copied there, it
+    would extract nothing from a widget with no rows and tell the user "nothing
+    to copy"."""
+    pane = fake.panes["%1"]
+    pane.alternate_on = pane.mouse_on = pane.mouse_sgr = True
+    fake.panes["%2"] = FakePane(screen=["other agent"], cursor=(0, 0))
+
+    async def drive() -> tuple[Widget | None, Selection | None, str, list[str]]:
+        host = PairHost(fake.server(tmp_path))
+        async with host.run_test(size=(40, 12)) as pilot:
+            first = host.query_one("#first", TerminalPane)
+            second = host.query_one("#second", TerminalPane)
+            await wait_until(pilot, lambda: synced(first) and synced(second))
+            await press(pilot, first, (7, 1), shift=True)
+            await move(pilot, first, (3, 1), button=1, shift=True)
+            # What a ContentSwitcher does to the tab it leaves, in the host that
+            # records what the user was told.
+            first.display = False
+            await wait_until(pilot, lambda: synced(second))
+            captured = host.mouse_captured
+            await move(pilot, second, (5, 2), button=1, shift=True)
+            await release(pilot, second, (5, 2), shift=True)
+            await pilot.pause()
+            return captured, first.text_selection, host.clipboard, host.notices
+
+    captured, selection, clipboard, notices = run(drive())
+    assert captured is None, "the hidden pane kept the pointer"
+    assert selection is None, f"the hidden pane holds {selection!r}"
+    assert (clipboard, notices) == ("", []), notices
+
+
+def test_a_dialog_pushed_mid_press_gives_the_program_its_release(
+    fake: FakeTmux, tmp_path: Path
+) -> None:
+    """#207 follow-up. A screen pushed mid-press takes the pointer back
+    (``App.push_screen`` ends the capture) and the release with it; the pane
+    was told only by a ``MouseRelease`` it had no handler for, so the program's
+    press stayed open, and after the dialog closed every bare move over the
+    pane reached the program as a drag. The pane ends the gesture when the
+    pointer is taken from it: the release where the drag got to, and nothing
+    after."""
+    pane = fake.panes["%1"]
+    pane.alternate_on = pane.mouse_on = pane.mouse_sgr = pane.mouse_drag = True
+
+    async def drive() -> str:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 6)) as pilot:
+            widget = host.pane
+            await wait_until(pilot, lambda: synced(widget))
+            await press(pilot, widget, (3, 2))
+            await move(pilot, widget, (5, 2), button=1)
+            modal = ModalScreen[None]()
+            host.push_screen(modal)
+            await pilot.pause()
+            await release(pilot, modal, (5, 2))
+            host.pop_screen()
+            await pilot.pause()
+            await move(pilot, widget, (7, 3))
+            await move(pilot, widget, (9, 3))
+            await pilot.pause(0.1)
+            return _literals(fake)
+
+    forwarded = run(drive())
+    assert forwarded == "\x1b[<0;4;3M\x1b[<32;6;3M\x1b[<0;6;3m", repr(forwarded)
+
+
+def test_a_dialog_pushed_mid_shift_drag_stops_the_highlight_where_it_got_to(
+    fake: FakeTmux, tmp_path: Path
+) -> None:
+    """The local half. The release went to the dialog, so the shift+drag was
+    never ended, and after the dialog closed its highlight followed the bare
+    pointer over the pane. It stops where it got to, and uncopied — as the
+    screen's own drag-select interrupted by a dialog copies nothing
+    (``test_a_modal_pushed_mid_drag_leaves_no_gesture_behind``) — standing for
+    ctrl+c to copy."""
+    pane = fake.panes["%1"]
+    pane.alternate_on = pane.mouse_on = pane.mouse_sgr = True
+
+    async def drive() -> tuple[str, str | None, list[str], Widget | None]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 6)) as pilot:
+            widget = host.pane
+            await wait_until(pilot, lambda: synced(widget))
+            await press(pilot, widget, (7, 1), shift=True)
+            await move(pilot, widget, (3, 1), button=1, shift=True)
+            modal = ModalScreen[None]()
+            host.push_screen(modal)
+            await pilot.pause()
+            await release(pilot, modal, (3, 1), shift=True)
+            host.pop_screen()
+            await pilot.pause()
+            await move(pilot, widget, (1, 2))
+            await move(pilot, widget, (0, 3))
+            await pilot.pause()
+            return host.clipboard, widget.selected_text(), host.notices, host.mouse_captured
+
+    clipboard, highlighted, notices, captured = run(drive())
+    assert highlighted == "second row"[3:8], f"the highlight followed the pointer: {highlighted!r}"
+    assert (clipboard, notices) == ("", []), notices
+    assert captured is None
+
+
+def test_the_pointer_a_click_gave_back_is_not_taken_from_the_next_press(
+    fake: FakeTmux, tmp_path: Path
+) -> None:
+    """The pane lets go of the pointer at every end of a gesture, and Textual
+    tells it so with a ``MouseRelease`` that waits its turn in the pane's
+    queue. In a burst — a click, then a press held for a drag — it arrives
+    after the next press has taken the pointer again. Read as the pointer
+    taken, it ended that press: the program got a release mid-drag, and the
+    drag's own release found nothing to end."""
+    pane = fake.panes["%1"]
+    pane.alternate_on = pane.mouse_on = pane.mouse_sgr = pane.mouse_drag = True
+
+    async def drive() -> tuple[str, bool, str]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 6)) as pilot:
+            widget = host.pane
+            await wait_until(pilot, lambda: synced(widget))
+            for event in (
+                mouse_event(events.MouseMove, widget, (1, 1), 0),
+                mouse_event(events.MouseDown, widget, (1, 1), 1),
+                mouse_event(events.MouseUp, widget, (1, 1), 1),
+                mouse_event(events.MouseDown, widget, (3, 2), 1),
+                mouse_event(events.MouseMove, widget, (5, 2), 1),
+            ):
+                host.post_message(event)
+            await pilot.pause()
+            await pilot.pause(0.1)
+            held, captured = _literals(fake), host.mouse_captured is widget
+            await release(pilot, widget, (7, 2))
+            await pilot.pause(0.1)
+            return held, captured, _literals(fake)[len(held) :]
+
+    held, captured, released = run(drive())
+    assert held == "\x1b[<0;2;2M\x1b[<0;2;2m\x1b[<0;4;3M\x1b[<32;6;3M", repr(held)
+    assert captured, "the drag lost the pointer mid-press"
+    assert released == "\x1b[<32;8;3M\x1b[<0;8;3m", repr(released)
+
+
 def test_agent_view_offers_stop_and_restart_and_routes_them_through_the_service(
     fake: FakeTmux, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

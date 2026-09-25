@@ -636,6 +636,14 @@ def use(
     typer.echo(f"  key:      {key_note}")
     if routing.bound:
         typer.echo(f"  routing:  {'; '.join(_routing_lines(routing))}")
+    elif own_key:
+        # The project's own key, and nothing to bind with it: calling it "a
+        # machine key" sent the operator to attach the key it already has
+        # (review of #172's follow-ups, round 1, F4).
+        typer.echo(
+            "  routing:  not applied — the identity template renders no agent names; "
+            "fix explainability.agent_name_template (it must contain {role})"
+        )
     elif target.api_key:
         typer.echo(
             f"  routing:  not applied — a machine key is not checked to be {row.workspace_name}'s; "

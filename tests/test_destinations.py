@@ -582,6 +582,24 @@ def test_a_machine_key_binds_no_roster_for_the_destination(
     assert "routing:  not applied — a machine key is not checked to be acme's" in human.output
 
 
+def test_the_projects_own_key_with_nothing_to_bind_is_not_called_a_machine_key(
+    runner: CliRunner, idp: IdentityProviderStub, signed_in: iam.Session, tmp_path: Path
+) -> None:
+    """The routing line said "a machine key is not checked to be acme's" whenever
+    nothing was bound, the project's own freshly minted key included (review of
+    #172's follow-ups, round 1, F4)."""
+    config = load_config()
+    config.explainability.agent_name_template = "aisquare-{team}"  # renders no name
+    save_config(config)
+    _project(tmp_path / "web")
+    result = runner.invoke(app, ["explainability", "use", "acme/Frontend"])
+    assert result.exit_code == 0, result.output
+    assert "key:      minted on your behalf" in result.output
+    assert "machine key" not in result.output
+    assert "routing:  not applied — the identity template renders no agent" in result.output
+    assert not [r for r in idp.requests if r["method"] == "PUT"]
+
+
 def test_a_hand_key_kept_across_a_workspace_change_is_named_as_such(
     runner: CliRunner,
     idp: IdentityProviderStub,

@@ -7,6 +7,52 @@
 > merges to `main` and deploys. Every entry: when, what, why, evidence.
 > Questions the owner must answer are collected at the bottom.
 
+## The release train folded in (23:28, 2026-09-24) — the owner's call of 20:09, taken early
+
+The owner asked for `rc/fixes` (#203, Anmol's release train) to be folded into
+this branch now rather than waiting for `main`, since this branch is the next
+release candidate after it. Done on a local branch (`merge/rc-fixes-into-hackathon`,
+worktree `~/work/aisquare-cli-hack-merge`), not pushed, for the owner's review.
+
+1. **Two merges, in this order.** `fix/store-v15-converge` (#208 = rc/fixes @
+   384c456 + the converge step) first, so the store lands consistent in one
+   commit — `2dbc560`; then the train's tail 384c456..d60c6d7 (11 commits: the
+   iam answer fixes, a restart whose replacement never starts waking the
+   manager, the Accounts page settle) — `e6a1ba2`, clean.
+2. **22 shared files, as coder3a measured.** 18 were insertion collisions and
+   unions (both sides' additions kept: config models, orchestrator, team briefing
+   arguments, packaging, the two UI test files, the CHANGELOG under one
+   Unreleased). Four took a decision: the store, the agent view, the settings
+   form, `docs/fleet.md`.
+3. **The store, exactly as the owner decided.** The train's ladder to v21; this
+   branch's `_SCHEMA_V15` dropped, not renumbered; the persona columns come from
+   `_PREPARE[15] = _converge_v15_fork` and `_converge_v15_shape`. Measured on
+   copies of this machine's three stores (persona-15 twice, the crew's board
+   store at 16): each reaches 21 with both shapes and every command answers; the
+   hackathon build still opens the result. Plain `rc/fixes` stamps the same
+   copies 21 with `no such column: account_slot`.
+4. **Stop and Restart on one rule.** P21's dialog and `x` are kept; #138's
+   Restart joins them. `sidebar.STOP_STATES = ALIVE_STATES | {"exited"}` is the
+   one constant both controls ask: the train's `remain-on-exit` keeps an exited
+   agent's window, and Stop on the 💤 row removes it — the dialog says so and
+   offers no Force. The dialog pins the stop to the row and reads the train's
+   `StopReceipt`. The train's three direct-press view tests go through the
+   dialog; P21's rule tests ask the new constant; one new test drives the
+   exited-row dialog end to end.
+5. **A replay keeps the row's persona.** `_respawn` (restart, switch) passes the
+   row's persona — spawned with or attached since — never the role's default of
+   the day; one that no longer resolves starts the agent without it and says so
+   (`test_restart_replays_the_rows_persona_and_says_when_it_no_longer_resolves`).
+6. **Two test helpers predated the train's rules.** `test_ui_spawn.register` now
+   onboards (#139: captured is not shown), and its socket guard lets the
+   socket-less `tmux -V` probe through, as `test_ui_shell`'s already does.
+7. **Gate.** On the head of the second merge, in a venv with the tree installed editable (`[dev]`, py3.12): ruff format/check clean; mypy strict clean (317 files); `pytest -ra` **5239 passed, 4 skipped, 0 failed** (the skips are the Windows answers, NTFS ACLs and `capture-pane -F` below tmux 3.7 — environmental, as on CI). The first merge's tree was gated the same way at 5231 passed with the three spawn-test failures fixed in that commit (§6). Handoff: `~/work/HACKATHON-RC-FOLD-2026-09-24.md`.
+8. **Open for the owner.** Push (or open a PR onto `rc/hackathon-v1`); the
+   Stop-on-exited decision (§4) is the one product call made here and is one
+   constant to flip; when #203 lands on `main`, the `main` merge into this
+   branch should be small (its content is already here) unless Anmol's store
+   fix differs from #208.
+
 ## Done — what to do this morning (15:16, 2026-09-15)
 
 **Status: READY.** Nineteen PRs are merged (the nineteenth, P21, is the Stop control you asked for on the morning of the 16th) into `rc/hackathon-v1` as merge
@@ -186,6 +232,7 @@ read-only.
 | 2026-09-15 15:16–15:55 | **PR #201 CI fully green: 32 of 32 checks pass** on the `main`-targeting workflow (the six rc checks plus the install-script, PowerShell and shellcheck jobs). `MERGEABLE`, blocked only by the required review. Both coders removed their sixteen worktrees after checking each head clean, pushed and an ancestor of rc; branches stay on origin for any reopen. | Nothing left for the fleet: the owner's review of #201 is the only gate. Team on standby; the manager's tick watches #201 and the board for a reopen. | PR #201 checks; board 15:24–15:31 |
 | 2026-09-16 11:45–14:20 | **Owner's new request, built and merged the same morning:** "i also need controls to be able to spawn and stop agents directly from the UI". Spawn already shipped (P3/P4/P7); **P21 → PR #202 → merged be32b3a** adds Stop. Contract verified against the code before it was handed over, and TWO of my own errors corrected in it: the key belongs on the Sidebar, not the unfocusable AgentRow, and the gate must ask the existing `ALIVE_STATES` rather than a hand-typed state list. A third, item 5, was wrong in the other direction — I claimed the stop path emits one board event; coder3a-1 read the code, I verified at `services/fleet.py:1553`, and it emits none, so the gate was corrected to expect zero from both sides before it could fail a correct implementation. coder3a-1 found two defects before the PR existed: a Stop called inline would freeze the app for the service's five-second grace while passing every acceptance bullet, and `x` was ungated where the button was gated, so a dead row could be stopped by key — reap semantics through the one control left open. Both landed as commits, not reopens. runner2-1 verified on a live tmux socket: Force at 0.3 s against Stop's 5.6 s proves the graceful exit was skipped, and Stop after killing the tmux server under the app returned an honest ended row. | **Decision, reversing my own recommendation:** P21 folded into #201 rather than kept as a follow-up, because the owner's instruction was "a single PR ready for me to review" and their review had not started, so folding costs no re-review and puts the feature they asked for into the branch they deploy. #201's CI re-runs on the new head; its features table and this summary now carry the P21 row. | merge be32b3a; PR #202; board 11:45–14:20 |
 | 2026-09-16 14:20–14:55 | **Final gate on the MERGED tree, green, graded twice.** The runner ran `make check` on rc@879e0c4 in a fresh worktree with its own venv — ruff clean, mypy Success on 280 source files, **3943 passed, 1 skipped, 0 failed** — and re-ran the live demo path there (Stop 5.6 s with the pane gone and the row ended, Force 0.4 s). Their reason for running at all is the one worth keeping: #202's six greens were graded at 6996d30, the head *before* the merge, so `be32b3a` and `879e0c4` were trees no gate had graded, and a merge that resolves cleanly is not the same claim as a merge that passes. coder3a-1 then corrected that premise mid-run with a current fact — #201's re-queued CI had finished on the identical sha, 32 of 32 SUCCESS, counted by grouping all states rather than reading the first rows — so the tree the owner reviews now carries two independent gradings that agree. Both coders verified P21's containment themselves with `git merge-base --is-ancestor` and confirmed the x-gate guard is live in the shipped file, then removed their worktrees after checking nothing unpushed could be lost. | Nothing open: 19 PRs in rc, zero open PRs, all 21 board tasks done, every lane clean. #201 remains the owner's to review, merge and deploy. | rc@879e0c4; board 14:31–14:53 |
+| 2026-09-24 20:30–23:28 | **The release train folded in.** `rc/fixes` (#203) came into this branch as two merges — #208's branch (rc/fixes @ 384c456 + the v15 converge) at `2dbc560`, then the train's tail (384c456..d60c6d7) at `e6a1ba2`, clean. 22 shared files resolved; the store on the owner's rule (persona columns via `_PREPARE[15]`, the hackathon's own v15 dropped); Stop and Restart on one rule (`sidebar.STOP_STATES`); a replay keeps the row's persona. | The owner's call (20:09, on #201), taken before `main` has #203, so the next RC is ready the moment Anmol's release lands. Not pushed: the branch and the Stop-on-exited product call are the owner's. | Gate on the final head: ruff and mypy --strict clean, **5239 passed, 4 skipped, 0 failed**; the merged build migrates copies of this machine's three stores (15/16 → 21, both shapes) where plain `rc/fixes` breaks them. `~/work/HACKATHON-RC-FOLD-2026-09-24.md` |
 | 2026-09-15 evening | Both coders deep in their first tasks (`coder3a-1` on P1 in `.aisquare-worktrees/p1-persona-core`, `coder3b-1` on P3 in `.aisquare-worktrees/p3-spawn-dialog`), exploring the code before writing. | No action; they were told their queues. | pane captures |
 
 ## Morning audit — questions and calls for the owner

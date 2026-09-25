@@ -459,13 +459,51 @@ def _uncreated_home(name: str) -> DoctorCheck | None:
     return _ok(name, "not created yet — set it up: aisquare init")
 
 
+#: How many missing tables, columns, indexes or triggers the database row names before
+#: "and N more".
+_MISSING_SHOWN = 6
+
+#: Where the database row sends a schema gap this build cannot close: a copy of
+#: pyproject's ``[project.urls] Issues``, kept in step by the tests.
+_ISSUES_URL = "https://github.com/AISquare-Studio/aisquare-cli/issues"
+
+#: What the database row says each missing trigger costs. Every trigger of this build
+#: keeps `aisquare context search` in step with the notes, and each one's absence puts
+#: it out of step in its own way, measured with it dropped (the tests repeat each
+#: measurement). One per trigger the ladder makes, in its order (pinned by the tests),
+#: so a trigger added without its sentence fails a test, not the operator.
+_TRIGGER_COSTS = {
+    "entry_ai": (
+        "without trigger entry_ai a new note is not indexed: `aisquare context search` "
+        "misses it, and editing or removing it, or purging its project, fails as "
+        "'database disk image is malformed', which the CLI calls a damaged store though "
+        "the notes are intact"
+    ),
+    "entry_ad": (
+        "without trigger entry_ad a note purged with its project stays indexed, and "
+        "`aisquare context search` can match a later note on the purged one's words"
+    ),
+    "entry_au": (
+        "without trigger entry_au an edited note stays indexed under its old text, so "
+        "`aisquare context search` matches what it said, not what it says"
+    ),
+}
+
+
 def _check_database() -> DoctorCheck:
     absent = _uncreated_home("database")
     if absent is not None:
         return absent
     try:
         with store_session() as store:
-            count = len(store.entries("user"))
+            missing = store.missing_schema()
+            # The count reads `entry`, so it waits for the schema. Counted first, a store
+            # without that table (or a column of it) raised "no such table: entry" here
+            # and was sent the corrupt-store move below, its intact history with it.
+            lacks_entry = any(
+                item == "table entry" or item.startswith("column entry.") for item in missing
+            )
+            count = None if lacks_entry else len(store.entries("user"))
     except Exception as exc:  # diagnostics must never crash
         # "Re-initialise: aisquare init" was measured CRASHING on every state
         # that reaches this line — 59 lines of traceback on a corrupt file, 72
@@ -477,6 +515,60 @@ def _check_database() -> DoctorCheck:
         # error the CLI prints, so the two cannot drift apart again — a
         # remediation nobody re-runs is how this one rotted.
         return _fail("database", f"context.db is unreadable: {exc}", damaged_store_recovery())
+    if missing:
+        # Readable is not usable. A store another line stamped 15, opened by a
+        # build that trusted the stamp, reached the current version with no
+        # `claude_account` and no `fleet_agent.account_slot`. Every fleet read and
+        # every accounts command then failed with "no such table/column" while
+        # this row said "context.db is readable" (review of #203, measured on a
+        # hackathon-build store). The open above converges what this build can,
+        # so what is still missing it cannot, and the row fails naming it. The
+        # history in the file is intact, so the remedy is not the corrupt-store
+        # move.
+        shown = ", ".join(missing[:_MISSING_SHOWN])
+        if len(missing) > _MISSING_SHOWN:
+            shown += f" and {len(missing) - _MISSING_SHOWN} more"
+        # What the gap costs depends on what is missing, so the row says it of each
+        # kind the store lacks, a kind counted in "and N more" too: what it costs is
+        # what the operator will meet. A table or column fails its readers loudly. A
+        # missing index or trigger raises nothing itself, and each trigger costs
+        # something of its own (:data:`_TRIGGER_COSTS`, whose sentences name it). The
+        # costly one is `entry_ai`: a note it did not index, once edited, removed or
+        # purged, hands FTS5 a 'delete' for text it never held, and SQLite answers
+        # "database disk image is malformed", which the CLI reports as a damaged store
+        # with the corrupt-store move (measured: `context add`, then `context remove`
+        # or `project forget --purge`). Warned here, the operator who meets it knows
+        # the notes are intact. Without `entry_au` or `entry_ad` nothing fails; search
+        # only goes stale.
+        kinds = {item.rsplit(" ", 1)[0] for item in missing}
+        costs: list[str] = []
+        if kinds & {"table", "column"}:
+            costs.append(
+                "a command that reads a missing table or column fails with 'no such "
+                "table' or 'no such column'"
+            )
+        costs += [
+            cost for trigger, cost in _TRIGGER_COSTS.items() if f"trigger {trigger}" in missing
+        ]
+        if "unique index" in kinds:
+            costs.append(
+                "a missing unique index raises nothing and lets in the duplicates it refused"
+            )
+        if "index" in kinds:
+            costs.append("a missing index that is not unique only slows the reads it served")
+        counted = "" if count is None else f" ({count} user entries)"
+        lacks = f"context.db opens{counted} but lacks part of this build's schema: {shown}"
+        database = paths.db_path()
+        return _fail(
+            "database",
+            "; ".join([lacks, *costs]),
+            "The open that just ran adds back the tables and columns this build knows "
+            "another line can skip, and these are not among them: another build or a "
+            "hand edit changed the store in a way this build does not know. The history "
+            f"in it is intact, so do not move it aside: keep a copy (cp {database} "
+            f"{database}.bak) and report this line, with the output of `aisquare "
+            f"--version`, at {_ISSUES_URL}",
+        )
     marker = paths.truncation_marker_path()
     if marker.exists():
         # The store opens and is perfectly valid — it is simply not the one this

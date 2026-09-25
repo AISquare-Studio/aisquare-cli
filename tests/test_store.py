@@ -18,7 +18,7 @@ from aisquare.core.store import (
     open_store,
     store_session,
 )
-from aisquare.models import ContextEntry, Pool, ProjectInfo
+from aisquare.models import CheckStatus, ContextEntry, Pool, ProjectInfo
 
 PROJECT = ProjectInfo(id="prj_test", root=Path("/tmp/example-project"), linked_repos=[])
 
@@ -853,6 +853,8 @@ INSERT INTO team_session (id, project_id, started_at, last_seen_at, agent, nativ
 
 # Two projects every cohort's store holds: one used on purpose (a context entry), which
 # the v17 backfill adopts, and one only ever captured (a prompt), which it leaves hidden.
+# The used one has a live fleet agent: a fleet read of it is what raised "no such
+# column: account_slot" on a store that skipped v15 (review of #203).
 _TWO_PROJECTS = """
 INSERT INTO project (id, root, name, linked_repos, created_at) VALUES
     ('prj_used', '/w/used', 'used', '[]', '2026-09-01T00:00:00+00:00'),
@@ -862,6 +864,9 @@ INSERT INTO entry (id, pool, project_id, text, tags, source, created_at, updated
             '2026-09-01T00:00:00+00:00', '2026-09-01T00:00:00+00:00');
 INSERT INTO prompt (id, project_id, text, source, created_at)
     VALUES ('prm_1', 'prj_seen', 'hello', 'claude-code', '2026-09-01T00:00:00+00:00');
+INSERT INTO fleet_agent (id, project_id, label, role, pane_id, cwd, created_at)
+    VALUES ('agt_1', 'prj_used', 'manager', 'manager', '%0', '/w/used',
+            '2026-09-01T00:00:00+00:00');
 """
 
 # (label, what the line's steps left, the stamp, a query over it, what it must still read)
@@ -880,12 +885,15 @@ _FOREIGN_COHORTS: tuple[tuple[str, str, int, str, list[tuple[object, ...]]], ...
         "SELECT persona FROM team_session",
         [("architect",)],
     ),
+    # The maintainer's own store is this cohort: a backup of it (31 projects) holds
+    # exactly these tables, indexes, triggers and columns, object for object.
     (
         "#113 at 17: coding-agent columns",
         CODING_AGENTS_AT_17,
         17,
-        "SELECT agent, native_session_id FROM team_session",
-        [("codex", "nat_1")],
+        "SELECT session.agent, session.native_session_id, agent.agent"
+        " FROM team_session AS session, fleet_agent AS agent",
+        [("codex", "nat_1", "claude-code")],
     ),
 )
 
@@ -920,9 +928,26 @@ def _built(steps: int, after: str = "") -> set[tuple[str, str]]:
         conn.close()
 
 
+def _contents(db: Path) -> tuple[list[tuple[object, ...]], dict[str, list[tuple[object, ...]]]]:
+    """``db``'s whole schema, SQL included, and every row of every table, with its version."""
+    raw = sqlite3.connect(str(db))
+    try:
+        schema = raw.execute("SELECT type, name, tbl_name, sql FROM sqlite_master").fetchall()
+        rows = {
+            name: sorted(raw.execute(f"SELECT * FROM {name}").fetchall(), key=repr)
+            for kind, name, _, _ in schema
+            if kind == "table"
+        }
+        rows["PRAGMA user_version"] = raw.execute("PRAGMA user_version").fetchall()
+        return sorted(schema, key=repr), rows
+    finally:
+        raw.close()
+
+
 def _open_a_foreign_cohort(db: Path, query: str) -> dict[str, object]:
     """Open ``db`` with this build, write through the store to the tables whose absence
-    was "no such table", and read back what :func:`_converged` says it must hold."""
+    was "no such table", read from the ones a fleet read and ``accounts list`` failed
+    on, open it once more, and read back what :func:`_converged` says it must hold."""
     store = open_store()  # a wedge raises out of here
     try:
         store.upsert_claude_account(1, Path("/h/.claude"))
@@ -931,9 +956,19 @@ def _open_a_foreign_cohort(db: Path, query: str) -> dict[str, object]:
             "listed": [p.id for p in store.list_projects()],
             "listed with --all": sorted(p.id for p in store.list_projects(all=True)),
             "account setting": store.project_setting("prj_used", "claude_account"),
+            "accounts": [(r.slot, r.config_dir) for r in store.claude_accounts()],
+            "fleet": [(a.id, a.account_slot) for a in store.fleet_agents("prj_used")],
+            "live fleet": [a.id for a in store.fleet_agents("prj_used", live_only=True)],
+            "missing": store.missing_schema(),
         }
     finally:
         store.close()
+    schema, rows = _contents(db)
+    open_store().close()
+    schema_again, rows_again = _contents(db)
+    read["a second open changed"] = sorted(
+        name for name in rows.keys() | rows_again.keys() if rows.get(name) != rows_again.get(name)
+    ) + (["the schema"] if schema_again != schema else [])
     raw = sqlite3.connect(str(db))
     try:
         read["version"] = raw.execute("PRAGMA user_version").fetchone()[0]
@@ -946,14 +981,20 @@ def _open_a_foreign_cohort(db: Path, query: str) -> dict[str, object]:
 
 def _converged(ddl: str, their_rows: list[tuple[object, ...]]) -> dict[str, object]:
     """What a foreign store reads once this build has opened it: the project used on
-    purpose listed (the v17 backfill ran) and the captured one not, every table, index
-    and column of this build and of the other line and nothing else, and the other
-    line's rows as it left them."""
+    purpose listed (the v17 backfill ran) and the captured one not, the account and the
+    fleet agent read back, nothing ``doctor`` would report missing, a second open that
+    changes no row and no schema, every table, index and column of this build and of
+    the other line and nothing else, and the other line's rows as it left them."""
     theirs = _built(14, _TWO_PROJECTS + ddl) - _built(14, _TWO_PROJECTS)
     return {
         "listed": ["prj_used"],
         "listed with --all": ["prj_seen", "prj_used"],
         "account setting": "1",
+        "accounts": [(1, Path("/h/.claude"))],
+        "fleet": [("agt_1", None)],
+        "live fleet": ["agt_1"],
+        "missing": [],
+        "a second open changed": [],
         "version": SCHEMA_VERSION,
         "shape": _built(SCHEMA_VERSION) | theirs,
         "their rows": their_rows,
@@ -1008,6 +1049,306 @@ def test_a_foreign_store_a_build_without_the_pass_carried_on_converges_too(
     assert "claude_account" not in tables, "the fixture is the store that build left"
 
     assert _open_a_foreign_cohort(db, query) == _converged(ddl, expected), label
+
+
+# --- doctor's database row reads the schema, not only the file (review of #203) ---------------
+
+
+def test_doctor_names_what_a_store_lacks_instead_of_calling_it_readable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Measured on #203 by the crew: a store #201 stamped 15, opened by a build that
+    trusted the stamp, reached the current version with no ``claude_account`` and no
+    ``fleet_agent.account_slot``. Every fleet read failed on the column, and doctor's
+    database row said "context.db is readable". That build is this one with the
+    presence pass taken out. The row fails and names each thing missing once (the
+    table, not its indexes as well). Its remedy is not the corrupt-store move: the
+    history in the file is intact."""
+    from aisquare.services import diagnostics
+
+    _at_version(14, after=_TWO_PROJECTS + PERSONAS_AT_15, stamp=15)
+    monkeypatch.setattr(store_module, "_converge_by_presence", lambda connection, below: None)
+    with store_session() as store, pytest.raises(sqlite3.OperationalError, match="account_slot"):
+        store.fleet_agents("prj_used")
+
+    row = diagnostics._check_database()
+
+    assert row.status is CheckStatus.fail, row
+    assert (
+        "schema: column fleet_agent.account_slot, table claude_account, table project_setting;"
+        in row.detail
+    ), row.detail
+    assert "claude_account_alias" not in row.detail, "an index of a missing table is noise"
+    assert "persona" not in row.detail, "another line's columns are not this build's to report"
+    assert row.fix is not None and f"cp {_db_path()}" in row.fix, row.fix
+    assert "mv " not in row.fix, "the corrupt-store move would drop an intact history"
+    assert "github.com/AISquare-Studio/aisquare-cli/issues" in row.fix, "report it where?"
+
+
+def test_doctor_fails_on_what_no_step_of_this_build_puts_back() -> None:
+    """The open restores only what a step from v15 on makes. A table or an index from
+    before that, gone from a store another build or a hand edit changed, stays gone
+    whatever the open does, and doctor's database row is where it shows. It names six
+    and counts the rest, so the row stays one line an operator can read. It says what
+    each kind the store lacks costs, and it still counts the notes, whose table is
+    whole."""
+    from aisquare.services import diagnostics
+
+    indexes = (
+        "entry_pool_project",
+        "metric_open_session",
+        "metric_project_started",
+        "team_event_project_seq",
+        "team_session_project",
+        "team_task_project_status",
+    )
+    with store_session() as store:
+        store.add(_entry())
+    raw = sqlite3.connect(str(_db_path()))
+    try:
+        raw.executescript("DROP TABLE prompt;" + "".join(f"DROP INDEX {i};" for i in indexes))
+    finally:
+        raw.close()
+
+    with store_session() as store:
+        missing = store.missing_schema()
+    row = diagnostics._check_database()
+
+    assert missing[0] == "table prompt", "a missing table is named before any index"
+    assert sorted(missing[1:]) == [f"index {i}" for i in indexes], missing
+    assert row.status is CheckStatus.fail, row
+    assert f"schema: {', '.join(missing[:6])} and 1 more;" in row.detail, row.detail
+    assert row.detail.startswith("context.db opens (1 user entries) but"), row.detail
+    assert row.detail.endswith(
+        "; a command that reads a missing table or column fails with 'no such table' or "
+        "'no such column'; a missing index that is not unique only slows the reads it served"
+    ), row.detail
+
+
+def test_doctor_says_what_a_trigger_it_only_counts_costs() -> None:
+    """The row names six missing objects and counts the rest, but says what each kind
+    the store lacks costs, a counted one too: what it costs is what the operator will
+    meet. A trigger's sentence names the trigger, so a note trigger that falls into
+    "and 1 more" still comes with its warning, and says which it is."""
+    from aisquare.services import diagnostics
+
+    tables = ("prompt", "team_event", "team_task", "team_meta", "metric")
+    open_store().close()
+    raw = sqlite3.connect(str(_db_path()))
+    try:
+        raw.executescript(
+            "ALTER TABLE project DROP COLUMN linked_repos;"
+            + "".join(f"DROP TABLE {table};" for table in tables)
+            + "DROP TRIGGER entry_ai;"
+        )
+    finally:
+        raw.close()
+
+    row = diagnostics._check_database()
+
+    assert row.status is CheckStatus.fail, row
+    assert row.detail.startswith(
+        "context.db opens (0 user entries) but lacks part of this build's schema: column "
+        f"project.linked_repos, {', '.join(f'table {table}' for table in tables)} and 1 "
+        "more; a command that reads a missing table or column fails"
+    ), row.detail
+    assert row.detail.endswith(f"; {diagnostics._TRIGGER_COSTS['entry_ai']}"), row.detail
+
+
+@pytest.mark.parametrize(
+    ("named", "script"),
+    [
+        ("table entry", "DROP TABLE entry;"),
+        (
+            "column entry.deleted_at",
+            "DROP INDEX entry_pool_project; ALTER TABLE entry DROP COLUMN deleted_at;",
+        ),
+    ],
+)
+def test_doctor_names_a_store_without_its_notes_table_instead_of_calling_it_unreadable(
+    named: str, script: str
+) -> None:
+    """The row counted the notes before it read the schema, and the count reads
+    ``entry``. A store without that table, or a column of it, raised "no such table:
+    entry" there and read as unreadable, with the corrupt-store move for its remedy: an
+    intact history moved aside over a table the file merely lacks. The schema is read
+    first, the count is left out when ``entry`` is what is missing, and the row names
+    the gap like any other."""
+    from aisquare.services import diagnostics
+
+    open_store().close()
+    raw = sqlite3.connect(str(_db_path()))
+    try:
+        raw.executescript(script)
+    finally:
+        raw.close()
+
+    row = diagnostics._check_database()
+
+    assert row.status is CheckStatus.fail, row
+    assert row.detail.startswith(
+        f"context.db opens but lacks part of this build's schema: {named}"
+    ), row.detail
+    assert row.fix is not None and "mv " not in row.fix, row.fix
+
+
+@pytest.mark.parametrize(
+    ("script", "said", "not_said"),
+    [
+        (
+            "DROP TRIGGER entry_ai;",
+            "schema: trigger entry_ai; without trigger entry_ai a new note is not indexed: "
+            "`aisquare context search` misses it, and editing or removing it, or purging its "
+            "project, fails as 'database disk image is malformed', which the CLI calls a "
+            "damaged store though the notes are intact",
+            ("stays indexed", "duplicates", "slows"),
+        ),
+        (
+            "DROP TRIGGER entry_ad;",
+            "schema: trigger entry_ad; without trigger entry_ad a note purged with its "
+            "project stays indexed, and `aisquare context search` can match a later note on "
+            "the purged one's words",
+            ("malformed", "old text", "duplicates", "slows"),
+        ),
+        (
+            "DROP TRIGGER entry_au;",
+            "schema: trigger entry_au; without trigger entry_au an edited note stays indexed "
+            "under its old text, so `aisquare context search` matches what it said, not what "
+            "it says",
+            ("malformed", "purged", "duplicates", "slows"),
+        ),
+        (
+            "DROP INDEX fleet_agent_live_label;",
+            "schema: unique index fleet_agent_live_label; a missing unique index raises "
+            "nothing and lets in the duplicates it refused",
+            ("context search", "slows"),
+        ),
+        (
+            "DROP INDEX prompt_project;",
+            "schema: index prompt_project; a missing index that is not unique only slows the "
+            "reads it served",
+            ("context search", "duplicates"),
+        ),
+    ],
+    ids=["entry_ai", "entry_ad", "entry_au", "unique index", "index"],
+)
+def test_doctor_says_what_a_missing_index_or_trigger_costs(
+    script: str, said: str, not_said: tuple[str, ...]
+) -> None:
+    """A missing table or column fails its readers with "no such table" or "no such
+    column"; nothing raises on a missing index or trigger, so the row says what each
+    costs, and only of the kinds the store lacks. It once said a missing index or
+    trigger "fails nothing", and then gave every trigger the cost of `entry_ai`: a note
+    it did not index hands FTS5 a 'delete' for text it never held when that note is
+    edited, removed or purged, and SQLite answers "database disk image is malformed",
+    which the CLI calls a damaged store and answers with the corrupt-store move. Without
+    `entry_ad` or `entry_au` nothing fails, and search goes stale in a way of its own,
+    so each trigger gets its own sentence (the tests after this one measure each)."""
+    from aisquare.services import diagnostics
+
+    open_store().close()
+    raw = sqlite3.connect(str(_db_path()))
+    try:
+        raw.executescript(script)
+    finally:
+        raw.close()
+
+    row = diagnostics._check_database()
+
+    assert row.status is CheckStatus.fail, row
+    assert row.detail.endswith(said), row.detail
+    assert "fails nothing" not in row.detail and "no such" not in row.detail, row.detail
+    assert not [cost for cost in not_said if cost in row.detail], row.detail
+
+
+def test_doctor_reports_a_schema_gap_where_the_package_says_issues_go() -> None:
+    """The database row's remedy says where to report a gap it cannot close. The address
+    is a copy of pyproject's ``[project.urls] Issues``, so a tracker that moves there
+    must move here too."""
+    import tomllib
+
+    from aisquare.services import diagnostics
+
+    pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
+    urls = tomllib.loads(pyproject.read_text(encoding="utf-8"))["project"]["urls"]
+
+    assert urls["Issues"] == diagnostics._ISSUES_URL
+
+
+def _drop_trigger(name: str) -> None:
+    """A store whose ``name`` trigger a hand edit or another build dropped."""
+    open_store().close()
+    raw = sqlite3.connect(str(_db_path()))
+    try:
+        raw.execute(f"DROP TRIGGER {name}")
+        raw.commit()
+    finally:
+        raw.close()
+
+
+def test_without_entry_ai_a_new_note_is_unsearchable_and_changing_it_is_malformed() -> None:
+    """What doctor's row says of a missing `entry_ai`, measured: the new note never
+    reaches the search index, and each later change hands FTS5 a 'delete' for text it
+    never held, which SQLite answers as a corrupt file though nothing in it is."""
+    _drop_trigger("entry_ai")
+    with store_session() as store:
+        store.ensure_project(PROJECT)
+        note = store.add(_entry("alpha beta", pool="project", project_id=PROJECT.id))
+
+        assert store.search("alpha", project_id=PROJECT.id) == []
+        for change in (
+            lambda: store.update(note.id, text="gamma delta"),
+            lambda: store.delete(note.id),
+            lambda: store.purge_project(PROJECT.id),
+        ):
+            with pytest.raises(sqlite3.DatabaseError, match="database disk image is malformed"):
+                change()
+
+
+def test_without_entry_ad_a_later_note_matches_a_purged_notes_words() -> None:
+    """What doctor's row says of a missing `entry_ad`, measured: a purge deletes the
+    project's notes for real, their text stays in the search index, and a note that
+    takes the freed rowid is found by words it does not hold. Nothing fails."""
+    _drop_trigger("entry_ad")
+    with store_session() as store:
+        store.ensure_project(PROJECT)
+        store.add(_entry("alpha beta", pool="project", project_id=PROJECT.id))
+        store.purge_project(PROJECT.id)
+        later = store.add(_entry("gamma delta"))
+
+        assert [entry.id for entry in store.search("alpha")] == [later.id]
+
+
+def test_without_entry_au_an_edited_note_is_found_by_its_old_text() -> None:
+    """What doctor's row says of a missing `entry_au`, measured: an edit leaves the
+    search index on the text the note had. Nothing fails, a removal included."""
+    _drop_trigger("entry_au")
+    with store_session() as store:
+        note = store.add(_entry("alpha beta"))
+        store.update(note.id, text="gamma delta")
+
+        assert [entry.text for entry in store.search("alpha")] == ["gamma delta"]
+        assert store.search("gamma") == []
+        store.delete(note.id)
+
+
+def test_doctor_has_a_cost_for_every_trigger_of_this_build() -> None:
+    """Doctor's database row says what a missing trigger costs from a sentence per
+    trigger, in the ladder's order. A trigger the ladder makes without one would be
+    named in the row with no word of what its absence does, so a new trigger fails
+    here until it has its sentence."""
+    from aisquare.services import diagnostics
+
+    connection = sqlite3.connect(":memory:")
+    try:
+        store_module._migrate(connection)
+        triggers = connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'trigger' ORDER BY rowid"
+        ).fetchall()
+    finally:
+        connection.close()
+
+    assert [name for (name,) in triggers] == list(diagnostics._TRIGGER_COSTS)
 
 
 def test_each_step_from_v15_on_declares_what_it_builds_and_builds_nothing_twice() -> None:

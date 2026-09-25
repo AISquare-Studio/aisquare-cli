@@ -1166,6 +1166,8 @@ class ContextStore(Protocol):
     def set_project_setting(self, project_id: str, key: str, value: str) -> None: ...
     def clear_project_setting(self, project_id: str, key: str) -> bool: ...
     def project_settings(self, key: str) -> dict[str, str]: ...
+    # What the open could not converge (doctor's database row).
+    def missing_schema(self) -> list[str]: ...
     def close(self) -> None: ...
 
 
@@ -3664,6 +3666,19 @@ class SqliteStore:
         events = [_row_to_event(row) for row in rows]
         return {event.task_id: event for event in events if event.task_id is not None}
 
+    def missing_schema(self) -> list[str]:
+        """This build's tables, indexes, triggers and columns that this store lacks.
+
+        The open has already converged what it can (:func:`_migrate`), so this is
+        what it could not: an object no step from v15 on produces, missing from a
+        store another build or a hand edit changed. Each is named for the operator,
+        ``table claude_account``, ``column fleet_agent.account_slot`` or ``unique index
+        project_codename``. Empty for a store that holds this build's whole schema;
+        tables and columns of another line's are not this build's and are never
+        reported.
+        """
+        return _missing_from(self._conn, _ladder_schema())
+
     def close(self) -> None:
         self._conn.close()
 
@@ -3953,6 +3968,74 @@ def _migrate(connection: sqlite3.Connection) -> None:
         with contextlib.suppress(sqlite3.Error):
             connection.execute("ROLLBACK")
         raise
+
+
+class _Schema(NamedTuple):
+    """A database's schema by name, as :func:`_missing_from` compares it."""
+
+    tables: dict[str, frozenset[str]]
+    """Each table, ordinary or virtual, with its columns."""
+    objects: dict[str, tuple[str, str]]
+    """Each index and trigger: its kind (``index``, ``unique index`` or ``trigger``) and
+    the table it belongs to."""
+
+
+def _ladder_schema() -> _Schema:
+    """What the ladder builds on an empty database: this build's whole schema.
+
+    Built, not listed, so it cannot drift from the steps: every step from v1 on,
+    run by :func:`_migrate` itself in memory (a few milliseconds). SQLite's own
+    objects (``sqlite_sequence``, automatic indexes) come and go with the tables
+    that cause them and are left out.
+    """
+    connection = sqlite3.connect(":memory:")
+    try:
+        _migrate(connection)
+        tables: dict[str, frozenset[str]] = {}
+        objects: dict[str, tuple[str, str]] = {}
+        for kind, name, table in connection.execute(
+            "SELECT type, name, tbl_name FROM sqlite_master "
+            "WHERE name NOT GLOB 'sqlite_*' ORDER BY rowid"
+        ).fetchall():
+            if kind == "table":
+                columns = connection.execute(f"PRAGMA table_info({name})").fetchall()
+                tables[name] = frozenset(column[1] for column in columns)
+            elif kind == "index":
+                # Told apart because their absence costs different things: a missing
+                # unique index lets in the duplicates it refused, any other only slows
+                # the reads it served, and doctor's database row says which.
+                listed = connection.execute(f"PRAGMA index_list({table})").fetchall()
+                unique = any(row[1] == name and row[2] for row in listed)
+                objects[name] = ("unique index" if unique else kind, table)
+            elif kind == "trigger":
+                objects[name] = (kind, table)
+        return _Schema(tables, objects)
+    finally:
+        connection.close()
+
+
+def _missing_from(connection: sqlite3.Connection, expected: _Schema) -> list[str]:
+    """``expected``'s tables, columns, indexes and triggers that ``connection`` lacks.
+
+    Tables first, in the order the ladder made them, each followed by its missing
+    columns by name; then indexes and triggers, again in the ladder's order. A
+    missing table is named once, not with each of its columns and indexes. Only
+    reads, and only this build's tables: another line's are not looked at.
+    """
+    present = {row[0] for row in connection.execute("SELECT name FROM sqlite_master")}
+    missing: list[str] = []
+    for table, columns in expected.tables.items():
+        if table not in present:
+            missing.append(f"table {table}")
+            continue
+        found = {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
+        missing += [f"column {table}.{column}" for column in sorted(columns - found)]
+    missing += [
+        f"{kind} {name}"
+        for name, (kind, table) in expected.objects.items()
+        if name not in present and table in present
+    ]
+    return missing
 
 
 def open_store() -> ContextStore:

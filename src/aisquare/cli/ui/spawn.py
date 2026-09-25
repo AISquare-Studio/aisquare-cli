@@ -31,6 +31,14 @@ through their own change handlers — an open form keeps what was typed — and 
 *+ New account* hands over to the Accounts page. *Import…* beside the Persona
 select opens the Personas tab's import dialog and selects what it imports.
 
+**The captain** (T4): opened on the home board preset to ``captain`` — the
+insignia's dialog when there is no captain — the form starts the captain through
+``services.captain.brain.start``, never ``fleet.spawn``, which refuses a captain
+without its brain folder and its one server (T2). So the fields that would change
+what the captain IS are fixed: the role, the label (one per home), the task (it
+has none) and the extra agent args (its own: the server, no other tool). Account,
+binary, permission mode, persona and a first prompt are the owner's to choose.
+
 Two things are sent although nobody touched them, because the default cannot
 stand: in a project that is not a git repository the worktree switch is off and
 disabled, so a role whose default IS a worktree is sent ``worktree=False``
@@ -183,6 +191,27 @@ def _bound_roles() -> list[str]:
         return []
 
 
+def start_captain(kwargs: dict[str, Any]) -> fleet_service.SpawnReceipt:
+    """The captain's start from the form: ``brain.start`` with the owner's choices (T4).
+
+    ``brain.find`` first: a dead or vanished captain is ended there, so the start
+    replaces it instead of being refused as a second one. The label, task, worktree
+    and extra args the form holds are not the captain's to take — ``brain`` gives
+    it its own. A persona left at its preset is the captain's.
+    """
+    from aisquare.services.captain import brain
+
+    brain.find()
+    persona = kwargs.get("persona")
+    return brain.start(
+        prompt=kwargs.get("prompt"),
+        account=kwargs.get("account"),
+        binary=kwargs.get("binary"),
+        permission_mode=kwargs.get("permission_mode"),
+        persona=brain.PERSONA if persona is None else persona,
+    )
+
+
 class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
     """Spawn one agent for ``project``; dismisses with the receipt, or ``None`` on cancel."""
 
@@ -224,6 +253,8 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         self._fleet = fleet_service.settings()
         self._git = fleet_service.is_git_project(project.root)
         self._role = role or "coder"
+        self._captain = self._role == fleet_service.CAPTAIN_ROLE
+        """Started through ``brain.start``, its role, label, task and args fixed (T4)."""
         roles = role_choices(_bound_roles())
         self._roles = roles if self._role in roles else [*roles, self._role]
         self._preset_binary = binary or ""
@@ -293,7 +324,7 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
 
     def _header(self) -> Text:
         text = Text()
-        text.append("Spawn an agent", style="bold")
+        text.append("Start the captain" if self._captain else "Spawn an agent", style="bold")
         text.append(f"  {self.project.root.name or self.project.id}", style="bold cyan")
         if self.project.codename:
             text.append(f" · {self.project.codename}", style="cyan")
@@ -336,9 +367,15 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
                         [(self._role_prompt(role), role) for role in self._roles],
                         value=self._role,
                         allow_blank=False,
+                        disabled=self._captain,
                         id="spawn-role",
                     )
-                    yield Button("Pick…", id="spawn-pick", tooltip="choose a bind or an account")
+                    yield Button(
+                        "Pick…",
+                        id="spawn-pick",
+                        tooltip="choose a bind or an account",
+                        disabled=self._captain,
+                    )
                 yield Static(id="spawn-role-note", classes="spawn-note")
                 with Horizontal(classes="spawn-row"):
                     yield Label("Account")
@@ -371,8 +408,13 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
                 yield Static(id="spawn-persona-description", classes="spawn-note")
                 with Horizontal(classes="spawn-row"):
                     yield Label("Label")
-                    yield Input(value=self._prefill, id="spawn-label")
-                    yield Button("🎲", id="spawn-dice", tooltip="<role>-<adjective>-<animal>")
+                    yield Input(value=self._prefill, id="spawn-label", disabled=self._captain)
+                    yield Button(
+                        "🎲",
+                        id="spawn-dice",
+                        tooltip="<role>-<adjective>-<animal>",
+                        disabled=self._captain,
+                    )
                 yield Static(id="spawn-label-rule", classes="spawn-note")
                 with Horizontal(classes="spawn-row"):
                     yield Label("Task")
@@ -380,6 +422,7 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
                         [("(none)", NO_TASK), *((task_choice(t), t.id) for t in self._tasks)],
                         value=NO_TASK,
                         allow_blank=False,
+                        disabled=self._captain,
                         id="spawn-task",
                     )
                 yield Static(id="spawn-task-note", classes="spawn-note")
@@ -403,7 +446,15 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
                     )
                 with Horizontal(classes="spawn-row"):
                     yield Label("Extra agent args")
-                    yield Input(placeholder="e.g. --model opus", id="spawn-args")
+                    yield Input(
+                        placeholder=(
+                            "the captain's own: its server and no other tool"
+                            if self._captain
+                            else "e.g. --model opus"
+                        ),
+                        disabled=self._captain,
+                        id="spawn-args",
+                    )
                 yield Static(id="spawn-args-error", classes="spawn-note")
                 with Horizontal(classes="spawn-row"):
                     yield Label("First prompt")
@@ -458,7 +509,7 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         )
         label_problem = (
             None
-            if self._role == "manager"
+            if self._role in ("manager", fleet_service.CAPTAIN_ROLE)
             else self._label_problem(self.query_one("#spawn-label", Input).value)
         )
         args_problem: str | None = None
@@ -493,7 +544,7 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
             label.value = self._prefill
         else:
             label.value = self._kept_label
-        locked = self._role == "manager"
+        locked = self._role in ("manager", fleet_service.CAPTAIN_ROLE)
         label.disabled = locked
         self.query_one("#spawn-dice", Button).disabled = locked
 
@@ -669,7 +720,9 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         ):
             persona = None  # the role's default — or no persona where there is no default
         return {
-            "label": None if self._role == "manager" or label == self._prefill else label,
+            "label": None
+            if self._role in ("manager", fleet_service.CAPTAIN_ROLE) or label == self._prefill
+            else label,
             "task_id": self._task_value() or None,
             "worktree": worktree,
             "permission_mode": None if mode == defaults.permission_mode else mode,
@@ -687,7 +740,9 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         role, kwargs = self._role, self.spawn_kwargs()
         self._set_spawning(True)
         self.run_worker(
-            lambda: fleet_service.spawn(self.project, role, **kwargs),
+            (lambda: start_captain(kwargs))
+            if self._captain
+            else (lambda: fleet_service.spawn(self.project, role, **kwargs)),
             name=SPAWN_WORKER,
             group=SPAWN_WORKER,
             thread=True,

@@ -248,7 +248,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   is said, the launch goes untraced, and the doctor's and `status`'s fixes
   name the config entry or `key set --from-env`, never `enable --target`, and
   say to rename the machine's own target first when it has the same name and
-  another gateway),
+  another gateway, as every shell reads it),
   `key set` binds to the destination's deployment and a key bound there
   answers only while a destination names it, never as the machine's target of
   the same name, and a key bound to the machine's target never answers for a

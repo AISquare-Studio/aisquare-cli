@@ -975,6 +975,55 @@ def test_a_fix_asks_for_no_rename_when_the_machines_target_is_the_same_deploymen
     assert fix().startswith(entry) and "Rename it first" in fix(), fix()
 
 
+def test_a_fix_asks_for_the_rename_when_only_this_shell_makes_the_machines_target_the_same(
+    isolated_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Whether the machine's target is the project's deployment is decided as every shell
+    reads the entry the fix writes. On the prod machine, a shell that exported staging's
+    gateway (``$EXPLAINABILITY_GATEWAY_URL``) read the machine's ``stg`` as staging, so the
+    proxy fix for a project on staging asked for no rename. Followed there, every project
+    without a destination, read from a shell that exports nothing, moved to that proxy
+    with the prod gateway and key: the move of round 2, back (review of the #203
+    final-review fixes, round 2, F1)."""
+    config = AppConfig()
+    config.explainability.enabled = True
+    config.explainability.gateway_url = "https://explainability-api.aisquare.studio"
+    config.explainability.proxy_url = "https://explainability-api.aisquare.studio:9443"
+    save_config(config)
+    service.store_api_key("AIS_machine_prod_key")
+    web = _project(tmp_path / "web")
+    other = _project(tmp_path / "api")
+    with store_session() as store:
+        dest.choose(
+            store,
+            web,
+            dest.Workspace(id=42, uid="ws-uid-42", name="acme", role="ADMIN"),
+            dest.Studio(id=301, uid="st-301", name="Frontend"),
+            iam.Session(api_url="https://stg-api.aisquare.studio", token="aisq_x", source="env"),
+        )
+
+    def read(project: ProjectInfo) -> tuple[str, str, str]:
+        resolved = ops.resolve_target(
+            load_config().explainability, None, project_id=project.id, env={}
+        )
+        return (resolved.gateway_url, resolved.proxy_url, resolved.key_source)
+
+    before = read(other)
+    monkeypatch.setenv(service.GATEWAY_ENV_VAR, "https://stg-explainability-api.aisquare.studio")
+    target = ops.resolve_target(load_config().explainability, None, project_id=web.id)
+    fix = " ".join(ops.deployment_fix(target, what="proxy", value="https://stg.example").split())
+    setting = re.search(r'proxy_url = "([^"]+)" under (\[explainability\.targets\."stg"\])', fix)
+    assert setting is not None, fix
+
+    if 'target = "<name>" under [explainability]' in fix:  # the rename, as the operator would
+        renamed = load_config()
+        renamed.explainability.target = "own"
+        save_config(renamed)
+    with paths.config_path().open("a", encoding="utf-8") as config_file:
+        config_file.write(f'\n{setting[2]}\nproxy_url = "{setting[1]}"\n')
+    assert read(other) == before, "the fix for one project's deployment moved another"
+
+
 def test_a_key_kept_for_the_machines_target_stays_kept_once_that_target_is_renamed(
     runner: CliRunner, isolated_home: Path, tmp_path: Path
 ) -> None:

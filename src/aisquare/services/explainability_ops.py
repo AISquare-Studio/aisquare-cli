@@ -190,7 +190,8 @@ class ResolvedTarget:
     ``$AISQUARE_EXPLAINABILITY_TARGET``). Its ``[explainability.targets."<name>"]`` is
     then also the entry every project without a destination reads, so a fix written
     there moves them too (:func:`deployment_fix`); ``None`` otherwise, and when the
-    machine's target of that name resolves this same deployment, whose entry it is too."""
+    machine's target of that name resolves this same deployment, whose entry it is too:
+    in every shell, so not by an exported ``$EXPLAINABILITY_GATEWAY_URL``."""
 
     @property
     def configured(self) -> bool:
@@ -453,10 +454,14 @@ def resolve_target(
     # the machine resolves this same deployment by that name: the entry is rightly both's
     # then, and the rename only unbound the keys attached for the name (review of the
     # #203 final-review fixes, F3). The machine's read is the one resolver's, as in
-    # `binding_serves`.
+    # `binding_serves`, and without the gateway this shell exports: the entry is read by
+    # every shell, and a staging gateway exported here dropped the rename on the prod
+    # machine, so the fix moved every other shell's projects to the staging proxy (review
+    # of the #203 final-review fixes, round 2, F1).
     entry_shared = None
     if not machine and chosen in (settings.target, exported):
-        own = resolve_target(settings, chosen, env=environ).gateway_url
+        every_shell = {k: v for k, v in environ.items() if k != GATEWAY_ENV_VAR}
+        own = resolve_target(settings, chosen, env=every_shell).gateway_url
         if not (own and _same_deployment(own, gateway_url)):
             entry_shared = "config" if chosen == settings.target else "env"
 
@@ -509,7 +514,8 @@ def deployment_fix(
     the machine's target needs a name of its own first. A machine whose target
     of that name resolves this same deployment gets the entry alone: the fix
     moves both to where both belong, and the rename only unbound the keys
-    attached for the name.
+    attached for the name. Resolves it in every shell, since every shell reads
+    the entry: a gateway exported in this one does not count.
     """
     if target.project_deployment:
         entry = f'[explainability.targets."{target.name}"] in {paths.config_path()}'

@@ -817,7 +817,7 @@ def test_ctrl_c_from_the_sidebar_copies_what_the_drag_copied(
             app.focused.ancestors if app.focused else []
         )
         await pilot.press("ctrl+c")
-        await pilot.pause()
+        await settle(app)  # the screen's binding: the key bubbles up from the sidebar to it
         return (
             dragged,
             app.clipboard,
@@ -1782,7 +1782,11 @@ def test_q_quits_from_the_sidebar_but_reaches_a_focused_terminal_pane(
         assert isinstance(app.focused, TerminalPane)
         for key in probes:
             await pilot.press(key)
-        await pilot.pause()
+        # Every read waits for the app to go quiet. The app's keys are not priority
+        # bindings: each runs once the key has bubbled from the focused widget back up
+        # to the app, so after one pause a `q` that did quit could still be on its way,
+        # and read then, "did not quit" passes whatever the pane does with the key.
+        await settle(app)
         keys = list(pane.keys)
         alive = app.return_code
         screen_with_pane = type(app.screen).__name__
@@ -1790,11 +1794,12 @@ def test_q_quits_from_the_sidebar_but_reaches_a_focused_terminal_pane(
         app.sidebar.focus()
         await pilot.pause()
         await pilot.press("f1")
-        await pilot.pause()
+        await settle(app)
         screen_from_sidebar = type(app.screen).__name__
         await pilot.press("escape")
-        await pilot.pause()
+        await settle(app)
         await pilot.press("q")
+        await settle(app)
         return keys, alive, screen_with_pane, screen_from_sidebar, app.return_code
 
     keys, alive, with_pane, from_sidebar, after_q = drive(go)
@@ -1832,7 +1837,7 @@ def test_the_app_keys_are_refused_while_focus_is_in_a_view(tmp_path: Path, scrip
             await pilot.pause()
             focused.append(type(app.focused).__name__)
             await pilot.press("q", "t", "question_mark", "f1")
-            await pilot.pause()
+            await settle(app)  # a refused key has bubbled all the way up and been refused
             codes.append(app.return_code)
             screens.append(type(app.screen).__name__)
         # The rule is "focus is IN the sidebar", not "focus IS the sidebar": a
@@ -1844,19 +1849,20 @@ def test_the_app_keys_are_refused_while_focus_is_in_a_view(tmp_path: Path, scrip
         await pilot.pause()
         focused.append(type(app.focused).__name__)
         await pilot.press("question_mark")
-        await pilot.pause()
+        await settle(app)
         screens.append(type(app.screen).__name__)
         await pilot.press("escape")
-        await pilot.pause()
+        await settle(app)
         # The control: the same keys from the sidebar itself do what they always did.
         app.sidebar.focus()
         await pilot.pause()
         await pilot.press("question_mark")
-        await pilot.pause()
+        await settle(app)
         screens.append(type(app.screen).__name__)
         await pilot.press("escape")
-        await pilot.pause()
+        await settle(app)
         await pilot.press("q")
+        await settle(app)
         return focused, codes, screens, app.return_code
 
     focused, codes, screens, quit_code = drive(go)
@@ -1892,11 +1898,11 @@ def test_help_opens_from_the_sidebar_and_closes(tmp_path: Path, script: Script) 
         app = fleet_app(pilot)
         closed_before = not isinstance(app.screen, HelpScreen)
         await pilot.press("question_mark")
-        await pilot.pause()
+        await settle(app)
         opened = isinstance(app.screen, HelpScreen)
         keys = shown(app.screen.query_one("#helpbox Static", Static))
         await pilot.press("escape")
-        await pilot.pause()
+        await settle(app)
         return closed_before, opened, isinstance(app.screen, HelpScreen), keys
 
     closed_before, opened, still_open, keys = drive(go)
@@ -1918,12 +1924,16 @@ def test_keyboard_cursor_walks_the_rows_and_enter_activates(tmp_path: Path, scri
         cursors_before = len(app.query(".cursor"))
         walk: list[str] = []
         await pilot.press("up")  # at the top already: stays on the first row
+        await settle(app)
         walk.append(type(app.query_one(".cursor")).__name__)
         await pilot.press("down")
+        await settle(app)
         walk.append(type(app.query_one(".cursor")).__name__)
         await pilot.press("down")
+        await settle(app)
         walk.append(type(app.query_one(".cursor")).__name__)
         await pilot.press("up")
+        await settle(app)
         walk.append(type(app.query_one(".cursor")).__name__)
         await pilot.press("enter")
         await settle(app)
@@ -1963,7 +1973,7 @@ def test_clicking_a_row_leaves_focus_on_the_sidebar_so_the_arrows_keep_working(
         scrolls: list[float] = []
         for _ in range(2):
             await pilot.press("down")
-            await pilot.pause()
+            await settle(app)
             # Not query_one: with the arrows eaten there is no cursor at all, and
             # the claim should read as a diff, not as a NoMatches from the probe.
             cursors = app.query(".cursor").results(Activatable)
@@ -2011,17 +2021,17 @@ def test_collapsing_the_card_under_the_cursor_leaves_one_cursor_and_moves_beside
         await pilot.pause()
         for _ in range(3):  # add → project:prj_a → agent:agt_a_manager
             await pilot.press("down")
-            await pilot.pause()
+            await settle(app)
         walked = cursors()
         await pilot.click(card_for(app, "prj_a").query_one(Disclosure))  # hides the cursor's row
         await pilot.pause()
         collapsed = cursors()
         await pilot.press("down")
-        await pilot.pause()
+        await settle(app)
         moved = cursors()
         # Control: the walk goes on from there, one cursor at a time.
         await pilot.press("down")
-        await pilot.pause()
+        await settle(app)
         return walked, collapsed, moved, cursors()
 
     walked, collapsed, moved, onwards = drive(go)
@@ -2047,7 +2057,7 @@ def test_the_cursor_skips_the_rows_of_a_collapsed_card(tmp_path: Path, script: S
             keys: list[str] = []
             for _ in range(4):
                 await pilot.press("down")
-                await pilot.pause()
+                await settle(app)
                 keys.append(app.query_one(".cursor", Activatable).selection_key)
             return keys
 
@@ -2364,7 +2374,9 @@ def test_r_refreshes_from_the_sidebar_but_is_forwarded_from_a_pane(
         await pilot.pause()
         script["prj_a"] = [status("prj_a", "manager", "manager", "attention")]
         await pilot.press("r")
-        await pilot.pause()
+        # Quiet before the read, as above: a refresh the key set off after one pause
+        # could land after it, and "nothing refreshed" would pass without being tested.
+        await settle(app)
         return first, from_sidebar, shown(row), list(pane.keys)
 
     first, from_sidebar, from_pane, keys = drive(go)
@@ -2417,15 +2429,15 @@ def test_theme_picker_applies_live_and_autosaves(
         app = fleet_app(pilot)
         initial = str(app.theme)
         await pilot.press("t")
-        await pilot.pause()
+        await settle(app)
         assert isinstance(app.screen, ThemePicker)
         await pilot.press("down")  # browsing applies instantly…
         await pilot.press("down")
-        await pilot.pause()
+        await settle(app)  # the picker applies the theme from its highlight, a message
         still_open = isinstance(app.screen, ThemePicker)
         applied = str(app.theme)
         await pilot.press("escape")  # …until the explicit close
-        await pilot.pause()
+        await settle(app)
         assert not isinstance(app.screen, ThemePicker)
         return still_open, initial, applied, str(app.theme)
 
@@ -2511,6 +2523,24 @@ async def _settled(pilot: Pilot[None]) -> None:
         if saver is not None:
             assert await asyncio.to_thread(saver.settled, 5.0), "a save never settled"
     await settle(app)
+
+
+async def _asked(pilot: Pilot[None], width: int) -> None:
+    """Wait, bounded, until the width's saver has been asked for ``width``, and no longer.
+
+    For a test that quits inside the debounce. The width reaches the saver as
+    ``ResizeSidebar``, which the sidebar's ``>`` posts and which bubbles to the partition,
+    so a test that returned straight after the press quit before it was handled: nothing
+    was due at quit, and the width was neither reported nor written (with every message
+    held 10 ms). ``settle`` would wait for it too, but it waits until the app is quiet, and
+    that can outlast the debounce the quit has to land inside.
+    """
+    saver = fleet_app(pilot).query_one(Divider)._autosave
+    assert saver is not None
+    deadline = time.monotonic() + 5.0
+    while saver.latest != width:
+        assert time.monotonic() < deadline, f"the saver was never asked for {width}"
+        await pilot.pause()
 
 
 async def _restored(pilot: Pilot[None]) -> None:
@@ -2802,10 +2832,10 @@ def test_the_keyboard_steps_the_partition_from_the_sidebar_and_a_held_key_is_one
         # The fallback exists for terminals without mouse reporting; ? is where they look.
         app.sidebar.focus()
         await pilot.press("question_mark")
-        await pilot.pause()
+        await settle(app)
         seen["help"] = shown(app.screen.query_one("#helpbox Static", Static))
         await pilot.press("escape")
-        await pilot.pause()
+        await settle(app)
         return seen
 
     seen = drive(go)
@@ -3172,6 +3202,7 @@ def test_a_width_the_file_already_has_is_not_rewritten_and_a_save_due_at_quit_is
         await pilot.press("greater_than_sign")  # ...and back to what the file says: handed
         await _settled(pilot)  # over, not rewritten — the file decides, under its lock
         await pilot.press("greater_than_sign")  # 38 queued — and the app quits inside the debounce
+        await _asked(pilot, declared + 2 * RESIZE_STEP)
         return declared
 
     declared = drive(go)
@@ -3375,6 +3406,7 @@ def test_a_refusal_that_arrives_at_quit_is_reported_after_the_run_not_as_a_trace
         apps.append(app)
         app.sidebar.focus()
         await pilot.press("greater_than_sign")  # and quit inside the debounce
+        await _asked(pilot, _declared(app) + RESIZE_STEP)
 
     try:
         with caplog.at_level(logging.ERROR):
@@ -3453,7 +3485,9 @@ def test_hiding_the_divider_mid_drag_ends_the_drag(
         await _mouse(pilot, events.MouseDown, app.sidebar.outer_size.width, 5)
         await _mouse(pilot, events.MouseMove, 60, 5)
         divider.display = False
-        await pilot.pause()
+        # `Hide` is posted by the layout pass that the pause ends with, so it is handled
+        # in a pause after that one: the app is let go quiet before the drag is read.
+        await settle(app)
         state = (divider.has_class("-dragging"), app.mouse_captured, app.sidebar.outer_size.width)
         divider.display = True
         await _settled(pilot)
@@ -3482,10 +3516,10 @@ def test_selecting_an_agent_focuses_its_pane_so_typing_reaches_the_agent_not_the
         assert isinstance(view, AgentView)
         focused_pane = app.focused is view.pane
         await pilot.press("q")
-        await pilot.pause()
+        await settle(app)
         alive = app.return_code
         await pilot.press("f12")
-        await pilot.pause()
+        await settle(app)  # the pane posts EscapeToSidebar, and the app moves the focus
         return focused_pane, alive, app.focused is view.pane
 
     focused_pane, alive, still_in_pane = drive(go)
@@ -3573,14 +3607,14 @@ def test_the_sidebar_hides_captured_directories_until_a_shows_them(
         before = [card.project.id for card in app.query(ProjectCard)]
         app.sidebar.focus()
         await pilot.press("a")
-        await pilot.pause()
+        await settle(app)  # the app's binding, reached once the key has bubbled up to it
         with_captured = [card.project.id for card in app.query(ProjectCard)]
         title = shown_text(app, "prj_scratch")
         await pilot.press("a")
-        await pilot.pause()
+        await settle(app)
         after = [card.project.id for card in app.query(ProjectCard)]
         await pilot.press("question_mark")
-        await pilot.pause()
+        await settle(app)
         return before, with_captured, title, after, shown(app.screen.query_one(Static))
 
     def shown_text(app: FleetApp, project_id: str) -> str:
@@ -3645,7 +3679,7 @@ def test_the_shell_remembers_the_captured_toggle_and_reopens_a_page(
     async def press_a(pilot: Pilot[None]) -> None:
         fleet_app(pilot).sidebar.focus()
         await pilot.press("a")
-        await pilot.pause()
+        await settle(fleet_app(pilot))  # the binding has stored the toggle before the app quits
 
     async def relaunch(pilot: Pilot[None]) -> tuple[list[str], str | None, str | None]:
         app = fleet_app(pilot)

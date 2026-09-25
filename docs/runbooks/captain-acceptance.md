@@ -71,9 +71,12 @@ aisquare captain log alpha --limit 8
 Have a coder sit at a permission prompt (its row reads `attention`). Say
 **"say yes to coder-1"**.
 
-Expect: `press y` (allowed only in `waiting` or `attention` with the agent in
-the foreground), then the pane moves on; the reply says what the pane shows.
-A coder that is `working` is refused with the state named, never pressed.
+Expect: `press yes`, sent as the digit of the chooser's Yes (`1` on Claude
+Code's permission chooser), then the pane moves on. The press audit shows the
+key sent and `answered: true`, and the reply says what the pane shows. A key
+the prompt ignores (the letter `y` on that chooser) comes back as an error,
+audited `ok: false`, never as a success. A coder that is `working` with no
+prompt on its screen is refused with the state named, never pressed.
 
 ```sh
 aisquare captain log alpha --limit 4
@@ -106,7 +109,8 @@ aisquare captain voice --mode listen
 ```
 
 The start line names the wake word (`wake word: captain`), and the idle chip
-reads **say Captain**.
+reads **say Captain**. The first utterance loads the speech model, which takes a
+few seconds: wait for its transcript before the next step.
 
 1. Say **"we should ship the fold today"**. Expect no words on the page, live or
    after, nothing delivered, nothing spoken.

@@ -29,9 +29,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   off) — interim transcripts, the thinking signal, the reply spoken back
   through a Speaker adapter per platform; one spool drainer in the captain's
   server plays the captain's own `speak()` lines. A fresh captain is started
-  bare and never typed into at Claude Code's trust dialog; after a reboot a
-  provably gone tmux server means a fresh start, anything less a fast refusal
-  naming `aisquare fleet reap -P <home> --server-down`.
+  bare and never typed into at Claude Code's trust dialog, and it takes its
+  first message at its idle input box even while the fleet still reads it
+  working. `press yes`/`press no` answer Claude Code's real permission chooser
+  by its Yes digit and Esc (read off the pane), and a key the prompt ignores is
+  said as an error. After a reboot a provably gone tmux server means a fresh
+  start, anything less a fast refusal naming
+  `aisquare fleet reap -P <home> --server-down`.
 
 ### Fixed
 

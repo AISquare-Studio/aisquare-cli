@@ -187,15 +187,27 @@ Named sequences of the captain's primitives, run as one tool call (`act`):
 ```toml
 [captain.actions.approve_and_check]
 description = "say yes to the prompt, then read what happened"
-steps = ["press y", "read_pane 20"]
+steps = ["press yes", "read_pane 20"]
 ```
 
 Primitives: `press <key>`, `paste <text>`, `tell <text>`, `read_pane [lines]`,
 `ui <action> [arg]`, `task <verb> <ref> [note]`. `{placeholders}` are filled
-from the call's arguments. Three come bundled — `approve_prompt` (press y),
-`unblock` (press y, then read the pane) and `open_spawn` — and a config entry
+from the call's arguments. Three come bundled — `approve_prompt` (press yes),
+`unblock` (press yes, then read the pane) and `open_spawn` — and a config entry
 wins on a name. The whole sequence is checked before the first step runs, and
 a failing step stops it and says which. `aisquare captain actions` lists them.
+
+`press yes` and `press no` are read off the pane at the moment of the press.
+On Claude Code's permission chooser, yes is the digit of the option that says
+Yes (usually `1`), and no is Esc. On a `[y/N]` line they are `y` and `n`. The
+letter `y` does nothing on Claude Code's chooser. `1` to `9` press a digit.
+After a key that answers a prompt, the pane is read back, and a prompt still
+showing is an error: the captain never reports a press the prompt ignored.
+The trust dialog is refused by name, because trusting a folder is yours to
+answer. An agent is ready for a key or a paste when it is waiting or asking. It
+is also ready when the fleet still reads it working but its screen shows a
+prompt, or Claude Code's input box drawn and idle: a freshly spawned agent
+reads working until its first reply.
 
 ### The easter eggs
 
@@ -235,6 +247,22 @@ one command that may decide it is gone:
 aisquare fleet reap -P <home> --server-down
 aisquare captain
 ```
+
+## Known limits
+
+Two follow-ups are open, each on its own card:
+
+- **After a reboot, a project agent's row still reads `waiting`.** The fleet
+  reads an agent's state from its last hook, not from tmux. So an agent whose
+  tmux server went away with the machine still shows as waiting in
+  `aisquare fleet ls` and in the sidebar. The captain's own row is checked
+  against its socket file (above). `bt` asks the server before it hands a
+  converted agent its cards back. For the rest, end the rows with
+  `aisquare fleet reap -P <project> --server-down`.
+- **The first audio in listen mode loads the speech model.** faster-whisper
+  loads on the first utterance, which takes a few seconds on a CPU. A mode
+  switch or a hold-to-talk press in those seconds is answered late. Speak once
+  and wait for the first transcript before you switch.
 
 ## Phase 2
 

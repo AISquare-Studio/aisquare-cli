@@ -46,12 +46,15 @@ import asyncio
 import contextlib
 import json
 import logging
+import re
 import time
 from array import array
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from math import sqrt
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
 from aisquare.core.version import DISTRIBUTION
@@ -92,6 +95,12 @@ MAX_AUDIO_BYTES = int(BYTES_PER_SECOND * MAX_UTTERANCE_S)
 #: What turns the mic off in always-listening mode instead of being delivered (matched on
 #: the whole final transcript, case and trailing punctuation aside).
 STOP_WORDS: frozenset[str] = frozenset({"stop listening"})
+WAKE_WORD = "captain"
+"""Listen mode's wake word (the owner's request, 13284): only an utterance that begins with it
+is delivered, stripped of it; ``[captain] wake_word`` in config.toml changes it, ``''`` turns
+it off. Focus mode (hold to talk) never needs it."""
+WAKE_WINDOW_S = 5.0
+"""How long the wake word ALONE keeps the mic open for the next utterance, delivered bare."""
 #: A reply slower than this earns one spoken cue, so the owner knows the request landed.
 CUE_AFTER_S = 3.0
 CUE_TEXT = "on it"
@@ -369,6 +378,88 @@ class Segmenter:
         return self._transcriber.finish()
 
 
+WAKE_WORD_SHAPE = re.compile(r"[a-z]+(?: [a-z]+)*")
+
+
+def configured_wake_word(config_path: Path | None = None) -> str:
+    """``[captain] wake_word`` from config.toml: ``''`` switches it off; absent, the default.
+
+    A to z letters and spaces, one word or a few ('captain', 'hey captain'). Anything else
+    raises ValueError, which the CLI refuses in one line like a bad speaker name: a typo
+    must never read as 'off', since the owner's meetings must never reach the captain. A
+    file that does not parse is said in the log and reads as the default, as for the speaker.
+    """
+    value = speaker_mod.captain_table(config_path).get("wake_word")
+    if value is None:
+        return WAKE_WORD
+    shape = "a to z letters and spaces, e.g. \"captain\"; '' switches it off"
+    if not isinstance(value, str):
+        raise ValueError(f"[captain] wake_word = {value!r} in config.toml is not text: {shape}")
+    word = " ".join(value.lower().split())
+    if word and not WAKE_WORD_SHAPE.fullmatch(word):
+        raise ValueError(f"[captain] wake_word = {value!r} in config.toml: {shape}")
+    return word
+
+
+_NOT_LETTERS = re.compile(r"[^a-z]+")
+
+
+def _one_edit_apart(a: str, b: str) -> bool:
+    """Whether ``a`` and ``b`` differ by one substitution, insertion, deletion or swap — whisper's
+    near-spellings of a word ('kaptain', 'captian', 'captin')."""
+    if a == b:
+        return True
+    if abs(len(a) - len(b)) > 1:
+        return False
+    if len(a) == len(b):
+        diffs = [index for index, (x, y) in enumerate(zip(a, b, strict=True)) if x != y]
+        if len(diffs) == 1:
+            return True
+        return (
+            len(diffs) == 2
+            and diffs[1] == diffs[0] + 1
+            and a[diffs[0]] == b[diffs[1]]
+            and a[diffs[1]] == b[diffs[0]]
+        )
+    short, long = (a, b) if len(a) < len(b) else (b, a)
+    return any(long[:index] + long[index + 1 :] == short for index in range(len(long)))
+
+
+def _near(token: str, expected: str) -> bool:
+    """One word of the wake word, as whisper may spell it: exact under four letters, else one
+    edit away — but never the plural or the possessive ('captains', "captain's"), which are
+    other words a meeting says."""
+    if token == expected:
+        return True
+    if len(expected) < 4 or token == expected + "s":
+        return False
+    return _one_edit_apart(token, expected)
+
+
+class WakeWord:
+    """The wake word's match on a final transcript: (woke, the rest to deliver)."""
+
+    def __init__(self, word: str) -> None:
+        self.words = tuple(re.findall(r"[a-z]+", word.lower()))
+        self.word = " ".join(self.words)
+
+    def __bool__(self) -> bool:
+        return bool(self.words)
+
+    def match(self, text: str) -> tuple[bool, str]:
+        """Whether ``text`` begins with the wake word, each of its words forgiven case,
+        punctuation and one misspelling (:func:`_near`), and what follows it, stripped."""
+        if not self.words:
+            return False, ""
+        rest = text
+        for expected in self.words:
+            head = re.match(r"^[\W_]*([A-Za-z']+)(.*)$", rest, re.S)
+            if head is None or not _near(_NOT_LETTERS.sub("", head.group(1).lower()), expected):
+                return False, ""
+            rest = head.group(2)
+        return True, re.sub(r"^[\W_]+", "", rest).strip()
+
+
 def is_stop_word(text: str) -> bool:
     """Whether a final transcript is the stop word, case and trailing punctuation aside."""
     return " ".join(text.lower().split()).strip(" .!?,") in STOP_WORDS
@@ -385,16 +476,27 @@ NO_TEXT_NOTE = "the captain answered with tools alone — its pane shows what it
 """Shown on the page for a turn that ended without text (contract 13175); never spoken."""
 
 
-def deliver_to_captain(text: str) -> str | None:
+@dataclass(frozen=True)
+class Delivered:
+    """What a delivery came back with: the reply text (``None`` for a turn of tools alone,
+    13175) and when the text went into the pane — the moment the speak() window opens."""
+
+    text: str | None
+    typed_at: datetime | None = None
+
+
+def deliver_to_captain(text: str) -> Delivered:
     """The product delivery: T2's ``brain.say`` — typed into the pane, the reply read back.
 
-    ``None`` is a turn that ended without text (13175): the captain answered with
-    tools alone. It is not a failure and it is never a placeholder.
+    A ``NoReply`` and a fleet refusal (T2's ``brain.Unreachable`` after a reboot is
+    one) are both a failed delivery the page says; nothing else is expected, and
+    anything else is caught by the turn and said as ``internal``.
     """
     try:
-        return brain.say(text).text
-    except brain.NoReply as exc:
+        reply = brain.say(text)
+    except (brain.NoReply, fleet_service.FleetError) as exc:
         raise DeliveryFailed(str(exc)) from exc
+    return Delivered(reply.text, typed_at=reply.typed_at)
 
 
 def voice_mode() -> Mode | None:
@@ -438,8 +540,10 @@ def home_seq() -> int:
         return store.latest_seq(captain_state.home_project().id)
 
 
-def spoke_since(seq: int) -> int:
-    """How many ``speak()`` calls the captain audited on the home board past ``seq``."""
+def spoke_since(seq: int, typed_at: datetime | None = None) -> int:
+    """How many ``speak()`` calls the captain audited on the home board past ``seq`` — and,
+    when ``typed_at`` is known, not before the text went in (coderp's S3: a speak() from the
+    busy turn ``say`` waited out, or from another page's turn, is not this turn's)."""
     from aisquare.core.store import store_session
 
     home = captain_state.home_project()
@@ -451,9 +555,27 @@ def spoke_since(seq: int) -> int:
             record = json.loads(event.text)
         except ValueError:
             continue
-        if isinstance(record, dict) and record.get("tool") == "speak" and record.get("ok"):
-            spoken += 1
+        if not (isinstance(record, dict) and record.get("tool") == "speak" and record.get("ok")):
+            continue
+        # Strictly after: a speak() stamped at the very instant of the typing cannot answer
+        # the text just typed, so an equal stamp (one clock tick on Windows) is the turn
+        # before's — counting it muted this reply on CI's Windows leg.
+        if typed_at is not None and _event_time(event.created_at) <= typed_at:
+            continue
+        spoken += 1
     return spoken
+
+
+def _event_time(raw: object) -> datetime:
+    """An event's ``created_at`` as an aware datetime."""
+    if isinstance(raw, datetime):
+        stamp = raw
+    else:
+        try:
+            stamp = datetime.fromisoformat(str(raw))
+        except ValueError:
+            return datetime.min.replace(tzinfo=UTC)
+    return stamp if stamp.tzinfo is not None else stamp.replace(tzinfo=UTC)
 
 
 @dataclass
@@ -461,20 +583,22 @@ class Hooks:
     """Everything the server reaches outside itself, replaceable in one place for a test."""
 
     transcriber_factory: Callable[[], Transcriber] = transcriber
-    deliver: Callable[[str], str | None] = deliver_to_captain
-    voice: speaker_mod.Voice = field(
-        default_factory=lambda: speaker_mod.Voice(speaker_mod.pick_speaker())
-    )
+    deliver: Callable[[str], Delivered] = deliver_to_captain
+    voice: speaker_mod.Voice = field(default_factory=speaker_mod.machine_voice)
     thinking: Callable[[], bool] = captain_is_thinking
     voice_mode: Callable[[], Mode | None] = voice_mode
     set_voice_mode: Callable[[Mode], None] = set_voice_mode
     home_seq: Callable[[], int] = home_seq
-    spoke_since: Callable[[int], int] = spoke_since
+    spoke_since: Callable[[int, datetime | None], int] = spoke_since
     on_thinking: Callable[[bool], None] | None = None
     """The CLI's side of the thinking signal: called on every flip, the terminal prints it."""
     clock: Callable[[], float] = time.monotonic
     cue_after_s: float = CUE_AFTER_S
     poll_s: float = POLL_S
+    # Late-bound, so the config is read as the server starts; the CLI reads it first, to
+    # refuse a bad value in one line (configured_wake_word raises).
+    wake_word: str = field(default_factory=lambda: configured_wake_word())
+    wake_window_s: float = WAKE_WINDOW_S
 
 
 # --- the page -------------------------------------------------------------------------------------
@@ -541,6 +665,14 @@ class _Connection:
         self._burst_bytes = 0
         self._delivering = 0
         self._deliveries = asyncio.Lock()
+        self._turns: set[asyncio.Task[None]] = set()
+        self._mode_writing = 0
+        self._wake = WakeWord(hooks.wake_word)
+        self._awake_until: float | None = None
+        """When the window the wake word alone opened closes (``hooks.clock``), or None."""
+        self._window_timer: asyncio.Task[None] | None = None
+        self._interim_shown = False
+        """Whether the page's live line shows words of this utterance (see _show_interim)."""
         self._shown_thinking: bool | None = None
         self._send_lock = asyncio.Lock()
 
@@ -557,6 +689,7 @@ class _Connection:
             listening=self.listening,
             speaker=speaker_mod.speaker_on(),
             thinking=self._shown_thinking,
+            wake_word=self._wake.word,
         )
         poller = asyncio.create_task(self._thinking_loop())
         try:
@@ -565,6 +698,17 @@ class _Connection:
             poller.cancel()
             with _swallow_cancel():
                 await poller
+            timer = self._window_timer
+            self._cancel_window_timer()
+            if timer is not None:
+                with _swallow_cancel():
+                    await timer
+            # A turn in flight is AWAITED, not cancelled: the owner who closed the tab is
+            # still in the room, and the reply is still theirs to hear. Its frames go to
+            # a socket that is gone, which _send swallows.
+            for turn in list(self._turns):
+                with _swallow_cancel():
+                    await turn
 
     async def _authenticate(self) -> bool:
         from starlette.websockets import WebSocketDisconnect
@@ -658,8 +802,10 @@ class _Connection:
             await self._set_listening(False)
         elif kind == "text":
             text = str(message.get("text", "")).strip()
-            if text:
-                await self._deliver(text)
+            if text and self.mode == "listen" and is_stop_word(text):
+                await self._heard_stop_word()  # typed, the stop word is the stop word
+            elif text:
+                self._start_delivery(text)
         elif kind == "speaker":
             speaker_mod.set_speaker(bool(message.get("on", True)))
             await self._send("speaker", on=speaker_mod.speaker_on())
@@ -675,9 +821,14 @@ class _Connection:
             await self._close_burst()
         self.mode = "listen" if mode == "listen" else "focus"
         self.listening = self.mode == "listen"
+        if self._awake_until is not None:
+            await self._close_window()
         if write:
             # The page's toggle writes the key (13179), so the TUI and every other
-            # page agree; a switch that CAME from the key is not written back.
+            # page agree; a switch that CAME from the key is not written back. While
+            # the write is in flight the poll still reads the old value: it must not
+            # bounce the page (coderp's minor), so it stands aside until the write lands.
+            self._mode_writing += 1
             try:
                 await asyncio.to_thread(self._hooks.set_voice_mode, self.mode)
             except Exception as exc:  # the page still switched; the key did not, said
@@ -685,6 +836,8 @@ class _Connection:
                 await self._send(
                     "error", code="mode_not_saved", message=f"the mode was not saved: {exc}"
                 )
+            finally:
+                self._mode_writing -= 1
         await self._send("mode", mode=self.mode, listening=self.listening)
 
     def _mode_key(self) -> Mode | None:
@@ -697,14 +850,18 @@ class _Connection:
     async def _follow_mode_key(self) -> None:
         """The one-second poll's other job (13179): a key another writer changed — T4's
         control, another page, ``--mode`` — switches this page, and the page is told."""
+        if self._mode_writing:
+            return
         wanted = await asyncio.to_thread(self._mode_key)
-        if wanted is not None and wanted != self.mode:
+        if wanted is not None and wanted != self.mode and not self._mode_writing:
             await self._set_mode(wanted, write=False)
 
     async def _set_listening(self, on: bool) -> None:
         if not on:
             await self._flush_listen()
         self.listening = on and self.mode == "listen"
+        if not self.listening and self._awake_until is not None:
+            await self._close_window()
         await self._send("listening", on=self.listening)
 
     async def _flush_listen(self) -> None:
@@ -769,23 +926,126 @@ class _Connection:
                 return
         interim, final = await asyncio.to_thread(self._segmenter.feed, chunk)
         if interim:
-            await self._send("stt", text=interim, final=False)
+            await self._show_interim(interim)
         if final is not None:
+            self._interim_shown = False
             await self._final(final)
 
-    async def _final(self, text: str) -> None:
-        """A finished utterance: shown, then delivered — or, as the stop word, the mic off."""
-        text = text.strip()
-        await self._send("stt", text=text, final=True)
-        if not text:
+    async def _show_interim(self, interim: str) -> None:
+        """The live line while listen mode hears someone (13321). With the wake word on it
+        shows NO words of what the mic hears — the owner may be sharing their screen in a
+        meeting — until an interim begins with the wake word; then the words after it,
+        live. Inside the window a bare 'Captain' opened, the whole line, as before."""
+        if not self._wake or self._window_open():
+            await self._send("stt", text=interim, final=False)
             return
-        if self.mode == "listen" and is_stop_word(text):
-            self.listening = False
-            await self._send("listening", on=False, why="stop word")
-            return
-        await self._deliver(text)
+        woke, rest = self._wake.match(interim)
+        if woke:
+            self._interim_shown = bool(rest)
+            await self._send("stt", text=rest, final=False)
+        elif self._interim_shown:
+            # whisper took the wake word back: the line clears rather than show the rest
+            self._interim_shown = False
+            await self._send("stt", text="", final=False)
 
-    # -- delivery, and the thinking signal
+    def _window_open(self) -> bool:
+        return self._awake_until is not None and self._hooks.clock() < self._awake_until
+
+    async def _final(self, text: str) -> None:
+        """A finished utterance: shown, then delivered — or, as the stop word, the mic off.
+
+        In listen mode the wake word, when set, decides first (:meth:`_gate`). The bare
+        stop word goes before it: the safety never needs the wake word.
+        """
+        text = text.strip()
+        if text and self.mode == "listen" and is_stop_word(text):
+            await self._send("stt", text=text, final=True)
+            await self._heard_stop_word()
+            return
+        if text and self.mode == "listen" and self._wake:
+            await self._gate(text)
+            return
+        await self._send("stt", text=text, final=True)
+        if text:
+            self._start_delivery(text)
+
+    async def _gate(self, text: str) -> None:
+        """Listen mode's wake word (13284). An utterance that begins with it is delivered
+        stripped of it; the word alone opens a short window in which the next utterance
+        goes through bare; anything else is dropped — never delivered, never spoken, and
+        not kept: its text never leaves this function, the page only clears its interim.
+        """
+        woke, rest = self._wake.match(text)
+        in_window = self._window_open()
+        if not woke and not in_window:
+            if self._awake_until is not None:
+                await self._close_window()
+            await self._send("stt", text="", final=True, dropped="no wake word")
+            return
+        await self._send("stt", text=text, final=True)
+        if woke and not rest:
+            await self._open_window()
+            return
+        if self._awake_until is not None:
+            await self._close_window()
+        request = rest if woke else text
+        if is_stop_word(request):  # "Captain, stop listening" is the stop word too
+            await self._heard_stop_word()
+            return
+        self._start_delivery(request)
+
+    async def _heard_stop_word(self) -> None:
+        """The stop word, spoken or typed: the mic goes off, and an open window with it — a
+        window that outlived the mute would deliver the first utterance after an unmute."""
+        self.listening = False
+        if self._awake_until is not None:
+            await self._close_window()
+        await self._send("listening", on=False, why="stop word")
+
+    async def _open_window(self) -> None:
+        """The wake word alone: the next utterance goes through bare for ``wake_window_s``.
+
+        The ``awake`` frame is the cue: the page shows 'listening' and plays a short tone.
+        Nothing is spoken here — the machine's voice would reach the mic inside the window
+        and be delivered as the request; the page's own tone is taken out of the mic.
+        """
+        self._awake_until = self._hooks.clock() + self._hooks.wake_window_s
+        self._cancel_window_timer()
+        self._window_timer = asyncio.create_task(self._close_window_when_due())
+        await self._send("awake", on=True, seconds=self._hooks.wake_window_s)
+
+    async def _close_window(self) -> None:
+        self._awake_until = None
+        self._cancel_window_timer()
+        await self._send("awake", on=False)
+
+    async def _close_window_when_due(self) -> None:
+        """Silence after the wake word: the window closes on its own, and the page's
+        'listening' goes back to 'say Captain'."""
+        while self._awake_until is not None:
+            remaining = self._awake_until - self._hooks.clock()
+            if remaining <= 0:
+                break
+            await asyncio.sleep(remaining)
+        if self._awake_until is not None:
+            self._awake_until = None
+            self._window_timer = None
+            await self._send("awake", on=False)
+
+    def _cancel_window_timer(self) -> None:
+        timer, self._window_timer = self._window_timer, None
+        if timer is not None:
+            timer.cancel()
+
+    def _start_delivery(self, text: str) -> None:
+        """A turn runs as its own task, never inside the read loop (coderp's B1): with the
+        loop blocked, uvicorn stopped reading the page's pongs and its keepalive closed the
+        socket 20 to 40 s into any longer turn, and the reply went to a dead socket. The
+        turns of one page still run one at a time (``_deliveries``); the read loop keeps
+        receiving, so a mute, a stop, a mode switch or the speaker switch lands at once."""
+        task = asyncio.create_task(self._deliver(text))
+        self._turns.add(task)
+        task.add_done_callback(self._turns.discard)
 
     async def _deliver(self, text: str) -> None:
         await self._send("utterance", text=text)
@@ -794,32 +1054,58 @@ class _Connection:
             await self._show_thinking()
             since = await asyncio.to_thread(self._read_home_seq)
             cue = asyncio.create_task(self._cue_later())
+            ended = False
             try:
-                reply = await asyncio.to_thread(self._hooks.deliver, text)
-            except DeliveryFailed as exc:
+                try:
+                    delivered = await asyncio.to_thread(self._hooks.deliver, text)
+                except DeliveryFailed as exc:
+                    cue.cancel()
+                    await self._send("error", code="no_reply", message=str(exc))
+                    ended = await self._end_turn()
+                    await asyncio.to_thread(self._hooks.voice.utter, "the captain did not answer")
+                    return
+                except Exception as exc:  # said, never a page stuck on "thinking" (S2)
+                    cue.cancel()
+                    log.warning("captain voice: the delivery failed: %s", exc)
+                    await self._send("error", code="internal", message=str(exc))
+                    ended = await self._end_turn()
+                    return
                 cue.cancel()
-                self._delivering -= 1
-                await self._send("error", code="no_reply", message=str(exc))
-                await asyncio.to_thread(self._hooks.voice.utter, "the captain did not answer")
-                await self._show_thinking()
-                return
-            cue.cancel()
-            self._delivering -= 1
-            # The brain decides what is worth saying (13143): a turn in which the
-            # captain called speak() is already audible; only a silent turn's reply
-            # is spoken here, so nothing is heard twice and nothing is missed.
-            spoken_by_captain = await asyncio.to_thread(self._count_spoken, since)
-            if reply is None:
-                # 13175: a turn of tools alone. The page says so in its own words and
-                # nothing is spoken — there is no reply text, and a placeholder read
-                # aloud would be the captain's words to the owner's ear.
-                await self._send("reply", text=None, spoken=False, note=NO_TEXT_NOTE)
-                await self._show_thinking()
-                return
-            await self._send("reply", text=reply, spoken=spoken_by_captain == 0)
-            await self._show_thinking()
-            if spoken_by_captain == 0:
-                await asyncio.to_thread(self._hooks.voice.utter, reply)
+                # The brain decides what is worth saying (13143): a turn in which the
+                # captain called speak() is already audible; only a silent turn's reply
+                # is spoken here, so nothing is heard twice and nothing is missed. The
+                # window opens when the text went in (S3), not when say started to wait.
+                spoken_by_captain = await asyncio.to_thread(
+                    self._count_spoken, since, delivered.typed_at
+                )
+                reply = delivered.text
+                if reply is None:
+                    # 13175: a turn of tools alone. The page says so in its own words and
+                    # nothing is spoken — there is no reply text, and a placeholder read
+                    # aloud would be the captain's words to the owner's ear.
+                    await self._send("reply", text=None, spoken=False, note=NO_TEXT_NOTE)
+                    ended = await self._end_turn()
+                    return
+                will_speak = (
+                    spoken_by_captain == 0 and bool(reply.strip()) and speaker_mod.speaker_on()
+                )
+                await self._send("reply", text=reply, spoken=will_speak)
+                ended = await self._end_turn()
+                if spoken_by_captain == 0:
+                    await asyncio.to_thread(self._hooks.voice.utter, reply)
+            finally:
+                # Whatever path left, or a cancellation mid-turn (S2): the cue never
+                # fires late, and the page is never left on "thinking".
+                cue.cancel()
+                if not ended:
+                    with _swallow_socket_errors():
+                        await self._end_turn()
+
+    async def _end_turn(self) -> bool:
+        """The turn is over: the delivering count drops and the thinking signal follows."""
+        self._delivering -= 1
+        await self._show_thinking()
+        return True
 
     def _read_home_seq(self) -> int:
         try:
@@ -828,11 +1114,11 @@ class _Connection:
             log.warning("captain voice: the home board could not be read: %s", exc)
             return -1
 
-    def _count_spoken(self, since: int) -> int:
+    def _count_spoken(self, since: int, typed_at: datetime | None) -> int:
         if since < 0:
             return 0
         try:
-            return self._hooks.spoke_since(since)
+            return self._hooks.spoke_since(since, typed_at)
         except Exception as exc:
             log.warning("captain voice: the speak() audit could not be read: %s", exc)
             return 0
@@ -852,7 +1138,7 @@ class _Connection:
             return False
 
     async def _show_thinking(self) -> None:
-        now = self._thinking_now()
+        now = await asyncio.to_thread(self._thinking_now)  # tmux and the store, off the loop
         if now != self._shown_thinking:
             self._shown_thinking = now
             await self._send("thinking", on=now)
@@ -917,6 +1203,15 @@ def serve(
     """Run the voice page until interrupted (the CLI's ``captain voice``)."""
     import uvicorn
 
-    uvicorn.run(
-        build_app(token=token, hooks=hooks, mode=mode), host=host, port=port, log_level="warning"
-    )
+    app = build_app(token=token, hooks=hooks, mode=mode)
+    uvicorn.Server(uvicorn_config(app, host, port)).run()
+
+
+def uvicorn_config(app: Starlette, host: str, port: int, **overrides: Any) -> Any:
+    """The server's own uvicorn settings — one place, so a test can shorten the websocket
+    keepalive (``ws_ping_interval``, ``ws_ping_timeout``) and drive the real server."""
+    import uvicorn
+
+    settings: dict[str, Any] = {"host": host, "port": port, "log_level": "warning"}
+    settings.update(overrides)
+    return uvicorn.Config(app, **settings)

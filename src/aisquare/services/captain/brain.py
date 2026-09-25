@@ -95,6 +95,9 @@ class Reply:
 
     text: str | None
     ended_at: datetime | None = None
+    typed_at: datetime | None = None
+    """When the text went in (T3 counts the captain's own ``speak()`` calls from here, not
+    from before ``say`` waited for the lock or a busy captain)."""
 
 
 def _home() -> Path:
@@ -278,7 +281,8 @@ def say(text: str, *, timeout: float = SAY_TIMEOUT_S) -> Reply:
             srv = _wait_until_ready(agent, deadline, timeout)
             typed_at = _now()
             _type(srv, agent, text)
-        return _await_reply(agent, typed_at, deadline, timeout)
+        reply = _await_reply(agent, typed_at, deadline, timeout)
+        return Reply(reply.text, ended_at=reply.ended_at, typed_at=typed_at)
 
 
 @contextlib.contextmanager

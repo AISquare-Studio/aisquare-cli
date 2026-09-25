@@ -15,6 +15,7 @@ from aisquare.cli.app import app
 from aisquare.services import fleet as fleet_service
 from aisquare.services.captain import brain
 from aisquare.services.captain import speaker as speaker_mod
+from tests.rendered import plain
 from tests.test_stubs import IMPLEMENTED
 
 
@@ -55,8 +56,18 @@ def test_show_token_prints_the_url_the_qr_and_the_adb_line_without_serving(
     result = runner.invoke(app, ["--json", "captain", "voice", "--show-token", "--mode", "listen"])
     assert result.exit_code == 0, result.output
     data = json.loads(result.output)
-    assert set(data) == {"url", "port", "host", "mode", "speaker", "adb_reverse", "serving"}
+    assert set(data) == {
+        "url",
+        "port",
+        "host",
+        "mode",
+        "speaker",
+        "wake_word",
+        "adb_reverse",
+        "serving",
+    }
     assert data["mode"] == "listen" and data["serving"] is False and data["port"] == 8749
+    assert data["wake_word"] == "captain", "on by default, and the start line says it"
 
 
 def test_serving_hands_the_token_mode_and_model_to_the_server(
@@ -136,6 +147,83 @@ def test_dash_dash_mode_writes_the_key_and_without_it_the_key_is_the_default(
     assert json.loads(result.stdout)["mode"] == "listen"
 
 
+def test_a_bad_speaker_in_config_is_refused_with_a_line_not_a_traceback(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """coderp's S5, the CLI half: the page refuses a bad [captain] speaker in one line."""
+    monkeypatch.setattr(speaker_mod, "configured_speaker", lambda: "bogus")
+    monkeypatch.setattr(captain_voice, "voice_dependency_error", lambda: None)
+    result = runner.invoke(app, ["captain", "voice", "--show-token"])
+    assert result.exit_code == 1, result.output
+    assert "bogus" in result.output and "Traceback" not in result.output
+
+
+def test_a_bad_wake_word_in_config_is_refused_with_a_line_before_anything_is_written(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from aisquare.services.captain import voice
+
+    monkeypatch.setattr(speaker_mod, "captain_table", lambda path=None: {"wake_word": "c@ptain"})
+    monkeypatch.setattr(captain_voice, "voice_dependency_error", lambda: None)
+    wrote: list[object] = []
+    monkeypatch.setattr(voice, "set_voice_mode", wrote.append)
+    monkeypatch.setattr(speaker_mod, "set_speaker", wrote.append)
+    result = runner.invoke(
+        app, ["captain", "voice", "--show-token", "--mode", "listen", "--speaker", "on"]
+    )
+    assert result.exit_code == 1, result.output
+    assert "c@ptain" in plain(result.output) and "Traceback" not in result.output
+    assert wrote == [], "refused before the mode or the speaker was written"
+
+
+def test_serving_hands_the_wake_word_to_the_server(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from aisquare.services.captain import voice
+
+    served: list[dict[str, Any]] = []
+    monkeypatch.setattr(speaker_mod, "captain_table", lambda path=None: {"wake_word": "Skipper"})
+    monkeypatch.setattr(captain_voice, "voice_dependency_error", lambda: None)
+    monkeypatch.setattr(voice, "serve", lambda **kw: served.append(kw))
+    result = runner.invoke(app, ["captain", "voice"])
+    assert result.exit_code == 0, result.output
+    assert "wake word: skipper" in plain(result.output)
+    assert served[0]["hooks"].wake_word == "skipper"
+
+
+def test_dash_dash_model_reaches_the_transcriber_and_json_keeps_stdout_to_the_report(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """coderp's minors: nothing tested --model, and --json printed plain thinking lines after
+    the report."""
+    from aisquare.services.captain import voice
+
+    served: list[dict[str, Any]] = []
+    asked: list[str | None] = []
+
+    def fake_transcriber(model: str | None) -> object:
+        asked.append(model)
+        return object()
+
+    monkeypatch.setattr(voice, "transcriber", fake_transcriber)
+    monkeypatch.setattr(captain_voice, "voice_dependency_error", lambda: None)
+
+    def fake_serve(**kw: Any) -> None:
+        served.append(kw)
+        kw["hooks"].transcriber_factory()
+        kw["hooks"].on_thinking(True)
+        kw["hooks"].on_thinking(False)
+
+    monkeypatch.setattr("aisquare.services.captain.voice.serve", fake_serve)
+    result = runner.invoke(app, ["--json", "captain", "voice", "--model", "small.en"])
+    assert result.exit_code == 0, result.output
+    assert asked == ["small.en"], "--model reached the factory"
+    lines = [line for line in result.stdout.splitlines() if line.strip()]
+    assert len(lines) == 1 and json.loads(lines[0])["serving"] is True, (
+        "one JSON object, no chatter"
+    )
+
+
 def test_a_non_loopback_host_and_a_bad_mode_are_refused(
     runner: CliRunner, isolated_home: Path
 ) -> None:
@@ -163,7 +251,8 @@ def test_the_groups_help_names_the_dash_dash_voice_spelling(runner: CliRunner) -
     guard both know it — the routing itself is the group's parse_args rewrite."""
     result = runner.invoke(app, ["captain", "--help"])
     assert result.exit_code == 0, result.output
-    assert "--voice" in result.output and "voice page" in result.output
+    # plain(): CI forces a styled terminal and the highlighter splits "--voice" (tests/rendered.py)
+    assert "--voice" in plain(result.output) and "voice page" in plain(result.output)
 
 
 def test_the_leaf_is_implemented_and_left_uninvoked_by_the_sweeps() -> None:

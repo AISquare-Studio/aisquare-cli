@@ -1549,7 +1549,7 @@ def run_stdio(*, close_after: int) -> None:
     from aisquare.services import mcp_server
     from aisquare.services.captain import speaker
 
-    speaker.start_drainer(speaker.machine_voice())
+    speaker.start_drainer(speaker.server_voice())
     mcp_server.run_stdio(
         close_after=close_after, server=build_server(), command="aisquare captain serve --stdio"
     )

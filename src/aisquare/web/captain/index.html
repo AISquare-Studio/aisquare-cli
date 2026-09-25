@@ -120,6 +120,25 @@ const modeButtons = { focus: $('mode-focus'), listen: $('mode-listen') };
 const token = new URLSearchParams(location.hash.replace(/^#/, '')).get('token') || '';
 let ws = null, mode = 'focus', listening = false, muted = false, holding = false, seq = 0;
 let ctx = null, stream = null, node = null, source = null, moduleReady = null, streaming = false;
+// coderp's S6: a burst that starts within the drain window of the one before it must not be
+// ended by the old timer — every burst gets a generation, and a stale timer does nothing.
+let burstGeneration = 0, drainTimer = null;
+// Listen mode's wake word (13284): the idle chip says it; the word alone opens a short
+// window, marked by 'listening' and a short tone.
+let wakeWord = '', awake = false, cueUntil = 0;
+const CUE_MS = 120, CUE_TAIL_MS = 150;
+function idleListenLabel() { return wakeWord ? 'say ' + wakeWord[0].toUpperCase() + wakeWord.slice(1) : 'listening'; }
+// The tone is the page's own, so the browser's echo cancellation takes it out of the mic,
+// and the frames it overlaps are held back besides: a spoken word from the machine's voice
+// would be heard inside the window and delivered as the request.
+function cue() {
+  if (!ctx) return; // no capture graph, no window to mark: the chip still says it
+  const osc = ctx.createOscillator(), gain = ctx.createGain();
+  osc.frequency.value = 880; gain.gain.value = 0.06;
+  osc.connect(gain); gain.connect(ctx.destination);
+  osc.start(); osc.stop(ctx.currentTime + CUE_MS / 1000);
+  cueUntil = performance.now() + CUE_MS + CUE_TAIL_MS;
+}
 
 function say(cls, text) {
   const el = document.createElement('div'); el.className = cls; el.textContent = text;
@@ -142,10 +161,12 @@ function connect() {
   ws.onmessage = (e) => {
     let m; try { m = JSON.parse(e.data); } catch { return; }
     switch (m.t) {
-      case 'hello': setStatus('connected', 'on'); setMode(m.mode, false); listening = m.listening; speakerBtn.textContent = 'speaker: ' + (m.speaker ? 'on' : 'off'); thinking.className = 'chip' + (m.thinking ? ' on' : ''); if (m.mode === 'listen' && m.listening) startStream(); break;
+      case 'hello': wakeWord = m.wake_word || ''; setStatus('connected', 'on'); setMode(m.mode, false); listening = m.listening; speakerBtn.textContent = 'speaker: ' + (m.speaker ? 'on' : 'off'); thinking.className = 'chip' + (m.thinking ? ' on' : ''); if (m.mode === 'listen' && m.listening) startStream(); break;
       case 'mode': setMode(m.mode, false); listening = m.listening; if (listening) startStream(); else stopStream(); break;
+      case 'awake': awake = m.on; if (listening) setStatus(awake ? 'listening' : idleListenLabel(), 'on'); if (awake) cue(); break;
       case 'listening': listening = m.on; if (!m.on) { stopStream(); say('note', m.why ? 'mic off (' + m.why + ')' : 'mic off'); muteBtn.textContent = 'unmute'; muted = true; } else { muteBtn.textContent = 'mute'; muted = false; startStream(); } break;
-      case 'stt': if (m.final) { interim.textContent = ''; if (m.text) say('said', m.text); } else interim.textContent = m.text; break;
+      case 'stt': if (m.final && m.dropped) { interim.textContent = ''; break; } // not kept: no text came
+      if (m.final) { interim.textContent = ''; if (m.text) say('said', m.text); } else interim.textContent = m.text; break;
       case 'utterance': break;
       case 'thinking': thinking.className = 'chip' + (m.on ? ' on' : ''); break;
       case 'reply': if (m.text === null) say('note', '(' + m.note + ')'); else say('reply', m.text); break;
@@ -201,7 +222,7 @@ async function ensureGraph() {
 let pendingEnd = null;
 function onFrame(buffer) {
   if (!(buffer instanceof ArrayBuffer) || buffer.byteLength === 0 || buffer.byteLength % 2) return;
-  if (!streaming) return;
+  if (!streaming || performance.now() < cueUntil) return;
   if (ws && ws.readyState === 1) ws.send(buffer);
 }
 
@@ -212,6 +233,7 @@ async function pressStart() {
   if (!(await ensureGraph())) { holding = false; return; }
   if (!holding) return;
   send({ t: 'audio', seq: ++seq });
+  burstGeneration += 1; if (drainTimer) { clearTimeout(drainTimer); drainTimer = null; }
   streaming = true; source.connect(node); talk.className = 'big live';
   interim.textContent = '…';
 }
@@ -222,9 +244,11 @@ function pressEnd() {
 }
 function finishStream(then) {
   if (!streaming) { then?.(); return; }
-  const done = () => { if (!streaming) return; streaming = false; try { source?.disconnect(); } catch {} then?.(); };
+  const gen = burstGeneration;
+  const done = () => { if (gen !== burstGeneration || !streaming) return; streaming = false; try { source?.disconnect(); } catch {} then?.(); };
   pendingEnd = done;
-  setTimeout(done, DRAIN_TIMEOUT_MS);
+  if (drainTimer) clearTimeout(drainTimer);
+  drainTimer = setTimeout(done, DRAIN_TIMEOUT_MS);
   // Ask the processor for its partial frame; a fresh node replaces the stopping one.
   node?.port.postMessage('stop'); const old = node; node = null; setTimeout(() => old?.disconnect?.(), DRAIN_TIMEOUT_MS + 50);
 }
@@ -233,7 +257,8 @@ function finishStream(then) {
 async function startStream() {
   if (mode !== 'listen' || muted || streaming) return;
   if (!(await ensureGraph())) return;
-  streaming = true; source.connect(node); setStatus('listening', 'on');
+  burstGeneration += 1; if (drainTimer) { clearTimeout(drainTimer); drainTimer = null; }
+  streaming = true; source.connect(node); setStatus(awake ? 'listening' : idleListenLabel(), 'on');
 }
 function stopStream() { finishStream(); setStatus('connected', 'on'); }
 

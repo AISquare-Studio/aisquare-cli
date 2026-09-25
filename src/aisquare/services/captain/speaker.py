@@ -46,7 +46,7 @@ log = logging.getLogger(__name__)
 Runner = Callable[[Sequence[str], str | None], None]
 """Runs one command, ``(argv, stdin_text)``, raising on failure: the seam every adapter uses."""
 
-SPEAK_TIMEOUT_S = 60.0
+SPEAK_TIMEOUT_S = 300.0  # a long reply is read out whole; 60 cut it mid-sentence
 """A line that is still playing after this long is a stuck synthesiser, not speech."""
 STATE_KEY = "captain_speaker"
 SPEECH_TTL_S = 30.0
@@ -57,11 +57,18 @@ ADAPTERS = ("powershell", "say", "spd-say", "null")
 """The names ``[captain] speaker`` may take, and each adapter's ``name``."""
 
 POWERSHELL_SCRIPT = (
+    "[Console]::InputEncoding = [System.Text.Encoding]::UTF8; "
     "Add-Type -AssemblyName System.Speech; "
     "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer; "
     "$s.Speak([Console]::In.ReadToEnd())"
 )
-"""Reads the text from stdin so the owner's words never sit in a PowerShell command line."""
+"""Reads the text from stdin so the owner's words never sit in a PowerShell command line.
+
+The input encoding is set to UTF-8 FIRST: Windows PowerShell 5.1 reads stdin in the
+console code page, and the UTF-8 bytes of an em dash arrived as ``ÔÇö`` and were
+spoken as such (coderp's S7; runner2 measured it through the real powershell.exe,
+board 13253). The runner sends UTF-8 on every platform.
+"""
 
 
 class SpeakerError(RuntimeError):
@@ -84,6 +91,7 @@ def run_subprocess(argv: Sequence[str], stdin: str | None) -> None:
             list(argv),
             input=stdin,
             text=True,
+            encoding="utf-8",
             capture_output=True,
             timeout=SPEAK_TIMEOUT_S,
             check=False,
@@ -93,6 +101,8 @@ def run_subprocess(argv: Sequence[str], stdin: str | None) -> None:
         )
     except FileNotFoundError as exc:
         raise SpeakerError(f"{argv[0]} is not on PATH") from exc
+    except OSError as exc:  # a denied binary, a bad interpreter: said, never raised out of utter
+        raise SpeakerError(f"{argv[0]} could not be run: {exc}") from exc
     except subprocess.TimeoutExpired as exc:
         raise SpeakerError(f"{argv[0]} did not finish speaking in {SPEAK_TIMEOUT_S:g}s") from exc
     if completed.returncode != 0:
@@ -155,31 +165,34 @@ def is_wsl(proc_version: Path = Path("/proc/version")) -> bool:
         return False
 
 
-def configured_speaker(config_path: Path | None = None) -> str | None:
-    """``[captain] speaker = "..."`` from config.toml, or ``None``; a bad file is said, not fatal.
+def captain_table(config_path: Path | None = None) -> dict[str, object]:
+    """The ``[captain]`` table of config.toml, or ``{}``; a bad file is said, not fatal.
 
-    Read raw, like ``actions.action_list``: a broken config.toml costs the adapter choice,
-    never the page.
+    Read raw, like ``actions.action_list``: a broken config.toml costs the captain's
+    settings (the speaker's name, the wake word), never the page.
     """
     path = config_path if config_path is not None else paths.config_path()
     try:
         raw = path.read_bytes()
     except FileNotFoundError:
-        return None
+        return {}
     except OSError as exc:
         log.warning(
-            "captain speaker: %s could not be read, using the platform's adapter: %s", path, exc
+            "captain: %s could not be read, its [captain] settings stand down: %s", path, exc
         )
-        return None
+        return {}
     try:
         loaded = tomllib.loads(raw.decode("utf-8-sig"))
     except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
-        log.warning(
-            "captain speaker: %s does not parse, using the platform's adapter: %s", path, exc
-        )
-        return None
+        log.warning("captain: %s does not parse, its [captain] settings stand down: %s", path, exc)
+        return {}
     captain = loaded.get("captain")
-    value = captain.get("speaker") if isinstance(captain, dict) else None
+    return dict(captain) if isinstance(captain, dict) else {}
+
+
+def configured_speaker(config_path: Path | None = None) -> str | None:
+    """``[captain] speaker = "..."`` from config.toml, or ``None`` for the platform's adapter."""
+    value = captain_table(config_path).get("speaker")
     return value if isinstance(value, str) and value else None
 
 
@@ -364,5 +377,19 @@ def start_drainer(
 
 
 def machine_voice() -> Voice:
-    """The Voice this machine speaks with: the configured adapter, else the platform's."""
+    """The Voice this machine speaks with: the configured adapter, else the platform's.
+
+    An unknown ``[captain] speaker`` name is a ``ValueError`` naming the four: the
+    CLI refuses on it in one line. The server uses :func:`server_voice`.
+    """
     return Voice(pick_speaker(configured=configured_speaker()))
+
+
+def server_voice() -> Voice:
+    """:func:`machine_voice` for the captain's server, which must serve whatever the speaker
+    config says (coderp's S4): a bad name is logged and the platform adapter plays."""
+    try:
+        return machine_voice()
+    except ValueError as exc:
+        log.warning("captain speaker: %s — speaking through the platform adapter instead", exc)
+        return Voice(pick_speaker())

@@ -4,10 +4,13 @@ and the ONE drainer of the spool (13143 (5)): a thread in the captain's server p
 from __future__ import annotations
 
 import logging
+import subprocess
+import sys
 import threading
 import time
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -227,6 +230,26 @@ def test_the_server_process_starts_exactly_one_drainer_before_serving(
     assert isinstance(voice, spk.Voice)
 
 
+def test_a_bad_speaker_in_config_is_said_and_the_server_still_starts_its_drainer(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """coderp's S4: pick_speaker raises on an unknown name, and run_stdio built the Voice before
+    serving — one config typo and the captain had no tools at all. The server must serve
+    whatever the speaker config says; the refusal is logged and the platform adapter plays."""
+    from aisquare.services import mcp_server
+    from aisquare.services.captain import actions
+
+    monkeypatch.setattr(spk, "configured_speaker", lambda: "bogus")
+    started: list[spk.Voice] = []
+    served: list[bool] = []
+    monkeypatch.setattr(spk, "start_drainer", lambda voice, **_: started.append(voice))
+    monkeypatch.setattr(mcp_server, "run_stdio", lambda **_: served.append(True))
+    with caplog.at_level(logging.WARNING, logger="aisquare.services.captain.speaker"):
+        actions.run_stdio(close_after=0)
+    assert served == [True] and len(started) == 1, "the server served, with a drainer"
+    assert any("bogus" in r.getMessage() for r in caplog.records), "the typo is said"
+
+
 def test_machine_voice_is_the_configured_adapter_else_the_platforms(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -234,6 +257,47 @@ def test_machine_voice_is_the_configured_adapter_else_the_platforms(
     assert isinstance(spk.machine_voice().speaker, spk.NullSpeaker)
     monkeypatch.setattr(spk, "configured_speaker", lambda: None)
     assert hasattr(spk.machine_voice().speaker, "utter")
+
+
+def test_powershell_reads_its_text_as_utf8_and_the_runner_sends_utf8() -> None:
+    """coderp's S7, measured by runner2 through the real powershell.exe (board 13253): the
+    script read stdin in the console code page, so an em dash arrived as 'ÔÇö' and was spoken
+    as such. The script sets the console's input encoding to UTF-8 before it reads, and the
+    runner encodes what it sends as UTF-8 on every platform."""
+    script = spk.POWERSHELL_SCRIPT
+    assert "[Console]::InputEncoding = [System.Text.Encoding]::UTF8" in script
+    assert script.index("InputEncoding") < script.index("ReadToEnd()"), "set before the read"
+    calls: list[dict[str, Any]] = []
+
+    def fake_run(argv: Sequence[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        calls.append(dict(kwargs))
+        return subprocess.CompletedProcess(list(argv), 0, "", "")
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(subprocess, "run", fake_run)
+        spk.run_subprocess(["say"], "Nothing needs you — em dash")
+    assert calls[0]["encoding"] == "utf-8" and calls[0]["input"] == "Nothing needs you — em dash"
+
+
+def test_the_real_runner_delivers_non_ascii_text_intact(tmp_path: Path) -> None:
+    """A child that decodes its stdin as UTF-8 must read the em dash the runner sent."""
+    heard = tmp_path / "heard.txt"
+    echo = (
+        "import pathlib, sys; "
+        f"pathlib.Path({str(heard)!r}).write_text(sys.stdin.read(), encoding='utf-8')"
+    )
+    spk.run_subprocess([sys.executable, "-X", "utf8", "-c", echo], "Nothing needs you — em dash")
+    assert heard.read_text(encoding="utf-8") == "Nothing needs you — em dash"
+
+
+def test_the_real_runner_says_a_synthesiser_it_cannot_run(tmp_path: Path) -> None:
+    """A PermissionError or a bad interpreter is a SpeakerError like a missing command, so
+    Voice.utter keeps its never-raises promise (coderp's minor)."""
+    not_runnable = tmp_path / "synth"
+    not_runnable.write_text("#!/bin/sh\necho\n", encoding="utf-8")
+    not_runnable.chmod(0o644)  # present, not executable: a PermissionError, not a missing command
+    with pytest.raises(spk.SpeakerError, match="could not be run"):
+        spk.run_subprocess([str(not_runnable)], "x")
 
 
 def test_the_real_runner_names_a_missing_command(tmp_path: Path) -> None:

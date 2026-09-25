@@ -892,11 +892,10 @@ class ExplainabilityView(VerticalScroll):
 
     def _saved(self, event: Worker.StateChanged) -> None:
         """What :func:`save_setup` returned, said; the key field cleared once a write began."""
-        key_field = self.query_one("#explainability-key", Input)
         if event.state is WorkerState.SUCCESS and isinstance(event.worker.result, SetupOutcome):
             outcome = event.worker.result
             if outcome.began:
-                key_field.value = ""
+                self._clear_key()
             for notice in outcome.notices:
                 self.notify(
                     notice.message, severity=notice.severity, timeout=notice.timeout, markup=False
@@ -905,13 +904,24 @@ class ExplainabilityView(VerticalScroll):
                 self.refresh_status()
         elif event.state is WorkerState.ERROR:
             # How far it got is unknown, so the key does not stay in the widget.
-            key_field.value = ""
+            self._clear_key()
             self.notify(
                 f"save failed: {event.worker.error}", severity="error", timeout=10, markup=False
             )
             self.refresh_status()
         if event.state in (WorkerState.SUCCESS, WorkerState.ERROR, WorkerState.CANCELLED):
             self._set_config_writers(disabled=False)
+
+    def _clear_key(self) -> None:
+        """Empty the key field once a write began, and untick the box that makes it the project's.
+
+        The box attaches the key typed beside it, and ticked with no key the form
+        refuses the press (G4). Left ticked, the next press was refused, and it was
+        the one the notices ask for: "tick 'make active' and save again" (review of
+        #170's follow-ups, round 1, F2).
+        """
+        self.query_one("#explainability-key", Input).value = ""
+        self.query_one("#explainability-key-project", Checkbox).value = False
 
     def _set_config_writers(self, *, disabled: bool) -> None:
         """Save, Enable and Disable, the buttons that write config.toml: off while a save runs."""

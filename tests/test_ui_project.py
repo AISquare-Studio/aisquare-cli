@@ -1486,6 +1486,31 @@ def test_a_key_the_projects_launches_do_not_resolve_is_not_called_the_one_they_u
     assert "tick 'make active'" in attached and severity == "warning"
 
 
+def test_the_save_again_the_attach_asks_for_is_not_refused(
+    project: ProjectInfo, quiet_explainability: dict[str, int]
+) -> None:
+    """The notice says "tick 'make active' and save again". The save had cleared the key
+    and left 'this project only' ticked, so that press met the refusal of a ticked box
+    with no key (review of #170's follow-ups, round 1, F2). The box is unticked with the
+    key it attached."""
+
+    async def scenario(pilot: Pilot[None], host: Host) -> tuple[bool, list[tuple[str, str]]]:
+        host.query_one(ProjectView).active = "tab-explainability"
+        await settle(pilot)
+        _attach_in_setup(host, "pk-prod-0123456789", target="prod", gateway="https://p.example")
+        await settle(pilot)
+        box = host.query_one("#explainability-key-project", Checkbox).value
+        host.query_one("#explainability-switch", Checkbox).value = True
+        host.query_one("#explainability-save", Button).press()
+        await settle(pilot)
+        return box, list(host.notices)
+
+    box, notices = drive(project, scenario)
+    assert box is False, "unticked with the key it attached"
+    assert not any("attaches the workspace key typed beside it" in m for m, _ in notices), notices
+    assert load_config().explainability.target == "prod", "the machine moved, as the notice said"
+
+
 def test_this_project_only_with_no_key_is_refused_not_ignored(
     project: ProjectInfo, quiet_explainability: dict[str, int]
 ) -> None:

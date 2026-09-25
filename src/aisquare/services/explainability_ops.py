@@ -45,6 +45,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from http.client import HTTPException, IncompleteRead
 from importlib.metadata import PackageNotFoundError, version
+from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -438,8 +439,18 @@ def _project_api_key(project_id: str | None, target_name: str) -> str | None:
     binding = project_key_binding(project_id)
     if binding is None or binding.target != target_name:
         return None
+    return read_project_key(binding.key_path)
+
+
+def read_project_key(path: Path) -> str | None:
+    """The key in a project's key file; ``None`` when it is missing, unreadable, not UTF-8 or blank.
+
+    The one reading of the file, for the resolver (:func:`_project_api_key`)
+    and for ``key show``, which called a file the resolver reads as no key a
+    healthy binding (review of #170's follow-ups, round 1, F8).
+    """
     try:
-        value = binding.key_path.read_text(encoding="utf-8").strip()
+        value = path.read_text(encoding="utf-8").strip()
     except (OSError, UnicodeDecodeError):
         return None
     return value or None

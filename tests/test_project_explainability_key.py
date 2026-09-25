@@ -495,6 +495,28 @@ def test_a_key_file_that_is_not_utf8_is_no_key_and_is_replaced_by_the_next_attac
     assert (repaired.api_key, repaired.key_source) == (PROJECT_KEY, "project")
 
 
+def test_key_show_says_a_file_that_is_not_utf8_holds_no_key(
+    home: Path, tmp_path: Path, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The resolver reads such a file as no key, like a missing one, and ``key show`` called
+    it a healthy binding: nothing on the human line, and ``file_present: true`` beside
+    ``key_source: unset`` (review of #170's follow-ups, round 1, F8)."""
+    _settings()
+    project = _project(tmp_path / "api")
+    path = _attach(project)
+    monkeypatch.chdir(project.root)
+    healthy = json.loads(runner.invoke(app, ["--json", "explainability", "key", "show"]).stdout)
+    assert (healthy["file_present"], healthy["file_holds_key"]) == (True, True)
+
+    path.write_bytes(b"\xff\xfe not a key")
+    shown = runner.invoke(app, ["explainability", "key", "show"])
+    assert shown.exit_code == 0, shown.output
+    assert f"at {path} (file holds no key: blank or not UTF-8" in shown.output
+    payload = json.loads(runner.invoke(app, ["--json", "explainability", "key", "show"]).stdout)
+    assert (payload["file_present"], payload["file_holds_key"]) == (True, False)
+    assert payload["key_source"] != "project"
+
+
 def test_key_set_refuses_a_target_this_machine_does_not_have(
     home: Path, tmp_path: Path, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
 ) -> None:

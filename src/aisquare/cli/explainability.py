@@ -106,6 +106,9 @@ def _key_project_id(ref: str | None) -> str | None:
 def _key_payload(project: ProjectInfo, target: str | None) -> dict[str, object]:
     binding = ops.project_key_binding(project.id)
     present = binding is not None and binding.key_path.is_file()
+    # A file there that is not UTF-8, or is blank, is no key: the resolver
+    # reads it as a missing file (review of #170's follow-ups, round 1, F8).
+    holds_key = binding is not None and ops.read_project_key(binding.key_path) is not None
     return {
         "project": project.id,
         "name": project.root.name or project.id,
@@ -113,6 +116,7 @@ def _key_payload(project: ProjectInfo, target: str | None) -> dict[str, object]:
         "target": binding.target if binding is not None else None,
         "key_path": str(binding.key_path) if binding is not None else None,
         "file_present": present,
+        "file_holds_key": holds_key,
         "set_at": binding.set_at.isoformat() if binding is not None else None,
         "set_by": binding.set_by if binding is not None else None,
         "resolves_for": target,
@@ -253,7 +257,13 @@ def key_show(
             f"{name}: no key of its own — target {resolved.name} resolves {resolved.key_origin}"
         )
         return
-    where = str(binding.key_path) + ("" if binding.key_path.is_file() else " (file MISSING)")
+    # The resolver reads a file that is not UTF-8, or is blank, as no key, and
+    # this line called it a healthy binding (review of #170's follow-ups, round 1, F8).
+    where = str(binding.key_path)
+    if not binding.key_path.is_file():
+        where += " (file MISSING)"
+    elif ops.read_project_key(binding.key_path) is None:
+        where += " (file holds no key: blank or not UTF-8 — attach it again)"
     match = "" if binding.target == resolved.name else f" — not used for target {resolved.name}"
     typer.echo(
         f"{name}: project key for target {binding.target} at {where}, set "

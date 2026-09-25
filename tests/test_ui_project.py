@@ -1492,10 +1492,13 @@ def test_under_a_hub_the_box_and_the_tab_say_whose_key_it_is(
         label = str(host.query_one("#explainability-key-project", Checkbox).label)
         _attach_in_setup(host, "pk-hub-0123456789")
         await settle(pilot)
+        _attach_in_setup(host, "", gateway="https://g.example")  # the box, and no key
+        await settle(pilot)
         return label, list(host.notices), host.query_one(ExplainabilityView).status_text
 
     label, notices, status = drive(project, scenario)
     assert label == "the hub (hub) only", label
+    assert any(m.startswith("'the hub (hub) only' attaches") for m, _ in notices), notices
     [attached] = [m for m, _ in notices if m.startswith("✓ key attached to")]
     assert attached.startswith("✓ key attached to hub (the AISQUARE_TEAM_HUB project"), attached
     assert "its own key for target stg is not used — its launches join hub" in status, status

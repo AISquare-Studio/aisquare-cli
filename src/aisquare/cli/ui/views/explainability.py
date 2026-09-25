@@ -117,6 +117,17 @@ def key_project(page: ProjectInfo | None) -> ProjectInfo | None:
     return orchestrator.team_project(page.root) if page is not None else None
 
 
+def own_key_label() -> str:
+    """The words on the box that makes the key the project's own (#141), and in every hint to it.
+
+    Under ``AISQUARE_TEAM_HUB`` the key goes to the HUB project, which every
+    project under the hub launches with, and "this project only" said the
+    opposite (review of #170's Setup-form merge, G5).
+    """
+    hub = orchestrator.team_hub()
+    return "this project only" if hub is None else f"the hub ({hub.name}) only"
+
+
 def status_report(page: ProjectInfo | None = None) -> StatusReport:
     """Gather what ``status`` shows: the proxy lane, the client lane, the spool.
 
@@ -241,7 +252,7 @@ def _key_origin_row(project: ProjectInfo, target: ops.ResolvedTarget) -> str:
     if binding is None:
         return (
             f"{name}: no key of its own — the machine's applies (attach one below: the "
-            "workspace key, 'this project only' ticked)"
+            f"workspace key, '{own_key_label()}' ticked)"
         )
     if binding.target != target.name:
         state = f"not used for target {target.name}"
@@ -490,7 +501,7 @@ def save_setup(form: SetupForm, page: ProjectInfo | None) -> SetupOutcome:
         # a page that box is the fix that works, and it is named (review of
         # #170's Setup-form merge, G8).
         own_key = (
-            ", or tick 'this project only' to make it this project's own key"
+            f", or tick '{own_key_label()}' to make it the project's own key"
             if page is not None
             else ""
         )
@@ -690,11 +701,8 @@ class ExplainabilityView(VerticalScroll):
             yield Label("workspace key")
             yield Input(placeholder="AIS_…", password=True, id="explainability-key")
             # A key per project (#141), in the one key field: no page, no project to own it.
-            # Under a hub the key is the HUB project's, shared by every project under
-            # it, and the box says so (review of #170's Setup-form merge, G5).
-            hub = orchestrator.team_hub()
             yield Checkbox(
-                "this project only" if hub is None else f"the hub ({hub.name}) only",
+                own_key_label(),
                 id="explainability-key-project",
                 disabled=self.project is None,
             )
@@ -821,7 +829,7 @@ class ExplainabilityView(VerticalScroll):
         # (review of #170's Setup-form merge, G4). Refused, the fields kept.
         if own and not key:
             self.notify(
-                "'this project only' attaches the workspace key typed beside it, and that "
+                f"'{own_key_label()}' attaches the workspace key typed beside it, and that "
                 "field is blank — type the key, or untick the box to save the other settings",
                 severity="warning",
                 timeout=8,

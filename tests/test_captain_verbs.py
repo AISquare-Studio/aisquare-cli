@@ -392,12 +392,12 @@ def test_actions_lists_the_owner_action_list(runner: CliRunner) -> None:
     assert code == 0 and set(data) == {"actions"}
     assert set(data["actions"]) >= {"approve_prompt", "unblock", "open_spawn"}
     assert data["actions"]["unblock"] == {
-        "steps": ["press y", "read_pane 20"],
+        "steps": ["press yes", "read_pane 20"],  # T1b: yes is read off the pane (13265)
         "description": "bundled",
         "problem": None,
     }
     code, out = run(runner, "actions")
-    assert code == 0 and "approve_prompt" in out and "press y" in out
+    assert code == 0 and "approve_prompt" in out and "press yes" in out
 
 
 # --- the frame around every verb -------------------------------------------------------------

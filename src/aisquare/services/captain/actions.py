@@ -37,7 +37,7 @@ import socket
 import sqlite3
 import time
 import tomllib
-from collections.abc import Callable, Collection, Mapping
+from collections.abc import Callable, Collection, Mapping, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, TypeVar
@@ -85,8 +85,23 @@ KEYS: dict[str, str] = {
     "tab": "Tab",
     "space": "Space",
     "ctrl-c": "C-c",
+    **{str(digit): str(digit) for digit in range(1, 10)},
 }
-"""The keys ``press`` may send, by the name the captain uses → tmux's own key name."""
+"""The keys ``press`` may send, by the name the captain uses → tmux's own key name. The
+digits are what Claude Code's numbered chooser takes (T1b: runner2-1 measured on a real
+claude that ``y`` does nothing there and ``1`` answers Yes, board 13265)."""
+
+ANSWERS = ("yes", "no")
+"""The semantic keys: resolved from the pane at the moment of the press (:func:`prompt_showing`)."""
+
+ANSWERING_KEYS = frozenset({"yes", "no", "y", "n", "enter", "esc", *(str(d) for d in range(1, 10))})
+"""Keys that answer a prompt: pressed while one shows, the pane is read back, and a prompt
+still showing is a said failure — the captain never reports a press the prompt ignored.
+The arrows, tab, space and ctrl-c move or interrupt; they only report what shows after."""
+
+READBACK_POLLS = 10
+READBACK_POLL_S = 0.2
+"""How long a press waits for its prompt to go: ten reads, two seconds in all."""
 
 READY_STATES = frozenset({"waiting", "attention"})
 """Where ``press`` and ``paste`` may type: an agent at its prompt, or one asking the
@@ -101,8 +116,8 @@ PRIMITIVES = ("press", "paste", "tell", "read_pane", "ui", "task")
 own example needs it: ``unblock = press y then read_pane``."""
 
 BUNDLED_ACTIONS: dict[str, tuple[str, ...]] = {
-    "approve_prompt": ("press y",),
-    "unblock": ("press y", "read_pane 20"),
+    "approve_prompt": ("press yes",),
+    "unblock": ("press yes", "read_pane 20"),
     "open_spawn": ("ui open_spawn",),
 }
 """The owner action list's defaults; ``[captain.actions.<name>]`` in config.toml wins."""
@@ -668,14 +683,153 @@ def _ready(target: ProjectInfo, label: str) -> tuple[FleetAgent, FleetAgentStatu
     return agent, status, srv
 
 
+# --- the prompt on a pane (T1b) --------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Prompt:
+    """A prompt showing at the bottom of an agent's pane, and the keys that answer it."""
+
+    shape: str
+    """``chooser`` (Claude Code's numbered menu), ``yn`` (a ``[y/N]`` line), ``trust``."""
+    question: str
+    yes_key: str | None
+    """tmux's key for yes — the digit of the first option that says Yes, or ``y``."""
+    no_key: str | None
+
+
+PROMPT_MARK = "\u276f"
+"""Claude Code's prompt mark, U+276F: its input line and a chooser's highlighted option."""
+
+_RULE = re.compile(r"^\s*[─━]{10,}\s*$")
+_OPTION = re.compile(r"^\s*(" + PROMPT_MARK + r"\s*)?(\d)[.)]\s+(\S.*)$")
+_MODAL_FOOTER = re.compile(r"Esc to cancel|Enter to confirm")
+_YES_NO = re.compile(r"[\[(]\s*[yY](?:es)?\s*/\s*[nN](?:o)?\s*[\])]\s*[:?]?\s*$")
+_TRUST = re.compile(r"Quick safety check|Yes, I trust this folder")
+_PROMPT_TAIL = 14
+"""How many non-blank lines at the bottom a prompt is looked for in."""
+
+
+def prompt_showing(lines: Sequence[str]) -> Prompt | None:
+    """The prompt at the bottom of a pane, read by its STRUCTURE (board 13264), or ``None``.
+
+    Claude Code at its prompt ends with the input box: the prompt-mark line between two
+    rules, footer lines under it. A dialog REPLACES that box. So a box at the bottom
+    means no prompt, whatever the conversation above it quotes — a reply that quotes a
+    whole chooser is not one. Without the box, the lines that replaced it are read:
+
+    - a numbered chooser — options ``1.``, ``2.``… with one highlighted (the mark), and a
+      footer naming Esc or Enter on the last two lines. Yes is the digit of the first
+      option that SAYS yes (``1`` on the real permission chooser, never a blind ``1``);
+      no is Esc, the chooser's own cancel.
+    - the trust dialog (``Quick safety check``) — its own shape, with no keys: trusting
+      a folder is the owner's to answer.
+    - a ``[y/N]``-style last line — a hook-less binary's question: ``y`` and ``n``.
+    """
+    rows = [_ESCAPES.sub("", line).rstrip() for line in lines]
+    rows = [row for row in rows if row.strip()][-_PROMPT_TAIL:]
+    if not rows or _input_box_at_bottom(rows):
+        return None
+    footer = any(_MODAL_FOOTER.search(row) for row in rows[-2:])
+    if footer and any(_TRUST.search(row) for row in rows):
+        question = next((row.strip() for row in rows if "Quick safety check" in row), "")
+        return Prompt("trust", question or "the trust dialog", None, None)
+    options = [(i, _OPTION.match(row)) for i, row in enumerate(rows)]
+    numbered = [(i, m) for i, m in options if m is not None]
+    if footer and len(numbered) >= 2:
+        digits = [m.group(2) for _, m in numbered]
+        highlighted = [m for _, m in numbered if m.group(1)]
+        if digits == [str(n) for n in range(1, len(digits) + 1)] and len(highlighted) == 1:
+            first = numbered[0][0]
+            question = next(
+                (row.strip() for row in reversed(rows[:first]) if row.strip()), "a numbered choice"
+            )
+            yes = next(
+                (m.group(2) for _, m in numbered if m.group(3).lower().startswith("yes")), None
+            )
+            return Prompt("chooser", question, yes, "Escape")
+    if _YES_NO.search(rows[-1]):
+        return Prompt("yn", rows[-1].strip(), "y", "n")
+    return None
+
+
+def _input_box_at_bottom(rows: Sequence[str]) -> bool:
+    """Whether the pane ends with Claude Code's input box: rule, prompt-mark line(s), rule,
+    footer.
+
+    Leans towards "a box": a box read as a prompt would have ``yes`` type a digit into
+    the agent's input, while a prompt read as a box only refuses the press.
+    """
+    below = len(rows) - 1
+    while below >= 0 and not _RULE.match(rows[below]) and len(rows) - 1 - below < 3:
+        below -= 1
+    if below < 0 or not _RULE.match(rows[below]):
+        return False
+    above = below - 1
+    while above >= 0 and not _RULE.match(rows[above]) and below - above <= 8:
+        above -= 1
+    if above < 0 or not _RULE.match(rows[above]):
+        return False
+    body = rows[above + 1 : below]
+    return bool(body) and body[0].lstrip().startswith(PROMPT_MARK)
+
+
+def _screen(srv: TmuxServer, pane_id: str) -> list[str]:
+    return list(srv.capture(pane_id).lines)
+
+
 def _press(target: ProjectInfo, label: str, key: str) -> Outcome:
-    sent = KEYS.get(key)
-    if sent is None:
-        raise Refused(f"key {key!r} is not one of {', '.join(KEYS)}")
+    if key not in KEYS and key not in ANSWERS:
+        raise Refused(f"key {key!r} is not one of {', '.join((*ANSWERS, *KEYS))}")
     agent, status, srv = _ready(target, label)
+    try:
+        before = prompt_showing(_screen(srv, agent.pane_id))
+    except TmuxError as exc:
+        if key in ANSWERS:
+            raise Refused(
+                f"{label}'s pane could not be read to see what {key} means ({exc}) — nothing "
+                "pressed"
+            ) from exc
+        before = None
+    if key in ANSWERS:
+        if before is None:
+            raise Refused(f"no prompt is showing on {label} — nothing pressed")
+        if before.shape == "trust":
+            raise Refused(
+                f"the trust dialog is showing on {label}: trusting a folder is the owner's to "
+                "answer (aisquare fleet attach) — nothing pressed"
+            )
+        sent = before.yes_key if key == "yes" else before.no_key
+        if sent is None:
+            raise Refused(f"the prompt on {label} offers no {key}: {before.question}")
+    else:
+        sent = KEYS[key]
     srv.send_keys(agent.pane_id, sent)
-    return Outcome(
-        {"label": label, "key": key, "state": status.state}, said=f"pressed {key} in {label}"
+    data: dict[str, Any] = {
+        "label": label,
+        "key": key,
+        "sent": sent,
+        "state": status.state,
+        "prompt": before.question if before is not None else None,
+        "answered": False,
+    }
+    shown = key if key == sent or key in KEYS else f"{key} ({sent})"
+    if before is None:
+        return Outcome(data, said=f"pressed {shown} in {label}")
+    if key not in ANSWERING_KEYS:
+        return Outcome(data, said=f"pressed {shown} in {label}: {before.question} still shows")
+    for _ in range(READBACK_POLLS):
+        _sleep(READBACK_POLL_S)
+        try:
+            after = prompt_showing(_screen(srv, agent.pane_id))
+        except TmuxError:
+            continue
+        if after is None or after.question != before.question:
+            data["answered"] = True
+            return Outcome(data, said=f"pressed {shown} in {label}: the prompt is gone")
+    raise Failed(
+        f"pressed {shown} in {label} but the prompt is still showing: {before.question} — "
+        "the key did not answer it"
     )
 
 
@@ -814,8 +968,8 @@ def _plan_step(
     text = f"{primitive} {filled}".strip()
     label = args.get("label", "")
     if primitive == "press":
-        if filled not in KEYS:
-            raise Refused(f"{where}: key {filled!r} is not one of {', '.join(KEYS)}")
+        if filled not in KEYS and filled not in ANSWERS:
+            raise Refused(f"{where}: key {filled!r} is not one of {', '.join((*ANSWERS, *KEYS))}")
         return _Step(text, lambda: _press(_on(target), label, filled))
     if primitive in ("paste", "tell"):
         if not filled:
@@ -1314,9 +1468,14 @@ def note(project: str, text: str, kind: str = "note", utterance: str = "") -> st
 
 
 def press(project: str, label: str, key: str, utterance: str = "") -> str:
-    """Press one key in an agent's pane: y n enter esc up down left right tab space ctrl-c.
+    """Press one key in an agent's pane: yes or no to the prompt showing, or a literal key.
 
-    Only into an agent that is waiting or asking (a permission prompt) — never a busy one.
+    ``yes``/``no`` are read off the pane: on Claude Code's numbered chooser yes is the
+    digit of its Yes option and no is Esc; on a [y/N] line, y and n; refused when no
+    prompt shows, and on the trust dialog (the owner's to answer). Literal keys: 1-9 y n
+    enter esc up down left right tab space ctrl-c. After a key that answers, the pane is
+    read back: a prompt still showing is an error, never a success. Only into an agent
+    that is waiting or asking — never a busy one.
     """
     return _run(
         "press",

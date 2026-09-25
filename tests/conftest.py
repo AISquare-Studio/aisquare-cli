@@ -8,11 +8,14 @@ the narrow one nobody selects it with.
 
 from __future__ import annotations
 
+import contextlib
 import os
+import shlex
 import shutil
+import subprocess
 import sys
 import tempfile
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as metadata_version
 from pathlib import Path
@@ -370,6 +373,155 @@ def isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     # test's HOME would outlive the home it came from.
     ci_client.reset_cache()
     return home
+
+
+def _uid() -> int:
+    """This user's id — the ``tmux-<uid>`` folder. Windows has neither, nor tmux; a test
+    that removes ``os.getuid`` (to stand for Windows) reads as uid 0 here, never a crash."""
+    if sys.platform == "win32":
+        return 0
+    getuid = getattr(os, "getuid", None)
+    return getuid() if callable(getuid) else 0
+
+
+#: Where tmux keeps the OWNER's sockets — read once, at import, before any fixture
+#: clears ``TMUX_TMPDIR`` (``isolated_home`` does, for every test). ``tmux -L asq``
+#: resolves to ``<dir>/tmux-<uid>/asq``: the owner's live fleet, when the dir is
+#: theirs. The default ``/tmp`` is always theirs too.
+_OWNER_TMUX_DIRS: frozenset[Path] = frozenset(
+    Path(base).resolve() / f"tmux-{_uid()}"
+    for base in {os.environ.get("TMUX_TMPDIR") or "/tmp", "/tmp"}
+) if sys.platform != "win32" else frozenset()  # fmt: skip
+
+
+def _tmux_target(argv: Sequence[str], uid: int) -> Path | None:
+    """The socket a tmux argv reaches, resolved the way tmux resolves it; ``None`` for
+    ``tmux -V``, which asks the binary and reaches no server."""
+    args = list(argv)
+    if args[1:] == ["-V"]:
+        return None
+    if "-S" in args:
+        return Path(args[args.index("-S") + 1])
+    name = args[args.index("-L") + 1] if "-L" in args else "default"
+    base = os.environ.get("TMUX_TMPDIR") or "/tmp"
+    return Path(base) / f"tmux-{uid}" / name
+
+
+class RealFleetGuard:
+    """What :func:`no_real_fleet` refused — read by the tests of the guard itself.
+
+    A plain class, not a dataclass: ``tests/test_gate_import_guard.py`` loads this file
+    by path without registering it in ``sys.modules``, where ``@dataclass`` looks."""
+
+    def __init__(self, private: Path, uid: int, tmux: str | None = None) -> None:
+        self.private = private
+        self.uid = uid
+        self.tmux = tmux
+        """The tmux binary, found at setup: a test may patch ``sys.platform`` to ``win32``
+        for its body (test_windows_contention.py), and ``shutil.which`` follows it."""
+        self.reached: list[tuple[str, ...]] = []
+        self.launched = private / "claude-launched.log"
+
+    def launches(self) -> list[str]:
+        return self.launched.read_text().splitlines() if self.launched.exists() else []
+
+    def forgive(self) -> None:
+        """A test that escaped ON PURPOSE, to prove the guard, clears the record."""
+        self.reached.clear()
+        self.launched.unlink(missing_ok=True)
+
+    def verdict(self) -> str | None:
+        """Why the test fails, or ``None``: what reached the owner's server, what launched."""
+        if self.reached:
+            return f"a test addressed the owner's tmux server: {self.reached[:3]}"
+        launched = self.launches()
+        if launched:
+            return f"a test launched claude (the suite's stand-in refused it): {launched[:3]}"
+        return None
+
+
+@pytest.fixture(autouse=True)
+def no_real_fleet(isolated_home: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[RealFleetGuard]:
+    """No test may reach the owner's tmux server or launch the real ``claude`` (board 13220).
+
+    A T3 test once spawned a REAL captain onto the owner's main fleet socket: the
+    fleet's default socket is ``asq``, ``isolated_home`` clears ``TMUX_TMPDIR``, so a
+    spawn that went all the way to tmux resolved ``/tmp/tmux-<uid>/asq`` — the owner's
+    live server — and its window exec'd the real ``claude`` (pid 85381, parked at the
+    trust dialog). ``AISQUARE_HOME`` alone isolated nothing of that. So, for every test:
+
+    - **a private ``TMUX_TMPDIR``** (short, under ``/tmp``: a unix socket's path is
+      capped near 100 bytes). Every ``-L <name>`` a test reaches — the fleet's ``asq``
+      included — resolves to a server of the test's own, and teardown kills whatever
+      server was left there, with every process in it.
+    - **the tmux seam refuses the owner's servers**: an argv that still resolves under
+      the owner's socket folder (a test that deletes ``TMUX_TMPDIR``, an ``-S`` path)
+      is answered as a failure without running, and the test FAILS at teardown with
+      the argv — refused and said, never passed through. Tests that swap the seam for
+      a fake (``no_real_tmux``, the fleet suite's ``FakeTmux``) replace this with
+      something that reaches no server at all.
+    - **a stand-in ``claude`` first on PATH**: a window this test's server opens
+      inherits the PATH, so an agent launched there runs the stand-in, which records
+      its argv and exits 97; the test FAILS at teardown with that argv. A test that
+      wants an agent brings its own stand-in ahead of this one (the captain's live
+      round trip does).
+    """
+    if sys.platform == "win32":  # no tmux, no /bin/sh: nothing to reach or to launch
+        yield RealFleetGuard(Path(tempfile.gettempdir()), 0)
+        return
+    from aisquare.core import tmux as tmux_core
+    from aisquare.core.tmux import Completed
+
+    private = Path(tempfile.mkdtemp(prefix="asqtx", dir="/tmp"))
+    # Read once, now: a test may remove os.getuid, or patch sys.platform, to stand for
+    # Windows (test_tmux.py, test_windows_contention.py) — and teardown runs under it.
+    guard = RealFleetGuard(private, _uid(), shutil.which("tmux"))
+    monkeypatch.setenv("TMUX_TMPDIR", str(private))
+    standin = private / "bin"
+    standin.mkdir()
+    claude = standin / "claude"
+    claude.write_text(
+        "#!/bin/sh\n"
+        f"printf '%s\\n' \"$*\" >> {shlex.quote(str(guard.launched))}\n"
+        "echo 'a test launched claude: refused (tests/conftest.py no_real_fleet)' >&2\n"
+        "exit 97\n",
+        encoding="utf-8",
+    )
+    claude.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{standin}{os.pathsep}{os.environ.get('PATH', '')}")
+    real_runner = tmux_core._tmux
+
+    def guarded(argv: Sequence[str], stdin: bytes | None) -> Completed:
+        target = _tmux_target(argv, guard.uid)
+        if target is not None and target.parent.resolve() in _OWNER_TMUX_DIRS:
+            guard.reached.append(tuple(argv))
+            return Completed(1, "", "refused: a test addressed the owner's tmux server\n")
+        return real_runner(argv, stdin)
+
+    monkeypatch.setattr(tmux_core, "_tmux", guarded)
+    try:
+        yield guard
+        verdict = guard.verdict()
+    finally:
+        _kill_private_servers(private, guard.uid, guard.tmux)
+        shutil.rmtree(private, ignore_errors=True)
+    if verdict is not None:
+        pytest.fail(verdict)
+
+
+def _kill_private_servers(private: Path, uid: int, tmux: str | None) -> None:
+    """End every tmux server a test left under its private ``TMUX_TMPDIR``, with its panes."""
+    folder = private / f"tmux-{uid}"
+    if tmux is None or not folder.is_dir():
+        return
+    for socket in folder.iterdir():
+        with contextlib.suppress(OSError, subprocess.TimeoutExpired):
+            subprocess.run(
+                [tmux, "-S", str(socket), "kill-server"],
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
 
 
 @pytest.fixture(autouse=True)

@@ -1217,22 +1217,23 @@ def test_a_key_kept_for_the_machines_target_stays_kept_once_that_target_is_renam
             iam.Session(api_url="https://stg-api.aisquare.studio", token="aisq_x", source="env"),
         )
     stg_gateway = "https://stg-explainability-api.aisquare.studio"
+    stg_proxy = "https://stg-explainability-api.aisquare.studio:9443"
 
     def resolved() -> ops.ResolvedTarget:
         return ops.resolve_target(load_config().explainability, None, project_id=project.id)
 
-    def read() -> tuple[str, str, str | None]:
+    def read() -> tuple[str, str, str, str | None]:
         target = resolved()
-        return (target.gateway_url, target.key_source, target.api_key)
+        return (target.gateway_url, target.proxy_url, target.key_source, target.api_key)
 
-    assert read() == (stg_gateway, "unset", None)
+    assert read() == (stg_gateway, stg_proxy, "unset", None)
     fix = " ".join(ops.deployment_fix(resolved(), what="proxy", value="https://<host>").split())
     assert 'Rename it first: target = "<name>" under [explainability]' in fix, fix
     renamed = load_config()  # the rename, as the operator would
     renamed.explainability.target = "own"
     save_config(renamed)
 
-    assert read() == (stg_gateway, "unset", None), "the prod key went to staging"
+    assert read() == (stg_gateway, stg_proxy, "unset", None), "the prod key went to staging"
     payload = _json(runner, "explainability", "key", "show", "--project", project.id)
     assert (payload["target"], payload["serves"], payload["key_source"]) == (
         "stg",
@@ -1248,7 +1249,7 @@ def test_a_key_kept_for_the_machines_target_stays_kept_once_that_target_is_renam
     ) in " ".join(shown.output.split())
 
     ops.attach_project_key(project, "AIS_staging_key", target="stg")
-    assert read() == (stg_gateway, "project", "AIS_staging_key")
+    assert read() == (stg_gateway, stg_proxy, "project", "AIS_staging_key")
 
 
 def test_use_on_a_host_it_does_not_know_says_where_its_gateway_goes(

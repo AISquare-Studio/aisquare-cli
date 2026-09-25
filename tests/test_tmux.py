@@ -1245,6 +1245,26 @@ def test_live_paste_delivers_every_line(live: TmuxServer) -> None:
 
 
 @requires_tmux
+def test_live_every_copy_is_a_new_buffer_even_with_the_same_text(live: TmuxServer) -> None:
+    """What the pane's paste-buffer mirror stands on (``TerminalPane._new_copy``):
+    a copy that names no buffer makes a NEW one, listed first, even when it holds
+    the text the newest already does, so a name the press did not list is a copy
+    made since. Compared by text, the same words copied twice read as no copy
+    (#207 follow-up). A buffer that is not there reads as none."""
+    _spawn(live, "asq-test-fox", "w0", CAT)
+    assert live.list_buffers() == []
+
+    live.run("set-buffer", "the same words")
+    first = live.list_buffers()
+    live.run("load-buffer", "-", stdin=b"the same words")
+    second = live.list_buffers()
+    assert len(first) == 1 and len(second) == 2, (first, second)
+    assert second[1:] == first, "the new buffer is listed first"
+    assert live.show_buffer(second[0]) == live.show_buffer(first[0]) == "the same words"
+    assert live.show_buffer("asq-test-no-such-buffer") is None
+
+
+@requires_tmux
 def test_live_two_pastes_at_once_reach_the_pane_they_were_addressed_to(live: TmuxServer) -> None:
     """The race, staged deterministically: B's whole paste runs inside A's.
 

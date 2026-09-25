@@ -144,6 +144,7 @@ from aisquare.core.keys import (
     translate,
 )
 from aisquare.core.tmux import (
+    PASTE_BUFFER,
     WRAP_FLAGS_MINIMUM,
     PaneFacts,
     TmuxError,
@@ -436,7 +437,8 @@ copied its highlight, or dropped one with no text under it."""
 def route_gesture_start(app: App[Any]) -> None:
     """A mouse button went down somewhere on ``app``: every pane on the active
     screen notes the selection it has now, which is what a release must differ
-    from to be that pane's copy (see :meth:`TerminalPane.selection_gesture_started`)."""
+    from to be that pane's copy, and ends a paste-buffer mirror's wait for a
+    late copy (see :meth:`TerminalPane.selection_gesture_started`)."""
     _tell_panes(app, "selection gesture start", TerminalPane.selection_gesture_started)
 
 
@@ -863,6 +865,11 @@ class TerminalPane(Widget, can_focus=True):
     """Seconds after a forwarded left-button release before tmux's paste buffer is
     read: the program's copy-on-select has to run first (Claude Code writes it
     from its release handler; measured well under 100 ms on this machine)."""
+    BUFFER_MIRROR_RETRY: float = 0.5
+    """Seconds from a first read that found no new paste buffer to one more read: a
+    copy that lands later than :attr:`BUFFER_MIRROR_DELAY` — a loaded host, a
+    clipboard helper the program runs first — is still the release's. Cut short by
+    the next press anywhere in the app (:meth:`_settle_mirror`)."""
     SCROLL_KEYS: ClassVar[dict[str, str]] = {
         "shift+pageup": "page_up",
         "shift+pagedown": "page_down",
@@ -933,13 +940,14 @@ class TerminalPane(Widget, can_focus=True):
         """Where a shift+drag began, while this widget runs that selection itself."""
         self._shift_button = 0
         """The button that began that shift+drag: its end copies for the left one only."""
-        self._buffer_before: str | None = None
-        """tmux's paste buffer as it stood at a forwarded left press (#148), until
-        that press's release takes it to the mirror."""
-        self._mirror: tuple[object, TmuxServer | None, str | None] | None = None
-        """The paste-buffer mirror a left release armed and that has not run yet:
-        its token, the server the press went to, and the buffer it compares with
-        (:meth:`_arm_mirror`)."""
+        self._buffer_before: frozenset[str] | None = None
+        """The names of tmux's paste buffers at a forwarded left press (#148),
+        until that press's release takes them to the mirror."""
+        self._mirror: tuple[object, TmuxServer | None, frozenset[str] | None, bool] | None = None
+        """The paste-buffer mirror a left release armed and that has not ended
+        yet: its token, the server the press went to, the buffer names it
+        compares with (:meth:`_arm_mirror`), and whether its first read found no
+        new buffer and it waits on its second."""
         self._last_drag: tuple[int, int, int] | None = None
         """The (code, column, row) of the last drag report sent, so a pointer that
         has not left its cell is not reported again — a terminal reports motion
@@ -2194,8 +2202,10 @@ class TerminalPane(Widget, can_focus=True):
         # A move that stays in the pressed cell is no motion: a terminal reports
         # motion per cell, and Textual moves the pointer before every release.
         self._last_drag = (code, x, y)
-        # The buffer as it stands, so a release can tell a NEW copy from an old one.
-        self._buffer_before = self._read_buffer(self.server) if event.button == 1 else None
+        # The buffers as they stand, so a release can tell a NEW copy from an old one.
+        self._buffer_before = (
+            frozenset(self._read_buffers(self.server)) if event.button == 1 else None
+        )
         self._queue_mouse("press", code, x, y)
         self.capture_mouse()
 
@@ -2412,41 +2422,69 @@ class TerminalPane(Widget, can_focus=True):
             code += 16
         return code
 
-    def _read_buffer(self, server: TmuxServer | None) -> str | None:
-        """``server``'s newest paste buffer, or ``None`` when there is none or tmux cannot say."""
+    def _read_buffers(self, server: TmuxServer | None) -> list[str]:
+        """``server``'s paste buffers by name, newest first; none when tmux cannot say.
+
+        The fleet's own paste buffers are left out (:data:`PASTE_BUFFER`): a
+        ``fleet tell`` in another process holds its prompt in one for the moment
+        between loading and pasting it — text on its way INTO a pane, never a
+        copy out of one. ``show-buffer`` without a name never showed them; a
+        list of every buffer does.
+        """
+        if server is None:
+            return []
+        try:
+            names = server.list_buffers()
+        except TmuxError:
+            return []
+        return [name for name in names if not name.startswith(f"{PASTE_BUFFER}-")]
+
+    def _new_copy(self, server: TmuxServer | None, before: frozenset[str] | None) -> str | None:
+        """The text of the newest paste buffer ``server`` holds that ``before`` did not name.
+
+        By NAME, not by text: every copy is a new buffer
+        (:meth:`~aisquare.core.tmux.TmuxServer.list_buffers`), and the text
+        cannot say so. Compared by text, the same words selected again after
+        the clipboard had moved on read as no copy at all (#207 follow-up).
+        ``None`` when there is no new buffer, or it went before it was read.
+        """
         if server is None:
             return None
+        new = [name for name in self._read_buffers(server) if name not in (before or ())]
+        if not new:
+            return None
         try:
-            return server.show_buffer()
+            return server.show_buffer(new[0])
         except TmuxError:
             return None
 
-    def _arm_mirror(self, before: str | None) -> None:
-        """A forwarded left release: read the paste buffer after the program's copy has run.
+    def _arm_mirror(self, before: frozenset[str] | None) -> None:
+        """A forwarded left release: read the paste buffers after the program's copy has run.
 
-        ``before`` is the buffer as it stood at that release's own press. Each
-        release used to arm a timer that read ONE shared snapshot, which the
-        first to run emptied: the second mirror of a double-click — or the one
-        after a right press inside the delay, which set the snapshot to nothing
-        — compared the buffer with nothing and copied whatever tmux held, an
+        ``before`` names the buffers at that release's own press. Each release
+        used to arm a timer that read ONE shared snapshot, which the first to
+        run emptied: the second mirror of a double-click — or the one after a
+        right press inside the delay, which set the snapshot to nothing —
+        compared the buffer with nothing and copied whatever tmux held, an
         hour-old copy included, with a toast (review of #203, round 1 of the
         terminal-ux fold). Now the snapshot travels with the pending mirror, and
         so does the server the press went to: an attach inside the delay may
         move this widget to another server (``ManagerTab`` sets ``server``, then
-        attaches), whose buffer says nothing about this snapshot.
+        attaches), whose buffers say nothing about this snapshot.
 
         A release while a mirror is still pending folds into it rather than
-        arming a second: one read, after the LAST release, against the buffer
+        arming a second: one read, after the LAST release, against the buffers
         from before the FIRST press. Two reads each saw what the program wrote
         at the second release — the word of a double-click went out twice, with
         two toasts — and the earlier one ran before that write could land. The
-        earlier timer still fires, and finds itself superseded.
+        earlier timer still fires, and finds itself superseded. A mirror waiting
+        on its second read folds in the same way, and its reads start over.
         """
         server = self.server
         if self._mirror is not None:
-            _, server, before = self._mirror
+            _, server, before, _ = self._mirror
         token = object()
-        self._mirror = (token, server, before)
+        self._mirror = (token, server, before, False)
         self.set_timer(
             self.BUFFER_MIRROR_DELAY, partial(self._mirror_buffer, token), name="buffer-mirror"
         )
@@ -2457,23 +2495,60 @@ class TerminalPane(Widget, can_focus=True):
         Claude Code's copy-on-select runs ``wl-copy``/``xclip`` in the PANE's
         environment — the tmux server's, which may have no display — and, inside
         tmux, writes the tmux paste buffer. That buffer is the one place the
-        selection is sure to land, so one that changed between the press and now
-        goes to the outer terminal's clipboard (OSC 52), the way this widget's
-        own copies do. Unchanged, or none: nothing was selected there — a click
-        that placed the cursor — and nothing is said. ``token`` names the arming
-        this timer was set for; when it no longer matches, a later release took
-        the mirror over and reads after its own release (:meth:`_arm_mirror`).
+        selection is sure to land, so one written between the press and now
+        (:meth:`_new_copy`) goes to the outer terminal's clipboard (OSC 52), the
+        way this widget's own copies do. None: nothing was selected there — a
+        click that placed the cursor — and nothing is said, once a second read
+        :attr:`BUFFER_MIRROR_RETRY` later has found none either. Read once, a
+        copy that landed after the read was never mirrored (#207 follow-up).
+        ``token`` names the arming this timer was set for; when it no longer
+        matches, a later release took the mirror over and reads after its own
+        release (:meth:`_arm_mirror`), or a press read it early
+        (:meth:`_settle_mirror`).
         """
         mirror = self._mirror
         if mirror is None or mirror[0] is not token:
             return
-        self._mirror = None
-        _, server, before = mirror
-        after = self._read_buffer(server)
-        if not after or after == before:
+        _, server, before, second = mirror
+        text = self._new_copy(server, before)
+        if not text and not second:
+            self._mirror = (token, server, before, True)
+            self.set_timer(
+                self.BUFFER_MIRROR_RETRY, partial(self._mirror_buffer, token), name="buffer-mirror"
+            )
             return
-        self.app.copy_to_clipboard(after)
-        count = len(after)
+        self._mirror = None
+        self._copy_agent_selection(text)
+
+    def _settle_mirror(self) -> None:
+        """A press anywhere in the app: a mirror waiting on its second read reads now, and ends.
+
+        The wait is for a late copy from the release that armed it, and a
+        buffer written once another gesture has begun is no longer that
+        release's alone: left to the second read, it would go to the clipboard
+        over whatever the new gesture had copied. Read at the press, before this
+        widget has sent the program any of it, a copy that landed by then is
+        mirrored and one after it is not. A mirror still waiting on its FIRST
+        read is left alone: :attr:`BUFFER_MIRROR_DELAY` is the program's own
+        time to copy, and a press straight after the release — a click on the
+        sidebar the moment a drag ends — lands before the copy does; read
+        there, the copy would never be mirrored. A double-click's second press
+        lands inside that delay too, and its release folds into the mirror
+        (:meth:`_arm_mirror`).
+        """
+        mirror = self._mirror
+        if mirror is None or not mirror[3]:
+            return
+        self._mirror = None
+        _, server, before, _ = mirror
+        self._copy_agent_selection(self._new_copy(server, before))
+
+    def _copy_agent_selection(self, text: str | None) -> None:
+        """Copy what the program copied to the outer clipboard, and say so; nothing for none."""
+        if not text:
+            return
+        self.app.copy_to_clipboard(text)
+        count = len(text)
         self.notify(
             f"copied {count} character{'s' if count != 1 else ''} — the agent's own selection",
             markup=False,
@@ -2508,8 +2583,12 @@ class TerminalPane(Widget, can_focus=True):
         screen has done anything with it, so the baseline is the selection as
         it stood — a standing highlight the gesture then leaves alone is not
         copied again.
+
+        The press also ends a paste-buffer mirror's wait for a late copy
+        (:meth:`_settle_mirror`): the gesture it belongs to is over.
         """
         self._baseline = self._own_selection()
+        self._settle_mirror()
 
     def selection_gesture_ended(self, button: int | None = None) -> GestureEnd | None:
         """The button came up somewhere on screen: copy what the gesture left here.

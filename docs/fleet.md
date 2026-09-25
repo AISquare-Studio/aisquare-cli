@@ -989,9 +989,10 @@ fail in silence. Each spawn now sets this shell's `DISPLAY`, `WAYLAND_DISPLAY`,
 `TERM_PROGRAM` on its window, and `fleet attach` refreshes the session's copy
 through `update-environment`; agents already running keep what they had, and
 `doctor` lists what is stale on the running server. The spawner's
-`AISQUARE_TEAM_HUB` (blank for none) goes on the window the same way, so the
-agent's `launch` joins the project, and takes the explainability key, that the
-spawner and the UI's Explainability tab resolve, not the server's.
+`AISQUARE_TEAM_HUB` and `AISQUARE_EXPLAINABILITY_TARGET` (blank for none) go on
+the window the same way, so the agent's `launch` joins the project, and traces
+with the key and to the deployment, that the spawner and the UI's Explainability
+tab resolve, not the server's.
 *Passthrough:* the server keeps `set-clipboard off` and no `allow-passthrough`,
 and it does not matter for
 the UI — no tmux client is attached to it, so an OSC 52 copy, an OSC 8 link or

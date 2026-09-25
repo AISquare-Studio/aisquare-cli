@@ -68,7 +68,7 @@ from aisquare.models import (
     TeamSession,
     TeamTask,
 )
-from aisquare.services import auto_mode
+from aisquare.services import auto_mode, explainability_ops
 from aisquare.services import claude_accounts as claude_accounts_service
 from aisquare.services import explainability as explainability_service
 
@@ -1216,7 +1216,8 @@ def spawn(
     carries the row id into the window; ``CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=0``
     keeps Claude's native teams out of the fleet unless configured otherwise (§7.6);
     ``AISQUARE_TEAM_HUB`` is set to this process's hub, or blank
-    (:func:`orchestrator.window_team_hub`).
+    (:func:`orchestrator.window_team_hub`), and ``AISQUARE_EXPLAINABILITY_TARGET``
+    to this process's value, or blank.
     Every variable set here is THIS window's: none reaches the tmux session's
     environment, so a later spawn sets its own account and opt-out rather than
     inheriting the first spawn's, and a window the operator opens by hand keeps
@@ -1433,6 +1434,14 @@ def spawn(
     # beside it — resolves, and takes that project's key, not the one the tmux
     # server's frozen environment would name (review of #170, D1b round 2, B1).
     env[orchestrator.TEAM_HUB_ENV_VAR] = orchestrator.window_team_hub()
+    # The deployment override too, for the same reason: the tab resolves the
+    # key's deployment, and shows the target, with THIS process's variable,
+    # and the window's `launch` has to trace where the tab says. Blank for
+    # none, which `resolve_target` reads as unset (review of #170's Setup-form
+    # merge, G2).
+    env[explainability_ops.TARGET_ENV_VAR] = os.environ.get(
+        explainability_ops.TARGET_ENV_VAR, ""
+    ).strip()
     # The desktop as THIS process sees it (#147). A window inherits the tmux
     # server's environment, frozen at the server's first start, so after a
     # re-login every new agent had a stale DISPLAY, WAYLAND_DISPLAY, bus and SSH

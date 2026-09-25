@@ -694,6 +694,7 @@ def test_spawn_manager_builds_the_launch_command_and_records_the_row(
         "AISQUARE_FLEET_AGENT": agent.id,
         "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "0",
         "AISQUARE_TEAM_HUB": "",  # no hub here, so none from the server either
+        "AISQUARE_EXPLAINABILITY_TARGET": "",  # nor a deployment override
     }
     assert spawned["cwd"] == project.root and agent.cwd == project.root and not agent.worktree
     assert agent.pane_id == "%1" and agent.binary == "claude" and agent.spawned_by == "user"
@@ -764,6 +765,19 @@ def test_a_window_resolves_the_hub_its_spawner_resolves(
     fleet_service.spawn(project, "tester")
     relative = tmux.spawned[-1]["env"]
     assert isinstance(relative, dict) and relative.get("AISQUARE_TEAM_HUB") == ""
+
+
+def test_a_window_traces_to_the_deployment_its_spawner_names(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The UI's Explainability tab resolves the target, and the deployment a project key is
+    bound to, with the spawning process's AISQUARE_EXPLAINABILITY_TARGET, while a window's
+    `launch` read the tmux server's: the tab named one deployment and the agents traced
+    to another (review of #170's Setup-form merge, G2). Carried like the hub."""
+    monkeypatch.setenv("AISQUARE_EXPLAINABILITY_TARGET", "prod")
+    fleet_service.spawn(project, "coder")
+    carried = tmux.spawned[-1]["env"]
+    assert isinstance(carried, dict) and carried.get("AISQUARE_EXPLAINABILITY_TARGET") == "prod"
 
 
 def test_spawn_refuses_a_second_manager(
@@ -1427,7 +1441,11 @@ def test_spawn_can_keep_native_agent_teams_on(
     _settings(monkeypatch, disable_native_agent_teams=False)
     agent = _coder(project)
     env = tmux.spawned[0]["env"]
-    assert env == {"AISQUARE_FLEET_AGENT": agent.id, "AISQUARE_TEAM_HUB": ""}
+    assert env == {
+        "AISQUARE_FLEET_AGENT": agent.id,
+        "AISQUARE_TEAM_HUB": "",
+        "AISQUARE_EXPLAINABILITY_TARGET": "",
+    }
 
 
 def test_spawn_without_tmux_is_fleet_unavailable(

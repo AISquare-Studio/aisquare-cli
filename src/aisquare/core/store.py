@@ -567,11 +567,12 @@ ALTER TABLE project ADD COLUMN forgotten_at TEXT;
 # (a partial unique index on ``alias``). ``ALTER TABLE`` cannot add a UNIQUE
 # constraint in SQLite, and a CHECK cannot span rows, so both are indexes.
 #
-# ``project_setting`` is a small key/value table per project — the "per-project
-# settings table" #141 and #142 also need (an explainability key reference, a
-# workspace/studio selection). Introduced here for one key, ``claude_account``
-# (the project's default account), and shaped for the rest so the next feature
-# adds a key rather than a table.
+# ``project_setting`` is a small key/value table per project, introduced here for
+# one key, ``claude_account`` (the project's default account). #141 and #142 were
+# planned as keys here and each has a table of its own instead: v19's
+# ``project_explainability`` and v21's ``project_destination``. A key binding and
+# a destination need typed columns and exactly one row per project, which a
+# key/value row cannot hold for them. This table is for plain per-project values.
 #
 # ``fleet_agent.account_slot`` records which account a fleet window was launched
 # under, as resolved at spawn: the flag, the role binding, the project default or

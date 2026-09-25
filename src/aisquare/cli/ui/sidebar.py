@@ -97,6 +97,10 @@ class AddProject(Message):
     """The + beside Fleet."""
 
 
+class CaptainRequested(Message):
+    """The rank insignia beside Fleet: the captain's view, or a start when there is none (T4)."""
+
+
 class ProjectSelected(Message):
     def __init__(self, project_id: str) -> None:
         self.project_id = project_id
@@ -327,6 +331,43 @@ class AddButton(Activatable):
 
     def message(self) -> Message:
         return AddProject()
+
+
+class CaptainButton(Activatable):
+    """The ``★`` between Fleet and ``+``: the captain, one click away (T4).
+
+    A rank insignia, a single star (plan section 4, the owner's pick): lit in the
+    accent while the captain's row is live — a process that can answer, the
+    ``ALIVE_STATES`` the cards count by — and dim otherwise. The shell decides what a
+    click does from the same frame: the captain view, or the Spawn dialog preset to
+    the captain when there is none to show.
+    """
+
+    DEFAULT_CSS = """
+    CaptainButton { width: 3; color: $text-muted; }
+    CaptainButton.live { color: $accent; text-style: bold; }
+    """
+
+    def __init__(self) -> None:
+        super().__init__(Text(" ★ "), id="captain-button")
+        # No selection key: the keyboard cursor's walk (↑ ↓ from the header, pinned by the
+        # shell's tests) stays as it was, and the captain's own row in the Captain section
+        # is the keyboard's way to it — the star is the mouse's.
+        self.tooltip = CaptainButton.tip(live=False)
+
+    @staticmethod
+    def tip(*, live: bool) -> str:
+        if live:
+            return "The captain — open its view (aisquare captain)"
+        return "No captain running — start one (aisquare captain)"
+
+    def show(self, status: FleetAgentStatus | None) -> None:
+        live = status is not None and status.state in ALIVE_STATES
+        self.set_class(live, "live")
+        self.tooltip = CaptainButton.tip(live=live)
+
+    def message(self) -> Message:
+        return CaptainRequested()
 
 
 class Disclosure(Static):
@@ -895,6 +936,7 @@ class Sidebar(Vertical):
     def compose(self) -> ComposeResult:
         with Horizontal(id="fleet-header"):
             yield Static(Text("Fleet"), id="fleet-title")
+            yield CaptainButton()
             yield AddButton()
         yield CaptainSection(id="captain-section")
         yield Static("", id="projects-notice")
@@ -918,8 +960,10 @@ class Sidebar(Vertical):
         """The home's captain row, above the projects (``None``: there is none).
 
         ``notice``: why the read failed — the row is then the last frame's, kept.
+        The insignia in the header follows the same row (T4).
         """
         self.query_one(CaptainSection).show(status, notice=notice)
+        self.query_one(CaptainButton).show(status)
 
     def show_projects(
         self,

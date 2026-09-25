@@ -172,12 +172,18 @@ class AgentView(Vertical):
             yield Static(header_text(self.status, self._labels), id="agent-header")
             yield Button("Stop", id="agent-stop", compact=True)
             yield Button("Restart", id="agent-restart", compact=True, variant="primary")
+        yield from self.compose_bars()
         yield TerminalPane(
             self.status.agent.pane_id,
             server=self.server,
             escape_key=self.escape_key,
             id="agent-pane",
         )
+
+    def compose_bars(self) -> ComposeResult:
+        """More bars between the header and the pane — the captain's (``views/captain.py``,
+        T4); an ordinary agent has none."""
+        yield from ()
 
     def on_mount(self) -> None:
         self._paint_actions()

@@ -4015,6 +4015,46 @@ def test_shift_g_groups_the_marked_cards_as_a_terminal_sends_it(
     assert screen == GroupPicker.__name__, "shift+g opens the picker for the marked cards"
 
 
+def test_m_marks_the_card_under_the_cursor_so_a_selection_needs_no_shift_click(
+    tmp_path: Path, script: Script, isolated_home: Path
+) -> None:
+    """Final review of #203, F7. Shift+click was the only way to mark a card, and most
+    terminals keep it for their own text selection while an app reports the mouse, so
+    it never reached the card there: nothing could be marked, and shift+g and a drag of
+    several cards had nothing to carry. `m` marks (and unmarks) the card under the
+    cursor, an agent row's card included, and opens nothing."""
+    seed(tmp_path, ("prj_a", "api", None), ("prj_b", "cli", None), ("prj_c", "docs", None))
+    script["prj_c"] = [status("prj_c", "coder-1", "coder", "working")]
+
+    async def go(pilot: Pilot[None]) -> tuple[list[str], list[str], str | None, list[str]]:
+        app = fleet_app(pilot)
+        app.sidebar.focus()
+        for key in ("project:prj_a", "project:prj_b", "agent:agt_c_coder-1", "project:prj_b"):
+            app.sidebar.select(key)  # the cursor's anchor
+            await pilot.press("m")  # cli twice: marked, then unmarked
+        await pilot.pause()
+        marked = app.sidebar.marked_ids()
+        highlighted = sorted(c.project.id for c in app.query(ProjectCard) if c.has_class("marked"))
+        view = app.current_view()
+        await pilot.press("G")  # what a terminal sends for Shift+G
+        await pilot.pause()
+        assert isinstance(app.screen, GroupPicker), type(app.screen).__name__
+        await pilot.press("end")  # … the last option is Ungroup; New group… is just above it
+        await pilot.press("up")
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.press(*"web")
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+        return marked, highlighted, view.id if view is not None else None, _cards(app)
+
+    marked, highlighted, opened, grouped = drive(go)
+    assert marked == ["prj_a", "prj_c"] and highlighted == marked, (marked, highlighted)
+    assert opened == "welcome", "a mark opens nothing"
+    assert grouped == ["group:web", "prj_a", "prj_c", "prj_b"], grouped
+
+
 def test_a_drop_the_store_refuses_part_way_lands_none_of_its_moves(
     tmp_path: Path, script: Script, isolated_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

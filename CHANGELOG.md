@@ -256,7 +256,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   sidebar: drag a card onto a group header, between cards, or below the list;
   drag a group header to reorder groups; `shift+↑`/`shift+↓` move, `g` opens
   the group picker (existing, new, ungroup), `p` pins, `space` folds, `u`
-  undoes the last gesture with a toast, `shift+click` marks several cards and
+  undoes the last gesture with a toast, `m` (or `shift+click`) marks cards and
   `shift+g` groups them. A 📌 Pinned section at the top; group headers roll up
   their members' agents. CLI parity: `project group create|rename|delete|list|
   add|remove|move`, `project pin|unpin`, `project move --to <group|top>

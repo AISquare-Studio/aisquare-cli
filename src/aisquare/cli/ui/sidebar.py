@@ -806,6 +806,7 @@ class Sidebar(Vertical):
         # Bound to `shift+g` alone, the gesture the help screen names did
         # nothing in practically every terminal (final review of #203, F4).
         Binding("G,shift+g", "group_marked", "group selection", show=False),
+        Binding("m", "toggle_mark", "mark", show=False),
         Binding("space", "toggle_collapse", "fold", show=False),
         Binding("u", "undo_layout", "undo", show=False),
         Binding("escape", "clear_marks", "clear marks", show=False),
@@ -823,7 +824,7 @@ class Sidebar(Vertical):
         self.arrangement: Arrangement | None = None
         """The order the last frame was painted in (groups, pins, loose) — #140."""
         self._marked: list[str] = []
-        """Project ids shift+clicked into a multi-selection, in click order."""
+        """Project ids marked into a multi-selection (shift+click or ``m``), in marking order."""
         self._drag: DragState | None = None
         self._drag_source: DragHandle | None = None
         self._drop_target: Widget | None = None
@@ -968,13 +969,26 @@ class Sidebar(Vertical):
         return {entry.id for entry in pinned if isinstance(entry, ProjectInfo)}
 
     def toggle_mark(self, project_id: str) -> None:
-        """shift+click: add the card to (or drop it from) the multi-selection."""
+        """shift+click or ``m``: add the card to (or drop it from) the multi-selection."""
         if project_id in self._marked:
             self._marked.remove(project_id)
         else:
             self._marked.append(project_id)
         for card in self.query(ProjectCard):
             card.set_class(card.project.id in self._marked, "marked")
+
+    def action_toggle_mark(self) -> None:
+        """``m``: shift+click's twin, on the card under the cursor (or the card of its row).
+
+        Most terminals keep Shift+click for their own text selection while an
+        app reports the mouse (kitty, the VTE terminals, Konsole, Alacritty,
+        WezTerm, xterm, Windows Terminal), so there the click never reached the
+        card and nothing could be marked: shift+g and a drag of several cards
+        had nothing to carry (final review of #203, F7).
+        """
+        target = self._cursor_target()
+        if target is not None and target[0] == "project":
+            self.toggle_mark(target[1])
 
     def action_clear_marks(self) -> None:
         self._marked.clear()

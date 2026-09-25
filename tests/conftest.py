@@ -525,8 +525,13 @@ def no_real_fleet(isolated_home: Path, monkeypatch: pytest.MonkeyPatch) -> Itera
         yield guard
         verdict = guard.verdict()
     finally:
-        _kill_private_servers(private, guard.uid, guard.tmux)
-        shutil.rmtree(private, ignore_errors=True)
+        # A first pass, under the test's own monkeypatches, which are still standing: a
+        # spy on os.open that refuses rmtree's dir_fd (test_state_file, on CI's 3.12)
+        # raised TypeError here and ERRORED the test. Whatever this pass cannot do, the
+        # session's sweep does, with nothing patched.
+        with contextlib.suppress(Exception):
+            _kill_private_servers(private, guard.uid, guard.tmux)
+            shutil.rmtree(private, ignore_errors=True)
     if verdict is not None:
         pytest.fail(verdict)
 

@@ -79,3 +79,17 @@ def test_a_server_a_test_starts_is_its_own_and_teardown_ends_it(
     alive = tmux_core._tmux([server.binary(), "-L", "asq", "has-session", "-t", "t"], None)
     assert alive.returncode != 0, "the private server is gone, and every pane with it"
     assert no_real_fleet.verdict() is None
+
+
+def test_a_test_that_breaks_rmtree_for_its_body_does_not_error_the_teardown(
+    no_real_fleet: RealFleetGuard, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The per-test cleanup runs under this test's patches; it must fail soft, and the
+    session's sweep removes what it could not (CI's 3.12 rmtree passes dir_fd to a spied
+    os.open that refused it — an ERROR in teardown on test_state_file, #223)."""
+
+    def broken(*args: object, **kwargs: object) -> None:
+        raise TypeError("a spy that refuses dir_fd")
+
+    monkeypatch.setattr(shutil, "rmtree", broken)
+    assert no_real_fleet.private.exists()

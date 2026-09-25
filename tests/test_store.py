@@ -402,15 +402,16 @@ def test_a_populated_v10_database_migrates_to_the_current_version_with_its_rows_
 
 def _at_version(version: int, *, after: str = "", stamp: int | None = None) -> Path:
     """A database migrated by hand to ``version``, with ``after`` run last and
-    ``user_version`` stamped ``stamp`` (default: ``version``)."""
-    from aisquare.core.store import _MIGRATIONS
+    ``user_version`` stamped ``stamp`` (default: ``version``). Each step as the
+    ladder runs it, so a step from v15 on brings its columns too."""
+    from aisquare.core.store import _run_step
 
     db = _db_path()
     db.parent.mkdir(parents=True, exist_ok=True)
     raw = sqlite3.connect(str(db))
     try:
-        for migration in _MIGRATIONS[:version]:
-            raw.executescript(migration)
+        for step in range(version):
+            _run_step(raw, step)
         if after:
             raw.executescript(after)
         raw.execute(f"PRAGMA user_version = {stamp if stamp is not None else version}")
@@ -802,6 +803,286 @@ def test_every_shape_of_user_version_11_converges_on_one_schema(
         assert any(t.startswith("metric_v1_orphaned") for t in tables), label
     if shape == "V1ORPHAN":
         assert "metric_v1_orphaned_2" in tables, "a taken orphan name must not wedge the rename"
+
+
+# --- stores another line stamped 15 or 17 (the note above _SCHEMA_V15) ----------------------
+#
+# v15-v17 were claimed by other lines of development while the accounts stack held
+# them. What each line's own steps above v14 left in its stores, verbatim from its
+# branch: #136 (codex/native-personas-workflow), #201 (rc/hackathon-v1) and #113
+# (feat/coding-agent-adapters), with a row in what each added.
+WORK_BRIEF_AT_15 = """
+CREATE TABLE IF NOT EXISTS work_brief (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    revision INTEGER NOT NULL,
+    data TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS work_brief_project ON work_brief(project_id);
+INSERT INTO work_brief (id, project_id, revision, data) VALUES ('wb_1', 'prj_used', 3, '{}');
+"""
+PERSONAS_AT_15 = """
+ALTER TABLE team_session ADD COLUMN persona TEXT;
+ALTER TABLE fleet_agent ADD COLUMN persona TEXT;
+INSERT INTO team_session (id, project_id, started_at, last_seen_at, persona)
+    VALUES ('ses_1', 'prj_used', '2026-09-01T00:00:00+00:00', '2026-09-01T00:00:00+00:00',
+            'architect');
+"""
+CODING_AGENTS_AT_17 = """
+ALTER TABLE team_session ADD COLUMN agent TEXT;
+ALTER TABLE team_session ADD COLUMN native_session_id TEXT;
+ALTER TABLE fleet_agent ADD COLUMN agent TEXT;
+UPDATE team_session SET agent = 'claude-code', native_session_id = id
+ WHERE account IS NOT NULL AND transcript_path LIKE '%/projects/%.jsonl';
+UPDATE fleet_agent SET agent = 'claude-code' WHERE binary = 'claude';
+ALTER TABLE team_meta ADD COLUMN updated_at INTEGER NOT NULL DEFAULT 0;
+UPDATE team_meta SET updated_at = CAST(strftime('%s', 'now') AS INTEGER);
+CREATE TRIGGER team_meta_insert_time AFTER INSERT ON team_meta BEGIN
+ UPDATE team_meta SET updated_at = CAST(strftime('%s', 'now') AS INTEGER) WHERE key = NEW.key;
+END;
+CREATE TRIGGER team_meta_update_time AFTER UPDATE OF value ON team_meta BEGIN
+ UPDATE team_meta SET updated_at = CAST(strftime('%s', 'now') AS INTEGER) WHERE key = NEW.key;
+END;
+UPDATE team_meta SET updated_at = CAST(strftime('%s', 'now') AS INTEGER)
+ WHERE updated_at = 0;
+INSERT INTO team_session (id, project_id, started_at, last_seen_at, agent, native_session_id)
+    VALUES ('ses_1', 'prj_used', '2026-09-01T00:00:00+00:00', '2026-09-01T00:00:00+00:00',
+            'codex', 'nat_1');
+"""
+
+# Two projects every cohort's store holds: one used on purpose (a context entry), which
+# the v17 backfill adopts, and one only ever captured (a prompt), which it leaves hidden.
+_TWO_PROJECTS = """
+INSERT INTO project (id, root, name, linked_repos, created_at) VALUES
+    ('prj_used', '/w/used', 'used', '[]', '2026-09-01T00:00:00+00:00'),
+    ('prj_seen', '/w/seen', 'seen', '[]', '2026-09-01T00:00:00+00:00');
+INSERT INTO entry (id, pool, project_id, text, tags, source, created_at, updated_at)
+    VALUES ('ent_1', 'project', 'prj_used', 'a fact', '[]', 'cli',
+            '2026-09-01T00:00:00+00:00', '2026-09-01T00:00:00+00:00');
+INSERT INTO prompt (id, project_id, text, source, created_at)
+    VALUES ('prm_1', 'prj_seen', 'hello', 'claude-code', '2026-09-01T00:00:00+00:00');
+"""
+
+# (label, what the line's steps left, the stamp, a query over it, what it must still read)
+_FOREIGN_COHORTS: tuple[tuple[str, str, int, str, list[tuple[object, ...]]], ...] = (
+    (
+        "#136 at 15: work_brief",
+        WORK_BRIEF_AT_15,
+        15,
+        "SELECT id, revision FROM work_brief",
+        [("wb_1", 3)],
+    ),
+    (
+        "#201 at 15: persona columns",
+        PERSONAS_AT_15,
+        15,
+        "SELECT persona FROM team_session",
+        [("architect",)],
+    ),
+    (
+        "#113 at 17: coding-agent columns",
+        CODING_AGENTS_AT_17,
+        17,
+        "SELECT agent, native_session_id FROM team_session",
+        [("codex", "nat_1")],
+    ),
+)
+
+
+def _shape(conn: sqlite3.Connection) -> set[tuple[str, str]]:
+    """Every table, index and trigger by name, and every column as ``table.column``.
+
+    SQLite's automatic indexes are left out: they come and go with their table."""
+    shape: set[tuple[str, str]] = set()
+    for kind, name in conn.execute(
+        "SELECT type, name FROM sqlite_master WHERE name NOT GLOB 'sqlite_*'"
+    ).fetchall():
+        shape.add((kind, name))
+        if kind == "table":
+            columns = conn.execute(f"PRAGMA table_info({name})").fetchall()
+            shape |= {("column", f"{name}.{column[1]}") for column in columns}
+    return shape
+
+
+def _built(steps: int, after: str = "") -> set[tuple[str, str]]:
+    """The shape of a database built in memory by the first ``steps`` steps, then ``after``."""
+    from aisquare.core.store import _run_step
+
+    conn = sqlite3.connect(":memory:")
+    try:
+        for step in range(steps):
+            _run_step(conn, step)
+        if after:
+            conn.executescript(after)
+        return _shape(conn)
+    finally:
+        conn.close()
+
+
+def _open_a_foreign_cohort(db: Path, query: str) -> dict[str, object]:
+    """Open ``db`` with this build, write through the store to the tables whose absence
+    was "no such table", and read back what :func:`_converged` says it must hold."""
+    store = open_store()  # a wedge raises out of here
+    try:
+        store.upsert_claude_account(1, Path("/h/.claude"))
+        store.set_project_setting("prj_used", "claude_account", "1")
+        read: dict[str, object] = {
+            "listed": [p.id for p in store.list_projects()],
+            "listed with --all": sorted(p.id for p in store.list_projects(all=True)),
+            "account setting": store.project_setting("prj_used", "claude_account"),
+        }
+    finally:
+        store.close()
+    raw = sqlite3.connect(str(db))
+    try:
+        read["version"] = raw.execute("PRAGMA user_version").fetchone()[0]
+        read["shape"] = _shape(raw)
+        read["their rows"] = raw.execute(query).fetchall()
+    finally:
+        raw.close()
+    return read
+
+
+def _converged(ddl: str, their_rows: list[tuple[object, ...]]) -> dict[str, object]:
+    """What a foreign store reads once this build has opened it: the project used on
+    purpose listed (the v17 backfill ran) and the captured one not, every table, index
+    and column of this build and of the other line and nothing else, and the other
+    line's rows as it left them."""
+    theirs = _built(14, _TWO_PROJECTS + ddl) - _built(14, _TWO_PROJECTS)
+    return {
+        "listed": ["prj_used"],
+        "listed with --all": ["prj_seen", "prj_used"],
+        "account setting": "1",
+        "version": SCHEMA_VERSION,
+        "shape": _built(SCHEMA_VERSION) | theirs,
+        "their rows": their_rows,
+    }
+
+
+@pytest.mark.parametrize(
+    ("label", "ddl", "stamp", "query", "expected"),
+    _FOREIGN_COHORTS,
+    ids=[c[0] for c in _FOREIGN_COHORTS],
+)
+def test_a_store_another_line_stamped_converges_on_this_schema_and_keeps_its_own(
+    label: str, ddl: str, stamp: int, query: str, expected: list[tuple[object, ...]]
+) -> None:
+    """A store stamped 15 or 17 by another line never ran this line's steps below its
+    stamp. Counted positionally, it had no ``claude_account``, so every accounts
+    command failed with "no such table". Stamped 17, it had no ``onboarded_at`` either:
+    v23 failed on that column and the store stopped opening. It converges instead:
+    every table and column this build makes, the v17 backfill (so its projects stay
+    listed), and the other line's tables, columns, triggers and rows left alone."""
+    db = _at_version(14, after=_TWO_PROJECTS + ddl, stamp=stamp)
+
+    assert _open_a_foreign_cohort(db, query) == _converged(ddl, expected), label
+
+
+@pytest.mark.parametrize(
+    ("label", "ddl", "stamp", "query", "expected"),
+    _FOREIGN_COHORTS,
+    ids=[c[0] for c in _FOREIGN_COHORTS],
+)
+def test_a_foreign_store_a_build_without_the_pass_carried_on_converges_too(
+    label: str, ddl: str, stamp: int, query: str, expected: list[tuple[object, ...]]
+) -> None:
+    """A foreign store that a build without the presence pass has already opened ran
+    this line's steps from its stamp on and none below it. Stamped 15, it reached the
+    current version without v15's tables, and the ladder never runs for it again, so
+    only the pass after the ladder can give them back. Stamped 17, it stopped at 22:
+    v23 failed on the missing ``onboarded_at``, and the pass before v23 adds it."""
+    from aisquare.core.store import _run_step
+
+    carried_to = SCHEMA_VERSION if stamp == 15 else SCHEMA_VERSION - 1
+    db = _at_version(14, after=_TWO_PROJECTS + ddl, stamp=stamp)
+    raw = sqlite3.connect(str(db))
+    try:
+        for step in range(stamp, carried_to):
+            _run_step(raw, step)
+        raw.execute(f"PRAGMA user_version = {carried_to}")
+        raw.commit()
+        tables = {r[0] for r in raw.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    finally:
+        raw.close()
+    assert "claude_account" not in tables, "the fixture is the store that build left"
+
+    assert _open_a_foreign_cohort(db, query) == _converged(ddl, expected), label
+
+
+def test_each_step_from_v15_on_declares_what_it_builds_and_builds_nothing_twice() -> None:
+    """``_PRODUCTS`` is what the presence pass looks for: a step whose entry drifts from
+    its script is a table the pass never restores, or one it restores on every open.
+    Checked by building: each step's new tables, indexes and columns are exactly its
+    entry, and applying the step again, as the pass does, changes nothing."""
+    from aisquare.core.store import _PRODUCTS, _Products, _run_step
+
+    assert all(14 <= step < SCHEMA_VERSION for step in _PRODUCTS)
+    conn = sqlite3.connect(":memory:")
+    try:
+        for step in range(SCHEMA_VERSION):
+            before = _shape(conn)
+            _run_step(conn, step)
+            after = _shape(conn)
+            if step < 14:
+                continue  # v1-v14 run once, below every stamp another line made
+            new = after - before
+            objects = {name for kind, name in new if kind != "column"}
+            columns = {
+                column
+                for kind, column in new
+                if kind == "column" and column.split(".")[0] not in objects
+            }
+            declared = _PRODUCTS.get(step, _Products())
+            assert objects == set(declared.objects), f"v{step + 1}"
+            assert columns == {f"{t}.{c}" for t, c, _ in declared.columns}, f"v{step + 1}"
+            _run_step(conn, step)
+            assert _shape(conn) == after, f"v{step + 1} applied twice"
+    finally:
+        conn.close()
+
+
+def test_the_ladder_from_v15_run_again_over_a_current_store_changes_nothing() -> None:
+    """Every step from v15 on is idempotent, so a store that meets them twice (stamped
+    back to 14 here) opens with the same schema and the same rows. That includes the
+    rows the v17 backfill reads: a captured project with a context entry stays
+    captured, because the backfill runs only when it adds the column."""
+    with store_session() as store:
+        store.onboard_project(PROJECT)
+        store.ensure_project(ProjectInfo(id="prj_captured", root=Path("/w/captured")))
+        store.add(_entry("a fact", pool="project", project_id="prj_captured"))
+        store.upsert_claude_account(1, Path("/h/.claude"))
+        store.set_project_setting(PROJECT.id, "claude_account", "1")
+        assert [p.id for p in store.list_projects()] == [PROJECT.id]
+
+    def dump() -> tuple[list[tuple[object, ...]], dict[str, list[tuple[object, ...]]]]:
+        raw = sqlite3.connect(str(_db_path()))
+        try:
+            schema = raw.execute("SELECT type, name, tbl_name, sql FROM sqlite_master").fetchall()
+            rows = {
+                name: sorted(raw.execute(f"SELECT * FROM {name}").fetchall(), key=repr)
+                for kind, name, _, _ in schema
+                if kind == "table"
+            }
+            return sorted(schema, key=repr), rows
+        finally:
+            raw.close()
+
+    before = dump()
+    raw = sqlite3.connect(str(_db_path()))
+    try:
+        raw.execute("PRAGMA user_version = 14")
+        raw.commit()
+    finally:
+        raw.close()
+
+    with store_session() as store:
+        assert [p.id for p in store.list_projects()] == [PROJECT.id]
+    raw = sqlite3.connect(str(_db_path()))
+    try:
+        assert raw.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+    finally:
+        raw.close()
+    assert dump() == before
 
 
 # --- the Claude account registry and per-project settings (v15, #145) ----------------------

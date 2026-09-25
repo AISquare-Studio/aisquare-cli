@@ -33,7 +33,7 @@ from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import EllipsisType
-from typing import Any, Protocol
+from typing import Any, NamedTuple, Protocol
 
 from aisquare.core import paths
 from aisquare.core.ids import new_prompt_id
@@ -441,7 +441,7 @@ def _free_name(connection: sqlite3.Connection, base: str) -> str:
 
 def _add_column_if_absent(
     connection: sqlite3.Connection, table: str, column: str, declaration: str
-) -> None:
+) -> bool:
     """``ALTER TABLE … ADD COLUMN`` only when the column is not already there.
 
     SQLite has no ``ADD COLUMN IF NOT EXISTS``, and a second ALTER raises
@@ -449,14 +449,18 @@ def _add_column_if_absent(
     store unopenable. A missing *table* is not this function's business either:
     a cohort that has no ``metric`` yet gets the column from the CREATE in
     _SCHEMA_V12, so there is nothing to add.
+
+    True when it added the column. A backfill that belongs to the column
+    (:data:`_BACKFILLS`) runs then, and only then.
     """
     query = "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?"
     if connection.execute(query, (table,)).fetchone() is None:
-        return
+        return False
     columns = {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
     if column in columns:
-        return
+        return False
     connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
+    return True
 
 
 def _converge_v11_fork(connection: sqlite3.Connection) -> None:
@@ -488,7 +492,9 @@ _PREPARE: dict[int, Callable[[sqlite3.Connection], None]] = {
 def _adopt_onboarded_projects(connection: sqlite3.Connection) -> None:
     """v16 → v17's backfill (#139): rows already used on purpose become onboarded.
 
-    Runs AFTER the column exists (a :data:`_FINISH` step, same transaction).
+    Runs right after ``project.onboarded_at`` is added, in the same transaction,
+    and only then (:data:`_BACKFILLS`): by v17, or by the presence pass for a
+    store another line stamped past 17 without ever running it.
     "On purpose" is read off what the row already carries: context entries, a
     codename (it entered the fleet), linked repos, board activity, a fleet
     agent — and a codebase snapshot on disk, which ``project onboard`` and
@@ -527,10 +533,16 @@ def _adopt_onboarded_projects(connection: sqlite3.Connection) -> None:
         )
 
 
-#: Steps run AFTER a migration's statements, in its transaction — the mirror of
-#: :data:`_PREPARE` for work that needs the columns the migration just added.
-_FINISH: dict[int, Callable[[sqlite3.Connection], None]] = {
-    16: _adopt_onboarded_projects,
+#: Backfills that belong to a column, keyed ``(table, column)``. Each runs in the
+#: transaction that adds its column, right after the ALTER, and only when the
+#: column was actually added: by its step on the ladder or by
+#: :func:`_converge_by_presence`, whichever gets there. Rows that predate the
+#: column get their value from what they already carry, and a store that
+#: already has the column is not backfilled again. That makes a step met twice
+#: a no-op, and the presence pass, which runs on every open, changes no row.
+#: A step's statements have all run by then (:func:`_run_step`).
+_BACKFILLS: dict[tuple[str, str], Callable[[sqlite3.Connection], None]] = {
+    ("project", "onboarded_at"): _adopt_onboarded_projects,
 }
 
 # v14: ``project forget`` — a tombstone on the registration, in the same spirit as
@@ -551,6 +563,23 @@ _SCHEMA_V14 = """
 ALTER TABLE project ADD COLUMN forgotten_at TEXT;
 """
 
+# v15 onward: every step is IDEMPOTENT, and what it produces is also looked for
+# by name after the ladder (:data:`_PRODUCTS`, :func:`_converge_by_presence`).
+# Other lines of development claimed v15-v17 while this one was in flight, as
+# v11 was claimed twice before them: #136 stamps 15 for ``work_brief``, #201
+# stamps 15 for the persona columns, and #113 stamps 15-17 for its coding-agent
+# columns. ``_migrate`` counts positionally, so a store stamped 15 or 17 by one
+# of those lines never runs this line's steps below its stamp. It has no
+# ``claude_account``, and every accounts command fails with "no such table";
+# stamped 17, it has no ``onboarded_at`` either, and v23 fails on that column,
+# so the store stops opening. Renumbering would strand the stores that ran
+# these steps under these numbers (the accounts stack's own), so the numbers
+# stay and the ladder converges instead: each CREATE is ``IF NOT EXISTS``, each
+# column is added by :func:`_add_column_if_absent` (a script cannot add a column
+# conditionally, so the columns are listed in :data:`_PRODUCTS`, not written as
+# ALTERs here), and a step whose products a store lacks is applied again,
+# whatever ``user_version`` says.
+#
 # v15: the Claude account REGISTRY and per-project settings (#145).
 #
 # ``claude_account`` is the operator's arrangement of the account slots — an
@@ -574,14 +603,14 @@ ALTER TABLE project ADD COLUMN forgotten_at TEXT;
 # a destination need typed columns and exactly one row per project, which a
 # key/value row cannot hold for them. This table is for plain per-project values.
 #
-# ``fleet_agent.account_slot`` records which account a fleet window was launched
-# under, as resolved at spawn: the flag, the role binding, the project default or
-# the machine default. ``team_session.account`` (v8) carries the config DIRECTORY
-# once the session's first hook reports a transcript path; this is the slot, known
-# before the agent has said a word, which is what a restart (#144) or a hand-over
-# (#146) needs.
+# ``fleet_agent.account_slot`` (in :data:`_PRODUCTS`) records which account a
+# fleet window was launched under, as resolved at spawn: the flag, the role
+# binding, the project default or the machine default. ``team_session.account``
+# (v8) carries the config DIRECTORY once the session's first hook reports a
+# transcript path; this is the slot, known before the agent has said a word,
+# which is what a restart (#144) or a hand-over (#146) needs.
 _SCHEMA_V15 = """
-CREATE TABLE claude_account (
+CREATE TABLE IF NOT EXISTS claude_account (
     slot        INTEGER PRIMARY KEY,
     config_dir  TEXT NOT NULL,
     alias       TEXT,
@@ -590,17 +619,18 @@ CREATE TABLE claude_account (
     disabled    INTEGER NOT NULL DEFAULT 0 CHECK (disabled IN (0, 1)),
     created_at  TEXT NOT NULL
 );
-CREATE UNIQUE INDEX claude_account_alias ON claude_account (alias) WHERE alias IS NOT NULL;
-CREATE UNIQUE INDEX claude_account_default ON claude_account (is_default) WHERE is_default = 1;
+CREATE UNIQUE INDEX IF NOT EXISTS claude_account_alias ON claude_account (alias)
+    WHERE alias IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS claude_account_default ON claude_account (is_default)
+    WHERE is_default = 1;
 
-CREATE TABLE project_setting (
+CREATE TABLE IF NOT EXISTS project_setting (
     project_id  TEXT NOT NULL REFERENCES project (id),
     key         TEXT NOT NULL,
     value       TEXT NOT NULL,
     set_at      TEXT NOT NULL,
     PRIMARY KEY (project_id, key)
 );
-ALTER TABLE fleet_agent ADD COLUMN account_slot INTEGER;
 """
 
 # v16: usage-aware accounts (#146).
@@ -612,12 +642,12 @@ ALTER TABLE fleet_agent ADD COLUMN account_slot INTEGER;
 # older than a week are pruned on write. Derived convenience, never the record:
 # a missing table costs a trend line, nothing else.
 #
-# ``team_session.limit_resets_at`` carries the reset time a usage-limit error
-# named, for the ``limited`` state the StopFailure hook writes; it is read only
-# while ``state = 'limited'`` and a prompt that lifts the session back to
-# ``working`` leaves the stale time behind unread.
+# ``team_session.limit_resets_at`` (in :data:`_PRODUCTS`) carries the reset time
+# a usage-limit error named, for the ``limited`` state the StopFailure hook
+# writes; it is read only while ``state = 'limited'`` and a prompt that lifts
+# the session back to ``working`` leaves the stale time behind unread.
 _SCHEMA_V16 = """
-CREATE TABLE claude_usage (
+CREATE TABLE IF NOT EXISTS claude_usage (
     slot               INTEGER NOT NULL,
     fetched_at         TEXT NOT NULL,
     session_percent    REAL,
@@ -625,24 +655,23 @@ CREATE TABLE claude_usage (
     week_percent       REAL,
     week_resets_at     TEXT
 );
-CREATE INDEX claude_usage_slot_time ON claude_usage (slot, fetched_at);
-ALTER TABLE team_session ADD COLUMN limit_resets_at TEXT;
+CREATE INDEX IF NOT EXISTS claude_usage_slot_time ON claude_usage (slot, fetched_at);
 """
 
 # v17: captured is not shown (#139). Hooks register every directory a session
 # runs in — that must stay, prompt history and injection depend on it — but only
 # a project added ON PURPOSE (init, project onboard/link, the sidebar's +, team
-# on, a fleet spawn) carries ``onboarded_at``, and only those are listed. A
-# plain ALTER; the backfill is :func:`_adopt_onboarded_projects` (_FINISH).
-_SCHEMA_V17 = """
-ALTER TABLE project ADD COLUMN onboarded_at TEXT;
-"""
+# on, a fleet spawn) carries ``onboarded_at``, and only those are listed. The
+# column is the whole step, so the script is empty: the column is in
+# :data:`_PRODUCTS`, its backfill (:func:`_adopt_onboarded_projects`) in
+# :data:`_BACKFILLS`.
+_SCHEMA_V17 = ""
 # v18 (#144): the launch spec a restart replays, and a home for UI state that
 # used to live in scattered files — one key/value table, read at mount and
-# written on change, so what was open comes back after a restart.
+# written on change, so what was open comes back after a restart. The column,
+# ``fleet_agent.launch_spec``, is in :data:`_PRODUCTS`.
 _SCHEMA_V18 = """
-ALTER TABLE fleet_agent ADD COLUMN launch_spec TEXT;
-CREATE TABLE ui_state (
+CREATE TABLE IF NOT EXISTS ui_state (
     key        TEXT PRIMARY KEY,
     value      TEXT NOT NULL,
     updated_at TEXT NOT NULL
@@ -651,7 +680,7 @@ CREATE TABLE ui_state (
 # v19 (#141): a project's own explainability key — its deployment and where the
 # mode-600 file is. Never the value: this database is mode 644.
 _SCHEMA_V19 = """
-CREATE TABLE project_explainability (
+CREATE TABLE IF NOT EXISTS project_explainability (
     project_id TEXT PRIMARY KEY REFERENCES project (id),
     target     TEXT NOT NULL,
     key_path   TEXT NOT NULL,
@@ -661,9 +690,11 @@ CREATE TABLE project_explainability (
 """
 # v20 (#140): project groups, pinning and manual order — a management layer over
 # projects. One group per project (like a browser tab), positions per scope,
-# pins on projects and groups. Nothing else references a group.
+# pins on projects and groups. Nothing else references a group. The project's
+# three columns, ``group_id``, ``position`` and ``pinned_at``, are in
+# :data:`_PRODUCTS`, added once this table exists.
 _SCHEMA_V20 = """
-CREATE TABLE project_group (
+CREATE TABLE IF NOT EXISTS project_group (
     id         TEXT PRIMARY KEY,
     name       TEXT NOT NULL UNIQUE,
     position   INTEGER NOT NULL DEFAULT 0,
@@ -671,9 +702,6 @@ CREATE TABLE project_group (
     collapsed  INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL
 );
-ALTER TABLE project ADD COLUMN group_id TEXT REFERENCES project_group (id);
-ALTER TABLE project ADD COLUMN position INTEGER;
-ALTER TABLE project ADD COLUMN pinned_at TEXT;
 """
 # v21 (#142): where a project's traces land — a workspace and a studio picked by a
 # signed-in user, from the API environment the session belongs to. Its own table
@@ -683,7 +711,7 @@ ALTER TABLE project ADD COLUMN pinned_at TEXT;
 # path every reader of the binding would then have to reason about. Two rows
 # per project at most, each with one job; the resolver joins them by target.
 _SCHEMA_V21 = """
-CREATE TABLE project_destination (
+CREATE TABLE IF NOT EXISTS project_destination (
     project_id     TEXT PRIMARY KEY REFERENCES project (id),
     api_url        TEXT NOT NULL,
     environment    TEXT NOT NULL,
@@ -762,6 +790,48 @@ _MIGRATIONS = (
     _SCHEMA_V23,
 )
 SCHEMA_VERSION = len(_MIGRATIONS)
+
+
+class _Products(NamedTuple):
+    """What one step of the ladder leaves in the store, looked for by name."""
+
+    objects: tuple[str, ...] = ()
+    """The tables and indexes its script creates, each ``IF NOT EXISTS``."""
+    columns: tuple[tuple[str, str, str], ...] = ()
+    """``(table, column, declaration)``, added after the script by
+    :func:`_add_column_if_absent`, since a script cannot add a column
+    conditionally."""
+
+
+#: What each step from v15 on produces, keyed like :data:`_PREPARE` by the version
+#: upgraded FROM (14 is v15). The ladder adds the columns (:func:`_run_step`), and
+#: :func:`_converge_by_presence` looks for everything here whatever
+#: ``user_version`` says (the note above _SCHEMA_V15 says why). v23 is a repair
+#: and produces nothing. A later step that creates or adds anything needs an
+#: entry, and a test compares every entry with what its step builds.
+_PRODUCTS: dict[int, _Products] = {
+    14: _Products(
+        ("claude_account", "claude_account_alias", "claude_account_default", "project_setting"),
+        (("fleet_agent", "account_slot", "INTEGER"),),
+    ),
+    15: _Products(
+        ("claude_usage", "claude_usage_slot_time"),
+        (("team_session", "limit_resets_at", "TEXT"),),
+    ),
+    16: _Products(columns=(("project", "onboarded_at", "TEXT"),)),
+    17: _Products(("ui_state",), (("fleet_agent", "launch_spec", "TEXT"),)),
+    18: _Products(("project_explainability",)),
+    19: _Products(
+        ("project_group",),
+        (
+            ("project", "group_id", "TEXT REFERENCES project_group (id)"),
+            ("project", "position", "INTEGER"),
+            ("project", "pinned_at", "TEXT"),
+        ),
+    ),
+    20: _Products(("project_destination",)),
+    21: _Products(("pending_revocation",)),
+}
 
 _PROJECT_COLUMNS = "id, root, linked_repos, codename, onboarded_at, group_id, position, pinned_at"
 _GROUP_COLUMNS = "id, name, position, pinned_at, collapsed, created_at"
@@ -3635,6 +3705,63 @@ def _statements(script: str) -> Iterator[str]:
         yield buffer
 
 
+def _run_step(connection: sqlite3.Connection, version: int) -> None:
+    """Step ``version`` → ``version + 1``, in the caller's transaction, without the bump.
+
+    :data:`_PREPARE`, the script, then the step's columns from :data:`_PRODUCTS`,
+    each followed by its :data:`_BACKFILLS` entry when it was added. This is also
+    how :func:`_converge_by_presence` applies a step again, which every step
+    from v15 on allows: each CREATE is ``IF NOT EXISTS``, each column is added
+    only when absent, and v23's repair leaves a repaired row as it is.
+    """
+    prepare = _PREPARE.get(version)
+    if prepare is not None:
+        prepare(connection)
+    for statement in _statements(_MIGRATIONS[version]):
+        connection.execute(statement)
+    for table, column, declaration in _PRODUCTS.get(version, _Products()).columns:
+        if _add_column_if_absent(connection, table, column, declaration):
+            backfill = _BACKFILLS.get((table, column))
+            if backfill is not None:
+                backfill(connection)
+
+
+def _steps_missing(connection: sqlite3.Connection, below: int) -> list[int]:
+    """The steps under ``below``, from v15 on, that left something out of this store.
+
+    A store stamped ``below`` claims to have run them all; one that another line
+    stamped has run that line's steps under these numbers instead. Only reads:
+    one ``sqlite_master`` query and a ``table_info`` per table a column belongs to.
+    """
+    steps = sorted(step for step in _PRODUCTS if step < below)
+    if not steps:
+        return []
+    names = {row[0] for row in connection.execute("SELECT name FROM sqlite_master")}
+    tables = {table for step in steps for table, _, _ in _PRODUCTS[step].columns}
+    columns = {
+        table: {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
+        for table in tables
+    }
+    return [
+        step
+        for step in steps
+        if not names.issuperset(_PRODUCTS[step].objects)
+        or any(column not in columns[table] for table, column, _ in _PRODUCTS[step].columns)
+    ]
+
+
+def _converge_by_presence(connection: sqlite3.Connection, below: int) -> None:
+    """Apply again each step under ``below`` whose products this store does not hold.
+
+    In the caller's transaction, which holds the write lock, so a racing opener
+    finds the products in place and does nothing. A store that holds them pays
+    the reads in :func:`_steps_missing` and nothing more. A column added here
+    brings its backfill, so a store that skipped v17 lists its projects.
+    """
+    for step in _steps_missing(connection, below):
+        _run_step(connection, step)
+
+
 def _migrate(connection: sqlite3.Connection) -> None:
     """Bring the schema to the current version, safely under concurrency.
 
@@ -3663,30 +3790,44 @@ def _migrate(connection: sqlite3.Connection) -> None:
 
     A loser whose script still fails re-reads the version: if another process
     advanced it, that's victory by other means; otherwise the error is real.
+
+    THE VERSION ALONE IS NOT TRUSTED FROM v15 ON: other lines of development
+    stamped 15-17 for steps of their own (the note above _SCHEMA_V15), so a
+    store may claim steps it never ran. Before each step, and once more after
+    the last, :func:`_converge_by_presence` applies again any step below the
+    version whose tables, indexes or columns the store lacks. Before each step,
+    because a later step can need an earlier one's products: v23 updates
+    ``onboarded_at``, which a store stamped 17 by #113 does not have. After the
+    last, because a store stamped current never enters the loop, including one
+    that a build without this pass carried to current past a step it skipped.
     """
     while True:
         if int(connection.execute("PRAGMA user_version").fetchone()[0]) >= len(_MIGRATIONS):
-            return
+            break
         try:
             connection.execute("BEGIN IMMEDIATE")
             version = int(connection.execute("PRAGMA user_version").fetchone()[0])
             if version >= len(_MIGRATIONS):
                 connection.execute("COMMIT")
-                return
-            prepare = _PREPARE.get(version)
-            if prepare is not None:
-                prepare(connection)
-            for statement in _statements(_MIGRATIONS[version]):
-                connection.execute(statement)
-            finish = _FINISH.get(version)
-            if finish is not None:
-                finish(connection)
+                break
+            _converge_by_presence(connection, version)
+            _run_step(connection, version)
             connection.execute(f"PRAGMA user_version = {version + 1}")
             connection.execute("COMMIT")
         except sqlite3.Error:
             with contextlib.suppress(sqlite3.Error):
                 connection.execute("ROLLBACK")
             raise
+    if not _steps_missing(connection, len(_MIGRATIONS)):
+        return
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        _converge_by_presence(connection, len(_MIGRATIONS))
+        connection.execute("COMMIT")
+    except sqlite3.Error:
+        with contextlib.suppress(sqlite3.Error):
+            connection.execute("ROLLBACK")
+        raise
 
 
 def open_store() -> ContextStore:

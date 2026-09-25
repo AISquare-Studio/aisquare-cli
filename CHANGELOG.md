@@ -165,6 +165,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     trailing slash or an explicitly written default port is not a misroute.
   - `explainability.is_loopback` is public for the second module that needs the
     same discriminator, on the precedent `stored_api_key` set.
+- **A store another line stamped 15 or 17 converges instead of failing.** Schema
+  v15-v17 were claimed by other lines of development too: #136 stamps 15 for
+  `work_brief`, #201 stamps 15 for persona columns, #113 stamps 15-17 for its
+  coding-agent columns. The ladder counts positionally, so such a store never
+  ran this line's steps below its stamp. At 15 it opened without
+  `claude_account`, and every accounts command failed with "no such table". At
+  17 it had no `onboarded_at` either, v23 failed on that column, and the store
+  stopped opening at 22. Every step from v15 on is now idempotent (`IF NOT
+  EXISTS`, columns added only when absent), and a step whose tables, indexes or
+  columns a store lacks is applied again, before the next step and after the
+  last, whatever `user_version` says. The `onboarded_at` backfill comes with its
+  column, so the projects of a store that skipped v17 stay listed. The other
+  line's tables, columns and rows are left alone, and no step is renumbered.
 
 ### Added
 - **The navigator is resizable** (#137). The line between the sidebar and the

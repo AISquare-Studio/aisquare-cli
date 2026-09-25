@@ -367,6 +367,11 @@ class Segmenter:
             return interim, self._end()
         return interim, None
 
+    @property
+    def heard_bytes(self) -> int:
+        """How much of the open utterance has been fed, from its first loud frame."""
+        return self._bytes
+
     def flush(self) -> str | None:
         """End the open utterance now, if there is one."""
         return self._end() if self.speaking else None
@@ -451,9 +456,11 @@ class WakeWord:
         punctuation and one misspelling (:func:`_near`), and what follows it, stripped."""
         if not self.words:
             return False, ""
-        rest = text
+        rest = text.replace("\u2019", "'")
         for expected in self.words:
-            head = re.match(r"^[\W_]*([A-Za-z']+)(.*)$", rest, re.S)
+            # A word ends at whitespace, punctuation or the end, never at a hyphen, an
+            # apostrophe or a letter (T3b S3): "Captain-led", "Captain's" are other words.
+            head = re.match(r"^[\W_]*([A-Za-z']+)(?=$|[^\w'-])(.*)$", rest, re.S)
             if head is None or not _near(_NOT_LETTERS.sub("", head.group(1).lower()), expected):
                 return False, ""
             rest = head.group(2)
@@ -673,6 +680,12 @@ class _Connection:
         self._window_timer: asyncio.Task[None] | None = None
         self._interim_shown = False
         """Whether the page's live line shows words of this utterance (see _show_interim)."""
+        self._began_awake = False
+        """Whether the utterance being heard BEGAN inside the window a bare wake word opened
+        (T3b S1): it is judged by when it began, not by when its final lands."""
+        self._interim_woke = False
+        """Whether this utterance's interims matched the wake word while they still began at
+        its first byte (T3b S2); past that, whisper's trailing window is never matched."""
         self._shown_thinking: bool | None = None
         self._send_lock = asyncio.Lock()
 
@@ -802,9 +815,11 @@ class _Connection:
             await self._set_listening(False)
         elif kind == "text":
             text = str(message.get("text", "")).strip()
-            if text and self.mode == "listen" and is_stop_word(text):
+            if text and self.mode == "listen" and self._typed_stop(text):
                 await self._heard_stop_word()  # typed, the stop word is the stop word
             elif text:
+                if self._awake_until is not None:
+                    await self._close_window()  # S4: a typed request takes the window too
                 self._start_delivery(text)
         elif kind == "speaker":
             speaker_mod.set_speaker(bool(message.get("on", True)))
@@ -868,6 +883,7 @@ class _Connection:
         if self._segmenter is not None and self._segmenter.speaking:
             final = await asyncio.to_thread(self._segmenter.flush)
             await self._final(final or "")
+            self._utterance_done()
 
     # -- audio
 
@@ -924,22 +940,42 @@ class _Connection:
                 await self._send("error", code="stt_unavailable", message=exc.reason, fix=exc.fix)
                 await self._send("listening", on=False)
                 return
+        starting = not self._segmenter.speaking
+        began_awake = self._window_open()
         interim, final = await asyncio.to_thread(self._segmenter.feed, chunk)
+        if starting and (self._segmenter.speaking or final is not None):
+            self._began_awake = began_awake  # S1: the window is judged when the utterance began
+            self._interim_woke = False
         if interim:
             await self._show_interim(interim)
         if final is not None:
-            self._interim_shown = False
             await self._final(final)
+            self._utterance_done()
+
+    def _utterance_done(self) -> None:
+        self._interim_shown = False
+        self._began_awake = False
+        self._interim_woke = False
+
+    def _hearing(self) -> bool:
+        return self._segmenter is not None and self._segmenter.speaking
 
     async def _show_interim(self, interim: str) -> None:
         """The live line while listen mode hears someone (13321). With the wake word on it
         shows NO words of what the mic hears — the owner may be sharing their screen in a
         meeting — until an interim begins with the wake word; then the words after it,
         live. Inside the window a bare 'Captain' opened, the whole line, as before."""
-        if not self._wake or self._window_open():
+        if not self._wake or self._began_awake:
             await self._send("stt", text=interim, final=False)
             return
-        woke, rest = self._wake.match(interim)
+        if self._segmenter is not None and self._segmenter.heard_bytes <= INTERIM_WINDOW_BYTES:
+            woke, rest = self._wake.match(interim)
+            self._interim_woke = woke
+        else:
+            # S2: past its first seconds whisper's interim decodes a trailing window, which
+            # may begin mid-sentence ("… the captain wants …"): never matched there. The
+            # decision made while the window began at the utterance's first byte stands.
+            woke, rest = self._interim_woke, interim
         if woke:
             self._interim_shown = bool(rest)
             await self._send("stt", text=rest, final=False)
@@ -947,6 +983,19 @@ class _Connection:
             # whisper took the wake word back: the line clears rather than show the rest
             self._interim_shown = False
             await self._send("stt", text="", final=False)
+
+    def _typed_stop(self, text: str) -> bool:
+        """The stop word typed, bare or after the wake word ('Captain, stop listening')."""
+        if is_stop_word(text):
+            return True
+        woke, rest = self._wake.match(text) if self._wake else (False, "")
+        return woke and is_stop_word(rest)
+
+    async def _before_speech(self) -> None:
+        """The server is about to speak: an open window closes first, or the speaker's own
+        words would reach the mic inside it and be delivered as a request (coderp's minor)."""
+        if self._awake_until is not None:
+            await self._close_window()
 
     def _window_open(self) -> bool:
         return self._awake_until is not None and self._hooks.clock() < self._awake_until
@@ -976,7 +1025,7 @@ class _Connection:
         not kept: its text never leaves this function, the page only clears its interim.
         """
         woke, rest = self._wake.match(text)
-        in_window = self._window_open()
+        in_window = self._began_awake
         if not woke and not in_window:
             if self._awake_until is not None:
                 await self._close_window()
@@ -1024,9 +1073,13 @@ class _Connection:
         'listening' goes back to 'say Captain'."""
         while self._awake_until is not None:
             remaining = self._awake_until - self._hooks.clock()
-            if remaining <= 0:
+            if remaining > 0:
+                await asyncio.sleep(remaining)
+            elif self._began_awake and self._hearing():
+                # S1: a request begun inside the window keeps it until its final is judged
+                await asyncio.sleep(self._hooks.poll_s)
+            else:
                 break
-            await asyncio.sleep(remaining)
         if self._awake_until is not None:
             self._awake_until = None
             self._window_timer = None
@@ -1062,6 +1115,7 @@ class _Connection:
                     cue.cancel()
                     await self._send("error", code="no_reply", message=str(exc))
                     ended = await self._end_turn()
+                    await self._before_speech()
                     await asyncio.to_thread(self._hooks.voice.utter, "the captain did not answer")
                     return
                 except Exception as exc:  # said, never a page stuck on "thinking" (S2)
@@ -1092,6 +1146,7 @@ class _Connection:
                 await self._send("reply", text=reply, spoken=will_speak)
                 ended = await self._end_turn()
                 if spoken_by_captain == 0:
+                    await self._before_speech()
                     await asyncio.to_thread(self._hooks.voice.utter, reply)
             finally:
                 # Whatever path left, or a cancellation mid-turn (S2): the cue never
@@ -1126,6 +1181,7 @@ class _Connection:
     async def _cue_later(self) -> None:
         with _swallow_cancel():
             await asyncio.sleep(self._hooks.cue_after_s)
+            await self._before_speech()
             await asyncio.to_thread(self._hooks.voice.utter, CUE_TEXT)
 
     def _thinking_now(self) -> bool:

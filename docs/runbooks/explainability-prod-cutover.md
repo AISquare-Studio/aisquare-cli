@@ -1465,9 +1465,10 @@ is a usage error, and fails as one.)
 
 > **[verified-train]** `status` honours `--json` now (it used to print human
 > text under the flag). `aisquare --json explainability status` returns a real
-> payload — `enabled`, `target`, `gateway`/`gateway_source`, `destination`
-> (where `key_project`'s traces land, #142; `null` until chosen), `credits`
-> (that workspace's balance, #143; `null` until a destination is chosen),
+> payload — `enabled`, `target`/`target_source` (what named it: `argument`,
+> the project's `destination`, `env` or `config`), `gateway`/`gateway_source`,
+> `destination` (where `key_project`'s traces land, #142; `null` until chosen),
+> `credits` (that workspace's balance, #143; `null` until a destination is chosen),
 > `key_env`/`key_set`/`key_source`/`key_origin`/`key_project` (never the key
 > itself), `proxy`, `identity`, `agents`, `probe`, `shipping`,
 > `redaction` — so the cutover can be scripted rather than eyeballed.
@@ -2242,7 +2243,8 @@ dies.
    Governance needs a credential class we do not hold, not a config edit.
 3. **[CLOSED]** `explainability status` honours `--json`. It used to print
    human text under the flag; it now returns a real payload — `enabled`,
-   `target`, `gateway`/`gateway_source`, `destination` (#142, `null` until chosen),
+   `target`/`target_source`, `gateway`/`gateway_source`, `destination` (#142,
+   `null` until chosen),
    `credits` (#143, `null` until a destination is chosen),
    `key_env`/`key_set`/`key_source`/`key_origin`/`key_project` (never the key
    itself), `proxy`, `identity`, `agents`, `probe`/`probe_severity`/`probe_fix`,

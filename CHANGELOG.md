@@ -210,7 +210,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   explainability target for that project alone, with its gateway and hosted
   proxy filled in (`stg-api` → `stg`, `api` → `prod`; nothing typed, nothing
   enabled behind your back). It is read off the destination and never written
-  to `config.toml`, so no other project, `doctor` or the shipper moves. An API
+  to `config.toml`, so no other project, `doctor` or the shipper moves. The
+  machine's own target's config entry is read as that deployment only while
+  the target is on the deployment's gateway, and the hosted proxy is filled in
+  only beside the table's own gateway. An API
   host outside the table gets no gateway rather than the machine's, and `use`
   says where to set one. The one resolver consults it after `--target` and
   before an exported `$AISQUARE_EXPLAINABILITY_TARGET` and the machine
@@ -241,7 +244,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `key set` binds to the destination's deployment and a key bound there
   answers only while a destination names it, never as the machine's target of
   the same name, and a key bound to the machine's target never answers for a
-  destination's deployment of that name on another gateway (schema v24,
+  destination's deployment of that name on another gateway, nor one bound to a
+  target the machine no longer has until `key set` attaches it there (schema v24,
   `project_explainability.api_url`; such a key is kept, `key show` says why it
   is not used, and `--json` carries `api_url` and `serves`), the CLI never
   mints over a hand key, and a minted
@@ -273,7 +277,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   write the store refuses lands none of
   it, and an undo it refuses stays on the stack. Group names are shown as
   typed, never read as markup, and a blank one is refused (by
-  `onboard --group ' '` too, before it onboards).
+  `onboard --group ' '` too, before it onboards); `onboard --group ' team '`
+  joins `team`.
 - **A workspace key per project** (#141). The explainability key was one per
   machine; pointing one project at another workspace meant another shell or
   swapping the file for everyone. `aisquare explainability key set [--project

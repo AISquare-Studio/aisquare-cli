@@ -2337,6 +2337,15 @@ def _pane_is_the_agent(srv: TmuxServer, pane_id: str) -> bool:
     return facts is not None and not facts.dead and _agent_running(facts.current_command)
 
 
+def pane_is_the_agent(srv: TmuxServer, pane_id: str) -> bool:
+    """Whether the pane's foreground process is the agent — :func:`tell`'s readiness test.
+
+    Public because it is a seam by use: the captain's ``press`` and ``paste``
+    (``services.captain.actions``) type only where ``tell`` would.
+    """
+    return _pane_is_the_agent(srv, pane_id)
+
+
 def _file_note(project: ProjectInfo, label: str, text: str, sender: str | None) -> str:
     team = _team()
     try:

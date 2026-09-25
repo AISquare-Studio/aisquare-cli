@@ -38,6 +38,7 @@ import secrets
 import sqlite3
 import sys
 import time
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, cast
 
 from aisquare.core import credentials as credentials_store
@@ -390,10 +391,7 @@ def serve_token() -> str:
 
 def build_server() -> MCPServer:
     """An ``MCPServer`` exposing the orchestrator tools."""
-    from mcp import types
-    from mcp.server.mcpserver import Context, MCPServer
-    from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
-    from mcp.shared.exceptions import MCPError
+    from mcp.server.mcpserver import MCPServer
 
     from aisquare.core.version import __version__
 
@@ -435,6 +433,21 @@ def build_server() -> MCPServer:
 
     if ci_recall.available():
         server.add_tool(ci_recall.collective_intelligence_recall)
+
+    exact_error_results(server)
+    return server
+
+
+def exact_error_results(server: MCPServer) -> None:
+    """Make ``server`` answer a failing tool with the tool's OWN words, as an error result.
+
+    Installed on this server and on the captain's (``services.captain.actions``):
+    both promise remote agents an error wording they can self-correct off.
+    """
+    from mcp import types
+    from mcp.server.mcpserver import Context
+    from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
+    from mcp.shared.exceptions import MCPError
 
     async def call_tool_with_exact_errors(
         ctx: ServerRequestContext[Any], params: CallToolRequestParams
@@ -487,20 +500,75 @@ def build_server() -> MCPServer:
     server._lowlevel_server.add_request_handler(
         "tools/call", types.CallToolRequestParams, call_tool_with_exact_errors
     )
-    return server
+
+
+class IdleClock:
+    """How long the server has been idle: silent client AND no request still being answered.
+
+    Inbound lines alone are not enough (review of #217, gate 1): a sync tool runs
+    on a worker thread while the loop reads nothing, so a call longer than the
+    deadline — the captain's ``ask_manager(timeout=400)`` under the default 300 —
+    was killed mid-flight, its answer orphaned. A call in flight is activity, and
+    so is the answer going out. Touched only from the event loop (the stdin reader
+    and the ``tools/call`` handler both run there), so it needs no lock.
+    """
+
+    def __init__(self, clock: Callable[[], float] = time.monotonic) -> None:
+        self._clock = clock
+        self._last = clock()
+        self.in_flight = 0
+
+    def heard(self) -> None:
+        """The client said something."""
+        self._last = self._clock()
+
+    def started(self) -> None:
+        self.in_flight += 1
+        self._last = self._clock()
+
+    def finished(self) -> None:
+        self.in_flight = max(0, self.in_flight - 1)
+        self._last = self._clock()
+
+    def idle_for(self) -> float:
+        """Seconds of idleness — zero while any call is still running."""
+        return 0.0 if self.in_flight else self._clock() - self._last
+
+
+def track_tool_calls(server: MCPServer, idle: IdleClock) -> None:
+    """Wrap the registered ``tools/call`` handler so each call counts as activity for its whole run.
+
+    Through the SDK's public ``get_request_handler`` / ``add_request_handler``,
+    wrapping whatever handler is there (``exact_error_results``' on both of our
+    servers); not ``Server.middleware``, which the SDK marks provisional.
+    """
+    low = server._lowlevel_server
+    entry = low.get_request_handler("tools/call")
+    if entry is None:
+        return
+    inner = entry.handler
+
+    async def tracked(ctx: Any, params: Any) -> Any:
+        idle.started()
+        try:
+            return await inner(ctx, params)
+        finally:
+            idle.finished()
+
+    low.add_request_handler("tools/call", entry.params_type, tracked)
 
 
 class _StampedStdin:
-    """Async line source over stdin that stamps a clock on every received line.
+    """Async line source over stdin that stamps the idle clock on every received line.
 
     Duck-types the one thing ``mcp.server.stdio.stdio_server`` does with its
     injectable ``stdin`` — ``async for line in stdin`` — so the idle watchdog
     can measure time since the LAST message the client actually sent.
     """
 
-    def __init__(self, inner: Any, last_activity: list[float]) -> None:
+    def __init__(self, inner: Any, idle: IdleClock) -> None:
         self._inner = inner
-        self._last = last_activity
+        self._idle = idle
 
     def __aiter__(self) -> _StampedStdin:
         return self
@@ -509,32 +577,37 @@ class _StampedStdin:
         line = cast(str, await self._inner.readline())
         if not line:  # EOF — the immediate-exit path, untouched by the deadline
             raise StopAsyncIteration
-        self._last[0] = time.monotonic()
+        self._idle.heard()
         return line
 
 
-async def _serve_stdio_until_idle(server: MCPServer, close_after: int) -> None:
+async def _serve_stdio_until_idle(
+    server: MCPServer, close_after: int, command: str = "aisquare serve --stdio"
+) -> None:
     """Run the stdio transport with an idle deadline (#19).
 
-    The deadline counts seconds since the last inbound client message; any
-    protocol traffic (handshake included) resets it. A busy server never
-    exits; an abandoned one — including a client killed mid-handshake with
-    the pipe write end still open, so EOF never comes — always does.
+    The deadline counts seconds since the last inbound client message or the
+    end of the last tool call, and does not run while a call is in flight
+    (:class:`IdleClock`); any protocol traffic (handshake included) resets it.
+    A busy server never exits; an abandoned one — including a client killed
+    mid-handshake with the pipe write end still open, so EOF never comes —
+    always does.
     """
     from io import TextIOWrapper
 
     import anyio
     from mcp.server.stdio import stdio_server
 
-    last_activity = [time.monotonic()]
+    idle = IdleClock()
+    track_tool_calls(server, idle)
     wrapped = anyio.wrap_file(TextIOWrapper(sys.stdin.buffer, encoding="utf-8", errors="replace"))
-    stdin = _StampedStdin(wrapped, last_activity)
+    stdin = _StampedStdin(wrapped, idle)
 
     async def watchdog() -> None:
         interval = max(0.2, min(2.0, close_after / 4))
         while True:
             await anyio.sleep(interval)
-            if time.monotonic() - last_activity[0] < close_after:
+            if idle.idle_for() < close_after:
                 continue
             # stdout is the protocol channel: announce on stderr only. Then
             # os._exit, deliberately: the pending readline sits in a blocked
@@ -542,7 +615,7 @@ async def _serve_stdio_until_idle(server: MCPServer, close_after: int) -> None:
             # unblock — a normal return would hang the interpreter on that
             # thread's join and reintroduce the orphan this deadline retires.
             sys.stderr.write(
-                f"aisquare serve --stdio: no client messages for {close_after}s — "
+                f"{command}: no client messages for {close_after}s — "
                 "closing (idle deadline; --close-after 0 disables)\n"
             )
             sys.stderr.flush()
@@ -561,21 +634,29 @@ async def _serve_stdio_until_idle(server: MCPServer, close_after: int) -> None:
         tg.cancel_scope.cancel()  # EOF: stop the watchdog, exit normally
 
 
-def run_stdio(*, close_after: int = DEFAULT_CLOSE_AFTER) -> None:
+def run_stdio(
+    *,
+    close_after: int = DEFAULT_CLOSE_AFTER,
+    server: MCPServer | None = None,
+    command: str = "aisquare serve --stdio",
+) -> None:
     """Serve over stdio (Claude Desktop launches and owns the process).
 
     ``close_after`` is the idle deadline in seconds — time since the last
     client message — after which the server exits 0 on its own (#19).
     ``0`` disables it for deliberately persistent clients. No process
     management anywhere: the daemon minds only its own clock.
+
+    ``server`` defaults to this module's; the captain passes its own, and
+    ``command`` is how the idle notice on stderr names the process.
     """
-    server = build_server()
+    served = server if server is not None else build_server()
     if close_after <= 0:
-        server.run(transport="stdio")
+        served.run(transport="stdio")
         return
     import anyio
 
-    anyio.run(_serve_stdio_until_idle, server, close_after)
+    anyio.run(_serve_stdio_until_idle, served, close_after, command)
 
 
 class _BearerGuard:

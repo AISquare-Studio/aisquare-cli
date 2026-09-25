@@ -230,6 +230,13 @@ def _http(
     body is cut short keeps its status, with what arrived of the body — the
     status is the answer, the body its detail — as the explainability root
     post reads one (rc/fixes' ccf4ac8).
+
+    A success status whose body will not read is still ``unreachable``, so every
+    caller that tolerates one is unchanged, but it is not SAID as one: the server
+    answered, and may have done what was asked — a minted key exists whose uid
+    never arrived, which nothing here can revoke — so "Could not reach" was
+    wrong, and invited a retry that mints another (review of the accounts
+    stack's fold, round 2, F3).
     """
     from http.client import HTTPException, IncompleteRead
     from urllib.error import HTTPError, URLError
@@ -248,7 +255,17 @@ def _http(
     request = Request(url, data=data, headers=request_headers, method=method)
     try:
         with urlopen(request, timeout=timeout) as response:
-            return HttpResult(response.status, _parse(response.read()), dict(response.headers))
+            try:
+                raw = response.read()
+            except (HTTPException, OSError) as exc:
+                landed = "" if method == "GET" else "; the request may have been carried out"
+                raise IamError(
+                    "unreachable",
+                    f"{url} answered HTTP {response.status}, but the answer was cut short "
+                    f"({exc!r}){landed}.",
+                    detail=str(exc),
+                ) from exc
+            return HttpResult(response.status, _parse(raw), dict(response.headers))
     except HTTPError as exc:
         # Read here, inside the handler, where the clause below cannot catch it.
         try:

@@ -2480,6 +2480,22 @@ def test_bt_never_reclaims_for_an_agent_whose_pane_or_server_is_gone(
     assert task_now(new.id).status == "todo", "the new card is still given back"
 
 
+def test_bt_never_reclaims_for_a_session_no_fleet_row_carries(
+    alpha: ProjectInfo, agents: dict[str, FleetAgent], fleet_rec: Fleet
+) -> None:
+    """T5b (13437): the session is open, but no fleet row carries it any more (a /clear
+    rebinds the row to the new session) — there is no agent to hand the card to."""
+    old = add_task(alpha, "the old job")
+    new = add_task(alpha, "the new job")
+    team_service.claim_task(old.id, session_ref="sess-coder-1")
+    ok(actions.wololo("alpha", "coder-1", new.id))
+    with store_session() as store:
+        store.upsert_fleet_agent(agents["coder-1"].model_copy(update={"session_id": None}))
+    result = ok(actions.bt())
+    assert (task_now(old.id).status, task_now(old.id).claimed_by) == ("todo", None)
+    assert f"{old.id} left in the pool: coder-1 has no fleet row" in result["said"]
+
+
 def test_bt_after_a_wololo_ends_its_line_without_a_stray_card_id(
     alpha: ProjectInfo, agents: dict[str, FleetAgent], fleet_rec: Fleet
 ) -> None:

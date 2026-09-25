@@ -43,13 +43,17 @@ class _Captain(TyperGroup):
     for the verb (``captain_verbs.TYPED``). A rewrite added here later (T3's
     ``--voice``) goes after the record, never before it (13350).
 
-    **Say by default.** A first word that names no subcommand is a message:
-    ``captain "what is up"`` means ``captain say "what is up"``. Only the group's own
-    help stays the group's. Rewritten BEFORE the group parses: at
-    ``resolve_command`` the group had already refused ``--timeout`` as its own
-    unknown option and eaten a ``--`` that was to let a message start with ``-``. So
-    ``captain --timeout 30 "what is up"`` and ``captain -- "-5 degrees"`` both reach
-    ``say`` whole.
+    **Say by default.** A first WORD that names no subcommand is a message:
+    ``captain "what is up"`` means ``captain say "what is up"``. Options before the
+    first word look past themselves (T5b, 13437): each is skipped, with its value when
+    it takes one, so where ``--json`` sits never changes which command runs —
+    ``captain --json next`` runs ``next``, ``captain --json what is up`` says. Typing
+    into the captain is an outward effect; it happens only when the owner means to talk
+    to it. No word at all is the group's own: its help, or the bare captain. Rewritten
+    BEFORE the group parses: at ``resolve_command`` the group had already refused
+    ``--timeout`` as its own unknown option and eaten a ``--`` that was to let a message
+    start with ``-``. So ``captain --timeout 30 "what is up"`` and
+    ``captain -- "-5 degrees"`` both reach ``say`` whole.
 
     ``ctx`` is typed ``Any``: click is vendored (``typer._click``), and like
     ``cli/global_flags.py`` this stays on the public typer surface.
@@ -57,10 +61,39 @@ class _Captain(TyperGroup):
 
     def parse_args(self, ctx: Any, args: list[str]) -> list[str]:
         ctx.meta[_TYPED] = tuple(args)
-        if args and args[0] not in self.commands and args[0] not in ctx.help_option_names:
+        word = self._first_word(args)
+        if word is not None and word not in self.commands:
             args = ["say", *args]
         result: list[str] = super().parse_args(ctx, args)
         return result
+
+    def _first_word(self, args: list[str]) -> str | None:
+        """The first positional word, past the options before it (each with its value)."""
+        valued = self._valued_options()
+        index = 0
+        while index < len(args):
+            arg = args[index]
+            if arg == "--":
+                return args[index + 1] if index + 1 < len(args) else None
+            if arg.startswith("-") and arg != "-":
+                index += 2 if arg in valued else 1  # --opt=value is one token
+                continue
+            return arg
+        return None
+
+    def _valued_options(self) -> set[str]:
+        """The option spellings that take a value: the group's own (the global flags) and
+        ``say``'s, the command a leading option goes to with a message."""
+        say = self.commands.get("say")
+        params = [*self.params, *(say.params if say is not None else [])]
+        return {
+            spelling
+            for param in params
+            if param.param_type_name == "option"
+            and not getattr(param, "is_flag", False)
+            and not getattr(param, "count", False)
+            for spelling in (*param.opts, *param.secondary_opts)
+        }
 
     def invoke(self, ctx: Any) -> Any:
         token = captain_verbs.TYPED.set(ctx.meta.get(_TYPED, ()))

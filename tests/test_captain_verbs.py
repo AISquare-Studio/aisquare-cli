@@ -564,6 +564,55 @@ def test_the_one_captain_group_records_the_words_before_it_routes_a_message_to_s
     assert last_audit()["utterance"] == "aisquare captain attention"
 
 
+def test_a_leading_option_looks_past_itself_and_the_first_word_decides(
+    runner: CliRunner, alpha: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T5b (13437): where --json sits never changes which command runs. Typing into the
+    captain is an outward effect, so it happens only when the first WORD is not a verb:
+    options before it are skipped, each with its value. The audit keeps the argv as typed."""
+    from aisquare.services.captain import brain
+
+    heard: list[str] = []
+
+    def say(text: str, *, timeout: float = 180.0) -> brain.Reply:
+        heard.append(text)
+        return brain.Reply(text="all quiet")
+
+    monkeypatch.setattr(brain, "say", say)
+    result = runner.invoke(app, ["captain", "--json", "next"], catch_exceptions=False)
+    assert result.exit_code == 0, result.output
+    assert heard == [], "the verb ran; nothing was typed into the captain"
+    assert last_audit()["tool"] == "next"
+    assert last_audit()["utterance"] == "aisquare captain --json next"
+    result = runner.invoke(app, ["captain", "--json", "what", "is", "up"], catch_exceptions=False)
+    assert result.exit_code == 0 and json.loads(result.output)["reply"] == "all quiet"
+    result = runner.invoke(app, ["captain", "--timeout", "30", "next"], catch_exceptions=False)
+    assert heard == ["what is up"], "an option's VALUE is skipped too: 30 is not the word"
+    assert last_audit()["tool"] == "next"
+
+
+def test_a_leading_option_alone_is_the_bare_captain_never_an_empty_say(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`captain --json` is `--json captain`: no word, so nothing is said (T2's bare rule)."""
+    from aisquare.cli import fleet as fleet_cli
+    from aisquare.services import fleet
+    from aisquare.services.captain import brain
+
+    row = FleetAgent(
+        id="agt_c", project_id="prj_home", label="captain", role="captain",
+        pane_id="%1", cwd=Path("/tmp"), created_at=datetime.now(tz=UTC),
+    )  # fmt: skip
+    monkeypatch.setattr(brain, "find", lambda: row)
+    monkeypatch.setattr(brain, "say", lambda *a, **k: pytest.fail("said with no words"))
+    monkeypatch.setattr(fleet_cli, "interactive_terminal", lambda: True)
+    monkeypatch.setattr(fleet_cli, "_exec_attach", lambda argv: pytest.fail("exec'd under --json"))
+    monkeypatch.setattr(fleet, "attach_argv", lambda project: ["tmux", "attach", "-t", "asq-h"])
+    result = runner.invoke(app, ["captain", "--json"], catch_exceptions=False)
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["agent"]["id"] == "agt_c"
+
+
 def test_the_verbs_need_no_mcp_sdk(runner: CliRunner, monkeypatch: pytest.MonkeyPatch) -> None:
     """A base install (no [serve] extra) drives the captain from the terminal all the same."""
     for name in list(sys.modules):

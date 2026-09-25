@@ -1,0 +1,260 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>captain</title>
+<style>
+  :root { color-scheme: dark; --bg:#0f1115; --fg:#e6e6e6; --dim:#8a8f98; --acc:#5fb3ff; --warn:#ffb454; --ok:#7ad38c; --bad:#ff6b6b; }
+  html, body { margin:0; background:var(--bg); color:var(--fg); font: 16px/1.4 system-ui, sans-serif; }
+  main { max-width: 42rem; margin: 0 auto; padding: 1rem; display: grid; gap: .9rem; }
+  header { display:flex; justify-content:space-between; align-items:center; gap:.5rem; }
+  h1 { font-size: 1.1rem; margin:0; letter-spacing:.04em; }
+  .chip { font-size:.85rem; color:var(--dim); }
+  .chip.on { color: var(--ok); }
+  .chip.bad { color: var(--bad); }
+  .row { display:flex; gap:.5rem; flex-wrap:wrap; align-items:center; }
+  button { background:#1b1f27; color:var(--fg); border:1px solid #2a3040; border-radius:.6rem; padding:.55rem .9rem; font-size:1rem; cursor:pointer; }
+  button.active { border-color: var(--acc); color: var(--acc); }
+  button.big { flex:1; padding: 1.4rem; font-size: 1.15rem; touch-action: none; user-select: none; -webkit-user-select: none; }
+  button.big.live { border-color: var(--bad); color: var(--bad); }
+  #interim { min-height: 1.6rem; color: var(--dim); font-style: italic; }
+  #thinking { display:none; color: var(--warn); }
+  #thinking.on { display:inline; }
+  #log { display:grid; gap:.5rem; }
+  .said, .reply, .note { padding:.6rem .8rem; border-radius:.6rem; }
+  .said { background:#182233; align-self:end; }
+  .reply { background:#1b2a1e; }
+  .note { color: var(--dim); font-size:.9rem; }
+  input[type=text] { flex:1; background:#1b1f27; color:var(--fg); border:1px solid #2a3040; border-radius:.6rem; padding:.55rem .8rem; font-size:1rem; }
+  #notice { color: var(--warn); }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>▲ captain</h1>
+    <span id="status" class="chip">connecting…</span>
+  </header>
+  <div id="notice"></div>
+  <div class="row">
+    <button id="mode-focus" class="active" title="Hold to talk">focus</button>
+    <button id="mode-listen" title="Mic stays open; silence ends an utterance">listen</button>
+    <button id="mute" title="Mute the mic in listen mode">mute</button>
+    <button id="speaker" title="Speak the replies through the PC">speaker: on</button>
+    <span id="thinking" class="chip">thinking…</span>
+  </div>
+  <div class="row">
+    <button id="talk" class="big">hold to talk (or hold space)</button>
+  </div>
+  <div id="interim"></div>
+  <form id="typed" class="row">
+    <input id="text" type="text" placeholder="or type a request — “stop listening” turns the mic off" autocomplete="off">
+    <button type="submit">send</button>
+  </form>
+  <section id="log"></section>
+</main>
+<script type="module">
+// The captain's voice page (card T3). One websocket, two modes, one microphone.
+// Audio leaves as 16 kHz mono PCM16LE in 20 ms binary frames; everything else is JSON.
+const TARGET_RATE = 16000;
+const FRAME_SAMPLES = 320;
+const DRAIN_TIMEOUT_MS = 400;
+
+// The AudioWorklet processor, inline and instantiated from a Blob URL (lifted
+// from cliXR's voice.js): downmix, box-average resample to 16 kHz, PCM16 frames.
+const WORKLET_SOURCE = `
+const TARGET_RATE = ${TARGET_RATE};
+const FRAME_SAMPLES = ${FRAME_SAMPLES};
+class PcmFramer extends AudioWorkletProcessor {
+  constructor() {
+    super();
+    this.ratio = sampleRate / TARGET_RATE;
+    this.phase = 0; this.acc = 0; this.accN = 0; this.held = 0;
+    this.frame = new Int16Array(FRAME_SAMPLES); this.filled = 0; this.stopping = false;
+    this.port.onmessage = (e) => { if (e.data === 'stop') this.stopping = true; };
+  }
+  push(value) {
+    let s = value;
+    if (!(s > -1)) s = s <= -1 ? -1 : 0; else if (s > 1) s = 1;
+    this.frame[this.filled++] = s < 0 ? s * 0x8000 : s * 0x7fff;
+    if (this.filled === FRAME_SAMPLES) {
+      const out = new Int16Array(this.frame); this.filled = 0;
+      this.port.postMessage(out.buffer, [out.buffer]);
+    }
+  }
+  flush() {
+    if (this.filled > 0) {
+      const tail = this.frame.slice(0, this.filled); this.filled = 0;
+      this.port.postMessage(tail.buffer, [tail.buffer]);
+    }
+    this.port.postMessage('done');
+  }
+  process(inputs) {
+    if (this.stopping) { this.flush(); return false; }
+    const input = inputs[0];
+    if (!input || !input.length) return true;
+    const block = input[0];
+    if (!block) return true;
+    const channels = input.length;
+    for (let i = 0; i < block.length; i++) {
+      let x = block[i];
+      if (channels > 1) { for (let c = 1; c < channels; c++) x += input[c][i]; x /= channels; }
+      this.acc += x; this.accN++; this.phase += 1;
+      while (this.phase >= this.ratio) {
+        if (this.accN) { this.held = this.acc / this.accN; this.acc = 0; this.accN = 0; }
+        this.push(this.held); this.phase -= this.ratio;
+      }
+    }
+    return true;
+  }
+}
+registerProcessor('pcm-framer', PcmFramer);
+`;
+
+const $ = (id) => document.getElementById(id);
+const status = $('status'), notice = $('notice'), interim = $('interim'), log = $('log'), thinking = $('thinking');
+const talk = $('talk'), muteBtn = $('mute'), speakerBtn = $('speaker'), textInput = $('text');
+const modeButtons = { focus: $('mode-focus'), listen: $('mode-listen') };
+
+const token = new URLSearchParams(location.hash.replace(/^#/, '')).get('token') || '';
+let ws = null, mode = 'focus', listening = false, muted = false, holding = false, seq = 0;
+let ctx = null, stream = null, node = null, source = null, moduleReady = null, streaming = false;
+
+function say(cls, text) {
+  const el = document.createElement('div'); el.className = cls; el.textContent = text;
+  log.prepend(el);
+}
+function setStatus(text, cls = '') { status.textContent = text; status.className = 'chip ' + cls; }
+function send(obj) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj)); }
+
+function connect() {
+  if (!token) { setStatus('no token — open the URL aisquare captain voice printed', 'bad'); return; }
+  const url = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws';
+  ws = new WebSocket(url);
+  ws.binaryType = 'arraybuffer';
+  ws.onopen = () => { ws.send(JSON.stringify({ t: 'auth', token })); };
+  ws.onclose = (e) => {
+    streaming = false;
+    if (e.code === 4401) { setStatus('token rejected — open the printed URL again', 'bad'); return; }
+    setStatus('reconnecting…'); setTimeout(connect, 1500);
+  };
+  ws.onmessage = (e) => {
+    let m; try { m = JSON.parse(e.data); } catch { return; }
+    switch (m.t) {
+      case 'hello': setStatus('connected', 'on'); setMode(m.mode, false); listening = m.listening; speakerBtn.textContent = 'speaker: ' + (m.speaker ? 'on' : 'off'); thinking.className = 'chip' + (m.thinking ? ' on' : ''); if (m.mode === 'listen' && m.listening) startStream(); break;
+      case 'mode': setMode(m.mode, false); listening = m.listening; if (listening) startStream(); else stopStream(); break;
+      case 'listening': listening = m.on; if (!m.on) { stopStream(); say('note', m.why ? 'mic off (' + m.why + ')' : 'mic off'); muteBtn.textContent = 'unmute'; muted = true; } else { muteBtn.textContent = 'mute'; muted = false; startStream(); } break;
+      case 'stt': if (m.final) { interim.textContent = ''; if (m.text) say('said', m.text); } else interim.textContent = m.text; break;
+      case 'utterance': break;
+      case 'thinking': thinking.className = 'chip' + (m.on ? ' on' : ''); break;
+      case 'reply': say('reply', m.text); break;
+      case 'speaker': speakerBtn.textContent = 'speaker: ' + (m.on ? 'on' : 'off'); break;
+      case 'error': say('note', '✗ ' + m.message + (m.fix ? ' — ' + m.fix : '')); if (m.code === 'auth_failed') setStatus('token rejected', 'bad'); break;
+    }
+  };
+}
+
+function setMode(next, tell) {
+  mode = next;
+  for (const [name, btn] of Object.entries(modeButtons)) btn.className = name === mode ? 'active' : '';
+  talk.style.display = mode === 'focus' ? '' : 'none';
+  muteBtn.style.display = mode === 'listen' ? '' : 'none';
+  if (tell) send({ t: 'mode', mode });
+}
+
+async function ensureGraph() {
+  if (!ctx) {
+    const Ctor = globalThis.AudioContext ?? globalThis.webkitAudioContext;
+    if (!Ctor) { notice.textContent = 'This browser has no Web Audio.'; return false; }
+    try { ctx = new Ctor({ sampleRate: TARGET_RATE }); } catch { ctx = new Ctor(); }
+  }
+  if (ctx.state === 'suspended') ctx.resume().catch(() => {});
+  if (!navigator.mediaDevices?.getUserMedia) {
+    notice.textContent = 'No microphone here: the page must be opened at http://localhost:' + (location.port || '8749') + ' (a secure context), e.g. on the PC, or on a phone through adb reverse.';
+    return false;
+  }
+  if (!stream || !stream.getTracks().every((t) => t.readyState === 'live')) {
+    try { stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, sampleRate: TARGET_RATE, echoCancellation: true } }); }
+    catch (err) { notice.textContent = 'Microphone permission was refused: ' + (err?.message ?? err); return false; }
+    if (source) { source.disconnect(); source = null; }
+  }
+  if (!moduleReady) {
+    const blob = new Blob([WORKLET_SOURCE], { type: 'application/javascript' });
+    moduleReady = ctx.audioWorklet.addModule(URL.createObjectURL(blob));
+  }
+  await moduleReady;
+  if (!node) {
+    node = new AudioWorkletNode(ctx, 'pcm-framer', { numberOfInputs: 1, numberOfOutputs: 0, channelCount: 1, channelCountMode: 'explicit' });
+    node.port.onmessage = (e) => { if (typeof e.data !== 'string') onFrame(e.data); else if (e.data === 'done' && pendingEnd) { pendingEnd(); pendingEnd = null; } };
+  }
+  if (!source) {
+    try { source = ctx.createMediaStreamSource(stream); }
+    catch (err) { // a browser that refuses a 16 kHz source: rebuild at the hardware rate
+      ctx = new (globalThis.AudioContext ?? globalThis.webkitAudioContext)(); moduleReady = null; node = null;
+      return ensureGraph();
+    }
+  }
+  return true;
+}
+
+let pendingEnd = null;
+function onFrame(buffer) {
+  if (!(buffer instanceof ArrayBuffer) || buffer.byteLength === 0 || buffer.byteLength % 2) return;
+  if (!streaming) return;
+  if (ws && ws.readyState === 1) ws.send(buffer);
+}
+
+// focus: hold to talk. The header goes out on press, frames while held, audioEnd after the flush.
+async function pressStart() {
+  if (holding || mode !== 'focus') return;
+  holding = true;
+  if (!(await ensureGraph())) { holding = false; return; }
+  if (!holding) return;
+  send({ t: 'audio', seq: ++seq });
+  streaming = true; source.connect(node); talk.className = 'big live';
+  interim.textContent = '…';
+}
+function pressEnd() {
+  if (!holding) return;
+  holding = false; talk.className = 'big';
+  finishStream(() => send({ t: 'audioEnd' }));
+}
+function finishStream(then) {
+  if (!streaming) { then?.(); return; }
+  const done = () => { if (!streaming) return; streaming = false; try { source?.disconnect(); } catch {} then?.(); };
+  pendingEnd = done;
+  setTimeout(done, DRAIN_TIMEOUT_MS);
+  // Ask the processor for its partial frame; a fresh node replaces the stopping one.
+  node?.port.postMessage('stop'); const old = node; node = null; setTimeout(() => old?.disconnect?.(), DRAIN_TIMEOUT_MS + 50);
+}
+
+// listen: the mic stays open; the server cuts utterances on silence.
+async function startStream() {
+  if (mode !== 'listen' || muted || streaming) return;
+  if (!(await ensureGraph())) return;
+  streaming = true; source.connect(node); setStatus('listening', 'on');
+}
+function stopStream() { finishStream(); setStatus('connected', 'on'); }
+
+talk.addEventListener('pointerdown', (e) => { e.preventDefault(); pressStart(); });
+talk.addEventListener('pointerup', pressEnd);
+talk.addEventListener('pointercancel', pressEnd);
+talk.addEventListener('pointerleave', () => { if (holding) pressEnd(); });
+window.addEventListener('keydown', (e) => { if (e.code === 'Space' && mode === 'focus' && document.activeElement !== textInput && !e.repeat) { e.preventDefault(); pressStart(); } });
+window.addEventListener('keyup', (e) => { if (e.code === 'Space' && mode === 'focus' && document.activeElement !== textInput) { e.preventDefault(); pressEnd(); } });
+modeButtons.focus.addEventListener('click', () => setMode('focus', true));
+modeButtons.listen.addEventListener('click', () => setMode('listen', true));
+muteBtn.addEventListener('click', () => { muted = !muted; muteBtn.textContent = muted ? 'unmute' : 'mute'; send({ t: 'listen', on: !muted }); });
+speakerBtn.addEventListener('click', () => { const on = speakerBtn.textContent.endsWith('off'); send({ t: 'speaker', on }); });
+$('typed').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const text = textInput.value.trim(); if (!text) return;
+  textInput.value = '';
+  if (/^stop listening[.!?]?$/i.test(text)) { muted = true; muteBtn.textContent = 'unmute'; send({ t: 'stop' }); return; }
+  say('said', text); send({ t: 'text', text });
+});
+connect();
+</script>
+</body>
+</html>

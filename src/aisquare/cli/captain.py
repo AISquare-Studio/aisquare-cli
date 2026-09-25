@@ -20,6 +20,7 @@ from typing import Annotated, Any
 import typer
 from typer.core import TyperGroup
 
+from aisquare.cli import captain_voice
 from aisquare.cli.common import fail
 from aisquare.cli.serve import dependency_error
 from aisquare.core.console import stdout_console
@@ -46,6 +47,7 @@ app = typer.Typer(
     invoke_without_command=True,
     no_args_is_help=False,
 )
+captain_voice.register(app)  # `voice`: the page, in its own module (T3)
 
 
 @app.callback()

@@ -170,11 +170,15 @@ def test_resolve_records_how_and_the_item_leaves_the_list(
     code, out = run(runner, "resolve", item["id"][:6], "told the manager: yes")
     assert code == 0 and f"resolved {item['id']}" in out and "action seq" in out
     assert run_json(runner, "attention")[1]["items"] == []
+    # A second resolve is refused in the queue's words (#218 gate 1, blocker 3): no
+    # silent second entry, and the refusal is audited like any other call.
     code, data = run_json(runner, "resolve", item["id"], "again")
-    assert code == 0 and data["item"]["status"] == "resolved"
-    assert [h["how"] for h in data["item"]["history"]] == ["told the manager: yes", "again"]
+    assert code == 1 and data["error"] == "refused"
+    code, out = run(runner, "resolve", item["id"], "again")
+    assert code == 1 and "already resolved" in out
     audit = last_audit()
-    assert audit["tool"] == "resolve" and audit["args"] == {"item": item["id"], "how": "again"}
+    assert audit["tool"] == "resolve" and audit["ok"] is False
+    assert audit["args"] == {"item": item["id"], "how": "again"}
     assert audit["utterance"] == f"aisquare captain resolve {item['id']} again"
 
 

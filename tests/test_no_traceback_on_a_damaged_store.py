@@ -66,6 +66,8 @@ from aisquare.core import paths
 UNINVOKED = {
     "serve": "binds a port and blocks",
     "captain serve": "serves MCP on stdio and blocks until its client goes quiet",
+    "captain say": "starts or types into the captain and waits for its reply",
+    "captain chat": "starts or types into the captain for every line it reads",
     "launch": "spawns a real agent process",
     "team spawn": "spawns a real agent process",
     "login": "polls the identity provider until a browser approval arrives",

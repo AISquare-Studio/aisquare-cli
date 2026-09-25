@@ -30,6 +30,9 @@ IMPLEMENTED: set[tuple[str, ...]] = {
     ("launch",),
     ("serve",),
     ("captain", "serve"),
+    ("captain",),
+    ("captain", "say"),
+    ("captain", "chat"),
     *(
         ("captain", verb)
         for verb in (

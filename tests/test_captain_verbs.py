@@ -522,14 +522,15 @@ def test_the_utterance_is_the_argv_as_typed(
     runner: CliRunner, alpha: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """13081: what the owner typed — the process's own argv when it carries this call, the
-    root's flags included; a --json after ``captain`` is recorded once, where it was."""
+    root's flags included; a --json typed after the verb is recorded once, where it was."""
     typed = ["--no-color", "captain", "attention", "--limit", "3"]
     monkeypatch.setattr(sys, "argv", ["/usr/local/bin/aisquare", *typed])
     assert runner.invoke(app, typed, catch_exceptions=False).exit_code == 0
     assert last_audit()["utterance"] == "aisquare --no-color captain attention --limit 3"
     monkeypatch.setattr(sys, "argv", ["pytest"])
-    assert runner.invoke(app, ["captain", "--json", "next"], catch_exceptions=False).exit_code == 0
-    assert last_audit()["utterance"] == "aisquare captain --json next"
+    # (--json right after `captain` is a message to the captain: T2's say-by-default.)
+    assert runner.invoke(app, ["captain", "next", "--json"], catch_exceptions=False).exit_code == 0
+    assert last_audit()["utterance"] == "aisquare captain next --json"
 
 
 def test_the_verbs_need_no_mcp_sdk(runner: CliRunner, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -904,6 +904,14 @@ class AmbiguousIdError(LookupError):
         self.ref = ref
 
 
+def _is_the_home(root: Path) -> bool:
+    """Whether ``root`` is the aisquare home itself (resolved, so a symlink is the same home)."""
+    try:
+        return root.resolve() == paths.aisquare_home().resolve()
+    except OSError:
+        return False
+
+
 class ContextStore(Protocol):
     """Everything the service layer needs from persistent context storage."""
 
@@ -1552,6 +1560,14 @@ class SqliteStore:
         A revived row comes back loose and unpinned, as :meth:`ensure_project`
         says; a live one keeps its place.
         """
+        if _is_the_home(project.root):
+            # The aisquare home's row is the captain's HOME BOARD (services.captain):
+            # captured so it can hold the captain's row and events, never one of the
+            # owner's projects — a spawn, a codename, a rename or a launch's
+            # activation onboarding it would put `.aisquare` in the sidebar, in
+            # `project list` and in the captain's own projects() tool (T2, 13121).
+            self.ensure_project(project)
+            return self._written_project(project.id)
         now = _now_iso()
         self._conn.execute(
             "INSERT INTO project (id, root, name, linked_repos, created_at, onboarded_at) "
@@ -1569,8 +1585,16 @@ class SqliteStore:
             ),
         )
         self._conn.commit()
-        stored = self.get_project(project.id)
-        assert stored is not None  # just written
+        return self._written_project(project.id)
+
+    def _written_project(self, project_id: str) -> ProjectInfo:
+        """The row just written — a ``KeyError`` if it is gone already (another process's
+        purge between the write and this read), as every lookup here says a missing
+        project. Checked, not asserted: under ``python -O`` an ``assert`` is stripped and
+        ``None`` went back against the return type (pre-gate review of #219)."""
+        stored = self.get_project(project_id)
+        if stored is None:
+            raise KeyError(project_id)
         return stored
 
     def list_projects(

@@ -43,7 +43,7 @@ from types import ModuleType
 from typing import Any, Literal
 
 from aisquare.core import claude_accounts as claude_accounts_core
-from aisquare.core import codenames, harness, orchestrator, personas, selfcli
+from aisquare.core import codenames, harness, orchestrator, paths, personas, selfcli
 from aisquare.core import tmux as tmux_core
 from aisquare.core.config import FleetRoleSettings, FleetSettings, load_config
 from aisquare.core.ids import new_agent_id
@@ -56,7 +56,7 @@ from aisquare.core.tmux import (
     TmuxUnavailable,
     WindowInfo,
 )
-from aisquare.core.workspace import active_project
+from aisquare.core.workspace import active_project, project_id_for
 from aisquare.models import (
     CLOSED_STATUSES,
     FleetAgent,
@@ -76,7 +76,12 @@ FLEET_ROLES: tuple[str, ...] = ("manager", "coder", "tester", "reviewer", "valid
 """The fleet's own roles (§3.3). Any harness or ``team bind`` role is accepted too."""
 
 MANAGER_LABEL = "manager"
-"""The one label the fleet reserves: exactly one manager per project."""
+"""A label the fleet reserves: exactly one manager per project."""
+
+CAPTAIN_ROLE = "captain"
+CAPTAIN_LABEL = "captain"
+"""The home-level captain (services.captain): one per HOME, on the home board — its role
+and its label are one word, as the manager's are, and the label is reserved (T2, 13121)."""
 
 LABEL = re.compile(r"^[a-z][a-z0-9-]{1,23}$")
 """An agent label: ≤ 24 chars, no ``.``, ``:`` or spaces (tmux target separators)."""
@@ -207,6 +212,9 @@ class SpawnReceipt:
     branch it was put on), a prompt that could not be typed, an agent that will not
     join the board. NOT a permission-mode fallback — there is none: the mode is the
     flag, then the role's config, then ``auto``, and nothing here rewrites it."""
+    prompt_typed: bool = False
+    """Whether a ``prompt`` went in — pasted and submitted. A caller waiting for the
+    answer (the captain's ``say``) must not wait on one the notes say never did."""
 
 
 @dataclass(frozen=True)
@@ -540,6 +548,23 @@ def ensure_codename(project: ProjectInfo, store: ContextStore | None = None) -> 
         return assign(opened)
 
 
+def _is_home_project(project: ProjectInfo) -> bool:
+    """Whether ``project`` is the aisquare home's own row — the captain's home board."""
+    home = paths.aisquare_home().resolve()
+    return project.id == project_id_for(home)
+
+
+def _is_the_captains_launch(cwd: Path | None, agent_args: Sequence[str] | None) -> bool:
+    """Whether a captain spawn carries what makes it the captain: a folder of its own and
+    no tool but its server (``services.captain.brain.launch_args``, replayed by a restart)."""
+    args = list(agent_args or ())
+    no_tools = any(
+        word == "--tools" and index + 1 < len(args) and args[index + 1] == ""
+        for index, word in enumerate(args)
+    )
+    return cwd is not None and "--strict-mcp-config" in args and no_tools
+
+
 def next_label(
     project: ProjectInfo,
     role: str,
@@ -559,6 +584,10 @@ def next_label(
         raise FleetError(f"the label {MANAGER_LABEL!r} is reserved for the manager role")
     if role == "manager":
         return MANAGER_LABEL
+    if wanted == CAPTAIN_LABEL and role != CAPTAIN_ROLE:
+        raise FleetError(f"the label {CAPTAIN_LABEL!r} is reserved for the captain")
+    if role == CAPTAIN_ROLE:
+        return CAPTAIN_LABEL
 
     def pick(store: ContextStore) -> str:
         live = {agent.label for agent in store.fleet_agents(project.id, live_only=True)}
@@ -1211,6 +1240,7 @@ def spawn(
     spec: LaunchSpec | None = None,
     claude_code: bool = False,
     takes_over: str | None = None,
+    cwd: Path | None = None,
 ) -> SpawnReceipt:
     """Start an agent for ``project`` in the fleet's tmux server and record it.
 
@@ -1289,6 +1319,11 @@ def spawn(
     """
     config = settings()
     _require_role(role)
+    if role == CAPTAIN_ROLE and not _is_home_project(project):
+        raise FleetError(
+            "the captain lives on the home board, one per home — `aisquare captain` starts "
+            f"it; it cannot be spawned into {_name(project)}"
+        )
     replayed_args = spec is not None and not agent_args
     if spec is not None:
         # The recorded launch stands in for the role's config, argument by argument
@@ -1302,6 +1337,13 @@ def spawn(
         worktree = worktree if worktree is not None else spec.worktree
         if replayed_args:
             agent_args = list(spec.extra_args)
+    if role == CAPTAIN_ROLE and not _is_the_captains_launch(cwd, agent_args):
+        # `fleet spawn captain` on the home was a captain with every tool, in the
+        # home itself — and `aisquare captain` then attached to it and typed into it.
+        raise FleetError(
+            "the captain is started by `aisquare captain`, which gives it its brain folder "
+            "and no tool but its own server"
+        )
     # A transcript to resume is one only Claude Code writes.
     claude_code = claude_code or resume is not None
     srv = server(config)
@@ -1342,6 +1384,13 @@ def spawn(
                     f"{_name(project)} already has a manager ({existing.id}) — one per "
                     "project; `aisquare fleet stop manager` first"
                 )
+        if role == CAPTAIN_ROLE:
+            existing = next((agent for agent in live if agent.role == CAPTAIN_ROLE), None)
+            if existing is not None:
+                raise FleetError(
+                    f"the home already has a captain ({existing.id}) — one per home; "
+                    "`aisquare captain` attaches to it"
+                )
         if len(live) >= config.max_agents_per_project:
             raise FleetError(
                 f"{_name(project)} already runs {len(live)} agents "
@@ -1358,7 +1407,11 @@ def spawn(
             notes.append(f"label {label!r} is held by a live agent — using {picked!r}")
 
     use_worktree = role_config.worktree if worktree is None else worktree
-    cwd = project.root
+    # ``cwd`` is a non-worktree agent's working directory when it is not the
+    # project's root: the captain runs from its brain folder under the home, so no
+    # project's CLAUDE.md or hooks brief it as a worker (T2, 13121). The row
+    # records it and a restart replays it.
+    cwd = cwd if cwd is not None else project.root
     if use_worktree:
         if not is_git_project(project.root):
             raise FleetError(
@@ -1459,6 +1512,14 @@ def spawn(
     flags += ["--name", picked]
     command = selfcli.argv_for(["launch", role, *flags, *role_args, *extra])
     env = {orchestrator.FLEET_AGENT_ENV_VAR: agent_id}
+    if role == CAPTAIN_ROLE:
+        # The launcher activates a board BEFORE it hands the agent its `-e` pairs,
+        # from its cwd — the brain folder, where `.aisquare` above it is a project
+        # marker. With the hub only in `-e`, it onboarded the brain folder (or
+        # `$HOME`, under `~/.aisquare`) as a project; here the launcher lands on the
+        # home board, which the store keeps captured (T2).
+        env["AISQUARE_HOME"] = str(paths.aisquare_home().resolve())
+        env["AISQUARE_TEAM_HUB"] = str(project.root)
     if config.disable_native_agent_teams:
         env["CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"] = "0"
     # The desktop as THIS process sees it (#147). A window inherits the tmux
@@ -1547,9 +1608,10 @@ def spawn(
     if takes_over is not None and identity.session_id is not None:
         stored = _take_over(stored, takes_over, identity.session_id, notes)
     _supersede(rows, views, stored, config)
-    if prompt:
-        _type_prompt(srv, stored.pane_id, prompt, notes)
-    return SpawnReceipt(agent=stored, asked_label=label, tmux_session=tmux_session, notes=notes)
+    typed = _type_prompt(srv, stored.pane_id, prompt, notes) if prompt else False
+    return SpawnReceipt(
+        agent=stored, asked_label=label, tmux_session=tmux_session, notes=notes, prompt_typed=typed
+    )
 
 
 def _chosen_persona(
@@ -1920,6 +1982,8 @@ def _relabel(
     """
     if agent.role == "manager":
         raise FleetError(f"{_name(project)} already has a manager — one per project")
+    if agent.role == CAPTAIN_ROLE:
+        raise FleetError("the home already has a captain — one per home")
     if agent.worktree:
         raise FleetError(
             f"label {agent.label!r} was taken while this agent was starting, and "
@@ -1957,8 +2021,10 @@ def _verify_cap(store: ContextStore, stored: FleetAgent, cap: int) -> None:
     )
 
 
-def _type_prompt(srv: TmuxServer, pane_id: str, prompt: str, notes: list[str]) -> None:
+def _type_prompt(srv: TmuxServer, pane_id: str, prompt: str, notes: list[str]) -> bool:
     """Wait (bounded) for the agent to come up, then paste the prompt and press Enter.
+
+    ``True`` when both went in; otherwise a note says why not.
 
     Ready means the pane's foreground process is no longer our launcher (or it
     has produced scrollback). Past :data:`PROMPT_TIMEOUT` a SINGLE-LINE prompt
@@ -1979,7 +2045,7 @@ def _type_prompt(srv: TmuxServer, pane_id: str, prompt: str, notes: list[str]) -
         facts = srv.pane_facts(pane_id)
         if facts is None or facts.dead:
             notes.append("the agent exited before the prompt could be typed")
-            return
+            return False
         if _agent_running(facts.current_command) or facts.history_size > 0:
             ready = True
             break
@@ -1996,7 +2062,7 @@ def _type_prompt(srv: TmuxServer, pane_id: str, prompt: str, notes: list[str]) -
             "as its own message. Send it once the agent is up: `aisquare fleet tell "
             "<label> …`, or `aisquare fleet attach`"
         )
-        return
+        return False
     else:
         notes.append(
             f"the agent did not come up within {PROMPT_TIMEOUT:.0f} s — prompt typed anyway"
@@ -2006,6 +2072,8 @@ def _type_prompt(srv: TmuxServer, pane_id: str, prompt: str, notes: list[str]) -
         srv.send_keys(pane_id, "Enter")
     except TmuxError as exc:
         notes.append(f"could not type the prompt: {exc}")
+        return False
+    return True
 
 
 #: How long after its end an agent whose window is still on the tmux server stays in
@@ -3942,6 +4010,7 @@ def _respawn(
         # Code whatever its binary is called, resumed or `--fresh`.
         claude_code=session is not None,
         takes_over=session.id if takes_over and resume is None and session is not None else None,
+        cwd=None if agent.worktree else agent.cwd,
     )
     notes.extend(receipt.notes)
     return receipt, resume is not None, notes
@@ -4306,6 +4375,12 @@ def _restart_prompt(agent: FleetAgent) -> str:
     ``working`` from its start hook, with no turn to end — refused the board's
     nudges for as long as that row stayed fresh (review of #163, round 2).
     """
+    if agent.role == CAPTAIN_ROLE:
+        # The captain has no shell (T2): it picks up through its own tools.
+        return (
+            "You are the captain, restarted and resumed mid-session: call attention() to see "
+            "what needs the owner now, then carry on from where you left off."
+        )
     return (
         f"You are {agent.label}, restarted and resumed mid-session: re-read `aisquare board` "
         "and `git status`, then continue exactly where you left off without redoing work "
@@ -4343,6 +4418,12 @@ def _handoff_prompt(
     short on purpose: the board and the working tree are the source of truth,
     and the prompt points at them instead of retelling them.
     """
+    if agent.role == CAPTAIN_ROLE:
+        return (
+            f"You are the captain, taking over from a previous session ({reason or 'it stopped'})."
+            " Call attention() to see what needs the owner, and since(project) for what "
+            "happened on a board while you were away; then wait for the owner."
+        )
     lines = [
         f"You are {agent.label}, taking over from a previous session of this agent "
         f"({reason or 'it stopped'}).",

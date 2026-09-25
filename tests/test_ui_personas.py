@@ -308,7 +308,7 @@ def test_the_catalogue_lists_layer_description_roles_and_marks(
 
     listed = drive(scenario, project=project)
     names = [row[0] for row in listed]
-    assert names == ["broken", "careful", "mentor", "minimalist", "pair", "skeptic"]
+    assert names == ["broken", "captain", "careful", "mentor", "minimalist", "pair", "skeptic"]
     by_name = {row[0]: row for row in listed}
     assert by_name["skeptic"] == (
         "skeptic",

@@ -726,6 +726,7 @@ def _ensure_worktree(
     notes: list[str],
     *,
     refuse_if_taken: Callable[[], None] | None = None,
+    own: Path | None = None,
 ) -> Path:
     """``<root>/<worktree_dir>/<label>`` on ``branch``, created or reused.
 
@@ -736,6 +737,17 @@ def _ensure_worktree(
     the branch THIS spawn asked for (see :func:`_reuse_worktree`), never handed
     over on whatever branch the last agent left it on.
 
+    Except the tree ``own`` names: that is the one a restarted or switched
+    agent worked in (:func:`_respawn`), and the replacement is the same agent
+    carrying on, so it is taken as it stands. ``branch`` is rebuilt from the
+    row's task and the codename, and neither is what it was at the spawn: a
+    task that closed is forgotten by the row (rule 3,
+    ``retire_fleet_assignments``), and ``fleet rename`` changes the codename.
+    Put on that branch, a tree holding uncommitted work was refused AFTER
+    ``restart`` or ``switch`` had stopped its agent — lost, its claims released
+    — and a clean one was moved to a branch the agent never worked on (review
+    of #203, final round, FLEET-2).
+
     ``refuse_if_taken`` reaches :func:`_reuse_worktree`, which asks it once more
     before switching branches; a tree this call CREATES cannot be another
     agent's, because ``git worktree add`` refuses an existing directory.
@@ -743,6 +755,9 @@ def _ensure_worktree(
     path = root / worktree_dir / label
     if path.exists():
         if (path / ".git").exists():
+            if own is not None and path.resolve() == own.resolve():
+                notes.append(f"kept the agent's worktree at {path} as it stands")
+                return path
             _reuse_worktree(root, path, branch, notes, refuse_if_taken=refuse_if_taken)
             return path
         # A `git worktree add` still in flight has made the directory and not
@@ -1241,6 +1256,7 @@ def spawn(
     takes_over: str | None = None,
     onboard: bool = True,
     bin_flag: bool = True,
+    own_worktree: Path | None = None,
 ) -> SpawnReceipt:
     """Start an agent for ``project`` in the fleet's tmux server and record it.
 
@@ -1258,7 +1274,11 @@ def spawn(
     are not replayed and that fallback may land on ``claude``. ``bin_flag`` is
     whether the caller takes ``--bin``: a replacement :func:`_respawn` starts
     for ``restart`` or ``switch`` does not, so a refusal of its binary names
-    ways out those commands have (:func:`_launch_binary`).
+    ways out those commands have (:func:`_launch_binary`). ``own_worktree`` is
+    such a replacement's too: the tree the agent it replaces worked in, which
+    is taken as it stands — branch, uncommitted work and all — when it is the
+    tree this spawn lands in (:func:`_ensure_worktree`), never put on the
+    branch today's task and codename would name.
 
     Every ``None`` means "the role's default" (config, then built-in). Refuses
     past ``max_agents_per_project``, a second manager, a worktree in a non-git
@@ -1446,6 +1466,7 @@ def spawn(
             branch,
             notes,
             refuse_if_taken=refuse_if_taken,
+            own=own_worktree,
         )
     notes.extend(f"accounts: {note}" for note in choice.notes)
     # A replayed spec already holds the role's arguments as they were at spawn;
@@ -3896,7 +3917,10 @@ def _respawn(
     The replacement replays the row's launch spec (#144; ``spawn(spec=…)``);
     ``permission_mode`` is a restart's explicit one, which wins over the spec
     as an explicit argument wins over the config, and is what the
-    replacement's spec records. ``onboard`` is :func:`spawn`'s.
+    replacement's spec records. ``onboard`` is :func:`spawn`'s. A worktree
+    agent's replacement works in the same tree, as it stands: its branch is
+    the one the agent was on, whatever its task or the codename says now
+    (``spawn(own_worktree=…)``).
     """
     notes: list[str] = []
     transcript = (
@@ -3932,6 +3956,7 @@ def _respawn(
         # Asked again here, after a stop that can outlast the binary (a relink in the
         # grace): the refusal names no `--bin`, which no command that gets here takes.
         bin_flag=False,
+        own_worktree=agent.cwd if agent.worktree else None,
     )
     if agent.launch_spec is not None:
         # Said once the replacement is up, for what it really took from the row: a

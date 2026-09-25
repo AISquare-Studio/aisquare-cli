@@ -528,7 +528,8 @@ c1/c2/c3 shell aliases people write by hand, owned by the tool instead.
   board naming `aisquare fleet switch <label>`, and the manager is woken. Claude
   Code's own wait-and-continue at the reset is left running. `fleet switch`
   stops the agent as `fleet stop` would and starts it again under the same
-  label, task and worktree on the account with the most headroom (`--to` names
+  label and task, in its worktree as it stands (the branch it was on, any
+  uncommitted work), on the account with the most headroom (`--to` names
   one), **resuming its session** from its transcript (`claude --resume
   <path>`) when that file is on disk — the resumed agent keeps its task claims
   and is told in one line to continue, and no exit is announced for it —
@@ -1167,8 +1168,9 @@ the dead window (`remain-on-exit`) so the last screen stays readable, and the
 row stays on the sidebar as **💤 exited** for a day while that window is
 there. Its row now records the exit the moment any listing sees the dead pane
 — no `reap` needed — so `aisquare fleet spawn manager` is not refused any more,
-and the row itself offers **Restart**: same label, role, task, worktree and
-account, and the SAME session resumed from its transcript when that file is
+and the row itself offers **Restart**: same label, role, task, worktree (as it
+stands, on the branch the agent was on — whatever its task or the codename says
+now) and account, and the SAME session resumed from its transcript when that file is
 on disk, so the manager comes back knowing its intake, its contracts and its
 coders (`--fresh` in the command, or a missing transcript, starts new with a
 hand-off prompt built from the board). From a shell: `aisquare fleet restart

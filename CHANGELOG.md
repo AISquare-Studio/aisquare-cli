@@ -339,7 +339,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `switched` join its wake kinds); other API errors end the turn as `waiting`
   with a `turn_failed` line. `aisquare fleet switch <label> [--to A] [--fresh]`
   stops the agent as `fleet stop` would and starts it again under the same
-  label, task and worktree on the account with the most headroom, **resuming
+  label and task, in its worktree as it stands, on the account with the most
+  headroom, **resuming
   the same session** from its transcript (`claude --resume <path>`) when it is
   on disk, else — or with `--fresh` — with a hand-off prompt built from the
   board, the old session's claims moving onto the new session with its row. With
@@ -1186,7 +1187,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   view gains **Stop** and **Restart**.
   `aisquare fleet restart <label> [--fresh]` — and the button — starts the
   agent again under its own label with the same role, task, worktree and
-  account, **resuming its session** from its transcript when that is on disk
+  account — the worktree as it stands, on the branch the agent was on, even
+  after its task closed or `fleet rename` — **resuming its session** from its transcript when that is on disk
   (`claude --resume <transcript>`), else fresh with a hand-off prompt from the
   board; a running agent is stopped first and handed over as `fleet switch`
   hands one over (its claims wait for the replacement and no exit is

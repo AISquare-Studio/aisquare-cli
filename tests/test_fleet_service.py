@@ -9947,3 +9947,48 @@ def test_a_row_that_outlived_its_server_is_not_its_own_projects_newer_agent(
     assert coder.pane_id not in tmux.killed, "the new manager was not stopped for coder-1"
     states = {s.agent.label: s.state for s in fleet_service.list_agents(project)}
     assert states == {"coder-2": "waiting", "manager": "waiting"}
+
+
+@pytest.mark.parametrize(
+    ("verb", "since"),
+    [("restart", "its task closed"), ("switch", "its task closed"), ("restart", "fleet rename")],
+)
+def test_a_replacement_keeps_its_agents_worktree_as_it_stands(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    verb: str,
+    since: str,
+) -> None:
+    """Review of #203, final round, FLEET-2: ``restart`` and ``switch`` rebuilt a
+    worktree agent's branch from its row's task and the codename, and neither is what
+    it was at the spawn: rule 3 forgets a task once it closes, and ``fleet rename``
+    changes the codename. The replacement then asked for another branch — a tree
+    holding uncommitted work was refused AFTER the agent had been stopped (lost, its
+    claims released), and a clean one was moved to a branch the agent never worked
+    on. The replacement is the same agent carrying on, in its tree as it stands."""
+    _two_slots_with_usage(monkeypatch, work=95, personal=10)
+    task = _add_task(project, "Wire the auth flow")
+    coder = fleet_service.spawn(project, "coder", task_id=task.id, account="2").agent
+    assert coder.worktree
+    branch = _git("rev-parse", "--abbrev-ref", "HEAD", cwd=coder.cwd)
+    dirty = since == "its task closed"
+    if dirty:
+        with store_session() as store:
+            store.set_task_status(task.id, "done")
+            assert store.retire_fleet_assignments(task.id) == 1
+        (coder.cwd / "wip.txt").write_text("half a change\n", encoding="utf-8")
+    else:
+        fleet_service.rename(project, "quiet-heron")
+
+    if verb == "restart":
+        started = fleet_service.restart(project, coder.label).started
+    else:
+        started = fleet_service.switch(project, coder.label).started
+
+    assert started.label == coder.label and started.cwd == coder.cwd
+    assert _git("rev-parse", "--abbrev-ref", "HEAD", cwd=coder.cwd) == branch
+    assert (coder.cwd / "wip.txt").exists() is dirty, "the work is where the agent left it"
+    live = fleet_service.list_agents(project)
+    assert [status.agent.id for status in live] == [started.id]

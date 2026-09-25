@@ -775,6 +775,31 @@ def test_a_key_bound_to_the_machines_target_never_answers_for_a_destination_else
     )
 
 
+def test_a_key_bound_to_the_machines_target_answers_for_its_gateway_however_spelled(
+    isolated_home: Path, tmp_path: Path
+) -> None:
+    """Whether the machine's target and the destination's deployment are one gateway was
+    decided by string: a top-level gateway typed with a capital or its default port kept
+    the key attached for the machine's ``stg`` unused on staging, a deployment it is for
+    (review of the #203 final-review fixes, F4). Compared on scheme, host and port, as
+    the proxy lane compares a reported gateway."""
+    config = AppConfig()
+    config.explainability.gateway_url = "https://STG-explainability-api.aisquare.studio:443/"
+    save_config(config)
+    project = _project(tmp_path / "web")
+    ops.attach_project_key(project, "AIS_staging_hand_key", target="stg")
+    with store_session() as store:
+        dest.choose(
+            store,
+            project,
+            dest.Workspace(id=42, uid="ws-uid-42", name="acme", role="ADMIN"),
+            dest.Studio(id=301, uid="st-301", name="Frontend"),
+            iam.Session(api_url="https://stg-api.aisquare.studio", token="aisq_x", source="env"),
+        )
+    resolved = ops.resolve_target(load_config().explainability, None, project_id=project.id)
+    assert (resolved.key_source, resolved.api_key) == ("project", "AIS_staging_hand_key")
+
+
 def test_no_remediation_for_a_projects_deployment_makes_it_the_machines_target(
     isolated_home: Path, tmp_path: Path
 ) -> None:

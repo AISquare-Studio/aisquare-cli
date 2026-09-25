@@ -619,9 +619,12 @@ def binding_serves(
     from aisquare.services.destinations import deployment_target  # lazy: it imports this
 
     # Both resolved, the machine's by the one resolver: neither is read off the config.
+    # Compared on scheme, host and port: the same gateway typed with a capital or its
+    # default port written out kept the key unused (review of the #203 final-review
+    # fixes, F4).
     machine = resolve_target(settings, target_name, env=env)
     theirs = deployment_target(settings, destination)
-    return not machine.gateway_url or machine.gateway_url == theirs.gateway_url.rstrip("/")
+    return not machine.gateway_url or _same_deployment(machine.gateway_url, theirs.gateway_url)
 
 
 def kept_key_note(

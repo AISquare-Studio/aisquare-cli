@@ -831,7 +831,7 @@ def test_settings_saves_a_changed_permission_mode_to_config_toml(project: Projec
         host.query_one("#perm-coder", Select).value = "plan"
         host.query_one("#worktree-dir", Input).value = ".fleet-trees"
         host.query_one("#save-settings", Button).press()
-        await pilot.pause()
+        await settle(pilot)
         return host.notices
 
     notices = drive(project, scenario)
@@ -852,7 +852,7 @@ def test_settings_rejects_a_bad_agent_cap_and_writes_nothing(project: ProjectInf
         await pilot.pause()
         host.query_one("#max-agents", Input).value = "0"
         host.query_one("#save-settings", Button).press()
-        await pilot.pause()
+        await settle(pilot)
         return host.notices
 
     notices = drive(project, scenario)
@@ -883,11 +883,11 @@ def test_settings_rejects_an_invalid_codename_and_renames_a_valid_one(
         field = host.query_one("#codename", Input)
         field.value = "Not Valid!"
         host.query_one("#rename-codename", Button).press()
-        await pilot.pause()
+        await settle(pilot)
         after_invalid = len(renames)
         field.value = "amber-otter"
         host.query_one("#rename-codename", Button).press()
-        await pilot.pause()
+        await settle(pilot)
         return host.notices, after_invalid, field.value
 
     notices, after_invalid, shown_value = drive(project, scenario)
@@ -912,7 +912,7 @@ def test_a_rejected_codename_reaches_the_toast_with_its_brackets(project: Projec
         await pilot.pause()
         host.query_one("#codename", Input).value = "[amber]-otter"
         host.query_one("#rename-codename", Button).press()
-        await pilot.pause()
+        await settle(pilot)
         return [n for n in host._notifications if "not a valid codename" in n.message]
 
     notifications = drive(project, scenario)
@@ -1012,7 +1012,7 @@ def test_settings_binds_an_account_per_role_and_a_cleared_one_leaves_no_empty_pr
         labels = [str(label) for label, _value in select._options]
         select.value = "2"
         host.query_one("#save-settings", Button).press()
-        await pilot.pause()
+        await settle(pilot)
         return labels, host.notices
 
     labels, notices = drive(project, scenario)
@@ -1030,7 +1030,7 @@ def test_settings_binds_an_account_per_role_and_a_cleared_one_leaves_no_empty_pr
         shown_value = select.value
         select.value = ""
         host.query_one("#save-settings", Button).press()
-        await pilot.pause()
+        await settle(pilot)
         return str(shown_value)
 
     shown_value = drive(project, clear)
@@ -1167,7 +1167,7 @@ def test_settings_saves_the_accounts_section_and_rejects_a_bad_line(project: Pro
         host.query_one("#accounts-on-limit", Select).value = "switch"
         host.query_one("#accounts-wait-minutes", Input).value = "5"
         host.query_one("#save-settings", Button).press()
-        await pilot.pause()
+        await settle(pilot)
         return host.notices
 
     notices = drive(project, scenario)
@@ -1187,7 +1187,7 @@ def test_settings_saves_the_accounts_section_and_rejects_a_bad_line(project: Pro
         shown_pick = str(host.query_one("#accounts-pick", Select).value)
         host.query_one("#accounts-switch-at", Input).value = "250"
         host.query_one("#save-settings", Button).press()
-        await pilot.pause()
+        await settle(pilot)
         return shown_pick, host.notices
 
     shown_pick, notices = drive(project, bad)

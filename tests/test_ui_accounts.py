@@ -16,7 +16,6 @@ the slot that must not be discarded.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import dataclasses
 import os
 import sys
@@ -31,11 +30,12 @@ import pytest
 from textual.containers import Vertical
 from textual.pilot import Pilot
 from textual.widgets import Button, Static
-from textual.worker import Worker, WorkerError, WorkerState
+from textual.worker import Worker, WorkerState
 
 from aisquare.cli.ui.app import ACCOUNTS_WORKER, FleetApp
 from aisquare.cli.ui.sidebar import AccountsSection, AccountsTitle
 from aisquare.cli.ui.terminal import TerminalPane
+from aisquare.cli.ui.views import accounts as accounts_view
 from aisquare.cli.ui.views.accounts import (
     SIGN_IN_WORKER,
     AccountRow,
@@ -181,13 +181,20 @@ def drive(
     overview: AccountsOverview | None = None,
     notifications: bool = False,
 ) -> T:
-    """Run ``fn`` against a mounted ``FleetApp`` whose Accounts reader answers ``overview``."""
+    """Run ``fn`` against a mounted ``FleetApp`` whose Accounts reader answers ``overview``.
+
+    The start-up doctor run has been painted before ``fn`` starts. Painting its report
+    resizes the Doctor section above the Accounts section and moves it (from row 30 to
+    row 34 here), and a report that landed between the press and the click of
+    ``open_accounts`` moved the section out from under the pointer: the click reached
+    another row and the page never opened (reproduced with every worker held 0.3 s).
+    """
     frame = overview if overview is not None else _overview(_status(1, "me@example.com"))
 
     async def run() -> T:
         app = FleetApp(refresh_seconds=3600, doctor=lambda: [], accounts=lambda: frame)
         async with app.run_test(size=SIZE, notifications=notifications) as pilot:
-            await accounts_read(app)  # the first frame is painted before the test looks
+            await settle(app)  # the start-up doctor and the first accounts frame, painted
             return await fn(pilot)
 
     return asyncio.run(run())
@@ -201,7 +208,7 @@ def shown(widget: Static) -> str:
 
 
 async def settle(app: FleetApp) -> None:
-    """Let the page go quiet: every message queued on it handled, every worker of ours done.
+    """Let the page go quiet: nothing queued on the app or its screen, every worker of ours done.
 
     Not only the workers that exist when it is called: the page starts its usage
     reading from ``on_show``, and a ``Show`` still queued when a test settled left
@@ -217,18 +224,11 @@ async def accounts_read(app: FleetApp) -> None:
     ``refresh_accounts`` reads in a thread worker (final review of #203, accounts
     F2), so a test that asks for a frame and then reads the page waits for that
     worker, and only that one: :func:`settle` would also wait for a worker a
-    test is holding on purpose. Rounds, as ``settle_page`` goes round, because
-    the answer is a message the app handles after the worker has finished.
+    test is holding on purpose. ``settle_page`` narrowed to the read's group, so
+    it goes round the same way (the answer is a message the app handles after
+    the worker has finished) and waits for a message still being handled.
     """
-    pilot = Pilot(app)
-    for _ in range(20):
-        await pilot.pause()
-        reads = [w for w in app.workers if w.group == ACCOUNTS_WORKER and not w.is_finished]
-        if not reads and not app.message_queue_size:
-            return
-        for worker in reads:
-            with contextlib.suppress(WorkerError):
-                await worker.wait()
+    await settle_page(app, group=ACCOUNTS_WORKER)
 
 
 def fleet_app(pilot: Pilot[None]) -> FleetApp:
@@ -238,9 +238,11 @@ def fleet_app(pilot: Pilot[None]) -> FleetApp:
 
 
 async def open_accounts(pilot: Pilot[None]) -> AccountsView:
+    """Click the section and wait for the page: the click posts ``AccountsSelected`` to the
+    app, whose handler mounts the page, so one pause could return before it existed."""
     app = fleet_app(pilot)
     await pilot.click(app.query_one(AccountsSection))
-    await pilot.pause()
+    await settle(app)
     view = app.query_one("#accounts", AccountsView)
     assert app.current_view() is view
     return view
@@ -1008,10 +1010,11 @@ def test_quitting_mid_sign_in_cancels_the_device_flow(
 ) -> None:
     """Textual cancelling a thread worker does not stop its callable; the page's own flag must."""
     seen = _script_device_flow(monkeypatch, no_network, outcome={"access_token": "aisq_new"})
-    released = threading.Event()
+    waiting, released = threading.Event(), threading.Event()
     observed: dict[str, bool] = {}
 
     def wait(e: iam.Endpoints, g: iam.DeviceAuthorization, *, cancelled: Any) -> dict[str, Any]:
+        waiting.set()
         deadline = time.monotonic() + 5
         while not cancelled() and time.monotonic() < deadline:
             time.sleep(0.02)
@@ -1024,7 +1027,9 @@ def test_quitting_mid_sign_in_cancels_the_device_flow(
     async def go(pilot: Pilot[None]) -> None:
         await open_accounts(pilot)
         await pilot.click("#aisquare-sign-in")
-        await pilot.pause()
+        # The quit must land while the wait runs. The press reaches the page as a message
+        # and the flow is a thread, so the wait's own start is what this waits for, bounded.
+        assert await asyncio.to_thread(waiting.wait, 5), "the sign-in never reached its wait"
 
     drive(go)  # the app exits here: the view unmounts while the wait is in flight
 
@@ -1039,7 +1044,15 @@ def test_quitting_mid_sign_in_cancels_the_device_flow(
 def _script_claude_sign_in(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, lands: bool
 ) -> dict[str, Any]:
-    """A fresh slot whose sign-in either lands on the first poll or never does."""
+    """A fresh slot whose sign-in either lands on the first poll or never does.
+
+    The page's own poll is pushed out of reach: every test takes its ticks by hand. The
+    real tick came every second, and the recorder answers its pane check with "no server",
+    which is a window that closed. A test that took longer than that between its click and
+    its cancel read "Claude Code closed before a sign-in landed" instead of the cancel
+    (with every message held 15 ms).
+    """
+    monkeypatch.setattr(accounts_view, "LOGIN_POLL_SECONDS", 3600.0)
     seen: dict[str, Any] = {"opened": [], "completed": [], "abandoned": [], "landed_polls": 0}
     account = ClaudeAccount(
         slot=2,
@@ -1097,7 +1110,7 @@ def test_add_opens_a_watched_window_and_records_the_account_when_the_login_lands
         app = fleet_app(pilot)
         view = await open_accounts(pilot)
         await pilot.click("#claude-add")
-        await pilot.pause()
+        await settle(app)
         box = view.query_one("#login-box", Vertical)
         pane = view.query_one("#login-pane", TerminalPane)
         box_shown, attached = box.display, pane.pane_id
@@ -1130,7 +1143,7 @@ def test_a_window_that_closes_without_a_login_discards_the_fresh_slot(
         app = fleet_app(pilot)
         view = await open_accounts(pilot)
         await pilot.click("#claude-add")
-        await pilot.pause()
+        await settle(app)
         # The recorder answers "no server" to display-message, which is a pane that is gone.
         view._poll_login()
         await pilot.pause()
@@ -1153,11 +1166,11 @@ def test_cancel_stops_a_sign_in_and_a_sign_in_of_an_existing_slot_is_never_disca
     async def go(pilot: Pilot[None]) -> tuple[int | None, str]:
         view = await open_accounts(pilot)
         await pilot.click("#account-sign-in-2")
-        await pilot.pause()
+        await settle(fleet_app(pilot))
         begun = seen.get("begin", "never")
         assert view.login is not None and not view.login.fresh
         await pilot.click("#login-cancel")
-        await pilot.pause()
+        await settle(fleet_app(pilot))
         return begun, notice(view)
 
     begun, said = drive(go, overview=overview)
@@ -1174,7 +1187,7 @@ def test_quitting_mid_claude_sign_in_closes_the_window_and_discards_the_fresh_sl
     async def go(pilot: Pilot[None]) -> None:
         view = await open_accounts(pilot)
         await pilot.click("#claude-add")
-        await pilot.pause()
+        await settle(fleet_app(pilot))
         assert view.login is not None
 
     drive(go)  # the app exits with the sign-in window still open
@@ -1198,7 +1211,7 @@ def test_quitting_after_the_login_landed_records_it_instead(
     async def go(pilot: Pilot[None]) -> None:
         view = await open_accounts(pilot)
         await pilot.click("#claude-add")
-        await pilot.pause()
+        await settle(fleet_app(pilot))
         assert view.login is not None
         landed["now"] = True  # the login lands, and the user quits before the next poll
 
@@ -1340,7 +1353,7 @@ def test_default_move_and_disable_buttons_write_through_the_service_and_refresh(
     async def run() -> tuple[str, list[int], str]:
         app = FleetApp(refresh_seconds=3600, doctor=lambda: [], accounts=lambda: frames[0])
         async with app.run_test(size=SIZE) as pilot:
-            await accounts_read(app)
+            await settle(app)  # the start-up doctor, painted before the click, as `drive` does
             return await go(pilot)
 
     after_default, order, last = asyncio.run(run())

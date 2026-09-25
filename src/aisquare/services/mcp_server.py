@@ -390,10 +390,7 @@ def serve_token() -> str:
 
 def build_server() -> MCPServer:
     """An ``MCPServer`` exposing the orchestrator tools."""
-    from mcp import types
-    from mcp.server.mcpserver import Context, MCPServer
-    from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
-    from mcp.shared.exceptions import MCPError
+    from mcp.server.mcpserver import MCPServer
 
     from aisquare.core.version import __version__
 
@@ -435,6 +432,21 @@ def build_server() -> MCPServer:
 
     if ci_recall.available():
         server.add_tool(ci_recall.collective_intelligence_recall)
+
+    exact_error_results(server)
+    return server
+
+
+def exact_error_results(server: MCPServer) -> None:
+    """Make ``server`` answer a failing tool with the tool's OWN words, as an error result.
+
+    Installed on this server and on the captain's (``services.captain.actions``):
+    both promise remote agents an error wording they can self-correct off.
+    """
+    from mcp import types
+    from mcp.server.mcpserver import Context
+    from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
+    from mcp.shared.exceptions import MCPError
 
     async def call_tool_with_exact_errors(
         ctx: ServerRequestContext[Any], params: CallToolRequestParams
@@ -487,7 +499,6 @@ def build_server() -> MCPServer:
     server._lowlevel_server.add_request_handler(
         "tools/call", types.CallToolRequestParams, call_tool_with_exact_errors
     )
-    return server
 
 
 class _StampedStdin:
@@ -513,7 +524,9 @@ class _StampedStdin:
         return line
 
 
-async def _serve_stdio_until_idle(server: MCPServer, close_after: int) -> None:
+async def _serve_stdio_until_idle(
+    server: MCPServer, close_after: int, command: str = "aisquare serve --stdio"
+) -> None:
     """Run the stdio transport with an idle deadline (#19).
 
     The deadline counts seconds since the last inbound client message; any
@@ -542,7 +555,7 @@ async def _serve_stdio_until_idle(server: MCPServer, close_after: int) -> None:
             # unblock — a normal return would hang the interpreter on that
             # thread's join and reintroduce the orphan this deadline retires.
             sys.stderr.write(
-                f"aisquare serve --stdio: no client messages for {close_after}s — "
+                f"{command}: no client messages for {close_after}s — "
                 "closing (idle deadline; --close-after 0 disables)\n"
             )
             sys.stderr.flush()
@@ -561,21 +574,29 @@ async def _serve_stdio_until_idle(server: MCPServer, close_after: int) -> None:
         tg.cancel_scope.cancel()  # EOF: stop the watchdog, exit normally
 
 
-def run_stdio(*, close_after: int = DEFAULT_CLOSE_AFTER) -> None:
+def run_stdio(
+    *,
+    close_after: int = DEFAULT_CLOSE_AFTER,
+    server: MCPServer | None = None,
+    command: str = "aisquare serve --stdio",
+) -> None:
     """Serve over stdio (Claude Desktop launches and owns the process).
 
     ``close_after`` is the idle deadline in seconds — time since the last
     client message — after which the server exits 0 on its own (#19).
     ``0`` disables it for deliberately persistent clients. No process
     management anywhere: the daemon minds only its own clock.
+
+    ``server`` defaults to this module's; the captain passes its own, and
+    ``command`` is how the idle notice on stderr names the process.
     """
-    server = build_server()
+    served = server if server is not None else build_server()
     if close_after <= 0:
-        server.run(transport="stdio")
+        served.run(transport="stdio")
         return
     import anyio
 
-    anyio.run(_serve_stdio_until_idle, server, close_after)
+    anyio.run(_serve_stdio_until_idle, served, close_after, command)
 
 
 class _BearerGuard:

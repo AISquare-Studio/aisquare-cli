@@ -140,7 +140,10 @@ MANAGER_WAKE_KINDS: frozenset[str] = frozenset(
 #: Code notification's feed line (#153). They never reach a teammate's prompt
 #: delta or a manager's wake-up reason — no agent can answer another's permission
 #: prompt, and each one would take a ``_DELTA_LIMIT`` slot from the real news.
-HUMAN_BOARD_KINDS: frozenset[str] = frozenset({"attention", "notice"})
+#: ``captain_action`` is the captain's audit line (``services.captain.actions``):
+#: one per tool call, reads included, for the owner — the effects it records
+#: (a note, a claim, a tell) reach teammates as their own events.
+HUMAN_BOARD_KINDS: frozenset[str] = frozenset({"attention", "notice", "captain_action"})
 
 #: The last sentence of every wake-up reason. Claude Code continues the turn with
 #: the reason as its instruction, so the instruction must license stopping — a

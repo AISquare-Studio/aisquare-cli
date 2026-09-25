@@ -3736,9 +3736,11 @@ def switch(
     written under one ``CLAUDE_CONFIG_DIR`` from another. The path form is
     documented and the id is preserved, but this machine has one login, so the
     cross-account leg is unverified; a resume that fails leaves a pane whose
-    error is visible, and ``--fresh`` is the documented way around it. A
-    replay that cannot start (:func:`_refuse_a_replay_that_cannot_start`) is
-    refused before the agent is stopped.
+    error is visible, and ``--fresh`` is the documented way around it. What
+    ``spawn`` would refuse without the stop — a replay that cannot start
+    (:func:`_refuse_a_replay_that_cannot_start`), the role, a task that is
+    closed — is refused before the agent is stopped, as :func:`restart`
+    refuses it.
     """
     with store_session() as store:
         agent = _live_agent(store, project, label)
@@ -3751,7 +3753,12 @@ def switch(
             # own row, and its take-back wrote a stale state over the second's mark
             # (review of #163, round 2).
             raise _in_hand_over("switch", label)
-        task = store.get_task(agent.task_id) if agent.task_id else None
+        # `spawn`'s refusal for the task (done, dropped, gone from the board), asked
+        # before anything is stopped, as `restart` asks it. After the stop it left the
+        # agent stopped and nothing started: a row spawned before rule 3 still names
+        # its closed task until its next briefing, and switching one always lost it
+        # (review of #203, final round, FLEET-3).
+        task = _task_for(store, project, agent.task_id)
         # The session's own newest entries (oldest first), not the project's last
         # 60 filtered down: on a busy board those all belonged to other agents
         # and the prompt lost its "last board entries" (review of #205, third round).
@@ -3760,6 +3767,7 @@ def switch(
             if agent.session_id is not None
             else []
         )
+    _require_role(agent.role)  # `spawn`'s first refusal, before the stop as the task's
     current = _account_slot_of(agent, session)
     notes: list[str] = []
     # The accounts service decides, as for every launch
@@ -3832,11 +3840,16 @@ def switch(
         # (review of the #205 fold, round 2).
         if session is not None and (left := _unmark_handing_over(session)) is not None:
             notes.append(left)
+    # The replacement is started from the row as the stop ENDED it, as `restart`
+    # starts one, not from the snapshot read before the headroom lookup and the
+    # grace: a task that closed meanwhile is gone from the row (rule 3), and
+    # `spawn` refused the snapshot's closed task with the agent already stopped
+    # (review of #203, final round, FLEET-3).
     stopped = handed_over.agent
     try:
         receipt, resumed, more = _respawn(
             project,
-            agent,
+            stopped,
             session,
             task,
             recent,
@@ -3845,7 +3858,7 @@ def switch(
             # What a FRESH replacement is told it takes over from: the account move is
             # the one thing it cannot read off the board.
             reason=f"it stopped on {reason or 'a usage limit'} under another Claude account",
-            resume_prompt=_resume_prompt(agent, reason),
+            resume_prompt=_resume_prompt(stopped, reason),
             takes_over=True,
             spawned_by=spawned_by,
             # The hook's hand-over is nobody's add (#139): `spawn`'s `onboard`.
@@ -3923,6 +3936,11 @@ def _respawn(
     (``spawn(own_worktree=…)``).
     """
     notes: list[str] = []
+    if task is not None and agent.task_id != task.id:
+        # Read before the stop, and closed during it: the row the stop ended no longer
+        # names it (rule 3), and a hand-off prompt naming it set the replacement on
+        # finished work.
+        task = None
     transcript = (
         Path(session.transcript_path) if session is not None and session.transcript_path else None
     )

@@ -9992,3 +9992,83 @@ def test_a_replacement_keeps_its_agents_worktree_as_it_stands(
     assert (coder.cwd / "wip.txt").exists() is dirty, "the work is where the agent left it"
     live = fleet_service.list_agents(project)
     assert [status.agent.id for status in live] == [started.id]
+
+
+def test_a_switch_whose_task_closes_during_the_stop_starts_the_replacement_without_it(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #203, final round, FLEET-3: ``switch`` started the replacement from the
+    row it read before the headroom lookup and the stop's grace. A task closed in that
+    window is forgotten by the live row (rule 3), but the snapshot still named it, so
+    ``spawn`` refused it — "task … is dropped" — with the agent already stopped, and
+    nothing started. The replacement comes from the row the stop ended, as ``restart``'s
+    does, and its hand-off prompt no longer sets it on the closed task."""
+    _two_slots_with_usage(monkeypatch, work=95, personal=10)
+    task = _add_task(project, "Ship auth")
+    agent = fleet_service.spawn(
+        project, "coder", worktree=False, task_id=task.id, account="2"
+    ).agent
+    _with_transcript(agent, None)  # nothing to resume: a hand-off prompt
+    original_spawn = tmux.spawn_window
+
+    def ready_spawn(*args: Any, **kwargs: Any) -> WindowInfo:
+        window = original_spawn(*args, **kwargs)
+        tmux.set_command(window.pane_id, "claude")
+        return window
+
+    real_kill = tmux.kill_window
+
+    def dropped_in_the_grace(pane_id: str) -> None:
+        if pane_id == agent.pane_id:
+            team_service.drop_task(task.id)  # the manager drops it meanwhile
+        real_kill(pane_id)
+
+    monkeypatch.setattr(tmux, "spawn_window", ready_spawn)
+    monkeypatch.setattr(tmux, "kill_window", dropped_in_the_grace)
+
+    receipt = fleet_service.switch(project, agent.label)
+
+    assert receipt.stopped.task_id is None and receipt.started.task_id is None
+    [prompt] = [text for _pane, kind, text in tmux.typed if kind == "paste"]
+    assert "Ship auth" not in prompt and task.id not in prompt
+    live = fleet_service.list_agents(project)
+    assert [status.agent.id for status in live] == [receipt.started.id]
+
+
+@pytest.mark.parametrize("refused", ["a closed task", "an unknown role"])
+def test_a_switch_that_spawn_would_refuse_is_refused_before_the_stop(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    refused: str,
+) -> None:
+    """``restart`` asks spawn's refusals for the role and the task before it stops
+    anything; ``switch`` asked neither, and ``spawn`` gave them after the stop, so the
+    agent was stopped for a replacement that never started. A row spawned before rule
+    3 names its closed task until its next briefing, so switching one always lost it
+    (review of #203, final round, FLEET-3)."""
+    _two_slots_with_usage(monkeypatch, work=95, personal=10)
+    task = _add_task(project, "Ship auth")
+    agent = fleet_service.spawn(
+        project, "coder", worktree=False, task_id=task.id, account="2"
+    ).agent
+    _with_transcript(agent, None)
+    if refused == "a closed task":
+        with store_session() as store:
+            store.set_task_status(task.id, "done")  # no rule 3: the row still names it
+        why = f"task {task.id} is done"
+    else:
+        # A role whose declaration left the config after the agent started.
+        monkeypatch.setattr(fleet_service, "_role_ok", lambda role: False)
+        why = "unknown role 'coder'"
+
+    with pytest.raises(FleetError, match=why):
+        fleet_service.switch(project, agent.label)
+
+    assert tmux.typed == [] and tmux.killed == [], "no /exit typed, no window killed"
+    assert len(tmux.spawned) == 1
+    with store_session() as store:
+        live = store.fleet_agent_by_label(project.id, agent.label, live_only=True)
+    assert live is not None and live.id == agent.id
+    assert _session_state(agent.session_id or "") == "working", "the session is not marked"

@@ -343,7 +343,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   headroom, **resuming
   the same session** from its transcript (`claude --resume <path>`) when it is
   on disk, else — or with `--fresh` — with a hand-off prompt built from the
-  board, the old session's claims moving onto the new session with its row. With
+  board, the old session's claims moving onto the new session with its row; an
+  agent whose role, task or binary would refuse the replacement is refused
+  before it is stopped, and a task that closes during the stop is left off the
+  replacement. With
   `on_limit = switch` the fleet does that by itself when the limit lifts more
   than `wait_if_reset_within_minutes` (15) away — in a worker detached from
   the agent's own hook, so the window kill cannot take the hand-over down; a

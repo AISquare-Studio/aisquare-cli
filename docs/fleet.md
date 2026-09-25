@@ -535,7 +535,10 @@ c1/c2/c3 shell aliases people write by hand, owned by the tool instead.
   and is told in one line to continue, and no exit is announced for it —
   `--fresh` (or a transcript that is not on disk) starts new with a hand-off
   prompt built from the board instead; that agent takes the claims over too,
-  on its new session, and no exit is announced for it either.
+  on its new session, and no exit is announced for it either. An agent whose
+  role, task (done or dropped) or binary would refuse the replacement is
+  refused before it is stopped, and a task that closes while it is being
+  stopped is left off the replacement.
   With `on_limit = "switch"` (*on a usage limit* on the Settings tab) the fleet
   does this by itself when the limit lifts more than
   `wait_if_reset_within_minutes` away, in a worker detached from the agent's

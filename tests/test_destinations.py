@@ -622,6 +622,66 @@ def test_a_projects_key_bound_off_the_machines_target_never_takes_the_machines_g
         )
 
 
+def test_a_key_attached_for_the_destinations_deployment_never_answers_as_the_machines(
+    runner: CliRunner, isolated_home: Path, tmp_path: Path
+) -> None:
+    """The destination's ``stg`` is staging; on the machine ``init --explainability``
+    writes, the machine's ``stg`` is the top-level prod gateway. A key bound by name alone
+    answered for both: a staging key attached while the project pointed at staging (``key
+    set`` after a refused mint), then ``use --clear``, went to the prod gateway and proxy
+    as the machine's ``stg``, and so did the same key under ``--target stg`` once the
+    project pointed at prod (review of #203). It is kept, answers again once a destination
+    names its deployment, and says why it is not used meanwhile."""
+    config = AppConfig()
+    config.explainability.enabled = True
+    config.explainability.gateway_url = "https://explainability-api.aisquare.studio"
+    config.explainability.proxy_url = "https://explainability-api.aisquare.studio:9443"
+    save_config(config)
+    service.store_api_key("AIS_machine_prod_key")
+    project = _project(tmp_path / "web")
+    workspace = dest.Workspace(id=42, uid="ws-uid-42", name="acme", role="ADMIN")
+    studio = dest.Studio(id=301, uid="st-301", name="Frontend")
+    staging = iam.Session(api_url="https://stg-api.aisquare.studio", token="aisq_x", source="env")
+    production = iam.Session(api_url="https://api.aisquare.studio", token="aisq_x", source="env")
+    settings = load_config().explainability
+    stg_gateway = "https://stg-explainability-api.aisquare.studio"
+
+    def read(name: str | None = None) -> tuple[str, str, str, str | None]:
+        resolved = ops.resolve_target(settings, name, project_id=project.id)
+        return (resolved.gateway_url, resolved.proxy_url, resolved.key_source, resolved.api_key)
+
+    with store_session() as store:
+        dest.choose(store, project, workspace, studio, staging)
+    ops.attach_project_key(project, "AIS_staging_hand_key", target="stg")
+    assert read()[::2] == (stg_gateway, "project")
+
+    with store_session() as store:
+        dest.forget(store, project)
+    prod = (
+        "https://explainability-api.aisquare.studio",
+        "https://explainability-api.aisquare.studio:9443",
+    )
+    assert read() == (*prod, "file", "AIS_machine_prod_key"), "the staging key went to prod"
+    shown = runner.invoke(app, ["explainability", "key", "show"])
+    assert shown.exit_code == 0, shown.output
+    said = " ".join(shown.output.split())
+    assert "attached for the deployment of https://stg-api.aisquare.studio" in said
+    assert "not used for this machine's target stg" in said
+
+    with store_session() as store:  # pointed at prod: `--target stg` is the machine's stg
+        dest.choose(store, project, workspace, studio, production)
+    assert read("stg") == (*prod, "file", "AIS_machine_prod_key")
+
+    with store_session() as store:  # back on staging: the key it was attached for answers
+        dest.choose(store, project, workspace, studio, staging)
+    assert read() == (
+        stg_gateway,
+        "https://stg-explainability.api.aisquare.studio:9443",
+        "project",
+        "AIS_staging_hand_key",
+    )
+
+
 def test_use_on_a_host_it_does_not_know_says_where_its_gateway_goes(
     runner: CliRunner,
     idp: IdentityProviderStub,

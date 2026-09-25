@@ -832,6 +832,7 @@ def mint_key(
             key_path=path,
             set_by=destination.set_by,
             minted=uid,
+            api_url=destination.api_url,
         )
     except BaseException as refused:
         put_back_project_key(project.id, earlier, refused)

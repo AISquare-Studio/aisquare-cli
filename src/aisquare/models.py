@@ -811,6 +811,14 @@ class ProjectExplainability(BaseModel):
     set_at: datetime
     set_by: str | None = None
     """Who attached it — the signed-in email when there is one, else the OS user."""
+    api_url: str | None = None
+    """The API of the project's destination (#142) when the key was attached for THAT
+    deployment, minted or by hand; ``None`` for a key bound to one of the machine's
+    targets. The name alone cannot say which: the destination's ``stg`` is the staging
+    deployment, while on the machine ``init --explainability`` writes the machine's
+    ``stg`` is the top-level prod gateway. So a key attached for a destination's
+    deployment answers only while a destination names that deployment, never for the
+    machine's target of the same name (review of #203)."""
 
 
 class TraceDestination(BaseModel):

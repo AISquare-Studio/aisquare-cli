@@ -293,8 +293,8 @@ def test_migrations_reach_the_current_schema_version() -> None:
     # v18 the launch spec and ui_state (#144), v19 the project explainability key (#141),
     # v20 project groups, pins and manual order (#140), v21 project destinations (#142),
     # v22 the revocations owed for keys the CLI minted (#142), v23 the one-time repair of
-    # old tombstones (#139, #140)
-    assert version == SCHEMA_VERSION == 23
+    # old tombstones (#139, #140), v24 the destination a project's key was attached for (#142)
+    assert version == SCHEMA_VERSION == 24
 
 
 def test_the_metric_check_constraints_mirror_the_python_vocabularies() -> None:
@@ -993,7 +993,7 @@ def test_a_foreign_store_a_build_without_the_pass_carried_on_converges_too(
     v23 failed on the missing ``onboarded_at``, and the pass before v23 adds it."""
     from aisquare.core.store import _run_step
 
-    carried_to = SCHEMA_VERSION if stamp == 15 else SCHEMA_VERSION - 1
+    carried_to = SCHEMA_VERSION if stamp == 15 else 22  # v23 is the step it failed on
     db = _at_version(14, after=_TWO_PROJECTS + ddl, stamp=stamp)
     raw = sqlite3.connect(str(db))
     try:
@@ -1249,6 +1249,40 @@ def test_v23_repairs_the_tombstones_older_cuts_left_holding_a_mark_or_a_place() 
         assert (kept.group_id, kept.position) == ("grp_1", 1) and kept.pinned_at is not None
     finally:
         store.close()
+
+
+def test_v24_marks_the_keys_bound_to_their_destinations_deployment() -> None:
+    """A binding named its deployment by target name alone, and the destination's ``stg``
+    and the machine's ``stg`` can be two deployments (review of #203). v24 records the
+    destination's API on a key bound to the deployment its destination names, as ``use``
+    and ``key set`` bind it; a key bound to another target stays one of the machine's."""
+    legacy = "'2026-09-01T00:00:00+00:00'"
+    _at_version(
+        23,
+        after=f"""
+        INSERT INTO project (id, root, name, linked_repos, created_at) VALUES
+            ('prj_dest', '/w/dest', 'dest', '[]', {legacy}),
+            ('prj_elsewhere', '/w/elsewhere', 'elsewhere', '[]', {legacy}),
+            ('prj_machine', '/w/machine', 'machine', '[]', {legacy});
+        INSERT INTO project_destination (project_id, api_url, environment, workspace_id,
+                                         workspace_name, set_at)
+        VALUES
+            ('prj_dest', 'https://stg-api.aisquare.studio', 'stg', 42, 'acme', {legacy}),
+            ('prj_elsewhere', 'https://api.aisquare.studio', 'prod', 42, 'acme', {legacy});
+        INSERT INTO project_explainability (project_id, target, key_path, set_at) VALUES
+            ('prj_dest', 'stg', '/k/dest', {legacy}),
+            ('prj_elsewhere', 'stg', '/k/elsewhere', {legacy}),
+            ('prj_machine', 'stg', '/k/machine', {legacy});
+    """,
+    )
+
+    with store_session() as store:
+        marked = {row.project_id: row.api_url for row in store.project_explainability_all()}
+    assert marked == {
+        "prj_dest": "https://stg-api.aisquare.studio",
+        "prj_elsewhere": None,
+        "prj_machine": None,
+    }
 
 
 def test_the_v17_migration_adopts_the_rows_already_used_on_purpose(

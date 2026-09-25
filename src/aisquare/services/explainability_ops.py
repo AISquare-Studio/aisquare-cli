@@ -357,10 +357,12 @@ def resolve_target(
 
     THE KEY, with ``project_id`` (#141): the project's own key first — attached
     with ``explainability key set`` and bound to ONE deployment, so it answers
-    only when that deployment is the one resolved here — then the target's
-    environment variable, then the machine key file under the same rule as
-    before. Without a project id the read is machine-level, as every caller
-    made it until now; ``doctor`` passes none and so opens no store.
+    only when that deployment is the one resolved here (:func:`binding_serves`:
+    a key attached for a destination's deployment never answers for the
+    machine's target of the same name) — then the target's environment
+    variable, then the machine key file under the same rule as before.
+    Without a project id the read is machine-level, as every caller made it
+    until now; ``doctor`` passes none and so opens no store.
 
     THE LAST FALLBACK IS THE SINGLE-DEPLOYMENT MACHINE, and it was missing.
     ``init --explainability`` writes ``settings.gateway_url`` and the key file
@@ -412,7 +414,7 @@ def resolve_target(
     else:
         target, placed = settings.targets.get(chosen, ExplainabilityTarget()), False
 
-    api_key, key_source = _project_api_key(project_id, chosen), "project"
+    api_key, key_source = _project_api_key(project_id, chosen, destination), "project"
     if api_key is None:
         api_key, key_source = environ.get(target.api_key_env) or None, "env"
     if api_key is None and target.api_key_env == KEY_ENV_VAR:
@@ -470,12 +472,15 @@ def deployment_fix(target: ResolvedTarget, *, what: str = "gateway") -> str:
     return f"aisquare explainability enable --target {target.name} --{what}-url <url>"
 
 
-def _project_api_key(project_id: str | None, target_name: str) -> str | None:
+def _project_api_key(
+    project_id: str | None, target_name: str, destination: TraceDestination | None
+) -> str | None:
     """The project's own key, when one is attached FOR ``target_name`` and its file reads.
 
     Called from :func:`resolve_target` and nowhere else (the AST guard in
     ``tests/test_one_key_resolver.py`` pins that). A binding for another
-    deployment is not a key for this one — the cross-deployment rule — and a
+    deployment is not a key for this one — the cross-deployment rule, which
+    :func:`binding_serves` decides with the project's ``destination`` — and a
     binding whose file is gone reads as no project key, so the next rung
     answers; ``explainability key show`` is where that is reported. So does a
     file that is not UTF-8, which no key is: it raised ``UnicodeDecodeError``
@@ -486,9 +491,37 @@ def _project_api_key(project_id: str | None, target_name: str) -> str | None:
     if project_id is None:
         return None
     binding = project_key_binding(project_id)
-    if binding is None or binding.target != target_name:
+    if binding is None or not binding_serves(binding, target_name, destination):
         return None
     return read_project_key(binding.key_path)
+
+
+def binding_serves(
+    binding: ProjectExplainability, target_name: str, destination: TraceDestination | None
+) -> bool:
+    """Whether the project's key ``binding`` is a key for the deployment ``target_name`` names.
+
+    Its target, by name, and for a key attached for a destination's deployment
+    (``binding.api_url``, v24) only while the project's ``destination`` names that
+    deployment. The name alone let one name mean two deployments: on the machine
+    ``init --explainability`` writes, the destination's ``stg`` is staging and the
+    machine's ``stg`` is the top-level prod gateway. A staging key attached while
+    the project pointed at staging answered after ``use --clear`` as the machine's
+    ``stg``, and went to prod with the prod proxy; so did one read under
+    ``--target stg`` once the project pointed at prod, and one read while the
+    destination could not be (``_project_destination`` fails open). Such a key is
+    kept and not used until a destination names its deployment again, and the
+    machine's key applies meanwhile (review of #203).
+
+    ONE rule, for the resolver and for the surfaces that say whether the key is
+    in use (``key show``, the Explainability page's key row), so neither calls a
+    kept key the one in use, or a key in use a missing file.
+    """
+    if binding.target != target_name:
+        return False
+    if binding.api_url is None:
+        return True
+    return destination is not None and destination.environment == target_name
 
 
 def read_project_key(path: Path) -> str | None:
@@ -656,7 +689,11 @@ def attach_project_key(
     binding just the same.
 
     A ``target`` that is not one of :func:`known_targets` raises
-    :class:`UnknownTarget` before anything is written.
+    :class:`UnknownTarget` before anything is written. A ``target`` the
+    project's destination names is that destination's deployment, and the
+    binding records its API (``ProjectExplainability.api_url``): the key then
+    never answers for the machine's target of the same name
+    (:func:`binding_serves`).
 
     Over a key the CLI minted (#142) the binding's commit also detaches it,
     owing its revocation (``set_project_explainability``); the caller revokes
@@ -699,10 +736,20 @@ def attach_project_key(
         minted = None
         if destination is not None and earlier is not None and earlier.strip() == value.strip():
             minted = destination.key_uid
+        # The destination's deployment, when it is the one named: `resolve_target`
+        # reads that name off the destination for this project, not off the config.
+        api_url = None
+        if destination is not None and destination.environment == target:
+            api_url = destination.api_url
         path = store_project_api_key(project.id, value)
         try:
             return store.set_project_explainability(
-                project.id, target=target, key_path=path, set_by=key_owner(), minted=minted
+                project.id,
+                target=target,
+                key_path=path,
+                set_by=key_owner(),
+                minted=minted,
+                api_url=api_url,
             )
         except BaseException as refused:
             put_back_project_key(project.id, earlier, refused)

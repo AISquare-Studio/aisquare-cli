@@ -264,7 +264,17 @@ def key_show(
         where += " (file MISSING)"
     elif ops.read_project_key(binding.key_path) is None:
         where += " (file holds no key: blank or not UTF-8 — attach it again)"
-    match = "" if binding.target == resolved.name else f" — not used for target {resolved.name}"
+    match = ""
+    if binding.target != resolved.name:
+        match = f" — not used for target {resolved.name}"
+    elif not ops.binding_serves(binding, resolved.name, resolved.destination):
+        # Attached for a destination's deployment, and no destination names it now:
+        # this project's `stg` is the machine's, which can be another deployment
+        # (review of #203). Kept, and used again once a destination names it.
+        match = (
+            f" — attached for the deployment of {binding.api_url}, which no destination "
+            f"of this project names now: not used for this machine's target {resolved.name}"
+        )
     typer.echo(
         f"{name}: project key for target {binding.target} at {where}, set "
         f"{binding.set_at:%Y-%m-%d %H:%M} by {binding.set_by or 'unknown'}{match}"

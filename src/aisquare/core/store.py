@@ -550,6 +550,29 @@ def _snapshot_on_disk(project_id: str) -> bool:
         return False
 
 
+def _bind_keys_to_their_destinations(connection: sqlite3.Connection) -> None:
+    """v23 → v24's backfill (#142): a key bound to its destination's deployment says so.
+
+    Runs right after ``project_explainability.api_url`` is added, in the same
+    transaction, and only then (:data:`_BACKFILLS`). A binding whose target is
+    the deployment the project's destination names now was minted for it, or
+    attached by ``key set``, which binds to the destination's deployment by
+    default, so it gets that destination's API. Every other binding stays NULL:
+    bound to one of the machine's targets. A key the operator had bound to the
+    machine's target before choosing a destination of the same name is marked
+    too. It then answers for that destination as it did, and after ``use
+    --clear`` it no longer answers for the machine's target, whose deployment it
+    may not be: the machine key applies there instead.
+    """
+    connection.execute(
+        "UPDATE project_explainability SET api_url = ("
+        "  SELECT destination.api_url FROM project_destination AS destination"
+        "  WHERE destination.project_id = project_explainability.project_id"
+        "  AND destination.environment = project_explainability.target"
+        ") WHERE api_url IS NULL"
+    )
+
+
 #: Backfills that belong to a column, keyed ``(table, column)``. Each runs in the
 #: transaction that adds its column, right after the ALTER, and only when the
 #: column was actually added: by its step on the ladder or by
@@ -560,6 +583,7 @@ def _snapshot_on_disk(project_id: str) -> bool:
 #: A step's statements have all run by then (:func:`_run_step`).
 _BACKFILLS: dict[tuple[str, str], Callable[[sqlite3.Connection], None]] = {
     ("project", "onboarded_at"): _adopt_onboarded_projects,
+    ("project_explainability", "api_url"): _bind_keys_to_their_destinations,
 }
 
 # v14: ``project forget`` — a tombstone on the registration, in the same spirit as
@@ -780,6 +804,18 @@ _SCHEMA_V23 = """
 UPDATE project SET onboarded_at = NULL, group_id = NULL, position = NULL, pinned_at = NULL
 WHERE forgotten_at IS NOT NULL;
 """
+# v24 (#142, review of #203): which deployment a project's key was attached FOR.
+# ``project_explainability.api_url`` is the API of the project's destination when
+# the key was minted or attached for that destination's deployment, and NULL for
+# a key bound to one of the machine's targets. The binding named its deployment
+# by target name alone, and one name can mean two deployments: the destination's
+# ``stg`` is staging, while on the machine ``init --explainability`` writes the
+# machine's ``stg`` is the top-level prod gateway. A staging key attached while
+# the project pointed at staging answered, after ``use --clear``, as the
+# machine's ``stg`` and went to prod. The column is the whole step, so the script
+# is empty: the column is in :data:`_PRODUCTS`, its backfill
+# (:func:`_bind_keys_to_their_destinations`) in :data:`_BACKFILLS`.
+_SCHEMA_V24 = ""
 # Ordered migrations; index i upgrades the db from user_version i to i+1.
 _MIGRATIONS = (
     _SCHEMA_V1,
@@ -805,6 +841,7 @@ _MIGRATIONS = (
     _SCHEMA_V21,
     _SCHEMA_V22,
     _SCHEMA_V23,
+    _SCHEMA_V24,
 )
 SCHEMA_VERSION = len(_MIGRATIONS)
 
@@ -848,6 +885,7 @@ _PRODUCTS: dict[int, _Products] = {
     ),
     20: _Products(("project_destination",)),
     21: _Products(("pending_revocation",)),
+    23: _Products(columns=(("project_explainability", "api_url", "TEXT"),)),
 }
 
 _PROJECT_COLUMNS = "id, root, linked_repos, codename, onboarded_at, group_id, position, pinned_at"
@@ -1089,6 +1127,7 @@ class ContextStore(Protocol):
         key_path: Path,
         set_by: str | None,
         minted: str | None = None,
+        api_url: str | None = None,
     ) -> ProjectExplainability: ...
     def clear_project_explainability(self, project_id: str) -> bool: ...
     # Where a project's traces land (v21, #142).
@@ -1220,6 +1259,7 @@ def _row_to_project_explainability(row: sqlite3.Row) -> ProjectExplainability:
         key_path=Path(row["key_path"]),
         set_at=datetime.fromisoformat(row["set_at"]),
         set_by=row["set_by"],
+        api_url=row["api_url"],
     )
 
 
@@ -2956,16 +2996,16 @@ class SqliteStore:
 
     def project_explainability(self, project_id: str) -> ProjectExplainability | None:
         row = self._conn.execute(
-            "SELECT project_id, target, key_path, set_at, set_by FROM project_explainability "
-            "WHERE project_id = ?",
+            "SELECT project_id, target, key_path, set_at, set_by, api_url "
+            "FROM project_explainability WHERE project_id = ?",
             (project_id,),
         ).fetchone()
         return _row_to_project_explainability(row) if row is not None else None
 
     def project_explainability_all(self) -> list[ProjectExplainability]:
         rows = self._conn.execute(
-            "SELECT project_id, target, key_path, set_at, set_by FROM project_explainability "
-            "ORDER BY project_id"
+            "SELECT project_id, target, key_path, set_at, set_by, api_url "
+            "FROM project_explainability ORDER BY project_id"
         ).fetchall()
         return [_row_to_project_explainability(row) for row in rows]
 
@@ -2977,6 +3017,7 @@ class SqliteStore:
         key_path: Path,
         set_by: str | None,
         minted: str | None = None,
+        api_url: str | None = None,
     ) -> ProjectExplainability:
         """Attach (or re-point) the project's key: one row per project, the newest wins.
 
@@ -2989,6 +3030,11 @@ class SqliteStore:
         as minted and the key it replaced is never forgotten while still live.
         ``minted`` itself, if it was still owed, is owed no more
         (:meth:`_owe_no_revocation`): it is the project's key again.
+
+        ``api_url`` is the destination's API when the key is for the deployment
+        that destination names, and ``None`` for one of the machine's targets
+        (:attr:`ProjectExplainability.api_url`, v24). Every attach writes it, so
+        a re-point never keeps the earlier key's.
 
         THE COMMIT IS THE LAST THING THAT CAN FAIL. The binding returned is
         built from the values written, not read back after the commit. Both
@@ -3005,14 +3051,16 @@ class SqliteStore:
             key_path=Path(str(key_path)),
             set_at=datetime.fromisoformat(now),
             set_by=set_by,
+            api_url=api_url,
         )
         with self._conn:
             self._conn.execute(
                 "INSERT INTO project_explainability (project_id, target, key_path, set_at, "
-                "set_by) VALUES (?, ?, ?, ?, ?) "
+                "set_by, api_url) VALUES (?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT (project_id) DO UPDATE SET target = excluded.target, "
-                "key_path = excluded.key_path, set_at = excluded.set_at, set_by = excluded.set_by",
-                (project_id, target, str(key_path), now, set_by),
+                "key_path = excluded.key_path, set_at = excluded.set_at, "
+                "set_by = excluded.set_by, api_url = excluded.api_url",
+                (project_id, target, str(key_path), now, set_by, api_url),
             )
             self._owe_revocation(project_id, keep=minted)
             if minted is not None:

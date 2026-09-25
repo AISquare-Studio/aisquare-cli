@@ -421,7 +421,13 @@ reported on its own line:
   be the workspace's. The API does not accept a sign-in token on that endpoint
   yet; until AISquare-Studio-BE#3493 lands the line reads `key: none — …` and
   `aisquare explainability key set --from-env VAR` is the way in — it binds the
-  key to the project's destination unless you pass `--target`. A key you
+  key to the project's destination unless you pass `--target`. A key bound to
+  the destination's deployment (minted, or by `key set`) answers only while a
+  destination names that deployment: the machine's own target can have the
+  same name and be another deployment (its default name is `stg`, whatever
+  gateway `init --explainability` gave the machine), so after `use --clear`,
+  or a move onto another deployment, the key is kept and not used, the machine
+  key applies, and `key show` says why. A key you
   attached by hand is used as is and never minted over; `key set` over a minted
   key revokes the minted one once the new key is recorded (a `key set` that
   fails leaves the minted key working), and so do `key clear`, `use --clear`, a

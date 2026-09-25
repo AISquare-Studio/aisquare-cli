@@ -244,6 +244,13 @@ def _key_origin_row(project: ProjectInfo, target: ops.ResolvedTarget) -> str:
         )
     if binding.target != target.name:
         state = f"not used for target {target.name}"
+    elif not ops.binding_serves(binding, target.name, target.destination):
+        # `key show`'s words: attached for a destination's deployment that no
+        # destination of the project names now (review of #203).
+        state = (
+            f"attached for the deployment of {binding.api_url}, which no destination of "
+            f"this project names now: not used for this machine's target {target.name}"
+        )
     elif target.key_source == "project":
         state = "in use"
     else:

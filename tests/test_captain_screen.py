@@ -78,6 +78,18 @@ def test_the_box_is_read_with_a_wrapped_draft_and_a_dim_suggestion() -> None:
     assert screen.input_box_at([shots.RULE, "not the mark", shots.RULE]) is None
 
 
+def test_a_hyperlink_ended_by_st_strips_clean_as_t1_stripped_it() -> None:
+    """coderp's S1 on #219: the shared pattern wanted ESC and TWO backslashes to end an OSC,
+    so a hyperlink ended by ST (ESC and one backslash, what tmux passes through) leaked its
+    target and broke the anchored option match on its line."""
+    linked = f"\x1b]8;;https://example.com\x1b\\ {MARK} 1. Yes\x1b]8;;\x1b\\"
+    assert screen.strip_escapes([linked]) == [f" {MARK} 1. Yes"]
+    raw = ["Do you want to proceed?", linked, "   2. No", " Esc to cancel"]
+    assert screen.modal_showing(raw) == "a numbered choice"
+    got = screen.prompt_showing(raw)
+    assert got is not None and (got.shape, got.yes_key) == ("chooser", "1")
+
+
 def test_escapes_are_stripped_before_anything_is_read() -> None:
     raw = [
         "\x1b[1;32mDo you want to proceed?\x1b[0m",

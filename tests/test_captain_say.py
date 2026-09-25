@@ -150,7 +150,7 @@ class Clock:
         self.now += timedelta(seconds=seconds)
 
 
-from tests.captain_screens import INPUT_BOX  # noqa: E402 — the one screen set
+from tests.captain_screens import BOX_WITH_ESC_FOOTER, INPUT_BOX, REAL_TRUST  # noqa: E402
 
 
 def _pane(*transcript: str, box: bool = True) -> list[str]:
@@ -325,6 +325,52 @@ def test_a_waiting_captain_gets_the_text_typed_and_its_reply_is_returned(
     assert reply.text == "Nothing needs you right now."
 
 
+def test_a_captain_idle_at_a_box_drawn_from_the_first_read_is_typed_into_at_once(
+    captain: tuple[Captain, Clock],
+) -> None:
+    """13294: the settle is for a new box. Before an idle captain it cost every voice turn 2 s."""
+    fake, clock = captain
+    fake.present()  # type: ignore[attr-defined]
+    asked_at = clock.now
+    brain.say("what is up", timeout=60)
+    assert fake.typed_at == asked_at, "typed at once, no settle"
+
+
+def test_a_box_first_seen_during_the_say_gets_its_one_settle(
+    captain: tuple[Captain, Clock],
+) -> None:
+    """A running captain whose box is not drawn yet (a redraw, a /clear) settles once it is."""
+    fake, clock = captain
+    fake.present()  # type: ignore[attr-defined]
+    fake.screen = []
+    drawn_at: list[datetime] = []
+    real_sleep = brain._sleep
+
+    def draw_after_two_polls(seconds: float) -> None:
+        real_sleep(seconds)
+        if clock.slept >= 2.0 and not fake.screen:
+            fake.screen = list(INPUT_BOX)
+            drawn_at.append(clock.now)
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(brain, "_sleep", draw_after_two_polls)
+        brain.say("what is up", timeout=60)
+    assert fake.started == [] and fake.typed_at is not None and drawn_at
+    assert fake.typed_at - drawn_at[0] >= timedelta(seconds=brain.TYPE_SETTLE_S), "one settle"
+
+
+def test_a_waiting_captain_whose_box_footer_names_esc_is_typed_into_not_refused(
+    captain: tuple[Captain, Clock],
+) -> None:
+    """coderp's minor: with the box drawn, nothing is a dialog, whatever its footer says. The
+    box check ignored reads the footer after the last rule as a dialog's."""
+    fake, _ = captain
+    fake.present()  # type: ignore[attr-defined]
+    fake.screen = list(BOX_WITH_ESC_FOOTER)
+    brain.say("what is up", timeout=60)
+    assert fake.typed == [("paste", "what is up"), ("keys", "Enter")]
+
+
 def test_a_busy_captain_is_waited_for_never_sent_a_board_note(
     captain: tuple[Captain, Clock],
 ) -> None:
@@ -384,6 +430,7 @@ def test_a_started_captain_that_never_reaches_its_prompt_is_said_at_the_deadline
         brain.say("what is up", timeout=30)
     assert caught.value.timed_out is True
     assert fake.typed == []
+    assert fake.started == [None], "started bare (13227)"
 
 
 TRUST_DIALOG = [
@@ -511,6 +558,7 @@ def test_a_fresh_captain_is_typed_into_only_once_its_prompt_is_drawn_and_after_o
         mp.setattr(brain, "_sleep", draw_after_three_polls)
         reply = brain.say("what is up", timeout=60)
     assert reply.text == "Nothing needs you right now."
+    assert fake.started == [None], "started bare (13227)"
     assert fake.typed_at is not None and drawn_at
     assert fake.typed_at - drawn_at[0] >= timedelta(seconds=brain.TYPE_SETTLE_S), "one settle"
 
@@ -548,6 +596,7 @@ def test_a_fresh_captain_parked_at_the_dialog_is_said_not_waited_out(
     with pytest.raises(brain.NoReply, match="trust its folder") as caught:
         brain.say("what is up", timeout=60)
     assert caught.value.timed_out is False and fake.typed == []
+    assert fake.started == [None], "started bare: the text is never its first prompt (13227)"
     assert clock.slept < 5, "not the whole timeout"
 
 
@@ -566,14 +615,19 @@ def test_a_fresh_captain_parked_at_the_dialog_is_said_not_waited_out(
         ),
     ],
 )  # fmt: skip
+@pytest.mark.parametrize("door", ["say", "send"])
 def test_say_never_types_into_a_dialog_and_names_what_is_showing(
-    captain: tuple[Captain, Clock], screen: list[str], showing: str
+    captain: tuple[Captain, Clock], screen: list[str], showing: str, door: str
 ) -> None:
+    """Both doors into the captain refuse the same screens in the same words (13325)."""
     fake, _ = captain
     fake.present()  # type: ignore[attr-defined]
     fake.screen = screen
     with pytest.raises(brain.NoReply, match=showing) as caught:
-        brain.say("what is up", timeout=60)
+        if door == "say":
+            brain.say("what is up", timeout=60)
+        else:
+            brain.send("what is up", timeout=60)
     assert "`aisquare captain` attaches" in str(caught.value)
     assert caught.value.timed_out is False and fake.typed == []
 
@@ -702,6 +756,82 @@ def test_one_message_reaches_the_captain_at_a_time(captain: tuple[Captain, Clock
     assert caught.value.timed_out is True
     assert fake.typed == []
     assert brain.say("what is up", timeout=60).text == "Nothing needs you right now."
+
+
+# --- send: the one guarded door, without a reply wait (13325) -------------------------------
+
+
+def test_send_types_into_a_waiting_captain_and_returns_without_waiting_for_a_reply(
+    captain: tuple[Captain, Clock],
+) -> None:
+    """T4's What's up types through here: at once, and back before any answer comes."""
+    fake, clock = captain
+    fake.present()  # type: ignore[attr-defined]
+    fake.turn_ends_after = None  # the captain never answers: send must not care
+    asked_at = clock.now
+    typed_at = brain.send("what is up")
+    assert fake.typed == [("paste", "what is up"), ("keys", "Enter")]
+    assert typed_at == asked_at and clock.slept == 0.0, "no settle, and no reply wait"
+    assert fake.started == [] and fake.told == []
+
+
+def test_send_never_types_into_the_trust_dialog_and_says_how_to_answer_it(
+    captain: tuple[Captain, Clock],
+) -> None:
+    """The first-run trap through the second door (13325): the Enter picks "No, exit". The
+    real capture of Claude Code's trust dialog, as a fresh captain parks at it."""
+    fake, clock = captain
+    fake.present()  # type: ignore[attr-defined]
+    fake.screen = list(REAL_TRUST)
+    with pytest.raises(brain.NoReply, match="trust its folder") as caught:
+        brain.send("what is up")
+    assert "run `aisquare captain` and choose Yes, I trust this folder (once)" in str(caught.value)
+    assert caught.value.timed_out is False and fake.typed == [] and clock.slept == 0.0
+
+
+def test_send_to_a_captain_that_is_not_running_is_said_never_started(
+    captain: tuple[Captain, Clock],
+) -> None:
+    fake, _ = captain
+    with pytest.raises(brain.NoReply, match="the captain is not running") as caught:
+        brain.send("what is up")
+    assert caught.value.timed_out is False
+    assert fake.started == [] and fake.typed == []
+
+
+def test_send_waits_out_a_busy_captain_then_types_never_a_board_note(
+    captain: tuple[Captain, Clock],
+) -> None:
+    fake, clock = captain
+    fake.present()  # type: ignore[attr-defined]
+    fake.busy_for = 5.0
+    brain.send("what is up")
+    assert fake.typed == [("paste", "what is up"), ("keys", "Enter")]
+    assert clock.slept >= 5.0 and fake.told == []
+
+
+def test_send_says_an_unreachable_captain_at_once(
+    captain: tuple[Captain, Clock], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake, clock = captain
+
+    def unreachable() -> None:
+        raise brain.Unreachable("run `aisquare fleet reap -P prj_home --server-down`")
+
+    monkeypatch.setattr(brain, "find", unreachable)
+    with pytest.raises(brain.NoReply, match="--server-down") as caught:
+        brain.send("what is up")
+    assert caught.value.timed_out is False and fake.typed == [] and clock.slept == 0.0
+
+
+def test_send_never_types_while_a_say_waits_for_its_reply(captain: tuple[Captain, Clock]) -> None:
+    """One delivery at a time: a line typed mid-say would be read as the say's answer."""
+    fake, _ = captain
+    fake.present()  # type: ignore[attr-defined]
+    held = brain._one_at_a_time(brain._now() + timedelta(seconds=5), 5.0)
+    with held, pytest.raises(brain.NoReply, match="another message to the captain") as caught:
+        brain.send("what is up", timeout=5)
+    assert caught.value.timed_out is True and fake.typed == []
 
 
 # --- the CLI ----------------------------------------------------------------------------------

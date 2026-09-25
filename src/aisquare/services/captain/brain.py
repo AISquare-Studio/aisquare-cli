@@ -52,6 +52,9 @@ SERVER = "captain"
 """The MCP server's name in ``mcp.json``: Claude Code calls its tools ``mcp__captain__<tool>``."""
 
 SAY_TIMEOUT_S = 180.0
+SEND_TIMEOUT_S = 30.0
+"""How long :func:`send` waits for the captain to be ready (or for a say still waiting for
+its reply) before it says so. Its callers are buttons: a short wait, then a sentence."""
 _POLL_S = 1.0
 
 # Indirection so a test runs a wait on a fake clock.
@@ -290,16 +293,48 @@ def say(text: str, *, timeout: float = SAY_TIMEOUT_S) -> Reply:
         except Unreachable as exc:
             # 13189: said at once, never waited out — the same words the bare command says.
             raise NoReply(str(exc), timed_out=False) from exc
+        started = agent is None
         if agent is None:
             # Started BARE, not with the text as its first prompt (13227): the fleet's
             # first-prompt typing reads the pane's process, not its text, and would
             # type into the trust dialog a fresh captain parks at. The text goes in
             # below, through the same guarded path, once the prompt shows.
             agent = start().agent
-        srv = _wait_until_ready(agent, deadline, timeout)
+        srv = _wait_until_ready(agent, deadline, timeout, settle=started)
         typed_at = _now()
         _type(srv, agent, text)
         return _await_reply(agent, typed_at, deadline, timeout)
+
+
+def send(text: str, *, timeout: float = SEND_TIMEOUT_S) -> datetime:
+    """Type ``text`` into the running captain through the one guarded door, and return as
+    soon as it is typed: no reply is waited for (13325). Returns when it was typed.
+
+    For whatever types into the captain without reading an answer — T4's What's up, the
+    first. Never ``fleet.tell``: it reads no screen, and its Enter at a fresh captain's
+    trust dialog picks "No, exit". The guard is :func:`say`'s: one delivery at a time
+    (a send never types while a say waits for its reply), the fleet asked first, the
+    pane read by structure, any dialog refused by name (13227), the drawn box as the
+    evidence typing needs. A captain that is not running is said, not started — starting
+    is the bare command's and ``say``'s. Every refusal is a :class:`NoReply`.
+    """
+    if not text.strip():
+        raise ValueError("nothing to send")
+    deadline = _now() + timedelta(seconds=timeout)
+    with _one_at_a_time(deadline, timeout):
+        try:
+            agent = find()
+        except Unreachable as exc:
+            raise NoReply(str(exc), timed_out=False) from exc
+        if agent is None:
+            raise NoReply(
+                "the captain is not running — `aisquare captain` starts it; nothing was typed",
+                timed_out=False,
+            )
+        srv = _wait_until_ready(agent, deadline, timeout, settle=False)
+        typed_at = _now()
+        _type(srv, agent, text)
+        return typed_at
 
 
 @contextlib.contextmanager
@@ -387,15 +422,20 @@ def _refuse_dialog(showing: str) -> NoReply:
     )
 
 
-def _wait_until_ready(agent: FleetAgent, deadline: datetime, timeout: float) -> TmuxServer:
+def _wait_until_ready(
+    agent: FleetAgent, deadline: datetime, timeout: float, *, settle: bool
+) -> TmuxServer:
     """Wait until the captain can take a line: at its prompt, with the prompt DRAWN.
 
     Each poll asks the fleet first — a dead or lost captain is said at once (M2) —
     then reads the pane: a dialog is refused with what shows (13227); the input box
-    drawn with the row waiting is the positive evidence typing needs (M3), and one
-    settle follows before the text goes in. A pane that cannot be read is said,
-    never raised. A fresh captain at the trust dialog has no session row yet, so
-    the pane is read whatever the row says.
+    drawn with the row waiting is the positive evidence typing needs (M3). A pane
+    that cannot be read is said, never raised. A fresh captain at the trust dialog
+    has no session row yet, so the pane is read whatever the row says.
+
+    One settle goes before the text, for a NEW box only: ``settle`` (this say started
+    the captain), or a read here that found no box drawn. A box drawn from the first
+    read is typed into at once — a settle there cost every voice turn 2 s (13294).
     """
     srv = fleet.server_for(agent.tmux_socket)
     while True:
@@ -418,8 +458,11 @@ def _wait_until_ready(agent: FleetAgent, deadline: datetime, timeout: float) -> 
             raise _refuse_dialog(showing)
         drawn = input_box_at(pane) is not None
         if state == "waiting" and drawn and fleet.pane_is_the_agent(srv, agent.pane_id):
-            _sleep(TYPE_SETTLE_S)
+            if settle:
+                _sleep(TYPE_SETTLE_S)
             return srv
+        if not drawn:
+            settle = True  # the box is not up yet: once it is, it gets its settle
         if _now() >= deadline:
             what = f"stayed {state}" if state != "waiting" else "never drew its prompt"
             raise NoReply(

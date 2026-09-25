@@ -119,8 +119,14 @@ otherwise: one word or a few, a to z and spaces (`wake_word = "hey captain"`).
 `wake_word = ""` switches it off, and listen mode then delivers everything it
 hears. The match forgives case, punctuation and one misspelling ("Kaptain",
 "Captian"), never the plural or the possessive ("Captains", "Captain's"). The
-start line of `aisquare captain voice` names the wake word, and a value that
-is not words is refused there in one line, never read as "off".
+wake word ends at a word boundary: a space, punctuation or the end of what you
+said, never a hyphen, an apostrophe or another letter. So "Captain-led teams"
+and "Captain’s report" are other words, and a meeting that says them stays off
+the page. A request that begins inside the window after a bare "Captain" is
+taken even if you are still speaking when the five seconds run out. A typed
+request closes the window. The start line of `aisquare captain voice` names the
+wake word, and a value that is not words is refused there in one line, never
+read as "off".
 
 In focus mode, and in listen mode once the wake word is heard, the page shows
 the interim transcript as you speak (so a misheard request is caught before it

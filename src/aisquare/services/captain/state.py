@@ -53,6 +53,7 @@ _BUSY = "captain_busy"
 _BRAKE = "captain_brake_at"
 _WAITING = "captain_waiting"
 _UNDO = "captain_undo"
+_PENDING = "captain_pending_confirm"
 _WHOLE_BOARD = "*"
 
 UNDO_KEEP = 20
@@ -500,6 +501,42 @@ def record_undo(
         return entries[-UNDO_KEEP:]
 
     state_file.modify_state(_UNDO, change)
+
+
+def _pending(current: object) -> dict[str, float]:
+    marks = cast(dict[str, object], current) if isinstance(current, dict) else {}
+    return {
+        key: float(at)
+        for key, at in marks.items()
+        if isinstance(at, int | float) and not isinstance(at, bool)
+    }
+
+
+def ask_pending(key: str, at: float, *, ttl: float) -> None:
+    """Remember that the captain was told to ask the owner about ``key`` at ``at`` (wall
+    clock), so the owner's bare yes can answer it (T1d, 13570). Stale questions are dropped."""
+
+    def change(current: object) -> object:
+        asked = {k: v for k, v in _pending(current).items() if 0 <= at - v < ttl}
+        asked[key] = at
+        return asked
+
+    state_file.modify_state(_PENDING, change)
+
+
+def answer_pending(key: str, now: float, *, ttl: float) -> bool:
+    """Whether a question about ``key`` is live (asked under ``ttl`` seconds before ``now``);
+    it is taken either way — one yes answers one question."""
+    live: list[bool] = []
+
+    def change(current: object) -> object:
+        asked = _pending(current)
+        at = asked.pop(key, None)
+        live.append(at is not None and 0 <= now - at < ttl)
+        return asked
+
+    state_file.modify_state(_PENDING, change)
+    return live[0]
 
 
 def record_undo_entry(entry: Undo) -> None:

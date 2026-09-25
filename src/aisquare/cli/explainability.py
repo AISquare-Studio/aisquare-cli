@@ -711,7 +711,10 @@ def status(
     are "the traces are not arriving where you think", which is what a cutover
     script gating on this code is asking, so the second case joined without a
     flag day. Amber -- a destination that cannot be checked from here -- exits
-    0; ``probe_severity`` in the JSON says which.
+    0; ``probe_severity`` in the JSON says which. A ``--project`` that names no
+    project is a usage error, and fails as one before anything is read: the
+    contract is about the lane, and a status for a project that is not there
+    has no lane to report (review of #172, D2 round 2, D6).
 
     Honours ``--json``, because this is the command a cutover gets scripted
     against: without it every check in the runbook is a grep against prose,
@@ -837,7 +840,7 @@ def status(
         # `remediation`, so the only surface carrying the fix was `doctor`.
         if proxy.remediation and proxy.severity is not CheckStatus.ok:
             typer.echo(f"          → {proxy.remediation}")
-        typer.echo(f"shipping: {state.reason}")
+        typer.echo(f"shipping: {state.reason}{ops.spool_key_note(target, state)}")
         # On THIS line and not a new one: "how much is queued" and "where is it"
         # are one question, and the empty case is exactly when someone goes
         # looking — so the path is printed at 0 queued too.

@@ -158,7 +158,7 @@ def status_report(page: ProjectInfo | None = None) -> StatusReport:
                 else ""
             ),
         ),
-        ("shipping", shipping.reason),
+        ("shipping", shipping.reason + ops.spool_key_note(target, shipping)),
         (
             "spool",
             f"{shipping.queued} queued, {shipping.sent} sent, {shipping.dead} dead-letter{located}",

@@ -70,6 +70,7 @@ from aisquare.services.explainability import (
     FALLBACK_ROLE,
     KEY_ENV_VAR,
     ProxyProbe,
+    ShippingState,
     clear_project_api_key,
     hosted_proxy_for,
     is_loopback,
@@ -232,6 +233,25 @@ class ResolvedTarget:
             if name not in names:
                 names.append(name)
         return tuple(names)
+
+
+def spool_key_note(target: ResolvedTarget, shipping: ShippingState) -> str:
+    """Said after the client lane's line when it reads as contradicting the key line above it.
+
+    The spool (``ship``) is the machine's: it drains every project's insights
+    with the machine's key to the machine's target (``shipping_state``), and a
+    project's own key (#141) authenticates that project's sessions only. So
+    ``status`` for a project with its own key printed "key: the project's own
+    key … is set" and, right under it, "but no workspace key: set $…" (review
+    of #172, D2 round 2, D3). Both are true, of two keys. The note says which is
+    which, rather than dropping either line. Empty otherwise.
+    """
+    if target.key_source != "project" or shipping.has_key:
+        return ""
+    return (
+        " (the spool is the machine's: it ships every project's insights with the "
+        "machine key; the project's own key above is for its sessions)"
+    )
 
 
 def unregistered_roles(target: ResolvedTarget) -> tuple[str, ...]:

@@ -562,6 +562,32 @@ def test_key_set_says_when_the_projects_launches_will_not_use_the_key(
     assert "launches and spawns in this project authenticate the proxy with it" in stg.output
 
 
+def test_status_says_the_spool_is_the_machines_when_the_key_above_it_is_the_projects(
+    home: Path, tmp_path: Path, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The key line said "the project's own key … is set" and the line under it "but no
+    workspace key: set $…": both true, of two keys, and read as one contradicting the
+    other (review of #172, D2 round 2, D3). The spool ships with the machine's key, so
+    it keeps its line, and the line says whose key that is."""
+    config = _settings()
+    config.explainability.ship = True
+    save_config(config)
+    monkeypatch.setattr(service, "probe_proxy", lambda url: service.ProxyProbe(True, "healthy"))
+    api = _project(tmp_path / "api")
+    monkeypatch.chdir(api.root)
+
+    machine = runner.invoke(app, ["explainability", "status"])
+    [line] = [ln for ln in machine.stdout.splitlines() if ln.startswith("shipping:")]
+    assert "no workspace key" in line and "the spool is the machine's" not in line
+
+    _attach(api)
+    status = runner.invoke(app, ["explainability", "status"])
+    assert "key:      the project's own key" in status.stdout
+    [line] = [ln for ln in status.stdout.splitlines() if ln.startswith("shipping:")]
+    assert "no workspace key" in line
+    assert "the spool is the machine's" in line and "the project's own key above" in line
+
+
 def test_key_set_records_the_signed_in_email_as_who_attached_it(
     home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

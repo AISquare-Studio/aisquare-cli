@@ -419,7 +419,8 @@ reported on its own line:
 - **routing** — a span lands in the studio its agent identity is bound to in
   that workspace (unbound identities go to the workspace's *Unassigned* inbox),
   so `use` binds this machine's identities (`aisquare-planner`, `aisquare-coder`,
-  …) to the chosen studio with the key. Binding needs a workspace OWNER/ADMIN
+  …) to the chosen studio with the project's own key — a machine key, unchecked
+  to be the workspace's, binds nothing. Binding needs a workspace OWNER/ADMIN
   key or the studio owner's; a refusal is reported per identity, and the
   destination is still recorded.
 - `whoami` gains a `traces:` line for the same project; `aisquare logout`

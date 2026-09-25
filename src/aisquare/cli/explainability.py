@@ -481,9 +481,10 @@ def use(
     target (gateway and proxy filled from the environment, nothing typed);
     obtains a workspace ingest key on your behalf when the project has none for
     that deployment (the API refuses this for a sign-in token today — the
-    message names the backend issue and the ``key set`` fallback); and binds
-    this machine's agent identities to the studio, which is what makes spans
-    land THERE rather than in the workspace's inbox. Tracing itself stays off
+    message names the backend issue and the ``key set`` fallback); and, with
+    the project's own key, binds this machine's agent identities to the
+    studio, which is what makes spans land THERE rather than in the
+    workspace's inbox. Tracing itself stays off
     until ``aisquare explainability enable`` — picking a destination must not
     silently start sending.
 
@@ -586,7 +587,13 @@ def use(
                 f"; meanwhile {machine} answers — a machine key, not checked to be "
                 f"{row.workspace_name}'s"
             )
-    routing = dest.bind_roster(row, target) if target.api_key else dest.RosterReport()
+    # With the project's own key only, as the note above takes it: a machine key
+    # was issued for whichever workspace set the machine up, so binding this
+    # workspace's roster with it is the stand-in the mint refuses — and the line
+    # that called it "not checked to be <workspace>'s" bound with it all the same
+    # (review of #172).
+    own_key = target.key_source == "project" and bool(target.api_key)
+    routing = dest.bind_roster(row, target) if own_key else dest.RosterReport()
     # Outside the store session, and every key owed, not only a replaced one:
     # `use` is where a signed-in operator lands, so it is one of the retries.
     revocations = dest.revoke_owed(session)
@@ -629,6 +636,11 @@ def use(
     typer.echo(f"  key:      {key_note}")
     if routing.bound:
         typer.echo(f"  routing:  {'; '.join(_routing_lines(routing))}")
+    elif target.api_key:
+        typer.echo(
+            f"  routing:  not applied — a machine key is not checked to be {row.workspace_name}'s; "
+            "attach the workspace's key (aisquare explainability key set) and run use again"
+        )
     else:
         typer.echo("  routing:  not applied — no key to bind the agent identities with")
     revoked = dest.describe_revocations(revocations)

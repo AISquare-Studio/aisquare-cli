@@ -562,6 +562,26 @@ def test_a_machine_key_named_for_the_deployment_is_used_meanwhile_and_said_unche
     assert "not checked to be acme's" in result.output
 
 
+def test_a_machine_key_binds_no_roster_for_the_destination(
+    runner: CliRunner,
+    idp: IdentityProviderStub,
+    signed_in: iam.Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``use`` said the machine key was "not checked to be acme's" and bound acme's
+    roster with it all the same (review of #172)."""
+    idp.key_mint = "token_not_valid"
+    idp.accepted_keys.append("AIS_machine_local_key")
+    monkeypatch.setenv("EXPLAINABILITY_LOCAL_API_KEY", "AIS_machine_local_key")
+    _project(tmp_path / "web")
+    payload = _json(runner, "explainability", "use", "acme/Frontend")
+    assert payload["key"]["source"] == "env" and payload["routing"] == []
+    assert not [r for r in idp.requests if r["method"] == "PUT"], "bound with an unchecked key"
+    human = runner.invoke(app, ["explainability", "use", "acme/Frontend"])
+    assert "routing:  not applied — a machine key is not checked to be acme's" in human.output
+
+
 def test_a_hand_key_kept_across_a_workspace_change_is_named_as_such(
     runner: CliRunner,
     idp: IdentityProviderStub,

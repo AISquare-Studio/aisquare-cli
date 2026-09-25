@@ -37,7 +37,7 @@ from textual.pilot import Pilot
 
 from aisquare.cli.ui import receiver
 from aisquare.cli.ui.app import FleetApp
-from aisquare.cli.ui.sidebar import Activatable
+from aisquare.cli.ui.sidebar import Activatable, ProjectSelected
 from aisquare.cli.ui.spawn import SpawnDialog
 from aisquare.cli.ui.stop import StopAgentScreen
 from aisquare.cli.ui.views.agent import AgentView
@@ -48,6 +48,7 @@ from aisquare.services import project_groups as groups_service
 from aisquare.services.captain import actions
 from aisquare.services.captain import state as captain_state
 from tests import test_ui_shell as ui_suite
+from tests.test_captain_sidebar import until
 from tests.test_ui_shell import Script, drive, fleet_app, seed, status
 
 # The UI suite's fixtures, bound here so pytest finds them for this module's tests
@@ -268,6 +269,67 @@ def test_a_dialog_is_not_stacked_on_a_dialog_that_is_open(
     assert again["ok"] is False and "SpawnDialog is open" in again["said"]
     assert stop["ok"] is False and "SpawnDialog is open" in stop["said"]
     assert depth == 2, "one dialog over the shell, not three"
+
+
+@UNIX_SOCKETS
+def test_chained_calls_see_each_others_effect_with_no_pause_between(
+    tmp_path: Path, script: Script, ui_path: Path
+) -> None:
+    """ui() answers once its action has LANDED (13290): an owner action chains ui steps, so
+    ``select_project beta`` then a bare ``open_spawn`` must spawn in beta, not the old pick."""
+    fleet(tmp_path, script)
+
+    def chain() -> list[dict[str, Any]]:
+        return [
+            ask(ui_path, request("select_project", "alpha")),
+            ask(ui_path, request("select_project", "beta")),
+            ask(ui_path, request("open_spawn")),
+        ]
+
+    async def body(pilot: Pilot[None]) -> tuple[list[dict[str, Any]], str | None]:
+        app = fleet_app(pilot)
+        replies = await asyncio.to_thread(chain)  # back to back, no pause for the loop
+        await pilot.pause()
+        dialog = app.screen
+        return replies, dialog.project.id if isinstance(dialog, SpawnDialog) else None
+
+    replies, project_id = drive(body)
+    assert replies == [
+        {"ok": True, "said": "selected alpha"},
+        {"ok": True, "said": "selected beta"},
+        {"ok": True, "said": "spawn dialog open for beta"},
+    ]
+    assert project_id == "prj_bbb"
+
+
+@UNIX_SOCKETS
+def test_an_action_that_has_not_landed_in_time_is_said_never_answered_ok(
+    tmp_path: Path, script: Script, ui_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Past LAND_S the answer says the action was sent but not shown: an ok would send the
+    next chained step on to read the old state."""
+    fleet(tmp_path, script)
+    monkeypatch.setattr(receiver, "LAND_S", 0.1)
+    handled = FleetApp.on_project_selected
+
+    async def slow(app: FleetApp, event: ProjectSelected) -> None:
+        await asyncio.sleep(0.6)  # a project page that takes its time to mount
+        await handled(app, event)
+
+    monkeypatch.setattr(FleetApp, "on_project_selected", slow)
+
+    async def body(pilot: Pilot[None]) -> tuple[dict[str, Any], str | None]:
+        reply = await send(pilot, ui_path, "select_project", "beta")
+        await until(
+            pilot,
+            lambda: fleet_app(pilot).sidebar.selected_key == "project:prj_bbb",
+            what="beta selected, late",
+        )
+        return reply, fleet_app(pilot).sidebar.selected_key
+
+    reply, selected = drive(body)
+    assert reply == {"ok": False, "said": "selected beta, but asq had not finished it within 0.1s"}
+    assert selected == "project:prj_bbb", "it still lands; the answer only said it had not yet"
 
 
 @UNIX_SOCKETS
@@ -821,13 +883,17 @@ def test_a_client_that_says_nothing_is_cut_off_in_time_for_the_next(
     """One connection at a time: a silent one may hold the next up, but not past T1's 2 s."""
     fleet(tmp_path, script)
 
+    def timed() -> tuple[dict[str, Any], float]:
+        """The client's own wait, from its connect to its answer — what T1's 2 s bounds."""
+        began = time.monotonic()
+        reply = ask(ui_path, request("select_project", "alpha"))
+        return reply, time.monotonic() - began
+
     async def body(pilot: Pilot[None]) -> tuple[dict[str, Any], float, dict[str, Any]]:
         with _unix_socket() as silent:
             silent.settimeout(5)
             silent.connect(str(ui_path))
-            began = time.monotonic()
-            reply = await send(pilot, ui_path, "select_project", "alpha")  # 2 s, as T1 waits
-            took = time.monotonic() - began
+            reply, took = await asyncio.to_thread(timed)
             with silent.makefile("rb") as stream:
                 told = json.loads(stream.readline(64 * 1024))
         return reply, took, told

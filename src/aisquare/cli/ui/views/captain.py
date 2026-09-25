@@ -23,13 +23,17 @@ under the header:
   **Speaker** flips ``captain_speaker``; **Mic** prints — never starts (13178
   Q2, Phase 2 starts it) — the page's URL and QR and, when nothing serves it, the
   command that does. The writes run off the UI thread (a held state lock waits
-  seconds); the reads are lock-free and ride the thinking tick, so a change the
-  page makes shows here too.
+  seconds), and so do the reads: each tick reads the flag, the mode and the
+  speaker on a worker (:func:`read_bar` — the read retries under Windows
+  contention for up to ~0.9 s) and paints the result, so a change the page makes
+  shows here too. A state.json that cannot be read is said on the bar — ``state
+  unreadable``, ``Mode: ?``, ``Speaker: ?`` — never shown as the defaults, and a
+  switch over it writes nothing.
 """
 
 from __future__ import annotations
 
-import socket
+import logging
 from dataclasses import dataclass
 from typing import Any, ClassVar
 
@@ -47,6 +51,8 @@ from aisquare.cli.ui.views.agent import AgentView
 from aisquare.models import FleetAgentStatus
 from aisquare.services import fleet as fleet_service
 
+_log = logging.getLogger(__name__)
+
 WHAT_IS_UP = "what is up"
 """The quick action's words: the captain's persona answers them from the attention queue."""
 
@@ -56,6 +62,7 @@ THINKING_TICK_S = 1.0
 TELL_WORKER = "captain-whats-up"
 VOICE_WORKER = "captain-voice-switch"
 MIC_WORKER = "captain-mic"
+BAR_WORKER = "captain-bar"
 
 START_COMMAND = "aisquare captain voice"
 """What serves the page (T3's ``captain voice``; ``--mode``/``--speaker`` write the same keys)."""
@@ -75,16 +82,28 @@ def thinking_text(on: bool) -> Text:
 
 
 def page_serving(port: int) -> bool:
-    """Whether something answers on the voice page's loopback port — a connect, nothing sent.
+    """Whether the voice page answers on its loopback port: ``GET /`` returns the page itself.
 
-    T3 records no running server; the port is the fact. Loopback only: the page
-    binds nothing else (T3's ``LOOPBACK_HOSTS``).
+    T3 records no running server, so the port is asked. A connect alone took any
+    listener there for the page (T4 gate S3); T3's server answers ``/`` with its
+    bundled page (the token gates the socket, not the page), so its bytes are the
+    mark. Another home's page on the same port is the same page — one port per box
+    (T6's runbook). Loopback only: the page binds nothing else (T3's ``LOOPBACK_HOSTS``).
     """
+    import http.client
+
+    from aisquare.services.captain import voice
+
+    page = voice.page_bytes()
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=PROBE_TIMEOUT_S)
     try:
-        with socket.create_connection(("127.0.0.1", port), timeout=PROBE_TIMEOUT_S):
-            return True
-    except OSError:
+        connection.request("GET", "/")
+        response = connection.getresponse()
+        return response.status == 200 and response.read(len(page) + 1) == page
+    except (OSError, http.client.HTTPException):
         return False
+    finally:
+        connection.close()
 
 
 @dataclass(frozen=True)
@@ -177,24 +196,40 @@ class MicScreen(ModalScreen[None]):
         self.dismiss(None)
 
 
-def _voice_state() -> tuple[str, bool]:
-    """The mode (unset reads as focus) and the speaker switch; lock-free reads of state.json."""
+@dataclass(frozen=True)
+class Bar:
+    """What the bar shows from state.json, read in one go off the UI thread.
+
+    ``mode`` and ``speaking`` are ``None`` when the file could not be read — never
+    the defaults, which the owner would take for the switches (T4 gate S2) — and
+    ``unreadable`` says why.
+    """
+
+    busy: bool
+    mode: str | None
+    speaking: bool | None
+    unreadable: str | None = None
+
+
+def read_bar() -> Bar:
+    """T1's busy flag, the mode (unset reads as focus) and the speaker: on a worker."""
     from aisquare.services.captain import speaker, voice
-
-    try:
-        return voice.voice_mode() or "focus", speaker.speaker_on()
-    except Exception:  # a moment's unreadable file: the defaults, and the next tick reads again
-        return "focus", True
-
-
-def _busy() -> bool:
-    """T1's busy flag. A flag that cannot be read is not thinking — the pane state still is."""
     from aisquare.services.captain import state as captain_state
 
+    problems: list[str] = []
     try:
-        return captain_state.busy_since() is not None
-    except Exception:  # state.json unreadable for a moment: the next tick reads it again
-        return False
+        busy = captain_state.busy_since() is not None
+    except Exception as exc:  # the pane state still says working; the flag is said unread
+        busy = False
+        problems.append(f"busy flag: {exc}")
+    mode: str | None
+    speaking: bool | None
+    try:
+        mode, speaking = voice.voice_mode() or "focus", speaker.speaker_on()
+    except Exception as exc:
+        mode = speaking = None
+        problems.append(f"voice switches: {exc}")
+    return Bar(busy, mode, speaking, "; ".join(problems) or None)
 
 
 class CaptainView(AgentView):
@@ -203,16 +238,20 @@ class CaptainView(AgentView):
     DEFAULT_CSS = """
     CaptainView #captain-bar { height: 1; }
     CaptainView #captain-thinking { width: 14; height: 1; padding: 0 1; }
+    CaptainView #captain-state { width: auto; height: 1; padding: 0 1; display: none; }
     CaptainView #captain-bar Button { min-width: 11; margin: 0 1 0 0; }
     """
 
     def __init__(self, status: FleetAgentStatus, **options: Any) -> None:
         super().__init__(status, **options)
         self.thinking_timer: Timer | None = None
+        self.bar: Bar | None = None
+        """The last read of state.json; ``None`` until the first one answers."""
 
     def compose_bars(self) -> ComposeResult:
         with Horizontal(id="captain-bar"):
             yield Static(thinking_text(False), id="captain-thinking")
+            yield Static(Text("state unreadable", style="dim"), id="captain-state")
             yield Button(
                 "What's up",
                 id="captain-whats-up",
@@ -240,24 +279,47 @@ class CaptainView(AgentView):
 
     def on_mount(self) -> None:
         super().on_mount()
-        self.paint_thinking()
+        self.tick()
         self._paint_quick_action()
-        self.thinking_timer = self.set_interval(THINKING_TICK_S, self.paint_thinking)
+        self.thinking_timer = self.set_interval(THINKING_TICK_S, self.tick)
 
     def refresh_status(self, status: FleetAgentStatus) -> None:
         super().refresh_status(status)
         if self.is_mounted:
-            self.paint_thinking()
+            self.paint_bar()
             self._paint_quick_action()
 
-    def paint_thinking(self) -> None:
-        """Repaint the bar from state.json and the pane state (the interval's callback): the
-        indicator, and the mode and speaker the page may have switched."""
-        on = thinking(self.status, busy=_busy())
+    def tick(self) -> None:
+        """The interval's callback: read state.json on a worker; its answer paints the bar."""
+        self.run_worker(
+            read_bar,
+            name=BAR_WORKER,
+            group=BAR_WORKER,
+            exclusive=True,
+            thread=True,
+            exit_on_error=False,
+        )
+
+    def paint_bar(self) -> None:
+        """Paint from the last read and the pane state: no I/O, on the UI thread."""
+        bar = self.bar
+        on = thinking(self.status, busy=bar is not None and bar.busy)
         self.query_one("#captain-thinking", Static).update(thinking_text(on))
-        mode, speaking = _voice_state()
+        note = self.query_one("#captain-state", Static)
+        note.display = bar is not None and bar.unreadable is not None
+        note.tooltip = bar.unreadable if bar is not None else None
+        if bar is None:
+            return
+        mode = "?" if bar.mode is None else bar.mode
+        speaking = "?" if bar.speaking is None else "on" if bar.speaking else "off"
         self.query_one("#captain-mode", Button).label = f"Mode: {mode}"
-        self.query_one("#captain-speaker", Button).label = f"Speaker: {'on' if speaking else 'off'}"
+        self.query_one("#captain-speaker", Button).label = f"Speaker: {speaking}"
+
+    def _bar_read(self, bar: Bar) -> None:
+        if bar.unreadable is not None and (self.bar is None or self.bar.unreadable is None):
+            _log.warning("the captain bar cannot read state.json: %s", bar.unreadable)
+        self.bar = bar
+        self.paint_bar()
 
     def _paint_quick_action(self) -> None:
         busy = any(
@@ -281,11 +343,28 @@ class CaptainView(AgentView):
         )
         self._paint_quick_action()
 
+    def _known(self) -> Bar | None:
+        """The last read, when it knows both switches; else said, and ``None``: a switch
+        over a state it could not read would write a guess."""
+        bar = self.bar
+        if bar is not None and bar.mode is not None and bar.speaking is not None:
+            return bar
+        why = bar.unreadable if bar is not None else "not read yet"
+        self.notify(
+            f"captain state unreadable ({why}) — the switch is left as it is",
+            severity="warning",
+            timeout=6,
+            markup=False,
+        )
+        return None
+
     @on(Button.Pressed, "#captain-mode")
     def _flip_mode(self, event: Button.Pressed) -> None:
         event.stop()
-        mode, _ = _voice_state()
-        wanted = "listen" if mode == "focus" else "focus"
+        bar = self._known()
+        if bar is None:
+            return
+        wanted = "listen" if bar.mode == "focus" else "focus"
 
         def write() -> None:
             from aisquare.services.captain import voice
@@ -297,7 +376,10 @@ class CaptainView(AgentView):
     @on(Button.Pressed, "#captain-speaker")
     def _flip_speaker(self, event: Button.Pressed) -> None:
         event.stop()
-        _, speaking = _voice_state()
+        bar = self._known()
+        if bar is None:
+            return
+        speaking = bar.speaking
 
         def write() -> None:
             from aisquare.services.captain import speaker
@@ -328,6 +410,10 @@ class CaptainView(AgentView):
         )
 
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
+        if event.worker.name == BAR_WORKER:
+            if event.state is WorkerState.SUCCESS and isinstance(event.worker.result, Bar):
+                self._bar_read(event.worker.result)
+            return
         if event.worker.name in (VOICE_WORKER, MIC_WORKER):
             self._voice_answered(event)
             return
@@ -373,4 +459,4 @@ class CaptainView(AgentView):
         if event.worker.name == MIC_WORKER and isinstance(event.worker.result, MicInfo):
             self.app.push_screen(MicScreen(event.worker.result))
         else:
-            self.paint_thinking()
+            self.tick()  # the switch was written: read it back

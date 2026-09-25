@@ -559,6 +559,19 @@ def fresh_state() -> Iterator[None]:
     reset_state()
 
 
+_PRIVATE_UI_ROOTS: list[Path] = []
+"""Every private ui socket root a test made — removed again when the session ends."""
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _sweep_private_ui_roots() -> Iterator[None]:
+    """Remove every private ui socket root at the session's end, where nothing is patched
+    (``private_ui_socket_root``'s own removal runs under the test's patches)."""
+    yield
+    for folder in _PRIVATE_UI_ROOTS:
+        shutil.rmtree(folder, ignore_errors=True)
+
+
 @pytest.fixture(autouse=True)
 def private_ui_socket_root(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """A long home's ui socket folder is made in a folder of this test's own.
@@ -595,14 +608,17 @@ def private_ui_socket_root(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
                     tempfile.mkdtemp(prefix="asq", dir=None if sys.platform == "win32" else "/tmp")
                 )
             )
+            _PRIVATE_UI_ROOTS.append(made[0])
         root = real()
         return made[0] / root.relative_to(root.anchor)
 
     monkeypatch.setattr(captain_state, "_short_root", private)
     yield
     for folder in made:
-        # Under the test's own patches (see no_real_fleet): never let them error the test.
-        with contextlib.suppress(Exception):
+        # Under the test's own patches (see no_real_fleet): a spied ``os.open`` that refuses
+        # rmtree's ``dir_fd`` raises TypeError, and a patched ``os`` call an OSError. Neither
+        # may error the test; ``_sweep_private_ui_roots`` removes what is left.
+        with contextlib.suppress(OSError, TypeError):
             shutil.rmtree(folder, ignore_errors=True)
 
 

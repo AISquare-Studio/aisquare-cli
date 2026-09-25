@@ -346,12 +346,10 @@ def test_the_thinking_indicator_follows_the_busy_flag(tmp_path: Path, script: Sc
         assert isinstance(view, CaptainView)
         assert "idle" in _thinking(pilot)
         captain_state.set_busy(True)
-        view.paint_thinking()
-        await pilot.pause()
+        await _ticked(pilot, view)
         assert "thinking" in _thinking(pilot)
         captain_state.set_busy(False)
-        view.paint_thinking()
-        await pilot.pause()
+        await _ticked(pilot, view)
         assert "idle" in _thinking(pilot)
 
     drive(body)
@@ -480,12 +478,120 @@ def test_the_view_follows_what_the_page_changed(tmp_path: Path, script: Script) 
         view = await _captain_view(pilot)
         voice.set_voice_mode("listen")
         speaker.set_speaker(False)
-        view.paint_thinking()  # the view's one tick paints the whole bar
-        await pilot.pause()
+        await _ticked(pilot, view)  # the view's one tick paints the whole bar
         assert _label(pilot, "#captain-mode") == "Mode: listen"
         assert _label(pilot, "#captain-speaker") == "Speaker: off"
 
     drive(body)
+
+
+async def _ticked(pilot: Pilot[None], view: CaptainView) -> None:
+    """One tick of the bar: its read runs on a worker (S1), then the paint."""
+    view.tick()
+    await pilot.pause()
+    await fleet_app(pilot).workers.wait_for_complete()
+    await pilot.pause()
+
+
+def test_the_bar_reads_state_json_off_the_ui_thread(
+    tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """state.json's read retries under Windows contention for up to ~0.9 s: never on the
+    UI loop, once a second (T4 gate S1, 13325)."""
+    import threading
+
+    from aisquare.services.captain import speaker, voice
+
+    script[captain_state.home_project().id] = [_captain()]
+    threads: list[str] = []
+
+    def spied(read: Callable[[], Any]) -> Callable[[], Any]:
+        def run() -> Any:
+            threads.append(threading.current_thread().name)
+            return read()
+
+        return run
+
+    monkeypatch.setattr(captain_state, "busy_since", spied(captain_state.busy_since))
+    monkeypatch.setattr(voice, "voice_mode", spied(voice.voice_mode))
+    monkeypatch.setattr(speaker, "speaker_on", spied(speaker.speaker_on))
+
+    async def body(pilot: Pilot[None]) -> None:
+        view = await _captain_view(pilot)
+        await _ticked(pilot, view)
+
+    drive(body)
+    main = threading.main_thread().name
+    assert threads, "the bar read state.json"
+    assert main not in threads, f"read on the UI thread: {threads}"
+
+
+def test_an_unreadable_state_file_is_said_on_the_bar_never_shown_as_the_defaults(
+    tmp_path: Path,
+    script: Script,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """T4 gate S2 (13325): focus and speaker-on are defaults, not facts, when the file cannot
+    be read — the bar says so, and says it again when the file reads."""
+    from aisquare.services.captain import speaker, voice
+
+    script[captain_state.home_project().id] = [_captain()]
+    real = voice.voice_mode, speaker.speaker_on, captain_state.busy_since
+
+    def unreadable() -> Any:
+        raise OSError("state.json: permission denied")
+
+    async def body(pilot: Pilot[None]) -> list[tuple[str, str, str]]:
+        view = await _captain_view(pilot)
+        seen = []
+        for what in (unreadable, None):
+            monkeypatch.setattr(voice, "voice_mode", what or real[0])
+            monkeypatch.setattr(speaker, "speaker_on", what or real[1])
+            monkeypatch.setattr(captain_state, "busy_since", what or real[2])
+            await _ticked(pilot, view)
+            note = fleet_app(pilot).query_one("#captain-state", Static)
+            seen.append(
+                (
+                    _label(pilot, "#captain-mode"),
+                    _label(pilot, "#captain-speaker"),
+                    shown(note) if note.display else "",
+                )
+            )
+        return seen
+
+    broken, mended = drive(body)
+    assert broken[:2] == ("Mode: ?", "Speaker: ?") and "state unreadable" in broken[2]
+    assert mended == ("Mode: focus", "Speaker: on", "")
+    assert any("permission denied" in record.getMessage() for record in caplog.records)
+
+
+def test_a_switch_over_an_unreadable_state_writes_nothing_and_says_why(
+    tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Flipping a switch whose state is unknown would write a guess."""
+    from aisquare.services.captain import speaker, voice
+
+    script[captain_state.home_project().id] = [_captain()]
+    written: list[object] = []
+
+    def unreadable() -> Any:
+        raise OSError("state.json: permission denied")
+
+    async def body(pilot: Pilot[None]) -> list[str]:
+        view = await _captain_view(pilot)
+        monkeypatch.setattr(voice, "voice_mode", unreadable)
+        monkeypatch.setattr(speaker, "speaker_on", unreadable)
+        monkeypatch.setattr(voice, "set_voice_mode", written.append)
+        monkeypatch.setattr(speaker, "set_speaker", written.append)
+        await _ticked(pilot, view)
+        await _clicked(pilot, "#captain-mode")
+        await _clicked(pilot, "#captain-speaker")
+        return [str(n.message) for n in fleet_app(pilot)._notifications]
+
+    said = drive(body)
+    assert written == []
+    assert sum("state unreadable" in line for line in said) == 2, said
 
 
 def _mic_text(pilot: Pilot[None]) -> str:
@@ -546,15 +652,45 @@ def test_the_mic_says_a_page_that_is_serving(
     assert "segno" in text, "no QR without segno — and it says why"
 
 
-def test_page_serving_is_a_real_connect_on_loopback() -> None:
-    """The probe answers False for a port nothing listens on, True for one that does."""
+def _http(port_body: bytes) -> tuple[Any, int]:
+    """A loopback HTTP server answering ``/`` with ``port_body``, on a free port."""
+    import http.server
+    import threading
+
+    class Page(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            self.send_response(200)
+            self.send_header("content-type", "text/html; charset=utf-8")
+            self.send_header("content-length", str(len(port_body)))
+            self.end_headers()
+            self.wfile.write(port_body)
+
+        def log_message(self, *args: Any) -> None:
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Page)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, server.server_address[1]
+
+
+def test_page_serving_is_the_voice_page_itself_not_any_listener() -> None:
+    """T4 gate S3 (13325): a connect took ANY listener on the port for the page. Now the
+    page's own bytes, from ``GET /`` — what T3's server answers, token or not."""
     import socket
 
     from aisquare.cli.ui.views.captain import page_serving
+    from aisquare.services.captain import voice
 
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
         listener.bind(("127.0.0.1", 0))
         listener.listen(1)
         port = listener.getsockname()[1]
-        assert page_serving(port)
-    assert not page_serving(port)
+        assert not page_serving(port), "a listener that says nothing is not the page"
+    assert not page_serving(port), "nothing listens"
+    for body, serving in ((voice.page_bytes(), True), (b"<title>captain</title>", False)):
+        server, port = _http(body)
+        try:
+            assert page_serving(port) is serving, body[:40]
+        finally:
+            server.shutdown()
+            server.server_close()

@@ -37,6 +37,10 @@ Rules the receiver keeps, each for a reason:
   message, pushes a dialog through the shell's own handler, or copies — it never
   waits for a spawn or a stop — so the answer is back well inside the client's
   two seconds.
+- **An answer means the action has landed** (13290). The owner's actions chain
+  ``ui`` steps — ``select_project beta``, then ``open_spawn`` — so the answer
+  waits until the app has handled what the action posted, to its end (a project
+  page mounted, the sidebar moved): the next step reads the new selection.
 - **A live socket is never stolen.** A socket file already at the path is
   dialled first: an answer means another asq listens there, and this one runs
   without a receiver (said once in the log); a refused dial means an asq crashed
@@ -94,10 +98,16 @@ VERSION = 1
 LINE_MAX = 64 * 1024
 """Bytes one request line may take — the bound T1's client reads its answer with."""
 
-READ_S = 1.0
+READ_S = 0.5
 """How long a connection has to send its line. Connections are served one at a time, so a
 client that dials and says nothing holds the next one up for at most this long — and under
-the client's two seconds (``actions.UI_TIMEOUT_S``) the next one is still answered in time."""
+the client's two seconds (``actions.UI_TIMEOUT_S``) the next one still has its read, its
+landing (:data:`LAND_S`) and its answer. T1's client writes its line as it connects."""
+
+LAND_S = 1.0
+"""How long an answer waits for its action to land (a project page mounting, a dialog
+pushed). Past it, the answer says the action was sent but not yet shown — never a false
+``ok``: the step after it would read the old state."""
 
 WRITE_S = 1.0
 """How long an answer may take to leave; a client that has gone costs no more than this."""
@@ -375,16 +385,23 @@ ACTIONS: dict[str, Handler] = {
 """The vocabulary: every action a ``ui`` call — or a ``ui`` step of an owner action — may name."""
 
 
-def _run(action: str, app: FleetApp, arg: str | None) -> tuple[bool, str]:
+def _run(action: str, app: FleetApp, arg: str | None, landed: threading.Event) -> tuple[bool, str]:
     """One action, ON the app's thread. A refusal is its answer; anything else it raises
-    reaches the receiver's thread through ``call_from_thread`` and is answered there."""
+    reaches the receiver's thread through ``call_from_thread`` and is answered there.
+
+    ``landed`` is set once everything the action posted has been handled: the app
+    handles its messages in order, each to its end (an ``async`` handler's awaits
+    included), so a callback queued behind them runs only after them.
+    """
     handler = ACTIONS.get(action)
     if handler is None:
         return False, f"unknown ui action {_quoted(action)} — known: {', '.join(sorted(ACTIONS))}"
     try:
-        return True, handler(app, arg)
+        said = handler(app, arg)
     except UiRefusal as exc:
         return False, str(exc)
+    app.call_later(landed.set)
+    return True, said
 
 
 # --- the wire -------------------------------------------------------------------------------------
@@ -664,8 +681,12 @@ class UiReceiver:
             if self._closing or app is None:
                 return False, "asq is quitting"
             self._dispatching = True
+        landed = threading.Event()
         try:
-            return app.call_from_thread(_run, action, app, arg)
+            ok, said = app.call_from_thread(_run, action, app, arg, landed)
+            if ok and not landed.wait(LAND_S):  # on this thread: the loop goes on landing it
+                return False, f"{said}, but asq had not finished it within {LAND_S:g}s"
+            return ok, said
         except Exception as exc:  # a handler that raised, or a loop that has gone
             _log.warning("ui action %s failed", action, exc_info=True)
             return False, f"error: {type(exc).__name__}: {exc}"

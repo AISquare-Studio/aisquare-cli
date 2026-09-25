@@ -4298,14 +4298,26 @@ def _pane_alive(agent: FleetAgent) -> bool:
     """Whether the row's pane exists and has not died — ``False`` when tmux cannot say.
 
     A pane under the row's id on a server younger than the row is another
-    agent's (:func:`_outlived`), so it is not the row's pane alive.
+    agent's (:func:`_outlived`), so it is not the row's pane alive. When the
+    server started is a second question, put once the pane has answered alive,
+    and a refusal of that one judges nothing, as a start tmux does not report
+    does. Read as "cannot say", it sent the restart of a RUNNING agent down
+    the other branch: stopped as ``fleet stop`` stops it, its claims released
+    and its exit announced, then replaced with no hand-over (review of the
+    #203 final-round fixes, F5).
     """
     srv = server_for(agent.tmux_socket)
     try:
         facts = srv.pane_facts(agent.pane_id)
-        return facts is not None and not facts.dead and not _outlived(agent, srv.started_at())
     except TmuxError:
         return False
+    if facts is None or facts.dead:
+        return False
+    try:
+        started = srv.started_at()
+    except TmuxError:
+        started = None
+    return not _outlived(agent, started)
 
 
 def project_of(agent: FleetAgent) -> ProjectInfo:

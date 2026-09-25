@@ -8236,6 +8236,41 @@ def test_restarting_a_running_agent_hands_its_claims_to_the_replacement_and_anno
     assert nudges == [f"{agent.label} exited"]
 
 
+def test_restart_hands_over_a_running_agent_whose_server_will_not_say_when_it_started(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of the #203 final-round fixes, F5: ``_pane_alive`` asked the server when it
+    started as a second, strict tmux call and read its ``TmuxError`` as "not running".
+    One refusal there (a wedged server's timeout, an OS refusal) after the pane had
+    answered alive sent the restart of a RUNNING agent down the other branch: stopped
+    as ``fleet stop`` stops it, its task back in the pool and its exit announced, the
+    replacement started with no hand-over. A start that cannot be read judges nothing:
+    the pane answered alive, so the agent is handed over."""
+    mine = _task(project, "the task this coder is for")
+    agent, first = _spawned(project, "coder", mine.id, tmux, monkeypatch)
+    team_service.hook_session_start(first, project.root, "startup")
+    team_service.claim_task(mine.id, session_ref=first)
+    nudges = _recorded_nudges(monkeypatch)
+    real_started_at = tmux.started_at
+    refusals = [TmuxError("display-message timed out (fake)")]
+
+    def refused_once() -> datetime | None:
+        if refusals:
+            raise refusals.pop()
+        return real_started_at()
+
+    monkeypatch.setattr(tmux, "started_at", refused_once)
+
+    receipt = fleet_service.restart(project, agent.label)
+
+    assert refusals == []  # the refusal was met, and it was the first question
+    assert receipt.was_running is True
+    held = _task_now(mine.id)
+    assert held.status == "doing" and held.claimed_by == receipt.started.session_id
+    assert _events(project, "agent_exited") == [] and _events(project, "task_released") == []
+    assert nudges == []
+
+
 def test_a_resumed_replacement_that_dies_before_its_first_hook_is_ended_like_any_dead_row(
     tmux: FakeTmux,
     claude_on_path: Path,

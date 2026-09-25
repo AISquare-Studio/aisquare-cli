@@ -1195,6 +1195,7 @@ def spawn(
     spec: LaunchSpec | None = None,
     claude_code: bool = False,
     takes_over: str | None = None,
+    onboard: bool = True,
 ) -> SpawnReceipt:
     """Start an agent for ``project`` in the fleet's tmux server and record it.
 
@@ -1248,7 +1249,9 @@ def spawn(
     A spawn is a deliberate add (#139): the project is onboarded with the row,
     once the window exists, and not before a refusal could still come (review
     of #168, round 2). A forget keeps the codename, so the onboarding cannot
-    ride on the codename's assignment.
+    ride on the codename's assignment. ``onboard=False`` is the automatic
+    usage-limit hand-over's (:func:`switch` with ``automatic``): nobody asked
+    for that spawn, so a project a forget left captured stays off the list.
 
     ``takes_over`` is a FRESH hand-over's (:func:`switch` with no transcript to
     resume, or ``--fresh``; never with ``resume``): the id of the session the
@@ -1545,6 +1548,7 @@ def spawn(
         wanted=label,
         notes=notes,
         cap=config.max_agents_per_project,
+        onboard=onboard,
     )
     # `auto` behind the explainability proxy is refused from the first tool call
     # once the session baseline is past what the proxy's non-streaming forward
@@ -1824,6 +1828,7 @@ def _record(
     wanted: str | None,
     notes: list[str],
     cap: int,
+    onboard: bool,
 ) -> FleetAgent:
     """Write the row; on a live-label collision re-pick the label and retry.
 
@@ -1843,10 +1848,10 @@ def _record(
     The spawn's deliberate add (#139) is made in the same store session, before
     the insert, so a store that refuses it refuses the row too and the window
     goes with it: onboarded after the insert, the refusal would leave a live
-    row on a killed window.
+    row on a killed window. ``onboard`` is :func:`spawn`'s.
     """
     try:
-        return _write_row(agent, project, wanted=wanted, notes=notes, cap=cap)
+        return _write_row(agent, project, wanted=wanted, notes=notes, cap=cap, onboard=onboard)
     except FleetError:
         _kill_unrecorded(srv, agent.pane_id)
         raise
@@ -1871,10 +1876,12 @@ def _write_row(
     wanted: str | None,
     notes: list[str],
     cap: int,
+    onboard: bool,
 ) -> FleetAgent:
     """The store half of :func:`_record`: onboard, insert, relabelling past a live collision."""
     with store_session() as store:
-        store.onboard_project(project)
+        if onboard:
+            store.onboard_project(project)
         for _ in range(_LABEL_RETRIES):
             try:
                 stored = store.upsert_fleet_agent(agent)
@@ -3756,6 +3763,8 @@ def switch(
             resume_prompt=_resume_prompt(agent, reason),
             takes_over=True,
             spawned_by=spawned_by,
+            # The hook's hand-over is nobody's add (#139): `spawn`'s `onboard`.
+            onboard=not automatic,
         )
     except Exception:
         if handed_over.withheld:
@@ -3802,6 +3811,7 @@ def _respawn(
     resume_prompt: str | None = None,
     takes_over: bool = False,
     permission_mode: str | None = None,
+    onboard: bool = True,
 ) -> tuple[SpawnReceipt, bool, list[str]]:
     """Start ``agent`` again — same label, role, task and worktree — resuming when it can.
 
@@ -3822,7 +3832,7 @@ def _respawn(
     The replacement replays the row's launch spec (#144; ``spawn(spec=…)``);
     ``permission_mode`` is a restart's explicit one, which wins over the spec
     as an explicit argument wins over the config, and is what the
-    replacement's spec records.
+    replacement's spec records. ``onboard`` is :func:`spawn`'s.
     """
     notes: list[str] = []
     transcript = (
@@ -3863,6 +3873,7 @@ def _respawn(
         # Code whatever its binary is called, resumed or `--fresh`.
         claude_code=session is not None,
         takes_over=session.id if takes_over and resume is None and session is not None else None,
+        onboard=onboard,
     )
     notes.extend(receipt.notes)
     return receipt, resume is not None, notes

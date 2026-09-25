@@ -1576,6 +1576,32 @@ def test_a_codename_is_not_an_onboarding(
         assert [p.id for p in store.list_projects()] == [unseen.id]
 
 
+def test_the_automatic_hand_over_lists_nothing_a_forget_left_captured(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #168, round 2: the usage-limit hand-over starts its replacement through
+    ``spawn``, which onboarded the project — listed with no action of anyone's, against
+    #139's "only deliberate actions list a project". A switch by hand still does."""
+    _two_slots_with_usage(monkeypatch, work=95, personal=10)
+    agent = fleet_service.spawn(project, "coder", worktree=False, account="2").agent
+    _with_transcript(agent, None)
+    with store_session() as store:
+        # What a forget that raced the spawn leaves once a prompt there captures the row.
+        store.forget_project(project.id)
+        store.ensure_project(project)
+        captured = store.get_project(project.id)
+    assert captured is not None
+
+    moved = fleet_service.switch(captured, agent.label, automatic=True, reason="session limit")
+
+    assert moved.to_slot == 3 and moved.started.ended_at is None
+    with store_session() as store:
+        assert store.list_projects() == [], "the hook's hand-over added nothing"
+    fleet_service.switch(captured, agent.label, to="2")
+    with store_session() as store:
+        assert [p.id for p in store.list_projects()] == [project.id], "a switch by hand does"
+
+
 # --- derived state (§5.1) --------------------------------------------------------------
 
 

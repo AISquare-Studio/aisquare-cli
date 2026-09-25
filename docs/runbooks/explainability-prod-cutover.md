@@ -1205,8 +1205,9 @@ second run returns the same ids rather than creating duplicates.
 
 **Run it from a directory whose project has no key of its own.** Since #141,
 `register` uses the key a launch from the current directory would use — the
-project's own key when that project (or `$AISQUARE_TEAM_HUB`'s) has one bound
-to prod, else the machine's — and registers the roster in the workspace that
+project's own key when that project has one bound to prod, else the machine's;
+under `$AISQUARE_TEAM_HUB` the project is the hub's, and only the hub's key is
+consulted — and registers the roster in the workspace that
 key names. From a checkout with its own prod key it registers there, and every
 machine-keyed launch still gets 409 `agent_not_registered`. The success line
 ends `under the project's own key (…)` when that happened;

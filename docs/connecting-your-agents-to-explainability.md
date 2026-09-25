@@ -162,8 +162,9 @@ Two ways not to get it wrong:
     nothing will look. With **this project only** ticked, the key is the
     project's own instead (see *A key per project* below), which every target
     reads first, whatever variable it names.
-  - The **prefix** is a name: `nishil` becomes `nishil-{role}`. Braces are taken
-    off, and the toast quotes what was stored.
+  - The **prefix** is a name: `nishil` becomes `nishil-{role}`. A prefix with a
+    brace in it (`nishil-{role}`, `nishil}`) is refused with the reason, and
+    nothing is stored; the role is added for you.
 - **On the command line** — pass it explicitly, as the examples above do.
 
 Either way, a gateway or proxy without a scheme (`stg.example`) is **refused**,

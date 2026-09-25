@@ -55,6 +55,7 @@ from aisquare.models import FleetAgent, FleetAgentStatus, ProjectInfo, TeamEvent
 from aisquare.services import fleet
 from aisquare.services import team as team_service
 from aisquare.services.captain import queue as captain_queue
+from aisquare.services.captain import screen
 from aisquare.services.captain import state as captain_state
 from aisquare.services.captain.errors import Failed, Refused
 
@@ -90,8 +91,23 @@ KEYS: dict[str, str] = {
     "tab": "Tab",
     "space": "Space",
     "ctrl-c": "C-c",
+    **{str(digit): str(digit) for digit in range(1, 10)},
 }
-"""The keys ``press`` may send, by the name the captain uses → tmux's own key name."""
+"""The keys ``press`` may send, by the name the captain uses → tmux's own key name. The
+digits are what Claude Code's numbered chooser takes (T1b: runner2-1 measured on a real
+claude that ``y`` does nothing there and ``1`` answers Yes, board 13265)."""
+
+ANSWERS = ("yes", "no")
+"""The semantic keys: read off the pane at the moment of the press (``screen.prompt_showing``)."""
+
+ANSWERING_KEYS = frozenset({"yes", "no", "y", "n", "enter", "esc", *(str(d) for d in range(1, 10))})
+"""Keys that answer a prompt: pressed while one shows, the pane is read back, and a prompt
+still showing is a said failure — the captain never reports a press the prompt ignored.
+The arrows, tab, space and ctrl-c move or interrupt; they only report what shows after."""
+
+READBACK_POLLS = 10
+READBACK_POLL_S = 0.2
+"""How long a press waits for its prompt to go: ten reads, two seconds in all."""
 
 READY_STATES = frozenset({"waiting", "attention"})
 """Where ``press`` and ``paste`` may type: an agent at its prompt, or one asking the
@@ -106,8 +122,8 @@ PRIMITIVES = ("press", "paste", "tell", "read_pane", "ui", "task")
 own example needs it: ``unblock = press y then read_pane``."""
 
 BUNDLED_ACTIONS: dict[str, tuple[str, ...]] = {
-    "approve_prompt": ("press y",),
-    "unblock": ("press y", "read_pane 20"),
+    "approve_prompt": ("press yes",),
+    "unblock": ("press yes", "read_pane 20"),
     "open_spawn": ("ui open_spawn",),
 }
 """The owner action list's defaults; ``[captain.actions.<name>]`` in config.toml wins."""
@@ -115,7 +131,7 @@ BUNDLED_ACTIONS: dict[str, tuple[str, ...]] = {
 UNDONE_REASON = "undone by the captain's brake (bt)"
 
 _OPEN_STATUSES = frozenset({"todo", "doing", "review", "blocked"})
-_ESCAPES = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-Z\\-_])")
+_ESCAPES = screen.PANE_ESCAPES  # one pattern for every captured pane (coderp's M4, 13278)
 _PLACEHOLDER = re.compile(r"\{([a-z_][a-z0-9_]*)\}")
 _UI_ACTION = re.compile(r"[a-z][a-z0-9_]*")
 
@@ -240,11 +256,12 @@ def _audit(
     receipt: int | None,
 ) -> int:
     board = target if target is not None else captain_state.home_project()
+    via = _VIA.get()
     record = {
         "v": 1,
         "tool": tool,
         "project": target.id if target is not None else None,
-        "args": args,
+        "args": {**args, "via": via} if via is not None else args,
         "utterance": utterance,
         "ok": ok,
         "said": said,
@@ -547,6 +564,7 @@ def _since(target: ProjectInfo, agent: str | None, advance: bool) -> Outcome:
             "pane": pane,
             "pane_error": pane_error,
             "advanced": False,
+            "said": said,
         },
         said=said,
         after=moved,
@@ -624,10 +642,24 @@ def _task(target: ProjectInfo, verb: str, ref: str, note: str | None) -> Outcome
         raise Refused("reopen needs a note (the feedback)")
     card = _card(target, ref)
     if verb == "claim":
-        moved = team_service.claim_task(card.id, session_ref=actor)
+        try:
+            moved = team_service.claim_task(card.id, session_ref=actor)
+        except Exception:
+            # Written, then its event failed (team.py commits first): still the captain's
+            # claim, so still bt's to undo — never an older entry undone in its place.
+            if not (card.status == "doing" and card.claimed_by == actor) and _held_by(
+                card.id, actor
+            ):
+                _record_quietly("claim", card.id, target)
+            raise
         captain_state.record_undo("claim", card.id, target.id)
     elif verb == "done":
-        moved = team_service.finish_task(card.id, note=note, session_ref=actor)
+        try:
+            moved = team_service.finish_task(card.id, note=note, session_ref=actor)
+        except Exception:
+            if card.status != "done" and _status_now(card.id) == "done":
+                _record_quietly("done", card.id, target)
+            raise
         captain_state.record_undo("done", card.id, target.id)
     elif verb == "reopen":
         moved = team_service.reopen_task(card.id, reason=note or "", session_ref=actor)
@@ -640,6 +672,22 @@ def _task(target: ProjectInfo, verb: str, ref: str, note: str | None) -> Outcome
         said=f"{verb}: {moved.id} is now {moved.status}",
         receipt=_receipt(before),
     )
+
+
+def _status_now(task_id: str) -> str | None:
+    with store_session() as store:
+        now = store.get_task(task_id)
+    return now.status if now is not None else None
+
+
+def _record_quietly(kind: captain_state.UndoKind, task_id: str, target: ProjectInfo) -> None:
+    """Record the undo of a write that landed while its call failed. The call's own error is
+    what the owner hears; an undo that cannot be recorded as well is logged, not raised
+    over it."""
+    try:
+        captain_state.record_undo(kind, task_id, target.id)
+    except (StateUnwritableError, OSError) as exc:
+        _log.warning("the undo of %s %s could not be recorded: %s", kind, task_id, exc)
 
 
 def _note(target: ProjectInfo, text: str, kind: str) -> Outcome:
@@ -657,15 +705,23 @@ def _ready(target: ProjectInfo, label: str) -> tuple[FleetAgent, FleetAgentStatu
     ``tell`` types only into a waiting agent whose pane runs the agent; ``press``
     and ``paste`` also type into one that is ASKING (a permission prompt reads
     ``attention``), because answering that prompt is what they are for.
+
+    And one the fleet still reads WORKING when its screen says otherwise (13313): a
+    fresh claude reads working until its first Stop hook, and the fleet's activity
+    window holds for seconds after a chooser draws. There a prompt showing, or the
+    input box drawn and idle, is the evidence; anything else stays refused. The screen
+    overrides the activity window, never a stop: limited, exited and lost are refused.
     """
     agent = _live(target, label)
     status = fleet.status_of(agent)
-    if status.state not in READY_STATES:
+    srv = fleet.server_for(agent.tmux_socket)
+    if status.state not in READY_STATES and not (
+        status.state == "working" and _asking_or_idle(srv, agent.pane_id)
+    ):
         raise Refused(
             f"{label} is {status.state} — the captain types only into an agent that is "
             "waiting at its prompt or asking something"
         )
-    srv = fleet.server_for(agent.tmux_socket)
     if not fleet.pane_is_the_agent(srv, agent.pane_id):
         raise Refused(
             f"{label}'s pane is not running the agent (a shell or the launcher is in front) — "
@@ -674,14 +730,72 @@ def _ready(target: ProjectInfo, label: str) -> tuple[FleetAgent, FleetAgentStatu
     return agent, status, srv
 
 
+def _screen(srv: TmuxServer, pane_id: str) -> list[str]:
+    return list(srv.capture(pane_id).lines)
+
+
+def _asking_or_idle(srv: TmuxServer, pane_id: str) -> bool:
+    """Whether the pane is ready by its screen: a prompt showing, or the box drawn and idle
+    (13313). A pane that cannot be read is not: the fleet's word, working, stands."""
+    try:
+        lines = _screen(srv, pane_id)
+    except TmuxError:
+        return False
+    return screen.prompt_showing(lines) is not None or screen.box_idle(lines)
+
+
 def _press(target: ProjectInfo, label: str, key: str) -> Outcome:
-    sent = KEYS.get(key)
-    if sent is None:
-        raise Refused(f"key {key!r} is not one of {', '.join(KEYS)}")
+    if key not in KEYS and key not in ANSWERS:
+        raise Refused(f"key {key!r} is not one of {', '.join((*ANSWERS, *KEYS))}")
     agent, status, srv = _ready(target, label)
+    try:
+        before = screen.prompt_showing(_screen(srv, agent.pane_id))
+    except TmuxError as exc:
+        if key in ANSWERS:
+            raise Refused(
+                f"{label}'s pane could not be read to see what {key} means ({exc}) — nothing "
+                "pressed"
+            ) from exc
+        before = None
+    if key in ANSWERS:
+        if before is None:
+            raise Refused(f"no prompt is showing on {label} — nothing pressed")
+        if before.shape == "trust":
+            raise Refused(
+                f"the trust dialog is showing on {label}: trusting a folder is the owner's to "
+                "answer (aisquare fleet attach) — nothing pressed"
+            )
+        sent = before.yes_key if key == "yes" else before.no_key
+        if sent is None:
+            raise Refused(f"the prompt on {label} offers no {key}: {before.question}")
+    else:
+        sent = KEYS[key]
     srv.send_keys(agent.pane_id, sent)
-    return Outcome(
-        {"label": label, "key": key, "state": status.state}, said=f"pressed {key} in {label}"
+    data: dict[str, Any] = {
+        "label": label,
+        "key": key,
+        "sent": sent,
+        "state": status.state,
+        "prompt": before.question if before is not None else None,
+        "answered": False,
+    }
+    shown = key if key == sent or key in KEYS else f"{key} ({sent})"
+    if before is None:
+        return Outcome(data, said=f"pressed {shown} in {label}")
+    if key not in ANSWERING_KEYS:
+        return Outcome(data, said=f"pressed {shown} in {label}: {before.question} still shows")
+    for _ in range(READBACK_POLLS):
+        _sleep(READBACK_POLL_S)
+        try:
+            after = screen.prompt_showing(_screen(srv, agent.pane_id))
+        except TmuxError:
+            continue
+        if after is None or after.question != before.question:
+            data["answered"] = True
+            return Outcome(data, said=f"pressed {shown} in {label}: the prompt is gone")
+    raise Failed(
+        f"pressed {shown} in {label} but the prompt is still showing: {before.question} — "
+        "the key did not answer it"
     )
 
 
@@ -820,8 +934,8 @@ def _plan_step(
     text = f"{primitive} {filled}".strip()
     label = args.get("label", "")
     if primitive == "press":
-        if filled not in KEYS:
-            raise Refused(f"{where}: key {filled!r} is not one of {', '.join(KEYS)}")
+        if filled not in KEYS and filled not in ANSWERS:
+            raise Refused(f"{where}: key {filled!r} is not one of {', '.join((*ANSWERS, *KEYS))}")
         return _Step(text, lambda: _press(_on(target), label, filled))
     if primitive in ("paste", "tell"):
         if not filled:
@@ -914,6 +1028,8 @@ def _undo(entry: captain_state.Undo) -> tuple[dict[str, Any], _Found]:
         return {**undid, "how": "skipped: the task or its board is gone"}, _Found(None)
     actor = captain_state.ensure_session(project)
     before = _seq_now(project.id)
+    if entry.kind == "wololo":
+        return _undo_wololo(entry, project, card, undid, before)
     if entry.kind == "claim":
         if card.status != "doing" or card.claimed_by != actor:
             how = f"skipped: it is {card.status} and no longer the captain's claim"
@@ -927,6 +1043,126 @@ def _undo(entry: captain_state.Undo) -> tuple[dict[str, Any], _Found]:
         kind, how = "task_reopened", "reopened"
     found = _effect_seq(project.id, before, (kind,), lambda event: event.task_id == card.id)
     return {**undid, "how": how}, found
+
+
+def _why_not_live(project: ProjectInfo, session: str, label: str) -> str | None:
+    """Why a converted agent cannot take its cards back, or ``None`` when it can (13371).
+
+    Three things must read live: its board session is open, its tmux server answers
+    (``fleet.server_state``, T2's reboot rule — asked before the row, which asks tmux),
+    and its fleet row is neither exited nor lost. An open session alone is not a live
+    agent: a pane killed without a SessionEnd, or a reboot's dead server, leaves it open
+    and the row reading waiting (13363, 13367).
+    """
+    with store_session() as store:
+        row = store.get_session(session) if session else None
+        agents = [a for a in store.fleet_agents(project.id) if a.session_id == session]
+    if row is None or row.ended_at is not None:
+        return f"{label}'s session has ended"
+    if not agents:
+        return f"{label} has no fleet row"
+    agent = agents[-1]
+    server, why = fleet.server_state(agent)
+    if server == "gone":
+        return f"{label}'s tmux server is gone ({why})"
+    if server != "up":
+        return f"{label}'s tmux server does not answer ({why})"
+    state = fleet.status_of(agent).state
+    if state in ("exited", "lost"):
+        return f"{label}'s pane has {'exited' if state == 'exited' else 'been lost'}"
+    return None
+
+
+def _held_by(task_id: str, session: str | None) -> bool:
+    """Whether the card reads back as ``session``'s claim now (a write that raised may have
+    landed: team.py commits before it writes the event)."""
+    with store_session() as store:
+        now = store.get_task(task_id)
+    return now is not None and now.status == "doing" and now.claimed_by == session
+
+
+def _undo_wololo(
+    entry: captain_state.Undo,
+    project: ProjectInfo,
+    card: TeamTask,
+    undid: dict[str, Any],
+    before: int,
+) -> tuple[dict[str, Any], _Found]:
+    """Give both sides of a conversion back (13242): release the agent's new claim, re-claim
+    its released cards for it while they are still free, and say what cannot be undone.
+
+    A step that fails after another has changed the board is said with what already
+    changed (13295 M1): ``bt`` puts the entry back, and a retry finishes the rest."""
+    session = entry.agent_session or ""
+    label = entry.label or "the agent"
+    said: list[str] = []
+    done: list[str] = []
+    ours = card.status == "doing" and card.claimed_by == session
+    try:
+        if ours:
+            team_service.release_task(card.id, session_ref=session)
+            done.append(f"released {card.id} from {label}")
+            said.append(done[-1])
+            kinds: tuple[str, ...] = ("task_released",)
+        else:
+            said.append(f"{card.id} is {card.status} and no longer {label}'s claim, left as it is")
+            kinds = ()
+        restored: list[str] = []
+        dead = _why_not_live(project, session, label)
+        for old_id in entry.released:
+            with store_session() as store:
+                old = store.get_task(old_id)
+            if old is None:
+                said.append(f"{old_id} is gone")
+            elif old.status == "todo" and old.claimed_by is None and dead is not None:
+                # A claim for an agent that cannot work would lock the card 'doing' for its
+                # whole lease with nobody on it (13295 S2, 13363 B1): it stays in the pool.
+                said.append(f"{old_id} left in the pool: {dead}")
+            elif old.status == "todo" and old.claimed_by is None:
+                try:
+                    team_service.claim_task(old.id, session_ref=session)
+                except (
+                    sqlite3.Error,
+                    OSError,
+                    ValueError,
+                    LookupError,
+                    team_service.ClaimLostError,
+                    team_service.DeliveryUnconfirmedError,
+                ) as exc:
+                    if not _held_by(old_id, session):  # else it landed, only its event failed
+                        with store_session() as store:
+                            now = store.get_task(old_id)
+                        said.append(
+                            f"{old_id} was taken meanwhile by {now.claimed_by} ({now.status}), "
+                            "not stolen back"
+                            if now is not None and now.claimed_by
+                            else f"{old_id} could not be re-claimed ({exc}), left in the pool"
+                        )
+                        continue
+                done.append(f"re-claimed {old.id} for {label}")
+                restored.append(old.id)
+            elif old.status == "doing" and old.claimed_by == session:
+                restored.append(old.id)  # already back with the agent
+            else:
+                holder = f" by {old.claimed_by}" if old.claimed_by else ""
+                said.append(f"{old_id} was taken meanwhile{holder} ({old.status}), not stolen back")
+        found = (
+            _effect_seq(project.id, before, kinds, lambda event: event.task_id == card.id)
+            if kinds
+            else _Found(None)
+        )
+    except Exception as exc:
+        released = f"released {card.id} from {label}"
+        if released not in done and ours and not _held_by(card.id, session):
+            done.insert(0, released)  # the release landed; its event is what failed
+        reason = _failure(exc)
+        if reason is None or not done:
+            raise
+        raise Failed(f"{reason} — after it had {', '.join(done)}") from exc
+    if restored:
+        said.append(f"re-claimed {', '.join(restored)} for {label}")
+    said.append(f"the instruction typed into {label}'s pane cannot be taken back")
+    return {**undid, "how": "; ".join(said), "restored": restored}, found
 
 
 def _bt() -> Outcome:
@@ -945,15 +1181,24 @@ def _bt() -> Outcome:
         except Exception as exc:
             # The entry goes back on the list, and the owner hears what DID happen: a
             # retried bt would otherwise undo an older action nobody asked to undo.
-            captain_state.record_undo(entry.kind, entry.task_id, entry.project_id)
+            back = "it is back on the undo list"
+            try:
+                captain_state.record_undo_entry(entry)
+            except (StateUnwritableError, OSError) as put:
+                back = f"it could not be put back on the undo list ({put})"
             reason = _failure(exc)
             if reason is None:
                 raise
             raise Failed(
                 f"brake: {', '.join(parts)}; undoing the {entry.kind} of {entry.task_id} "
-                f"failed and it is back on the undo list: {reason}"
+                f"failed and {back}: {reason}"
             ) from exc
-    parts.append(f"{undid['how']} {undid['task']}" if undid is not None else "nothing to undo")
+    if undid is None:
+        parts.append("nothing to undo")
+    elif "restored" in undid:  # a wololo's own line names every card already
+        parts.append(str(undid["how"]))
+    else:
+        parts.append(f"{undid['how']} {undid['task']}")
     said = "brake: " + ", ".join(parts) + found.note
     return Outcome(
         {
@@ -981,26 +1226,67 @@ def _wololo(target: ProjectInfo, label: str, task: str) -> Outcome:
         raise Refused(f"{card.id} is {card.status} — wololo takes a card from the pool")
     actor = captain_state.ensure_session(target)
     before = _seq_now(target.id)
-    # The new claim first: a claim that loses a race leaves the agent's old work as it was.
-    team_service.claim_task(card.id, session_ref=agent.session_id)
+    session = agent.session_id
     with store_session() as store:
         held = [
-            t
+            t.id
             for t in store.team_tasks(target.id, status="doing")
-            if t.claimed_by == agent.session_id and t.id != card.id
+            if t.claimed_by == session and t.id != card.id
         ]
-    released = []
-    for old in held:
-        team_service.release_task(old.id, session_ref=actor)
-        released.append(old.id)
-    told = fleet.tell(
-        target,
-        label,
-        f"aisquare: the captain reassigned you — {card.id} is claimed for you: {card.title}. "
-        f"Read it with `aisquare task show {card.id}` and start"
-        + ("; your earlier claims went back to the pool." if released else "."),
-        sender=actor,
-    )
+    step = f"claiming {card.id}"
+    failure: Exception | None = None
+    try:
+        # The new claim first: a claim that loses a race leaves the agent's old work as it was.
+        team_service.claim_task(card.id, session_ref=session)
+        for old_id in held:
+            step = f"releasing {old_id}"
+            team_service.release_task(old_id, session_ref=actor)
+    except Exception as exc:  # what moved is read back below, whatever raised
+        failure = exc
+    # Read back, never counted from the calls that returned: team.py commits a claim or a
+    # release BEFORE it writes its event, so a call can raise after its change landed.
+    if not _held_by(card.id, session):
+        if failure is not None:
+            raise failure  # the claim is first and it did not land: nothing moved
+        raise Failed(f"{card.id} was claimed but does not read back as {label}'s")
+    released = [old_id for old_id in held if not _held_by(old_id, session)]
+    kept = [old_id for old_id in held if old_id not in released]
+    problems = [f"{step} failed: {failure}"] if failure is not None else []
+    # One compound undo entry (13242), from what moved: a step that failed still leaves a
+    # conversion bt can brake — never an older entry undone in its place (13295 S1).
+    recorded = True
+    try:
+        captain_state.record_undo(
+            "wololo",
+            card.id,
+            target.id,
+            agent_session=session,
+            label=label,
+            released=tuple(released),
+        )
+    except (StateUnwritableError, OSError) as exc:
+        recorded = False
+        problems.append(f"its undo could not be recorded: {exc}")
+    # The agent holds the card whatever else failed, so it is always told, and told true.
+    moves = [f"{', '.join(released)} went back to the pool"] if released else []
+    moves += [f"still yours: {', '.join(kept)}"] if kept else []
+    told: fleet.TellResult | None = None
+    try:
+        told = fleet.tell(
+            target,
+            label,
+            f"aisquare: the captain reassigned you — {card.id} is claimed for you: "
+            f"{card.title}. Read it with `aisquare task show {card.id}` and start"
+            + (f"; {'; '.join(moves)}." if moves else "."),
+            sender=actor,
+        )
+    except (fleet.FleetError, sqlite3.Error, OSError) as exc:
+        problems.append(f"the tell failed: {exc}")
+    if failure is not None and _failure(failure) is None:
+        raise failure  # a crash: the conversion is recorded and told, its traceback kept
+    if told is None or problems:
+        brake = "bt undoes it" if recorded else "bt cannot undo it"
+        raise Failed(f"{label} was converted to {card.id} ({brake}) but {'; '.join(problems)}")
     claimed = _effect_seq(
         target.id, before, ("task_claimed",), lambda event: event.task_id == card.id
     )
@@ -1320,9 +1606,14 @@ def note(project: str, text: str, kind: str = "note", utterance: str = "") -> st
 
 
 def press(project: str, label: str, key: str, utterance: str = "") -> str:
-    """Press one key in an agent's pane: y n enter esc up down left right tab space ctrl-c.
+    """Press one key in an agent's pane: yes or no to the prompt showing, or a literal key.
 
-    Only into an agent that is waiting or asking (a permission prompt) — never a busy one.
+    ``yes``/``no`` are read off the pane: on Claude Code's numbered chooser yes is the
+    digit of its Yes option and no is Esc; on a [y/N] line, y and n; refused when no
+    prompt shows, and on the trust dialog (the owner's to answer). Literal keys: 1-9 y n
+    enter esc up down left right tab space ctrl-c. After a key that answers, the pane is
+    read back: a prompt still showing is an error, never a success. Only into an agent
+    that is waiting or asking — never a busy one.
     """
     return _run(
         "press",
@@ -1431,23 +1722,53 @@ INSTRUCTIONS = (
 )
 
 
-def perform(tool: str, args: Mapping[str, Any], utterance: str) -> dict[str, Any]:
+def perform(
+    tool: str, args: Mapping[str, Any], utterance: str, *, via: str = "cli"
+) -> dict[str, Any]:
     """Run one tool by the name the captain calls it — from Python, no MCP SDK needed.
 
     The CLI verbs (``aisquare captain attention``, ``… wololo``, ``… bt``; card T5)
     are the owner's own hands on the same tools, so they go through the same
-    frame: one ``captain_action`` per call, the argv as the ``utterance``, the same
-    refusals in the same words. Returns the tool's result with its ``action_seq``;
-    raises :class:`Refused` or :class:`Failed` whose text is exactly what the
-    captain would have been told, the audit's seq included.
+    frame: one ``captain_action`` per call, the argv as the ``utterance``, ``via``
+    in its args (13081), the same refusals in the same words. Returns the tool's
+    result with its ``action_seq``; raises :class:`Refused` or :class:`Failed`
+    whose text is exactly what the captain would have been told, the audit's seq
+    included.
     """
     function = dict(TOOLS).get(tool)
     if function is None:
         known = ", ".join(name for name, _ in TOOLS)
         raise Refused(f"no tool named {tool!r} — the captain's tools are {known}")
-    data = json.loads(function(**dict(args), utterance=utterance))
+    token = _VIA.set(via)
+    try:
+        data = json.loads(function(**dict(args), utterance=utterance))
+    finally:
+        _VIA.reset(token)
     if not isinstance(data, dict):  # pragma: no cover — every tool answers an object
         raise Failed(f"{tool} answered something that is not an object")
+    return data
+
+
+def perform_read(
+    name: str,
+    args: Mapping[str, Any],
+    utterance: str,
+    read: Callable[[], tuple[dict[str, Any], str]],
+    *,
+    project: str | None = None,
+    via: str = "cli",
+) -> dict[str, Any]:
+    """A read the owner runs that is no captain tool — ``log``, ``actions`` — through the
+    same audited frame (13081: one ``captain_action`` per call, reads included). ``read``
+    answers the data and the line to say; its errors are said like any tool's."""
+    token = _VIA.set(via)
+    try:
+        answer = _run(name, dict(args), utterance, lambda _: Outcome(*read()), project=project)
+    finally:
+        _VIA.reset(token)
+    data = json.loads(answer)
+    if not isinstance(data, dict):  # pragma: no cover — _run answers an object
+        raise Failed(f"{name} answered something that is not an object")
     return data
 
 
@@ -1493,6 +1814,10 @@ _CALL_RAN: ContextVar[list[bool] | None] = ContextVar("captain_call_ran", defaul
 """Set per ``tools/call``: a one-item flag the tool body flips (:func:`_run`). A list, not a
 bool, because the body runs on a worker thread with a COPY of this context — the copy holds
 the same list, so the flip is seen here."""
+_VIA: ContextVar[str | None] = ContextVar("captain_call_via", default=None)
+"""Where a call came from when it did not come over MCP: ``cli`` for the owner's own verbs
+(T5). Recorded in the audited ``args`` as ``via`` (13081), so ``log`` tells the owner's
+terminal from the captain's voice."""
 
 
 def _audit_rejected_calls(server: MCPServer) -> None:

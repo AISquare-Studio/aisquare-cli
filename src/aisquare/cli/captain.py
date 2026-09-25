@@ -8,6 +8,9 @@
 - ``aisquare captain chat``: a line-by-line conversation over the same delivery.
 - ``aisquare captain serve --stdio``: the Actions MCP server the captain mounts
   (``services.captain.actions``) — the only hands the captain has.
+- ``aisquare captain attention | next | resolve | snooze | since | log | uav | wololo
+  | bt | actions`` (``cli/captain_verbs.py``, T5): the owner's own hands on the
+  captain's tools, each audited with the words as typed.
 """
 
 from __future__ import annotations
@@ -29,31 +32,89 @@ NO_TEXT = "the captain's turn ended without text — its pane shows what it did"
 """What ``say`` reports for a turn that answered with tools alone: said, never as the reply."""
 
 
-class _SayByDefault(TyperGroup):
-    """A first word that names no subcommand is a message: ``captain "what is up"`` means
-    ``captain say "what is up"``. Only the group's own help stays the group's.
+_TYPED = "aisquare.captain.typed"
 
-    Rewritten BEFORE the group parses (``parse_args``): at ``resolve_command`` the
-    group had already refused ``--timeout`` as its own unknown option and eaten a
-    ``--`` that was to let a message start with ``-``. So ``captain --timeout 30
-    "what is up"`` and ``captain -- "-5 degrees"`` both reach ``say`` whole.
+
+class _Captain(TyperGroup):
+    """The one captain group: it keeps the words as typed, then routes a message to ``say``.
+
+    **As typed, first.** Every verb's audit records the owner's words (13081), so the
+    group keeps its args in ``ctx.meta`` BEFORE any rewrite, and ``invoke`` scopes them
+    for the verb (``captain_verbs.TYPED``). Then the rewrites, in this order (13445):
+    ``--voice`` among the leading options goes to the ``voice`` leaf (T3); then a first
+    word that names no subcommand goes to ``say``.
+
+    **Say by default.** A first WORD that names no subcommand is a message:
+    ``captain "what is up"`` means ``captain say "what is up"``. Options before the
+    first word look past themselves (T5b, 13437): each is skipped, with its value when
+    it takes one, so where ``--json`` sits never changes which command runs —
+    ``captain --json next`` runs ``next``, ``captain --json what is up`` says. Typing
+    into the captain is an outward effect; it happens only when the owner means to talk
+    to it. No word at all is the group's own: its help, or the bare captain. Rewritten
+    BEFORE the group parses: at ``resolve_command`` the group had already refused
+    ``--timeout`` as its own unknown option and eaten a ``--`` that was to let a message
+    start with ``-``. So ``captain --timeout 30 "what is up"`` and
+    ``captain -- "-5 degrees"`` both reach ``say`` whole.
 
     ``ctx`` is typed ``Any``: click is vendored (``typer._click``), and like
-    ``cli/global_flags.py`` this stays on the public typer surface."""
+    ``cli/global_flags.py`` this stays on the public typer surface.
+    """
 
     def parse_args(self, ctx: Any, args: list[str]) -> list[str]:
-        if args and args[0] == "--voice":
-            # The plan's spelling of the voice page (T3, rider 13143 (1)): the leaf,
-            # not a message to the captain that starts with "--voice".
-            args = ["voice", *args[1:]]
-        if args and args[0] not in self.commands and args[0] not in ctx.help_option_names:
-            args = ["say", *args]
+        ctx.meta[_TYPED] = tuple(args)  # 1. the words as typed, before any rewrite
+        at = self._first_word_at(args)
+        leading = args if at is None else args[:at]
+        if "--voice" in leading:
+            # 2. The plan's spelling of the voice page (T3, rider 13143 (1)): the leaf, not
+            # a message that starts with "--voice" — wherever it sits among the options.
+            index = leading.index("--voice")
+            args = ["voice", *args[:index], *args[index + 1 :]]
+        elif at is not None and args[at] not in self.commands:
+            args = ["say", *args]  # 3. say by default: the first word is no verb
         result: list[str] = super().parse_args(ctx, args)
         return result
 
+    def _first_word_at(self, args: list[str]) -> int | None:
+        """Where the first positional word is, past the options before it (each with its
+        value); ``None`` when there is no word. ``--`` ends the options."""
+        valued = self._valued_options()
+        index = 0
+        while index < len(args):
+            arg = args[index]
+            if arg == "--":
+                return index + 1 if index + 1 < len(args) else None
+            if arg.startswith("-") and arg != "-":
+                index += 2 if arg in valued else 1  # --opt=value is one token
+                continue
+            return index
+        return None
+
+    def _valued_options(self) -> set[str]:
+        """The option spellings that take a value: the group's own (the global flags) and
+        those of ``say`` and ``voice``, the commands leading options go to."""
+        params = [*self.params]
+        for name in ("say", "voice"):
+            command = self.commands.get(name)
+            params += command.params if command is not None else []
+        return {
+            spelling
+            for param in params
+            if param.param_type_name == "option"
+            and not getattr(param, "is_flag", False)
+            and not getattr(param, "count", False)
+            for spelling in (*param.opts, *param.secondary_opts)
+        }
+
+    def invoke(self, ctx: Any) -> Any:
+        token = captain_verbs.TYPED.set(ctx.meta.get(_TYPED, ()))
+        try:
+            return super().invoke(ctx)
+        finally:
+            captain_verbs.TYPED.reset(token)
+
 
 app = typer.Typer(
-    cls=_SayByDefault,
+    cls=_Captain,
     help="The captain: the home-level agent that runs every project's fleet for you. "
     'Bare, it starts or attaches to the captain; `aisquare captain "text"` asks it.',
     invoke_without_command=True,

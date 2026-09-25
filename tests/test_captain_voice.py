@@ -20,9 +20,9 @@ import threading
 import time
 from array import array
 from collections.abc import Callable, Iterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, tzinfo
 from pathlib import Path
-from typing import Any
+from typing import Any, Self
 
 import pytest
 from starlette.testclient import TestClient
@@ -116,6 +116,7 @@ class Harness:
         mode: voice.Mode = "focus",
         wake_word: str = "",
         wake_window_s: float = 5.0,
+        transcriber: voice.Transcriber | None = None,
     ) -> None:
         self.transcribers: list[FakeTranscriber] = []
         self.spoken = Spoken()
@@ -128,7 +129,9 @@ class Harness:
         self.mode_key: voice.Mode | None = None  # state.json captain_voice_mode, in memory
         self.mode_writes: list[voice.Mode] = []
 
-        def factory() -> FakeTranscriber:
+        def factory() -> voice.Transcriber:
+            if transcriber is not None:
+                return transcriber
             fake = FakeTranscriber(canned)
             self.transcribers.append(fake)
             return fake
@@ -167,9 +170,18 @@ class Harness:
         self.app = build_app(token=TOKEN, hooks=self.hooks, mode=mode)
 
     def captain_speaks(self, at: datetime | None = None) -> None:
-        """What T1's ``speak()`` leaves behind: one ok ``captain_action`` on the home board."""
+        """What T1's ``speak()`` leaves behind: one ok ``captain_action`` on the home board.
+
+        Stamped now, and never at or before the last typing: a speak() made after the text
+        went in is audited after it. Windows' clock ticks every 15.6 ms, so "now" could be
+        the typing's own tick, which voice.spoke_since reads as the turn before's
+        (3e1fdeb7's Windows leg)."""
         self.seq += 1
-        self.speak_seqs.append((self.seq, at or datetime.now(tz=UTC)))
+        if at is None:
+            at = datetime.now(tz=UTC)
+            if self.deliveries.typed_at:
+                at = max(at, self.deliveries.typed_at[-1] + timedelta(microseconds=1))
+        self.speak_seqs.append((self.seq, at))
 
 
 @pytest.fixture
@@ -390,17 +402,31 @@ def test_the_reply_is_spoken_only_when_the_captain_made_no_speak_call_that_turn(
     """13143 (4): the brain decides what is worth saying. A turn in which the captain called
     ``speak()`` is already audible through the server's drainer, so the page stays quiet;
     a silent turn's reply is spoken so a captain that forgets still answers aloud."""
+    reply, lines = _a_turn(captain_spoke=captain_spoke)
+    assert reply == {"t": "reply", "text": "all green", "spoken": not captain_spoke}
+    assert lines == ([] if captain_spoke else ["all green"])
+
+
+def _a_turn(
+    *, captain_spoke: bool = False, spoke_while_waiting: bool = False
+) -> tuple[dict[str, Any], list[str]]:
+    """One typed turn: the reply frame and the lines the page's voice spoke. An earlier turn's
+    speak() is always on the board; ``captain_spoke`` adds one inside this turn, and
+    ``spoke_while_waiting`` one while say waited to type (the busy turn's, S3)."""
     harness = Harness(deliveries=Deliveries("all green"))
     harness.captain_speaks()  # an earlier turn's line: not this turn's, never counted
     if captain_spoke:
         harness.deliveries.during = harness.captain_speaks
+    if spoke_while_waiting:
+        harness.deliveries.before_typing = lambda: harness.captain_speaks(
+            at=datetime.now(tz=UTC)
+        )  # the busy turn's own speak(), landing while say waits to type
     with TestClient(harness.app) as client:
         for connection in _authed(client):
             connection.send_text(json.dumps({"t": "text", "text": "how is the fold"}))
             reply = _until(connection, "reply")
             _spoken(harness, 0 if captain_spoke else 1)
-    assert reply == {"t": "reply", "text": "all green", "spoken": not captain_spoke}
-    assert harness.spoken.lines == ([] if captain_spoke else ["all green"])
+    return reply, harness.spoken.lines
 
 
 def test_a_turn_without_text_shows_the_pages_own_note_and_speaks_nothing() -> None:
@@ -511,19 +537,36 @@ def test_deliver_to_captain_says_a_fleet_refusal_as_a_failed_delivery(
         voice.deliver_to_captain("what is up")
 
 
+class _WindowsClock(datetime):
+    """Windows' clock: it ticks every 15.625 ms, so two stamps taken in a row are often equal."""
+
+    @classmethod
+    def now(cls, tz: tzinfo | None = None) -> Self:
+        t = super().now(tz)
+        return t.replace(microsecond=t.microsecond // 15625 * 15625)
+
+
+@pytest.mark.parametrize("captain_spoke", [False, True])
+def test_the_speak_window_holds_on_a_windows_clock(
+    captain_spoke: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """3e1fdeb7's Windows leg: on a 15.6 ms clock the turn's own speak() and the typing shared a
+    stamp, and the strict window (a tie is the turn before's) left the reply spoken twice. The
+    harness stamps a speak made after the typing after it, as the audit would be; this runs the
+    two window tests on that clock, so Linux CI sees what only Windows did."""
+    monkeypatch.setattr(sys.modules[__name__], "datetime", _WindowsClock)
+    reply, lines = _a_turn(captain_spoke=captain_spoke)
+    assert reply["spoken"] is not captain_spoke, "this turn's own speak() mutes the reply"
+    assert lines == ([] if captain_spoke else ["all green"])
+    reply, lines = _a_turn(spoke_while_waiting=True)
+    assert reply["spoken"] is True and lines == ["all green"], "the busy turn's does not"
+
+
 def test_a_speak_from_the_wait_before_the_text_was_typed_does_not_mute_this_reply() -> None:
     """coderp's S3: the window opened before brain.say waited for the lock or a busy captain,
     so another turn's speak() muted this reply. It opens when the text is typed."""
-    harness = Harness(deliveries=Deliveries("all green"))
-    harness.deliveries.before_typing = lambda: harness.captain_speaks(
-        at=datetime.now(tz=UTC)
-    )  # the busy turn's own speak(), landing while say waits to type
-    with TestClient(harness.app) as client:
-        for connection in _authed(client):
-            connection.send_text(json.dumps({"t": "text", "text": "how is the fold"}))
-            reply = _until(connection, "reply")
-            _spoken(harness, 1)
-    assert reply["spoken"] is True and harness.spoken.lines == ["all green"]
+    reply, lines = _a_turn(spoke_while_waiting=True)
+    assert reply["spoken"] is True and lines == ["all green"]
 
 
 def test_when_the_home_board_cannot_be_read_the_reply_is_still_spoken_and_it_is_said(
@@ -613,12 +656,38 @@ def test_listen_splits_two_utterances_on_silence_and_delivers_each() -> None:
     assert bytes(harness.transcribers[0].fed).count(LOUD) == 2 * FRAMES_PER_SECOND
 
 
-def _say(connection: Any) -> None:
-    """One spoken utterance in listen mode: a second of speech, then the silence that ends it."""
-    for _ in range(FRAMES_PER_SECOND):
+def _say(connection: Any, seconds: float = 1.0) -> None:
+    """One spoken utterance in listen mode: ``seconds`` of speech, then the silence that ends it."""
+    for _ in range(int(FRAMES_PER_SECOND * seconds)):
         connection.send_bytes(LOUD)
     for _ in range(FRAMES_OF_SILENCE):
         connection.send_bytes(QUIET)
+
+
+class ScriptedTranscriber:
+    """Interims as whisper's trailing window gives them (T3b S2): each is due once so many
+    bytes of the utterance were heard, and past INTERIM_WINDOW_BYTES it decodes only the
+    last seconds, which may begin mid-sentence. ``final`` decodes the whole utterance."""
+
+    def __init__(self, interims: list[tuple[float, str]], final: str) -> None:
+        self._interims = [(int(voice.BYTES_PER_SECOND * at), text) for at, text in interims]
+        self._final = final
+        self._heard = 0
+        self._next = 0
+
+    def feed(self, pcm: bytes) -> str | None:
+        self._heard += len(pcm)
+        if self._next < len(self._interims) and self._heard >= self._interims[self._next][0]:
+            self._next += 1
+            return self._interims[self._next - 1][1]
+        return None
+
+    def finish(self) -> str:
+        self._heard = self._next = 0
+        return self._final
+
+    def discard(self) -> None:
+        self._heard = self._next = 0
 
 
 def test_listen_delivers_only_what_follows_the_wake_word_and_strips_it() -> None:
@@ -809,6 +878,160 @@ def test_listen_in_the_window_the_next_utterance_shows_live() -> None:
     assert interims == ["find me this"]
 
 
+# --- T3b: the wake word's four edges (13429, 13431) ------------------------------------------
+
+
+def test_a_request_begun_inside_the_window_is_delivered_though_its_final_lands_after_it() -> None:
+    """S1: the window a bare 'Captain' opens is for the NEXT request, judged when it BEGAN. A
+    request still being spoken when the window's seconds run out was dropped after its words
+    showed live."""
+    harness = Harness(
+        canned=["Captain", "find me this"], mode="listen", wake_word="captain", wake_window_s=0.3
+    )
+    with TestClient(harness.app) as client:
+        for connection in _authed(client):
+            _say(connection)
+            assert _until(connection, "awake")["on"] is True
+            for _ in range(FRAMES_PER_SECOND // 4):  # the request begins inside the window …
+                connection.send_bytes(LOUD)
+            time.sleep(0.6)  # … and is still being spoken when the window's time is up
+            _say(connection)
+            frames: list[dict[str, Any]] = []
+            while not frames or frames[-1]["t"] != "reply":
+                frames.append(json.loads(_text(connection)))
+    assert frames[-1]["text"] == "done"
+    assert harness.deliveries.texts == ["find me this"]
+    order = [
+        f["t"] if f["t"] != "stt" or not f["final"] else "final"
+        for f in frames
+        if f["t"] in ("awake", "reply") or (f["t"] == "stt" and f["final"])
+    ]
+    assert order.index("final") < order.index("awake"), f"the window closed mid-request: {order}"
+
+
+def test_meeting_speech_with_the_captain_mid_sentence_never_shows_on_the_page() -> None:
+    """S2: interims decode whisper's trailing window. Past the utterance's first seconds that
+    window begins mid-sentence, and 'the captain wants …' is no wake word."""
+    meeting = ScriptedTranscriber(
+        [
+            (1, "so I told the team"),
+            (3, "so I told the team yesterday the"),
+            (5, "captain wants the roadmap by friday"),  # the window slid: mid-sentence
+        ],
+        final="so I told the team yesterday the captain wants the roadmap by friday",
+    )
+    harness = Harness(mode="listen", wake_word="captain", transcriber=meeting)
+    with TestClient(harness.app) as client:
+        for connection in _authed(client):
+            _say(connection, seconds=6)
+            frames = _frames_until_final(connection)
+    shown = [f["text"] for f in frames if f["t"] == "stt" and f["text"]]
+    assert shown == [], f"meeting speech reached the page: {frames}"
+    assert harness.deliveries.texts == []
+
+
+def test_a_long_woken_request_keeps_showing_live_after_the_wake_word_slides_out() -> None:
+    """S2's other half: the wake word matched while the window began at the utterance's
+    start; once the window slides past it, the request still shows, never a blank line."""
+    long_request = ScriptedTranscriber(
+        [
+            (1, "Captain, find me"),
+            (3, "Captain, find me the fold's"),
+            (5, "the fold's test log from yesterday"),
+        ],
+        final="Captain, find me the fold's test log from yesterday",
+    )
+    harness = Harness(mode="listen", wake_word="captain", transcriber=long_request)
+    with TestClient(harness.app) as client:
+        for connection in _authed(client):
+            _say(connection, seconds=6)
+            frames = _frames_until_final(connection)
+    interims = [f["text"] for f in frames if f["t"] == "stt" and not f["final"]]
+    assert interims == ["find me", "find me the fold's", "the fold's test log from yesterday"]
+
+
+@pytest.mark.parametrize(
+    ("heard", "delivered"),
+    [
+        ("Captain\u2019s report is late", None),
+        ("Captain-led teams ship faster", None),
+        ("captains, the fold is green", None),
+        ("Captain's log is late", None),
+        ("Captain, what is up", "what is up"),
+        ("Captain what is up", "what is up"),
+    ],
+)
+def test_the_wake_word_ends_at_a_word_boundary(heard: str, delivered: str | None) -> None:
+    """S3: whitespace, a comma, a full stop, ! or ?, or the end close the wake word. A hyphen,
+    an apostrophe of either kind, or a letter never do: those are other words a meeting says."""
+    harness = Harness(canned=[heard], mode="listen", wake_word="captain")
+    with TestClient(harness.app) as client:
+        for connection in _authed(client):
+            _say(connection)
+            final = _until(connection, "stt")
+            while not final["final"]:
+                final = _until(connection, "stt")
+            if delivered is not None:
+                _until(connection, "reply")
+    assert harness.deliveries.texts == ([] if delivered is None else [delivered])
+
+
+def test_a_typed_request_closes_an_open_window() -> None:
+    """S4: a typed request takes the window, as a woken utterance does; the next meeting line
+    inside what would have been the window is dropped."""
+    harness = Harness(
+        canned=["Captain", "we should ship the fold"],
+        mode="listen",
+        wake_word="captain",
+        wake_window_s=30.0,
+    )
+    with TestClient(harness.app) as client:
+        for connection in _authed(client):
+            _say(connection)
+            assert _until(connection, "awake")["on"] is True
+            connection.send_text(json.dumps({"t": "text", "text": "find me this"}))
+            assert _until(connection, "awake")["on"] is False
+            _until(connection, "reply")
+            _say(connection)
+            final = _until(connection, "stt")
+            while not final["final"]:
+                final = _until(connection, "stt")
+    assert final.get("dropped") == "no wake word"
+    assert harness.deliveries.texts == ["find me this"]
+
+
+def test_the_servers_own_speech_closes_an_open_window() -> None:
+    """coderp's minor: a reply spoken while a bare 'Captain' window is open reaches the mic
+    inside it, and would be delivered as a request."""
+    harness = Harness(
+        deliveries=Deliveries(delay_s=0.5),
+        canned=["Captain"],
+        mode="listen",
+        wake_word="captain",
+        wake_window_s=30.0,
+    )
+    with TestClient(harness.app) as client:
+        for connection in _authed(client):
+            connection.send_text(json.dumps({"t": "text", "text": "how is the fold"}))
+            _say(connection)  # 'Captain' alone, while the answer is on its way
+            assert _until(connection, "awake")["on"] is True
+            _until(connection, "reply")
+            assert _until(connection, "awake")["on"] is False, "closed before the reply is spoken"
+            _spoken(harness, 1)
+    assert harness.spoken.lines == ["done"]
+
+
+def test_a_typed_stop_word_after_the_wake_word_is_the_stop_word() -> None:
+    """coderp's minor: typed 'Captain, stop listening' went to the captain as a request."""
+    harness = Harness(mode="listen", wake_word="captain")
+    with TestClient(harness.app) as client:
+        for connection in _authed(client):
+            connection.send_text(json.dumps({"t": "text", "text": "Captain, stop listening"}))
+            off = _until(connection, "listening")
+    assert off == {"t": "listening", "on": False, "why": "stop word"}
+    assert harness.deliveries.texts == []
+
+
 def test_typed_text_in_listen_mode_needs_no_wake_word() -> None:
     """The wake word gates what the mic hears; a typed line is the owner's on purpose."""
     harness = Harness(mode="listen", wake_word="captain")
@@ -907,6 +1130,8 @@ def test_a_wake_word_of_two_words_matches_both_in_order() -> None:
         ("Captains, we need to talk", False, ""),
         ("Captain's log is late", False, ""),
         ("Captain… find me this", True, "find me this"),
+        ("Captain\u2019s report is late", False, ""),
+        ("Captain-led teams ship faster", False, ""),
         ("spawn a coder", False, ""),
         ("", False, ""),
     ],
@@ -1110,8 +1335,6 @@ def test_spoke_since_counts_only_ok_speak_audits_on_the_home_board(isolated_home
     assert voice.spoke_since(voice.home_seq()) == 0, "a speak() before a turn is not the turn's"
     # coderp's S3: the window opens when the text is typed. A speak() audited before that
     # moment (the busy turn's, another page's) is not this turn's, seq or no seq.
-    from datetime import timedelta
-
     later = datetime.now(tz=UTC) + timedelta(seconds=5)
     assert voice.spoke_since(before, later) == 0, "spoken before the text went in"
     assert voice.spoke_since(before, later - timedelta(minutes=1)) == 1

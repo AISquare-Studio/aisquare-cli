@@ -1,0 +1,163 @@
+"""One reader, two questions (13278): ``say`` asks "may I type text here?", ``press`` asks
+"is there a prompt to answer, and with which key?" — and on every captured screen the two
+answers agree about what is on the screen."""
+
+from __future__ import annotations
+
+import pytest
+
+from aisquare.services.captain import screen
+from tests import captain_screens as shots
+
+MARK = shots.MARK
+
+
+@pytest.mark.parametrize(
+    ("name", "lines", "prompt", "modal"),
+    [
+        ("a real idle pane", shots.REAL_IDLE, None, None),
+        (
+            "the real permission chooser",
+            shots.REAL_CHOOSER,
+            ("chooser", "1", "Escape"),
+            "a numbered choice",
+        ),
+        ("the real trust dialog", shots.REAL_TRUST, ("trust", None, None), "the trust dialog"),
+        ("a [y/N] line", shots.YES_NO, ("yn", "y", "n"), None),
+        ("a chooser quoted above the box", shots.REAL_QUOTED, None, None),
+        ("a box whose footer names Esc", shots.BOX_WITH_ESC_FOOTER, None, None),
+        ("a highlighted list mid-turn, no footer", shots.MID_TURN_LIST, None, None),
+        (
+            "a chooser whose first option is No",
+            shots.CHOOSER_NO_FIRST,
+            ("chooser", "2", "Escape"),
+            "a numbered choice",
+        ),
+        ("a working pane quoting dialog words", shots.WORKING_QUOTING, None, None),
+        ("the trust sentence quoted mid-turn, no footer", shots.TRUST_QUOTED_MID_TURN, None, None),
+        (
+            "the rating survey above the box",
+            shots.RATING_ABOVE_BOX,
+            None,
+            "the session-rating prompt",
+        ),
+        ("a model picker", shots.MODEL_PICKER, None, "a dialog waiting for Enter or Esc"),
+        ("a real box drawn mid-turn, its top rule named", shots.REAL_WORKING, None, None),
+        ("a real idle box after the first Stop, named", shots.REAL_IDLE_AFTER_STOP, None, None),
+        ("an empty pane", [], None, None),
+        ("a shell", ["$ ", "ready"], None, None),
+    ],
+)  # fmt: skip
+def test_both_views_of_the_one_reader_agree_on_every_captured_screen(
+    name: str,
+    lines: list[str],
+    prompt: tuple[str, str | None, str | None] | None,
+    modal: str | None,
+) -> None:
+    got = screen.prompt_showing(lines)
+    shape = (got.shape, got.yes_key, got.no_key) if got is not None else None
+    assert shape == prompt, f"{name}: prompt_showing"
+    assert screen.modal_showing(lines) == modal, f"{name}: modal_showing"
+    # The agreement: a prompt to ANSWER is never a screen say may type into, and the box drawn
+    # is the same fact for both.
+    if got is not None and got.shape != "yn":
+        assert modal is not None, f"{name}: press sees a prompt that say would type over"
+    if modal in ("a numbered choice", "the trust dialog"):
+        assert got is not None, f"{name}: say refuses a prompt that press cannot answer"
+
+
+def _with_footer(words: str) -> list[str]:
+    """The real mid-turn capture with its footer's 'esc to interrupt' swapped for ``words``."""
+    return [line.replace("esc to interrupt", words) for line in shots.REAL_WORKING]
+
+
+def _without_spinner() -> list[str]:
+    """The real mid-turn capture without its spinner line: only the footer says it."""
+    return [line for line in shots.REAL_WORKING if "Sautéing…" not in line]
+
+
+def test_the_box_is_found_on_both_real_captures_whose_top_rule_carries_the_name() -> None:
+    """T2b (13383): the fleet launches every agent with --name, and Claude Code draws it in
+    the box's TOP rule. A reader that took only bare rules found no box on any real pane,
+    so say and send never typed."""
+    for lines in (shots.REAL_WORKING, shots.REAL_IDLE_AFTER_STOP):
+        rows = screen.tail(lines)
+        top = screen.input_box_at(rows)
+        assert top is not None and "screen-coder" in rows[top]
+    assert screen.RULE.match(shots.REAL_TOP_RULE) and screen.RULE.match(shots.TOP_RULE)
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "the verdict ─── is in",
+        f"{'─' * 20} two words ─",
+        f"{'─' * 20} coder-1 ─ and more",
+        f"{'─' * 20} coder-1 {'─' * 20}",
+        "─── x ─",
+    ],
+)
+def test_a_rule_carries_one_name_and_a_short_close_nothing_else(line: str) -> None:
+    """The card's shape (T2b): 8 or more rule characters, then optionally one space, the name,
+    one space and a short closing run — nothing else on the line."""
+    assert screen.RULE.match(line) is None
+
+
+@pytest.mark.parametrize(
+    ("name", "lines", "idle"),
+    [
+        ("the real idle pane, its finished turn's line above the box", shots.REAL_IDLE, True),
+        ("the real idle box after the first Stop", shots.REAL_IDLE_AFTER_STOP, True),
+        ("the plain input box", shots.INPUT_BOX, True),
+        ("the real box mid-turn: a live spinner above, esc to interrupt below",
+         shots.REAL_WORKING, False),
+        ("the live spinner alone says it", _with_footer("? for shortcuts"), False),
+        ("the footer alone says it", _without_spinner(), False),
+        ("a chooser: no box at all", shots.REAL_CHOOSER, False),
+        ("a spinner and no box", shots.MID_TURN_LIST, False),
+        ("an empty pane", [], False),
+    ],
+)  # fmt: skip
+def test_an_idle_box_is_read_by_its_structure(name: str, lines: list[str], idle: bool) -> None:
+    """13313: real Claude Code keeps its input box drawn DURING a turn. Idle means the box is
+    drawn, no live spinner sits just above it, and its footer does not say 'esc to interrupt'.
+    The finished turn's line ('✻ Cooked for 5s · done') is no spinner."""
+    assert screen.box_idle(lines) is idle, name
+
+
+def test_the_box_is_read_with_a_wrapped_draft_and_a_dim_suggestion() -> None:
+    long_draft = [
+        shots.RULE,
+        f"{MARK} a draft that wraps",
+        "  onto a second line",
+        shots.RULE,
+        "  ⏸ manual mode on",
+    ]
+    assert screen.input_box_at(long_draft) == 0
+    with_suggestion = [shots.RULE, f'{MARK} \x1b[2mTry "what is up"\x1b[0m', shots.RULE]
+    assert screen.input_box_at(screen.strip_escapes(with_suggestion)) == 0
+    assert screen.input_box_at([shots.RULE, "not the mark", shots.RULE]) is None
+
+
+def test_a_hyperlink_ended_by_st_strips_clean_as_t1_stripped_it() -> None:
+    """coderp's S1 on #219: the shared pattern wanted ESC and TWO backslashes to end an OSC,
+    so a hyperlink ended by ST (ESC and one backslash, what tmux passes through) leaked its
+    target and broke the anchored option match on its line."""
+    linked = f"\x1b]8;;https://example.com\x1b\\ {MARK} 1. Yes\x1b]8;;\x1b\\"
+    assert screen.strip_escapes([linked]) == [f" {MARK} 1. Yes"]
+    raw = ["Do you want to proceed?", linked, "   2. No", " Esc to cancel"]
+    assert screen.modal_showing(raw) == "a numbered choice"
+    got = screen.prompt_showing(raw)
+    assert got is not None and (got.shape, got.yes_key) == ("chooser", "1")
+
+
+def test_escapes_are_stripped_before_anything_is_read() -> None:
+    raw = [
+        "\x1b[1;32mDo you want to proceed?\x1b[0m",
+        f"\x1b]8;;http://x\x07 {MARK} 1. Yes\x1b]8;;\x07",
+        "   2. No",
+        " Esc to cancel",
+    ]
+    got = screen.prompt_showing(raw)
+    assert got is not None and (got.shape, got.yes_key) == ("chooser", "1")
+    assert screen.modal_showing(raw) == "a numbered choice"

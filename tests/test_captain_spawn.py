@@ -237,6 +237,13 @@ def test_an_exited_captain_is_not_found_and_a_bare_start_replaces_it(
     assert ended is not None and ended.ended_at is not None
 
 
+TMUX_SOCKETS = pytest.mark.skipif(
+    sys.platform == "win32", reason="tmux sockets are POSIX: socket_path() refuses on Windows"
+)
+"""The reboot rule reads a socket FILE where the fleet resolves it — there is none on
+Windows, where there is no tmux (#223's Windows leg: TmuxUnavailable in the helper)."""
+
+
 def _captain_at_its_prompt(
     tmux: FakeTmux, monkeypatch: pytest.MonkeyPatch
 ) -> tuple[FleetAgent, Path]:
@@ -252,6 +259,7 @@ def _captain_at_its_prompt(
     return agent, socket
 
 
+@TMUX_SOCKETS
 def test_after_a_reboot_swept_the_socket_a_bare_captain_starts_fresh(
     tmux: FakeTmux,
     claude_on_path: Path,
@@ -276,6 +284,7 @@ def test_after_a_reboot_swept_the_socket_a_bare_captain_starts_fresh(
     assert [row.role for row in live] == ["captain"] and live[0].id != agent.id
 
 
+@TMUX_SOCKETS
 def test_a_silent_server_with_its_socket_present_is_refused_fast_naming_reap(
     tmux: FakeTmux,
     claude_on_path: Path,
@@ -308,6 +317,7 @@ def test_a_silent_server_with_its_socket_present_is_refused_fast_naming_reap(
     assert row is not None and row.ended_at is None, "no evidence, so the row stands"
 
 
+@TMUX_SOCKETS
 @pytest.mark.parametrize("shape", ["no client", "denied socket"])
 def test_a_tmux_that_cannot_be_asked_is_refused_not_recovered(
     tmux: FakeTmux,
@@ -322,8 +332,11 @@ def test_a_tmux_that_cannot_be_asked_is_refused_not_recovered(
         tmux.installed = False
     else:
         tmux.socket_denied = True
-    with pytest.raises(brain.Unreachable, match=r"tmux could not be (run|asked) .*reap -P"):
+    with pytest.raises(brain.Unreachable, match=r"tmux could not be (run|asked) .*reap -P") as got:
         brain.find()  # said as a question that could not be put, not as a missing socket
+    assert "sweep" not in str(got.value), (
+        "refused before any sweep ran (coderp's delta gate, 13233)"
+    )
     with store_session() as store:
         row = store.get_fleet_agent(agent.id)
     assert row is not None and row.ended_at is None

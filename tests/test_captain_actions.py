@@ -39,6 +39,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 from aisquare.cli.app import app
 from aisquare.core import paths
 from aisquare.core.ids import new_agent_id, new_event_id, new_task_id
+from aisquare.core.state_file import StateUnwritableError
 from aisquare.core.store import store_session
 from aisquare.core.tmux import Capture, PaneFacts, TmuxError
 from aisquare.core.workspace import project_id_for
@@ -55,8 +56,10 @@ from aisquare.services import fleet, mcp_server
 from aisquare.services import team as team_service
 from aisquare.services.captain import actions
 from aisquare.services.captain import queue as captain_queue
+from aisquare.services.captain import screen as screen_reader
 from aisquare.services.captain import state as captain_state
 from aisquare.services.captain.errors import Failed, Refused
+from tests import captain_screens as shots
 from tests.rendered import plain
 
 CONTRACT_TOOLS = frozenset(
@@ -104,6 +107,9 @@ class Pane:
     pastes: list[str] = field(default_factory=list)
     typed: list[tuple[str, str]] = field(default_factory=list)
     """Everything that reached the pane, in order: ``("keys", "Enter")``, ``("paste", text)``."""
+    answers: dict[str, list[str]] = field(default_factory=dict)
+    """What the screen becomes when a key lands (T1b): a chooser answered by ``1`` goes
+    back to the input box; a key the prompt ignores is simply not here."""
 
     def facts(self, pane_id: str) -> PaneFacts:
         return PaneFacts(
@@ -126,12 +132,25 @@ class Pane:
 class FakeServer:
     """The tmux server behind the fleet: routes each call to the pane it names."""
 
-    def __init__(self, panes: dict[str, Pane]) -> None:
+    def __init__(
+        self, panes: dict[str, Pane], *, up: bool = True, socket: Path | None = None
+    ) -> None:
         self._panes = panes
+        self._up = up
+        self._socket = socket
+
+    def reachable(self) -> bool:
+        return self._up
+
+    def socket_path(self) -> Path:
+        return self._socket if self._socket is not None else Path("/nonexistent/tmux-0/asq")
 
     def send_keys(self, pane_id: str, *keys: str) -> None:
-        self._panes[pane_id].keys.append(keys)
-        self._panes[pane_id].typed.append(("keys", " ".join(keys)))
+        pane = self._panes[pane_id]
+        pane.keys.append(keys)
+        pane.typed.append(("keys", " ".join(keys)))
+        if keys and keys[0] in pane.answers:
+            pane.screen = list(pane.answers[keys[0]])
 
     def paste(self, pane_id: str, text: str) -> None:
         self._panes[pane_id].pastes.append(text)
@@ -169,7 +188,17 @@ class Fleet:
         for name in ("tell", "spawn", "stop", "restart", "attach_persona", "list_agents"):
             monkeypatch.setattr(fleet, name, getattr(self, name))
         monkeypatch.setattr(fleet, "status_of", self.status_of)
-        monkeypatch.setattr(fleet, "server_for", lambda socket, config=None: FakeServer(self.panes))
+        self.server_up = True
+        """False stands for a tmux server that does not answer (kill-server, a reboot)."""
+        self.socket_file: Path | None = None
+        """Where the server's socket is; ``None`` stands for no socket file at all."""
+        monkeypatch.setattr(
+            fleet,
+            "server_for",
+            lambda socket, config=None: FakeServer(
+                self.panes, up=self.server_up, socket=self.socket_file
+            ),
+        )
 
     def names(self) -> list[str]:
         return [name for name, _ in self.calls]
@@ -984,6 +1013,16 @@ def test_read_pane_returns_the_tail_without_escapes_and_marks_it_untrusted(
     assert ok(actions.read_pane("alpha", "coder-1", lines=500))["lines"][0] == "old 0"
 
 
+def test_read_pane_strips_a_hyperlink_ended_by_st(
+    alpha: ProjectInfo, agents: dict[str, FleetAgent], fleet_rec: Fleet
+) -> None:
+    """coderp's S1 on #219: T1's pattern stripped a hyperlink ended by ST (ESC and one
+    backslash). The shared one must too, or read_pane hands the captain link targets."""
+    pane = fleet_rec.panes["%1"]
+    pane.screen = ["see \x1b]8;;https://example.com/pr/219\x1b\\the PR\x1b]8;;\x1b\\ now", ""]
+    assert ok(actions.read_pane("alpha", "coder-1", lines=5))["lines"][-1] == "see the PR now"
+
+
 def test_read_pane_refuses_an_agent_that_is_not_there(
     alpha: ProjectInfo, agents: dict[str, FleetAgent], fleet_rec: Fleet
 ) -> None:
@@ -1484,8 +1523,257 @@ def test_press_refuses_a_key_outside_the_list_by_name(
     alpha: ProjectInfo, agents: dict[str, FleetAgent], fleet_rec: Fleet
 ) -> None:
     message = refused(lambda: actions.press("alpha", "coder-1", "F13"))
-    assert message.startswith("refused: key 'F13' is not one of y, n, enter, esc")
+    assert message.startswith("refused: key 'F13' is not one of yes, no, y, n, enter, esc")
     assert fleet_rec.panes["%1"].keys == []
+
+
+# --- press answers Claude Code's real prompts (T1b) --------------------------------------
+#
+# The screens are runner2-1's captures from a REAL Claude Code 2.1.282 (board 13265): on
+# its permission chooser and on the trust dialog the letter y does nothing; the digit 1
+# (Yes), Enter with Yes highlighted and the arrows do.
+
+MARK = shots.MARK
+RULE = shots.REAL_RULE
+IDLE = shots.REAL_IDLE
+CHOOSER = shots.REAL_CHOOSER
+TRUST = shots.REAL_TRUST
+YES_NO = shots.YES_NO
+QUOTED = shots.REAL_QUOTED
+
+
+def _at(fleet_rec: Fleet, screen: list[str], **answers: list[str]) -> Pane:
+    pane = fleet_rec.panes["%1"]
+    pane.screen = list(screen)
+    pane.answers = dict(answers)
+    fleet_rec.states["coder-1"] = "attention"
+    return pane
+
+
+def test_the_permission_chooser_is_read_as_one_with_its_yes_digit() -> None:
+    prompt = screen_reader.prompt_showing(CHOOSER)
+    assert prompt is not None
+    assert (prompt.shape, prompt.yes_key, prompt.no_key) == ("chooser", "1", "Escape")
+    assert prompt.question == "Do you want to create probe2.txt?"
+
+
+def test_a_chooser_whose_first_option_is_no_answers_yes_with_its_yes_digit() -> None:
+    screen = [" Allow this?", f" {MARK} 1. No", "   2. Yes", " Esc to cancel"]
+    prompt = screen_reader.prompt_showing(screen)
+    assert prompt is not None and prompt.yes_key == "2", "never a blind 1"
+
+
+def test_a_y_n_line_is_read_as_one() -> None:
+    prompt = screen_reader.prompt_showing(YES_NO)
+    assert prompt is not None
+    assert (prompt.shape, prompt.yes_key, prompt.no_key) == ("yn", "y", "n")
+
+
+def test_the_trust_dialog_is_read_as_its_own_shape() -> None:
+    prompt = screen_reader.prompt_showing(TRUST)
+    assert prompt is not None and prompt.shape == "trust"
+    assert prompt.yes_key is None and prompt.no_key is None
+
+
+@pytest.mark.parametrize("screen", [IDLE, QUOTED, ["$ ", "ready"], []])
+def test_an_input_box_or_a_plain_screen_is_no_prompt(screen: list[str]) -> None:
+    """A reply that quotes a whole chooser sits ABOVE the input box: it is no prompt (13264)."""
+    assert screen_reader.prompt_showing(screen) is None
+
+
+def test_an_input_box_at_the_bottom_is_no_prompt_whatever_else_shows() -> None:
+    """13264's rule on its own: the box means the agent is at its input. Here the footer
+    under the box ALSO mentions Esc, and a chooser is quoted above — still no prompt."""
+    screen = [*QUOTED[:5], RULE, f"{MARK} ", RULE, "  ⏸ manual mode on · Esc to cancel a draft"]
+    assert screen_reader.prompt_showing(screen) is None
+
+
+def test_a_numbered_list_mid_turn_is_no_prompt_without_a_dialog_footer() -> None:
+    """The chooser's footer is what makes numbered lines a dialog: mid-turn output that
+    happens to highlight a line, with no Esc/Enter footer, is not one."""
+    screen = [
+        "Here are the options:",
+        f" {MARK} 1. Yes",
+        "   2. No",
+        "✻ Thinking… (esc to interrupt)",
+    ]
+    assert screen_reader.prompt_showing(screen) is None
+
+
+# --- ready by the screen while the hook still says working (13313) -----------------------------
+
+
+def _working(fleet_rec: Fleet, lines: list[str], **answers: list[str]) -> Pane:
+    """A pane the fleet reads WORKING: a fresh real claude before its first Stop hook, or
+    the 5 s activity window after a chooser draws (runner2's 13308 and 13323)."""
+    pane = fleet_rec.panes["%1"]
+    pane.screen = list(lines)
+    pane.answers = dict(answers)
+    fleet_rec.states["coder-1"] = "working"
+    return pane
+
+
+def test_a_fresh_coder_takes_a_paste_when_its_box_is_drawn_and_idle(
+    alpha: ProjectInfo, agents: dict[str, FleetAgent], fleet_rec: Fleet
+) -> None:
+    """Acceptance line 2 (13313; runner2's red-before at 13323): a just-spawned real claude
+    reads working until its first Stop hook. Its drawn, idle box is the evidence."""
+    pane = _working(fleet_rec, shots.REAL_IDLE_AFTER_STOP)
+    result = ok(actions.paste("alpha", "coder-1", "run the fold's tests", submit=True))
+    assert result["submitted"] is True
+    assert pane.typed == [("paste", "run the fold's tests"), ("keys", "Enter")]
+
+
+def test_the_real_idle_pane_is_ready_its_finished_turns_line_is_no_spinner(
+    alpha: ProjectInfo, agents: dict[str, FleetAgent], fleet_rec: Fleet
+) -> None:
+    pane = _working(fleet_rec, IDLE)
+    ok(actions.paste("alpha", "coder-1", "next"))
+    assert pane.pastes == ["next"]
+
+
+def test_a_box_drawn_mid_turn_refuses_the_paste(
+    alpha: ProjectInfo, agents: dict[str, FleetAgent], fleet_rec: Fleet
+) -> None:
+    """Real Claude Code keeps its box during a turn: a live spinner above it and 'esc to
+    interrupt' in its footer are what say the agent is working."""
+    pane = _working(fleet_rec, shots.REAL_WORKING)
+    message = refused(lambda: actions.paste("alpha", "coder-1", "run the fold's tests"))
+    assert "coder-1 is working" in message
+    assert pane.typed == []
+
+
+def test_a_chooser_just_drawn_takes_press_yes_while_the_fleet_still_reads_working(
+    alpha: ProjectInfo, agents: dict[str, FleetAgent], fleet_rec: Fleet
+) -> None:
+    """A prompt showing is the agent asking, whatever the activity window says (13313)."""
+    pane = _working(fleet_rec, CHOOSER, **{"1": IDLE})
+    result = ok(actions.press("alpha", "coder-1", "yes"))
+    assert pane.keys == [("1",)] and result["answered"] is True
+
+
+@pytest.mark.parametrize("state", ["limited", "exited", "lost"])
+def test_only_working_is_read_past_an_idle_screen(
+    alpha: ProjectInfo, agents: dict[str, FleetAgent], fleet_rec: Fleet, state: str
+) -> None:
+    """The screen overrides the activity window, never a stop: an agent parked on its usage
+    limit, or gone, is refused whatever its last screen shows."""
+    pane = _working(fleet_rec, shots.REAL_IDLE_AFTER_STOP)
+    fleet_rec.states["coder-1"] = state  # type: ignore[assignment]
+    message = refused(lambda: actions.paste("alpha", "coder-1", "next"))
+    assert f"coder-1 is {state}" in message or "no live agent" in message
+    assert pane.typed == []
+
+
+def test_a_working_pane_that_cannot_be_read_stays_refused_as_working(
+    alpha: ProjectInfo,
+    agents: dict[str, FleetAgent],
+    fleet_rec: Fleet,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pane = _working(fleet_rec, shots.REAL_IDLE_AFTER_STOP)
+
+    def unreadable(*args: object, **kwargs: object) -> Capture:
+        raise TmuxError("tmux capture-pane failed: no such pane")
+
+    monkeypatch.setattr(FakeServer, "capture", unreadable)
+    message = refused(lambda: actions.paste("alpha", "coder-1", "next"))
+    assert "coder-1 is working" in message and pane.typed == []
+
+
+def test_the_captains_persona_says_yes_through_approve_prompt_and_its_result() -> None:
+    """13273: the persona line rides with whichever of T2 (the persona's owner) and T1b lands
+    second. T2 landed first (e49c5464), so it is T1b's."""
+    from aisquare.core import personas
+
+    persona = personas.resolve("captain", paths.aisquare_home())
+    body = "\n".join(personas.briefing(persona))
+    assert "approve_prompt" in body and "its result" in body
+
+
+def test_press_yes_answers_the_real_chooser_with_1_and_reads_it_gone(
+    alpha: ProjectInfo, agents: dict[str, FleetAgent], fleet_rec: Fleet, clock: Clock
+) -> None:
+    pane = _at(fleet_rec, CHOOSER, **{"1": IDLE})
+    result = ok(actions.press("alpha", "coder-1", "yes"))
+    assert pane.keys == [("1",)], "the digit, never the ignored y"
+    assert (result["key"], result["sent"], result["answered"]) == ("yes", "1", True)
+    assert result["prompt"] == "Do you want to create probe2.txt?"
+    assert audit(alpha.id)[-1]["ok"] is True
+
+
+def test_press_no_on_the_chooser_is_esc(
+    alpha: ProjectInfo, agents: dict[str, FleetAgent], fleet_rec: Fleet, clock: Clock
+) -> None:
+    pane = _at(fleet_rec, CHOOSER, Escape=IDLE)
+    result = ok(actions.press("alpha", "coder-1", "no"))
+    assert pane.keys == [("Escape",)] and result["answered"] is True
+
+
+def test_press_yes_on_a_y_n_line_is_y(
+    alpha: ProjectInfo, agents: dict[str, FleetAgent], fleet_rec: Fleet, clock: Clock
+) -> None:
+    pane = _at(fleet_rec, YES_NO, y=["Installing 3 packages.", "Proceed? [y/N] y", "done"])
+    result = ok(actions.press("alpha", "coder-1", "yes"))
+    assert pane.keys == [("y",)] and result["answered"] is True
+
+
+def test_a_press_the_prompt_ignores_is_a_said_failure_never_a_success(
+    alpha: ProjectInfo, agents: dict[str, FleetAgent], fleet_rec: Fleet, clock: Clock
+) -> None:
+    """y on the real chooser does nothing (13265): the captain must not report it pressed."""
+    pane = _at(fleet_rec, CHOOSER)
+    message = refused(lambda: actions.press("alpha", "coder-1", "y"))
+    assert message.startswith("error: pressed y in coder-1 but the prompt is still showing")
+    assert "Do you want to create probe2.txt?" in message
+    assert pane.keys == [("y",)]
+    assert audit(alpha.id)[-1]["ok"] is False
+
+
+def test_yes_with_no_prompt_showing_is_refused_and_nothing_is_sent(
+    alpha: ProjectInfo, agents: dict[str, FleetAgent], fleet_rec: Fleet, clock: Clock
+) -> None:
+    pane = _at(fleet_rec, QUOTED)
+    message = refused(lambda: actions.press("alpha", "coder-1", "yes"))
+    assert message.startswith("refused: no prompt is showing on coder-1")
+    assert pane.keys == []
+
+
+def test_yes_on_the_trust_dialog_is_refused_as_the_owners_to_answer(
+    alpha: ProjectInfo, agents: dict[str, FleetAgent], fleet_rec: Fleet, clock: Clock
+) -> None:
+    pane = _at(fleet_rec, TRUST)
+    message = refused(lambda: actions.press("alpha", "coder-1", "yes"))
+    assert message.startswith("refused: the trust dialog is showing on coder-1")
+    assert "owner" in message and pane.keys == []
+
+
+def test_a_navigation_key_on_a_chooser_is_not_a_failure(
+    alpha: ProjectInfo, agents: dict[str, FleetAgent], fleet_rec: Fleet, clock: Clock
+) -> None:
+    pane = _at(fleet_rec, CHOOSER)
+    result = ok(actions.press("alpha", "coder-1", "down"))
+    assert pane.keys == [("Down",)] and result["answered"] is False
+    assert result["prompt"] == "Do you want to create probe2.txt?"
+
+
+@pytest.mark.parametrize("digit", ["1", "2", "3", "9"])
+def test_press_sends_a_digit(
+    digit: str, alpha: ProjectInfo, agents: dict[str, FleetAgent], fleet_rec: Fleet, clock: Clock
+) -> None:
+    pane = _at(fleet_rec, CHOOSER, **{digit: IDLE})
+    ok(actions.press("alpha", "coder-1", digit))
+    assert pane.keys == [(digit,)]
+
+
+def test_approve_prompt_answers_the_real_chooser_with_1(
+    alpha: ProjectInfo, agents: dict[str, FleetAgent], fleet_rec: Fleet, clock: Clock
+) -> None:
+    pane = _at(fleet_rec, CHOOSER, **{"1": IDLE})
+    result = ok(actions.act("approve_prompt", {"project": "alpha", "label": "coder-1"}))
+    assert pane.keys == [("1",)]
+    assert result["steps"][0]["step"] == "press yes"
+    assert actions.BUNDLED_ACTIONS["unblock"] == ("press yes", "read_pane 20")
 
 
 def test_paste_is_one_bracketed_paste_and_never_an_enter(
@@ -1701,12 +1989,13 @@ def test_a_socket_a_crashed_asq_left_behind_is_a_said_no_op(
 
 
 def test_act_runs_a_bundled_action(
-    alpha: ProjectInfo, agents: dict[str, FleetAgent], fleet_rec: Fleet
+    alpha: ProjectInfo, agents: dict[str, FleetAgent], fleet_rec: Fleet, clock: Clock
 ) -> None:
-    fleet_rec.states["coder-1"] = "attention"
+    """approve_prompt is ``press yes`` (T1b): the real chooser's Yes digit, read off the pane."""
+    _at(fleet_rec, CHOOSER, **{"1": IDLE})
     result = ok(actions.act("approve_prompt", {"project": "alpha", "label": "coder-1"}))
-    assert fleet_rec.panes["%1"].keys == [("y",)]
-    assert [step["step"] for step in result["steps"]] == ["press y"]
+    assert fleet_rec.panes["%1"].keys == [("1",)]
+    assert [step["step"] for step in result["steps"]] == ["press yes"]
 
 
 def test_act_runs_a_config_defined_sequence_in_order_with_its_placeholders(
@@ -1807,13 +2096,13 @@ def test_a_failing_step_stops_the_sequence_and_names_the_step(
 
 
 def test_a_malformed_config_action_refuses_itself_only(
-    alpha: ProjectInfo, agents: dict[str, FleetAgent], fleet_rec: Fleet
+    alpha: ProjectInfo, agents: dict[str, FleetAgent], fleet_rec: Fleet, clock: Clock
 ) -> None:
     write_config('[captain.actions.broken]\nsteps = "press y"\n')
     assert refused(lambda: actions.act("broken")).startswith(
         "refused: captain.actions.broken in config.toml is not valid: steps must be a list"
     )
-    fleet_rec.states["coder-1"] = "attention"
+    _at(fleet_rec, CHOOSER, **{"1": IDLE})
     ok(actions.act("approve_prompt", {"project": "alpha", "label": "coder-1"}))
 
 
@@ -2011,6 +2300,486 @@ def test_wololo_converts_an_idle_agent_to_a_new_task(
     assert result["said"] == f"Wololo! coder-1 converts to {new.id}"
     claimed = [e for e in _events_of(alpha, "task_claimed") if e.task_id == new.id]
     assert audit(alpha.id)[-1]["receipt"] == claimed[-1].seq
+
+
+def test_bt_undoes_a_wololo_restoring_both_claims_and_naming_the_untakeable_tell(
+    alpha: ProjectInfo, agents: dict[str, FleetAgent], fleet_rec: Fleet
+) -> None:
+    """13242: a wrong reassignment is exactly what the owner would brake. bt releases the
+    agent's new claim, re-claims its released cards for it while they are still free, and
+    says the one thing it cannot take back — the instruction typed into the pane."""
+    old = add_task(alpha, "the old job")
+    new = add_task(alpha, "the new job")
+    team_service.claim_task(old.id, session_ref="sess-coder-1")
+    ok(actions.wololo("alpha", "coder-1", new.id))
+    result = ok(actions.bt())
+    assert result["undid"]["kind"] == "wololo" and result["undid"]["task"] == new.id
+    assert task_now(new.id).status == "todo", "the agent's new claim is released"
+    restored = task_now(old.id)
+    assert (restored.status, restored.claimed_by) == ("doing", "sess-coder-1"), "its old claim back"
+    assert "the instruction typed into coder-1's pane cannot be taken back" in result["said"]
+    released = [e for e in _events_of(alpha, "task_released") if e.task_id == new.id]
+    assert result["action_seq"] > released[-1].seq and audit(alpha.id)[-1]["ok"] is True
+
+
+def test_bt_after_a_wololo_says_an_old_card_taken_meanwhile_is_not_stolen(
+    alpha: ProjectInfo, agents: dict[str, FleetAgent], fleet_rec: Fleet
+) -> None:
+    old = add_task(alpha, "the old job")
+    new = add_task(alpha, "the new job")
+    team_service.claim_task(old.id, session_ref="sess-coder-1")
+    ok(actions.wololo("alpha", "coder-1", new.id))
+    team_service.claim_task(old.id, session_ref="sess-coder-2")  # someone took it meanwhile
+    result = ok(actions.bt())
+    assert task_now(new.id).status == "todo", "the new claim is still released"
+    taken = task_now(old.id)
+    assert (taken.status, taken.claimed_by) == ("doing", "sess-coder-2"), "not stolen back"
+    assert f"{old.id} was taken meanwhile" in result["said"]
+    assert "cannot be taken back" in result["said"]
+
+
+def test_a_wololo_whose_tell_fails_is_still_braked_and_bt_touches_nothing_older(
+    alpha: ProjectInfo, agents: dict[str, FleetAgent], fleet_rec: Fleet
+) -> None:
+    """The claims moved before the tell failed: the owner hears it was converted (bt undoes
+    it), and bt undoes THAT — never the captain's earlier, unrelated claim (13295 S1)."""
+    earlier = add_task(alpha, "an earlier claim of the captain's")
+    ok(actions.task("alpha", "claim", earlier.id))
+    old = add_task(alpha, "the old job")
+    new = add_task(alpha, "the new job")
+    team_service.claim_task(old.id, session_ref="sess-coder-1")
+
+    def gone(project: ProjectInfo, label: str, text: str) -> None:
+        raise fleet.NoSuchAgent(f"no live agent {label!r} in {project.root.name}")
+
+    fleet_rec.on_tell = gone
+    message = refused(lambda: actions.wololo("alpha", "coder-1", new.id))
+    assert message.startswith(f"error: coder-1 was converted to {new.id} (bt undoes it)")
+    assert "the tell failed" in message
+    result = ok(actions.bt())
+    assert result["undid"]["kind"] == "wololo" and result["undid"]["task"] == new.id
+    assert task_now(new.id).status == "todo"
+    assert (task_now(old.id).status, task_now(old.id).claimed_by) == ("doing", "sess-coder-1")
+    assert task_now(earlier.id).status == "doing", "the older claim is untouched"
+
+
+def test_a_wololo_whose_release_fails_records_what_it_did_release(
+    alpha: ProjectInfo,
+    agents: dict[str, FleetAgent],
+    fleet_rec: Fleet,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = add_task(alpha, "first old job")
+    second = add_task(alpha, "second old job")
+    new = add_task(alpha, "the new job")
+    for card in (first, second):
+        team_service.claim_task(card.id, session_ref="sess-coder-1")
+    real = team_service.release_task
+    calls: list[str] = []
+
+    def second_fails(ref: str, *, session_ref: str | None = None) -> TeamTask:
+        calls.append(ref)
+        if len(calls) == 2:
+            raise sqlite3.OperationalError("database is locked")
+        return real(ref, session_ref=session_ref)
+
+    monkeypatch.setattr(team_service, "release_task", second_fails)
+    refused(lambda: actions.wololo("alpha", "coder-1", new.id))
+    monkeypatch.setattr(team_service, "release_task", real)
+    entry = captain_state.pop_undo()
+    assert entry is not None and entry.kind == "wololo" and entry.task_id == new.id
+    assert entry.released == (calls[0],), "only the release that happened"
+
+
+def test_bt_never_reclaims_for_an_agent_whose_session_has_ended(
+    alpha: ProjectInfo, agents: dict[str, FleetAgent], fleet_rec: Fleet
+) -> None:
+    """A card claimed for a dead session is locked 'doing' for the whole lease (13295 S2)."""
+    old = add_task(alpha, "the old job")
+    new = add_task(alpha, "the new job")
+    team_service.claim_task(old.id, session_ref="sess-coder-1")
+    ok(actions.wololo("alpha", "coder-1", new.id))
+    with store_session() as store:
+        store.end_session("sess-coder-1", release_claims=True)
+    result = ok(actions.bt())
+    assert (task_now(old.id).status, task_now(old.id).claimed_by) == ("todo", None)
+    assert f"{old.id} left in the pool: coder-1's session has ended" in result["said"]
+
+
+def test_bt_says_a_card_it_could_not_reclaim_and_still_gives_the_new_one_back(
+    alpha: ProjectInfo,
+    agents: dict[str, FleetAgent],
+    fleet_rec: Fleet,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A re-claim that fails is said, not raised: the rest of the undo still happens."""
+    old = add_task(alpha, "the old job")
+    new = add_task(alpha, "the new job")
+    team_service.claim_task(old.id, session_ref="sess-coder-1")
+    ok(actions.wololo("alpha", "coder-1", new.id))
+
+    def locked(ref: str, *, session_ref: str | None = None) -> TeamTask:
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(team_service, "claim_task", locked)
+    result = ok(actions.bt())
+    assert (
+        f"{old.id} could not be re-claimed (database is locked), left in the pool"
+        in (result["said"])
+    )
+    assert task_now(new.id).status == "todo" and task_now(old.id).status == "todo"
+
+
+def test_a_wololo_undo_that_fails_part_way_says_what_it_did_and_a_retry_finishes(
+    alpha: ProjectInfo,
+    agents: dict[str, FleetAgent],
+    fleet_rec: Fleet,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed undo goes back on the list (13255), and the owner hears what DID change
+    before it failed (13295 M1): the next bt finishes the rest, never an older entry."""
+    old = add_task(alpha, "the old job")
+    new = add_task(alpha, "the new job")
+    team_service.claim_task(old.id, session_ref="sess-coder-1")
+    ok(actions.wololo("alpha", "coder-1", new.id))
+    real = actions._effect_seq
+
+    def locked(*args: object, **kwargs: object) -> object:
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(actions, "_effect_seq", locked)
+    message = refused(actions.bt)
+    assert "back on the undo list" in message and "database is locked" in message
+    assert f"after it had released {new.id} from coder-1" in message
+    assert f"re-claimed {old.id} for coder-1" in message
+    monkeypatch.setattr(actions, "_effect_seq", real)
+    result = ok(actions.bt())
+    assert result["undid"]["kind"] == "wololo" and result["undid"]["task"] == new.id
+    assert task_now(new.id).status == "todo"
+    assert (task_now(old.id).status, task_now(old.id).claimed_by) == ("doing", "sess-coder-1")
+    assert captain_state.pop_undo() is None
+
+
+def _commits_then_fails(
+    real: Callable[..., TeamTask], *, times: int = 1
+) -> Callable[..., TeamTask]:
+    """The write lands, then its board event does not: team.py commits the change before
+    it writes the event, and ``database is locked`` can come in between (a second writer)."""
+    left = [times]
+
+    def call(ref: str, **kwargs: Any) -> TeamTask:
+        moved = real(ref, **kwargs)
+        if left[0] > 0:
+            left[0] -= 1
+            raise sqlite3.OperationalError("database is locked")
+        return moved
+
+    return call
+
+
+def _tells(fleet_rec: Fleet) -> list[str]:
+    return [str(args["text"]) for name, args in fleet_rec.calls if name == "tell"]
+
+
+def test_a_wololo_whose_claim_lands_but_errors_is_still_braked_and_the_agent_told(
+    alpha: ProjectInfo,
+    agents: dict[str, FleetAgent],
+    fleet_rec: Fleet,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The claim committed, its event did not: that is still a conversion bt must brake —
+    never the captain's earlier entry in its place — and the agent holds the card, so it
+    is told (self-review of the round, finding 1)."""
+    earlier = add_task(alpha, "an earlier claim of the captain's")
+    ok(actions.task("alpha", "claim", earlier.id))
+    old = add_task(alpha, "the old job")
+    new = add_task(alpha, "the new job")
+    team_service.claim_task(old.id, session_ref="sess-coder-1")
+    real = team_service.claim_task
+    monkeypatch.setattr(team_service, "claim_task", _commits_then_fails(real))
+    message = refused(lambda: actions.wololo("alpha", "coder-1", new.id))
+    assert message.startswith(f"error: coder-1 was converted to {new.id} (bt undoes it) but ")
+    assert f"claiming {new.id} failed: database is locked" in message
+    tells = _tells(fleet_rec)
+    assert len(tells) == 1 and new.id in tells[0] and f"still yours: {old.id}" in tells[0]
+    monkeypatch.setattr(team_service, "claim_task", real)
+    result = ok(actions.bt())
+    assert result["undid"]["kind"] == "wololo" and result["undid"]["task"] == new.id
+    assert task_now(new.id).status == "todo"
+    assert task_now(earlier.id).status == "doing", "the older entry is untouched"
+
+
+def test_a_release_that_lands_but_errors_is_in_the_undo_entry(
+    alpha: ProjectInfo,
+    agents: dict[str, FleetAgent],
+    fleet_rec: Fleet,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """What moved is read back, not counted from calls that returned: a release that
+    committed and then raised went back to the pool, so bt gives it back (finding 3), and
+    the owner hears the conversion and the failed step in one line (finding 4)."""
+    first = add_task(alpha, "first old job")
+    second = add_task(alpha, "second old job")
+    new = add_task(alpha, "the new job")
+    for card in (first, second):
+        team_service.claim_task(card.id, session_ref="sess-coder-1")
+    real = team_service.release_task
+    monkeypatch.setattr(team_service, "release_task", _commits_then_fails(real))
+    message = refused(lambda: actions.wololo("alpha", "coder-1", new.id))
+    monkeypatch.setattr(team_service, "release_task", real)
+    entry = captain_state.pop_undo()
+    assert entry is not None and entry.kind == "wololo" and entry.task_id == new.id
+    [gone] = [c.id for c in (first, second) if task_now(c.id).status == "todo"]
+    [kept] = [c.id for c in (first, second) if c.id != gone]
+    assert entry.released == (gone,), "the release that landed, though it raised"
+    assert f"coder-1 was converted to {new.id} (bt undoes it) but releasing {gone} failed" in (
+        message
+    )
+    tells = _tells(fleet_rec)
+    assert len(tells) == 1 and f"{gone} went back to the pool" in tells[0]
+    assert f"still yours: {kept}" in tells[0]
+
+
+def test_a_crash_mid_wololo_is_still_braked_and_told_then_raised_as_a_crash(
+    alpha: ProjectInfo,
+    agents: dict[str, FleetAgent],
+    fleet_rec: Fleet,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bug is a traceback, never a sentence — but the claim it left moved is still
+    recorded for bt and told to the agent before it goes up."""
+    old = add_task(alpha, "the old job")
+    new = add_task(alpha, "the new job")
+    team_service.claim_task(old.id, session_ref="sess-coder-1")
+
+    def boom(ref: str, **kwargs: Any) -> TeamTask:
+        raise RuntimeError("a bug in release")
+
+    monkeypatch.setattr(team_service, "release_task", boom)
+    with pytest.raises(RuntimeError, match="a bug in release"):
+        actions.wololo("alpha", "coder-1", new.id)
+    entry = captain_state.pop_undo()
+    assert entry is not None and (entry.kind, entry.task_id, entry.released) == (
+        "wololo",
+        new.id,
+        (),
+    )
+    assert len(_tells(fleet_rec)) == 1
+
+
+def test_a_wololo_whose_undo_cannot_be_recorded_says_bt_cannot_undo_it(
+    alpha: ProjectInfo,
+    agents: dict[str, FleetAgent],
+    fleet_rec: Fleet,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """state.json's lock held past its wait: the claims have moved and nothing can record
+    them. Said — and the agent still told — rather than a bare lock error (finding 2)."""
+    old = add_task(alpha, "the old job")
+    new = add_task(alpha, "the new job")
+    team_service.claim_task(old.id, session_ref="sess-coder-1")
+
+    def held(*args: object, **kwargs: object) -> None:
+        raise StateUnwritableError("state.json.lock is held by another process (waited 2s)")
+
+    monkeypatch.setattr(captain_state, "record_undo", held)
+    message = refused(lambda: actions.wololo("alpha", "coder-1", new.id))
+    assert f"coder-1 was converted to {new.id} (bt cannot undo it) but" in message
+    assert "its undo could not be recorded: state.json.lock is held" in message
+    assert len(_tells(fleet_rec)) == 1
+    assert task_now(new.id).status == "doing" and task_now(old.id).status == "todo"
+
+
+def test_a_reclaim_that_lands_but_errors_is_counted_as_restored(
+    alpha: ProjectInfo,
+    agents: dict[str, FleetAgent],
+    fleet_rec: Fleet,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    old = add_task(alpha, "the old job")
+    new = add_task(alpha, "the new job")
+    team_service.claim_task(old.id, session_ref="sess-coder-1")
+    ok(actions.wololo("alpha", "coder-1", new.id))
+    monkeypatch.setattr(team_service, "claim_task", _commits_then_fails(team_service.claim_task))
+    result = ok(actions.bt())
+    assert result["undid"]["restored"] == [old.id]
+    assert f"re-claimed {old.id} for coder-1" in result["said"]
+    assert "could not be re-claimed" not in result["said"]
+
+
+def test_a_reclaim_lost_to_another_agent_is_said_and_the_undo_goes_on(
+    alpha: ProjectInfo,
+    agents: dict[str, FleetAgent],
+    fleet_rec: Fleet,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ClaimLostError is a race lost, not a crash: the card is someone else's now."""
+    old = add_task(alpha, "the old job")
+    new = add_task(alpha, "the new job")
+    team_service.claim_task(old.id, session_ref="sess-coder-1")
+    ok(actions.wololo("alpha", "coder-1", new.id))
+    real = team_service.claim_task
+
+    def beaten(ref: str, **kwargs: Any) -> TeamTask:
+        taken = real(ref, session_ref="sess-coder-2")
+        raise team_service.ClaimLostError(taken)
+
+    monkeypatch.setattr(team_service, "claim_task", beaten)
+    result = ok(actions.bt())
+    assert (
+        f"{old.id} was taken meanwhile by sess-coder-2 (doing), not stolen back" in (result["said"])
+    )
+    assert task_now(new.id).status == "todo"
+
+
+def test_a_part_way_undo_names_a_release_that_landed_but_errored(
+    alpha: ProjectInfo,
+    agents: dict[str, FleetAgent],
+    fleet_rec: Fleet,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    old = add_task(alpha, "the old job")
+    new = add_task(alpha, "the new job")
+    team_service.claim_task(old.id, session_ref="sess-coder-1")
+    ok(actions.wololo("alpha", "coder-1", new.id))
+    real = team_service.release_task
+    monkeypatch.setattr(team_service, "release_task", _commits_then_fails(real))
+    message = refused(actions.bt)
+    assert "back on the undo list" in message
+    assert f"after it had released {new.id} from coder-1" in message
+    monkeypatch.setattr(team_service, "release_task", real)
+    result = ok(actions.bt())
+    assert result["undid"]["task"] == new.id and task_now(new.id).status == "todo"
+
+
+def test_a_failed_undo_that_cannot_be_put_back_says_so(
+    alpha: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The put-back is a write too (finding 7): its failure is said, not raised over the
+    undo's own reason."""
+    card = add_task(alpha, "a claim")
+    ok(actions.task("alpha", "claim", card.id))
+
+    def locked(*args: object, **kwargs: object) -> None:
+        raise sqlite3.OperationalError("database is locked")
+
+    def held(entry: object) -> None:
+        raise StateUnwritableError("state.json.lock is held by another process (waited 2s)")
+
+    monkeypatch.setattr(team_service, "release_task", locked)
+    monkeypatch.setattr(captain_state, "record_undo_entry", held)
+    message = refused(actions.bt)
+    assert "database is locked" in message
+    assert "could not be put back on the undo list (state.json.lock is held" in message
+
+
+def test_bt_names_the_task_of_a_wololo_whose_card_is_gone(alpha: ProjectInfo) -> None:
+    captain_state.record_undo(
+        "wololo", "tsk_gone", alpha.id, agent_session="sess-coder-1", label="coder-1"
+    )
+    said = ok(actions.bt())["said"]
+    assert "skipped: the task or its board is gone tsk_gone" in said, said
+
+
+def test_a_captain_claim_or_done_that_lands_but_errors_is_still_on_the_undo_list(
+    alpha: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T1's own claim and done have the wololo's shape: written, then the event fails."""
+    earlier = add_task(alpha, "an earlier claim")
+    ok(actions.task("alpha", "claim", earlier.id))
+    card = add_task(alpha, "claimed, then the event failed")
+    claim, finish = team_service.claim_task, team_service.finish_task
+    monkeypatch.setattr(team_service, "claim_task", _commits_then_fails(claim))
+    refused(lambda: actions.task("alpha", "claim", card.id))
+    monkeypatch.setattr(team_service, "claim_task", claim)
+    entry = captain_state.pop_undo()
+    assert entry is not None and (entry.kind, entry.task_id) == ("claim", card.id)
+    monkeypatch.setattr(team_service, "finish_task", _commits_then_fails(finish))
+    refused(lambda: actions.task("alpha", "done", earlier.id))
+    monkeypatch.setattr(team_service, "finish_task", finish)
+    entry = captain_state.pop_undo()
+    assert entry is not None and (entry.kind, entry.task_id) == ("done", earlier.id)
+
+
+@pytest.mark.parametrize(
+    ("shape", "why"),
+    [
+        ("kill -9", "coder-1's pane has exited"),
+        ("kill-server", "coder-1's tmux server does not answer (nothing answers on"),
+        ("no socket file", "coder-1's tmux server is gone (no socket file at"),
+    ],
+)
+def test_bt_never_reclaims_for_an_agent_whose_pane_or_server_is_gone(
+    alpha: ProjectInfo,
+    agents: dict[str, FleetAgent],
+    fleet_rec: Fleet,
+    tmp_path: Path,
+    shape: str,
+    why: str,
+) -> None:
+    """13363 B1, 13371: an open session is not a live agent. A pane killed without a
+    SessionEnd, or a reboot's dead server (the row still reads waiting), leaves the card in
+    the pool — a claim there locks it 'doing' for a lease nobody works — and says why."""
+    old = add_task(alpha, "the old job")
+    new = add_task(alpha, "the new job")
+    team_service.claim_task(old.id, session_ref="sess-coder-1")
+    ok(actions.wololo("alpha", "coder-1", new.id))
+    if shape == "kill -9":
+        fleet_rec.states["coder-1"] = "exited"
+    else:
+        fleet_rec.server_up = False
+        if shape == "kill-server":  # the socket file is left behind
+            fleet_rec.socket_file = tmp_path / "asq"
+            fleet_rec.socket_file.touch()
+    result = ok(actions.bt())
+    assert (task_now(old.id).status, task_now(old.id).claimed_by) == ("todo", None)
+    assert f"{old.id} left in the pool: {why}" in result["said"], result["said"]
+    assert result["undid"]["restored"] == []
+    assert task_now(new.id).status == "todo", "the new card is still given back"
+
+
+def test_bt_never_reclaims_for_a_session_no_fleet_row_carries(
+    alpha: ProjectInfo, agents: dict[str, FleetAgent], fleet_rec: Fleet
+) -> None:
+    """T5b (13437): the session is open, but no fleet row carries it any more (a /clear
+    rebinds the row to the new session) — there is no agent to hand the card to."""
+    old = add_task(alpha, "the old job")
+    new = add_task(alpha, "the new job")
+    team_service.claim_task(old.id, session_ref="sess-coder-1")
+    ok(actions.wololo("alpha", "coder-1", new.id))
+    with store_session() as store:
+        store.upsert_fleet_agent(agents["coder-1"].model_copy(update={"session_id": None}))
+    result = ok(actions.bt())
+    assert (task_now(old.id).status, task_now(old.id).claimed_by) == ("todo", None)
+    assert f"{old.id} left in the pool: coder-1 has no fleet row" in result["said"]
+
+
+def test_bt_after_a_wololo_ends_its_line_without_a_stray_card_id(
+    alpha: ProjectInfo, agents: dict[str, FleetAgent], fleet_rec: Fleet
+) -> None:
+    old = add_task(alpha, "the old job")
+    new = add_task(alpha, "the new job")
+    team_service.claim_task(old.id, session_ref="sess-coder-1")
+    ok(actions.wololo("alpha", "coder-1", new.id))
+    said = ok(actions.bt())["said"]
+    assert said.rstrip().endswith("cannot be taken back"), said
+
+
+def test_the_frame_raises_failed_for_an_error_and_refused_for_a_refusal(
+    projects: dict[str, ProjectInfo], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The split perform() and the CLI read: an error is never a Refused, nor the reverse."""
+
+    def locked(limit: int) -> list[dict[str, object]]:
+        raise RuntimeError("queue.json is locked by another process")
+
+    monkeypatch.setattr(captain_queue, "ranked", locked)
+    with pytest.raises(Failed) as failed:
+        actions.perform("attention", {}, "attention")
+    assert not isinstance(failed.value, Refused)
+    with pytest.raises(Refused) as refusal:
+        actions.perform("board", {"project": "nowhere"}, "board nowhere")
+    assert not isinstance(refusal.value, Failed)
 
 
 def test_wololo_refuses_a_working_agent_and_changes_nothing(

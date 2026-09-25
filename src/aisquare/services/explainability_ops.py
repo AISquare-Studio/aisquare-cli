@@ -184,14 +184,6 @@ class ResolvedTarget:
     """The deployment is the PROJECT's — its destination's, or the one its own key is
     bound to off the machine's target — so the machine's top-level gateway and proxy
     never stand in for it, and its fix is its own entry (:func:`deployment_fix`)."""
-    machine_shares_entry: str | None = None
-    """For a destination's deployment whose name the machine's own target has too, and so
-    whose ``[explainability.targets.<name>]`` the machine reads as well: the gateway the
-    machine resolves there, when that is another deployment ("" for none). ``None``
-    otherwise, including when both resolve the same gateway, where the entry is rightly
-    both's. On the machine ``init --explainability`` writes, ``stg`` is the top-level prod
-    gateway for the machine and staging for a project ``use``d there, and a fix written
-    into that entry for the project moved every project without a destination too."""
 
     @property
     def configured(self) -> bool:
@@ -441,16 +433,6 @@ def resolve_target(
     if not gateway_url:
         source = "unset"
     proxy_url = target.proxy_url or (settings.proxy_url if machine else "")
-    # The machine's own target reads the destination's entry by the same name, and
-    # where that entry has no gateway it takes the machine's: another deployment,
-    # which a fix written into the entry for this one would move (final review of
-    # #203, EX1). Read as the machine's own resolution reads it, just above.
-    shared: str | None = None
-    if placed and chosen == settings.target:
-        own = settings.targets.get(chosen, ExplainabilityTarget())
-        theirs = own.gateway_url or environ.get(GATEWAY_ENV_VAR, "") or settings.gateway_url
-        if theirs.rstrip("/") != gateway_url.rstrip("/"):
-            shared = theirs.rstrip("/")
 
     roles = target.roles if target.roles is not None else settings.roles
     return ResolvedTarget(
@@ -470,7 +452,6 @@ def resolve_target(
         target_source=target_source,
         unused_env_target=unused_env_target,
         project_deployment=not machine,
-        machine_shares_entry=shared,
     )
 
 
@@ -483,16 +464,7 @@ def deployment_fix(
     project's own deployment (:attr:`ResolvedTarget.project_deployment`) that
     command is the wrong one: it makes the named target the MACHINE's, which
     moves every project without a destination onto it — the re-point ``use``
-    itself made (review of #203). The config entry moves that deployment alone,
-    unless the machine's own target has the same name and is another deployment
-    (:attr:`ResolvedTarget.machine_shares_entry`): it reads that entry too, so
-    the fix first gives it another name. Under a name no entry has it resolves
-    the gateway it has now, which the entry never gave it (with one, both would
-    be the same deployment). Without that step, following the proxy lane's fix
-    for a project ``use``d on staging, on the machine ``init --explainability``
-    writes (``target = "stg"`` by default), sent every other project's model
-    traffic and the prod key through the staging proxy (final review of #203,
-    EX1).
+    itself made (review of #203). The config entry moves that deployment alone.
 
     With no ``value`` it says where both go, for a deployment that has neither;
     with one — a URL to store, or a placeholder — it names that one setting,
@@ -502,22 +474,9 @@ def deployment_fix(
     """
     if target.project_deployment:
         entry = f'[explainability.targets."{target.name}"] in {paths.config_path()}'
-        fix = (
-            f"gateway_url and proxy_url under {entry}"
-            if value is None
-            else f'{what}_url = "{value}" under {entry}'
-        )
-        shared = target.machine_shares_entry
-        if shared is None:
-            return fix
-        where = f"on {shared}" if shared else "with no gateway"
-        return (
-            f"{fix} — but first give this machine's own target another name: it is "
-            f"'{target.name}' too, {where}, and reads the same entry, so the write would "
-            'move every project without a destination as well. Set target = "<name>" under '
-            "[explainability] in that file, a name no [explainability.targets] entry has"
-            + (f": its gateway stays {shared}" if shared else "")
-        )
+        if value is None:
+            return f"gateway_url and proxy_url under {entry}"
+        return f'{what}_url = "{value}" under {entry}'
     return f"aisquare explainability enable --target {target.name} --{what}-url {value or '<url>'}"
 
 

@@ -1319,7 +1319,8 @@ def test_a_crlf_file_from_a_windows_write_is_still_an_unchanged_fold(fx: Fixture
     read, so a cold queue over a CRLF file is a no-op there too."""
     _seed_three_projects(fx)
     fx.queue().refresh()
-    fx.path.write_bytes(fx.path.read_bytes().replace(b"\n", b"\r\n"))
+    raw = fx.path.read_bytes().replace(b"\r\n", b"\n")  # LF first: Windows already holds CRLF
+    fx.path.write_bytes(raw.replace(b"\n", b"\r\n"))
     before = fx.path.read_bytes()
     stamp = fx.path.stat().st_mtime_ns
     fx.clock.tick(seconds=5)

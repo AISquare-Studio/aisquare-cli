@@ -28,7 +28,7 @@ import sqlite3
 import sys
 import time
 import uuid
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -1011,6 +1011,7 @@ class ContextStore(Protocol):
         since_seq: int | None = None,
         kind: str | None = None,
         task_id: str | None = None,
+        exclude_kinds: Collection[str] = (),
         limit: int = 30,
     ) -> list[TeamEvent]: ...
     def latest_seq(self, project_id: str) -> int: ...
@@ -2583,6 +2584,7 @@ class SqliteStore:
         since_seq: int | None = None,
         kind: str | None = None,
         task_id: str | None = None,
+        exclude_kinds: Collection[str] = (),
         limit: int = 30,
     ) -> list[TeamEvent]:
         """Matching events for ``team log``'s filters, oldest-first.
@@ -2593,7 +2595,9 @@ class SqliteStore:
         events (the MCP ``team_log`` contract). Rides the ``(project_id,
         seq)`` index; ``since_iso`` compares stored ISO-8601 UTC strings
         lexicographically (uniform format by construction). ``session_id`` is
-        exact — prefix resolution is the service layer's job.
+        exact — prefix resolution is the service layer's job. ``exclude_kinds``
+        leaves those kinds out INSIDE the query, so a window stays ``limit``
+        long however many of them the board holds (the captain's audit lines).
         """
         clauses = ["project_id = ?"]
         params: list[str | int] = [project_id]
@@ -2612,6 +2616,11 @@ class SqliteStore:
         if task_id is not None:
             clauses.append("task_id = ?")
             params.append(task_id)
+        if exclude_kinds:
+            # In the query, not after it: a window of N filtered AFTER the LIMIT
+            # comes back short on a board where the excluded kind is common.
+            clauses.append(f"kind NOT IN ({', '.join('?' * len(exclude_kinds))})")
+            params.extend(exclude_kinds)
         paging = since_seq is not None
         rows = self._conn.execute(
             f"SELECT {_EVENT_COLUMNS} FROM team_event "

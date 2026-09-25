@@ -903,6 +903,43 @@ def test_a_fix_for_a_projects_deployment_followed_moves_no_other_project(
     )
 
 
+def test_a_fix_asks_for_no_rename_when_the_machines_target_is_the_same_deployment(
+    isolated_home: Path, tmp_path: Path
+) -> None:
+    """The rename is for a machine whose target of the deployment's name is another
+    deployment. It was asked whenever the names matched: on a staging machine (``target =
+    "stg"``, the top-level staging gateway) every proxy or gateway fix for a project on
+    staging said to rename the machine's target and ``key set`` again, which only unbound
+    the keys attached for ``stg`` (review of the #203 final-review fixes, F3). The entry is
+    both's there, and the fix names it alone; the prod machine still gets the rename."""
+    stg_gateway = "https://stg-explainability-api.aisquare.studio"
+    config = AppConfig()
+    config.explainability.enabled = True
+    config.explainability.gateway_url = stg_gateway
+    save_config(config)
+    project = _project(tmp_path / "web")
+    with store_session() as store:
+        dest.choose(
+            store,
+            project,
+            dest.Workspace(id=42, uid="ws-uid-42", name="acme", role="ADMIN"),
+            dest.Studio(id=301, uid="st-301", name="Frontend"),
+            iam.Session(api_url="https://stg-api.aisquare.studio", token="aisq_x", source="env"),
+        )
+
+    def fix() -> str:
+        target = ops.resolve_target(load_config().explainability, None, project_id=project.id)
+        assert (target.project_deployment, target.gateway_url) == (True, stg_gateway)
+        return " ".join(ops.deployment_fix(target, what="proxy", value="https://<host>").split())
+
+    entry = 'proxy_url = "https://<host>" under [explainability.targets."stg"]'
+    assert fix().startswith(entry) and "Rename it first" not in fix(), fix()
+    prod = load_config()
+    prod.explainability.gateway_url = "https://explainability-api.aisquare.studio"
+    save_config(prod)
+    assert fix().startswith(entry) and "Rename it first" in fix(), fix()
+
+
 def test_a_key_kept_for_the_machines_target_stays_kept_once_that_target_is_renamed(
     runner: CliRunner, isolated_home: Path, tmp_path: Path
 ) -> None:

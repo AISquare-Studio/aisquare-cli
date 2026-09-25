@@ -189,7 +189,8 @@ class ResolvedTarget:
     names that target: "config" (``settings.target``) or "env" (an exported
     ``$AISQUARE_EXPLAINABILITY_TARGET``). Its ``[explainability.targets."<name>"]`` is
     then also the entry every project without a destination reads, so a fix written
-    there moves them too (:func:`deployment_fix`); ``None`` otherwise."""
+    there moves them too (:func:`deployment_fix`); ``None`` otherwise, and when the
+    machine's target of that name resolves this same deployment, whose entry it is too."""
 
     @property
     def configured(self) -> bool:
@@ -442,12 +443,16 @@ def resolve_target(
         source = "unset"
     proxy_url = target.proxy_url or (settings.proxy_url if machine else "")
     # The project's deployment, named like the machine's own target: one config entry
-    # for both, which `deployment_fix` must not name as this deployment's alone.
+    # for both, which `deployment_fix` must not name as this deployment's alone. Unless
+    # the machine resolves this same deployment by that name: the entry is rightly both's
+    # then, and the rename only unbound the keys attached for the name (review of the
+    # #203 final-review fixes, F3). The machine's read is the one resolver's, as in
+    # `binding_serves`.
     entry_shared = None
-    if not machine and chosen == settings.target:
-        entry_shared = "config"
-    elif not machine and chosen == exported:
-        entry_shared = "env"
+    if not machine and chosen in (settings.target, exported):
+        own = resolve_target(settings, chosen, env=environ).gateway_url
+        if not (own and _same_deployment(own, gateway_url)):
+            entry_shared = "config" if chosen == settings.target else "env"
 
     roles = target.roles if target.roles is not None else settings.roles
     return ResolvedTarget(
@@ -488,14 +493,17 @@ def deployment_fix(
     gateway rows, which named ``enable --target`` for a project's deployment
     too).
 
-    UNLESS THE MACHINE'S OWN TARGET HAS THE SAME NAME
+    UNLESS THE MACHINE'S OWN TARGET HAS THE SAME NAME AND IS ANOTHER DEPLOYMENT
     (:attr:`ResolvedTarget.entry_shared`): then the entry is its too, and every
     project without a destination reads it. The machine ``init
     --explainability`` writes is on prod and named ``stg`` by default, so for a
     project on staging the proxy row's fix, followed word for word, moved every
     other project's proxy to staging, with the prod gateway and key (review of
     #203, round 2). The entry is still where the setting goes, and the fix says
-    the machine's target needs a name of its own first.
+    the machine's target needs a name of its own first. A machine whose target
+    of that name resolves this same deployment gets the entry alone: the fix
+    moves both to where both belong, and the rename only unbound the keys
+    attached for the name.
     """
     if target.project_deployment:
         entry = f'[explainability.targets."{target.name}"] in {paths.config_path()}'

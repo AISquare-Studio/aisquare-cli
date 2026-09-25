@@ -243,7 +243,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   target ever falls back to the machine's gateway or proxy (no gateway known
   is said, the launch goes untraced, and the doctor's and `status`'s fixes
   name the config entry or `key set --from-env`, never `enable --target`, and
-  say to rename the machine's own target first when it has the same name),
+  say to rename the machine's own target first when it has the same name and
+  another gateway),
   `key set` binds to the destination's deployment and a key bound there
   answers only while a destination names it, never as the machine's target of
   the same name, and a key bound to the machine's target never answers for a

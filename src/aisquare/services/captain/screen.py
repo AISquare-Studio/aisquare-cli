@@ -35,11 +35,10 @@ import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-PANE_ESCAPES = re.compile(
-    r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\\\)|[@-Z\\\\-_])"
-)
+PANE_ESCAPES = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-Z\\-_])")
 """Every escape a captured pane row can carry — CSI with any parameters (colon ones
-included), OSC (hyperlinks) and the bare two-byte sequences."""
+included), OSC (hyperlinks, ended by BEL or by ST, which is ESC and ONE backslash) and the
+bare two-byte sequences. T1's pattern, character for character (coderp's S1 on #219)."""
 
 PROMPT_MARK = "\u276f"
 """Claude Code's prompt mark, U+276F: its input line and a chooser's highlighted option."""

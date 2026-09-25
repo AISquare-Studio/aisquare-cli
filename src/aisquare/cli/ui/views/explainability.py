@@ -607,7 +607,11 @@ def save_setup(form: SetupForm, page: ProjectInfo | None) -> SetupOutcome:
         try:
             attached = attach_project_key(key, owner, key_target, launches=launches)
         except Exception as exc:  # the store or the filesystem said no: a notice
-            return _failed_after_save(f"the key could not be attached: {exc}")
+            # With the writer's notes: when the file could not be put back, a
+            # note says what it holds now and what to delete, and `{exc}` alone
+            # left it out (review of #170's follow-ups, round 1, F3).
+            said_why = "; ".join([str(exc), *getattr(exc, "__notes__", ())])
+            return _failed_after_save(f"the key could not be attached: {said_why}")
         said.append(attached)
     elif key:
         try:

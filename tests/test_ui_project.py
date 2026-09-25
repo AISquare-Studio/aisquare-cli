@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import sqlite3
 import sys
 import threading
 import tomllib
@@ -56,7 +57,7 @@ from aisquare.cli.ui.views.settings import SettingsView
 from aisquare.core import paths
 from aisquare.core import tmux as tmux_core
 from aisquare.core.config import ExplainabilityTarget, load_config, save_config
-from aisquare.core.store import store_session
+from aisquare.core.store import SqliteStore, store_session
 from aisquare.core.tmux import Capture, Completed, PaneFacts, TmuxServer
 from aisquare.models import (
     CheckStatus,
@@ -1347,6 +1348,41 @@ def test_a_config_write_made_while_save_setup_runs_is_not_saved_over(
     assert not any("tracing disabled" in m for m, _ in notices), notices
     assert any(m.startswith("✓ key attached to") for m, _ in notices), notices
     assert load_config().explainability.enabled is False, "the write made meanwhile is kept"
+
+
+def test_a_key_the_attach_could_not_put_back_is_named_on_the_form(
+    project: ProjectInfo, quiet_explainability: dict[str, int], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The attach's put-back failed, and the writer's note said what the key file holds
+    now and what to delete. The form rendered the error with ``f"{exc}"``, which leaves
+    the note out (review of #170's follow-ups, round 1, F3)."""
+    ops.attach_project_key(
+        project, "pk-earlier-0123456789", target=load_config().explainability.target
+    )
+    writes = explainability_service.store_project_api_key
+
+    def refuse(self: SqliteStore, *_args: object, **_kwargs: object) -> None:
+        raise sqlite3.OperationalError("database is locked")
+
+    def full_disk_for_the_put_back(project_id: str, key: str) -> Path:
+        if key == "pk-earlier-0123456789":
+            raise OSError(28, "No space left on device")
+        return writes(project_id, key)
+
+    monkeypatch.setattr(SqliteStore, "set_project_explainability", refuse)
+    monkeypatch.setattr(ops, "store_project_api_key", full_disk_for_the_put_back)
+
+    async def scenario(pilot: Pilot[None], host: Host) -> list[tuple[str, str]]:
+        host.query_one(ProjectView).active = "tab-explainability"
+        await settle(pilot)
+        _attach_in_setup(host, "pk-refused-0123456789")
+        await settle(pilot)
+        return list(host.notices)
+
+    notices = drive(project, scenario)
+    [failed] = [m for m, s in notices if s == "error" and "could not be attached" in m]
+    assert "database is locked" in failed
+    assert "could not be put back as it was" in failed and "it was removed" in failed
 
 
 def test_the_explainability_tab_has_one_key_field_and_the_box_says_whose_key(

@@ -240,11 +240,12 @@ def _audit(
     receipt: int | None,
 ) -> int:
     board = target if target is not None else captain_state.home_project()
+    via = _VIA.get()
     record = {
         "v": 1,
         "tool": tool,
         "project": target.id if target is not None else None,
-        "args": args,
+        "args": {**args, "via": via} if via is not None else args,
         "utterance": utterance,
         "ok": ok,
         "said": said,
@@ -547,6 +548,7 @@ def _since(target: ProjectInfo, agent: str | None, advance: bool) -> Outcome:
             "pane": pane,
             "pane_error": pane_error,
             "advanced": False,
+            "said": said,
         },
         said=said,
         after=moved,
@@ -939,39 +941,62 @@ def _undo_wololo(
     before: int,
 ) -> tuple[dict[str, Any], _Found]:
     """Give both sides of a conversion back (13242): release the agent's new claim, re-claim
-    its released cards for it while they are still free, and say what cannot be undone."""
+    its released cards for it while they are still free, and say what cannot be undone.
+
+    A step that fails after another has changed the board is said with what already
+    changed (13295 M1): ``bt`` puts the entry back, and a retry finishes the rest."""
     session = entry.agent_session or ""
     label = entry.label or "the agent"
     said: list[str] = []
-    if card.status == "doing" and card.claimed_by == session:
-        team_service.release_task(card.id, session_ref=session)
-        said.append(f"released {card.id} from {label}")
-        kinds: tuple[str, ...] = ("task_released",)
-    else:
-        said.append(f"{card.id} is {card.status} and no longer {label}'s claim, left as it is")
-        kinds = ()
-    restored: list[str] = []
-    for old_id in entry.released:
-        with store_session() as store:
-            old = store.get_task(old_id)
-        if old is None:
-            said.append(f"{old_id} is gone")
-        elif old.status == "todo" and old.claimed_by is None:
-            team_service.claim_task(old.id, session_ref=session)
-            restored.append(old.id)
-        elif old.status == "doing" and old.claimed_by == session:
-            restored.append(old.id)  # already back with the agent
+    done: list[str] = []
+    try:
+        if card.status == "doing" and card.claimed_by == session:
+            team_service.release_task(card.id, session_ref=session)
+            done.append(f"released {card.id} from {label}")
+            said.append(done[-1])
+            kinds: tuple[str, ...] = ("task_released",)
         else:
-            holder = f" by {old.claimed_by}" if old.claimed_by else ""
-            said.append(f"{old_id} was taken meanwhile{holder} ({old.status}), not stolen back")
+            said.append(f"{card.id} is {card.status} and no longer {label}'s claim, left as it is")
+            kinds = ()
+        restored: list[str] = []
+        with store_session() as store:
+            row = store.get_session(session) if session else None
+        alive = row is not None and row.ended_at is None
+        for old_id in entry.released:
+            with store_session() as store:
+                old = store.get_task(old_id)
+            if old is None:
+                said.append(f"{old_id} is gone")
+            elif old.status == "todo" and old.claimed_by is None and not alive:
+                # A claim for a session that has ended would lock the card 'doing' for its
+                # whole lease with nobody working it (13295 S2): it stays in the pool.
+                said.append(f"{old_id} left in the pool: {label}'s session has ended")
+            elif old.status == "todo" and old.claimed_by is None:
+                try:
+                    team_service.claim_task(old.id, session_ref=session)
+                except (sqlite3.Error, OSError, ValueError, LookupError) as exc:
+                    said.append(f"{old_id} could not be re-claimed ({exc}), left in the pool")
+                    continue
+                done.append(f"re-claimed {old.id} for {label}")
+                restored.append(old.id)
+            elif old.status == "doing" and old.claimed_by == session:
+                restored.append(old.id)  # already back with the agent
+            else:
+                holder = f" by {old.claimed_by}" if old.claimed_by else ""
+                said.append(f"{old_id} was taken meanwhile{holder} ({old.status}), not stolen back")
+        found = (
+            _effect_seq(project.id, before, kinds, lambda event: event.task_id == card.id)
+            if kinds
+            else _Found(None)
+        )
+    except Exception as exc:
+        reason = _failure(exc)
+        if reason is None or not done:
+            raise
+        raise Failed(f"{reason} — after it had {', '.join(done)}") from exc
     if restored:
         said.append(f"re-claimed {', '.join(restored)} for {label}")
     said.append(f"the instruction typed into {label}'s pane cannot be taken back")
-    found = (
-        _effect_seq(project.id, before, kinds, lambda event: event.task_id == card.id)
-        if kinds
-        else _Found(None)
-    )
     return {**undid, "how": "; ".join(said), "restored": restored}, found
 
 
@@ -999,7 +1024,12 @@ def _bt() -> Outcome:
                 f"brake: {', '.join(parts)}; undoing the {entry.kind} of {entry.task_id} "
                 f"failed and it is back on the undo list: {reason}"
             ) from exc
-    parts.append(f"{undid['how']} {undid['task']}" if undid is not None else "nothing to undo")
+    if undid is None:
+        parts.append("nothing to undo")
+    elif undid["kind"] == "wololo":
+        parts.append(str(undid["how"]))  # its own line names every card already
+    else:
+        parts.append(f"{undid['how']} {undid['task']}")
     said = "brake: " + ", ".join(parts) + found.note
     return Outcome(
         {
@@ -1029,35 +1059,45 @@ def _wololo(target: ProjectInfo, label: str, task: str) -> Outcome:
     before = _seq_now(target.id)
     # The new claim first: a claim that loses a race leaves the agent's old work as it was.
     team_service.claim_task(card.id, session_ref=agent.session_id)
-    with store_session() as store:
-        held = [
-            t
-            for t in store.team_tasks(target.id, status="doing")
-            if t.claimed_by == agent.session_id and t.id != card.id
-        ]
-    released = []
-    for old in held:
-        team_service.release_task(old.id, session_ref=actor)
-        released.append(old.id)
-    told = fleet.tell(
-        target,
-        label,
-        f"aisquare: the captain reassigned you — {card.id} is claimed for you: {card.title}. "
-        f"Read it with `aisquare task show {card.id}` and start"
-        + ("; your earlier claims went back to the pool." if released else "."),
-        sender=actor,
-    )
+    released: list[str] = []
+    try:
+        with store_session() as store:
+            held = [
+                t
+                for t in store.team_tasks(target.id, status="doing")
+                if t.claimed_by == agent.session_id and t.id != card.id
+            ]
+        for old in held:
+            team_service.release_task(old.id, session_ref=actor)
+            released.append(old.id)
+    finally:
+        # One compound undo entry (13242), recorded the moment the claims have moved and
+        # naming only the releases that happened: a release or the tell that fails after
+        # this still leaves a conversion bt can brake — never an older entry undone in
+        # its place (13295 S1).
+        captain_state.record_undo(
+            "wololo",
+            card.id,
+            target.id,
+            agent_session=agent.session_id,
+            label=label,
+            released=tuple(released),
+        )
+    try:
+        told = fleet.tell(
+            target,
+            label,
+            f"aisquare: the captain reassigned you — {card.id} is claimed for you: "
+            f"{card.title}. Read it with `aisquare task show {card.id}` and start"
+            + ("; your earlier claims went back to the pool." if released else "."),
+            sender=actor,
+        )
+    except (fleet.FleetError, sqlite3.Error, OSError) as exc:
+        raise Failed(
+            f"{label} was converted to {card.id} (bt undoes it) but the tell failed: {exc}"
+        ) from exc
     claimed = _effect_seq(
         target.id, before, ("task_claimed",), lambda event: event.task_id == card.id
-    )
-    # One compound undo entry (13242): bt gives both sides back.
-    captain_state.record_undo(
-        "wololo",
-        card.id,
-        target.id,
-        agent_session=agent.session_id,
-        label=label,
-        released=tuple(released),
     )
     said = f"Wololo! {label} converts to {card.id}"
     return Outcome(
@@ -1486,23 +1526,52 @@ INSTRUCTIONS = (
 )
 
 
-def perform(tool: str, args: Mapping[str, Any], utterance: str) -> dict[str, Any]:
+def perform(
+    tool: str, args: Mapping[str, Any], utterance: str, *, via: str = "cli"
+) -> dict[str, Any]:
     """Run one tool by the name the captain calls it — from Python, no MCP SDK needed.
 
     The CLI verbs (``aisquare captain attention``, ``… wololo``, ``… bt``; card T5)
     are the owner's own hands on the same tools, so they go through the same
-    frame: one ``captain_action`` per call, the argv as the ``utterance``, the same
-    refusals in the same words. Returns the tool's result with its ``action_seq``;
-    raises :class:`Refused` or :class:`Failed` whose text is exactly what the
-    captain would have been told, the audit's seq included.
+    frame: one ``captain_action`` per call, the argv as the ``utterance``, ``via``
+    in its args (13081), the same refusals in the same words. Returns the tool's
+    result with its ``action_seq``; raises :class:`Refused` or :class:`Failed`
+    whose text is exactly what the captain would have been told, the audit's seq
+    included.
     """
     function = dict(TOOLS).get(tool)
     if function is None:
         known = ", ".join(name for name, _ in TOOLS)
         raise Refused(f"no tool named {tool!r} — the captain's tools are {known}")
-    data = json.loads(function(**dict(args), utterance=utterance))
+    token = _VIA.set(via)
+    try:
+        data = json.loads(function(**dict(args), utterance=utterance))
+    finally:
+        _VIA.reset(token)
     if not isinstance(data, dict):  # pragma: no cover — every tool answers an object
         raise Failed(f"{tool} answered something that is not an object")
+    return data
+
+
+def perform_read(
+    name: str,
+    args: Mapping[str, Any],
+    utterance: str,
+    read: Callable[[], tuple[dict[str, Any], str]],
+    *,
+    via: str = "cli",
+) -> dict[str, Any]:
+    """A read the owner runs that is no captain tool — ``log``, ``actions`` — through the
+    same audited frame (13081: one ``captain_action`` per call, reads included). ``read``
+    answers the data and the line to say; its errors are said like any tool's."""
+    token = _VIA.set(via)
+    try:
+        answer = _run(name, dict(args), utterance, lambda _: Outcome(*read()))
+    finally:
+        _VIA.reset(token)
+    data = json.loads(answer)
+    if not isinstance(data, dict):  # pragma: no cover — _run answers an object
+        raise Failed(f"{name} answered something that is not an object")
     return data
 
 
@@ -1548,6 +1617,10 @@ _CALL_RAN: ContextVar[list[bool] | None] = ContextVar("captain_call_ran", defaul
 """Set per ``tools/call``: a one-item flag the tool body flips (:func:`_run`). A list, not a
 bool, because the body runs on a worker thread with a COPY of this context — the copy holds
 the same list, so the flip is seen here."""
+_VIA: ContextVar[str | None] = ContextVar("captain_call_via", default=None)
+"""Where a call came from when it did not come over MCP: ``cli`` for the owner's own verbs
+(T5). Recorded in the audited ``args`` as ``via`` (13081), so ``log`` tells the owner's
+terminal from the captain's voice."""
 
 
 def _audit_rejected_calls(server: MCPServer) -> None:

@@ -11,17 +11,24 @@ header; ``wololo`` and ``bt`` are the two easter eggs the contract names;
 
 Human output by default; under ``--json`` the tool's own result, as the captain
 sees it (``action_seq`` included), so the shapes are pinned once for both. A
-refusal is ``✗ refused: … (action seq N)`` and exit 1 — ``{"error": "refused"}``
-under ``--json`` — never a traceback. None of this needs the MCP SDK.
+refusal is ``✗ refused: … (action seq N)`` and exit 1 — ``{"error": "refused",
+"detail": "refused: … (action seq N)"}`` under ``--json`` — never a traceback. None
+of this needs the MCP SDK.
+
+**Lazy on purpose.** Every ``aisquare`` command — a Claude Code hook included —
+imports the CLI, and ``cli/captain.py`` registers these verbs at import; the
+captain's actions, queue and state load only inside a verb that runs.
 """
 
 from __future__ import annotations
 
 import json
+import shlex
 import sqlite3
 from collections.abc import Callable, Mapping
+from contextvars import ContextVar
 from datetime import UTC, datetime
-from typing import Annotated, Any, NoReturn
+from typing import TYPE_CHECKING, Annotated, Any, NoReturn
 
 import typer
 from rich.table import Table
@@ -30,11 +37,10 @@ from aisquare.cli.common import fail, local_time
 from aisquare.core.console import stdout_console
 from aisquare.core.state import get_state
 from aisquare.core.store import store_session
-from aisquare.models import ProjectInfo, TeamEvent
-from aisquare.services import fleet as fleet_service
-from aisquare.services.captain import actions
-from aisquare.services.captain import state as captain_state
 from aisquare.services.captain.errors import Failed, Refused
+
+if TYPE_CHECKING:
+    from aisquare.models import ProjectInfo, TeamEvent
 
 DEFAULT_LIMIT = 10
 DEFAULT_SNOOZE_MINUTES = 15
@@ -46,21 +52,38 @@ UAV_LINE = "UAV online"
 Limit = Annotated[int, typer.Option("--limit", "-n", min=1, help="How many items to show.")]
 
 
-def _utterance(*parts: object) -> str:
-    """What the audit records as the owner's words: the command as typed, near enough."""
-    return "aisquare captain " + " ".join(str(part) for part in parts if part is not None)
+TYPED: ContextVar[tuple[str, ...]] = ContextVar("captain_typed", default=())
+"""The words after ``captain`` exactly as typed, set by the group around each call
+(``cli/captain.py``) before click turns them into values."""
 
 
-def _perform(tool: str, args: Mapping[str, Any], utterance: str) -> dict[str, Any]:
+def _typed() -> str:
+    """The command as the owner typed it, for the audit's ``utterance`` (13081).
+
+    ``-m 7`` stays ``-m 7`` and a default never appears; ``--json`` is the root's.
+    Shell-quoted, so the line can be run again.
+    """
+    root = ["aisquare", *(["--json"] if get_state().json_output else []), "captain"]
+    return shlex.join([*root, *TYPED.get()])
+
+
+def _perform(tool: str, args: Mapping[str, Any]) -> dict[str, Any]:
     """One tool through the audited frame; a refusal or failure ends the command in its words."""
+    from aisquare.services.captain import actions
+
     try:
-        return actions.perform(tool, args, utterance)
-    except Refused as exc:
-        fail(str(exc), error="refused")
-    except Failed as exc:
-        fail(str(exc), error="failed")
+        return actions.perform(tool, args, _typed())
+    except (Refused, Failed) as exc:
+        _said_and_exit(exc)
     except (sqlite3.DatabaseError, OSError) as exc:
-        fail(f"error: {exc}", error="store")
+        fail(f"error: {exc}", error="store", detail=str(exc))
+
+
+def _said_and_exit(exc: Refused | Failed) -> NoReturn:
+    """The frame's own words, on both surfaces: the reason and the audit's seq are kept
+    under ``--json`` as ``detail`` (a script needs both, not just the kind)."""
+    kind = "failed" if isinstance(exc, Failed) else "refused"
+    fail(str(exc), error=kind, detail=str(exc))
 
 
 def _emit_json(data: Mapping[str, Any]) -> None:
@@ -155,7 +178,7 @@ def register(app: typer.Typer) -> None:
 
 def attention(limit: Limit = DEFAULT_LIMIT) -> None:
     """What needs you across every project, most urgent first (the attention queue)."""
-    result = _perform("attention", {"limit": limit}, _utterance("attention", "--limit", limit))
+    result = _perform("attention", {"limit": limit})
     if get_state().json_output:
         _emit_json(result)
         return
@@ -165,7 +188,7 @@ def attention(limit: Limit = DEFAULT_LIMIT) -> None:
 
 def next_item() -> None:
     """Item one: the single most urgent thing that needs you, or nothing."""
-    result = _perform("next", {}, _utterance("next"))
+    result = _perform("next", {})
     if get_state().json_output:
         _emit_json(result)
         return
@@ -180,7 +203,7 @@ def resolve(
     ],
 ) -> None:
     """Mark an attention item resolved, recording what was done about it."""
-    result = _perform("resolve", {"item": item, "how": how}, _utterance("resolve", item, how))
+    result = _perform("resolve", {"item": item, "how": how})
     if get_state().json_output:
         _emit_json(result)
         return
@@ -196,9 +219,7 @@ def snooze(
     ] = DEFAULT_SNOOZE_MINUTES,
 ) -> None:
     """Hide an attention item for a while; it comes back on its own."""
-    result = _perform(
-        "snooze", {"item": item, "minutes": minutes}, _utterance("snooze", item, "--for", minutes)
-    )
+    result = _perform("snooze", {"item": item, "minutes": minutes})
     if get_state().json_output:
         _emit_json(result)
         return
@@ -222,16 +243,7 @@ def since(
 ) -> None:
     """Board events since the captain's watermark — what happened since you last looked."""
     args: dict[str, Any] = {"project": project, "agent": agent, "advance": advance}
-    result = _perform(
-        "since",
-        args,
-        _utterance(
-            "since",
-            project,
-            *(["--agent", agent] if agent else []),
-            *(["--advance"] if advance else []),
-        ),
-    )
+    result = _perform("since", args)
     if get_state().json_output:
         _emit_json(result)
         return
@@ -239,11 +251,13 @@ def since(
     who = f"{project}/{agent}" if agent else project
     events = result.get("events")
     rows = events if isinstance(events, list) else []
+    frm, to = result.get("from_seq"), result.get("to_seq")
     more = " (more waiting)" if result.get("truncated") else ""
     console.print(
-        f"{who}: {len(rows)} event(s), seq {result.get('from_seq')} → "
-        f"{result.get('to_seq')}{more}"
-        + (" · watermark advanced" if result.get("advanced") else "")
+        f"{who}: {result.get('said')}"  # nothing to span (e.g. an agent never joined)
+        if to is None
+        else f"{who}: {len(rows)} event(s), seq {'the start' if frm is None else frm} → "
+        f"{to}{more}" + (" · watermark advanced" if result.get("advanced") else "")
     )
     for event in rows:
         if not isinstance(event, dict):
@@ -273,12 +287,16 @@ def log(
     ] = LOG_DEFAULT,
 ) -> None:
     """The captain's audit: every action it — or you, from a terminal — took, newest last."""
-    try:
-        rows = audit_log(project, limit=limit)
-    except fleet_service.NoSuchProject as exc:
-        fail(f"refused: {exc}", error="refused")
-    except (sqlite3.DatabaseError, OSError) as exc:
-        fail(f"error: {exc}", error="store")
+    from aisquare.services import fleet as fleet_service
+
+    def read() -> tuple[dict[str, Any], str]:
+        try:
+            found = audit_log(project, limit=limit)
+        except fleet_service.NoSuchProject as exc:
+            raise Refused(str(exc)) from exc
+        return {"events": found}, f"read {len(found)} captain action(s)"
+
+    rows = _read_audited("log", {"project": project, "limit": limit}, read)["events"]
     if get_state().json_output:
         _emit_json({"events": rows})
         return
@@ -304,6 +322,22 @@ def log(
     console.print(table)
 
 
+def _read_audited(
+    name: str, args: Mapping[str, Any], read: Callable[[], tuple[dict[str, Any], str]]
+) -> dict[str, Any]:
+    """A read that is no captain tool, audited like one (13081). The verb prints only what it
+    read, so ``log`` and ``actions`` keep their shapes."""
+    from aisquare.services.captain import actions
+
+    try:
+        data = actions.perform_read(name, args, _typed(), read)
+    except (Refused, Failed) as exc:
+        _said_and_exit(exc)
+    except (sqlite3.DatabaseError, OSError) as exc:
+        fail(f"error: {exc}", error="store", detail=str(exc))
+    return data
+
+
 def audit_log(project: str | None, *, limit: int = LOG_DEFAULT) -> list[dict[str, Any]]:
     """The last ``limit`` ``captain_action`` events, decoded, oldest first.
 
@@ -312,6 +346,10 @@ def audit_log(project: str | None, *, limit: int = LOG_DEFAULT) -> list[dict[str
     A record that does not decode is kept with its raw text, never dropped: the
     audit is the one thing this command must not edit.
     """
+    from aisquare.services import fleet as fleet_service
+    from aisquare.services.captain import actions
+    from aisquare.services.captain import state as captain_state
+
     boards: list[ProjectInfo]
     if project is not None:
         boards = [fleet_service.resolve_project(project)]
@@ -350,11 +388,18 @@ def _decode(event: TeamEvent, board: ProjectInfo) -> dict[str, Any]:
 
 def uav(limit: Limit = DEFAULT_LIMIT) -> None:
     """The sitrep: 'UAV online', whether the captain is thinking, then what needs you."""
-    result = _perform("attention", {"limit": limit}, _utterance("uav", "--limit", limit))
-    busy = captain_state.busy_since()
+    from aisquare.services.captain import state as captain_state
+
+    result = _perform("attention", {"limit": limit})
+    busy_error: str | None = None
+    try:
+        busy = captain_state.busy_since()
+    except OSError as exc:  # the queue answered; the flag's file did not — say which
+        busy, busy_error = None, str(exc)
     report: dict[str, Any] = {
         "uav": "online",
         "busy_since": busy.isoformat() if busy is not None else None,
+        **({"busy_error": busy_error} if busy_error is not None else {}),
         **result,
     }
     if get_state().json_output:
@@ -362,11 +407,14 @@ def uav(limit: Limit = DEFAULT_LIMIT) -> None:
         return
     console = stdout_console()
     console.print(UAV_LINE, style="bold")
-    console.print(
-        f"captain thinking since {local_time(busy):%H:%M:%S}"
-        if busy is not None
-        else "captain idle"
-    )
+    if busy_error is not None:
+        console.print(f"captain state unreadable: {busy_error}", style="yellow")
+    else:
+        console.print(
+            f"captain thinking since {local_time(busy):%H:%M:%S}"
+            if busy is not None
+            else "captain idle"
+        )
     items = result.get("items")
     rows = items if isinstance(items, list) else []
     console.print(f"{len(rows)} item(s) need you" if rows else "nothing needs you")
@@ -380,11 +428,7 @@ def wololo(
     task: Annotated[str, typer.Argument(help="The todo card to claim for it (id prefix).")],
 ) -> None:
     """Wololo! Convert an idle agent to a task: release its claims, claim the card, tell it."""
-    result = _perform(
-        "wololo",
-        {"project": project, "label": label, "task": task},
-        _utterance("wololo", project, label, task),
-    )
+    result = _perform("wololo", {"project": project, "label": label, "task": task})
     if get_state().json_output:
         _emit_json(result)
         return
@@ -398,7 +442,7 @@ def wololo(
 
 def bt() -> None:
     """The brake: cancel a wait, clear the speech queue, undo the last reversible action."""
-    result = _perform("bt", {}, _utterance("bt"))
+    result = _perform("bt", {})
     if get_state().json_output:
         _emit_json(result)
         return
@@ -407,12 +451,16 @@ def bt() -> None:
 
 def action_list() -> None:
     """The owner action list: what `act <name>` runs, bundled and from config.toml."""
-    try:
-        listed = actions.action_list()
-    except Refused as exc:
-        fail(str(exc), error="refused")
-    except OSError as exc:
-        fail(f"error: {exc}", error="config")
+    from aisquare.services.captain import actions
+
+    holder: dict[str, Any] = {}
+
+    def read() -> tuple[dict[str, Any], str]:
+        holder["listed"] = actions.action_list()
+        return {}, f"listed {len(holder['listed'])} owner action(s)"
+
+    _read_audited("actions", {}, read)
+    listed = holder["listed"]
     if get_state().json_output:
         _emit_json(
             {

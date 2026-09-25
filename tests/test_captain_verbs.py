@@ -69,6 +69,7 @@ SINCE_KEYS = {
     "pane",
     "pane_error",
     "advanced",
+    "said",
     "action_seq",
 }
 
@@ -139,7 +140,8 @@ def test_attention_lists_what_needs_you_and_audits_the_call(
     assert item["kind"] == "question" and item["project_name"] == "alpha"
     audit = last_audit()
     assert audit["tool"] == "attention" and audit["ok"] is True
-    assert audit["utterance"] == "aisquare captain attention --limit 10"
+    assert audit["utterance"] == "aisquare --json captain attention", "as typed, --json included"
+    assert audit["args"]["via"] == "cli"
     assert audit["board"] == captain_state.home_project().root.name
 
 
@@ -167,8 +169,12 @@ def test_resolve_records_how_and_the_item_leaves_the_list(
     runner: CliRunner, alpha: ProjectInfo
 ) -> None:
     (item,) = run_json(runner, "attention")[1]["items"]
-    code, out = run(runner, "resolve", item["id"][:6], "told the manager: yes")
-    assert code == 0 and f"resolved {item['id']}" in out and "action seq" in out
+    code, data = run_json(runner, "resolve", item["id"][:6], "told the manager: yes")
+    assert code == 0 and set(data) == {"item", "action_seq"}
+    assert set(data["item"]) == ITEM_KEYS and data["item"]["status"] == "resolved"
+    assert last_audit()["utterance"] == (
+        f"aisquare --json captain resolve {item['id'][:6]} 'told the manager: yes'"
+    ), "the argv as typed, quoting kept"
     assert run_json(runner, "attention")[1]["items"] == []
     # A second resolve is refused in the queue's words (#218 gate 1, blocker 3): no
     # silent second entry, and the refusal is audited like any other call.
@@ -176,9 +182,12 @@ def test_resolve_records_how_and_the_item_leaves_the_list(
     assert code == 1 and data["error"] == "refused"
     code, out = run(runner, "resolve", item["id"], "again")
     assert code == 1 and "already resolved" in out
+    code, out = run(runner, "resolve", item["id"][:6], "second look")
+    assert code == 1 and "already resolved" in out
+    run(runner, "resolve", item["id"], "again")
     audit = last_audit()
     assert audit["tool"] == "resolve" and audit["ok"] is False
-    assert audit["args"] == {"item": item["id"], "how": "again"}
+    assert audit["args"] == {"item": item["id"], "how": "again", "via": "cli"}
     assert audit["utterance"] == f"aisquare captain resolve {item['id']} again"
 
 
@@ -190,13 +199,16 @@ def test_snooze_hides_an_item_for_the_given_minutes(runner: CliRunner, alpha: Pr
     code, data = run_json(runner, "snooze", item["id"], "-m", "7")
     assert code == 0 and data["item"]["status"] == "snoozed"
     assert data["item"]["snoozed_until"] is not None
-    assert last_audit()["utterance"] == f"aisquare captain snooze {item['id']} --for 7"
+    assert last_audit()["utterance"] == f"aisquare --json captain snooze {item['id']} -m 7"
+    assert set(data) == {"item", "action_seq"} and set(data["item"]) == ITEM_KEYS
 
 
 def test_snooze_defaults_to_fifteen_minutes(runner: CliRunner, alpha: ProjectInfo) -> None:
     (item,) = run_json(runner, "attention")[1]["items"]
     assert run(runner, "snooze", item["id"])[1].count("15 min") == 1
-    assert last_audit()["args"]["minutes"] == captain_verbs.DEFAULT_SNOOZE_MINUTES == 15
+    audit = last_audit()
+    assert audit["args"]["minutes"] == captain_verbs.DEFAULT_SNOOZE_MINUTES == 15
+    assert audit["utterance"] == f"aisquare captain snooze {item['id']}", "no flag it was not given"
 
 
 def test_uav_prints_the_sitrep_header_first_and_carries_the_busy_flag(
@@ -215,7 +227,7 @@ def test_uav_prints_the_sitrep_header_first_and_carries_the_busy_flag(
     assert data["uav"] == "online" and data["busy_since"] is not None
     assert len(data["items"]) == 1
     assert "captain thinking since" in run(runner, "uav")[1]
-    assert last_audit()["utterance"] == "aisquare captain uav --limit 10"
+    assert last_audit()["utterance"] == "aisquare captain uav"
 
 
 # --- since and log ------------------------------------------------------------------------------
@@ -274,8 +286,11 @@ def test_log_reads_the_audit_newest_last_and_narrows_to_one_board(
     }
     code, data = run_json(runner, "log", "alpha")
     assert code == 0 and [row["tool"] for row in data["events"]] == ["since"]
-    code, out = run(runner, "log", "-n", "2")
-    assert code == 0 and "since" in out and "next" in out and "attention" not in out
+    # the two reads above are audited too (13081: reads included), newest last
+    code, data = run_json(runner, "log", "-n", "4")
+    assert code == 0 and [row["tool"] for row in data["events"]] == ["since", "next", "log", "log"]
+    code, out = run(runner, "log", "-n", "4")
+    assert code == 0 and "next" in out and "attention" not in out
     code, out = run(runner, "log", "nowhere")
     assert code == 1 and "refused" in out
 
@@ -335,19 +350,29 @@ def test_wololo_converts_an_idle_agent_and_refuses_a_missing_one(
         return fleet_service.TellResult(True, "typed into its pane")
 
     monkeypatch.setattr(fleet_service, "tell", tell)
-    code, out = run(runner, "wololo", "alpha", "coder-1", tid)
-    assert code == 0, out
-    assert f"Wololo! coder-1 converts to {tid}" in out and "action seq" in out
+    code, data = run_json(runner, "wololo", "alpha", "coder-1", tid)
+    assert code == 0, data
+    assert set(data) == {"label", "released", "claimed", "told", "said", "action_seq"}
+    assert data["claimed"] == tid and data["said"] == f"Wololo! coder-1 converts to {tid}"
     assert told and tid in told[0]
     with store_session() as store:
         card = store.get_task(tid)
     assert card is not None and card.status == "doing" and card.claimed_by == agent.session_id
     audit = last_audit("alpha")
     assert audit["tool"] == "wololo" and audit["receipt"] is not None
-    assert audit["utterance"] == f"aisquare captain wololo alpha coder-1 {tid}"
+    assert audit["utterance"] == f"aisquare --json captain wololo alpha coder-1 {tid}"
     code, data = run_json(runner, "wololo", "alpha", "nobody", tid)
     assert code == 1 and data["error"] == "refused"
-    assert "no live agent nobody" in data["message"] if "message" in data else True
+    assert "no live agent" in data["detail"] and "nobody" in data["detail"]
+
+
+def test_the_since_watermark_never_moves_backwards(alpha: ProjectInfo) -> None:
+    """The CLI and the captain both advance it now; a slower writer must not rewind it."""
+    captain_state.set_watermark(alpha.id, None, 10)
+    captain_state.set_watermark(alpha.id, None, 7)
+    assert captain_state.watermark(alpha.id, None) == 10
+    captain_state.set_watermark(alpha.id, None, 12)
+    assert captain_state.watermark(alpha.id, None) == 12
 
 
 def test_bt_pulls_the_brake_and_says_what_it_did(runner: CliRunner) -> None:
@@ -385,8 +410,86 @@ def test_a_refusal_is_one_line_exit_1_and_an_error_object_under_json(runner: Cli
     assert "Traceback" not in out
     code, data = run_json(runner, "resolve", "nothing", "x")
     assert code == 1 and data["error"] == "refused"
+    assert "no queue item matches 'nothing'" in data["detail"], "the queue's words, kept"
+    assert "action seq" in data["detail"]
     audit = last_audit()
     assert audit["tool"] == "resolve" and audit["ok"] is False
+
+
+def test_a_failure_is_error_failed_and_a_refusal_error_refused(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The frame's split (Failed: said as error:, Refused: said as refused:) reaches --json."""
+    from aisquare.services.captain import queue as captain_queue
+
+    def locked(limit: int) -> list[dict[str, object]]:
+        raise RuntimeError("queue.json is locked by another process")
+
+    monkeypatch.setattr(captain_queue, "ranked", locked)
+    code, data = run_json(runner, "attention")
+    assert code == 1 and data["error"] == "failed"
+    assert data["detail"].startswith("error: the attention queue failed")
+    code, data = run_json(runner, "since", "nowhere")
+    assert code == 1 and data["error"] == "refused"
+
+
+def test_log_and_actions_are_audited_like_every_verb(runner: CliRunner) -> None:
+    """13081: one captain_action per call, reads included — the audit of the audit too."""
+    run(runner, "log")
+    audit = last_audit()
+    assert (audit["tool"], audit["ok"], audit["utterance"]) == ("log", True, "aisquare captain log")
+    assert audit["args"]["via"] == "cli"
+    run(runner, "actions")
+    audit = last_audit()
+    assert (audit["tool"], audit["utterance"]) == ("actions", "aisquare captain actions")
+
+
+def test_the_everyday_cli_does_not_load_the_captain(tmp_path: Path) -> None:
+    """Every aisquare command — a hook included — imports the CLI; the captain's actions,
+    queue and state load only when a captain verb runs."""
+    import os
+    import subprocess
+
+    probe = (
+        "import sys, aisquare.cli.app\n"
+        "heavy = ('aisquare.services.captain.actions', 'aisquare.services.captain.queue',"
+        " 'aisquare.services.captain.state')\n"
+        "print([m for m in heavy if m in sys.modules])"
+    )
+    env = {**os.environ, "AISQUARE_HOME": str(tmp_path / "home")}
+    out = subprocess.run(
+        [sys.executable, "-c", probe], capture_output=True, text=True, env=env, check=True
+    )
+    assert out.stdout.strip() == "[]"
+
+
+def test_uav_says_an_unreadable_state_file_rather_than_crashing(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def unreadable() -> None:
+        raise PermissionError(13, "Permission denied", "state.json")
+
+    monkeypatch.setattr(captain_state, "busy_since", unreadable)
+    code, out = run(runner, "uav")
+    assert code == 0 and "captain state unreadable" in out and "Traceback" not in out
+    code, data = run_json(runner, "uav")
+    assert code == 0 and data["busy_since"] is None and "Permission denied" in data["busy_error"]
+
+
+def test_since_for_an_agent_that_never_joined_says_so_in_its_own_words(
+    runner: CliRunner, alpha: ProjectInfo
+) -> None:
+    now = datetime.now(UTC)
+    with store_session() as store:
+        store.upsert_fleet_agent(
+            FleetAgent(
+                id=new_agent_id(), project_id=alpha.id, label="coder-9", role="coder",
+                pane_id="%9", cwd=alpha.root, created_at=now,
+            )
+        )  # fmt: skip
+    code, out = run(runner, "since", "alpha", "--agent", "coder-9")
+    assert code == 0, out
+    assert "coder-9 has not joined the board" in out and "None" not in out
 
 
 def test_the_verbs_need_no_mcp_sdk(runner: CliRunner, monkeypatch: pytest.MonkeyPatch) -> None:

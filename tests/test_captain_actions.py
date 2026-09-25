@@ -2049,6 +2049,156 @@ def test_bt_after_a_wololo_says_an_old_card_taken_meanwhile_is_not_stolen(
     assert "cannot be taken back" in result["said"]
 
 
+def test_a_wololo_whose_tell_fails_is_still_braked_and_bt_touches_nothing_older(
+    alpha: ProjectInfo, agents: dict[str, FleetAgent], fleet_rec: Fleet
+) -> None:
+    """The claims moved before the tell failed: the owner hears it was converted (bt undoes
+    it), and bt undoes THAT — never the captain's earlier, unrelated claim (13295 S1)."""
+    earlier = add_task(alpha, "an earlier claim of the captain's")
+    ok(actions.task("alpha", "claim", earlier.id))
+    old = add_task(alpha, "the old job")
+    new = add_task(alpha, "the new job")
+    team_service.claim_task(old.id, session_ref="sess-coder-1")
+
+    def gone(project: ProjectInfo, label: str, text: str) -> None:
+        raise fleet.NoSuchAgent(f"no live agent {label!r} in {project.root.name}")
+
+    fleet_rec.on_tell = gone
+    message = refused(lambda: actions.wololo("alpha", "coder-1", new.id))
+    assert message.startswith(f"error: coder-1 was converted to {new.id} (bt undoes it)")
+    assert "the tell failed" in message
+    result = ok(actions.bt())
+    assert result["undid"]["kind"] == "wololo" and result["undid"]["task"] == new.id
+    assert task_now(new.id).status == "todo"
+    assert (task_now(old.id).status, task_now(old.id).claimed_by) == ("doing", "sess-coder-1")
+    assert task_now(earlier.id).status == "doing", "the older claim is untouched"
+
+
+def test_a_wololo_whose_release_fails_records_what_it_did_release(
+    alpha: ProjectInfo,
+    agents: dict[str, FleetAgent],
+    fleet_rec: Fleet,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = add_task(alpha, "first old job")
+    second = add_task(alpha, "second old job")
+    new = add_task(alpha, "the new job")
+    for card in (first, second):
+        team_service.claim_task(card.id, session_ref="sess-coder-1")
+    real = team_service.release_task
+    calls: list[str] = []
+
+    def second_fails(ref: str, *, session_ref: str | None = None) -> TeamTask:
+        calls.append(ref)
+        if len(calls) == 2:
+            raise sqlite3.OperationalError("database is locked")
+        return real(ref, session_ref=session_ref)
+
+    monkeypatch.setattr(team_service, "release_task", second_fails)
+    refused(lambda: actions.wololo("alpha", "coder-1", new.id))
+    monkeypatch.setattr(team_service, "release_task", real)
+    entry = captain_state.pop_undo()
+    assert entry is not None and entry.kind == "wololo" and entry.task_id == new.id
+    assert entry.released == (calls[0],), "only the release that happened"
+
+
+def test_bt_never_reclaims_for_an_agent_whose_session_has_ended(
+    alpha: ProjectInfo, agents: dict[str, FleetAgent], fleet_rec: Fleet
+) -> None:
+    """A card claimed for a dead session is locked 'doing' for the whole lease (13295 S2)."""
+    old = add_task(alpha, "the old job")
+    new = add_task(alpha, "the new job")
+    team_service.claim_task(old.id, session_ref="sess-coder-1")
+    ok(actions.wololo("alpha", "coder-1", new.id))
+    with store_session() as store:
+        store.end_session("sess-coder-1", release_claims=True)
+    result = ok(actions.bt())
+    assert (task_now(old.id).status, task_now(old.id).claimed_by) == ("todo", None)
+    assert f"{old.id} left in the pool: coder-1's session has ended" in result["said"]
+
+
+def test_bt_says_a_card_it_could_not_reclaim_and_still_gives_the_new_one_back(
+    alpha: ProjectInfo,
+    agents: dict[str, FleetAgent],
+    fleet_rec: Fleet,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A re-claim that fails is said, not raised: the rest of the undo still happens."""
+    old = add_task(alpha, "the old job")
+    new = add_task(alpha, "the new job")
+    team_service.claim_task(old.id, session_ref="sess-coder-1")
+    ok(actions.wololo("alpha", "coder-1", new.id))
+
+    def locked(ref: str, *, session_ref: str | None = None) -> TeamTask:
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(team_service, "claim_task", locked)
+    result = ok(actions.bt())
+    assert (
+        f"{old.id} could not be re-claimed (database is locked), left in the pool"
+        in (result["said"])
+    )
+    assert task_now(new.id).status == "todo" and task_now(old.id).status == "todo"
+
+
+def test_a_wololo_undo_that_fails_part_way_says_what_it_did_and_a_retry_finishes(
+    alpha: ProjectInfo,
+    agents: dict[str, FleetAgent],
+    fleet_rec: Fleet,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed undo goes back on the list (13255), and the owner hears what DID change
+    before it failed (13295 M1): the next bt finishes the rest, never an older entry."""
+    old = add_task(alpha, "the old job")
+    new = add_task(alpha, "the new job")
+    team_service.claim_task(old.id, session_ref="sess-coder-1")
+    ok(actions.wololo("alpha", "coder-1", new.id))
+    real = actions._effect_seq
+
+    def locked(*args: object, **kwargs: object) -> object:
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(actions, "_effect_seq", locked)
+    message = refused(actions.bt)
+    assert "back on the undo list" in message and "database is locked" in message
+    assert f"after it had released {new.id} from coder-1" in message
+    assert f"re-claimed {old.id} for coder-1" in message
+    monkeypatch.setattr(actions, "_effect_seq", real)
+    result = ok(actions.bt())
+    assert result["undid"]["kind"] == "wololo" and result["undid"]["task"] == new.id
+    assert task_now(new.id).status == "todo"
+    assert (task_now(old.id).status, task_now(old.id).claimed_by) == ("doing", "sess-coder-1")
+    assert captain_state.pop_undo() is None
+
+
+def test_bt_after_a_wololo_ends_its_line_without_a_stray_card_id(
+    alpha: ProjectInfo, agents: dict[str, FleetAgent], fleet_rec: Fleet
+) -> None:
+    old = add_task(alpha, "the old job")
+    new = add_task(alpha, "the new job")
+    team_service.claim_task(old.id, session_ref="sess-coder-1")
+    ok(actions.wololo("alpha", "coder-1", new.id))
+    said = ok(actions.bt())["said"]
+    assert said.rstrip().endswith("cannot be taken back"), said
+
+
+def test_the_frame_raises_failed_for_an_error_and_refused_for_a_refusal(
+    projects: dict[str, ProjectInfo], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The split perform() and the CLI read: an error is never a Refused, nor the reverse."""
+
+    def locked(limit: int) -> list[dict[str, object]]:
+        raise RuntimeError("queue.json is locked by another process")
+
+    monkeypatch.setattr(captain_queue, "ranked", locked)
+    with pytest.raises(Failed) as failed:
+        actions.perform("attention", {}, "attention")
+    assert not isinstance(failed.value, Refused)
+    with pytest.raises(Refused) as refusal:
+        actions.perform("board", {"project": "nowhere"}, "board nowhere")
+    assert not isinstance(refusal.value, Failed)
+
+
 def test_wololo_refuses_a_working_agent_and_changes_nothing(
     alpha: ProjectInfo, agents: dict[str, FleetAgent], fleet_rec: Fleet
 ) -> None:

@@ -257,11 +257,18 @@ def watermark(project_id: str, agent: str | None) -> int | None:
 
 
 def set_watermark(project_id: str, agent: str | None, seq: int) -> None:
+    """Move a watermark forward — never back. The CLI (T5) and the captain both advance it,
+    and a slower writer's older seq must not rewind what the faster one moved past."""
+
     def change(current: object) -> object:
         marks = cast(dict[str, object], current) if isinstance(current, dict) else {}
         board = marks.get(project_id)
         entries = cast(dict[str, object], board) if isinstance(board, dict) else {}
-        entries[agent or _WHOLE_BOARD] = seq
+        key = agent or _WHOLE_BOARD
+        existing = entries.get(key)
+        if isinstance(existing, int) and not isinstance(existing, bool) and existing >= seq:
+            return marks
+        entries[key] = seq
         marks[project_id] = entries
         return marks
 

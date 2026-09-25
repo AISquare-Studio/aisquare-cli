@@ -8,15 +8,38 @@ with their own cards.
 
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Any
 
 import typer
+from typer.core import TyperGroup
 
 from aisquare.cli import captain_verbs
 from aisquare.cli.common import fail
 from aisquare.cli.serve import dependency_error
 
+_TYPED = "aisquare.captain.typed"
+
+
+class _Captain(TyperGroup):
+    """Keeps the words after ``captain`` as typed: every verb's audit records them.
+
+    ``ctx`` is duck-typed, as in ``global_flags``: click is vendored in typer.
+    """
+
+    def parse_args(self, ctx: Any, args: list[str]) -> list[str]:
+        ctx.meta[_TYPED] = tuple(args)
+        return super().parse_args(ctx, args)
+
+    def invoke(self, ctx: Any) -> Any:
+        token = captain_verbs.TYPED.set(ctx.meta.get(_TYPED, ()))
+        try:
+            return super().invoke(ctx)
+        finally:
+            captain_verbs.TYPED.reset(token)
+
+
 app = typer.Typer(
+    cls=_Captain,
     help="The captain: the home-level agent that runs every project's fleet for you.",
     no_args_is_help=True,
 )

@@ -53,9 +53,10 @@ from aisquare.models import (
 )
 from aisquare.services import fleet, mcp_server
 from aisquare.services import team as team_service
-from aisquare.services.captain import actions, errors
+from aisquare.services.captain import actions
 from aisquare.services.captain import queue as captain_queue
 from aisquare.services.captain import state as captain_state
+from aisquare.services.captain.errors import Failed, Refused
 from tests.rendered import plain
 
 CONTRACT_TOOLS = frozenset(
@@ -387,7 +388,9 @@ def ok(result: str) -> dict[str, Any]:
 
 
 def refused(call: Callable[[], str]) -> str:
-    with pytest.raises(ToolError) as caught:
+    # A direct call raises the frame's own Refused/Failed; through the SDK it is a ToolError
+    # with the same words (test_a_call_through_the_protocol_...).
+    with pytest.raises((ToolError, Refused, Failed)) as caught:
         call()
     return str(caught.value)
 
@@ -831,7 +834,7 @@ def test_every_call_writes_exactly_one_captain_action_success_or_refusal(
 ) -> None:
     before = audit_count(projects)
     function = dict(actions.TOOLS)[tool]
-    with contextlib.suppress(ToolError):
+    with contextlib.suppress(ToolError, Refused, Failed):
         function(**kwargs, utterance=f"owner asked for {tool}")
     assert audit_count(projects) == before + 1
 
@@ -840,7 +843,7 @@ def test_ask_manager_writes_one_captain_action_too(
     alpha: ProjectInfo, agents: dict[str, FleetAgent], fleet_rec: Fleet, clock: Clock
 ) -> None:
     before = len(audit(alpha.id))
-    with contextlib.suppress(ToolError):
+    with contextlib.suppress(ToolError, Refused, Failed):
         actions.ask_manager("alpha", "status?", timeout=2)
     assert len(audit(alpha.id)) == before + 1
 
@@ -1817,14 +1820,19 @@ def test_a_malformed_config_action_refuses_itself_only(
 # --- attention: the T7 seam -------------------------------------------------------------
 
 
-def test_the_queue_tools_say_the_queue_is_not_built_yet(projects: dict[str, ProjectInfo]) -> None:
-    for call in (
-        lambda: actions.attention(),
-        lambda: actions.next_item(),
-        lambda: actions.resolve("q1", "told coder-1"),
-        lambda: actions.snooze("q1", 10),
-    ):
-        assert refused(call).startswith("refused: the attention queue lands with T7")
+def test_the_queue_tools_answer_from_the_real_queue(projects: dict[str, ProjectInfo]) -> None:
+    """With T7 in, the four tools read the home's queue: an empty home is an empty list (the
+    truth, now that there is a queue to read), and an unknown item is refused in the queue's
+    own words through the same frame. The T1 stub's refusal ("lands with T7") is gone."""
+    result = ok(actions.attention())
+    assert result["items"] == [] and result["action_seq"] > 0
+    assert ok(actions.next_item())["item"] is None
+    assert refused(lambda: actions.resolve("q1", "told coder-1")).startswith(
+        "refused: no queue item matches 'q1'"
+    )
+    assert refused(lambda: actions.snooze("q1", 10)).startswith(
+        "refused: no queue item matches 'q1'"
+    )
 
 
 def test_a_queue_that_drops_the_stubs_class_still_refuses_in_words(
@@ -1835,7 +1843,7 @@ def test_a_queue_that_drops_the_stubs_class_still_refuses_in_words(
     monkeypatch.delattr(captain_queue, "QueueUnavailable")
 
     def unknown(item_id: str, how: str) -> dict[str, object]:
-        raise errors.Refused(f"no open item {item_id}")
+        raise Refused(f"no open item {item_id}")
 
     monkeypatch.setattr(captain_queue, "resolve", unknown)
     assert refused(lambda: actions.resolve("q9", "said yes")).startswith("refused: no open item q9")

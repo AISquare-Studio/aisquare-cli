@@ -38,7 +38,9 @@ class ExplainabilityTarget(BaseModel):
     """One explainability deployment (stg, prod, …) this machine can point at.
 
     Every field falls back to the top-level ``[explainability]`` default when
-    unset, so a target is usually two lines. ``api_key_env`` is a *key source*,
+    unset, so a target is usually two lines — except the gateway and proxy of a
+    project's own deployment (a destination's, #142), which the machine's never
+    stand in for. ``api_key_env`` is a *key source*,
     never a key: the CLI reads the named environment variable at the moment it
     needs it. No path to a secrets file is ever baked into config or source —
     the operator sources their own file into the shell (or exports the var by

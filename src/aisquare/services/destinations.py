@@ -219,6 +219,10 @@ def deployment_target(
     existing target's empty gateway did the same (review of #203). Only
     :func:`~aisquare.services.explainability_ops.resolve_target` calls this,
     for the project whose destination names the target.
+
+    An API host outside the table gets no gateway and no proxy here, and the
+    resolver answers "no gateway known" rather than reaching for the machine's
+    top level: that is another deployment's, and the project's key went to it.
     """
     environment = environment_for(destination.api_url)
     configured = settings.targets.get(destination.environment)

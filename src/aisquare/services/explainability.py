@@ -836,6 +836,17 @@ def wire_session(
             traced=False, reason=f"role {role!r} is not header-safe — launching untraced"
         )
 
+    # No proxy at all is a project's own deployment that none is known for — a
+    # destination on an API host outside the table — and the machine's is another
+    # deployment's, which the project's key must never reach (review of #203).
+    if not settings.proxy_url:
+        return SessionWiring(
+            traced=False,
+            reason="explainability.proxy_url is empty: no proxy is known for the deployment "
+            "this project's traces go to — launching untraced (aisquare explainability "
+            "status says where to set one)",
+        )
+
     # The one value here that can cost a LAUNCH rather than a trace. The agent
     # parses ANTHROPIC_BASE_URL before it can report anything, so a malformed
     # one does not degrade to untraced — it dies at its first request with

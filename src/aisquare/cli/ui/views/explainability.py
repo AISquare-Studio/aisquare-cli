@@ -382,7 +382,7 @@ def register_roster(page: ProjectInfo | None = None) -> Notice:
     if not target.gateway_url:
         return Notice(
             f"target '{target.name}' has no gateway URL — set one with: "
-            f"aisquare explainability enable --target {target.name} --gateway-url <url>",
+            f"{ops.deployment_fix(target)}",
             "error",
         )
     if not target.api_key:

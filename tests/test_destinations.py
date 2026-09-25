@@ -538,6 +538,118 @@ def test_use_for_one_project_leaves_what_every_other_project_resolves(
     assert everyone_else() == before, "one project's `use` re-pointed the machine"
 
 
+@pytest.mark.parametrize("api_url", ["https://api.acme-selfhosted.example", "http://[::1]:8000"])
+def test_an_unknown_hosts_key_never_goes_to_the_machines_gateway_or_proxy(
+    runner: CliRunner,
+    isolated_home: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    api_url: str,
+) -> None:
+    """A destination on an API host outside the table (self-hosted, or ``[::1]``, which is
+    loopback to the sign-in but not the ``local`` deployment's) got a target with no
+    gateway, and the resolver fell back to the machine's: the project's key went to the
+    prod gateway and proxy (review of #203). No gateway known is the answer, and said."""
+    config = AppConfig()
+    config.explainability.enabled = True
+    config.explainability.gateway_url = "https://explainability-api.aisquare.studio"
+    config.explainability.proxy_url = "https://explainability-api.aisquare.studio:9443"
+    save_config(config)
+    monkeypatch.setenv(service.GATEWAY_ENV_VAR, "https://from-the-shell.example")
+    monkeypatch.setattr(service, "probe_proxy", lambda _url: service.ProxyProbe(True, "healthy"))
+    project = _project(tmp_path / "web")
+    session = iam.Session(api_url=api_url, token="aisq_x", source="env")
+    with store_session() as store:
+        row = dest.choose(
+            store,
+            project,
+            dest.Workspace(id=42, uid="ws-uid-42", name="acme", role="ADMIN"),
+            dest.Studio(id=301, uid="st-301", name="Frontend"),
+            session,
+        )
+        path = service.store_project_api_key(project.id, "AIS_selfhosted_key")
+        store.set_project_explainability(
+            project.id, target=row.environment, key_path=path, set_by=None
+        )
+
+    settings = load_config().explainability
+    for chosen in (None, row.environment):  # by the destination, and named by --target
+        resolved = ops.resolve_target(settings, chosen, project_id=project.id)
+        assert (resolved.name, resolved.key_source) == (row.environment, "project")
+        assert (resolved.gateway_url, resolved.gateway_source) == ("", "unset")
+        assert (resolved.proxy_url, resolved.proxy_source) == ("", "unset")
+    assert ops.effective_settings(settings, project_id=project.id).proxy_url == ""
+    assert ops.resolve_target(settings, None).gateway_url == "https://from-the-shell.example", (
+        "the machine's own reads keep the shell's gateway"
+    )
+
+    launched = runner.invoke(app, ["explainability", "env", "coder"])
+    assert launched.exit_code != 0 and "no proxy is known" in launched.output
+    assert "AIS_selfhosted_key" not in launched.output
+    status = runner.invoke(app, ["explainability", "status"])
+    where = f'[explainability.targets."{row.environment}"]'
+    assert "gateway:  (unset) [unset]" in status.output and where in status.output
+    doctor = {check.name: check for check in ops.checks(project_id=project.id)}
+    assert where in (doctor["explainability config"].fix or "")
+
+
+def test_a_projects_key_bound_off_the_machines_target_never_takes_the_machines_gateway(
+    isolated_home: Path, tmp_path: Path
+) -> None:
+    """The project-key half of the rule: a key attached for a target that names no
+    gateway of its own answered with the top-level gateway and proxy, the machine's
+    deployment and not the one the key was issued for (review of #203). The machine's
+    own target keeps the top level: on the machine ``init --explainability`` writes, that
+    IS its deployment, and a key bound to it is bound there."""
+    config = AppConfig()
+    config.explainability.gateway_url = "https://explainability-api.aisquare.studio"
+    config.explainability.targets["acme"] = ExplainabilityTarget(api_key_env="ACME_KEY")
+    save_config(config)
+    project = _project(tmp_path / "web")
+    service.store_api_key("AIS_machine_key")
+    for target in ("acme", "stg"):
+        ops.attach_project_key(project, f"AIS_{target}_key", target=target)
+        settings = load_config().explainability
+        resolved = ops.resolve_target(settings, target, project_id=project.id)
+        assert resolved.key_source == "project"
+        if target == "stg":  # the machine's own target
+            assert resolved.gateway_url == "https://explainability-api.aisquare.studio"
+            continue
+        assert (resolved.gateway_url, resolved.proxy_url) == ("", ""), "another deployment's"
+        machine_read = ops.resolve_target(settings, target)
+        assert machine_read.gateway_url == "https://explainability-api.aisquare.studio", (
+            "a machine key's read of the same target is as it was"
+        )
+
+
+def test_use_on_a_host_it_does_not_know_says_where_its_gateway_goes(
+    runner: CliRunner,
+    idp: IdentityProviderStub,
+    signed_in: iam.Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``use`` printed "(no gateway known)" only while no top-level gateway existed, and
+    otherwise the machine's; with none known it now says where to set one — the config
+    entry, never ``enable --target``, which would make it the whole machine's target."""
+    monkeypatch.setattr(
+        dest, "ENVIRONMENTS", tuple(e for e in dest.ENVIRONMENTS if e.name != "local")
+    )
+    config = load_config()
+    config.explainability.gateway_url = "https://explainability-api.aisquare.studio"
+    save_config(config)
+    _project(tmp_path / "web")
+    result = runner.invoke(app, ["explainability", "use", "acme/Frontend"])
+    assert result.exit_code == 0, result.output
+    host = dest.environment_name(idp.url)
+    assert f"target:   {host} → (no gateway known)" in result.output
+    said = " ".join(result.output.split())
+    where = f'set gateway_url and proxy_url under [explainability.targets."{host}"]'
+    assert f"{host} is not a deployment this CLI knows — {where}" in said
+    assert "explainability-api.aisquare.studio" not in result.output
+    assert load_config().explainability.targets == {}
+
+
 def test_describe_has_one_voice() -> None:
     assert dest.describe(None).startswith("(none chosen")
     session = iam.Session(

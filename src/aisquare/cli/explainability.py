@@ -659,6 +659,13 @@ def use(
     typer.echo(f"✓ traces from {pname} land in {row.label} ({row.environment})")
     proxy = f"  [proxy {target.proxy_url}]" if target.proxy_url else ""
     typer.echo(f"  target:   {target_name} → {target.gateway_url or '(no gateway known)'}{proxy}")
+    if not (target.gateway_url and target.proxy_url):
+        # An API host outside the table: nothing traces there until its endpoints are
+        # named, and the machine's never stand in for them (review of #203).
+        typer.echo(
+            f"            {target_name} is not a deployment this CLI knows — set "
+            f"{ops.deployment_fix(target)}"
+        )
     typer.echo(f"  key:      {key_note}")
     if routing.bound:
         typer.echo(f"  routing:  {'; '.join(_routing_lines(routing))}")
@@ -1045,7 +1052,7 @@ def register(
     if not target.gateway_url:
         fail(
             f"target '{target.name}' has no gateway URL — set one with: "
-            f"aisquare explainability enable --target {target.name} --gateway-url <url>",
+            f"{ops.deployment_fix(target)}",
             error="unconfigured",
         )
     if not target.api_key:

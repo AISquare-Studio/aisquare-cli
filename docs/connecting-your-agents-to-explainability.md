@@ -394,7 +394,13 @@ reported on its own line:
   the target names its own key variable (`EXPLAINABILITY_PROD_API_KEY`, …), so
   the machine key — issued for whichever deployment set the machine up — never
   answers for another one; the exception is the machine whose top-level gateway
-  already is that deployment's. Launches, `fleet spawn` and
+  already is that deployment's. An API host this CLI does not know (a
+  self-hosted API, `[::1]`) has no gateway or proxy it can fill in, and the
+  machine's never stand in: `use` says `(no gateway known)` and where to set
+  them — `gateway_url` and `proxy_url` under
+  `[explainability.targets."<host>"]`, not `enable --target`, which would make
+  it the whole machine's target — and until then the project's launches go
+  untraced, saying why. Launches, `fleet spawn` and
   `explainability env` in the project take the proxy **and** the key from this
   target, whatever `AISQUARE_EXPLAINABILITY_TARGET` says: a project's
   destination comes before that variable, which moves only the projects without

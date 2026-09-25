@@ -165,7 +165,7 @@ class ResolvedTarget:
     #: not in play.
     key_source: str
     proxy_url: str
-    proxy_source: str  # "config" | "default" — the default is unreachable ON PURPOSE
+    proxy_source: str  # "config" | "default" | "unset" — the default is unreachable ON PURPOSE
     agent_name_template: str
     studio_id: str
     roles: tuple[str, ...]
@@ -180,6 +180,10 @@ class ResolvedTarget:
     """The target an exported ``$AISQUARE_EXPLAINABILITY_TARGET`` names when the
     project's destination won over it and names another, so a surface can say the
     variable is not in play for this project; ``None`` otherwise."""
+    project_deployment: bool = False
+    """The deployment is the PROJECT's — its destination's, or the one its own key is
+    bound to off the machine's target — so the machine's top-level gateway and proxy
+    never stand in for it, and its fix is its own entry (:func:`deployment_fix`)."""
 
     @property
     def configured(self) -> bool:
@@ -339,7 +343,17 @@ def resolve_target(
     destination (:func:`~aisquare.services.destinations.deployment_target`),
     never out of the machine's ``targets`` map by name alone: ``use`` wrote it
     there, where the machine's own target of the same name is read, and one
-    project's choice re-pointed every other.
+    project's choice re-pointed every other. Neither
+    ``$EXPLAINABILITY_GATEWAY_URL`` nor the top-level gateway or proxy stands
+    in for what it lacks: those are the MACHINE's deployment, and
+    for an API host outside the table the project's minted key went to them —
+    the prod gateway and proxy for a self-hosted workspace's key. Nor for a
+    project's own key bound to another target than the machine's: the key
+    answers only for its deployment, and the top level is the machine's. Such
+    a resolution has no gateway (``gateway_source`` "unset") and no proxy
+    (``proxy_source`` "unset"), and every surface says so rather than tracing
+    somewhere else. The machine's own target keeps the top level, which is
+    what it is on the machine ``init --explainability`` writes.
 
     THE KEY, with ``project_id`` (#141): the project's own key first — attached
     with ``explainability key set`` and bound to ONE deployment, so it answers
@@ -394,17 +408,9 @@ def resolve_target(
     if destination is not None and chosen == destination.environment:
         from aisquare.services.destinations import deployment_target  # lazy: it imports this
 
-        target = deployment_target(settings, destination)
+        target, placed = deployment_target(settings, destination), True
     else:
-        target = settings.targets.get(chosen, ExplainabilityTarget())
-
-    gateway_url, source = target.gateway_url, "config"
-    if not gateway_url:
-        gateway_url, source = environ.get(GATEWAY_ENV_VAR, ""), "env"
-    if not gateway_url:
-        gateway_url, source = settings.gateway_url, "config"
-    if not gateway_url:
-        source = "unset"
+        target, placed = settings.targets.get(chosen, ExplainabilityTarget()), False
 
     api_key, key_source = _project_api_key(project_id, chosen), "project"
     if api_key is None:
@@ -414,6 +420,18 @@ def resolve_target(
     if api_key is None:
         key_source = "unset"
 
+    # The machine's deployment stands in only for the machine's reads: never for
+    # a destination's, nor for a project's key bound elsewhere (see the docstring).
+    machine = not placed and (key_source != "project" or chosen == settings.target)
+    gateway_url, source = target.gateway_url, "config"
+    if not gateway_url and machine:
+        gateway_url, source = environ.get(GATEWAY_ENV_VAR, ""), "env"
+    if not gateway_url and machine:
+        gateway_url, source = settings.gateway_url, "config"
+    if not gateway_url:
+        source = "unset"
+    proxy_url = target.proxy_url or (settings.proxy_url if machine else "")
+
     roles = target.roles if target.roles is not None else settings.roles
     return ResolvedTarget(
         name=chosen,
@@ -422,8 +440,8 @@ def resolve_target(
         api_key_env=target.api_key_env,
         api_key=api_key,
         key_source=key_source,
-        proxy_url=target.proxy_url or settings.proxy_url,
-        proxy_source=_proxy_source(settings, target),
+        proxy_url=proxy_url,
+        proxy_source=_proxy_source(settings, target) if proxy_url else "unset",
         agent_name_template=target.agent_name_template or settings.agent_name_template,
         studio_id=target.studio_id,
         roles=tuple(roles),
@@ -431,7 +449,25 @@ def resolve_target(
         destination=destination,
         target_source=target_source,
         unused_env_target=unused_env_target,
+        project_deployment=not machine,
     )
+
+
+def deployment_fix(target: ResolvedTarget, *, what: str = "gateway") -> str:
+    """Where ``target``'s missing gateway (or proxy) is set: one wording for every surface.
+
+    For one of the machine's targets, ``enable --target … --gateway-url``. For a
+    project's own deployment (:attr:`ResolvedTarget.project_deployment`) that
+    command is the wrong one: it makes the named target the MACHINE's, which
+    moves every project without a destination onto it — the re-point ``use``
+    itself made (review of #203). The config entry moves that deployment alone.
+    """
+    if target.project_deployment:
+        return (
+            f'gateway_url and proxy_url under [explainability.targets."{target.name}"] '
+            f"in {paths.config_path()}"
+        )
+    return f"aisquare explainability enable --target {target.name} --{what}-url <url>"
 
 
 def _project_api_key(project_id: str | None, target_name: str) -> str | None:
@@ -1372,8 +1408,7 @@ def _check_config(target: ResolvedTarget, *, on: bool) -> DoctorCheck:
         return degrade(
             name,
             f"target '{target.name}' has no gateway URL",
-            "Point it at a deployment: aisquare explainability enable "
-            f"--target {target.name} --gateway-url <url>",
+            f"Point it at a deployment: {deployment_fix(target)}",
         )
     # A gateway that is not a URL -- `stg.example`, the runbook command four
     # characters short. `configure_target` refuses it now, but a hand-edited
@@ -1565,10 +1600,23 @@ def proxy_state(
     * tracing is ON and the proxy does not answer — genuinely red: launches
       still succeed (they never block on this) but they go UNTRACED, silently,
       which is the whole failure this lane exists to prevent.
+
+    Before any of them: a project's own deployment with no proxy known
+    (:attr:`ResolvedTarget.project_deployment`) has none to dial, and its
+    launches go untraced — red while tracing is on, amber while it is off.
     """
     # Resolved here rather than bound as a default argument, so a test (or a
     # caller) can substitute a prober by patching this module.
     ask = prober or probe_proxy
+    if not target.proxy_url:
+        # A project's own deployment with no proxy known (review of #203): the
+        # machine's proxy is another deployment's, so nothing is dialled in its
+        # place and the project's launches go untraced. Amber while tracing is off.
+        return ProxyState(
+            summary=f"no proxy is known for target '{target.name}' — its launches go untraced",
+            severity=CheckStatus.fail if on else CheckStatus.warn,
+            remediation=f"Give it one: {deployment_fix(target, what='proxy')}",
+        )
     if not on:
         if target.proxy_source == "default":
             # Never dialled, --live or not: nobody asked about this address.
@@ -1918,8 +1966,7 @@ def _live_checks(target: ResolvedTarget, *, on: bool) -> list[DoctorCheck]:
             _warn(
                 "explainability gateway",
                 "skipped — no gateway URL and key for this target",
-                "Configure the target first: aisquare explainability enable "
-                f"--target {target.name} --gateway-url <url>",
+                f"Configure the target first: {deployment_fix(target)}",
             )
         ]
 

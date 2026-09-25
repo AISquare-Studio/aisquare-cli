@@ -1343,6 +1343,69 @@ def test_a_mint_that_answers_with_the_same_uid_owes_nothing(
     assert row is not None and row.key_uid == "key-1"
 
 
+def test_a_mint_that_answers_with_a_uid_still_owed_takes_it_back_and_revokes_nothing(
+    runner: CliRunner,
+    idp: IdentityProviderStub,
+    signed_in: iam.Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A uid still owed that a mint answers again is the project's key once more.
+
+    Its record stayed owed, so the same ``use`` stored the key and then revoked it:
+    the project's key, dead on the server (review of #172's follow-ups, round 1, F2).
+    """
+    project = _project(tmp_path / "web")
+    _json(runner, "explainability", "use", "acme/Frontend")
+    with monkeypatch.context() as signed_out:
+        signed_out.setattr(iam, "signed_in_quietly", lambda: None)
+        cleared = _json(runner, "explainability", "key", "clear")
+    assert [owed["key_uid"] for owed in cleared["revocations"]["still_live"]] == ["key-1"]
+    idp.minted.pop()  # the stub numbers keys by count: the next one is key-1 again
+    again = _json(runner, "explainability", "use", "acme/Frontend")
+    assert again["key"]["minted"] is True and idp.minted[0]["uid"] == "key-1"
+    assert again["revocations"] == {"revoked": [], "still_live": []}
+    assert idp.revoked_keys == []
+    with store_session() as store:
+        row = store.project_destination(project.id)
+        assert store.pending_revocations() == []
+    assert row is not None and row.key_uid == "key-1"
+
+
+def test_every_write_that_puts_an_owed_uid_back_on_its_row_owes_it_no_more(
+    isolated_home: Path, tmp_path: Path
+) -> None:
+    """The other half of the primitive (``_owe_no_revocation``): a uid a write stores
+    on its row is the project's key, and nothing owed revokes it from under it (review
+    of #172's follow-ups, round 1, F2)."""
+    project = _project(tmp_path / "web")
+    session = iam.Session(api_url="https://api.aisquare.studio", token="aisq_x", source="env")
+
+    def carried_over(store: SqliteStore) -> None:
+        row = store.project_destination(project.id)
+        assert row is not None
+        store.set_project_destination(row.model_copy(update={"key_uid": "key-1"}))
+
+    writes: dict[str, Callable[[SqliteStore], object]] = {
+        "a mint": lambda store: store.set_project_explainability(
+            project.id, target="local", key_path=tmp_path / "key", set_by=None, minted="key-1"
+        ),
+        "a re-point that carries it": carried_over,
+        "the uid set": lambda store: store.set_project_destination_key(project.id, "key-1"),
+    }
+    for name, write in writes.items():
+        with store_session() as store:
+            assert isinstance(store, SqliteStore)
+            _minted_by_hand(store, project, session, "key-1")
+            store.detach_minted_key(project.id)
+            assert [record.key_uid for record in store.pending_revocations()] == ["key-1"], name
+            write(store)
+            owed = store.pending_revocations()
+            row = store.project_destination(project.id)
+        assert owed == [], name
+        assert row is not None and row.key_uid == "key-1", name
+
+
 def test_a_minted_key_the_store_cannot_record_is_revoked_and_leaves_no_file(
     runner: CliRunner,
     idp: IdentityProviderStub,

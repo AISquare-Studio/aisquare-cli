@@ -2835,6 +2835,8 @@ class SqliteStore:
         it is detached and its revocation owed in this same transaction
         (:meth:`_owe_revocation`), so a hand key never goes on being described
         as minted and the key it replaced is never forgotten while still live.
+        ``minted`` itself, if it was still owed, is owed no more
+        (:meth:`_owe_no_revocation`): it is the project's key again.
         """
         with self._conn:
             self._conn.execute(
@@ -2850,6 +2852,7 @@ class SqliteStore:
                     "UPDATE project_destination SET key_uid = ? WHERE project_id = ?",
                     (minted, project_id),
                 )
+                self._owe_no_revocation(project_id, minted)
         stored = self.project_explainability(project_id)
         assert stored is not None  # just written
         return stored
@@ -2922,6 +2925,8 @@ class SqliteStore:
                     destination.set_by,
                 ),
             )
+            if destination.key_uid is not None:
+                self._owe_no_revocation(destination.project_id, destination.key_uid)
         stored = self.project_destination(destination.project_id)
         assert stored is not None  # just written
         return stored
@@ -2940,6 +2945,7 @@ class SqliteStore:
                     "UPDATE project_destination SET key_uid = ? WHERE project_id = ?",
                     (key_uid, project_id),
                 )
+                self._owe_no_revocation(project_id, key_uid)
             elif detached:
                 self._drop_binding(project_id)
 
@@ -3010,6 +3016,23 @@ class SqliteStore:
             (project_id, keep),
         )
         return cursor.rowcount > 0
+
+    def _owe_no_revocation(self, project_id: str, key_uid: str) -> None:
+        """Inside the caller's transaction: ``key_uid`` is the project's key again, so owed nothing.
+
+        The other half of :meth:`_owe_revocation`, called by every write that
+        stores a uid on a destination row. A uid still owed can come back — a
+        mint that answers with the uid it answered before, a re-point that
+        carries the row's uid over — and left owed, the same command's
+        ``revoke_owed`` revoked the key the project had just been given
+        (review of #172's follow-ups, round 1, F2). Only while the row names
+        it: a record whose uid no row holds is still owed.
+        """
+        self._conn.execute(
+            "DELETE FROM pending_revocation WHERE key_uid = ? AND EXISTS "
+            "(SELECT 1 FROM project_destination WHERE project_id = ? AND key_uid = ?)",
+            (key_uid, project_id, key_uid),
+        )
 
     def _drop_binding(self, project_id: str) -> None:
         self._conn.execute("DELETE FROM project_explainability WHERE project_id = ?", (project_id,))

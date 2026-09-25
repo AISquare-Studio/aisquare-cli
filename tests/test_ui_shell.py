@@ -4010,7 +4010,7 @@ def test_a_card_released_over_an_agents_pane_copies_nothing_and_ctrl_c_still_int
         pane.focus()
         await pilot.pause()
         await pilot.press("ctrl+c")
-        await pilot.pause()
+        await settle(app)  # read once the key has reached the pane, or "no copy" tests nothing
         return app.clipboard, len(app._notifications), standing, tmux.sent()
 
     clipboard, toasts, standing, sent = drive(go, notifications=True)
@@ -4036,7 +4036,7 @@ def test_a_mark_on_a_card_that_leaves_the_list_goes_with_it(
         app = fleet_app(pilot)
         app.sidebar.focus()
         await pilot.press("a")  # the captured directory is a card now
-        await pilot.pause()
+        await settle(app)
         for project_id in ("prj_a", "prj_c", "prj_scratch"):
             await _click(pilot, card_for(app, project_id).query_one(ProjectTitle), shift=True)
         marked = app.sidebar.marked_ids()
@@ -4044,7 +4044,7 @@ def test_a_mark_on_a_card_that_leaves_the_list_goes_with_it(
             store.forget_project("prj_c")
         app.sidebar.focus()
         await pilot.press("a")  # hidden again; the refresh also drops the forgotten docs
-        await pilot.pause()
+        await settle(app)
         kept = app.sidebar.marked_ids()
         header = app.sidebar.query_one(GroupHeader)
         await _drag_onto(pilot, card_for(app, "prj_a").query_one(ProjectTitle), header, (3, 0))
@@ -4114,21 +4114,25 @@ def test_m_marks_the_card_under_the_cursor_so_a_selection_needs_no_shift_click(
         for key in ("project:prj_a", "project:prj_b", "agent:agt_c_coder-1", "project:prj_b"):
             app.sidebar.select(key)  # the cursor's anchor
             await pilot.press("m")  # cli twice: marked, then unmarked
-        await pilot.pause()
+            # `m` is the sidebar's binding, not a priority one: it runs once the key has
+            # bubbled back up to the sidebar, and the next select must not move the
+            # cursor before it has.
+            await settle(app)
         marked = app.sidebar.marked_ids()
         highlighted = sorted(c.project.id for c in app.query(ProjectCard) if c.has_class("marked"))
         view = app.current_view()
         await pilot.press("G")  # what a terminal sends for Shift+G
-        await pilot.pause()
+        await settle(app)
         assert isinstance(app.screen, GroupPicker), type(app.screen).__name__
         await pilot.press("end")  # … the last option is Ungroup; New group… is just above it
         await pilot.press("up")
         await pilot.press("enter")
-        await pilot.pause()
+        await settle(app)
         await pilot.press(*"web")
         await pilot.press("enter")
-        await pilot.pause()
-        await pilot.pause()
+        # The new group's refresh starts the accounts read, a thread worker: its answer
+        # is handled here, not while ``run_test`` tears the app down.
+        await settle(app)
         return marked, highlighted, view.id if view is not None else None, _cards(app)
 
     marked, highlighted, opened, grouped = drive(go)

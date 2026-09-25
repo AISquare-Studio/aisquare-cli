@@ -1064,7 +1064,7 @@ def test_settings_save_leaves_the_bindings_it_did_not_change_as_the_file_has_the
         host.query_one("#acct-tester", Select).value = "3"  # the one change made here
         host.query_one("#max-agents", Input).value = "7"
         host.query_one("#save-settings", Button).press()
-        await pilot.pause()
+        await settle(pilot)
         return notes, host.notices
 
     notes, notices = drive(project, scenario)

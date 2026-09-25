@@ -15,6 +15,7 @@ from aisquare.core.store import (
     SCHEMA_VERSION,
     AmbiguousIdError,
     ContextStore,
+    is_corrupt_error,
     open_store,
     store_session,
 )
@@ -1185,6 +1186,76 @@ def test_doctor_fails_on_a_full_text_index_that_lost_a_shadow_table(shadow: str)
         "written nor searched: adding a note and `aisquare context search` fail with an "
         "error that reads as a damaged store, though the notes are intact"
     ), row.detail
+
+
+@pytest.mark.parametrize(
+    "script",
+    ["DELETE FROM entry_fts_config;", "UPDATE entry_fts_config SET v = 99 WHERE k = 'version';"],
+)
+def test_doctor_names_a_full_text_index_fts5_cannot_open_instead_of_calling_the_store_unreadable(
+    script: str,
+) -> None:
+    """With every shadow table there, FTS5 still cannot open ``entry_fts`` when its
+    ``_config`` lost the version row or holds one the module does not read. The row's
+    own column read opened it and raised "invalid fts5 file format", and the row called
+    the store unreadable, with the corrupt-store move for its remedy, while every note
+    still read (review of #203, round 3, F1). It names the index, says what that costs,
+    counts the notes and keeps the file."""
+    from aisquare.services import diagnostics
+
+    with store_session() as store:
+        store.add(_entry())
+    raw = sqlite3.connect(str(_db_path()))
+    try:
+        raw.executescript(script)
+    finally:
+        raw.close()
+
+    with store_session() as store:
+        missing = store.missing_schema()
+        with pytest.raises(sqlite3.OperationalError, match="invalid fts5 file format") as raised:
+            store.add(_entry())
+    row = diagnostics._check_database()
+
+    assert not is_corrupt_error(raised.value), raised.value
+    assert missing == ["unreadable table entry_fts"], missing
+    assert row.status is CheckStatus.fail, row
+    assert row.detail == (
+        "context.db opens (1 user entries) but lacks part of this build's schema: "
+        "unreadable table entry_fts; FTS5 cannot open an unreadable table, the notes' "
+        "full-text index, so it can be neither written nor searched: adding a note and "
+        "`aisquare context search` fail with a traceback ending in SQLite's error, though "
+        "the notes are intact"
+    ), row.detail
+    assert row.fix is not None and "mv " not in row.fix, row.fix
+
+
+def test_a_lock_on_the_full_text_index_is_not_taken_for_an_unreadable_one() -> None:
+    """Only a read the module refuses names ``entry_fts`` unreadable. "database is
+    locked" says nothing about the file, so it raises as it did before the read was
+    guarded, and is not reported as a gap in the schema."""
+    from typing import cast
+
+    class LockedIndex:
+        """A connection whose read of ``entry_fts``'s columns meets a writer's lock."""
+
+        def __init__(self, real: sqlite3.Connection) -> None:
+            self._real = real
+
+        def execute(self, sql: str) -> sqlite3.Cursor:
+            if sql == "PRAGMA table_info(entry_fts)":
+                raise sqlite3.OperationalError("database is locked")
+            return self._real.execute(sql)
+
+    open_store().close()
+    raw = sqlite3.connect(str(_db_path()))
+    try:
+        with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+            store_module._missing_from(
+                cast(sqlite3.Connection, LockedIndex(raw)), store_module._ladder_schema()
+            )
+    finally:
+        raw.close()
 
 
 def test_a_table_named_after_the_full_text_index_is_not_taken_for_its_shadow(

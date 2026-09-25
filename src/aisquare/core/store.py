@@ -3673,9 +3673,9 @@ class SqliteStore:
         what it could not: an object no step from v15 on produces, missing from a
         store another build or a hand edit changed. Each is named for the operator,
         ``table claude_account``, ``column fleet_agent.account_slot``, ``unique index
-        project_codename`` or ``shadow table entry_fts_data``. Empty for a store that
-        holds this build's whole schema; tables and columns of another line's are not
-        this build's and are never reported.
+        project_codename``, ``shadow table entry_fts_data`` or ``unreadable table
+        entry_fts``. Empty for a store that holds this build's whole schema; tables and
+        columns of another line's are not this build's and are never reported.
         """
         return _missing_from(self._conn, _ladder_schema())
 
@@ -4045,8 +4045,10 @@ def _missing_from(connection: sqlite3.Connection, expected: _Schema) -> list[str
     missing table is named once, not with each of its columns and indexes, and a
     missing FTS5 table not with its shadow tables. A shadow table missing beside
     its FTS5 table is named ``shadow table …``, since it costs something of its
-    own: the index can be neither written nor searched. Only reads, and only this
-    build's tables: another line's are not looked at.
+    own: the index can be neither written nor searched. An FTS5 table the module
+    cannot open though its shadow tables are all there is named ``unreadable table
+    …``, at the same cost. Only reads, and only this build's tables: another line's
+    are not looked at.
     """
     present = {row[0] for row in connection.execute("SELECT name FROM sqlite_master")}
     missing: list[str] = []
@@ -4065,7 +4067,18 @@ def _missing_from(connection: sqlite3.Connection, expected: _Schema) -> list[str
             # `_config` shadow to do that: without it this read raised "vtable
             # constructor failed", which doctor's row took for an unreadable store.
             continue
-        found = {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
+        try:
+            found = {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
+        except sqlite3.DatabaseError as exc:
+            if table not in expected.shadows.values() or is_locked_error(exc):
+                raise
+            # Every shadow table is there and the module still cannot open it: its
+            # `_config` lost its version row, or holds a version this SQLite does not
+            # read, and FTS5 answers "invalid fts5 file format". It is the index that
+            # is unreadable, not the store, whose notes all read, so the row names it
+            # instead of calling the store unreadable and offering the move.
+            missing.append(f"unreadable table {table}")
+            continue
         missing += [f"column {table}.{column}" for column in sorted(columns - found)]
     missing += [
         f"{kind} {name}"

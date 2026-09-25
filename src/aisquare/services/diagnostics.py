@@ -545,7 +545,12 @@ def _check_database() -> DoctorCheck:
         # without one no note can be added and nothing searched: SQLite answers "fts5:
         # corruption found", "database disk image is malformed" or, without
         # `entry_fts_config`, "vtable constructor failed" (measured: `context add`,
-        # `remember`, `context search`), while `context list` reads every note.
+        # `remember`, `context search`), while `context list` reads every note. An
+        # unreadable table is the index FTS5 cannot open though its shadow tables are
+        # all there (its `_config` lost the version row or holds one this SQLite does
+        # not read). SQLite answers "invalid fts5 file format", which the CLI does not
+        # take for damage, so adding a note or searching ends in a traceback (measured:
+        # `context add`, `context search`), while `context list` reads every note.
         kinds = {item.rsplit(" ", 1)[0] for item in missing}
         costs: list[str] = []
         if kinds & {"table", "column"}:
@@ -558,6 +563,13 @@ def _check_database() -> DoctorCheck:
                 "without a shadow table the notes' full-text index can be neither written "
                 "nor searched: adding a note and `aisquare context search` fail with an "
                 "error that reads as a damaged store, though the notes are intact"
+            )
+        if "unreadable table" in kinds:
+            costs.append(
+                "FTS5 cannot open an unreadable table, the notes' full-text index, so it can "
+                "be neither written nor searched: adding a note and `aisquare context "
+                "search` fail with a traceback ending in SQLite's error, though the notes "
+                "are intact"
             )
         costs += [
             cost for trigger, cost in _TRIGGER_COSTS.items() if f"trigger {trigger}" in missing

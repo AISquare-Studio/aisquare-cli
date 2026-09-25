@@ -1117,9 +1117,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   those tables. It now compares the store with the schema this build's ladder
   makes on an empty database. For anything still missing after the open, it
   fails and names each table, index, trigger or column, and each shadow table
-  the notes' full-text index lost, without which no note can be added. Its
-  remedy keeps the file, whose history is intact, instead of offering the
-  corrupt-store move.
+  the notes' full-text index lost, without which no note can be added. An index
+  FTS5 cannot open is named too, not taken for an unreadable store. Its remedy
+  keeps the file, whose history is intact, instead of offering the corrupt-store
+  move.
 - **A machine key file that is not UTF-8 holds no key instead of crashing.**
   `~/.aisquare/explainability-key` written as UTF-16 — what PowerShell 5.1's
   `>` produces — raised `UnicodeDecodeError` out of the resolver, and

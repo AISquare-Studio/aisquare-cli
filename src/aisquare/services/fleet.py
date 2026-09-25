@@ -1214,7 +1214,9 @@ def spawn(
     already named or resumed a session, ``--name <label>``, then the role's
     ``extra_args`` and the caller's ``agent_args``. ``AISQUARE_FLEET_AGENT``
     carries the row id into the window; ``CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=0``
-    keeps Claude's native teams out of the fleet unless configured otherwise (§7.6).
+    keeps Claude's native teams out of the fleet unless configured otherwise (§7.6);
+    ``AISQUARE_TEAM_HUB`` is set to this process's hub, or blank
+    (:func:`orchestrator.window_team_hub`).
     Every variable set here is THIS window's: none reaches the tmux session's
     environment, so a later spawn sets its own account and opt-out rather than
     inheriting the first spawn's, and a window the operator opens by hand keeps
@@ -1426,6 +1428,11 @@ def spawn(
     env = {orchestrator.FLEET_AGENT_ENV_VAR: agent_id}
     if config.disable_native_agent_teams:
         env["CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"] = "0"
+    # The hub as THIS process resolves it, blank for none: the window's
+    # `launch` joins the project the spawner — and the UI's Explainability tab
+    # beside it — resolves, and takes that project's key, not the one the tmux
+    # server's frozen environment would name (review of #170, D1b round 2, B1).
+    env[orchestrator.TEAM_HUB_ENV_VAR] = orchestrator.window_team_hub()
     # The desktop as THIS process sees it (#147). A window inherits the tmux
     # server's environment, frozen at the server's first start, so after a
     # re-login every new agent had a stale DISPLAY, WAYLAND_DISPLAY, bus and SSH

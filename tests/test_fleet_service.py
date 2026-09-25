@@ -693,6 +693,7 @@ def test_spawn_manager_builds_the_launch_command_and_records_the_row(
     assert spawned["env"] == {
         "AISQUARE_FLEET_AGENT": agent.id,
         "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "0",
+        "AISQUARE_TEAM_HUB": "",  # no hub here, so none from the server either
     }
     assert spawned["cwd"] == project.root and agent.cwd == project.root and not agent.worktree
     assert agent.pane_id == "%1" and agent.binary == "claude" and agent.spawned_by == "user"
@@ -732,6 +733,37 @@ def test_spawn_with_an_account_carries_the_callers_environment_into_the_window(
     assert plain_command[0] == sys.executable  # no env prefix: the launcher comes first…
     assert plain_command.index("-m") == module - 5  # …shaped exactly as the prefixed one after it
     assert "AISQUARE_HOME" not in plain_env
+
+
+def test_a_window_resolves_the_hub_its_spawner_resolves(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A window inherits the tmux SERVER's environment, so its ``launch`` joined the hub
+    the server was started under while the UI's Explainability tab, in the spawning
+    process, resolved the key for another project: the tab's key was not the
+    launches' (review of #170, D1b round 2, B1). The window now carries the
+    spawner's hub, blank for none, which also overrides whatever the server kept."""
+    hub = tmp_path / "hub"
+    hub.mkdir()
+    monkeypatch.setenv("AISQUARE_TEAM_HUB", str(hub))
+    fleet_service.spawn(project, "coder")
+    carried = tmux.spawned[-1]["env"]
+    assert isinstance(carried, dict)
+    assert carried.get("AISQUARE_TEAM_HUB") == str(hub.resolve())
+    # The project the window's launch joins is the one the spawning process (the tab's
+    # `key_project`) resolves, whatever the server was started under.
+    spawner_sees = team_project(project.root)
+    monkeypatch.setenv("AISQUARE_TEAM_HUB", carried["AISQUARE_TEAM_HUB"])
+    assert team_project(project.root) == spawner_sees
+
+    monkeypatch.setenv("AISQUARE_TEAM_HUB", "./relative")  # ignored here, so there
+    fleet_service.spawn(project, "tester")
+    relative = tmux.spawned[-1]["env"]
+    assert isinstance(relative, dict) and relative.get("AISQUARE_TEAM_HUB") == ""
 
 
 def test_spawn_refuses_a_second_manager(
@@ -1395,7 +1427,7 @@ def test_spawn_can_keep_native_agent_teams_on(
     _settings(monkeypatch, disable_native_agent_teams=False)
     agent = _coder(project)
     env = tmux.spawned[0]["env"]
-    assert env == {"AISQUARE_FLEET_AGENT": agent.id}
+    assert env == {"AISQUARE_FLEET_AGENT": agent.id, "AISQUARE_TEAM_HUB": ""}
 
 
 def test_spawn_without_tmux_is_fleet_unavailable(

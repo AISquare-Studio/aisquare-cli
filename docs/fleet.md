@@ -988,8 +988,12 @@ fail in silence. Each spawn now sets this shell's `DISPLAY`, `WAYLAND_DISPLAY`,
 `XDG_RUNTIME_DIR`, `DBUS_SESSION_BUS_ADDRESS`, `SSH_AUTH_SOCK`, `COLORTERM` and
 `TERM_PROGRAM` on its window, and `fleet attach` refreshes the session's copy
 through `update-environment`; agents already running keep what they had, and
-`doctor` lists what is stale on the running server. *Passthrough:* the server
-keeps `set-clipboard off` and no `allow-passthrough`, and it does not matter for
+`doctor` lists what is stale on the running server. The spawner's
+`AISQUARE_TEAM_HUB` (blank for none) goes on the window the same way, so the
+agent's `launch` joins the project, and takes the explainability key, that the
+spawner and the UI's Explainability tab resolve, not the server's.
+*Passthrough:* the server keeps `set-clipboard off` and no `allow-passthrough`,
+and it does not matter for
 the UI — no tmux client is attached to it, so an OSC 52 copy, an OSC 8 link or
 an OSC 9 notification from Claude Code has no terminal to reach; copies arrive
 through the pane (Textual selection, and the paste-buffer mirror below) and

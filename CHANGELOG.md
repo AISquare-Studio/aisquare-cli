@@ -253,8 +253,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and each project page's Explainability tab shows the key its launches use
   (the hub's under a hub); its Setup form's one key field attaches the key to
   that project, for the deployment the form names, when *this project only* is
-  ticked, and writes the machine key as before when it is not. The client lane
-  (`ship`) still uses the machine key.
+  ticked, and writes the machine key as before when it is not. A fleet window
+  carries its spawner's `AISQUARE_TEAM_HUB` (blank for none), so the key the
+  tab shows is the one the window's launches take. The client lane (`ship`)
+  still uses the machine key.
 - **A restart is the same agent, and the UI comes back where it was** (#144).
   `fleet_agent` rows record a `launch_spec` at spawn — the binary, the
   permission mode actually passed (none included), the arguments after the

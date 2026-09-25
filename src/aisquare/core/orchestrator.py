@@ -104,6 +104,34 @@ def lease_minutes() -> int:
     return value if value > 0 else DEFAULT_LEASE_MINUTES
 
 
+TEAM_HUB_ENV_VAR = "AISQUARE_TEAM_HUB"
+"""The hub that pins every session to one board (:func:`team_project`). ``fleet
+spawn`` sets it on every window it starts, as :func:`window_team_hub` says."""
+
+
+def window_team_hub() -> str:
+    """``AISQUARE_TEAM_HUB`` for a window this process spawns: the hub it honours, else blank.
+
+    A window inherits the tmux SERVER's environment, which was frozen when the
+    private server first started, and ``launch`` inside the window joins
+    ``team_project`` from there. The fleet UI's Explainability tab resolves the
+    same question in THIS process (``key_project``). With the hub exported in
+    one and not the other, the tab showed and attached one project's key while
+    the window's launches took another's: a 409 ``agent_not_registered`` on
+    every span, or traces in the other project's workspace (review of #170,
+    D1b round 2, B1). Set on the window, the window resolves as its spawner
+    does. The value is the hub's absolute path when this process honours one,
+    else blank. ``team_project`` reads blank as unset, and a relative value,
+    which this process ignores, becomes blank too. Blank, not absent, because
+    ``tmux -e`` can only set, and the server's retained value must not leak in
+    as ours.
+    """
+    hub = os.environ.get(TEAM_HUB_ENV_VAR, "").strip()
+    if not hub or not Path(hub).expanduser().is_absolute():
+        return ""
+    return str(Path(hub).expanduser().resolve())
+
+
 #: Relative hub values already reported, so a command that resolves the board
 #: from several call sites says it once rather than three times. Per process:
 #: the variable does not change under a running command.
@@ -119,7 +147,7 @@ def team_project(cwd: Path | None = None) -> ProjectInfo:
     worktrees resolve to their principal checkout, so the team shares one board
     regardless of which worktree a session sits in.
     """
-    hub = os.environ.get("AISQUARE_TEAM_HUB", "").strip()
+    hub = os.environ.get(TEAM_HUB_ENV_VAR, "").strip()
     if hub and not Path(hub).expanduser().is_absolute():
         # A RELATIVE hub inverts the feature. `Path('./').resolve()` is the
         # process cwd, so "one board for sessions in several repositories"

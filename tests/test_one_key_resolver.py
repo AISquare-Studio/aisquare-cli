@@ -42,7 +42,7 @@ import pytest
 from typer.testing import CliRunner
 
 from aisquare.cli.app import app
-from aisquare.core.config import load_config
+from aisquare.core.config import AppConfig, load_config, save_config
 from aisquare.services import explainability as service
 from aisquare.services import explainability_ops as ops
 
@@ -155,6 +155,32 @@ def test_a_key_file_that_is_not_utf8_is_no_key_and_crashes_nothing(
             argv,
             repr(result.exception),
         )
+
+
+def test_a_key_file_that_holds_no_key_is_named_where_the_key_is_said_missing(
+    isolated_home: Path, monkeypatch: pytest.MonkeyPatch, runner: CliRunner
+) -> None:
+    """Read as no key, the file went unmentioned. The doctor told the operator who wrote it
+    to export ``$EXPLAINABILITY_API_KEY`` ("the CLI reads it from the environment and
+    never stores it"), and ``status`` said only that the variable is not set (review of
+    the #203 final-review fixes, EX5a). Both name the file and what is wrong with it."""
+    config = AppConfig()
+    config.explainability.enabled = True
+    config.explainability.gateway_url = "https://explainability-api.aisquare.studio"
+    save_config(config)
+    monkeypatch.delenv(service.KEY_ENV_VAR, raising=False)
+    service.key_path().write_bytes(_FAKE_FILE_KEY.encode("utf-16"))
+    said = f"{service.key_path()} (holds no key: blank, or not UTF-8)"
+
+    row = {check.name: check for check in ops.checks()}["explainability config"]
+    assert f"{service.key_path()} holds no key (blank, or not UTF-8)" in row.detail, row
+    assert f"Write the workspace key into {service.key_path()} again" in (row.fix or ""), row
+    assert "never stores it" not in (row.fix or ""), row
+    status = runner.invoke(app, ["explainability", "status"])
+    assert f"key:      {said} is NOT set" in status.output, status.output
+
+    service.key_path().unlink()  # no file: the variable is the thing to set, as before
+    assert ops.resolve_target(load_config().explainability).key_origin == "$EXPLAINABILITY_API_KEY"
 
 
 #: Allowed to resolve a key. ``resolve_target`` (in ``explainability_ops``, and

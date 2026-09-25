@@ -185,7 +185,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `~/.aisquare/explainability-key` written as UTF-16 — what PowerShell 5.1's
   `>` produces — raised `UnicodeDecodeError` out of the resolver, and
   `aisquare doctor`, `explainability status` and `ship` ended in a traceback.
-  It now reads as no key, as a project's key file already did.
+  It now reads as no key, as a project's key file already did, and `doctor`,
+  `status` and `key show` name the file and say it holds no key, where they
+  said only that `$EXPLAINABILITY_API_KEY` is not set.
 
 ### Added
 - **The navigator is resizable** (#137). The line between the sidebar and the

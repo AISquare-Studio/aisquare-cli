@@ -215,12 +215,18 @@ class ResolvedTarget:
         With nothing set anywhere there is no winning source, so it falls back
         to the variable the target NAMES: that is the thing an operator would
         populate next, and it is what every remediation line already tells them
-        to export.
+        to export. Unless that is the default variable and the key file is
+        there, holding no key (blank, or not UTF-8: PowerShell 5.1's ``>``
+        writes UTF-16). Then the file is what its writer fixes next, and
+        naming the variable alone left every surface silent about it (review
+        of the #203 final-review fixes, EX5a).
         """
         if self.key_source == "project":
             return f"the project's own key ({project_key_path(self.project_id or '?')})"
         if self.key_source == "file":
             return str(key_path())
+        if self.key_source == "unset" and self.api_key_env == KEY_ENV_VAR and key_path().is_file():
+            return f"{key_path()} (holds no key: blank, or not UTF-8)"
         return f"${self.api_key_env}"
 
     @property
@@ -1620,6 +1626,18 @@ def _check_config(target: ResolvedTarget, *, on: bool) -> DoctorCheck:
             else "point the target at another variable: aisquare explainability enable "
             f"--target {target.name} --key-env <VAR>"
         )
+        if target.api_key_env == KEY_ENV_VAR and key_path().is_file():
+            # The key file is there and reads as no key. Its writer was told to export
+            # the variable "the CLI never stores" (review of the #203 final-review
+            # fixes, EX5a).
+            return degrade(
+                name,
+                f"target '{target.name}' -> {target.gateway_url} ({target.gateway_source}), "
+                f"but ${target.api_key_env} is not set in this shell and {key_path()} holds no "
+                "key (blank, or not UTF-8)",
+                f"Write the workspace key into {key_path()} again, as UTF-8 text (PowerShell "
+                f"5.1's `>` writes UTF-16), export it as ${target.api_key_env}, or {other}",
+            )
         return degrade(
             name,
             f"target '{target.name}' -> {target.gateway_url} ({target.gateway_source}), "

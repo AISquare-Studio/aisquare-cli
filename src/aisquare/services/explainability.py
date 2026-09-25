@@ -1121,11 +1121,7 @@ def resolve_api_key() -> str | None:
     from_env = os.environ.get(KEY_ENV_VAR, "").strip()
     if from_env:
         return from_env
-    try:
-        stored = key_path().read_text(encoding="utf-8").strip()
-    except (OSError, UnicodeDecodeError):  # not UTF-8 is no key, as in `stored_api_key`
-        return None
-    return stored or None
+    return stored_api_key()
 
 
 #: Port the deployment convention puts the hosted claude_code proxy on, beside

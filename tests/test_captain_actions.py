@@ -451,10 +451,12 @@ def test_the_stdio_server_closes_itself_after_the_idle_deadline(isolated_home: P
         with contextlib.suppress(Exception):
             proc.kill()
         proc.stdin.close()
-    err = proc.stderr.read().decode()
+    # Bytes, as test_serve_lifecycle compares them: a piped stderr on Windows is
+    # the ANSI code page, and the notice's dash is not UTF-8 there.
+    err = proc.stderr.read()
     proc.stderr.close()
     assert proc.returncode == 0, err
-    assert "aisquare captain serve --stdio: no client messages for 1s" in err
+    assert b"aisquare captain serve --stdio: no client messages for 1s" in err
     assert time.perf_counter() - started < 30
 
 

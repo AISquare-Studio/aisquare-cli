@@ -42,6 +42,7 @@ import pytest
 from typer.testing import CliRunner
 
 from aisquare.cli.app import app
+from aisquare.core.config import load_config
 from aisquare.services import explainability as service
 from aisquare.services import explainability_ops as ops
 
@@ -129,6 +130,31 @@ def test_the_default_variable_still_counts_when_no_target_names_another(
     monkeypatch.setenv(service.KEY_ENV_VAR, "-".join(["not", "a", "real", "env", "key"]))
 
     assert service.shipping_offer().has_key is True
+
+
+def test_a_key_file_that_is_not_utf8_is_no_key_and_crashes_nothing(
+    isolated_home: Path, monkeypatch: pytest.MonkeyPatch, runner: CliRunner
+) -> None:
+    """The machine key file's readers caught ``OSError`` alone, and ``UnicodeDecodeError``
+    is a ``ValueError``. A key file written as UTF-16 (PowerShell 5.1's ``>``; the docs
+    say to write it by hand) rose out of ``resolve_target``, and ``doctor``,
+    ``explainability status`` and the shipper, which never raises, all ended in a
+    traceback (final review of #203, EX5). It holds no key, as a project's key file that
+    is not UTF-8 does not."""
+    runner.invoke(app, ["init", "--yes"], catch_exceptions=False)
+    monkeypatch.delenv(service.KEY_ENV_VAR, raising=False)
+    service.key_path().write_bytes(_FAKE_FILE_KEY.encode("utf-16"))
+
+    assert (service.stored_api_key(), service.resolve_api_key()) == (None, None)
+    resolved = ops.resolve_target(load_config().explainability)
+    assert (resolved.api_key, resolved.key_source) == (None, "unset")
+    assert service.shipping_state().has_key is False
+    for argv in (["doctor"], ["explainability", "status"]):
+        result = runner.invoke(app, argv)
+        assert result.exception is None or isinstance(result.exception, SystemExit), (
+            argv,
+            repr(result.exception),
+        )
 
 
 #: Allowed to resolve a key. ``resolve_target`` (in ``explainability_ops``, and

@@ -179,6 +179,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   last, whatever `user_version` says. The `onboarded_at` backfill comes with its
   column, so the projects of a store that skipped v17 stay listed. The other
   line's tables, columns and rows are left alone, and no step is renumbered.
+- **A machine key file that is not UTF-8 holds no key instead of crashing.**
+  `~/.aisquare/explainability-key` written as UTF-16 — what PowerShell 5.1's
+  `>` produces — raised `UnicodeDecodeError` out of the resolver, and
+  `aisquare doctor`, `explainability status` and `ship` ended in a traceback.
+  It now reads as no key, as a project's key file already did.
 
 ### Added
 - **The navigator is resizable** (#137). The line between the sidebar and the

@@ -1097,10 +1097,16 @@ def stored_api_key() -> str | None:
     and ``explainability_ops.resolve_target``, which is where the fallback
     belongs — see that function for why the operational surfaces used to
     disagree with the shipping path about whether a key exists.
+
+    A file that is not UTF-8 holds no key, as a project's key file does not
+    (``read_project_key``). ``UnicodeDecodeError`` is a ``ValueError``, not an
+    ``OSError``, and it rose out of the resolver: a key file written by
+    PowerShell 5.1's ``>`` (UTF-16) crashed ``doctor`` and ``explainability
+    status``, and the shipper, which never raises (final review of #203, EX5).
     """
     try:
         stored = key_path().read_text(encoding="utf-8").strip()
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         return None
     return stored or None
 
@@ -1117,7 +1123,7 @@ def resolve_api_key() -> str | None:
         return from_env
     try:
         stored = key_path().read_text(encoding="utf-8").strip()
-    except OSError:
+    except (OSError, UnicodeDecodeError):  # not UTF-8 is no key, as in `stored_api_key`
         return None
     return stored or None
 

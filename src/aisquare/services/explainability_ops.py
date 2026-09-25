@@ -580,10 +580,20 @@ def binding_serves(
     a hand key, so nothing replaced it (review of #203, round 2). Such a key
     does not answer for the destination's deployment when the machine's target
     of that name resolves another gateway: it is kept and not used, as above.
-    A name none of the machine's targets has, or a machine target with no
-    gateway at all, is a deployment by name only, and the name is the
+    A machine target that resolves no gateway at all (no entry, top level or
+    shell gives it one) is a deployment by name only, and the name is the
     destination's, so the key answers there as it did (``key set`` on a
     machine whose target was set to ``local`` before ``use``, #141).
+
+    A name the machine no longer has is not one. The key was bound to one of
+    the machine's targets (:func:`known_targets` refuses any other name), and
+    which deployment that target resolved is recorded nowhere. Since then the
+    target was renamed, which :func:`deployment_fix` says to do first for a
+    project's deployment named like it, or its entry was removed. Answering by
+    name, the prod key the rule above kept answered for staging once the
+    operator followed that step, before any ``key set`` again (review of the
+    #203 final-review fixes, R1). It stays kept, and ``key set`` attaches the
+    destination's.
 
     ONE rule, for the resolver and for the surfaces that say whether the key is
     in use (``key show``, the Explainability page's key row, through
@@ -597,7 +607,7 @@ def binding_serves(
     if binding.api_url is not None:
         return True
     if target_name != settings.target and target_name not in settings.targets:
-        return True
+        return False
     from aisquare.services.destinations import deployment_target  # lazy: it imports this
 
     # Both resolved, the machine's by the one resolver: neither is read off the config.
@@ -624,6 +634,12 @@ def kept_key_note(
         return (
             f"attached for the deployment of {binding.api_url}, which no destination of this "
             f"project names now: not used for this machine's target {target.name}"
+        )
+    if binding.target != settings.target and binding.target not in settings.targets:
+        return (
+            f"attached for this machine's target {binding.target}, which it no longer has, so "
+            "not known to be a key for the deployment this project's destination names "
+            f"({target.gateway_url or 'no gateway known'}): not used for it"
         )
     return (
         f"attached for this machine's own target {binding.target}, another deployment than "

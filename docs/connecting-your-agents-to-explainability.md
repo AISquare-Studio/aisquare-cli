@@ -446,7 +446,11 @@ reported on its own line:
   another gateway, so a prod key is never sent to staging. It is kept, answers
   again once the project has no destination, and `key show` says why (`--json`
   carries the binding's `api_url`, null for the machine's target, and whether it
-  `serves` the target asked about). A key you
+  `serves` the target asked about). Renaming the machine's target, the first
+  step of the fix for a project's deployment of its name, turns no such key back
+  on: which deployment it was for is recorded nowhere, so a name the machine no
+  longer has is not taken for the destination's, and `key set` attaches the
+  destination's key. A key you
   attached by hand is used as is and never minted over; `key set` over a minted
   key revokes the minted one once the new key is recorded (a `key set` that
   fails leaves the minted key working), and so do `key clear`, `use --clear`, a

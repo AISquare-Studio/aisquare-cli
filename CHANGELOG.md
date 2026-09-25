@@ -247,7 +247,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `key set` binds to the destination's deployment and a key bound there
   answers only while a destination names it, never as the machine's target of
   the same name, and a key bound to the machine's target never answers for a
-  destination's deployment of that name on another gateway (schema v24,
+  destination's deployment of that name on another gateway, nor once the
+  machine's target of that name is renamed as those fixes say (schema v24,
   `project_explainability.api_url`; such a key is kept, `key show` says why it
   is not used, and `--json` carries `api_url` and `serves`), the CLI never
   mints over a hand key, and a minted

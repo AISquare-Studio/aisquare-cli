@@ -587,8 +587,9 @@ def test_an_unknown_hosts_key_never_goes_to_the_machines_gateway_or_proxy(
             session,
         )
         path = service.store_project_api_key(project.id, "AIS_selfhosted_key")
+        # Bound as `key set` binds it with this destination: for its deployment.
         store.set_project_explainability(
-            project.id, target=row.environment, key_path=path, set_by=None
+            project.id, target=row.environment, key_path=path, set_by=None, api_url=row.api_url
         )
 
     settings = load_config().explainability
@@ -900,6 +901,67 @@ def test_a_fix_for_a_projects_deployment_followed_moves_no_other_project(
     assert "$AISQUARE_EXPLAINABILITY_TARGET names another target" in ops.deployment_fix(
         exported, what="proxy", value="https://<host>"
     )
+
+
+def test_a_key_kept_for_the_machines_target_stays_kept_once_that_target_is_renamed(
+    runner: CliRunner, isolated_home: Path, tmp_path: Path
+) -> None:
+    """On the machine ``init --explainability`` writes (prod, ``target = "stg"``), a prod key
+    attached with ``key set`` before ``use`` is bound to the machine's ``stg``, and once the
+    project points at staging it is kept and not used there. The fixes for that project's
+    deployment say to rename the machine's target first. Renamed, ``stg`` was a name the
+    machine no longer had, which answered by name alone, and the prod key went to
+    staging's gateway and proxy before any ``key set`` again (review of the #203
+    final-review fixes, R1). It stays kept, ``key show`` says why, and ``key set`` for the
+    destination attaches the key that answers."""
+    config = AppConfig()
+    config.explainability.enabled = True
+    config.explainability.gateway_url = "https://explainability-api.aisquare.studio"
+    config.explainability.proxy_url = "https://explainability-api.aisquare.studio:9443"
+    save_config(config)
+    service.store_api_key("AIS_machine_prod_key")
+    project = _project(tmp_path / "web")
+    ops.attach_project_key(project, "AIS_hand_prod_key", target="stg")
+    with store_session() as store:
+        dest.choose(
+            store,
+            project,
+            dest.Workspace(id=42, uid="ws-uid-42", name="acme", role="ADMIN"),
+            dest.Studio(id=301, uid="st-301", name="Frontend"),
+            iam.Session(api_url="https://stg-api.aisquare.studio", token="aisq_x", source="env"),
+        )
+    stg_gateway = "https://stg-explainability-api.aisquare.studio"
+
+    def resolved() -> ops.ResolvedTarget:
+        return ops.resolve_target(load_config().explainability, None, project_id=project.id)
+
+    def read() -> tuple[str, str, str | None]:
+        target = resolved()
+        return (target.gateway_url, target.key_source, target.api_key)
+
+    assert read() == (stg_gateway, "unset", None)
+    fix = " ".join(ops.deployment_fix(resolved(), what="proxy", value="https://<host>").split())
+    assert 'Rename it first: target = "<name>" under [explainability]' in fix, fix
+    renamed = load_config()  # the rename, as the operator would
+    renamed.explainability.target = "own"
+    save_config(renamed)
+
+    assert read() == (stg_gateway, "unset", None), "the prod key went to staging"
+    payload = _json(runner, "explainability", "key", "show", "--project", project.id)
+    assert (payload["target"], payload["serves"], payload["key_source"]) == (
+        "stg",
+        False,
+        "unset",
+    )
+    shown = runner.invoke(app, ["explainability", "key", "show", "--project", project.id])
+    assert shown.exit_code == 0, shown.output
+    assert (
+        "attached for this machine's target stg, which it no longer has, so not known to be a "
+        f"key for the deployment this project's destination names ({stg_gateway})"
+    ) in " ".join(shown.output.split())
+
+    ops.attach_project_key(project, "AIS_staging_key", target="stg")
+    assert read() == (stg_gateway, "project", "AIS_staging_key")
 
 
 def test_use_on_a_host_it_does_not_know_says_where_its_gateway_goes(

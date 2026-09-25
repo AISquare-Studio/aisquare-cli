@@ -10,9 +10,10 @@ tmux call held to a private socket.
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 import pytest
 from textual.pilot import Pilot
@@ -27,12 +28,41 @@ from aisquare.services import fleet as fleet_service
 from aisquare.services.captain import brain
 from aisquare.services.captain import state as captain_state
 from tests import test_ui_shell as ui_suite
-from tests.test_ui_shell import Script, drive, fleet_app, row_for, seed, shown, status
+from tests.test_captain_sidebar import agent_opened, quiet, until
+from tests.test_ui_shell import Script, fleet_app, row_for, seed, shown, status
 
 # The UI suite's fixtures, bound here so pytest finds them for this module's tests
 # (``no_real_tmux`` is autouse there: every tmux call held to a private socket).
 no_real_tmux = ui_suite.no_real_tmux
 script = ui_suite.script
+
+T = TypeVar("T")
+
+
+def drive(body: Callable[[Pilot[None]], Awaitable[T]], **options: Any) -> T:
+    """The suite's ``drive``, with the app's workers answered before the body returns
+    (``quiet``): a Doctor scope change or a tell's worker must not land in teardown."""
+
+    async def settled(pilot: Pilot[None]) -> T:
+        result = await body(pilot)
+        await quiet(pilot)
+        return result
+
+    return ui_suite.drive(settled, **options)
+
+
+async def _open_view(pilot: Pilot[None]) -> CaptainView:
+    """Click the lit star and wait for the selection's last effect, not for a pause
+    (``tests.test_captain_sidebar.until`` says why: Windows returned mid-handler)."""
+    app = fleet_app(pilot)
+    home = captain_state.home_project()
+    rows = app.snapshot.agents.get(home.id, []) if app.snapshot else []
+    assert rows, "a live captain row to open"
+    await pilot.click("#captain-button")
+    await until(pilot, agent_opened(pilot, rows[0].agent.id), what="the captain view open")
+    view = app.current_view()
+    assert isinstance(view, CaptainView)
+    return view
 
 
 def _captain(state: str = "waiting") -> FleetAgentStatus:
@@ -111,8 +141,7 @@ def test_the_lit_insignia_opens_the_captain_view_over_its_pane(
         app = fleet_app(pilot)
         app.refresh_data()
         await pilot.pause()
-        await pilot.click("#captain-button")
-        await pilot.pause()
+        await _open_view(pilot)
         view = app.current_view()
         assert isinstance(view, CaptainView)
         assert view.status.agent.id == captain.agent.id
@@ -226,10 +255,10 @@ def test_selecting_the_captain_row_opens_the_captain_view(tmp_path: Path, script
         app.refresh_data()
         await pilot.pause()
         row_for(app, captain.agent.id).activate()
-        await pilot.pause()
+        await until(pilot, agent_opened(pilot, captain.agent.id), what="the captain selected")
         assert isinstance(app.current_view(), CaptainView)
         row_for(app, "agt_aaa_coder-1").activate()
-        await pilot.pause()
+        await until(pilot, agent_opened(pilot, "agt_aaa_coder-1"), what="the coder selected")
         view = app.current_view()
         assert isinstance(view, AgentView) and not isinstance(view, CaptainView)
 
@@ -264,8 +293,7 @@ def test_the_quick_action_tells_the_captain_what_is_up(
         app = fleet_app(pilot)
         app.refresh_data()
         await pilot.pause()
-        await pilot.click("#captain-button")
-        await pilot.pause()
+        await _open_view(pilot)
         await pilot.click("#captain-whats-up")
         await pilot.pause()
         await app.workers.wait_for_complete()
@@ -288,8 +316,7 @@ def test_the_quick_action_waits_for_a_captain_at_its_prompt(
         app = fleet_app(pilot)
         app.refresh_data()
         await pilot.pause()
-        await pilot.click("#captain-button")
-        await pilot.pause()
+        await _open_view(pilot)
         button = app.query_one("#captain-whats-up", Button)
         assert button.disabled
         script[home.id] = [_captain("waiting")]
@@ -314,8 +341,7 @@ def test_the_thinking_indicator_follows_the_busy_flag(tmp_path: Path, script: Sc
         app = fleet_app(pilot)
         app.refresh_data()
         await pilot.pause()
-        await pilot.click("#captain-button")
-        await pilot.pause()
+        await _open_view(pilot)
         view = app.current_view()
         assert isinstance(view, CaptainView)
         assert "idle" in _thinking(pilot)
@@ -341,8 +367,7 @@ def test_the_thinking_indicator_reads_a_working_pane_as_thinking(
         app = fleet_app(pilot)
         app.refresh_data()
         await pilot.pause()
-        await pilot.click("#captain-button")
-        await pilot.pause()
+        await _open_view(pilot)
         assert "idle" in _thinking(pilot)
         script[home.id] = [_captain("working")]
         app.refresh_data()
@@ -361,8 +386,7 @@ def test_the_view_ticks_the_flag_on_its_own(tmp_path: Path, script: Script) -> N
         app = fleet_app(pilot)
         app.refresh_data()
         await pilot.pause()
-        await pilot.click("#captain-button")
-        await pilot.pause()
+        await _open_view(pilot)
         view = app.current_view()
         assert isinstance(view, CaptainView)
         assert view.thinking_timer is not None
@@ -388,19 +412,11 @@ def test_the_captain_row_is_still_an_ordinary_agent_row(tmp_path: Path, script: 
 # --- the voice controls (T3's page: services.captain.voice and speaker) -----------------------
 
 
-def _open_captain(pilot: Pilot[None]) -> CaptainView:
-    view = fleet_app(pilot).current_view()
-    assert isinstance(view, CaptainView)
-    return view
-
-
 async def _captain_view(pilot: Pilot[None]) -> CaptainView:
     app = fleet_app(pilot)
     app.refresh_data()
     await pilot.pause()
-    await pilot.click("#captain-button")
-    await pilot.pause()
-    return _open_captain(pilot)
+    return await _open_view(pilot)
 
 
 async def _clicked(pilot: Pilot[None], selector: str) -> None:

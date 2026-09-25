@@ -51,7 +51,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from aisquare.core import paths
-from aisquare.core.config import AppConfig, ExplainabilitySettings, ExplainabilityTarget
+from aisquare.core.config import ExplainabilitySettings, ExplainabilityTarget
 from aisquare.core.store import ContextStore, store_session
 from aisquare.models import UNKNOWN_KEY_UID, PendingRevocation, ProjectInfo, TraceDestination
 from aisquare.services import iam
@@ -190,41 +190,47 @@ def _machine_key_serves(settings: ExplainabilitySettings, environment: Environme
     return settings.gateway_url.rstrip("/") == environment.gateway_url
 
 
-def ensure_target(config: AppConfig, api_url: str) -> tuple[str, bool]:
-    """Make sure the deployment the session belongs to exists as an explainability target.
+def deployment_target(
+    settings: ExplainabilitySettings, destination: TraceDestination
+) -> ExplainabilityTarget:
+    """The deployment a project's destination names, as the target its resolution reads.
 
-    Fills ONLY what is empty: a gateway or proxy an operator set by hand stays.
-    Returns the target name and whether the config changed. Does not flip
-    ``enabled`` — that is ``explainability enable``'s one job, and a command
-    that picks a destination must not silently start tracing.
+    The operator's ``[explainability.targets.<name>]`` for that deployment when
+    there is one, with only what is empty filled from the table: a gateway or
+    proxy set by hand stays. Otherwise a target of its own, which names a key
+    variable of its own (:func:`key_env_for`). With the default one, the
+    unlabelled machine key — ``~/.aisquare/explainability-key`` or
+    ``$EXPLAINABILITY_API_KEY`` — would answer for every deployment anyone
+    signs in to, and ``use`` would bind the roster and every launch would
+    authenticate with a key issued for somewhere else: the hazard
+    ``tests/test_key_never_crosses_deployments.py`` pins. The one exception is
+    the machine whose top-level gateway already is this deployment's, where
+    that key is exactly the right one and a new variable would only take it
+    away.
 
-    A target CREATED here names a key variable of its own
-    (:func:`key_env_for`). With the default one, the unlabelled machine key —
-    ``~/.aisquare/explainability-key`` or ``$EXPLAINABILITY_API_KEY`` — would
-    answer for every deployment anyone signs in to, and ``use`` would bind the
-    roster and every launch would authenticate with a key issued for somewhere
-    else: the hazard ``tests/test_key_never_crosses_deployments.py`` pins.
-    The one exception is the machine whose top-level gateway already is this
-    deployment's, where that key is exactly the right one and a new variable
-    would only take it away.
+    BUILT FOR THE ONE RESOLUTION, NEVER WRITTEN TO THE CONFIG. ``use`` used to
+    write it into the ``targets`` map the machine's own target is read from, so
+    one project's choice re-pointed every project without a destination. On
+    the machine ``init --explainability`` writes — a top-level gateway, the key
+    file, no target, and ``target = "stg"`` by default — ``use`` for one
+    project while signed in to staging created ``targets.stg`` with the staging
+    gateway and a key variable nothing sets: every other project, the doctor
+    and the shipper moved to staging with no key, so untraced. Filling an
+    existing target's empty gateway did the same (review of #203). Only
+    :func:`~aisquare.services.explainability_ops.resolve_target` calls this,
+    for the project whose destination names the target.
     """
-    name = environment_name(api_url)
-    environment = environment_for(api_url)
-    settings = config.explainability
-    target = settings.targets.get(name, ExplainabilityTarget())
-    changed = name not in settings.targets
-    if changed and not _machine_key_serves(settings, environment):
-        target.api_key_env = key_env_for(name)
+    environment = environment_for(destination.api_url)
+    configured = settings.targets.get(destination.environment)
+    target = configured.model_copy() if configured is not None else ExplainabilityTarget()
+    if configured is None and not _machine_key_serves(settings, environment):
+        target.api_key_env = key_env_for(destination.environment)
     if environment is not None:
         if not target.gateway_url:
             target.gateway_url = environment.gateway_url
-            changed = True
         if not target.proxy_url and environment.proxy_url:
             target.proxy_url = environment.proxy_url
-            changed = True
-    if changed:
-        settings.targets[name] = target
-    return name, changed
+    return target
 
 
 # ── what the signed-in user can see ────────────────────────────────────────────

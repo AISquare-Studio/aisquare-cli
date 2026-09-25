@@ -19,6 +19,7 @@ import sqlite3
 import stat
 import sys
 from collections.abc import Callable, Iterator
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -123,24 +124,39 @@ def test_the_session_host_names_the_deployment() -> None:
     assert dest.environment_name("https://api.example.org:8443") == "api.example.org"
 
 
-def test_ensure_target_fills_only_what_is_empty_and_never_enables(isolated_home: Path) -> None:
+def _destination(api_url: str, project_id: str = "p") -> TraceDestination:
+    """A destination as ``choose`` records it from a session on ``api_url``."""
+    return TraceDestination(
+        project_id=project_id,
+        api_url=api_url,
+        environment=dest.environment_name(api_url),
+        workspace_id=42,
+        workspace_name="acme",
+        set_at=datetime(2026, 9, 13, tzinfo=UTC),
+    )
+
+
+def test_the_destinations_deployment_fills_only_what_is_empty_and_is_never_written(
+    isolated_home: Path,
+) -> None:
     config = AppConfig()
-    name, changed = dest.ensure_target(config, "https://stg-api.aisquare.studio")
-    stg = config.explainability.targets["stg"]
-    assert (name, changed) == ("stg", True)
+    stg = dest.deployment_target(
+        config.explainability, _destination("https://stg-api.aisquare.studio")
+    )
     assert stg.gateway_url == "https://stg-explainability-api.aisquare.studio"
     assert stg.proxy_url == "https://stg-explainability.api.aisquare.studio:9443"
-    assert config.explainability.enabled is False, "picking a destination does not start tracing"
-    # A hand-set gateway stays; a second call changes nothing.
+    assert config.explainability.targets == {}, "read off the destination, never written"
+    # A hand-set gateway stays, and the entry itself is not filled in.
     config.explainability.targets["prod"] = ExplainabilityTarget(gateway_url="https://mine.example")
-    name, changed = dest.ensure_target(config, "https://api.aisquare.studio")
-    assert (name, changed) == ("prod", True), "the proxy was empty and is filled"
-    assert config.explainability.targets["prod"].gateway_url == "https://mine.example"
-    assert dest.ensure_target(config, "https://api.aisquare.studio") == ("prod", False)
-    # An unknown host: a target by host name, nothing filled in.
-    name, changed = dest.ensure_target(config, "https://api.example.org")
-    assert (name, changed) == ("api.example.org", True)
-    assert config.explainability.targets["api.example.org"].gateway_url == ""
+    prod = dest.deployment_target(
+        config.explainability, _destination("https://api.aisquare.studio")
+    )
+    assert prod.gateway_url == "https://mine.example"
+    assert prod.proxy_url == "https://explainability-api.aisquare.studio:9443"
+    assert config.explainability.targets["prod"].proxy_url is None
+    # An unknown host: nothing to fill in.
+    unknown = dest.deployment_target(config.explainability, _destination("https://api.example.org"))
+    assert (unknown.gateway_url, unknown.proxy_url) == ("", None)
 
 
 # --- listing through the session ---------------------------------------------------------------
@@ -245,11 +261,10 @@ def test_use_records_the_choice_targets_the_deployment_mints_a_key_and_binds_the
         row = store.project_destination(project.id)
     assert row is not None and row.api_url == idp.url and row.key_uid == "key-1"
 
-    # The deployment became a target, gateway and proxy filled, tracing untouched.
+    # The deployment is the project's target, gateway and proxy filled, tracing
+    # untouched — and the machine's config is not written (review of #203).
     settings = load_config().explainability
-    assert settings.targets["local"].gateway_url == "http://localhost:8000"
-    assert settings.targets["local"].proxy_url == "http://127.0.0.1:9090"
-    assert settings.enabled is False
+    assert settings.targets == {} and settings.enabled is False
     assert payload["target"] == {
         "name": "local",
         "gateway": "http://localhost:8000",
@@ -347,7 +362,6 @@ def test_a_hand_attached_key_binds_the_roster_and_outlives_logout(
     project = _project(tmp_path / "web")
     # The #141 way, bound to the deployment the session belongs to.
     config = load_config()
-    dest.ensure_target(config, idp.url)
     config.explainability.target = "local"
     save_config(config)
     monkeypatch.setenv("WEB_KEY", "AIS_handmade_key")
@@ -467,6 +481,63 @@ def test_the_destination_names_the_target_between_the_explicit_forms_and_the_def
     assert ops.resolve_target(settings, None).name == "prod", "the machine still follows it"
 
 
+# --- one project's `use` is that project's alone (review of #203) ---------------------------
+
+
+@pytest.mark.parametrize("entry", [False, True], ids=["no-target-entry", "entry-without-gateway"])
+def test_use_for_one_project_leaves_what_every_other_project_resolves(
+    runner: CliRunner,
+    idp: IdentityProviderStub,
+    signed_in: iam.Session,
+    tmp_path: Path,
+    entry: bool,
+) -> None:
+    """The machine ``init --explainability`` writes: a top-level gateway, proxy and key
+    file, and a machine target named like the deployment the session belongs to. ``use``
+    for ONE project created that target (or filled its empty gateway) with the session's
+    deployment and a key variable nothing sets, and saved the config: every project
+    without a destination, the doctor and the shipper moved there with no key (review of
+    #203, measured with ``stg``; the stub is the ``local`` deployment)."""
+    config = load_config()
+    config.explainability.target = "local"
+    config.explainability.gateway_url = "https://explainability-api.aisquare.studio"
+    config.explainability.proxy_url = "https://explainability-api.aisquare.studio:9443"
+    if entry:
+        config.explainability.targets["local"] = ExplainabilityTarget(
+            agent_name_template="m-{role}"
+        )
+    save_config(config)
+    service.store_api_key("AIS_machine_key")
+    lib = _project(tmp_path / "lib")
+    _project(tmp_path / "web")  # the checkout `use` runs from
+
+    def everyone_else() -> list[object]:
+        settings = load_config().explainability
+        other = ops.resolve_target(settings, None, project_id=lib.id)
+        machine = ops.resolve_target(settings, None)
+        shipping = service.shipping_state()
+        rows = {check.name: check.detail for check in ops.checks()}
+        return [
+            (other.name, other.gateway_url, other.proxy_url, other.key_source, other.api_key),
+            (machine.name, machine.gateway_url, machine.proxy_url, machine.key_source),
+            (shipping.gateway_url, shipping.has_key),
+            rows["explainability config"],
+        ]
+
+    before = everyone_else()
+    assert before[0] == (
+        "local",
+        "https://explainability-api.aisquare.studio",
+        "https://explainability-api.aisquare.studio:9443",
+        "file",
+        "AIS_machine_key",
+    )
+    payload = _json(runner, "explainability", "use", "acme/Frontend")
+    assert payload["target"]["gateway"] == "http://localhost:8000", "the project's own deployment"
+    assert payload["key"]["source"] == "project"
+    assert everyone_else() == before, "one project's `use` re-pointed the machine"
+
+
 def test_describe_has_one_voice() -> None:
     assert dest.describe(None).startswith("(none chosen")
     session = iam.Session(
@@ -494,24 +565,23 @@ def test_describe_has_one_voice() -> None:
 # --- the key never crosses a deployment or a workspace ---------------------------------------
 
 
-def test_a_target_use_creates_names_its_own_key_variable(isolated_home: Path) -> None:
+def test_the_destinations_deployment_names_its_own_key_variable(isolated_home: Path) -> None:
     """The unlabelled machine key answers only for the deployment it already served."""
-    config = AppConfig()
-    dest.ensure_target(config, "https://api.aisquare.studio")
-    assert config.explainability.targets["prod"].api_key_env == "EXPLAINABILITY_PROD_API_KEY"
-    dest.ensure_target(config, "https://api.example.org")
-    created = config.explainability.targets["api.example.org"]
-    assert created.api_key_env == "EXPLAINABILITY_API_EXAMPLE_ORG_API_KEY"
+    settings = AppConfig().explainability
+    prod = dest.deployment_target(settings, _destination("https://api.aisquare.studio"))
+    assert prod.api_key_env == "EXPLAINABILITY_PROD_API_KEY"
+    unknown = dest.deployment_target(settings, _destination("https://api.example.org"))
+    assert unknown.api_key_env == "EXPLAINABILITY_API_EXAMPLE_ORG_API_KEY"
     # The single-deployment machine `init --explainability` wrote for staging keeps its key.
-    single = AppConfig()
-    single.explainability.gateway_url = "https://stg-explainability-api.aisquare.studio/"
-    dest.ensure_target(single, "https://stg-api.aisquare.studio")
-    assert single.explainability.targets["stg"].api_key_env == service.KEY_ENV_VAR
+    single = AppConfig().explainability
+    single.gateway_url = "https://stg-explainability-api.aisquare.studio/"
+    staging = dest.deployment_target(single, _destination("https://stg-api.aisquare.studio"))
+    assert staging.api_key_env == service.KEY_ENV_VAR
     # A target the operator wrote is theirs, variable and all.
-    mine = AppConfig()
-    mine.explainability.targets["prod"] = ExplainabilityTarget(gateway_url="https://mine.example")
-    dest.ensure_target(mine, "https://api.aisquare.studio")
-    assert mine.explainability.targets["prod"].api_key_env == service.KEY_ENV_VAR
+    mine = AppConfig().explainability
+    mine.targets["prod"] = ExplainabilityTarget(gateway_url="https://mine.example")
+    theirs = dest.deployment_target(mine, _destination("https://api.aisquare.studio"))
+    assert theirs.api_key_env == service.KEY_ENV_VAR
 
 
 def test_another_deployments_machine_key_is_never_used_for_the_destination(
@@ -531,9 +601,8 @@ def test_another_deployments_machine_key_is_never_used_for_the_destination(
     assert len(idp.minted) == 1, "the project had no key of its own, so one was minted"
     puts = [r for r in idp.requests if r["method"] == "PUT"]
     assert puts and all(r["headers"]["x-api-key"] == idp.minted[0]["api_key"] for r in puts)
-    assert load_config().explainability.targets["local"].api_key_env == (
-        "EXPLAINABILITY_LOCAL_API_KEY"
-    )
+    resolved = ops.resolve_target(load_config().explainability, None, project_id=project.id)
+    assert resolved.api_key_env == "EXPLAINABILITY_LOCAL_API_KEY"
     # Refused mint: the foreign key still does not answer, so nothing is bound with it.
     idp.key_mint = "token_not_valid"
     _json(runner, "explainability", "use", "--clear")
@@ -747,6 +816,12 @@ def test_the_live_rows_name_the_check_they_are_part_of_when_they_say_re_run(
     assert rows["explainability ingest"].fix == (
         f"Fix the gateway row above, then re-run: {shlex.join(rerun)}"
     )
+    # The machine's own `local` target, which `use` does not write (review of #203).
+    config = load_config()
+    config.explainability.targets["local"] = ExplainabilityTarget(
+        gateway_url="http://localhost:8000", api_key_env="EXPLAINABILITY_LOCAL_API_KEY"
+    )
+    save_config(config)
     monkeypatch.setenv("EXPLAINABILITY_LOCAL_API_KEY", "AIS_machine_local_key")
     machine = {check.name: check for check in ops.checks(target_name="local", live=True)}
     assert machine["explainability ingest"].fix == (

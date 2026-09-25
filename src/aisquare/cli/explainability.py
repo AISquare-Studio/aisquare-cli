@@ -154,7 +154,7 @@ def key_set(
     # resolved — the fallback `use` points at when the API will not mint one.
     resolved = ops.resolve_target(settings, target_name, project_id=project.id)
     target = resolved.name
-    known = ops.known_targets(settings)
+    known = ops.known_targets(settings, resolved.destination)
     if target not in known:
         # `resolve_target` answers for any name, so a typo (`--target prdo`),
         # or one an exported $AISQUARE_EXPLAINABILITY_TARGET names, bound the
@@ -498,8 +498,9 @@ def use(
     """Pick where ONE project's traces land: a workspace and a studio, as the signed-in user.
 
     What it does, in order, and each step is reported: records the choice per
-    project; makes the deployment the session belongs to an explainability
-    target (gateway and proxy filled from the environment, nothing typed);
+    project, and with it the deployment the session belongs to, which this
+    project's launches then trace to (gateway and proxy from the environment,
+    nothing typed; no other project's target changes);
     obtains a workspace ingest key on your behalf when the project has none for
     that deployment (the API refuses this for a sign-in token today — the
     message names the backend issue and the ``key set`` fallback); and, with
@@ -559,10 +560,11 @@ def use(
         fail(exc.message, error=exc.code)
 
     config = load_config()
-    target_name, changed = dest.ensure_target(config, session.api_url)
-    if changed:
-        with expected_config_write_errors():
-            save_config(config)
+    # The deployment the session belongs to, recorded on the destination and read
+    # off it by every resolution for this project — never written into the
+    # machine's targets, which re-pointed every project without a destination
+    # (review of #203).
+    target_name = dest.environment_name(session.api_url)
     with store_session() as store:
         previous = store.project_destination(project.id)
         row = dest.choose(store, project, workspace, studio, session, previous=previous)

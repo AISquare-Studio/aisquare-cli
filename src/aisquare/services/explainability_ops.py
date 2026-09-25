@@ -333,6 +333,14 @@ def resolve_target(
     variable, then the top-level ``gateway_url`` — and the winning source is
     reported either way.
 
+    THE DESTINATION'S DEPLOYMENT IS ITS OWN (review of #203). When the target
+    resolved is the one the project's destination names — chosen by the
+    destination, or named by ``--target`` or the variable — it is read off the
+    destination (:func:`~aisquare.services.destinations.deployment_target`),
+    never out of the machine's ``targets`` map by name alone: ``use`` wrote it
+    there, where the machine's own target of the same name is read, and one
+    project's choice re-pointed every other.
+
     THE KEY, with ``project_id`` (#141): the project's own key first — attached
     with ``explainability key set`` and bound to ONE deployment, so it answers
     only when that deployment is the one resolved here — then the target's
@@ -383,7 +391,12 @@ def resolve_target(
     else:
         chosen, target_source = settings.target, "config"
     unused_env_target = exported if target_source == "destination" and exported != chosen else None
-    target = settings.targets.get(chosen, ExplainabilityTarget())
+    if destination is not None and chosen == destination.environment:
+        from aisquare.services.destinations import deployment_target  # lazy: it imports this
+
+        target = deployment_target(settings, destination)
+    else:
+        target = settings.targets.get(chosen, ExplainabilityTarget())
 
     gateway_url, source = target.gateway_url, "config"
     if not gateway_url:
@@ -529,7 +542,9 @@ class UnknownTarget(ValueError):
         self.known = tuple(known)
 
 
-def known_targets(settings: ExplainabilitySettings) -> list[str]:
+def known_targets(
+    settings: ExplainabilitySettings, destination: TraceDestination | None = None
+) -> list[str]:
     """The deployments a project's key may be bound to: the machine's target and every entry.
 
     ``resolve_target`` answers for any name, so a binding to a name nothing
@@ -543,8 +558,15 @@ def known_targets(settings: ExplainabilitySettings) -> list[str]:
     saves). The form used to judge a name after its own save had made it
     the machine's target, so "make active" let a typo through (review of
     #170's Setup-form merge, G1/G7).
+
+    With the project's ``destination`` (#142), its deployment counts too: it is
+    read off the destination, not written to the config (``use`` no longer
+    re-points the machine to record it, review of #203), and it is the target
+    ``key set`` binds to by default — the fallback ``use`` names when no key
+    could be minted.
     """
-    return sorted({settings.target, *settings.targets})
+    named = [destination.environment] if destination is not None else []
+    return sorted({settings.target, *settings.targets, *named})
 
 
 def launches_elsewhere(
@@ -623,11 +645,13 @@ def attach_project_key(
     """
     from aisquare.core.store import store_session  # lazy, as in project_key_binding
 
-    known = known_targets(load_config().explainability)
-    if target not in known:
-        raise UnknownTarget(target, known)
+    settings = load_config().explainability
     with store_session() as store:
         destination = store.project_destination(project.id)
+        # With its destination: that deployment is known without a config entry.
+        known = known_targets(settings, destination)
+        if target not in known:
+            raise UnknownTarget(target, known)
         if refuse_minted and destination is not None and destination.key_uid:
             raise MintedKeyInPlace(project.id)
         store.onboard_project(project)

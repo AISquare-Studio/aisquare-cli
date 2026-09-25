@@ -550,6 +550,10 @@ def save_setup(form: SetupForm, page: ProjectInfo | None) -> SetupOutcome:
         # names the deployment its traces go to when the field does not.
         resolved = ops.resolve_target(settings, target or None, project_id=owner.id)
         key_target = resolved.name
+        if resolved.destination is not None:
+            # Its destination's deployment is read off the destination, not the
+            # config (review of #203), so it is known without an entry.
+            known = sorted({*known, *ops.known_targets(settings, resolved.destination)})
         if key_target not in known:
             named = f", named by ${ops.TARGET_ENV_VAR}" if resolved.target_source == "env" else ""
             return _refused(

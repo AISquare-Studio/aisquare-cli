@@ -383,14 +383,18 @@ aisquare explainability use --clear
 reported on its own line:
 
 - **target** — the deployment the session belongs to becomes the explainability
-  target for this project (`stg-api.aisquare.studio` → `stg`, with the staging
-  gateway and hosted proxy filled in; `api.aisquare.studio` → `prod`). It fills
-  only what is empty, so a gateway or proxy you set by hand stays, and it does
-  **not** turn tracing on — that is still `aisquare explainability enable`. A
-  target `use` creates names its own key variable (`EXPLAINABILITY_PROD_API_KEY`,
-  …), so the machine key — issued for whichever deployment set the machine up —
-  never answers for another one; the exception is the machine whose top-level
-  gateway already is that deployment's. Launches, `fleet spawn` and
+  target for **this project only** (`stg-api.aisquare.studio` → `stg`, with the
+  staging gateway and hosted proxy filled in; `api.aisquare.studio` → `prod`). It
+  is read off the destination and never written to `config.toml`, so no other
+  project, the doctor and the shipper resolve exactly what they did before —
+  even when the machine's own target has the same name. A
+  `[explainability.targets.<name>]` you wrote for that deployment is used, and
+  only what it leaves empty is filled in, and `use` does **not** turn tracing
+  on — that is still `aisquare explainability enable`. Without an entry of yours
+  the target names its own key variable (`EXPLAINABILITY_PROD_API_KEY`, …), so
+  the machine key — issued for whichever deployment set the machine up — never
+  answers for another one; the exception is the machine whose top-level gateway
+  already is that deployment's. Launches, `fleet spawn` and
   `explainability env` in the project take the proxy **and** the key from this
   target, whatever `AISQUARE_EXPLAINABILITY_TARGET` says: a project's
   destination comes before that variable, which moves only the projects without

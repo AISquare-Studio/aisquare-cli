@@ -657,6 +657,75 @@ def test_sign_out_revokes_and_forgets(
     assert status.startswith("Not signed in") and not sign_out_shown
 
 
+def test_sign_out_takes_the_keys_the_cli_minted_with_it_as_logout_does(
+    monkeypatch: pytest.MonkeyPatch, no_network: dict[str, Any], tmp_path: Path
+) -> None:
+    """*Sign out* revoked the session alone, so every ingest key the CLI had minted
+    (#142) outlived the sign-in that obtained it — bound, in its file, and live on the
+    server — while ``aisquare logout`` forgot them (review of #172). They go first,
+    their revoke taking the session's Bearer, and one the server refuses is said and
+    stays owed."""
+    from aisquare.core.workspace import project_id_for
+    from aisquare.models import ProjectInfo
+    from aisquare.services import destinations
+    from aisquare.services import explainability as explainability_service
+
+    session = _session()
+    no_network["session"] = session
+    projects = [
+        ProjectInfo(id=project_id_for(tmp_path / name), root=tmp_path / name)
+        for name in ("web", "api")
+    ]
+    with store_session() as store:
+        for project, uid in zip(projects, ("key-web", "key-api"), strict=True):
+            destinations.choose(
+                store,
+                project,
+                destinations.Workspace(id=42, uid="ws-uid-42", name="acme", role="ADMIN"),
+                destinations.Studio(id=301, uid="st-301", name="Frontend"),
+                session,
+            )
+            path = explainability_service.store_project_api_key(project.id, f"AIS_{uid}")
+            store.set_project_explainability(
+                project.id, target="prod", key_path=path, set_by=None, minted=uid
+            )
+    order: list[str] = []
+
+    def revoke(path: str, **kwargs: Any) -> iam.HttpResult:
+        if not path.endswith("/revoke/"):  # the page's credits reading
+            return iam.HttpResult(404, {"detail": "Not found."}, {})
+        order.append(path.split("/")[-3])
+        return iam.HttpResult(403 if "key-api" in path else 204, {"detail": "not yours"}, {})
+
+    def sign_out(session: iam.Session) -> auth_service.SignedOut:
+        order.append("session")
+        no_network["session"] = None
+        return auth_service.SignedOut(revoked=True, restricted=True)
+
+    monkeypatch.setattr(iam, "request", revoke)
+    monkeypatch.setattr(auth_service, "sign_out", sign_out)
+
+    async def go(pilot: Pilot[None]) -> str:
+        app = fleet_app(pilot)
+        view = await open_accounts(pilot)
+        await pilot.click("#aisquare-sign-out")
+        await settle(app)
+        await pilot.pause()
+        return notice(view)
+
+    said = drive(go)
+    assert sorted(order[:2]) == ["key-api", "key-web"], order
+    assert order[2:] == ["session"], "the keys go before the session: their revoke takes it"
+    assert said.startswith("✓ Signed out of AISquare; 1 key the CLI minted is still live"), said
+    assert "acme for api (the API answered HTTP 403: not yours)" in said
+    assert not any(
+        explainability_service.project_key_path(project.id).exists() for project in projects
+    )
+    with store_session() as store:
+        assert [record.key_uid for record in store.pending_revocations()] == ["key-api"]
+        assert store.project_explainability_all() == []
+
+
 def test_a_sign_out_whose_rewrite_could_not_be_restricted_says_so_on_the_page(
     monkeypatch: pytest.MonkeyPatch, no_network: dict[str, Any]
 ) -> None:

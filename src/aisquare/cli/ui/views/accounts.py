@@ -41,7 +41,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any, ClassVar, NamedTuple
 
 from rich.text import Text
 from textual import on
@@ -68,7 +68,7 @@ from aisquare.models import (
 from aisquare.services import auth as auth_service
 from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import credits as credits_service
-from aisquare.services import device_flow, iam
+from aisquare.services import destinations, device_flow, iam
 from aisquare.services import fleet as fleet_service
 from aisquare.services.credits import WorkspaceCredits
 
@@ -90,6 +90,25 @@ _WARN_AT = 50.0
 _HOT_AT = 80.0
 
 SessionReader = Callable[[], "iam.Session | None"]
+
+
+class SignOutOutcome(NamedTuple):
+    """What *Sign out* did: the keys the CLI had minted (#142), then the session."""
+
+    keys: destinations.MintedKeysForgotten
+    session: auth_service.SignedOut
+
+
+def _sign_out(session: iam.Session) -> SignOutOutcome:
+    """*Sign out*, off the UI thread: ``aisquare logout``'s two steps, in its order.
+
+    The ingest keys the CLI minted go with the sign-in that obtained them, as
+    ``logout`` takes them, and first: their revoke takes the session's Bearer.
+    This button revoked the session alone, so every minted key outlived it —
+    in its file, bound, and live on the server (review of #172).
+    """
+    keys = destinations.forget_minted_keys(session)
+    return SignOutOutcome(keys=keys, session=auth_service.sign_out(session))
 
 
 class AccountsChanged(Message):
@@ -822,7 +841,7 @@ class AccountsView(Vertical):
             return
         self.query_one("#aisquare-sign-out", Button).disabled = True
         self.run_worker(
-            lambda: auth_service.sign_out(session),
+            lambda: _sign_out(session),
             name=SIGN_OUT_WORKER,
             group=SIGN_OUT_WORKER,
             exclusive=True,
@@ -832,16 +851,20 @@ class AccountsView(Vertical):
 
     def _sign_out_finished(self, worker: Worker[Any], state: WorkerState) -> None:
         self.session = self._read_session()
-        if state is WorkerState.SUCCESS and isinstance(worker.result, auth_service.SignedOut):
-            outcome = worker.result
+        if state is WorkerState.SUCCESS and isinstance(worker.result, SignOutOutcome):
+            outcome = worker.result.session
             said = "✓ Signed out of AISquare" + (
                 "" if outcome.revoked else " (locally — the server could not be reached to revoke)"
             )
-            if outcome.restricted:
-                self._notice(said, "ok")
-            else:
+            tone = "ok"
+            if not outcome.restricted:
                 # As for a sign-in: the service warns on stderr, which Textual captures.
-                self._notice(f"{said}, but {iam.unrestricted_warning(signed_out=True)}", "warn")
+                said, tone = f"{said}, but {iam.unrestricted_warning(signed_out=True)}", "warn"
+            owed = worker.result.keys.revocations.owed
+            if owed:
+                said = f"{said}; {destinations.describe_owed(owed)} — {destinations.REVOKE_RETRY}"
+                tone = "warn"
+            self._notice(said, tone)
             self.post_message(AccountsChanged())
         elif state is WorkerState.ERROR:
             self._notice(f"✗ sign-out failed: {worker.error}", "error")

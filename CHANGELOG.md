@@ -203,8 +203,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   is what makes spans land there. `status` shows `destination:` (the UI's
   Explainability view `lands in`) and takes `--project`: it is the check `use`
   names once tracing is on, since `doctor` resolves only the machine's key;
-  `whoami` gains a `traces:` line; `logout` forgets every key the CLI minted and
-  leaves hand-attached keys alone. The key never crosses a deployment or a
+  `whoami` gains a `traces:` line; `logout`, and *Sign out* on the fleet UI's
+  Accounts page, forget every key the CLI minted and leave hand-attached keys
+  alone. The key never crosses a deployment or a
   workspace: a target `use` creates names its own key variable,
   a machine key never stands in for the mint, launches take the proxy from the
   same target as the key, `key set` binds to the destination's deployment, the

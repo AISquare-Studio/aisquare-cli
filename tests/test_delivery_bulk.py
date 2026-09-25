@@ -12,7 +12,8 @@ run alongside — and holds the #20 delivery contract in bulk:
 (b) every dropped write exited nonzero with a machine-readable error and
     no success marker (at-least-once semantics: a failed confirm may still
     have committed, so absence is deliberately NOT asserted);
-(c) zero ``aisquare serve --stdio`` daemons accumulate across the run;
+(c) zero ``aisquare serve --stdio`` daemons accumulate across the run
+    (where the probe can tell ours from anyone else's: ``/proc``);
 (d) the whole storm stays inside a CI-friendly time box.
 """
 
@@ -204,9 +205,10 @@ def _stdio_daemon_pids(home: Path) -> list[int]:
     the phrase as one argument can never satisfy. And is it OURS: the process
     environment must carry this test's ``AISQUARE_HOME``.
 
-    Both answers come from ``/proc``, so this is Linux-only; the caller skips
+    Both answers come from ``/proc``, so this is Linux-only. It raises
     rather than silently counting nothing, because an assertion that cannot
-    observe its subject is worse than one that is merely awkward.
+    observe its subject is worse than one that is merely awkward: the storm
+    leaves out the one check that needs it, and runs the rest.
     """
     if not Path("/proc").is_dir():
         raise _ProbeUnavailable("/proc is required to tell our daemons from anyone else's")
@@ -235,10 +237,14 @@ def test_bulk_concurrent_writes_never_lose_a_confirmed_write(tmp_path: Path) -> 
     activated = _cli(["team", "on"], cwd=project, env=env)
     assert activated.returncode == 0, activated.stderr
 
+    # Without /proc (Windows) only the leak check (c) is left out. This skipped
+    # the whole storm there, so (a), (b), (d) and the Python reader port never
+    # ran on the Windows lane while the CHANGELOG said the storm was ported
+    # (final review of #203, tests-ci TC2).
     try:
-        daemons_before = _stdio_daemon_pids(home)
-    except _ProbeUnavailable as exc:
-        pytest.skip(str(exc))
+        daemons_before: list[int] | None = _stdio_daemon_pids(home)
+    except _ProbeUnavailable:
+        daemons_before = None
     started = time.monotonic()
     readers = [_reader_loop(project, env, iterations=20) for _ in range(READERS)]
     try:
@@ -299,7 +305,8 @@ def test_bulk_concurrent_writes_never_lose_a_confirmed_write(tmp_path: Path) -> 
 
     # (c) the storm strands no stdio daemons OF OURS. Scoped to this test's
     # home, so a sibling checkout running its own suite cannot fail this.
-    assert _stdio_daemon_pids(home) == daemons_before
+    if daemons_before is not None:
+        assert _stdio_daemon_pids(home) == daemons_before
 
     # (d) bounded runtime — the whole point is that this stays in CI.
     assert elapsed < TIME_BOX_SECONDS, f"bulk run took {elapsed:.1f}s"
@@ -315,9 +322,10 @@ def test_bulk_concurrent_writes_never_lose_a_confirmed_write(tmp_path: Path) -> 
 # Both ends are asserted against `/proc`, `/bin/sh` and `pgrep`, so they are
 # Linux-only — not by preference but by construction: telling OUR daemon from a
 # sibling checkout's needs each process's ENVIRONMENT, and Win32_Process does
-# not carry it (only the command line). The storm above skips its own leak
-# check the same way, via `_ProbeUnavailable`, so nothing silently asserts
-# against a probe that cannot see.
+# not carry it (only the command line). The storm above runs everywhere and
+# leaves out only its own leak check (c) when the probe raises
+# `_ProbeUnavailable`, so nothing silently asserts against a probe that cannot
+# see.
 
 _needs_proc = pytest.mark.skipif(not Path("/proc").is_dir(), reason="the daemon probe reads /proc")
 

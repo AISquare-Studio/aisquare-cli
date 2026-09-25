@@ -1052,8 +1052,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
   Three skips remain, all structural rather than deferred. The stdio-daemon
   leak probe needs each process's ENVIRONMENT to tell our daemons from a
-  sibling checkout's and `Win32_Process` carries only the command line, so it
-  and its two self-tests are `/proc`-only. Mount-table matching needs POSIX
+  sibling checkout's and `Win32_Process` carries only the command line, so its
+  two self-tests are `/proc`-only, and on Windows the #20 storm runs every
+  check but that leak count. Mount-table matching needs POSIX
   path semantics, and Windows has no mount table — the Windows answer
   (`None`, through the existing fail-open) is asserted separately so the
   behaviour is pinned rather than merely skipped.

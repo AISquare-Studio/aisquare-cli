@@ -6,6 +6,32 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-09-25
+
+**Accounts, project groups and destinations, and a fleet that survives
+restarts.**
+- Several Claude accounts, with a default, a priority order, and spawn and
+  hand-over that follow usage headroom.
+- A resizable navigator, with projects you can group, pin and order.
+- Each project can trace to its own Explainability workspace: picked with your
+  sign-in, with its own key and credits shown.
+- A dead agent restarts as the same agent from its recorded launch spec.
+- Mouse buttons, hotkeys and selection work in an agent's pane.
+- The suite runs green on Windows.
+
+Everything in this release went through independent review rounds, then a
+whole-release review whose findings were checked by adversarial verifiers,
+before it shipped.
+
+**Upgrading:**
+- The store migrates to schema v24 on first open, from 0.6.0's v14 or from a
+  branch build's v15–v17. Every step from v15 up is idempotent, and a store
+  another build stamped converges instead of failing.
+- `aisquare init --reinit` on a `config.toml` it cannot read now needs `--yes`.
+- Directories that hooks only captured are no longer listed.
+  `aisquare project list --all` shows them.
+- On tmux older than 3.5, shift+enter is sent as C-j.
+
 ### Added
 - **The navigator is resizable** (#137). The line between the sidebar and the
   content is a divider: drag it (the sidebar never drops below 24 columns, the
@@ -2913,7 +2939,8 @@ First release — a portable memory layer for coding agents.
 - **Diagnostics & config** — `status`, `doctor` (dependency + setup health with
   fixes), the `config` group, and `log` (captured prompt history).
 
-[Unreleased]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.4.0rc2...v0.5.0
 [0.4.0rc2]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.4.0rc1...v0.4.0rc2

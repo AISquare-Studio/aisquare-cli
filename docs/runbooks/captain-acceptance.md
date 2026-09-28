@@ -164,8 +164,17 @@ aisquare board
 
 ## 7. `make check` green
 
-On the assembled `rc/captain-v1` head, in a fresh worktree with its own venv and
-an isolated `AISQUARE_HOME`:
+On the assembled `rc/captain-v1` head, in docker: no host venvs (the owner's
+rule). Mount the worktree, and the main checkout read-only with its `.git`, at
+their host paths. A worktree's project root resolves to the main checkout, and
+without it `tests/test_query_time_damage_is_legible.py` fails on any head.
+Install the worktree editable inside the container, as CI does, and run each
+phase as your own user with an isolated `HOME` and `AISQUARE_HOME`.
+
+Until its follow-up card makes it skip inside a container, one test fails in any
+container: `tests/test_install_script_functions.py`'s
+`test_root_is_refused_outside_a_container`, whose premise is "outside a
+container". Read it as the docker base set.
 
 ```text
 ⟨PASTE: ruff format --check · ruff check · mypy --strict · pytest counts · exit 0⟩

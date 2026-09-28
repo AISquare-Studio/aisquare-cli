@@ -710,6 +710,32 @@ def test_dry_run_still_reports_what_it_would_do(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _container_sign() -> str | None:
+    """What makes install.sh's ``in_container()`` true on this machine whatever a test sets.
+
+    The script also reads ``$container``, which a test clears; it cannot hide these. So the
+    same false failure the docker gate met (the test run inside a container, where root is
+    allowed by design) is skipped under podman and a cgroup-only container too.
+    """
+    for marker in ("/.dockerenv", "/run/.containerenv"):
+        if Path(marker).is_file():  # the script's `[ -f … ]`
+            return marker
+    try:
+        cgroup = Path("/proc/1/cgroup").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    return "/proc/1/cgroup" if re.search(r"docker|lxc|containerd|kubepods", cgroup) else None
+
+
+_CONTAINER_SIGN = _container_sign()
+
+
+@pytest.mark.skipif(
+    _CONTAINER_SIGN is not None,
+    reason=f"inside a container ({_CONTAINER_SIGN} exists): install.sh's in_container() is "
+    "true here whatever the test sets, so root is allowed by design (§3.7); the premise "
+    "'outside a container' cannot hold",
+)
 def test_root_is_refused_outside_a_container(tmp_path: Path) -> None:
     """Everything in the Bootstrap and Ours classes lands under $HOME.
 

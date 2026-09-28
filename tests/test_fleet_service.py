@@ -704,6 +704,7 @@ def test_spawn_manager_builds_the_launch_command_and_records_the_row(
     assert "--command" not in command, "no --bin given: launch resolves the binary itself"
     assert spawned["env"] == {
         "AISQUARE_FLEET_AGENT": agent.id,
+        "AISQUARE_TEAM_HUB": str(project.root),
         "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "0",
     }
     assert spawned["cwd"] == project.root and agent.cwd == project.root and not agent.worktree
@@ -1500,7 +1501,7 @@ def test_spawn_can_keep_native_agent_teams_on(
     _settings(monkeypatch, disable_native_agent_teams=False)
     agent = _coder(project)
     env = tmux.spawned[0]["env"]
-    assert env == {"AISQUARE_FLEET_AGENT": agent.id}
+    assert env == {"AISQUARE_FLEET_AGENT": agent.id, "AISQUARE_TEAM_HUB": str(project.root)}
 
 
 def test_spawn_without_tmux_is_fleet_unavailable(
@@ -9740,3 +9741,29 @@ def test_a_row_spawned_before_the_launch_spec_is_refused_its_replay_before_the_s
         session = store.get_session(agent.session_id or "")
     assert live is not None and live.id == agent.id and live.launch_spec is None
     assert session is not None and session.state == "working", "the session is not marked"
+
+
+@pytest.mark.parametrize("caller_hub", [False, True])
+@pytest.mark.parametrize("role", ["coder", "manager", "tester"])
+def test_every_window_carries_its_own_fleets_hub(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    role: str,
+    caller_hub: bool,
+) -> None:
+    """Card tsk_01m3k89b2f96tt7xc6crzvxzjk, fix 1: a window inherits the tmux SERVER's
+    environment, and the owner's ``asqui`` server holds a global ``AISQUARE_TEAM_HUB``
+    naming a third project, so every seat of two fleets registered there. Every window
+    now carries its own fleet's root, set per window like its identity, so the server's
+    hub can never pick a seat's board. Before, only the captain's window carried one."""
+    if caller_hub:
+        third = tmp_path / "third-hub"
+        third.mkdir()
+        monkeypatch.setenv("AISQUARE_TEAM_HUB", str(third))
+    fleet_service.spawn(project, role, worktree=False)
+    env = tmux.spawned[-1]["env"]
+    assert isinstance(env, dict)
+    assert env.get("AISQUARE_TEAM_HUB") == str(project.root)

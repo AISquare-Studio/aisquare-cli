@@ -1,0 +1,226 @@
+# Captain — acceptance runbook (Phase 1)
+
+**What this is.** The seven acceptance lines of the captain card
+(`docs/plans/captain.md` §7), each with the command the owner types, what must
+be seen and heard, and a slot for the **real pasted output** from the assembled
+`rc/captain-v1` head. A slot marked `⟨PASTE⟩` has not been run yet on that head;
+the runner replays this page with a real headset on this box and fills it. Name
+what could not be heard or held rather than leaving a slot blank.
+
+How current is this file? Ask git: `git log -1 --format='%h %ad' -- docs/runbooks/captain-acceptance.md`.
+
+## 0. Preflight
+
+```sh
+aisquare --version
+aisquare doctor
+aisquare captain voice --show-token
+```
+
+Expect: the URL `http://localhost:8749/#token=…`, the QR, the `adb reverse`
+line, `mode: focus · speaker: on`. Headset: the Windows default playback
+device is the headset; the browser's microphone prompt gets the headset mic.
+If the captain has never run in this home, `aisquare captain` first, and answer
+*Yes, I trust this folder* once in its window.
+
+Claude Code asks once per folder, and the captain's answer covers only its own
+brain folder. If step 2's project (alpha) has never been trusted under the
+config dir the fleet's coders run with, open `claude` in it once by hand and
+answer *Yes, I trust this folder* first. A new coder in an untrusted folder
+stops at its own trust dialog. The captain never types into it: `paste`, `tell`
+and `press` refuse by name, saying *trust this folder first*.
+
+Claude Code can draw its session-rating survey (*How is Claude doing this
+session?*) in the captain's pane mid-conversation. The captain never types into
+it, and a phone cannot answer it, so every voice line would be refused until
+someone attaches. The captain is spawned with the survey off (T1e). If a survey
+ever shows in its pane anyway, bind the switch once as a fallback; `--env`
+merges per key with what the role already has:
+
+```sh
+aisquare team bind captain --env CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1
+```
+
+```text
+⟨PASTE: aisquare captain voice --show-token⟩
+```
+
+## 1. Headphones on: what is up, item one spoken, resolve, next
+
+Open the page in focus mode, hold the button, say **"what is up"**, release.
+
+Expect: the interim transcript, then the final; `thinking` on; the reply lists
+the ranked items and **item one is spoken**; `thinking` off. Then say
+**"resolve it, I told coder-1 to retry"** and **"next"**.
+
+Board evidence (one `captain_action` per call, `ok` true):
+
+```sh
+aisquare captain log --limit 6
+aisquare captain attention
+```
+
+```text
+⟨PASTE: the page's log panel — interim, final, utterance, reply⟩
+⟨PASTE: aisquare captain log --limit 6⟩
+```
+
+## 2. Ask the manager, then spawn and paste — three receipts
+
+Say **"ask alpha's manager what is blocking the deploy"**, then, on its answer,
+**"spawn a coder for it and paste the manager's answer to it"**. Your words name
+the role, so the spawn goes at once, with no question.
+
+Expect three tool calls with receipts: `ask_manager` (the manager's note seq),
+`spawn` (the new row), `paste` (chars and `submitted`). The spawn tool's task
+is optional. When the captain files a card for the work first, its `task`
+receipt sits before `spawn` in the log.
+
+```sh
+aisquare captain log alpha --limit 8
+```
+
+```text
+⟨PASTE: aisquare captain log alpha --limit 8 — the three receipts⟩
+```
+
+## 3. A coder stuck on a permission prompt, unblocked by "say yes to coder-1"
+
+Have a coder sit at a permission prompt (its row reads `attention`). Say
+**"say yes to coder-1"**.
+
+Expect: `press yes`, sent as the digit of the chooser's Yes (`1` on Claude
+Code's permission chooser), then the pane moves on. The press audit shows the
+key sent and `answered: true`, and the reply says what the pane shows. A key
+the prompt ignores (the letter `y` on that chooser) comes back as an error,
+audited `ok: false`, never as a success. A coder that is `working` with no
+prompt on its screen is refused with the state named, never pressed.
+
+```sh
+aisquare captain log alpha --limit 4
+```
+
+```text
+⟨PASTE: the reply, and the press audit with its state⟩
+```
+
+## 4. "What did coder-1 do since my last update", spoken, watermark moved
+
+Say **"what did coder-1 do since my last update"**.
+
+Expect: `since alpha coder-1` with the events past the watermark and the pane
+tail; the summary spoken; the watermark advanced (`advanced: true`), so the
+same question again returns only what is new.
+
+```sh
+aisquare captain since alpha --agent coder-1
+```
+
+```text
+⟨PASTE: the spoken summary as the page logged it; the since result with from_seq/to_seq⟩
+```
+
+## 5. Always listening: only "Captain, …" lands, and two land as two requests
+
+```sh
+aisquare captain voice --mode listen
+```
+
+The start line names the wake word (`wake word: captain`), and the idle chip
+reads **say Captain**. The first utterance loads the speech model, which takes a
+few seconds: wait for its transcript before the next step.
+
+1. Say **"we should ship the fold today"**. Expect no words on the page, live or
+   after, nothing delivered, nothing spoken.
+2. Say **"Captain, what is up"**, pause a second, then say **"Captain, snooze
+   the first one for an hour"**. Expect two deliveries without the wake word
+   ("what is up", "snooze the first one for an hour"), `thinking` between them,
+   and two replies.
+3. Say **"Captain"** alone. Expect a short tone and the chip's **listening**.
+   Within five seconds say **"what is up"**; it is delivered as it is.
+4. Say **"stop listening"**. The mic turns off and nothing is delivered.
+
+The page's mode toggle and the terminal's `--mode` agree
+(`captain_voice_mode` in `state.json`).
+
+```text
+⟨PASTE: the page's log panel — the dropped sentence (no words), two deliveries, the window, the stop word⟩
+```
+
+## 6. Every action a board event; a refusal said, never faked
+
+`stop`, `spawn` and `restart` act only when your words name the agent, its role
+or its project. Words that name nothing are refused by the tool, which gives the
+captain its one-sentence question; your yes answers it.
+
+Say **"stop it"**, with nothing named. Expect one `captain_action` for `stop`
+with `ok: false` on alpha's board (the owner's words name no agent, role or
+project), the captain asking its one question (*Stop coder-1 in alpha?*), and
+nothing stopped. Answer **"yes"**: expect the stop, with its receipt
+(`agent_exited`).
+
+Then say **"spawn a coder in alpha"** and **"stop the coding agent in alpha"**.
+Both name what they act on, so each goes at once, with no question: the spawn
+with its row, and the stop with its receipt and the coder's claim released.
+
+```sh
+aisquare captain log alpha --limit 4
+aisquare board
+```
+
+```text
+⟨PASTE: the refused stop (ok false) and the captain's question, the stop after your yes, then the named spawn and stop, each with its receipt⟩
+```
+
+## 7. `make check` green
+
+On the assembled `rc/captain-v1` head, in docker: no host venvs (the owner's
+rule). Mount the worktree, and the main checkout read-only with its `.git`, at
+their host paths. A worktree's project root resolves to the main checkout, and
+without it `tests/test_query_time_damage_is_legible.py` fails on any head.
+Install the worktree editable inside the container, as CI does, and run each
+phase as your own user with an isolated `HOME` and `AISQUARE_HOME`.
+
+`tests/test_install_script_functions.py`'s
+`test_root_is_refused_outside_a_container` skips inside a container and names
+the sign it found, so the docker gate reads 0 failed.
+
+```text
+⟨PASTE: ruff format --check · ruff check · mypy --strict · pytest counts · exit 0⟩
+```
+
+## Not heard, not held
+
+List here, per replay, what the box could not do (no headset, no Android
+device, a model that would not load), so a green slot is never assumed.
+
+```text
+⟨PASTE⟩
+```
+
+## Known facts about CI
+
+The RC base's Windows leg is red on five persona tests from the fold — a
+persona-train follow-up, not the captain's. The RC's own Windows run at
+`f28b7eb2` also failed three UI tests: `test_ui_accounts`'s slot buttons and
+`test_ui_shell`'s refusal dialog and explainability toasts. The sidebar-width
+tests (the divider's tap-after-drag and the width autosave) are intermittent on
+any leg: they failed on ubuntu py3.12 and the ambient proxy-up leg at #232, and
+earlier on three other heads. They pass on re-run. A captain PR's legs are read against
+that base set.
+
+## After a reboot, or a tmux kill-server
+
+After a reboot the fleet's socket file is gone too, so bare `aisquare captain`
+ends the stale row and starts a fresh captain. The folder is already trusted, so
+it comes straight up.
+
+After a `kill-server` the socket file stays and nothing answers. Then
+`aisquare captain` and `aisquare captain "text"` refuse within a second, naming
+the one command that may decide the server is gone; `<home>` is the project id
+the refusal prints. Run it, then start again:
+
+```sh
+aisquare fleet reap -P <home> --server-down
+aisquare captain
+```

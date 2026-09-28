@@ -147,6 +147,25 @@ prints one usage object so a `jq` pipeline gets JSON rather than a help page.
 **[The fleet guide](docs/fleet.md)** has the roles in full, the
 `aisquare fleet …` command reference and every default you can change.
 
+## The captain
+
+One agent above every project: the **captain** runs every fleet for you, and you
+talk to it — typed or spoken. `aisquare captain` starts it (or attaches to it);
+`aisquare captain say "what is up"` asks it what needs you, across every board,
+and prints the reply; `aisquare captain --voice` serves the voice page (hold to
+talk, or always listening for "Captain, …") with the reply spoken back. Every effect is one of the
+captain's 24 tools, each leaving one audit event with your words and a receipt;
+`stop`, `spawn` and `restart` happen only when your words name the agent, its role
+or its project, or when you say yes to the captain's one-sentence question; a
+refusal is said, never faked. The guide is [`docs/captain.md`](docs/captain.md).
+
+```sh
+aisquare captain
+aisquare captain say "what is up"
+aisquare captain attention
+aisquare captain voice --show-token
+```
+
 ## The rest of aisquare
 
 The UI is a view over two halves, and they are **independent** — neither needs
@@ -688,7 +707,9 @@ whose hooks went missing is named rather than hidden behind a healthy ✓.
 
 For executions spanning multiple repositories, set
 `AISQUARE_TEAM_HUB=/path/to/hub` in every session; git worktrees already
-share their principal repo's board automatically.
+share their principal repo's board automatically. A fleet window always lands
+on its own fleet's board: `fleet spawn` sets the hub per window, and inside it
+the fleet row wins over a hub inherited from the tmux server.
 
 ## How it works
 

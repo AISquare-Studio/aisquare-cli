@@ -6,8 +6,55 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **The captain** — the home-level voice-and-text agent that runs every
+  project's fleet for you (`docs/captain.md`; the plan as merged in
+  `docs/plans/captain.md`; the acceptance runbook in
+  `docs/runbooks/captain-acceptance.md`). One Claude Code session per home, on
+  the home board, with no tool but its own **Actions server** (`aisquare captain
+  serve --stdio`): 24 fixed tools, one `captain_action` audit event per call
+  carrying the owner's words and the effect's receipt; `stop`, `spawn` and
+  `restart` act only when the owner's words name the agent, its role or its
+  project; otherwise the tool's refusal is its one-sentence question itself
+  ("Stop coder-1 in alpha?", the rule kept in the audit), which a bare yes or
+  roger answers within two minutes and a no, or any other owner line, closes.
+  Every other refusal is said as `refused:` / `error:`, never faked. `aisquare captain` starts or attaches;
+  `aisquare captain "text"` delivers and prints the reply (`--json`: one object);
+  `aisquare captain chat` is line by line. The **attention queue** folds every
+  board into one ranked list of what needs the owner (question, blocked,
+  waiting, review, pull request, stale), deduplicated and resolved one item at a
+  time — `aisquare captain attention | next | resolve | snooze`, with `since`,
+  `log`, `actions`, and the easter eggs `uav`, `wololo`, `bt`. The **voice page**
+  (`aisquare captain --voice`, `[voice]` extra): hold to talk, or always
+  listening behind the wake word — only "Captain, …" reaches the captain, the
+  rest is never delivered, spoken or shown (`[captain] wake_word`, `""` turns it
+  off) — interim transcripts, the thinking signal, the reply spoken back
+  through a Speaker adapter per platform; one spool drainer in the captain's
+  server plays the captain's own `speak()` lines. A fresh captain is started
+  bare and never typed into at Claude Code's trust dialog, and it takes its
+  first message at its idle input box even while the fleet still reads it
+  working. `press yes`/`press no` answer Claude Code's real permission chooser
+  by its Yes digit and Esc (read off the pane), and a key the prompt ignores is
+  said as an error. Nothing the captain types reaches an agent's own trust
+  dialog: `press`, `paste`, `tell`, the manager ask and `wololo` refuse it by
+  name (*trust this folder first*), and a pane that cannot be read is refused.
+  After a reboot a provably gone tmux server means a fresh
+  start, anything less a fast refusal naming
+  `aisquare fleet reap -P <home> --server-down`. The captain is spawned with
+  Claude Code's session-rating survey off (`CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY`),
+  so a survey never blocks the voice path from a phone that cannot answer it.
+
 ### Fixed
 
+- **Each fleet seat lands on its own fleet's board.** A tmux server started from
+  a shell that exported `AISQUARE_TEAM_HUB` handed that hub to every window, and
+  the hub overrode everything, so the seats of two fleets on one server
+  registered on a third board and their deltas mixed both trains. Every window
+  `fleet spawn` opens now carries its own fleet's root as the hub; inside a
+  fleet window the fleet row's board wins over an inherited hub, said once on
+  stderr; and a session that registered on the wrong board moves to its fleet's
+  board when a restart resumes it.
 - **`aisquare serve --stdio` no longer exits in the middle of a tool call.** Its
   idle deadline (`--close-after`, `AISQUARE_SERVE_CLOSE_AFTER`) counted inbound
   client messages only, while a tool runs on a worker thread and the client sends

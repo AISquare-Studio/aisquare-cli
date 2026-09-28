@@ -45,8 +45,9 @@ owner ── TUI captain view (T4) ─────────┘               
   `captain_action` event `{"v","tool","project","args","utterance","ok","said",
   "receipt"}` on the project's board, or the home board when it names none. The
   actor is a virtual session `captain:<project>` per board, so writes route by
-  session and never by cwd. `stop`, `spawn` and `restart` need `confirm=true`,
-  and only on the owner's own words (13013).
+  session and never by cwd. `stop`, `spawn` and `restart` need `confirm=true`
+  (13013), and the server takes it only when the owner's words name the agent,
+  its role or its project (T1d, 13548).
 - **T2 — the captain as a fleet agent** (`services/captain/brain.py`,
   `cli/captain.py`). One per home, on the home board (the project row for
   `$AISQUARE_HOME`, captured never onboarded — one store-level rule). Runs from
@@ -96,6 +97,12 @@ owner ── TUI captain view (T4) ─────────┘               
 | 13189 | after a reboot: auto-recover only when the tmux server is provably gone (socket file absent), otherwise refuse fast naming `aisquare fleet reap -P <home> --server-down` |
 | 13206 | T6's riders: the owner's spelling `--voice`, the headset as default playback device, the reboot fallback, the Phase 2 list, the known CI fact, real pasted output |
 | 13227 | nothing types into a dialog: read the pane first; the trust dialog names the one-time step |
+| 13548 | T1d: confirm needs named words: stop, spawn and restart take `confirm=true` only when the utterance names the agent, its role or its project |
+| 13570 | a bare yes answers the captain's own named question, recorded pending for 120 s (`CONFIRM_TTL_S`); words naming another agent or project refuse |
+| 13614 / 14375 | ok, okay, sure, yup, roger, copy and affirmative count only as the whole answer, and a no only alone; the persona calls the tool first |
+| 14404 / 14427 | any other owner line closes a pending question; the persona passes the owner's exact words, a no included |
+| 14476 | T1e: the captain is spawned with Claude Code's session-rating survey off |
+| 14560 | T1e: the refusal for words that name nothing is the question itself; the rule and the seq stay in the audit |
 
 ## 3. Decisions log
 
@@ -129,6 +136,17 @@ owner ── TUI captain view (T4) ─────────┘               
   thread body is module-level: `tests/test_config_writes_stay_in_the_cli.py`
   fuses functions by name and read `say` as the CLI command that reaches a
   config write.
+- **Confirm by name, and the server is the gate** (T1d: 13548, 13570, 13614,
+  14375, 14404): the owner's words must name what a stop, spawn or restart acts
+  on, or the tool refuses and records its question pending for 120 s. A yes
+  answers it; a no, or any other owner line through `say`, `send` or the voice
+  page, closes it. The server never relies on the model passing a no.
+- **The refusal for unnamed words is the question itself** (T1e, 14560): the
+  captain says a refusal as it came, so it asks; the rule and the seq stay in
+  the audit.
+- **The captain is spawned with the session-rating survey off** (T1e, 14476):
+  Claude Code drew it in the captain's pane mid-conversation, and a phone
+  cannot answer it; `screen.py`'s refusal to type into it stays the backstop.
 - **No test may spawn on a real tmux socket or launch the real `claude`**
   (13220): a bite check that removed the `--voice` dispatch fell through to the
   bare command and started a real captain on the owner's socket. The voice CLI
@@ -145,8 +163,8 @@ owner ── TUI captain view (T4) ─────────┘               
 | `$AISQUARE_HOME/captain/speech/spk_*.txt` | the speech spool, oldest first |
 | `$AISQUARE_HOME/captain/say.lock` | one delivery at a time |
 | `$AISQUARE_HOME/captain/ui.sock` | T4's action receiver (or `/tmp/aisquare-<uid>/captain-<hash>.sock` when the home path is too long) |
-| `state.json` | `captain_busy`, `captain_watermarks`, `captain_speaker`, `captain_voice_mode`, `captain_brake_at`, `captain_undo` |
-| `config.toml` | `[captain] speaker`, `[captain.actions.<name>]` |
+| `state.json` | `captain_busy`, `captain_watermarks`, `captain_speaker`, `captain_voice_mode`, `captain_brake_at`, `captain_undo`, `captain_waiting` (T1), `captain_pending_confirm` (T1d) |
+| `config.toml` | `[captain] speaker`, `[captain] wake_word`, `[captain.actions.<name>]` |
 
 ## 5. Gates
 

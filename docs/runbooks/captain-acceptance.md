@@ -33,9 +33,9 @@ and `press` refuse by name, saying *trust this folder first*.
 Claude Code can draw its session-rating survey (*How is Claude doing this
 session?*) in the captain's pane mid-conversation. The captain never types into
 it, and a phone cannot answer it, so every voice line would be refused until
-someone attaches. Once card T1e is on the RC, the captain is spawned with the
-survey off. Before that, bind the switch once; `--env` merges per key with what
-the role already has:
+someone attaches. The captain is spawned with the survey off (T1e). If a survey
+ever shows in its pane anyway, bind the switch once as a fallback; `--env`
+merges per key with what the role already has:
 
 ```sh
 aisquare team bind captain --env CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1
@@ -72,9 +72,9 @@ Say **"ask alpha's manager what is blocking the deploy"**, then, on its answer,
 the role, so the spawn goes at once, with no question.
 
 Expect three tool calls with receipts: `ask_manager` (the manager's note seq),
-`spawn` (the new row), `paste` (chars and `submitted`). The spawn tool needs a
-task for the coder, so when none names the work the captain adds one first: its
-`task` receipt sits before `spawn` in the log.
+`spawn` (the new row), `paste` (chars and `submitted`). The spawn tool's task
+is optional. When the captain files a card for the work first, its `task`
+receipt sits before `spawn` in the log.
 
 ```sh
 aisquare captain log alpha --limit 8
@@ -181,10 +181,9 @@ without it `tests/test_query_time_damage_is_legible.py` fails on any head.
 Install the worktree editable inside the container, as CI does, and run each
 phase as your own user with an isolated `HOME` and `AISQUARE_HOME`.
 
-Until its follow-up card makes it skip inside a container, one test fails in any
-container: `tests/test_install_script_functions.py`'s
-`test_root_is_refused_outside_a_container`, whose premise is "outside a
-container". Read it as the docker base set.
+`tests/test_install_script_functions.py`'s
+`test_root_is_refused_outside_a_container` skips inside a container and names
+the sign it found, so the docker gate reads 0 failed.
 
 ```text
 ⟨PASTE: ruff format --check · ruff check · mypy --strict · pytest counts · exit 0⟩
@@ -202,9 +201,13 @@ device, a model that would not load), so a green slot is never assumed.
 ## Known facts about CI
 
 The RC base's Windows leg is red on five persona tests from the fold — a
-persona-train follow-up, not the captain's. Two UI tests are intermittent on
-Windows and on py3.11 (the sidebar's divider double-click; the accounts view);
-they pass on re-run. A captain PR's Windows leg is read against that base set.
+persona-train follow-up, not the captain's. The RC's own Windows run at
+`f28b7eb2` also failed three UI tests: `test_ui_accounts`'s slot buttons and
+`test_ui_shell`'s refusal dialog and explainability toasts. The sidebar-width
+tests (the divider's tap-after-drag and the width autosave) are intermittent on
+any leg: they failed on ubuntu py3.12 and the ambient proxy-up leg at #232, and
+earlier on three other heads. They pass on re-run. A captain PR's legs are read against
+that base set.
 
 ## After a reboot, or a tmux kill-server
 

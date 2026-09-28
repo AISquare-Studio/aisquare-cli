@@ -16,9 +16,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   serve --stdio`): 24 fixed tools, one `captain_action` audit event per call
   carrying the owner's words and the effect's receipt; `stop`, `spawn` and
   `restart` act only when the owner's words name the agent, its role or its
-  project, and otherwise refuse with a one-sentence question, which a bare yes
-  or roger answers within two minutes and a no, or any other owner line,
-  closes; a refusal is said as `refused:` / `error:`, never faked. `aisquare captain` starts or attaches;
+  project; otherwise the tool's refusal is its one-sentence question itself
+  ("Stop coder-1 in alpha?", the rule kept in the audit), which a bare yes or
+  roger answers within two minutes and a no, or any other owner line, closes.
+  Every other refusal is said as `refused:` / `error:`, never faked. `aisquare captain` starts or attaches;
   `aisquare captain "text"` delivers and prints the reply (`--json`: one object);
   `aisquare captain chat` is line by line. The **attention queue** folds every
   board into one ranked list of what needs the owner (question, blocked,

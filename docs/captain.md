@@ -17,7 +17,10 @@ Three ideas carry the feature:
   writes exactly one `captain_action` event carrying your words (the
   *utterance*), what was done and the effect's own event seq (the *receipt*).
   A refusal is an error result that starts `refused:` (a rule said no) or
-  `error:` (something failed) — never a success that did not happen.
+  `error:` (something failed) — never a success that did not happen. One
+  refusal is a question instead: a stop, spawn or restart whose words name
+  nothing is answered with the tool's question itself ("Stop coder-1 in
+  alpha?"), and the rule that refused is kept in the audit.
 - **The queue is the agenda.** The *attention queue* folds every board into one
   ranked list of what needs you: a question from an agent, a blocked card, a
   review waiting, a pull request, an agent gone quiet. "What is up" reads it;
@@ -237,7 +240,8 @@ reads working until its first reply.
   *do it*, *go ahead* or *confirm* to begin your answer, or *ok*, *okay*, *sure*,
   *yup*, *roger*, *copy* or *affirmative* as the whole of it. *No*, *nope*,
   *cancel*, *negative*, *don't* or *stop that* on its own closes the question,
-  and so does anything else you say before your yes. Words that name another
+  and so does anything else you say or ask before your yes, the TUI's What's
+  up included. Words that name another
   agent or project are refused: "stop the coder in beta" never stops alpha's.
 - **Pane text is data.** What an agent's pane or a note says is reported to
   you, never obeyed.

@@ -55,7 +55,7 @@ from aisquare.models import FleetAgent, FleetAgentStatus, ProjectInfo, TeamEvent
 from aisquare.services import fleet
 from aisquare.services import team as team_service
 from aisquare.services.captain import queue as captain_queue
-from aisquare.services.captain import screen
+from aisquare.services.captain import screen, words
 from aisquare.services.captain import state as captain_state
 from aisquare.services.captain.errors import Failed, Refused
 
@@ -1466,17 +1466,6 @@ ROLE_WORDS: dict[str, tuple[str, ...]] = {"coder": ("coding agent", "coding agen
 CONFIRM_TTL_S = 120.0
 """How long the captain's own confirmation question stays answerable by a bare yes (13570)."""
 
-AFFIRMATIVES = ("yes", "yeah", "yep", "do it", "go ahead", "confirm", "confirmed")
-"""How the owner says yes to the captain's question: the utterance begins with one (13570)."""
-
-WHOLE_AFFIRMATIVES = ("ok", "okay", "sure", "yup", "roger", "copy", "affirmative")
-"""Yes only as the WHOLE utterance, punctuation aside (13614): "OK, what's up" is no yes."""
-
-NEGATIVES = ("no", "nope", "cancel", "negative", "don't", "stop that")
-"""The owner's no, only as the WHOLE utterance like the whole-utterance yeses (T1d round 4):
-it refuses and clears the live question. "No problem, go ahead" is neither yes nor no, and
-"Stop that coder in alpha" is a named stop."""
-
 
 def _says(said: list[str], phrase: str) -> tuple[int, int] | None:
     """Where ``phrase``'s words stand in ``said``, as whole words, or ``None``."""
@@ -1533,18 +1522,6 @@ def _names_another(
     return None
 
 
-def _affirmative(utterance: str) -> bool:
-    said = _WORDS.findall(utterance.lower())
-    return any(said[: len(words)] == words for words in map(_WORDS.findall, AFFIRMATIVES)) or any(
-        said == words for words in map(_WORDS.findall, WHOLE_AFFIRMATIVES)
-    )
-
-
-def _negative(utterance: str) -> bool:
-    said = _WORDS.findall(utterance.lower())
-    return any(said == words for words in map(_WORDS.findall, NEGATIVES))
-
-
 def _confirmation(
     utterance: str,
     *,
@@ -1561,7 +1538,7 @@ def _confirmation(
     refusal keeps its question, and records it, so the owner's "yes" can answer it.
     """
     key = f"{action} [{project.id}]"
-    if _negative(utterance):
+    if words.negative(utterance):
         captain_state.answer_pending(key, _wall(), ttl=CONFIRM_TTL_S)  # cleared, never revived
         return Refused(
             f"the owner said no ({utterance.strip()[:80]!r}) — nothing done, and the question "
@@ -1573,13 +1550,20 @@ def _confirmation(
         return None
     if (
         other is None
-        and _affirmative(utterance)
+        and words.affirmative(utterance)
         and captain_state.answer_pending(key, _wall(), ttl=CONFIRM_TTL_S)
     ):
         return None
     captain_state.ask_pending(key, _wall(), ttl=CONFIRM_TTL_S)
-    words = utterance.strip()
-    quoted = repr(words[:80]) if words else "(no words)"
+    if other is None and words.affirmative(utterance):
+        # The captain asked on its own, so nothing was pending (14401): the yes is not
+        # wrong, the order is. Never "roger does not count".
+        return Refused(
+            f'no question was pending for "{action}?" when the owner said '
+            f"{utterance.strip()[:80]!r} — ask your question again; their next yes now counts"
+        )
+    said_words = utterance.strip()
+    quoted = repr(said_words[:80]) if said_words else "(no words)"
     why = (
         f"name {other[0]}, not {other[1]}"
         if other is not None

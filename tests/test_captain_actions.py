@@ -1339,7 +1339,7 @@ def test_spawn_takes_confirm_on_its_role_and_asks_first_on_words_that_name_nothi
 ) -> None:
     """The plan's one-utterance delegation line holds: "spawn a coder for it" names the role."""
     message = refused(lambda: actions.spawn("alpha", "coder", confirm=True, utterance="Do it."))
-    assert 'ask first: "spawn a coder in alpha?"' in message, message
+    assert '"spawn a coder in alpha?"' in message, message  # "Do it." is a yes: ask again
     assert fleet_rec.calls == []
     ok(
         actions.spawn(
@@ -1387,7 +1387,7 @@ def test_a_bare_yes_with_nothing_pending_is_refused_and_asks(
     alpha: ProjectInfo, agents: dict[str, FleetAgent], fleet_rec: Fleet
 ) -> None:
     message = refused(lambda: actions.stop("alpha", "coder-1", confirm=True, utterance="Yes."))
-    assert 'ask first: "stop coder-1 in alpha?"' in message, message
+    assert '"stop coder-1 in alpha?"' in message and "ask your question again" in message
     assert fleet_rec.calls == []
 
 
@@ -1456,6 +1456,39 @@ def test_a_no_refuses_and_clears_the_question_so_a_later_yes_cannot_revive_it(
     _at_wall(monkeypatch, 1000.0)
     refused(lambda: actions.stop("alpha", "coder-1", confirm=True, utterance="Stop it."))
     refused(lambda: actions.stop("alpha", "coder-1", confirm=True, utterance=no))
+    refused(lambda: actions.stop("alpha", "coder-1", confirm=True, utterance="Yes."))
+    assert fleet_rec.calls == []
+
+
+def test_a_captain_that_asked_first_gets_roger_refused_then_its_re_asked_roger_counts(
+    alpha: ProjectInfo,
+    agents: dict[str, FleetAgent],
+    fleet_rec: Fleet,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """runner2's red (14401, 14414): the captain asked on its own, so nothing was pending and
+    roger was refused. The refusal must say to ask again, never that roger does not count."""
+    _at_wall(monkeypatch, 1000.0)
+    message = refused(lambda: actions.stop("alpha", "coder-1", confirm=True, utterance="roger"))
+    assert "ask your question again" in message and "counts" in message, message
+    assert "does not count" not in message
+    ok(actions.stop("alpha", "coder-1", confirm=True, utterance="roger"))
+    assert fleet_rec.names() == ["stop"]
+
+
+def test_an_owner_line_between_the_question_and_the_yes_kills_the_question(
+    alpha: ProjectInfo,
+    agents: dict[str, FleetAgent],
+    fleet_rec: Fleet,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """runner2's second line (14414), at the server: "Stop it.", then an unrelated owner line
+    (a no the captain answered itself, or "What is up?") through say, then "Yes.": no stop."""
+    from aisquare.services.captain import words
+
+    _at_wall(monkeypatch, 1000.0)
+    refused(lambda: actions.stop("alpha", "coder-1", confirm=True, utterance="Stop it."))
+    words.owner_said("What is up?")
     refused(lambda: actions.stop("alpha", "coder-1", confirm=True, utterance="Yes."))
     assert fleet_rec.calls == []
 

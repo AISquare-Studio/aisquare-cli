@@ -43,7 +43,7 @@ from aisquare.core.store import store_session
 from aisquare.core.tmux import TmuxError, TmuxServer
 from aisquare.models import FleetAgent, TeamSession
 from aisquare.services import fleet
-from aisquare.services.captain import screen
+from aisquare.services.captain import screen, words
 from aisquare.services.captain import state as captain_state
 
 PERSONA = "captain"
@@ -260,6 +260,7 @@ def say(text: str, *, timeout: float = SAY_TIMEOUT_S) -> Reply:
     """
     if not text.strip():
         raise ValueError("nothing to say")
+    words.owner_said(text)  # T1d round 5: an owner line that is no yes closes a pending stop
     deadline = _now() + timedelta(seconds=timeout)
     with _one_at_a_time(deadline, timeout):
         try:

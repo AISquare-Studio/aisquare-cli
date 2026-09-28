@@ -524,6 +524,11 @@ def ask_pending(key: str, at: float, *, ttl: float) -> None:
     state_file.modify_state(_PENDING, change)
 
 
+def clear_pending() -> None:
+    """Close every pending confirmation question (an owner line that is no yes, 14404)."""
+    state_file.modify_state(_PENDING, lambda current: {})
+
+
 def answer_pending(key: str, now: float, *, ttl: float) -> bool:
     """Whether a question about ``key`` is live (asked under ``ttl`` seconds before ``now``);
     it is taken either way — one yes answers one question."""

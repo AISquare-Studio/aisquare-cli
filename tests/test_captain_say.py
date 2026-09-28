@@ -10,6 +10,7 @@ transcript once its session reads ``waiting`` past the moment the text went in.
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -339,6 +340,23 @@ def test_a_waiting_captain_gets_the_text_typed_and_its_reply_is_returned(
     assert fake.typed == [("paste", "what is up"), ("keys", "Enter")]
     assert fake.started == [] and fake.told == []
     assert reply.text == "Nothing needs you right now."
+
+
+@pytest.mark.parametrize(
+    ("line", "kept"), [("No.", False), ("What is up?", False), ("roger", True)]
+)
+def test_an_owner_line_clears_a_pending_confirmation_unless_it_is_a_yes(
+    captain: tuple[Captain, Clock], line: str, kept: bool
+) -> None:
+    """T1d round 5 (14404 (c)): the server never relies on the captain passing a no to the
+    tool. Any owner line through say (the CLI, chat, the voice page) clears a pending stop,
+    restart or spawn question, unless the line is itself a yes."""
+    fake, _ = captain
+    fake.present()  # type: ignore[attr-defined]
+    now = time.time()
+    captain_state.ask_pending("stop coder-1 in alpha [prj_a]", now, ttl=120.0)
+    brain.say(line, timeout=60)
+    assert captain_state.answer_pending("stop coder-1 in alpha [prj_a]", now + 1, ttl=120.0) is kept
 
 
 def test_a_captain_idle_at_a_box_drawn_from_the_first_read_is_typed_into_at_once(

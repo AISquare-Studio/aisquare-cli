@@ -1889,11 +1889,22 @@ class SqliteStore:
         return row is not None
 
     def upsert_session(self, session: TeamSession) -> TeamSession:
-        """Insert the session, or revive/refresh it if the id is already known."""
+        """Insert the session, or revive/refresh it if the id is already known.
+
+        A known session that registers on ANOTHER board moves there (card
+        tsk_01m3k89b2f96tt7xc6crzvxzjk, fix 2b): a fleet restart resumes the same
+        session id, so a seat that once registered on the wrong board stayed there.
+        A move starts from the new board's cursor, as a fresh registration does, so
+        its first delta does not replay that board's history; a refresh on the same
+        board keeps its cursor. (Every SET expression reads the OLD row.)
+        """
         self._conn.execute(
             f"INSERT INTO team_session ({_SESSION_COLUMNS}) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT (id) DO UPDATE SET "
+            "cursor = CASE WHEN excluded.project_id = team_session.project_id "
+            "THEN team_session.cursor ELSE excluded.cursor END, "
+            "project_id = excluded.project_id, "
             "last_seen_at = excluded.last_seen_at, ended_at = NULL, "
             "state = 'working', "
             "transcript_path = COALESCE(excluded.transcript_path, transcript_path), "

@@ -24,10 +24,10 @@ from pathlib import Path
 import pytest
 
 from aisquare.core import orchestrator
-from aisquare.core.ids import new_agent_id
+from aisquare.core.ids import new_agent_id, new_event_id
 from aisquare.core.store import store_session
 from aisquare.core.workspace import project_id_for
-from aisquare.models import FleetAgent, ProjectInfo
+from aisquare.models import FleetAgent, ProjectInfo, TeamEvent, TeamSession
 from aisquare.services import team as team_service
 
 
@@ -207,3 +207,93 @@ def test_the_same_row_id_in_another_store_answers_that_stores_project(
         monkeypatch.setenv("AISQUARE_FLEET_AGENT", "agt_01samerowid")
         seen.append((orchestrator.team_project().id, project.id))
     assert [answer for answer, _ in seen] == [expected for _, expected in seen], seen
+
+
+# --- fix 2b (14435): a session registered on the wrong board moves on its next start -------
+
+
+def _note_on(project: ProjectInfo, text: str) -> int:
+    with store_session() as store:
+        event = store.add_team_event(
+            TeamEvent(
+                id=new_event_id(),
+                project_id=project.id,
+                kind="note",
+                text=text,
+                created_at=datetime.now(tz=UTC),
+            )
+        )
+    assert event.seq is not None
+    return event.seq
+
+
+def _registered(session_id: str, project: ProjectInfo, cursor: int) -> TeamSession:
+    now = datetime.now(tz=UTC)
+    with store_session() as store:
+        return store.upsert_session(
+            TeamSession(
+                id=session_id,
+                project_id=project.id,
+                role="coder",
+                started_at=now,
+                last_seen_at=now,
+                cursor=cursor,
+            )
+        )
+
+
+def test_a_session_registered_under_a_then_under_b_reads_b_from_a_fresh_cursor(
+    boards: tuple[ProjectInfo, ProjectInfo, Path],
+) -> None:
+    """``upsert_session``'s conflict branch kept the first board forever, and a fleet
+    restart resumes the same session id, so a seat that once registered on the wrong
+    board stayed there (the manager moved 4 rows by hand on 09-28). Moving it also moves
+    its cursor to where a fresh registration on B starts, or its first delta on B would
+    replay B's history since its old place on A."""
+    captain, release, _ = boards
+    sid = "aaaa0000-0000-0000-0000-00000000000a"
+    _registered(sid, captain, cursor=_note_on(captain, "captain news"))
+    backlog = _note_on(release, "release news the seat never needs replayed")
+    moved = _registered(sid, release, cursor=backlog)
+    assert moved.project_id == release.id
+    assert moved.cursor == backlog, "a move starts from the new board's cursor"
+
+
+def test_a_session_re_registered_on_its_own_board_keeps_its_cursor(
+    boards: tuple[ProjectInfo, ProjectInfo, Path],
+) -> None:
+    """The control: a resume on the SAME board is a refresh, exactly as before."""
+    captain, _, _ = boards
+    sid = "aaaa0000-0000-0000-0000-00000000000b"
+    first = _note_on(captain, "before")
+    _registered(sid, captain, cursor=first)
+    later = _note_on(captain, "after")
+    again = _registered(sid, captain, cursor=later)
+    assert (again.project_id, again.cursor) == (captain.id, first)
+
+
+def test_a_seat_on_the_wrong_board_moves_to_its_fleets_board_on_restart(
+    boards: tuple[ProjectInfo, ProjectInfo, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End to end, as the fleet restart runs it: the seat first registered under the
+    server's hub (the defect), then resumes the SAME session id inside its fleet window.
+    It must land on its fleet's board, and news posted there before the move must not
+    come back in its first delta (the start already briefed it on the board)."""
+    captain, _, third = boards
+    monkeypatch.setenv("AISQUARE_TEAM_HUB", str(third))
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
+    sid = "cccc9999-0000-0000-0000-000000000009"
+    team_service.hook_session_start(sid, captain.root, "startup")
+    with store_session() as store:
+        before = store.get_session(sid)
+    assert before is not None and before.project_id == project_id_for(third.resolve())
+
+    _note_on(captain, "posted on the captain board before the seat arrived")
+    monkeypatch.setenv("AISQUARE_FLEET_AGENT", _seat(captain, "coder-1").id)
+    team_service.hook_session_start(sid, captain.root, "resume")
+    with store_session() as store:
+        after = store.get_session(sid)
+    assert after is not None and after.project_id == captain.id
+
+    delta = team_service.hook_prompt_heartbeat(sid, captain.root)
+    assert "before the seat arrived" not in delta, delta

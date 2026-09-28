@@ -429,6 +429,7 @@ def test_the_bundled_captain_persona_carries_the_cards_rules() -> None:
         "confirm=true",
         "name the agent, its role or its project",  # T1d: "stop it" names nothing
         "their yes",  # T1d (13570): the owner's yes to the named question confirms it
+        "if the tool refuses, ask its question",  # 13614 (2): call first, so it is recorded
     ):
         assert rule in body, rule
 

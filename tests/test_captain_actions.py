@@ -1442,6 +1442,51 @@ def test_words_that_name_a_different_agent_or_project_refuse(
     assert fleet_rec.calls == []
 
 
+@pytest.mark.parametrize("no", ["No.", "nope", "cancel", "negative", "don't", "stop that"])
+def test_a_no_refuses_and_clears_the_question_so_a_later_yes_cannot_revive_it(
+    alpha: ProjectInfo,
+    agents: dict[str, FleetAgent],
+    fleet_rec: Fleet,
+    monkeypatch: pytest.MonkeyPatch,
+    no: str,
+) -> None:
+    """13612 R1, 13614 (1): "Stop it.", the question, then the owner's no."""
+    _at_wall(monkeypatch, 1000.0)
+    refused(lambda: actions.stop("alpha", "coder-1", confirm=True, utterance="Stop it."))
+    refused(lambda: actions.stop("alpha", "coder-1", confirm=True, utterance=no))
+    refused(lambda: actions.stop("alpha", "coder-1", confirm=True, utterance="Yes."))
+    assert fleet_rec.calls == []
+
+
+@pytest.mark.parametrize("yes", ["OK.", "okay", "sure", "yup", "Roger.", "copy", "Affirmative!"])
+def test_a_whole_utterance_ok_or_roger_answers_a_live_question(
+    alpha: ProjectInfo,
+    agents: dict[str, FleetAgent],
+    fleet_rec: Fleet,
+    monkeypatch: pytest.MonkeyPatch,
+    yes: str,
+) -> None:
+    """13614 (3): these count only as the WHOLE utterance, and only while a question is live."""
+    _at_wall(monkeypatch, 1000.0)
+    refused(lambda: actions.stop("alpha", "coder-1", confirm=True, utterance=yes))
+    ok(actions.stop("alpha", "coder-1", confirm=True, utterance=yes))
+    assert fleet_rec.names() == ["stop"]
+
+
+def test_ok_inside_a_sentence_is_never_a_yes(
+    alpha: ProjectInfo,
+    agents: dict[str, FleetAgent],
+    fleet_rec: Fleet,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _at_wall(monkeypatch, 1000.0)
+    refused(lambda: actions.stop("alpha", "coder-1", confirm=True, utterance="Stop it."))
+    refused(
+        lambda: actions.stop("alpha", "coder-1", confirm=True, utterance="OK, what's up with it")
+    )
+    assert fleet_rec.calls == []
+
+
 def test_a_yes_that_names_another_agent_refuses_even_with_its_question_live(
     alpha: ProjectInfo,
     agents: dict[str, FleetAgent],

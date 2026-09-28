@@ -1469,6 +1469,12 @@ CONFIRM_TTL_S = 120.0
 AFFIRMATIVES = ("yes", "yeah", "yep", "do it", "go ahead", "confirm", "confirmed")
 """How the owner says yes to the captain's question: the utterance begins with one (13570)."""
 
+WHOLE_AFFIRMATIVES = ("ok", "okay", "sure", "yup", "roger", "copy", "affirmative")
+"""Yes only as the WHOLE utterance, punctuation aside (13614): "OK, what's up" is no yes."""
+
+NEGATIVES = ("no", "nope", "cancel", "negative", "don't", "stop that")
+"""The owner's no: it refuses and clears the live question, so no later yes revives it."""
+
 
 def _says(said: list[str], phrase: str) -> tuple[int, int] | None:
     """Where ``phrase``'s words stand in ``said``, as whole words, or ``None``."""
@@ -1527,7 +1533,14 @@ def _names_another(
 
 def _affirmative(utterance: str) -> bool:
     said = _WORDS.findall(utterance.lower())
-    return any(said[: len(words)] == words for words in map(_WORDS.findall, AFFIRMATIVES))
+    return any(said[: len(words)] == words for words in map(_WORDS.findall, AFFIRMATIVES)) or any(
+        said == words for words in map(_WORDS.findall, WHOLE_AFFIRMATIVES)
+    )
+
+
+def _negative(utterance: str) -> bool:
+    said = _WORDS.findall(utterance.lower())
+    return any(said[: len(words)] == words for words in map(_WORDS.findall, NEGATIVES))
 
 
 def _confirmation(
@@ -1546,6 +1559,12 @@ def _confirmation(
     refusal keeps its question, and records it, so the owner's "yes" can answer it.
     """
     key = f"{action} [{project.id}]"
+    if _negative(utterance):
+        captain_state.answer_pending(key, _wall(), ttl=CONFIRM_TTL_S)  # cleared, never revived
+        return Refused(
+            f"the owner said no ({utterance.strip()[:80]!r}) — nothing done, and the question "
+            f'"{action}?" is closed; ask again only if they raise it again'
+        )
     other = _names_another(utterance, label=label, role=role, project=project)
     if other is None and _named(utterance, label=label, role=role, project=project):
         captain_state.answer_pending(key, _wall(), ttl=CONFIRM_TTL_S)  # answered in full

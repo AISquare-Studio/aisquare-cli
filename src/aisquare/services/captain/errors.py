@@ -15,5 +15,19 @@ class Refused(Exception):
     """A rule said no. The message is what the owner hears after ``refused: ``."""
 
 
+class Ask(Refused):
+    """A refusal whose words are one question for the owner (T1e, 14560).
+
+    The captain says a refusal as it came, so the question IS the refusal: the Actions
+    server says ``question`` alone, never ``refused:`` or an action seq to narrate. The
+    rule that refused (``reason``) goes to the audit with the question.
+    """
+
+    def __init__(self, question: str, *, reason: str) -> None:
+        super().__init__(question)
+        self.question = question
+        self.reason = reason
+
+
 class Failed(Exception):
     """Something failed that a retry may fix (a held lock, a busy store): said after ``error: ``."""

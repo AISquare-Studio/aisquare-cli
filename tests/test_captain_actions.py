@@ -1290,12 +1290,11 @@ def test_stop_it_names_nothing_so_confirm_is_not_taken_and_nothing_stops(
     message = refused(
         lambda: actions.stop("alpha", "coder-1", force=force, confirm=True, utterance="Stop it.")
     )
-    ask = "force-stop coder-1 in alpha?" if force else "stop coder-1 in alpha?"
-    assert "'Stop it.' name no agent, role or project" in message, message
-    assert f'ask first: "{ask}"' in message, message
+    assert message == ("Force-stop" if force else "Stop") + " coder-1 in alpha?", message
     assert fleet_rec.calls == [], "nothing stopped"
     last = audit(alpha.id)[-1]
     assert (last["tool"], last["ok"], last["utterance"]) == ("stop", False, "Stop it.")
+    assert "'Stop it.' name no agent, role or project" in last["said"], "the rule, audited"
 
 
 @pytest.mark.parametrize(
@@ -1339,7 +1338,7 @@ def test_spawn_takes_confirm_on_its_role_and_asks_first_on_words_that_name_nothi
 ) -> None:
     """The plan's one-utterance delegation line holds: "spawn a coder for it" names the role."""
     message = refused(lambda: actions.spawn("alpha", "coder", confirm=True, utterance="Do it."))
-    assert '"spawn a coder in alpha?"' in message, message  # "Do it." is a yes: ask again
+    assert message == "Spawn a coder in alpha?", message  # "Do it." is a yes: ask again
     assert fleet_rec.calls == []
     ok(
         actions.spawn(
@@ -1356,10 +1355,89 @@ def test_restart_takes_confirm_on_named_words_and_asks_first_otherwise(
     message = refused(
         lambda: actions.restart("alpha", "coder-1", confirm=True, utterance="Restart it.")
     )
-    assert 'ask first: "restart coder-1 in alpha?"' in message, message
+    assert message == "Restart coder-1 in alpha?", message
     assert fleet_rec.calls == []
     ok(actions.restart("alpha", "coder-1", confirm=True, utterance="restart coder-1"))
     assert fleet_rec.names() == ["restart"]
+
+
+UNNAMED_CALLS = [
+    pytest.param(
+        lambda: actions.stop("alpha", "coder-1", confirm=True, utterance="Stop it."),
+        "Stop coder-1 in alpha?",
+        "the owner's words 'Stop it.' name no agent, role or project",
+        id="stop",
+    ),
+    pytest.param(
+        lambda: actions.stop("alpha", "coder-1", force=True, confirm=True, utterance="Stop it."),
+        "Force-stop coder-1 in alpha?",
+        "the owner's words 'Stop it.' name no agent, role or project",
+        id="force-stop",
+    ),
+    pytest.param(
+        lambda: actions.restart("alpha", "coder-1", confirm=True, utterance="Restart it."),
+        "Restart coder-1 in alpha?",
+        "the owner's words 'Restart it.' name no agent, role or project",
+        id="restart",
+    ),
+    pytest.param(
+        lambda: actions.spawn("alpha", "coder", confirm=True, utterance="Start one."),
+        "Spawn a coder in alpha?",
+        "the owner's words 'Start one.' name no agent, role or project",
+        id="spawn",
+    ),
+    pytest.param(
+        lambda: actions.stop("alpha", "coder-1", confirm=True, utterance=""),
+        "Stop coder-1 in alpha?",
+        "the owner's words (no words) name no agent, role or project",
+        id="no-words",
+    ),
+    pytest.param(
+        lambda: actions.stop("alpha", "coder-1", confirm=True, utterance="Yes."),
+        "Stop coder-1 in alpha?",
+        "no question was pending for \"stop coder-1 in alpha?\" when the owner said 'Yes.'",
+        id="bare-yes-nothing-pending",
+    ),
+]
+
+
+@pytest.mark.parametrize(("call", "question", "why"), UNNAMED_CALLS)
+def test_words_that_name_nothing_are_refused_with_the_question_itself(
+    alpha: ProjectInfo,
+    agents: dict[str, FleetAgent],
+    fleet_rec: Fleet,
+    call: Callable[[], str],
+    question: str,
+    why: str,
+) -> None:
+    """runner2's real captain (14560): an unnamed stop came back as "The stop was refused
+    (action seq N) because Stop it. doesn't name ... Stop coder-1 in alpha?", the question
+    always after a narrated refusal, whatever the persona said. The refusal's words ARE the
+    question now, so said as it came it only asks; the rule and the seq stay in the audit."""
+    assert refused(call) == question
+    assert fleet_rec.calls == [], "nothing done"
+    last = audit(alpha.id)[-1]
+    assert last["ok"] is False
+    assert why in last["said"] and question in last["said"], last["said"]
+
+
+def test_through_the_protocol_the_captain_reads_the_question_alone(
+    alpha: ProjectInfo, agents: dict[str, FleetAgent], fleet_rec: Fleet
+) -> None:
+    """What the captain's Claude Code reads (14560): an error result whose text is the
+    question, with no "refused:" and no action seq to narrate."""
+
+    async def go() -> Any:
+        async with Client(actions.build_server(), mode="legacy") as client:
+            return await client.call_tool(
+                "stop",
+                {"project": "alpha", "label": "coder-1", "confirm": True, "utterance": "Stop it."},
+            )
+
+    result = anyio.run(go)
+    assert result.is_error
+    assert result.content[0].text == "Stop coder-1 in alpha?"
+    assert fleet_rec.calls == []
 
 
 def _at_wall(monkeypatch: pytest.MonkeyPatch, now: float) -> None:
@@ -1387,7 +1465,8 @@ def test_a_bare_yes_with_nothing_pending_is_refused_and_asks(
     alpha: ProjectInfo, agents: dict[str, FleetAgent], fleet_rec: Fleet
 ) -> None:
     message = refused(lambda: actions.stop("alpha", "coder-1", confirm=True, utterance="Yes."))
-    assert '"stop coder-1 in alpha?"' in message and "ask your question again" in message
+    assert message == "Stop coder-1 in alpha?", message
+    assert "no question was pending" in audit(alpha.id)[-1]["said"]
     assert fleet_rec.calls == []
 
 
@@ -1470,8 +1549,9 @@ def test_a_captain_that_asked_first_gets_roger_refused_then_its_re_asked_roger_c
     roger was refused. The refusal must say to ask again, never that roger does not count."""
     _at_wall(monkeypatch, 1000.0)
     message = refused(lambda: actions.stop("alpha", "coder-1", confirm=True, utterance="roger"))
-    assert "ask your question again" in message and "counts" in message, message
-    assert "does not count" not in message
+    assert message == "Stop coder-1 in alpha?", "asked again: the question itself"
+    said = audit(alpha.id)[-1]["said"]
+    assert "their next yes now counts" in said and "does not count" not in said, said
     ok(actions.stop("alpha", "coder-1", confirm=True, utterance="roger"))
     assert fleet_rec.names() == ["stop"]
 
@@ -1507,7 +1587,7 @@ def test_a_sentence_that_starts_like_a_no_is_neither_yes_nor_no(
     message = refused(
         lambda: actions.stop("alpha", "coder-1", confirm=True, utterance="No problem, go ahead")
     )
-    assert "said no" not in message and 'ask first: "stop coder-1 in alpha?"' in message
+    assert message == "Stop coder-1 in alpha?", "no answer either way: asked again"
     ok(actions.stop("alpha", "coder-1", confirm=True, utterance="Yes."))
     ok(actions.stop("alpha", "coder-1", confirm=True, utterance="Stop that coder in alpha"))
     assert fleet_rec.names() == ["stop", "stop"]

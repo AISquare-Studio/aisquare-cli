@@ -23,7 +23,10 @@ Rules every tool keeps:
   ``AISQUARE_TEAM_HUB`` cannot pull a write onto the wrong board.
 - **A refusal is said, never faked.** It is an MCP error result whose text
   starts ``refused:`` (a rule said no) or ``error:`` (something failed) and
-  ends with the audit's seq.
+  ends with the audit's seq. One kind is a question instead: a stop, spawn or
+  restart whose words name nothing is refused with the question itself
+  (``Stop coder-1 in alpha?``, :class:`~aisquare.services.captain.errors.Ask`),
+  so the captain, saying it as it came, only asks; its rule and seq are audited.
 
 Results are JSON objects, each with ``action_seq`` (the audit event's seq).
 Called from Python — :func:`perform`, which the CLI verbs use — a tool raises
@@ -57,7 +60,7 @@ from aisquare.services import team as team_service
 from aisquare.services.captain import queue as captain_queue
 from aisquare.services.captain import screen, words
 from aisquare.services.captain import state as captain_state
-from aisquare.services.captain.errors import Failed, Refused
+from aisquare.services.captain.errors import Ask, Failed, Refused
 
 if TYPE_CHECKING:
     from mcp.server.mcpserver import MCPServer
@@ -215,6 +218,16 @@ def _run(
                 raise Refused(str(exc)) from exc
         outcome = body(target)
     except Exception as exc:
+        if isinstance(exc, Ask):
+            # The question IS the refusal (14560): said as it came, it asks the owner and
+            # narrates nothing. The rule that refused, and the seq, stay in the audit; an
+            # audit that failed is still said, as every refusal says it.
+            recorded = _audit_quietly(
+                tool, target, args, utterance, f"refused: {exc.reason}; asked {exc.question!r}"
+            )
+            raise Refused(
+                exc.question if recorded.isdigit() else f"{exc.question} ({recorded})"
+            ) from exc
         said = _failure(exc)
         if said is None:
             _audit_quietly(
@@ -1555,23 +1568,28 @@ def _confirmation(
     ):
         return None
     captain_state.ask_pending(key, _wall(), ttl=CONFIRM_TTL_S)
+    # Words that name nothing are refused with the question itself (14560): the captain
+    # says a refusal as it came, so it asks, and never narrates the refusal first.
+    question = f"{action[:1].upper()}{action[1:]}?"
     if other is None and words.affirmative(utterance):
         # The captain asked on its own, so nothing was pending (14401): the yes is not
         # wrong, the order is. Never "roger does not count".
-        return Refused(
-            f'no question was pending for "{action}?" when the owner said '
-            f"{utterance.strip()[:80]!r} — ask your question again; their next yes now counts"
+        return Ask(
+            question,
+            reason=f'no question was pending for "{action}?" when the owner said '
+            f"{utterance.strip()[:80]!r}; their next yes now counts",
         )
     said_words = utterance.strip()
     quoted = repr(said_words[:80]) if said_words else "(no words)"
-    why = (
-        f"name {other[0]}, not {other[1]}"
-        if other is not None
-        else "name no agent, role or project"
-    )
+    if other is None:
+        return Ask(
+            question,
+            reason=f"the owner's words {quoted} name no agent, role or project, so "
+            "confirm=true is not taken",
+        )
     return Refused(
-        f"the owner's words {quoted} {why}, so confirm=true is not taken — ask first: "
-        f'"{action}?" and call again with their answer as the utterance'
+        f"the owner's words {quoted} name {other[0]}, not {other[1]}, so confirm=true is not "
+        f'taken — ask first: "{action}?" and call again with their answer as the utterance'
     )
 
 
@@ -1917,7 +1935,7 @@ def perform(
     in its args (13081), the same refusals in the same words. Returns the tool's
     result with its ``action_seq``; raises :class:`Refused` or :class:`Failed`
     whose text is exactly what the captain would have been told, the audit's seq
-    included.
+    included (a question, :class:`Ask`, is said alone).
     """
     function = dict(TOOLS).get(tool)
     if function is None:

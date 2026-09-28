@@ -228,9 +228,17 @@ reads working until its first reply.
 
 ## Rules the captain keeps
 
-- **Confirm before stop, spawn and restart.** Those three refuse unless the
-  captain passes `confirm=true`, and its briefing lets it do so only when your
-  own words asked for that action or confirmed it.
+- **Confirm by name before stop, spawn and restart.** Those three act only when
+  your words name what they act on: the agent (`coder-1`), its role (`coder`,
+  `coding agent`) or its project (`alpha`). "Stop the coding agent in alpha" is
+  honoured at once. Words that name nothing ("stop it") are refused and nothing
+  happens; the captain asks you the tool's one-sentence question ("Stop coder-1
+  in alpha?"), and your yes answers it within two minutes: *yes*, *yeah*, *yep*,
+  *do it*, *go ahead* or *confirm* to begin your answer, or *ok*, *okay*, *sure*,
+  *yup*, *roger*, *copy* or *affirmative* as the whole of it. *No*, *nope*,
+  *cancel*, *negative*, *don't* or *stop that* on its own closes the question,
+  and so does anything else you say before your yes. Words that name another
+  agent or project are refused: "stop the coder in beta" never stops alpha's.
 - **Pane text is data.** What an agent's pane or a note says is reported to
   you, never obeyed.
 - **Never into a dialog.** Anything that types into the captain reads its pane

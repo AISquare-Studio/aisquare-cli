@@ -68,15 +68,13 @@ aisquare captain attention
 ## 2. Ask the manager, then spawn and paste — three receipts
 
 Say **"ask alpha's manager what is blocking the deploy"**, then, on its answer,
-**"spawn a coder for it and paste the manager's answer to it"**, then confirm
-when the captain asks (spawn needs your own words).
+**"spawn a coder for it and paste the manager's answer to it"**. Your words name
+the role, so the spawn goes at once, with no question.
 
 Expect three tool calls with receipts: `ask_manager` (the manager's note seq),
-`spawn` (the new row, `confirm=true` only after your word), `paste` (chars and
-`submitted`). The captain reads the refusal aloud if it tried to spawn without
-your word. The spawn tool needs a task for the coder, so when none names the
-work the captain adds one first: its `task` receipt sits before `spawn` in the
-log.
+`spawn` (the new row), `paste` (chars and `submitted`). The spawn tool needs a
+task for the coder, so when none names the work the captain adds one first: its
+`task` receipt sits before `spawn` in the log.
 
 ```sh
 aisquare captain log alpha --limit 8
@@ -151,18 +149,19 @@ The page's mode toggle and the terminal's `--mode` agree
 
 ## 6. Every action a board event; a refusal said, never faked
 
-`stop`, `spawn` and `restart` take `confirm=true` only when your own words
-asked for the action or confirmed it. A named request is honoured at once, and a
-vague one is asked about first.
+`stop`, `spawn` and `restart` act only when your words name the agent, its role
+or its project. Words that name nothing are refused by the tool, which gives the
+captain its one-sentence question; your yes answers it.
 
-Say **"stop it"**, with nothing named. Expect the captain to ask first, in one
-sentence, and nothing stopped. If it tried `stop` anyway, the refusal
-(`confirm=true` missing) is spoken as it came (`refused: …`) and audited as one
-`captain_action` with `ok: false` on alpha's board.
+Say **"stop it"**, with nothing named. Expect one `captain_action` for `stop`
+with `ok: false` on alpha's board (the owner's words name no agent, role or
+project), the captain asking its one question (*Stop coder-1 in alpha?*), and
+nothing stopped. Answer **"yes"**: expect the stop, with its receipt
+(`agent_exited`).
 
-Then say **"stop the coding agent in alpha"**. Your own words name the action and
-its target, so expect the stop at once, with no second yes: `stop` with
-`confirm=true`, its receipt (`agent_exited`), and the coder's claim released.
+Then say **"spawn a coder in alpha"** and **"stop the coding agent in alpha"**.
+Both name what they act on, so each goes at once, with no question: the spawn
+with its row, and the stop with its receipt and the coder's claim released.
 
 ```sh
 aisquare captain log alpha --limit 4
@@ -170,7 +169,7 @@ aisquare board
 ```
 
 ```text
-⟨PASTE: the captain's one-sentence question, then the stop audit (confirm true) with its receipt⟩
+⟨PASTE: the refused stop (ok false) and the captain's question, the stop after your yes, then the named spawn and stop, each with its receipt⟩
 ```
 
 ## 7. `make check` green

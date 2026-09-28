@@ -15,8 +15,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the home board, with no tool but its own **Actions server** (`aisquare captain
   serve --stdio`): 24 fixed tools, one `captain_action` audit event per call
   carrying the owner's words and the effect's receipt; `stop`, `spawn` and
-  `restart` need `confirm=true` on the owner's own words; a refusal is said as
-  `refused:` / `error:`, never faked. `aisquare captain` starts or attaches;
+  `restart` act only when the owner's words name the agent, its role or its
+  project, and otherwise refuse with a one-sentence question, which a bare yes
+  or roger answers within two minutes and a no, or any other owner line,
+  closes; a refusal is said as `refused:` / `error:`, never faked. `aisquare captain` starts or attaches;
   `aisquare captain "text"` delivers and prints the reply (`--json`: one object);
   `aisquare captain chat` is line by line. The **attention queue** folds every
   board into one ranked list of what needs the owner (question, blocked,
@@ -38,10 +40,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   name (*trust this folder first*), and a pane that cannot be read is refused.
   After a reboot a provably gone tmux server means a fresh
   start, anything less a fast refusal naming
-  `aisquare fleet reap -P <home> --server-down`.
+  `aisquare fleet reap -P <home> --server-down`. The captain is spawned with
+  Claude Code's session-rating survey off (`CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY`),
+  so a survey never blocks the voice path from a phone that cannot answer it.
 
 ### Fixed
 
+- **Each fleet seat lands on its own fleet's board.** A tmux server started from
+  a shell that exported `AISQUARE_TEAM_HUB` handed that hub to every window, and
+  the hub overrode everything, so the seats of two fleets on one server
+  registered on a third board and their deltas mixed both trains. Every window
+  `fleet spawn` opens now carries its own fleet's root as the hub; inside a
+  fleet window the fleet row's board wins over an inherited hub, said once on
+  stderr; and a session that registered on the wrong board moves to its fleet's
+  board when a restart resumes it.
 - **`aisquare serve --stdio` no longer exits in the middle of a tool call.** Its
   idle deadline (`--close-after`, `AISQUARE_SERVE_CLOSE_AFTER`) counted inbound
   client messages only, while a tool runs on a worker thread and the client sends

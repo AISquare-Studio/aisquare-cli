@@ -297,3 +297,23 @@ def test_a_seat_on_the_wrong_board_moves_to_its_fleets_board_on_restart(
 
     delta = team_service.hook_prompt_heartbeat(sid, captain.root)
     assert "before the seat arrived" not in delta, delta
+
+
+def test_the_overridden_hub_is_printed_as_typed_never_escaped(
+    boards: tuple[ProjectInfo, ProjectInfo, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """#230's Windows red (job 108830025123, 14482): the warning quoted the hub with repr, so a
+    Windows path's backslashes came out doubled, and the owner could not find their own path
+    in it. A backslash is a legal name character on POSIX, so this reproduces it on every OS."""
+    captain, _, _ = boards
+    odd = tmp_path / "work\\space-rc"
+    odd.mkdir(parents=True)
+    monkeypatch.setenv("AISQUARE_TEAM_HUB", str(odd))
+    monkeypatch.setenv("AISQUARE_FLEET_AGENT", _seat(captain, "coder-1").id)
+    orchestrator.team_project()
+    err = capsys.readouterr().err
+    assert str(odd) in err, err
+    assert "\\\\" not in err, "each backslash is printed once, as typed"

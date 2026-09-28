@@ -172,7 +172,9 @@ def team_project(cwd: Path | None = None) -> ProjectInfo:
         if differs and hub not in _WARNED_HUBS:
             _WARNED_HUBS.add(hub)
             print(
-                f"⚠ AISQUARE_TEAM_HUB={hub!r} names another board, but this is a fleet "
+                # The path as typed, in plain quotes: repr doubled every backslash of a
+                # Windows path, and the owner could not find their own path in it (#230).
+                f"⚠ AISQUARE_TEAM_HUB='{hub}' names another board, but this is a fleet "
                 f"window of {fleet.root.name or fleet.id}, so the fleet's own board wins.",
                 file=sys.stderr,
             )

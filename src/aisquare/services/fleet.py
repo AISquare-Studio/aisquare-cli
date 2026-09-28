@@ -1548,15 +1548,18 @@ def spawn(
         flags += ["--persona", chosen_persona]
     flags += ["--name", picked]
     command = selfcli.argv_for(["launch", role, *flags, *role_args, *extra])
-    env = {orchestrator.FLEET_AGENT_ENV_VAR: agent_id}
+    # Every window names its own fleet's board. A window inherits the tmux SERVER's
+    # environment, and a server started from a shell that exported a hub carries it
+    # globally, so without this pin every seat of every fleet on that server joined
+    # the one board the server's hub named (card tsk_01m3k89b2f96tt7xc6crzvxzjk).
+    env = {orchestrator.FLEET_AGENT_ENV_VAR: agent_id, "AISQUARE_TEAM_HUB": str(project.root)}
     if role == CAPTAIN_ROLE:
         # The launcher activates a board BEFORE it hands the agent its `-e` pairs,
         # from its cwd — the brain folder, where `.aisquare` above it is a project
         # marker. With the hub only in `-e`, it onboarded the brain folder (or
-        # `$HOME`, under `~/.aisquare`) as a project; here the launcher lands on the
-        # home board, which the store keeps captured (T2).
+        # `$HOME`, under `~/.aisquare`) as a project; the hub above lands the
+        # launcher on the home board, which the store keeps captured (T2).
         env["AISQUARE_HOME"] = str(paths.aisquare_home().resolve())
-        env["AISQUARE_TEAM_HUB"] = str(project.root)
     if config.disable_native_agent_teams:
         env["CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"] = "0"
     # The desktop as THIS process sees it (#147). A window inherits the tmux

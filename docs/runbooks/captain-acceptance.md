@@ -30,6 +30,17 @@ answer *Yes, I trust this folder* first. A new coder in an untrusted folder
 stops at its own trust dialog. The captain never types into it: `paste`, `tell`
 and `press` refuse by name, saying *trust this folder first*.
 
+Claude Code can draw its session-rating survey (*How is Claude doing this
+session?*) in the captain's pane mid-conversation. The captain never types into
+it, and a phone cannot answer it, so every voice line would be refused until
+someone attaches. Once card T1e is on the RC, the captain is spawned with the
+survey off. Before that, bind the switch once; `--env` merges per key with what
+the role already has:
+
+```sh
+aisquare team bind captain --env CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1
+```
+
 ```text
 ⟨PASTE: aisquare captain voice --show-token⟩
 ```

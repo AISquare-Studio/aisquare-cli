@@ -181,6 +181,25 @@ def test_the_captains_window_carries_the_home_and_the_hub(
     assert env["AISQUARE_HOME"] == str(paths.aisquare_home().resolve())
 
 
+def test_the_captains_window_turns_claude_codes_rating_survey_off(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+) -> None:
+    """T1e: runner2's docker pass saw Claude Code 2.1.283 draw its session-rating survey in
+    the captain's pane mid-conversation; send rightly refused to type into it, so every voice
+    line was refused, and from the phone the owner cannot answer it. Off at spawn, for the
+    captain alone (screen.py's refusal stays the backstop)."""
+    brain.start()
+    env = tmux.spawned[-1]["env"]
+    assert isinstance(env, dict)
+    assert env["CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY"] == "1"
+    fleet_service.spawn(project, "coder", worktree=False)
+    coder_env = tmux.spawned[-1]["env"]
+    assert isinstance(coder_env, dict)
+    assert "CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY" not in coder_env, "other roles unchanged"
+
+
 def test_the_captains_launcher_joins_the_home_board_never_a_project(
     tmux: FakeTmux,
     claude_on_path: Path,
@@ -429,7 +448,7 @@ def test_the_bundled_captain_persona_carries_the_cards_rules() -> None:
         "confirm=true",
         "name the agent, its role or its project",  # T1d: "stop it" names nothing
         "their yes",  # T1d (13570): the owner's yes to the named question confirms it
-        "if the tool refuses, ask its question",  # 13614 (2): call first, so it is recorded
+        "if the tool refuses, ask only its question",  # 13614 (2), 14481: never the refusal
         "a no too; never ask first",  # 14404 (a): the owner's exact words, every time
     ):
         assert rule in body, rule

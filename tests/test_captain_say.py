@@ -851,6 +851,21 @@ def test_both_doors_type_into_a_real_captain_whose_top_rule_carries_its_name(
     assert fake.typed == [("paste", "what is up"), ("keys", "Enter")]
 
 
+@pytest.mark.parametrize(("line", "kept"), [("what is up", False), ("roger", True)])
+def test_send_clears_a_pending_confirmation_as_say_does(
+    captain: tuple[Captain, Clock], line: str, kept: bool
+) -> None:
+    """T1e F1 (coder3d-1, PR 228 comment 5866161120): What's up types through send. Without
+    this, the captain's reply ends with its own question and the owner's Yes. confirms an
+    earlier stop instead."""
+    fake, _ = captain
+    fake.present()  # type: ignore[attr-defined]
+    now = time.time()
+    captain_state.ask_pending("stop coder-1 in alpha [prj_a]", now, ttl=120.0)
+    brain.send(line)
+    assert captain_state.answer_pending("stop coder-1 in alpha [prj_a]", now + 1, ttl=120.0) is kept
+
+
 def test_send_types_into_a_waiting_captain_and_returns_without_waiting_for_a_reply(
     captain: tuple[Captain, Clock],
 ) -> None:

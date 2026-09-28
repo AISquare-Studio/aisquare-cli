@@ -297,6 +297,7 @@ def send(text: str, *, timeout: float = SEND_TIMEOUT_S) -> datetime:
     """
     if not text.strip():
         raise ValueError("nothing to send")
+    words.owner_said(text)  # T1e F1: What's up is an owner line too, and closes a pending stop
     deadline = _now() + timedelta(seconds=timeout)
     with _one_at_a_time(deadline, timeout):
         try:

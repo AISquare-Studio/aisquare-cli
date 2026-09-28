@@ -43,7 +43,7 @@ from aisquare.core.store import store_session
 from aisquare.core.tmux import TmuxError, TmuxServer
 from aisquare.models import FleetAgent, TeamSession
 from aisquare.services import fleet
-from aisquare.services.captain import screen
+from aisquare.services.captain import screen, words
 from aisquare.services.captain import state as captain_state
 
 PERSONA = "captain"
@@ -209,8 +209,22 @@ def find() -> FleetAgent | None:
     return None
 
 
-def start(prompt: str | None = None, *, size: tuple[int, int] | None = None) -> fleet.SpawnReceipt:
-    """Start the home's captain. The fleet refuses a second one (one per home)."""
+def start(
+    prompt: str | None = None,
+    *,
+    size: tuple[int, int] | None = None,
+    account: str | None = None,
+    binary: str | None = None,
+    permission_mode: str | None = None,
+    persona: str = PERSONA,
+) -> fleet.SpawnReceipt:
+    """Start the home's captain. The fleet refuses a second one (one per home).
+
+    ``account``, ``binary``, ``permission_mode`` and ``persona`` are the owner's
+    choices from the Spawn dialog (T4), each passed to ``fleet.spawn`` as its CLI
+    flag would be (``None``: the role's default). What makes it the captain — its
+    home board, its label, its brain folder, its one server — is never a choice.
+    """
     home = captain_state.home_project()
     brain_dir().mkdir(parents=True, exist_ok=True)
     write_mcp_config()
@@ -218,11 +232,14 @@ def start(prompt: str | None = None, *, size: tuple[int, int] | None = None) -> 
         home,
         fleet.CAPTAIN_ROLE,
         label=fleet.CAPTAIN_LABEL,
-        persona=PERSONA,
+        persona=persona,
         cwd=brain_dir(),
         agent_args=launch_args(home.root),
         prompt=prompt,
         size=size,
+        account=account,
+        binary=binary,
+        permission_mode=permission_mode,
     )
 
 
@@ -243,6 +260,7 @@ def say(text: str, *, timeout: float = SAY_TIMEOUT_S) -> Reply:
     """
     if not text.strip():
         raise ValueError("nothing to say")
+    words.owner_said(text)  # T1d round 5: an owner line that is no yes closes a pending stop
     deadline = _now() + timedelta(seconds=timeout)
     with _one_at_a_time(deadline, timeout):
         try:

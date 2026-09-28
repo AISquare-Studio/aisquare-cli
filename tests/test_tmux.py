@@ -1172,6 +1172,36 @@ def test_live_new_session_env_does_not_reach_a_window_opened_by_hand(live: TmuxS
 
 
 @requires_tmux
+def test_live_a_windows_own_hub_beats_the_servers_global_hub(live: TmuxServer) -> None:
+    """Card tsk_01m3k89b2f96tt7xc6crzvxzjk: the owner's ``asqui`` server holds a GLOBAL
+    ``AISQUARE_TEAM_HUB``, which every window inherits. Two fleets' windows on ONE such
+    server, each spawned with its own hub (``fleet spawn`` sets it per window), must each
+    see their own. The window opened by hand, with no ``-e``, sees the server's, which
+    proves the global pin is live on this server (the negative control)."""
+    say = 'echo "hub=${AISQUARE_TEAM_HUB:-unset}"; exec sleep 30'
+    first = live.spawn_window(
+        "asq-test-fox", name="w0", cwd=Path("/tmp"), command=["sh", "-c", say],
+        env={"AISQUARE_TEAM_HUB": "/work/captain"}, width=80, height=24,
+    )  # fmt: skip
+    live.run("set-environment", "-g", "AISQUARE_TEAM_HUB", "/work/workspace-rc")
+    second = live.spawn_window(
+        "asq-test-owl", name="w0", cwd=Path("/tmp"), command=["sh", "-c", say],
+        env={"AISQUARE_TEAM_HUB": "/work/release"}, width=80, height=24,
+    )  # fmt: skip
+    by_hand = live.run(
+        "new-window", "-d", "-P", "-F", "#{pane_id}", "-t", "=asq-test-owl:", "--",
+        "sh", "-c", say,
+    ).strip()  # fmt: skip
+    panes = (first.pane_id, second.pane_id, by_hand)
+    assert _wait(lambda: all("hub=" in _screen(live, pane) for pane in panes)), [
+        _screen(live, pane) for pane in panes
+    ]
+    assert "hub=/work/captain" in _screen(live, first.pane_id)
+    assert "hub=/work/release" in _screen(live, second.pane_id)
+    assert "hub=/work/workspace-rc" in _screen(live, by_hand)
+
+
+@requires_tmux
 def test_live_has_session_is_exact_because_of_the_equals(live: TmuxServer) -> None:
     _spawn(live, "asq-test-fox", "w0", CAT)
     assert live.has_session("asq-test-fox") is True

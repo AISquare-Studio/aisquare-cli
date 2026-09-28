@@ -58,10 +58,13 @@ from aisquare.cli.ui.groups import (
     TogglePin,
     UndoLayout,
 )
+from aisquare.cli.ui.receiver import listen_for_ui, stop_listening_for_ui
 from aisquare.cli.ui.sidebar import (
+    ALIVE_STATES,
     AccountsSelected,
     AddProject,
     AgentSelected,
+    CaptainRequested,
     DoctorSelected,
     ProjectSelected,
     ResizeSidebar,
@@ -76,6 +79,7 @@ from aisquare.cli.ui.terminal import EscapeToSidebar, SelectionHost, TerminalPan
 from aisquare.cli.ui.theme import ThemePicker, restore_theme, theme_autosave
 from aisquare.cli.ui.views.accounts import AccountsChanged, AccountsView, read_session, summarise
 from aisquare.cli.ui.views.agent import AgentRestarted, AgentView
+from aisquare.cli.ui.views.captain import CaptainView
 from aisquare.cli.ui.views.doctor import DoctorRefreshed, DoctorView
 from aisquare.cli.ui.views.onboard import OnboardFailed, OnboardView, ProjectOnboarded
 from aisquare.cli.ui.views.project import ProjectView
@@ -430,6 +434,8 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         self.set_interval(self.refresh_seconds, self.refresh_data)
         self.run_doctor()
         self._restore_selection()
+        # The captain's ui actions (T4): after the first frame, which they resolve against.
+        listen_for_ui(self)
 
     # --- what was open (#144) ---------------------------------------------------------
 
@@ -526,6 +532,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             self._theme_autosave.remember(theme_name)
 
     def on_unmount(self) -> None:
+        stop_listening_for_ui(self)  # first: no ui action lands on a shell that is quitting
         # Every saver — the theme's here, the divider's — started first and joined
         # against ONE deadline, so quit waits once, not once per preference.
         self.unsaved = Autosave.flush_all(self)
@@ -868,11 +875,62 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             self.notify("that agent is no longer listed", severity="warning", timeout=4)
             return
         view_id = f"agent-{status.agent.id}"
-        await self._show(view_id, lambda: AgentView(status, id=view_id))
+        await self._show(view_id, lambda: self._agent_view(status, view_id))
         self.sidebar.select(f"agent:{status.agent.id}")
         self._set_doctor_scope(event.project_id)
         self._remember_selection(f"agent:{event.project_id}/{status.agent.id}")
         self._focus_pane(view_id)
+
+    def _agent_view(self, status: FleetAgentStatus, view_id: str) -> AgentView:
+        """The view for one agent's row: the captain's has its own bar (T4)."""
+        if (
+            self.snapshot is not None
+            and self.snapshot.is_home(status.agent.project_id)
+            and status.agent.role == fleet_service.CAPTAIN_ROLE
+        ):
+            return CaptainView(status, id=view_id)
+        return AgentView(status, id=view_id)
+
+    def on_captain_requested(self, event: CaptainRequested) -> None:
+        """The insignia: the captain's view when it is live, else the Spawn dialog preset to it.
+
+        Decided from the frame the insignia was painted from, so the click does what
+        the star showed: lit is a live row (``ALIVE_STATES``), dim is none — or one
+        that is gone, which a start replaces (``brain.find`` reaps it first).
+        """
+        # Imported here, not at the top: the shell starts without the captain's modules.
+        from aisquare.services.captain import brain
+        from aisquare.services.captain import state as captain_state
+
+        snapshot = self.snapshot
+        home = snapshot.home if snapshot is not None else None
+        rows = snapshot.agents.get(home.id, []) if snapshot is not None and home else []
+        captain = next(iter(rows), None)
+        if captain is not None and captain.state in ALIVE_STATES:
+            self.post_message(AgentSelected(captain.agent.project_id, captain.agent.id))
+            return
+        if home is None:
+            # No home row yet (a store that never saw a captain): registering it is what
+            # the start is about to do anyway, on a deliberate click.
+            try:
+                home = captain_state.home_project()
+            except Exception as exc:
+                self.notify(
+                    f"could not open the captain's board: {type(exc).__name__}: {exc}",
+                    severity="error",
+                    timeout=8,
+                    markup=False,
+                )
+                return
+        self.push_screen(
+            SpawnDialog(
+                home,
+                role=fleet_service.CAPTAIN_ROLE,
+                persona=brain.PERSONA,
+                accounts=self._accounts,
+            ),
+            callback=self.spawn_finished,
+        )
 
     def _focus_pane(self, view_id: str) -> None:
         """Give the agent just selected the keyboard (#147).
@@ -915,7 +973,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             )
             return
         view_id = f"agent-{status.agent.id}"
-        await self._show(view_id, lambda: AgentView(status, id=view_id))
+        await self._show(view_id, lambda: self._agent_view(status, view_id))
         self.sidebar.select(f"agent:{status.agent.id}")
         self._set_doctor_scope(started.project_id)
         self._remember_selection(f"agent:{started.project_id}/{status.agent.id}")

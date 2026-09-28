@@ -16,6 +16,7 @@ import json
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -38,6 +39,7 @@ from aisquare.services import fleet as fleet_service
 from aisquare.services.captain import actions
 from aisquare.services.captain import state as captain_state
 from aisquare.services.captain.errors import Refused
+from tests import captain_screens as shots
 from tests.test_stubs import IMPLEMENTED
 
 VERBS = ("attention", "next", "resolve", "snooze", "since", "log", "uav", "wololo", "bt", "actions")
@@ -344,6 +346,16 @@ def test_wololo_converts_an_idle_agent_and_refuses_a_missing_one(
     monkeypatch.setattr(
         fleet_service, "status_of", lambda row: FleetAgentStatus(agent=row, state="waiting")
     )
+
+    class IdlePane:
+        """T1c: wololo reads the agent's pane before any claim moves and refuses one it
+        cannot read, so this agent sits at Claude Code's real idle box."""
+
+        def capture(self, pane_id: str, **_: object) -> SimpleNamespace:
+            assert pane_id == "%7"
+            return SimpleNamespace(lines=list(shots.REAL_IDLE_AFTER_STOP))
+
+    monkeypatch.setattr(fleet_service, "server_for", lambda socket, config=None: IdlePane())
 
     def tell(project: ProjectInfo, label: str, text: str, *, sender: str | None = None) -> Any:
         told.append(f"{label}: {text}")

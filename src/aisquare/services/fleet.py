@@ -1560,6 +1560,10 @@ def spawn(
         # `$HOME`, under `~/.aisquare`) as a project; the hub above lands the
         # launcher on the home board, which the store keeps captured (T2).
         env["AISQUARE_HOME"] = str(paths.aisquare_home().resolve())
+        # Claude Code's session-rating survey drew in the captain's pane mid-conversation, and
+        # send (rightly) never types into a dialog: every voice line was refused, and from the
+        # phone the owner cannot answer it (T1e). screen.py's refusal stays the backstop.
+        env["CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY"] = "1"
     if config.disable_native_agent_teams:
         env["CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"] = "0"
     # The desktop as THIS process sees it (#147). A window inherits the tmux

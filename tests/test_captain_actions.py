@@ -1442,7 +1442,9 @@ def test_words_that_name_a_different_agent_or_project_refuse(
     assert fleet_rec.calls == []
 
 
-@pytest.mark.parametrize("no", ["No.", "nope", "cancel", "negative", "don't", "stop that"])
+@pytest.mark.parametrize(
+    "no", ["No.", "no", "Nope.", "Cancel.", "Negative.", "Don't.", "Stop that."]
+)
 def test_a_no_refuses_and_clears_the_question_so_a_later_yes_cannot_revive_it(
     alpha: ProjectInfo,
     agents: dict[str, FleetAgent],
@@ -1456,6 +1458,26 @@ def test_a_no_refuses_and_clears_the_question_so_a_later_yes_cannot_revive_it(
     refused(lambda: actions.stop("alpha", "coder-1", confirm=True, utterance=no))
     refused(lambda: actions.stop("alpha", "coder-1", confirm=True, utterance="Yes."))
     assert fleet_rec.calls == []
+
+
+def test_a_sentence_that_starts_like_a_no_is_neither_yes_nor_no(
+    alpha: ProjectInfo,
+    agents: dict[str, FleetAgent],
+    fleet_rec: Fleet,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Round 4 (the manager's ruling on coder3d-1's catch): negatives are whole utterances.
+    "No problem, go ahead" is no answer either way, so the question stays and is asked again;
+    "Stop that coder in alpha" is a named stop."""
+    _at_wall(monkeypatch, 1000.0)
+    refused(lambda: actions.stop("alpha", "coder-1", confirm=True, utterance="Stop it."))
+    message = refused(
+        lambda: actions.stop("alpha", "coder-1", confirm=True, utterance="No problem, go ahead")
+    )
+    assert "said no" not in message and 'ask first: "stop coder-1 in alpha?"' in message
+    ok(actions.stop("alpha", "coder-1", confirm=True, utterance="Yes."))
+    ok(actions.stop("alpha", "coder-1", confirm=True, utterance="Stop that coder in alpha"))
+    assert fleet_rec.names() == ["stop", "stop"]
 
 
 @pytest.mark.parametrize("yes", ["OK.", "okay", "sure", "yup", "Roger.", "copy", "Affirmative!"])

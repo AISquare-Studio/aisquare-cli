@@ -1473,7 +1473,9 @@ WHOLE_AFFIRMATIVES = ("ok", "okay", "sure", "yup", "roger", "copy", "affirmative
 """Yes only as the WHOLE utterance, punctuation aside (13614): "OK, what's up" is no yes."""
 
 NEGATIVES = ("no", "nope", "cancel", "negative", "don't", "stop that")
-"""The owner's no: it refuses and clears the live question, so no later yes revives it."""
+"""The owner's no, only as the WHOLE utterance like the whole-utterance yeses (T1d round 4):
+it refuses and clears the live question. "No problem, go ahead" is neither yes nor no, and
+"Stop that coder in alpha" is a named stop."""
 
 
 def _says(said: list[str], phrase: str) -> tuple[int, int] | None:
@@ -1540,7 +1542,7 @@ def _affirmative(utterance: str) -> bool:
 
 def _negative(utterance: str) -> bool:
     said = _WORDS.findall(utterance.lower())
-    return any(said[: len(words)] == words for words in map(_WORDS.findall, NEGATIVES))
+    return any(said == words for words in map(_WORDS.findall, NEGATIVES))
 
 
 def _confirmation(

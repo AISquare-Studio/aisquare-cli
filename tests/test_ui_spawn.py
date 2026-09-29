@@ -1448,3 +1448,36 @@ def test_the_captains_dialog_has_no_hand_off(
         return len(dialog.query("#spawn-from"))
 
     assert drive(git_project, scenario, presets={"role": fleet_service.CAPTAIN_ROLE}) == 0
+
+
+@pytest.mark.parametrize("take_over", [False, True])
+def test_account_set_to_this_shells_is_sent_as_this_shells(
+    git_project: ProjectInfo,
+    hand_offs: HandOffRecorder,
+    teammates: list[FleetAgentStatus],
+    take_over: bool,
+) -> None:
+    """runner2-1's reopen of #234: the teammate runs on slot 2, and Account edited to
+    (this shell's) was sent as None, which the service reads as the teammate's own slot.
+    It is sent as THIS_SHELL_ACCOUNT, on Fork and on Take over."""
+    teammates.append(teammate(git_project))
+
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> None:
+        select(dialog, "from").value = "coder-1"
+        await settle(pilot)
+        if take_over:
+            dialog.query_one("#spawn-take-over", RadioButton).value = True
+            await settle(pilot)
+        assert select(dialog, "account").value == "2"
+        select(dialog, "account").value = ""  # (this shell's)
+        await settle(pilot)
+        await pilot.click("#spawn-submit")
+        await settle(pilot)
+        if take_over:
+            await pilot.click("#take-over-yes")
+            await settle(pilot)
+
+    drive(git_project, scenario)
+    [(_, _, sent)] = hand_offs.calls
+    assert sent["mode"] == ("take_over" if take_over else "fork")
+    assert sent["account"] == fleet_service.THIS_SHELL_ACCOUNT

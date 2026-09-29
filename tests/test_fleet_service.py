@@ -10827,3 +10827,41 @@ def test_a_take_over_whose_replacement_cannot_start_gives_the_claims_back(
 
     held = _task_now(task.id)
     assert held.claimed_by != old or held.status != "doing", "left parked on the stopped session"
+
+
+def test_a_fork_on_this_shells_account_runs_where_a_plain_spawn_runs(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """runner2-1's reopen of #234: Account edited to (this shell's) was dropped, because the
+    dialog sent None, and None keeps the teammate's own slot. THIS_SHELL_ACCOUNT says it
+    explicitly: no --account, the ladder a plain spawn runs, never the teammate's slot."""
+    _two_slots_with_usage(monkeypatch, work=10, personal=10)
+    source = fleet_service.spawn(project, "coder", worktree=False, account="2").agent
+    plain = fleet_service.spawn(project, "coder", worktree=False).agent
+    plain_flag = _flag(_command(tmux), "--account")
+    assert source.account_slot == 2 and plain.account_slot != 2, "the pin needs two answers"
+
+    fork = fleet_service.hand_off(
+        project, source.label, fresh=True, account=fleet_service.THIS_SHELL_ACCOUNT
+    ).started.agent
+
+    assert fork.account_slot == plain.account_slot
+    assert _flag(_command(tmux), "--account") == plain_flag
+
+
+def test_a_take_over_on_this_shells_account_runs_where_a_plain_spawn_runs(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same through Take over, which is the teammate's restart."""
+    _two_slots_with_usage(monkeypatch, work=10, personal=10)
+    source = fleet_service.spawn(project, "coder", worktree=False, account="2").agent
+    plain = fleet_service.spawn(project, "coder", worktree=False).agent
+    plain_flag = _flag(_command(tmux), "--account")
+    assert source.account_slot == 2 and plain.account_slot != 2, "the pin needs two answers"
+
+    receipt = fleet_service.hand_off(
+        project, source.label, mode="take_over", account=fleet_service.THIS_SHELL_ACCOUNT
+    )
+
+    assert receipt.started.agent.account_slot == plain.account_slot
+    assert _flag(_command(tmux), "--account") == plain_flag

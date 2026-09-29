@@ -873,15 +873,19 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         persona = self._persona_value()
         label = self.query_one("#spawn-label", Input).value
         prompt = self.query_one("#spawn-prompt", TextArea).text
+        if not isinstance(account, str) or account == own_slot:
+            sent: str | None = None  # the teammate's own
+        elif account == THIS_SHELL:
+            # Explicitly this shell's: None would keep the teammate's slot (runner2-1's
+            # reopen of #234).
+            sent = fleet_service.THIS_SHELL_ACCOUNT
+        else:
+            sent = account
         return {
             "mode": "take_over" if take_over else "fork",
             "fresh": self.query_one("#spawn-fresh", Checkbox).value,
             "role": None if self._role == agent.role else self._role,
-            "account": (
-                account
-                if isinstance(account, str) and account not in (own_slot, THIS_SHELL)
-                else None
-            ),
+            "account": sent,
             "persona": None if persona == (agent.persona or NO_PERSONA) else persona,
             "label": None if take_over or label == self._prefill else label,
             "prompt": None if take_over or not prompt.strip() else prompt,

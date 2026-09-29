@@ -4470,10 +4470,13 @@ def restart(
     that hand-over ends it and starts the replacement itself.
     ``agent_id`` pins the row, as for :func:`stop`: the agent view's Restart
     means the row it shows, never a replacement that took the label since.
+
     ``role``, ``account`` and ``persona`` are a take-over's changes (the Spawn dialog's
-    *Take over*, :func:`hand_off`); ``None`` keeps the row's. Another role launches as
-    today's config says for it, since the recorded launch was the old role's; a persona
-    of ``""`` is none. Each is checked with the rest, before anything is stopped.
+    *Take over*, :func:`hand_off`); ``None`` keeps the row's, and an account of
+    :data:`THIS_SHELL_ACCOUNT` runs where a plain spawn with no ``--account`` runs.
+    Another role launches as today's config says for it, since the recorded launch was
+    the old role's; a persona of ``""`` is none. Each is checked with the rest, before
+    anything is stopped.
 
     ``permission_mode`` is refused first when Claude Code does not take it
     (:data:`~aisquare.core.config.CLAUDE_PERMISSION_MODES`, or ``""`` for no
@@ -4541,9 +4544,7 @@ def restart(
         if persona:
             _chosen_persona(project, runs_as, persona, role_settings(runs_as, settings()), [])
         choice = claude_accounts_service.choose(
-            account if account is not None else (str(slot) if slot is not None else None),
-            role=runs_as,
-            project=project,
+            _account_wanted(account, slot), role=runs_as, project=project
         )
     except (FleetError, claude_accounts_service.NoSuchAccount) as exc:
         raise FleetError(f"cannot restart {label!r}: {exc}") from exc
@@ -4663,6 +4664,13 @@ def restart(
 
 HandoffMode = Literal["fork", "take_over"]
 
+THIS_SHELL_ACCOUNT = "(this shell's)"
+"""An ``account`` for :func:`hand_off` and :func:`restart`: run where a plain spawn with
+no ``--account`` runs, the resolver's ladder (``claude_accounts.choose(None)``), and never
+on the row's own slot, which ``None`` keeps. The Spawn dialog's *(this shell's)* sends it
+(runner2-1's reopen of #234: sent as ``None``, it ran the new agent on the teammate's
+slot). It is no slot, alias or email, so it can never name an account itself."""
+
 
 @dataclass(frozen=True)
 class HandoffReceipt:
@@ -4725,8 +4733,9 @@ def hand_off(
     asked. The row read here is the row restarted (``agent_id``).
 
     ``role``, ``account`` and ``persona`` are the dialog's changes, ``None`` keeping the
-    source's; a persona of ``""`` is none. ``label`` and ``prompt`` are a fork's own: a
-    take-over keeps the source's label, and continues its work.
+    source's; a persona of ``""`` is none, and an account of :data:`THIS_SHELL_ACCOUNT`
+    runs where a plain spawn with no ``--account`` runs. ``label`` and ``prompt`` are a
+    fork's own: a take-over keeps the source's label, and continues its work.
     """
     with store_session() as store:
         agent = store.fleet_agent_by_label(project.id, source, live_only=False)
@@ -4797,7 +4806,7 @@ def hand_off(
         worktree=own,
         prompt=first,
         spawned_by=spawned_by,
-        account=account if account is not None else (str(slot) if slot is not None else None),
+        account=_account_wanted(account, slot),
         resume=resume,
         size=size,
         spec=agent.launch_spec if replay else None,
@@ -4827,6 +4836,16 @@ def hand_off(
         notes=[*notes, *receipt.notes],
         failures=list(receipt.failures),
     )
+
+
+def _account_wanted(account: str | None, slot: int | None) -> str | None:
+    """What the resolver is asked for a replacement or a fork: the dialog's account, the
+    row's own slot for ``None``, or no flag at all for :data:`THIS_SHELL_ACCOUNT`."""
+    if account == THIS_SHELL_ACCOUNT:
+        return None
+    if account is not None:
+        return account
+    return str(slot) if slot is not None else None
 
 
 def _head_of(tree: Path) -> str | None:

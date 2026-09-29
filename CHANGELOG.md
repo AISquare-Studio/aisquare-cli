@@ -243,6 +243,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   carries its spawner's hub: under it, the captain, which runs under the home's
   hub, put every seat it spawned for a project on the home board.
   `AISQUARE_EXPLAINABILITY_TARGET` still travels from the spawner.
+- **Under an exported `AISQUARE_TEAM_HUB`, a project page's Explainability tab
+  follows its project.** It shows, attaches and registers the page's own key,
+  the one its fleet seats launch with, since a fleet window joins its fleet's
+  board whatever hub is exported (the rule above), and *this project only* means
+  the page. Under 0.7.0's rule the tab named the hub's key, which the page's
+  seats no longer use. With no hub nothing changes.
 - **`aisquare serve --stdio` no longer exits in the middle of a tool call.** Its
   idle deadline (`--close-after`, `AISQUARE_SERVE_CLOSE_AFTER`) counted inbound
   client messages only, while a tool runs on a worker thread and the client sends

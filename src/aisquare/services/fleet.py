@@ -34,6 +34,7 @@ import shutil
 import sqlite3
 import subprocess
 import time
+import uuid
 from collections.abc import Callable, Collection, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field
@@ -188,6 +189,12 @@ class ResumeSpec:
 
     session_id: str
     transcript_path: Path
+    fork: bool = False
+    """Resume it as a FORK (the Spawn dialog's hand-off, card tsk_01m3ns5a736s): the source's
+    conversation under a NEW session id, minted by :func:`spawn` and passed as
+    ``--session-id`` beside ``--resume <transcript> --fork-session``, so the new row joins
+    its own session and the source's id is never shared. ``session_id`` is then the
+    source's, the one forked from."""
 
 
 @dataclass(frozen=True)
@@ -826,8 +833,12 @@ def _ensure_worktree(
     *,
     refuse_if_taken: Callable[[], None] | None = None,
     own: Path | None = None,
+    start_point: str | None = None,
 ) -> Path:
     """``<root>/<worktree_dir>/<label>`` on ``branch``, created or reused.
+
+    ``start_point`` is where a NEW ``branch`` is cut (``git worktree add -b``), the
+    checkout's HEAD when ``None``; a branch that exists already is checked out as it is.
 
     Reuse is deliberate: a coder respawned on the same task after review
     findings must land in the tree that holds its branch, not beside it. A
@@ -875,7 +886,7 @@ def _ensure_worktree(
         _git_ok(root, "worktree", "add", str(path), branch)
         notes.append(f"branch {branch} already existed — checked it out")
     else:
-        _git_ok(root, "worktree", "add", str(path), "-b", branch)
+        _git_ok(root, "worktree", "add", str(path), "-b", branch, *filter(None, [start_point]))
     _exclude_worktrees(root, worktree_dir, notes)
     return path
 
@@ -1369,6 +1380,7 @@ def spawn(
     onboard: bool = True,
     bin_flag: bool = True,
     own_worktree: Path | None = None,
+    start_point: str | None = None,
 ) -> SpawnReceipt:
     """Start an agent for ``project`` in the fleet's tmux server and record it.
 
@@ -1454,6 +1466,10 @@ def spawn(
     without its ASSIGNED TO YOU block — ``_late_assignment`` does not re-brief
     a bound row — and the hand-off prompt still names the task (review of
     #205, fifth round: this used to promise the move came first).
+
+    ``start_point`` is the commit a NEW worktree branch is cut at, instead of the
+    checkout's HEAD: a fork's, at the commit its source's tree is on (:func:`hand_off`).
+    A branch that already exists is checked out as it is.
 
     ``size`` is the ``(columns, rows)`` the window is born with. The UI passes
     the pane it is about to attach, so the agent never runs wider than it will
@@ -1609,6 +1625,7 @@ def spawn(
             notes,
             refuse_if_taken=refuse_if_taken,
             own=own_worktree,
+            start_point=start_point,
         )
     notes.extend(f"accounts: {note}" for note in choice.notes)
     # A replayed spec already holds the role's arguments as they were at spawn;
@@ -1627,7 +1644,20 @@ def spawn(
     # The same goes for a session the CALLER chose (`--session-id`, `--resume`,
     # `--continue`): see `_without_session_choice`.
     recorded_args = _without_session_choice(resolution.binary, [*role_args, *extra])
-    if resume is not None:
+    if resume is not None and resume.fork:
+        # A FORK (card tsk_01m3ns5a736s): `--resume <transcript> --fork-session` opens the
+        # source's conversation under a NEW id, minted here and passed as `--session-id`
+        # (Claude Code takes the two together only when it forks), so the row joins the
+        # fork's own session. The identity planner is not asked: it reads `--resume <path>`
+        # as the RESUMED id and knows nothing of `--fork-session`. The recorded spec drops
+        # all three flags (`_without_session_choice`), so a restart of the fork resumes the
+        # fork, never its source.
+        forked = str(uuid.uuid4())
+        extra = ["--resume", str(resume.transcript_path), "--fork-session", *extra]
+        identity = explainability_service.SessionIdentity(
+            forked, inject_args=("--session-id", forked)
+        )
+    elif resume is not None:
         # `--resume <transcript path>` keeps the ORIGINAL session id (#146), so
         # the row is joined to it here rather than minted or learned later; the
         # identity planner would otherwise read the path as the id.
@@ -4210,6 +4240,8 @@ def _respawn(
     takes_over: bool = False,
     permission_mode: str | None = None,
     onboard: bool = True,
+    role: str | None = None,
+    persona: str | None = None,
 ) -> tuple[SpawnReceipt, bool, list[str]]:
     """Start ``agent`` again — same label, role, task and worktree — resuming when it can.
 
@@ -4252,9 +4284,13 @@ def _respawn(
             "no transcript on disk to resume — the replacement starts fresh with a hand-off prompt"
         )
     prompt = resume_prompt if resume is not None else _handoff_prompt(agent, task, recent, reason)
+    # A take-over from the Spawn dialog may run the label as another role (card
+    # tsk_01m3ns5a736s): the recorded launch was the old role's, so it is replayed only
+    # for the same role, and the new one launches as today's config says for it.
+    replay = role is None or role == agent.role
     receipt = spawn(
         project,
-        agent.role,
+        agent.role if replay or role is None else role,
         label=agent.label,
         task_id=agent.task_id,
         worktree=agent.worktree,
@@ -4264,8 +4300,8 @@ def _respawn(
         resume=resume,
         size=size,
         permission_mode=permission_mode,
-        spec=agent.launch_spec,
-        persona=_persona_for_replay(project, agent, notes),
+        spec=agent.launch_spec if replay else None,
+        persona=_persona_for_replay(project, agent, notes) if persona is None else persona,
         # Only Claude Code's hooks write a board session (`agents connect`
         # installs them for Claude Code alone): a row joined to one is Claude
         # Code whatever its binary is called, resumed or `--fresh`.
@@ -4278,7 +4314,7 @@ def _respawn(
         bin_flag=False,
         own_worktree=agent.cwd if agent.worktree else None,
     )
-    if agent.launch_spec is not None:
+    if agent.launch_spec is not None and replay:
         # Said once the replacement is up, for what it really took from the row: a
         # recorded binary that has left the PATH was replaced by today's resolution,
         # which the spawn's own note names, and "the binary comes from the row" beside
@@ -4392,6 +4428,9 @@ def restart(
     spawned_by: str = "user",
     agent_id: str | None = None,
     permission_mode: str | None = None,
+    role: str | None = None,
+    account: str | None = None,
+    persona: str | None = None,
 ) -> RestartReceipt:
     """Start an agent again under its own label — the **Restart** of #138.
 
@@ -4431,6 +4470,11 @@ def restart(
     that hand-over ends it and starts the replacement itself.
     ``agent_id`` pins the row, as for :func:`stop`: the agent view's Restart
     means the row it shows, never a replacement that took the label since.
+    ``role``, ``account`` and ``persona`` are a take-over's changes (the Spawn dialog's
+    *Take over*, :func:`hand_off`); ``None`` keeps the row's. Another role launches as
+    today's config says for it, since the recorded launch was the old role's; a persona
+    of ``""`` is none. Each is checked with the rest, before anything is stopped.
+
     ``permission_mode`` is refused first when Claude Code does not take it
     (:data:`~aisquare.core.config.CLAUDE_PERMISSION_MODES`, or ``""`` for no
     flag). The replacement records it, so a typo was replayed by every later
@@ -4478,11 +4522,28 @@ def restart(
     # slot, else the one its session ran under, whose number outlives a removed
     # slot — and the replacement is started on what was resolved here.
     slot = _account_slot_of(agent, session)
+    runs_as = role or agent.role
     try:
-        _require_role(agent.role)
-        _refuse_a_replay_that_cannot_start(agent, session)
+        _require_role(runs_as)
+        if runs_as == agent.role:
+            _refuse_a_replay_that_cannot_start(agent, session)
+        else:
+            # Another role launches as today's config says for it, not as the row
+            # recorded the old one: that binary is the one to ask about.
+            _launch_binary(
+                runs_as,
+                binary=None,
+                spec=None,
+                claude_code=session is not None,
+                notes=[],
+                bin_flag=False,
+            )
+        if persona:
+            _chosen_persona(project, runs_as, persona, role_settings(runs_as, settings()), [])
         choice = claude_accounts_service.choose(
-            str(slot) if slot is not None else None, role=agent.role, project=project
+            account if account is not None else (str(slot) if slot is not None else None),
+            role=runs_as,
+            project=project,
         )
     except (FleetError, claude_accounts_service.NoSuchAccount) as exc:
         raise FleetError(f"cannot restart {label!r}: {exc}") from exc
@@ -4565,6 +4626,8 @@ def restart(
             resume_prompt=_restart_prompt(agent),
             takes_over=handed_over is not None,
             permission_mode=permission_mode,
+            role=role,
+            persona=persona,
         )
     except Exception:
         if handed_over is not None and handed_over.withheld:
@@ -4596,6 +4659,216 @@ def restart(
         notes=notes,
         prompt_typed=bool(receipt.prompt_typed),
     )
+
+
+HandoffMode = Literal["fork", "take_over"]
+
+
+@dataclass(frozen=True)
+class HandoffReceipt:
+    """What a hand-off from a teammate did (the Spawn dialog's, card tsk_01m3ns5a736s)."""
+
+    mode: HandoffMode
+    source: FleetAgent
+    """The teammate handed off from, as read before anything started."""
+    started: SpawnReceipt
+    """The agent started. The dialog dismisses with it, so the shell attaches it as it
+    attaches any spawn."""
+    resumed: bool
+    """Whether it resumed the source's transcript: a fork under its own new id, a
+    take-over under the same id, with the claims."""
+    stopped: FleetAgent | None = None
+    """The source as a take-over stopped it; ``None`` for a fork, which touches nothing."""
+    notes: list[str] = field(default_factory=list)
+    failures: list[str] = field(default_factory=list)
+
+
+def handoff_sources(project: ProjectInfo) -> list[FleetAgentStatus]:
+    """The teammates a spawn can hand off from: the project's listed rows, less the lost.
+
+    The owner's words: "any current running or stopped but still open/attached
+    teammate". That is the fleet's own listing (the sidebar's rows): the running,
+    waiting and asking agents, and the exited ones whose dead window tmux still keeps.
+    A ``lost`` row's window is gone, so it is nobody to hand off from. The captain
+    lives on the home board, so no project lists it.
+    """
+    return [status for status in list_agents(project) if status.state != "lost"]
+
+
+def hand_off(
+    project: ProjectInfo,
+    source: str,
+    *,
+    mode: HandoffMode = "fork",
+    fresh: bool = False,
+    role: str | None = None,
+    account: str | None = None,
+    persona: str | None = None,
+    label: str | None = None,
+    prompt: str | None = None,
+    size: tuple[int, int] | None = None,
+    spawned_by: str = "user",
+) -> HandoffReceipt:
+    """Start an agent from teammate ``source``: the Spawn dialog's *Hand off from*.
+
+    **Fork**, the default, touches nothing of the source: no mark, no stop, no claim. The
+    new agent takes a new label (``label``, else the next free one), its own worktree cut
+    at the commit the source's tree is on, and no task. With the source's transcript on
+    disk and ``fresh`` not asked, it resumes that conversation as a FORK
+    (``ResumeSpec(fork=True)``: ``--resume <transcript> --fork-session`` under a new id),
+    and is told in one line what it is. Otherwise it starts fresh, with a first message
+    built from the board that names the source and its task as the source's work.
+
+    **Take over** is the source's own hand-over, which :func:`restart` already is: a
+    running source is stopped with its claims parked for the replacement (an exited one
+    is simply started again), under the same label, task and tree, resumed or fresh as
+    asked. The row read here is the row restarted (``agent_id``).
+
+    ``role``, ``account`` and ``persona`` are the dialog's changes, ``None`` keeping the
+    source's; a persona of ``""`` is none. ``label`` and ``prompt`` are a fork's own: a
+    take-over keeps the source's label, and continues its work.
+    """
+    with store_session() as store:
+        agent = store.fleet_agent_by_label(project.id, source, live_only=False)
+        if agent is None:
+            raise NoSuchAgent(f"no teammate {source!r} in {_name(project)} to hand off from")
+        session = store.get_session(agent.session_id) if agent.session_id else None
+        try:
+            task = _task_for(store, project, agent.task_id)
+        except FleetError:
+            task = None  # finished work: nothing to name in a fork's first message
+        recent = (
+            store.filtered_events(project.id, session_id=agent.session_id, limit=_HANDOFF_NOTES)
+            if agent.session_id is not None
+            else []
+        )
+    if mode == "take_over":
+        restarted = restart(
+            project,
+            source,
+            fresh=fresh,
+            role=role,
+            account=account,
+            persona=persona,
+            size=size,
+            spawned_by=spawned_by,
+            agent_id=agent.id,
+        )
+        started = SpawnReceipt(
+            agent=restarted.started,
+            asked_label=source,
+            tmux_session=restarted.tmux_session,
+            notes=list(restarted.notes),
+            prompt_typed=restarted.prompt_typed,
+        )
+        return HandoffReceipt(
+            mode="take_over",
+            source=agent,
+            started=started,
+            resumed=restarted.resumed,
+            stopped=restarted.replaced,
+            notes=list(restarted.notes),
+        )
+    notes: list[str] = []
+    transcript = (
+        Path(session.transcript_path) if session is not None and session.transcript_path else None
+    )
+    resume: ResumeSpec | None = None
+    if not fresh and session is not None and transcript is not None and transcript.is_file():
+        resume = ResumeSpec(session.id, transcript, fork=True)
+    elif not fresh:
+        notes.append("no transcript on disk to fork — the new agent starts fresh from the board")
+    runs_as = role or agent.role
+    replay = runs_as == agent.role
+    own = is_git_project(project.root)
+    if not own:
+        notes.append(f"not a git repository — the fork works in {project.root}, beside {source}")
+    first = _fork_prompt(agent, task, recent, resumed=resume is not None)
+    if prompt and prompt.strip():
+        # A resumed fork's first message stays one line (see :func:`_fork_prompt`).
+        extra = " ".join(prompt.split()) if resume is not None else prompt.strip()
+        first = f"{first} {extra}" if resume is not None else f"{first}\n\n{extra}"
+    slot = _account_slot_of(agent, session)
+    receipt = spawn(
+        project,
+        runs_as,
+        label=label,
+        task_id=None,
+        worktree=own,
+        prompt=first,
+        spawned_by=spawned_by,
+        account=account if account is not None else (str(slot) if slot is not None else None),
+        resume=resume,
+        size=size,
+        spec=agent.launch_spec if replay else None,
+        persona=(
+            (_persona_for_replay(project, agent, notes) if replay else None)
+            if persona is None
+            else persona
+        ),
+        claude_code=session is not None,
+        start_point=_head_of(Path(agent.cwd)) if own else None,
+    )
+    resumed = resume is not None
+    how = "resumed its session as a fork" if resumed else "started fresh"
+    with contextlib.suppress(Exception), store_session() as store:  # the courtesy, not the record
+        _team()._emit(
+            store,
+            project.id,
+            "forked",
+            f"{receipt.agent.label} forked from {source} — {how}",
+            session_id=receipt.agent.session_id,
+        )
+    return HandoffReceipt(
+        mode="fork",
+        source=agent,
+        started=receipt,
+        resumed=resumed,
+        notes=[*notes, *receipt.notes],
+        failures=list(receipt.failures),
+    )
+
+
+def _head_of(tree: Path) -> str | None:
+    """The commit ``tree``'s checkout is on, or ``None`` when git cannot say."""
+    done = _git(tree, "rev-parse", "--verify", "--quiet", "HEAD")
+    return (done.stdout.strip() or None) if done.returncode == 0 else None
+
+
+def _fork_prompt(
+    source: FleetAgent, task: TeamTask | None, recent: list[TeamEvent], *, resumed: bool
+) -> str:
+    """The first message of a fork: what it is, what it is not, where to look.
+
+    Resumed, ONE line, as :func:`_resume_prompt` is and for its reason: ``claude
+    --resume`` opens at an idle prompt, and :func:`_type_prompt` types a single line past
+    its timeout and refuses a multi-line one. It carries the source's conversation, so it
+    is told only what changed. Fresh, it is built from the board as
+    :func:`_handoff_prompt` is, with the source's task named as the source's.
+    """
+    if resumed:
+        return (
+            f"You are a fork of {source.label}: you have its conversation up to now, but you run "
+            "in your own worktree on your own branch with no claims, and "
+            f"{source.label} keeps working in its own tree, so never touch that tree or its "
+            "task. Re-read `aisquare board` and `git status` here, then say what you will "
+            "take on."
+        )
+    lines = [
+        f"You are a fork of {source.label}, which keeps running: you start fresh, in your own "
+        "worktree on your own branch, with no claims.",
+    ]
+    if task is not None:
+        lines.append(f"{source.label} is working on {task.title} ({task.id}): its task, not yours.")
+    tail = recent[-_HANDOFF_NOTES:]
+    if tail:
+        lines.append(f"{source.label}'s last board entries:")
+        lines.extend(f"- {event.kind}: {event.text}" for event in tail)
+    lines.append(
+        "Start by reading `aisquare board`, then `git status` and `git log --oneline -5` in "
+        "your own worktree, and say what you will take on."
+    )
+    return "\n".join(lines)
 
 
 def _pane_alive(agent: FleetAgent) -> bool:

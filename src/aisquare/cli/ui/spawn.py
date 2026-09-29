@@ -59,6 +59,7 @@ agent pane behind it keeps every key it had.
 
 from __future__ import annotations
 
+import dataclasses
 import random
 import shlex
 from collections.abc import Callable, Iterable
@@ -71,7 +72,19 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
 from textual.screen import ModalScreen
-from textual.widgets import Button, Input, Label, OptionList, Select, Static, Switch, TextArea
+from textual.widgets import (
+    Button,
+    Checkbox,
+    Input,
+    Label,
+    OptionList,
+    RadioButton,
+    RadioSet,
+    Select,
+    Static,
+    Switch,
+    TextArea,
+)
 from textual.worker import Worker, WorkerState
 
 from aisquare.cli.ui.attach import AttachTargetScreen, NewAccountRequested, Target
@@ -82,7 +95,13 @@ from aisquare.core.config import FleetRoleSettings, load_config
 from aisquare.core.personas import Persona
 from aisquare.core.store import store_session
 from aisquare.core.workspace import git_common_root
-from aisquare.models import AccountsOverview, ClaudeAccountStatus, ProjectInfo, TeamTask
+from aisquare.models import (
+    AccountsOverview,
+    ClaudeAccountStatus,
+    FleetAgentStatus,
+    ProjectInfo,
+    TeamTask,
+)
 from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import fleet as fleet_service
 from aisquare.services import personas as personas_service
@@ -102,6 +121,8 @@ THIS_SHELL = ""
 
 NO_PERSONA = ""
 """The Persona field's ``(none)`` — and what ``spawn`` reads as "no persona"."""
+NO_SOURCE = ""
+"""The Hand off from field's ``(none)``: the plain spawn, field for field (tsk_01m3ns5a736s)."""
 
 OPEN_TASK_STATUSES = ("todo", "doing", "review", "blocked")
 """A task an agent can still be spawned for; ``done`` and ``dropped`` are refused by the service."""
@@ -212,6 +233,76 @@ def start_captain(kwargs: dict[str, Any]) -> fleet_service.SpawnReceipt:
     )
 
 
+def source_choice(status: FleetAgentStatus) -> str:
+    """One teammate in *Hand off from*: its label, state, role, task and account."""
+    agent = status.agent
+    slot = f"slot {agent.account_slot}" if agent.account_slot is not None else "this shell's"
+    return f"{agent.label} · {status.state} · {agent.role} · {agent.task_id or 'no task'} · {slot}"
+
+
+def hand_off(
+    project: ProjectInfo, source: str, kwargs: dict[str, Any]
+) -> fleet_service.SpawnReceipt:
+    """Run a hand-off and answer as a spawn does: the started agent's receipt, every note on it.
+
+    The dialog dismisses with a :class:`~aisquare.services.fleet.SpawnReceipt` whichever
+    way it started the agent, so the shell attaches a fork or a take-over as it attaches
+    any spawn.
+    """
+    result = fleet_service.hand_off(project, source, **kwargs)
+    return dataclasses.replace(result.started, notes=list(result.notes))
+
+
+class ConfirmTakeOverScreen(ModalScreen[bool]):
+    """The one question before a take-over stops its source (card tsk_01m3ns5a736s)."""
+
+    DEFAULT_CSS = """
+    ConfirmTakeOverScreen { align: center middle; }
+    ConfirmTakeOverScreen #take-over-box { width: 64; max-width: 96%; height: auto;
+                                           border: heavy $warning; background: $surface;
+                                           padding: 1 2; }
+    ConfirmTakeOverScreen #take-over-buttons { height: auto; align-horizontal: right;
+                                               padding-top: 1; }
+    ConfirmTakeOverScreen #take-over-buttons Button { margin-left: 2; }
+    """
+    BINDINGS: ClassVar = [Binding("escape", "cancel", "cancel")]
+
+    def __init__(self, label: str) -> None:
+        super().__init__()
+        self.label = label
+
+    def question(self) -> Text:
+        """The question as data: the label is the user's, brackets and all."""
+        text = Text()
+        text.append("Stop ")
+        text.append(self.label, style="bold")
+        text.append(" and hand its claims to the new agent?\n")
+        text.append(
+            "It is stopped as a restart stops it: its claims wait for the new agent, which "
+            "takes its label, task and tree.",
+            style="dim",
+        )
+        return text
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="take-over-box"):
+            yield Static(self.question(), id="take-over-question")
+            with Horizontal(id="take-over-buttons"):
+                yield Button("Take over", id="take-over-yes", variant="warning")
+                yield Button("Cancel", id="take-over-no")
+
+    @on(Button.Pressed, "#take-over-yes")
+    def _yes(self) -> None:
+        self.dismiss(True)
+
+    @on(Button.Pressed, "#take-over-no")
+    def _no(self) -> None:
+        self.dismiss(False)
+
+    def action_cancel(self) -> None:
+        self.dismiss(False)
+
+
 class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
     """Spawn one agent for ``project``; dismisses with the receipt, or ``None`` on cancel."""
 
@@ -231,6 +322,8 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
     SpawnDialog .spawn-note { height: auto; padding-left: 18; color: $text-muted; }
     SpawnDialog #spawn-worktree-note { padding: 1 0 0 1; height: auto; color: $text-muted; }
     SpawnDialog #spawn-prompt { height: 6; width: 1fr; }
+    SpawnDialog #spawn-how { width: auto; height: auto; }
+    SpawnDialog #spawn-fresh { margin-left: 2; }
     SpawnDialog #spawn-status { height: auto; padding: 0 0 0 0; }
     SpawnDialog #spawn-buttons { height: auto; align-horizontal: right; padding-bottom: 1; }
     SpawnDialog #spawn-buttons Button { margin-left: 2; }
@@ -272,6 +365,11 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         self._kept_label: str | None = None
         """What the user had typed, kept while the manager role locks the field."""
         self._spawning = False
+        self._sources, self._sources_unavailable = (
+            ([], None) if self._captain else self._read_sources()
+        )
+        self._source: FleetAgentStatus | None = None
+        """The teammate the form hands off from; ``None`` is the plain spawn."""
 
     # --- what the form reads when it opens ----------------------------------------------
 
@@ -290,6 +388,13 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         except Exception as exc:  # a layer we cannot read costs the list, never the dialog
             return [], f"personas unavailable — {type(exc).__name__}: {exc}"
         return found, None
+
+    def _read_sources(self) -> tuple[list[FleetAgentStatus], str | None]:
+        """The teammates *Hand off from* offers (:func:`fleet_service.handoff_sources`)."""
+        try:
+            return fleet_service.handoff_sources(self.project), None
+        except Exception as exc:  # tmux or the store could not be asked: no list, still a dialog
+            return [], f"teammates unavailable — {type(exc).__name__}: {exc}"
 
     def _read_manager_live(self) -> bool:
         try:
@@ -360,6 +465,29 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         with Vertical(id="spawn-box"):
             yield Static(self._header(), id="spawn-header")
             with VerticalScroll(id="spawn-fields"):
+                if not self._captain:
+                    # A hand-off from a teammate (card tsk_01m3ns5a736s). ``(none)`` is
+                    # the plain spawn below, field for field.
+                    with Horizontal(classes="spawn-row"):
+                        yield Label("Hand off from")
+                        yield Select(
+                            [
+                                ("(none)", NO_SOURCE),
+                                *((source_choice(s), s.agent.label) for s in self._sources),
+                            ],
+                            value=NO_SOURCE,
+                            allow_blank=False,
+                            disabled=not self._sources,
+                            id="spawn-from",
+                        )
+                    yield Static(id="spawn-from-note", classes="spawn-note")
+                    with Horizontal(classes="spawn-row", id="spawn-how-row"):
+                        yield Label("How")
+                        with RadioSet(id="spawn-how"):
+                            yield RadioButton("Fork", value=True, id="spawn-fork")
+                            yield RadioButton("Take over", id="spawn-take-over")
+                        yield Checkbox("Start fresh", id="spawn-fresh")
+                    yield Static(id="spawn-how-note", classes="spawn-note")
                 # Who runs it …
                 with Horizontal(classes="spawn-row"):
                     yield Label("Role")
@@ -469,6 +597,10 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
             # After the Select has built its overlay's options (its own mount).
             self.call_after_refresh(self._grey_out_manager)
         self._note("#spawn-task-note", self._tasks_unavailable, style="dim")
+        if not self._captain:
+            self.query_one("#spawn-how-row").display = False
+            self._note("#spawn-how-note", None)
+            self._note("#spawn-from-note", self._sources_unavailable, style="dim")
         self._describe_persona()
         self._validate()
         if self._accounts is not None:
@@ -502,9 +634,12 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
     def _validate(self) -> bool:
         """Show every rule the form breaks right now; *Spawn* is enabled only when there is none."""
         name = self.project.root.name or self.project.id
+        replaces_manager = (
+            self._take_over() and self._source is not None and self._source.agent.role == "manager"
+        )
         role_problem = (
             f"{name} already has a manager — one per project"
-            if self._role == "manager" and self._manager_live
+            if self._role == "manager" and self._manager_live and not replaces_manager
             else None
         )
         label_problem = (
@@ -536,6 +671,8 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
 
     def _relabel(self, old_role: str) -> None:
         """Re-prefill the label for the current role and task — unless the user changed it."""
+        if self._take_over():
+            return  # a take-over keeps its source's label (_apply_handoff)
         label = self.query_one("#spawn-label", Input)
         if old_role != "manager":
             self._kept_label = label.value if label.value != self._prefill else None
@@ -605,8 +742,150 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
 
     @on(Select.Changed, "#spawn-task")
     def _task_changed(self) -> None:
-        self._relabel(self._role)
+        if self._source is None:  # a hand-off decides the task itself (_apply_handoff)
+            self._relabel(self._role)
         self._validate()
+
+    # --- a hand-off from a teammate (card tsk_01m3ns5a736s) -------------------------------
+
+    @on(Select.Changed, "#spawn-from")
+    def _source_changed(self, event: Select.Changed) -> None:
+        chosen = event.value if isinstance(event.value, str) else NO_SOURCE
+        source = next((s for s in self._sources if s.agent.label == chosen), None)
+        if source is self._source:
+            return
+        self._source = source
+        self.query_one("#spawn-how-row").display = source is not None
+        if source is not None:
+            self._prefill_from(source)
+        self._apply_handoff()
+
+    @on(RadioSet.Changed, "#spawn-how")
+    def _how_changed(self) -> None:
+        self._apply_handoff()
+
+    def _take_over(self) -> bool:
+        """Whether the form takes over its teammate rather than forking it."""
+        if self._source is None:
+            return False
+        return self.query_one("#spawn-take-over", RadioButton).value
+
+    def _prefill_from(self, source: FleetAgentStatus) -> None:
+        """Role, Account and Persona from the teammate, all still editable (the owner's call).
+
+        The persona is marked chosen, so the role's own change handler, which runs after
+        this, does not replace it with the role's default.
+        """
+        agent = source.agent
+        if agent.role not in self._roles:
+            self._roles.append(agent.role)
+            self.query_one("#spawn-role", Select).set_options(
+                [(self._role_prompt(r), r) for r in self._roles]
+            )
+        self.query_one("#spawn-role", Select).value = agent.role
+        persona = agent.persona or NO_PERSONA
+        self._persona_touched = True
+        self._persona_shown = persona
+        field = self.query_one("#spawn-persona", Select)
+        field.set_options(self._persona_options())
+        field.value = persona
+        if agent.account_slot is not None:
+            self._preset_account = str(agent.account_slot)
+            accounts = self.query_one("#spawn-account", Select)
+            accounts.set_options(self._account_options(self._account_statuses))
+            accounts.value = self._preset_account
+        self._describe_persona()
+
+    def _apply_handoff(self) -> None:
+        """Lock or free what a hand-off decides, and name the button for what it does."""
+        source = self._source
+        take_over = self._take_over()
+        task = self.query_one("#spawn-task", Select)
+        label = self.query_one("#spawn-label", Input)
+        worktree = self.query_one("#spawn-worktree", Switch)
+        prompt = self.query_one("#spawn-prompt", TextArea)
+        for selector in ("#spawn-binary", "#spawn-permission", "#spawn-args", "#spawn-pick"):
+            self.query_one(selector).disabled = source is not None
+        submit = self.query_one("#spawn-submit", Button)
+        if label.disabled and self._role not in ("manager", fleet_service.CAPTAIN_ROLE):
+            label.value = self._prefill  # a take-over's lock, never the user's typing
+        if source is None:
+            task.value = NO_TASK
+            task.disabled = False
+            worktree.value = self._defaults(self._role).worktree and self._git
+            worktree.disabled = not self._git
+            prompt.disabled = False
+            self._relabel(self._role)
+            submit.label = "Spawn"
+            self._note("#spawn-how-note", None)
+            self._validate()
+            return
+        agent = source.agent
+        worktree.disabled = True
+        if take_over:
+            if agent.task_id and agent.task_id not in {t.id for t in self._tasks}:
+                task.set_options(
+                    [
+                        ("(none)", NO_TASK),
+                        *((task_choice(t), t.id) for t in self._tasks),
+                        (f"{agent.task_id} ({agent.label}'s)", agent.task_id),
+                    ]
+                )
+            task.value = agent.task_id or NO_TASK
+            label.value = agent.label
+            label.disabled = True
+            self.query_one("#spawn-dice", Button).disabled = True
+            worktree.value = agent.worktree
+            prompt.disabled = True
+            submit.label = "Take over"
+            note = (
+                f"{agent.label} is stopped, after one question, and the new agent takes over "
+                "its claims, its task and its tree, resuming its session unless Start fresh "
+                "is checked."
+            )
+        else:
+            task.value = NO_TASK
+            worktree.value = self._git
+            prompt.disabled = False
+            self._relabel(self._role)
+            submit.label = "Fork"
+            where = (
+                f"its own worktree, cut at {agent.label}'s commit"
+                if self._git
+                else f"{agent.label}'s folder (not a git repository)"
+            )
+            note = (
+                f"{agent.label} keeps running. The fork takes a new label, {where}, and no "
+                "claims, and resumes its conversation unless Start fresh is checked."
+            )
+        task.disabled = True
+        self._note("#spawn-how-note", note, style="dim")
+        self._validate()
+
+    def handoff_kwargs(self) -> dict[str, Any]:
+        """The keywords a hand-off sends: ``None`` wherever the form shows the teammate's own."""
+        if self._source is None:
+            raise RuntimeError("no teammate chosen: a plain spawn sends spawn_kwargs")
+        agent = self._source.agent
+        take_over = self._take_over()
+        own_slot = str(agent.account_slot) if agent.account_slot is not None else THIS_SHELL
+        account = self.query_one("#spawn-account", Select).value
+        persona = self._persona_value()
+        label = self.query_one("#spawn-label", Input).value
+        prompt = self.query_one("#spawn-prompt", TextArea).text
+        return {
+            "mode": "take_over" if take_over else "fork",
+            "fresh": self.query_one("#spawn-fresh", Checkbox).value,
+            "role": None if self._role == agent.role else self._role,
+            "account": (
+                account
+                if isinstance(account, str) and account not in (own_slot, THIS_SHELL)
+                else None
+            ),
+            "persona": None if persona == (agent.persona or NO_PERSONA) else persona,
+            "label": None if take_over or label == self._prefill else label,
+            "prompt": None if take_over or not prompt.strip() else prompt,
+        }
 
     @on(Input.Changed, "#spawn-label")
     @on(Input.Changed, "#spawn-args")
@@ -737,12 +1016,32 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
     def _submit(self) -> None:
         if self._spawning or not self._validate():
             return
+        if self._source is not None:
+            source, handoff = self._source.agent.label, self.handoff_kwargs()
+            if handoff["mode"] == "take_over":
+                self.app.push_screen(
+                    ConfirmTakeOverScreen(source),
+                    callback=lambda yes: self._hand_off(source, handoff) if yes else None,
+                )
+                return
+            self._hand_off(source, handoff)
+            return
         role, kwargs = self._role, self.spawn_kwargs()
         self._set_spawning(True)
         self.run_worker(
             (lambda: start_captain(kwargs))
             if self._captain
             else (lambda: fleet_service.spawn(self.project, role, **kwargs)),
+            name=SPAWN_WORKER,
+            group=SPAWN_WORKER,
+            thread=True,
+            exit_on_error=False,  # a FleetError is an answer to show, not a crash
+        )
+
+    def _hand_off(self, source: str, kwargs: dict[str, Any]) -> None:
+        self._set_spawning(True)
+        self.run_worker(
+            lambda: hand_off(self.project, source, kwargs),
             name=SPAWN_WORKER,
             group=SPAWN_WORKER,
             thread=True,

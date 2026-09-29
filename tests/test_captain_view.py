@@ -33,6 +33,7 @@ from tests.captain_screens import INPUT_BOX, REAL_IDLE_AFTER_STOP, REAL_TRUST, R
 from tests.test_captain_say import Captain, Clock
 from tests.test_captain_sidebar import agent_opened, quiet, until
 from tests.test_ui_shell import Script, fleet_app, row_for, seed, shown, status
+from tests.ui_workers import settle_page
 
 # The UI suite's fixtures, bound here so pytest finds them for this module's tests
 # (``no_real_tmux`` is autouse there: every tmux call held to a private socket).
@@ -232,7 +233,7 @@ def test_the_captain_dialog_starts_the_captain_through_its_own_launch(
         assert isinstance(dialog, SpawnDialog)
         await pilot.click("#spawn-submit")
         await pilot.pause()
-        await app.workers.wait_for_complete()
+        await settle_page(app)
         await pilot.pause()
 
     drive(body)
@@ -296,7 +297,7 @@ async def _whats_up(pilot: Pilot[None]) -> list[str]:
     await _open_view(pilot)
     await pilot.click("#captain-whats-up")
     await pilot.pause()
-    await app.workers.wait_for_complete()
+    await settle_page(app)
     await pilot.pause()
     return [str(note.message) for note in app._notifications]
 
@@ -485,7 +486,12 @@ async def _captain_view(pilot: Pilot[None]) -> CaptainView:
     app = fleet_app(pilot)
     app.refresh_data()
     await pilot.pause()
-    return await _open_view(pilot)
+    view = await _open_view(pilot)
+    # The mount's first read lands before the test acts: a switch clicked while the bar
+    # is not read yet writes nothing, by design (``_known``), and a slow thread lost that
+    # race when every worker was held 0.3 s (card tsk_01m3pt9eme0h).
+    await settle_page(app)
+    return view
 
 
 async def _clicked(pilot: Pilot[None], selector: str) -> None:
@@ -496,7 +502,7 @@ async def _clicked(pilot: Pilot[None], selector: str) -> None:
     """
     await pilot.click(selector)
     await pilot.pause()
-    await fleet_app(pilot).workers.wait_for_complete()
+    await settle_page(fleet_app(pilot))
     await pilot.pause(0.3)
 
 
@@ -560,7 +566,7 @@ async def _ticked(pilot: Pilot[None], view: CaptainView) -> None:
     """One tick of the bar: its read runs on a worker (S1), then the paint."""
     view.tick()
     await pilot.pause()
-    await fleet_app(pilot).workers.wait_for_complete()
+    await settle_page(fleet_app(pilot))
     await pilot.pause()
 
 
@@ -677,7 +683,7 @@ async def _press_mic(pilot: Pilot[None]) -> str:
     await _captain_view(pilot)
     await pilot.click("#captain-mic")
     await pilot.pause()
-    await fleet_app(pilot).workers.wait_for_complete()
+    await settle_page(fleet_app(pilot))
     await pilot.pause()
     return _mic_text(pilot)
 

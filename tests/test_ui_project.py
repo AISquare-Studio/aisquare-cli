@@ -60,6 +60,7 @@ from aisquare.core import tmux as tmux_core
 from aisquare.core.config import ExplainabilityTarget, FleetRoleSettings, load_config, save_config
 from aisquare.core.store import SqliteStore, store_session
 from aisquare.core.tmux import Capture, Completed, PaneFacts, TmuxServer
+from aisquare.core.workspace import project_id_for
 from aisquare.models import (
     CheckStatus,
     DoctorCheck,
@@ -1839,37 +1840,42 @@ def test_a_machine_key_beside_its_own_variable_names_the_box_that_would_work(
     assert "tick 'this project only'" in refused
 
 
-def test_under_a_hub_the_box_and_the_tab_say_whose_key_it_is(
+def test_under_a_hub_the_tab_follows_its_project_as_its_seats_do(
     project: ProjectInfo,
     quiet_explainability: dict[str, int],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Under AISQUARE_TEAM_HUB the key goes to the hub project, which every project under
-    the hub launches with, and the box read "this project only" (G5). A key the page
-    had of its own vanished from the tab while its file stayed on disk (B7)."""
+    """The owner's decision (card tsk_01m3nwrzqe61fy5t6tph5z7wv3): the tab follows the
+    project. A fleet window carries its fleet's own root as its hub and names its row
+    (#230), so the seats a page spawns trace with the PAGE's key whatever hub the UI runs
+    under. The box says "this project only", the key typed with it is the page's, and the
+    page's own key is the one in use. Main's 0.7.0 sent all three to the hub (review of
+    #170, G5 and B7), when a window carried its spawner's hub."""
     ops.attach_project_key(project, "pk-page-0123456789", target="stg")  # the page's own
     hub = tmp_path / "hub"
     hub.mkdir()
     monkeypatch.setenv("AISQUARE_TEAM_HUB", str(hub))
+    name = project.root.name or project.id
 
     async def scenario(pilot: Pilot[None], host: Host) -> tuple[str, list[tuple[str, str]], str]:
         host.query_one(ProjectView).active = "tab-explainability"
         await settle(pilot)
         label = str(host.query_one("#explainability-key-project", Checkbox).label)
-        _attach_in_setup(host, "pk-hub-0123456789")
-        await settle(pilot)
-        _attach_in_setup(host, "", gateway="https://g.example")  # the box, and no key
+        _attach_in_setup(host, "pk-page-9876543210")
         await settle(pilot)
         return label, list(host.notices), host.query_one(ExplainabilityView).status_text
 
     label, notices, status = drive(project, scenario)
-    assert label == "the hub (hub) only", label
-    assert any(m.startswith("'the hub (hub) only' attaches") for m, _ in notices), notices
+    assert label == "this project only", label
     [attached] = [m for m, _ in notices if m.startswith("✓ key attached to")]
-    assert attached.startswith("✓ key attached to hub (the AISQUARE_TEAM_HUB project"), attached
-    assert "its own key for target stg is not used — its launches join hub" in status, status
-    assert f"key clear --project {project.id}" in status
+    assert attached.startswith(f"✓ key attached to {name} for target stg"), attached
+    assert "AISQUARE_TEAM_HUB" not in attached
+    assert f"{name}: its own key for target stg (in use)" in status, status
+    assert "is not used" not in status, status
+    with store_session() as store:
+        assert store.project_explainability(project.id) is not None
+        assert store.project_explainability(project_id_for(hub)) is None, "never the hub's"
 
 
 def test_a_project_key_lands_where_its_destination_does_and_never_over_a_minted_one(
@@ -2081,18 +2087,15 @@ def test_the_explainability_tab_registers_the_roster_under_its_projects_key(
     assert any(m.startswith("✓ registered") for m, _ in notices), notices
 
 
-def test_under_a_hub_the_explainability_tab_is_about_the_hub_its_launches_join(
+def test_under_a_hub_register_uses_the_key_the_pages_seats_launch_with(
     project: ProjectInfo,
     quiet_explainability: dict[str, int],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """``AISQUARE_TEAM_HUB`` puts a fleet window's ``launch`` on the hub's board, so its
-    agents authenticate with the hub's key — the one ``key set`` binds from any
-    repo under the hub. The tab showed, attached and registered under the PAGE's
-    key, which no launch from the page read (review of #170)."""
-    from aisquare.core.workspace import project_id_for
-
+    """Register roster names the key the page's seats launch with. Under a hub that is the
+    PAGE's own key (card tsk_01m3nwrzqe61fy5t6tph5z7wv3; a fleet window joins its fleet's
+    board, #230), where main's 0.7.0 registered under the hub's (review of #170)."""
     config = load_config()
     config.explainability.targets = {
         "stg": ExplainabilityTarget(gateway_url="https://stg.example"),
@@ -2113,7 +2116,7 @@ def test_under_a_hub_the_explainability_tab_is_about_the_hub_its_launches_join(
     async def scenario(pilot: Pilot[None], host: Host) -> str:
         host.query_one(ProjectView).active = "tab-explainability"
         await settle(pilot)
-        _attach_in_setup(host, "pk-hub-0123456789")
+        _attach_in_setup(host, "pk-page-0123456789")
         await settle(pilot)
         await pilot.click("#explainability-register")
         await settle(pilot)
@@ -2121,10 +2124,48 @@ def test_under_a_hub_the_explainability_tab_is_about_the_hub_its_launches_join(
 
     status = drive(project, scenario)
     with store_session() as store:
-        assert store.project_explainability(project_id_for(hub)) is not None
-        assert store.project_explainability(project.id) is None, "not the page under a hub"
-    assert "hub: its own key for target stg (in use)" in status
-    assert keys == ["pk-hub-0123456789"]
+        assert store.project_explainability(project.id) is not None
+        assert store.project_explainability(project_id_for(hub)) is None, "not the hub's"
+    assert f"{project.root.name or project.id}: its own key for target stg (in use)" in status
+    assert keys == ["pk-page-0123456789"]
+
+
+def test_the_tabs_project_under_a_hub_is_the_one_its_seats_join(
+    project: ProjectInfo, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The card's pin. Under a hub, the project whose key the tab shows is the one a seat
+    spawned for the page joins inside its window, whose hub is the fleet's own root and
+    whose row names it (#230). With no hub nothing changes: ``team_project(page.root)``."""
+    from aisquare.cli.ui.views import explainability as explainability_view
+    from aisquare.core import orchestrator
+
+    with store_session() as store:
+        seat = store.upsert_fleet_agent(
+            FleetAgent(
+                id="agt_seatforthepage",
+                project_id=project.id,
+                label="coder-1",
+                role="coder",
+                pane_id="%1",
+                cwd=project.root,
+                created_at=datetime.now(tz=UTC),
+            )
+        )
+    unchanged = orchestrator.team_project(project.root)
+    assert explainability_view.key_project(project) == unchanged
+    assert explainability_view.own_key_label() == "this project only"
+
+    hub = tmp_path / "hub"
+    hub.mkdir()
+    monkeypatch.setenv("AISQUARE_TEAM_HUB", str(hub))  # the UI's own process, under a hub
+    tab = explainability_view.key_project(project)
+    label = explainability_view.own_key_label()
+    monkeypatch.setenv("AISQUARE_TEAM_HUB", str(project.root))  # inside the seat's window
+    monkeypatch.setenv("AISQUARE_FLEET_AGENT", seat.id)
+    joined = orchestrator.team_project()
+
+    assert tab is not None and tab.id == joined.id == project.id
+    assert label == "this project only"
 
 
 def test_the_key_row_names_a_missing_file_instead_of_contradicting_itself(

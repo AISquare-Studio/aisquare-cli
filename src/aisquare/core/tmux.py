@@ -78,6 +78,7 @@ import shutil
 import subprocess
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 
 from aisquare.core import paths
@@ -530,8 +531,32 @@ class TmuxServer:
         return True
 
     def version(self) -> tuple[int, int] | None:
-        """The server binary's version, or ``None`` when it cannot be read."""
+        """The version of the tmux binary on PATH, or ``None`` when it cannot be read.
+
+        That is the version a server started NOW would run, which is what
+        :meth:`require` gates. It is not the running server's
+        (:meth:`server_version`) once the package was upgraded in place.
+        """
         completed = self._runner([self.binary(), "-V"], None)
+        return parse_version(completed.stdout) if completed.returncode == 0 else None
+
+    def server_version(self) -> tuple[int, int] | None:
+        """The RUNNING server's version, asked of the socket; ``None`` when it will not say.
+
+        tmux parses a command's flags in the server, not in the client, so a
+        flag or a key name the server does not know is refused (or typed out)
+        whatever the binary on PATH knows. Upgraded in place (brew, dnf, apt)
+        while the private server keeps running the old binary — the case
+        :meth:`server_absent` names — ``tmux -V`` said 3.7 to a 3.4 server:
+        ``capture-pane -F`` failed every frame and ``S-Enter`` was typed into
+        the agent (final review of #203, F2; measured with a 3.7c client on a
+        3.4 server, which talk without complaint). ``display-message -p
+        '#{version}'`` is the question :meth:`reachable` already puts, and the
+        server answers it with its own version. A refusal (no server, a denied
+        socket) is ``None``; a question that could not be put (no binary, a
+        timeout) raises :class:`TmuxError`, as :meth:`version` does.
+        """
+        completed = self._runner(self.argv("display-message", "-p", "#{version}"), None)
         return parse_version(completed.stdout) if completed.returncode == 0 else None
 
     def require(self) -> None:
@@ -798,6 +823,29 @@ class TmuxServer:
         if completed.returncode == 0:
             return False
         return _ABSENT.search(completed.stderr) is not None
+
+    def started_at(self) -> datetime | None:
+        """When the server on this socket started (``#{start_time}``), to the whole second.
+
+        A pane id names a pane of ONE server's lifetime: the next server on the
+        socket numbers its panes from ``%0`` again (measured on 3.7c,
+        ``test_live_a_new_server_reuses_pane_ids_and_says_when_it_started``). So an
+        id recorded earlier is only worth asking about once the server answering
+        is known to be the one it was recorded on, and this is what tells them
+        apart. tmux reports the start in whole seconds, rounded down.
+
+        ``None`` when no server is listening (:data:`_ABSENT`), or when the
+        answer is not a number. A question that could not be put — a denied
+        socket, a wedged server's timeout — raises :class:`TmuxError`, as the
+        strict reads do.
+        """
+        completed = self._runner(self.argv("display-message", "-p", "#{start_time}"), None)
+        if completed.returncode != 0:
+            if _ABSENT.search(completed.stderr):
+                return None
+            raise TmuxError(completed.stderr.strip() or "tmux display-message could not be reached")
+        epoch = completed.stdout.strip()
+        return datetime.fromtimestamp(int(epoch), tz=UTC) if epoch.isdigit() else None
 
     def spawn_window(
         self,
@@ -1216,15 +1264,32 @@ class TmuxServer:
                 self.run("delete-buffer", "-b", buffer_name)
             raise
 
-    def show_buffer(self) -> str | None:
-        """The newest paste buffer's text, or ``None`` when the server holds none.
+    def list_buffers(self) -> list[str]:
+        """The server's paste buffers by name, the most recently written first.
 
-        ``show-buffer`` without ``-b`` prints the most recently used buffer, as
-        the program wrote it. A server with no buffers answers ``no buffers`` and
-        exits 1 — an answer, not a failure; every other error is raised.
+        A copy that names no buffer — copy mode's, a program's OSC 52,
+        ``set-buffer`` or ``load-buffer`` without ``-b`` — makes a NEW buffer,
+        ``buffer<N>`` with ``N`` never reused while the server runs, even when
+        it holds the text the newest one already does (measured on 3.7c). So a
+        name this list did not have before is a copy made since, and the text
+        cannot say that: the same words copied twice read as no copy at all
+        (``test_live_every_copy_is_a_new_buffer_even_with_the_same_text``).
+        A server with no buffers lists none, with exit 0.
+        """
+        return [
+            name for name in self.run("list-buffers", "-F", "#{buffer_name}").splitlines() if name
+        ]
+
+    def show_buffer(self, name: str) -> str | None:
+        """The text of the paste buffer ``name``, or ``None`` when the server holds no such buffer.
+
+        Printed as the program wrote it. A buffer that is not there answers
+        ``no buffer <name>`` and exits 1 — an answer, not a failure: one listed a
+        moment ago may be gone, as a paste's own buffer is once ``paste-buffer
+        -d`` ran. Every other error is raised.
         """
         try:
-            return self.run("show-buffer")
+            return self.run("show-buffer", "-b", name)
         except TmuxError as exc:
             if "no buffer" in str(exc).lower():
                 return None

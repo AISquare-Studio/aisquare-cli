@@ -56,12 +56,15 @@ aisquare auth status --live
 aisquare auth token
 ```
 
-`whoami` reads the session from the file. It touches the network for one
-thing only: when the project here has a destination (see *Choose where traces
-land with your sign-in* in the explainability guide), its `credits:` line asks
-the API for that workspace's balance, cached for a minute and waiting at most
-5 seconds; when the API cannot answer, the line says why and the rest is
-unchanged. `auth status --live` also asks the server whether the session still
+`whoami` reads the session: `AISQUARE_TOKEN` when it is set (see below), else
+the file. It touches the network for one thing only: when the project here has
+a destination (see *Choose where traces land with your sign-in* in the
+explainability guide), its `credits:` line asks the API for that workspace's
+balance. A balance it read is reused for a minute, and each network operation
+of the request gives up after 5 seconds of silence (looking up the host takes
+as long as your system's resolver does). When the API cannot answer, the line
+says why and the rest is unchanged, and when you are signed in to another API
+than the workspace's, the line says that, with the command that fixes it. `auth status --live` also asks the server whether the session still
 works. `auth token` prints the token for scripts; it grants full access to your
 account, so treat it like a password. Every command accepts `--json` for
 machine-readable output.

@@ -31,9 +31,9 @@ from typing import Annotated
 
 import typer
 
-from aisquare.cli.common import expected_config_write_errors, fail
+from aisquare.cli.common import expected_config_write_errors, fail, project_for_ref
 from aisquare.core import orchestrator, outbox
-from aisquare.core.config import load_config, save_config
+from aisquare.core.config import ExplainabilitySettings, load_config, save_config
 from aisquare.core.state import get_state
 from aisquare.core.store import store_session
 from aisquare.models import CheckStatus, ProjectInfo, TraceDestination
@@ -42,7 +42,6 @@ from aisquare.services import destinations as dest
 from aisquare.services import explainability as explainability_service
 from aisquare.services import explainability_ops as ops
 from aisquare.services import iam
-from aisquare.services import project as project_service
 from aisquare.services.explainability import (
     RESERVED_ENV_VARS,
     clear_project_api_key,
@@ -85,12 +84,7 @@ def _project_for(ref: str | None) -> ProjectInfo:
     """
     if ref is None:
         return orchestrator.team_project(None)
-    try:
-        return project_service.resolve(ref)
-    except KeyError:
-        fail(f"no project matches '{ref}'", error="not_found", ref=ref)
-    except ValueError as exc:
-        fail(str(exc), error="ambiguous_project", ref=ref)
+    return project_for_ref(ref)
 
 
 def _key_project_id(ref: str | None) -> str | None:
@@ -109,19 +103,32 @@ def _key_project_id(ref: str | None) -> str | None:
         return None
 
 
-def _key_payload(project: ProjectInfo, target: str | None) -> dict[str, object]:
+def _key_payload(
+    project: ProjectInfo, resolved: ops.ResolvedTarget, settings: ExplainabilitySettings
+) -> dict[str, object]:
     binding = ops.project_key_binding(project.id)
     present = binding is not None and binding.key_path.is_file()
+    # A file there that is not UTF-8, or is blank, is no key: the resolver
+    # reads it as a missing file (review of #170's follow-ups, round 1, F8).
+    holds_key = binding is not None and ops.read_project_key(binding.key_path) is not None
+    # What the binding was attached for, and whether that is `resolves_for`: a key kept
+    # and not used read exactly like one in use here (review of #203, round 2).
+    serves = binding is not None and ops.binding_serves(
+        binding, resolved.name, resolved.destination, settings
+    )
     return {
         "project": project.id,
         "name": project.root.name or project.id,
         "attached": binding is not None,
         "target": binding.target if binding is not None else None,
+        "api_url": binding.api_url if binding is not None else None,
         "key_path": str(binding.key_path) if binding is not None else None,
         "file_present": present,
+        "file_holds_key": holds_key,
         "set_at": binding.set_at.isoformat() if binding is not None else None,
         "set_by": binding.set_by if binding is not None else None,
-        "resolves_for": target,
+        "resolves_for": resolved.name,
+        "serves": serves,
     }
 
 
@@ -151,22 +158,26 @@ def key_set(
     """
     project = _project_for(project_ref)
     settings = load_config().explainability
-    known = sorted({settings.target, *settings.targets})
-    if target_name is not None and target_name not in known:
-        # `resolve_target` answers for any name, so a typo (`--target prdo`)
-        # bound the key to a deployment nothing ever resolves and still printed
-        # success (review of #170). Refused before the key is read or written.
-        fail(
-            f"no target '{target_name}' on this machine (known: {', '.join(known)}) — "
-            f"create it first: aisquare explainability enable --target {target_name} "
-            "--gateway-url <url>",
-            error="unknown_target",
-            ref=target_name,
-        )
     # With the project (#142): its destination names the deployment when
     # `--target` does not, so the key lands where the project's traces are
     # resolved — the fallback `use` points at when the API will not mint one.
-    target = ops.resolve_target(settings, target_name, project_id=project.id).name
+    resolved = ops.resolve_target(settings, target_name, project_id=project.id)
+    target = resolved.name
+    known = ops.known_targets(settings, resolved.destination)
+    if target not in known:
+        # `resolve_target` answers for any name, so a typo (`--target prdo`),
+        # or one an exported $AISQUARE_EXPLAINABILITY_TARGET names, bound the
+        # key to a deployment nothing configures and still printed success
+        # (review of #170). Refused before the key is read or written; the
+        # writer refuses it too, by the same rule.
+        named = f", named by ${ops.TARGET_ENV_VAR}" if resolved.target_source == "env" else ""
+        fail(
+            f"no target '{target}' on this machine{named} (known: {', '.join(known)}) — "
+            f"create it first: aisquare explainability enable --target {target} "
+            "--gateway-url <url>",
+            error="unknown_target",
+            ref=target,
+        )
     if from_env is not None:
         value = os.environ.get(from_env, "").strip()
         if not value:
@@ -181,18 +192,25 @@ def key_set(
         value = sys.stdin.read().strip()
         if not value:
             fail("nothing on stdin — the key was empty", error="no_key")
-    # The same file holds a key the CLI minted (#142): this one replaces it.
-    # The minted key stops being called minted before the write, so the uid
-    # never names a hand key, and is revoked once the new one is recorded: a
-    # write that fails puts the file back, and the uid with it (review of #172).
-    with (
-        store_session() as store,
-        dest.retiring_minted_key(store, project.id, session=_signed_in_quietly()),
-    ):
+    # The same file holds a key the CLI minted (#142): this one replaces it. The
+    # new binding and the minted key's detachment are one commit, which owes the
+    # minted key's revocation; a write or a binding that fails leaves the file,
+    # the binding and the uid as they were. The revoke is made once the store is
+    # closed, and a key it cannot revoke yet stays owed, and is said (review of
+    # #172).
+    try:
         binding = ops.attach_project_key(project, value, target=target)
-    payload = _key_payload(project, target)
+    except ops.UnknownTarget as exc:  # the config changed under this command
+        fail(str(exc), error="unknown_target", ref=target)
+    revocations = dest.revoke_owed(iam.signed_in_quietly(), project_ids={project.id})
+    payload = _key_payload(project, resolved, settings)
     if get_state().json_output:
-        typer.echo(json.dumps(payload))
+        launches = ops.resolve_target(settings, None, project_id=project.id).name
+        typer.echo(
+            json.dumps(
+                {**payload, "launches_target": launches, "revocations": revocations.as_json()}
+            )
+        )
         return
     name = project.root.name or project.id
     # The register step, named: a key for ANOTHER workspace traces nothing until
@@ -209,11 +227,20 @@ def key_set(
             binding.target,
         ]
     )
+    # Said only when it is true: a key bound to another deployment than the
+    # one the project's launches resolve is kept, and not used by them.
+    elsewhere = ops.launches_elsewhere(settings, project.id, binding.target)
+    used = (
+        "launches and spawns in this project authenticate the proxy with it"
+        if elsewhere is None
+        else ops.unused_key_note(elsewhere)
+    )
     typer.echo(
         f"✓ key attached to {name} for target {binding.target} — {binding.key_path} "
-        "(mode 600); launches and spawns in this project authenticate the proxy with it. "
+        f"(mode 600); {used}. "
         f"If that workspace has not registered this machine's agents yet: {register}"
     )
+    _say_revocations(revocations)
 
 
 @key_app.command("show")
@@ -225,7 +252,7 @@ def key_show(
     project = _project_for(project_ref)
     settings = load_config().explainability
     resolved = ops.resolve_target(settings, target_name, project_id=project.id)
-    payload = _key_payload(project, resolved.name)
+    payload = _key_payload(project, resolved, settings)
     payload["key_source"] = resolved.key_source
     payload["key_origin"] = resolved.key_origin
     payload["key_set"] = bool(resolved.api_key)
@@ -239,8 +266,23 @@ def key_show(
             f"{name}: no key of its own — target {resolved.name} resolves {resolved.key_origin}"
         )
         return
-    where = str(binding.key_path) + ("" if binding.key_path.is_file() else " (file MISSING)")
-    match = "" if binding.target == resolved.name else f" — not used for target {resolved.name}"
+    # The resolver reads a file that is not UTF-8, or is blank, as no key, and
+    # this line called it a healthy binding (review of #170's follow-ups, round 1, F8).
+    where = str(binding.key_path)
+    if not binding.key_path.is_file():
+        where += " (file MISSING)"
+    elif ops.read_project_key(binding.key_path) is None:
+        where += " (file holds no key: blank or not UTF-8 — attach it again)"
+    match = ""
+    # Attached for another deployment than the one this name resolves now: a
+    # destination's while no destination names it, or the machine's while the
+    # destination names another of that name (review of #203). Kept, and used again
+    # once that deployment is the one resolved.
+    kept = ops.kept_key_note(binding, resolved, settings)
+    if binding.target != resolved.name:
+        match = f" — not used for target {resolved.name}"
+    elif kept:
+        match = f" — {kept}"
     typer.echo(
         f"{name}: project key for target {binding.target} at {where}, set "
         f"{binding.set_at:%Y-%m-%d %H:%M} by {binding.set_by or 'unknown'}{match}"
@@ -251,20 +293,29 @@ def key_show(
 def key_clear(project_ref: Annotated[str | None, _PROJECT_OPTION] = None) -> None:
     """Detach the project's key and delete its file; the machine key applies again."""
     project = _project_for(project_ref)
-    with (
-        store_session() as store,
-        dest.retiring_minted_key(store, project.id, session=_signed_in_quietly()),  # (#142)
-    ):
+    with store_session() as store:
+        # A minted key (#142) goes with its binding, its revocation owed in the
+        # same commit; revoked below, once the store is closed.
         had_row = store.clear_project_explainability(project.id)
     had_file = clear_project_api_key(project.id)
+    revocations = dest.revoke_owed(iam.signed_in_quietly(), project_ids={project.id})
     if get_state().json_output:
-        typer.echo(json.dumps({"project": project.id, "cleared": had_row or had_file}))
+        typer.echo(
+            json.dumps(
+                {
+                    "project": project.id,
+                    "cleared": had_row or had_file,
+                    "revocations": revocations.as_json(),
+                }
+            )
+        )
         return
     name = project.root.name or project.id
     if not (had_row or had_file):
         typer.echo(f"{name} had no key of its own — nothing to clear")
-        return
-    typer.echo(f"✓ key cleared for {name} — the machine key applies again")
+    else:
+        typer.echo(f"✓ key cleared for {name} — the machine key applies again")
+    _say_revocations(revocations)
 
 
 _TARGET_OPTION = typer.Option("--target", help="Deployment to act on, e.g. stg or prod.")
@@ -294,12 +345,11 @@ def _session_or_fail() -> iam.Session:
     return session
 
 
-def _signed_in_quietly() -> iam.Session | None:
-    """The sign-in when there is one, for a best-effort revoke that must never cost the command."""
-    try:
-        return iam.current_session()
-    except iam.IamError:
-        return None
+def _say_revocations(report: dest.Revocations) -> None:
+    """The revokes a command made of keys the CLI minted (#142), and what is still live."""
+    line = dest.describe_revocations(report)
+    if line is not None:
+        typer.echo(f"{'⚠' if report.owed else '✓'} {line}")
 
 
 def _workspace_rows(found: list[dest.Workspace]) -> list[dict[str, object]]:
@@ -422,29 +472,26 @@ def _routing_lines(report: dest.RosterReport) -> list[str]:
     return [f"{b.agent} → {'bound' if b.ok else 'not bound: ' + b.detail}" for b in report.bound]
 
 
-def _next_check(target: ops.ResolvedTarget, project_ref: str | None) -> str:
-    """The step ``use`` names once tracing is on: one that resolves the key ``use`` set up.
+def _next_check(target: ops.ResolvedTarget, project: ProjectInfo) -> str:
+    """The step ``use`` names once tracing is on: one that puts the key ``use`` set up to use.
 
-    ``doctor`` resolves the MACHINE's key and opens no store, so the project's
-    own key — minted or attached by hand — is invisible to it: it fails the
-    config row and tells the operator to export a machine key, the one thing
-    that never stands in for the project's. ``explainability status`` resolves
-    the project's key and probes the destination's proxy. With no key at all
-    the next step is attaching one, not a check. ``doctor --live`` stays for a
-    machine key, which it resolves too and is the one check that puts it to the
-    gateway. ``--target`` pins the destination's deployment whatever the shell
-    exports, and ``--project`` is repeated when ``use`` was given one.
+    ``doctor --live --project`` resolves the key the project's launches take,
+    its own key (minted or attached by hand) first, and posts a real span to the
+    gateway with it. ``use`` named ``explainability status`` for the project's
+    own key, which only probes the proxy, so a revoked key or another
+    workspace's passed it (review of #172, D2 round 2). With no key at all the
+    next step is attaching one, not a check: ``key set`` for the same project,
+    which binds it to the destination's deployment. The project is always
+    named by id. Without it, the step asked about the checkout it was run
+    from, which is not the project a ``use --project`` chose (D7).
     """
-    name = shlex.quote(target.name)
-    project = f" --project {shlex.quote(project_ref)}" if project_ref is not None else ""
-    if target.key_source == "project":
-        return f"aisquare explainability status --target {name}{project}"
+    project_id = shlex.quote(project.id)
     if target.key_source == "unset":
         return (
-            f"aisquare explainability key set --from-env VAR --target {name}{project}"
-            "   (the project has no key for this destination yet)"
+            f"aisquare explainability key set --project {project_id}"
+            "   (pipe the workspace's key on stdin, or name its variable with --from-env)"
         )
-    return f"aisquare doctor --live --target {name}"
+    return f"aisquare doctor --live --project {project_id}"
 
 
 @app.command()
@@ -469,13 +516,15 @@ def use(
     """Pick where ONE project's traces land: a workspace and a studio, as the signed-in user.
 
     What it does, in order, and each step is reported: records the choice per
-    project; makes the deployment the session belongs to an explainability
-    target (gateway and proxy filled from the environment, nothing typed);
+    project, and with it the deployment the session belongs to, which this
+    project's launches then trace to (gateway and proxy from the environment,
+    nothing typed; no other project's target changes);
     obtains a workspace ingest key on your behalf when the project has none for
     that deployment (the API refuses this for a sign-in token today — the
-    message names the backend issue and the ``key set`` fallback); and binds
-    this machine's agent identities to the studio, which is what makes spans
-    land THERE rather than in the workspace's inbox. Tracing itself stays off
+    message names the backend issue and the ``key set`` fallback); and, with
+    the project's own key, binds this machine's agent identities to the
+    studio, which is what makes spans land THERE rather than in the
+    workspace's inbox. Tracing itself stays off
     until ``aisquare explainability enable`` — picking a destination must not
     silently start sending.
 
@@ -483,18 +532,31 @@ def use(
     different workspace revokes and drops the key the CLI minted for the old
     one. Only the project's own key skips the mint — a machine key was issued
     for whichever workspace set the machine up, so it only answers meanwhile.
+    Every key the CLI minted and could not revoke yet (signed out, another
+    host, offline) is tried again here, and what is still live is said.
     """
     project = _project_for(project_ref)
     pname = project.root.name or project.id
     if clear:
         with store_session() as store:
-            previous = dest.forget(store, project, session=_signed_in_quietly())
+            previous = dest.forget(store, project)
+        revocations = dest.revoke_owed(iam.signed_in_quietly(), project_ids={project.id})
         if get_state().json_output:
-            typer.echo(json.dumps({"project": project.id, "cleared": dest.as_json(previous)}))
-        elif previous is None:
+            typer.echo(
+                json.dumps(
+                    {
+                        "project": project.id,
+                        "cleared": dest.as_json(previous),
+                        "revocations": revocations.as_json(),
+                    }
+                )
+            )
+            return
+        if previous is None:
             typer.echo(f"{pname} had no destination")
         else:
             typer.echo(f"✓ {pname} no longer points at {previous.label}")
+        _say_revocations(revocations)
         return
     if destination is None:
         fail(
@@ -516,10 +578,11 @@ def use(
         fail(exc.message, error=exc.code)
 
     config = load_config()
-    target_name, changed = dest.ensure_target(config, session.api_url)
-    if changed:
-        with expected_config_write_errors():
-            save_config(config)
+    # The deployment the session belongs to, recorded on the destination and read
+    # off it by every resolution for this project — never written into the
+    # machine's targets, which re-pointed every project without a destination
+    # (review of #203).
+    target_name = dest.environment_name(session.api_url)
     with store_session() as store:
         previous = store.project_destination(project.id)
         row = dest.choose(store, project, workspace, studio, session, previous=previous)
@@ -527,6 +590,9 @@ def use(
         # project already has THIS destination's key must not depend on an
         # exported $AISQUARE_EXPLAINABILITY_TARGET, or every `use` under it
         # mints again, and the roster is bound with the other deployment's key.
+        # Launches resolve the same one: the destination comes before the
+        # variable in `resolve_target`, so the target `use` reports is the one
+        # the project's launches use (review of #172, D2 round 2).
         target = ops.resolve_target(config.explainability, target_name, project_id=project.id)
         key_note: str
         minted = None
@@ -565,7 +631,16 @@ def use(
                 f"; meanwhile {machine} answers — a machine key, not checked to be "
                 f"{row.workspace_name}'s"
             )
-    routing = dest.bind_roster(row, target) if target.api_key else dest.RosterReport()
+    # With the project's own key only, as the note above takes it: a machine key
+    # was issued for whichever workspace set the machine up, so binding this
+    # workspace's roster with it is the stand-in the mint refuses — and the line
+    # that called it "not checked to be <workspace>'s" bound with it all the same
+    # (review of #172).
+    own_key = target.key_source == "project" and bool(target.api_key)
+    routing = dest.bind_roster(row, target) if own_key else dest.RosterReport()
+    # Outside the store session, and every key owed, not only a replaced one:
+    # `use` is where a signed-in operator lands, so it is one of the retries.
+    revocations = dest.revoke_owed(session)
 
     if get_state().json_output:
         typer.echo(
@@ -594,6 +669,7 @@ def use(
                         }
                         for b in routing.bound
                     ],
+                    "revocations": revocations.as_json(),
                 }
             )
         )
@@ -601,15 +677,53 @@ def use(
     typer.echo(f"✓ traces from {pname} land in {row.label} ({row.environment})")
     proxy = f"  [proxy {target.proxy_url}]" if target.proxy_url else ""
     typer.echo(f"  target:   {target_name} → {target.gateway_url or '(no gateway known)'}{proxy}")
+    if not (target.gateway_url and target.proxy_url):
+        # An API host outside the table: nothing traces there until its endpoints are
+        # named, and the machine's never stand in for them (review of #203).
+        typer.echo(
+            f"            {target_name} is not a deployment this CLI knows — set "
+            f"{ops.deployment_fix(target)}"
+        )
     typer.echo(f"  key:      {key_note}")
     if routing.bound:
         typer.echo(f"  routing:  {'; '.join(_routing_lines(routing))}")
+    elif own_key:
+        # The project's own key, and nothing to bind with it: calling it "a
+        # machine key" sent the operator to attach the key it already has
+        # (review of #172's follow-ups, round 1, F4).
+        typer.echo(
+            "  routing:  not applied — the identity template renders no agent names; "
+            "fix explainability.agent_name_template (it must contain {role})"
+        )
+    elif target.api_key:
+        typer.echo(
+            f"  routing:  not applied — a machine key is not checked to be {row.workspace_name}'s; "
+            "attach the workspace's key (aisquare explainability key set) and run use again"
+        )
     else:
         typer.echo("  routing:  not applied — no key to bind the agent identities with")
+    revoked = dest.describe_revocations(revocations)
+    if revoked is not None:
+        typer.echo(f"  revoke:   {revoked}")
     if not config.explainability.enabled:
         typer.echo("  next:     aisquare explainability enable   (tracing is off on this machine)")
     else:
-        typer.echo(f"  next:     {_next_check(target, project_ref)}")
+        typer.echo(f"  next:     {_next_check(target, project)}")
+
+
+def _unused_env_note(target: ops.ResolvedTarget) -> str:
+    """Said beside the target when an exported variable names another one and is not used.
+
+    The project's destination comes before ``$AISQUARE_EXPLAINABILITY_TARGET``
+    (:func:`ops.resolve_target`), so an operator who exported it for a cutover
+    reads here that this project is not moved by it, and what does move it.
+    """
+    if target.unused_env_target is None:
+        return ""
+    return (
+        f" (the project's destination; ${ops.TARGET_ENV_VAR}={target.unused_env_target} "
+        "applies to projects without one, --target overrides both)"
+    )
 
 
 @app.command()
@@ -628,7 +742,12 @@ def status(
     are "the traces are not arriving where you think", which is what a cutover
     script gating on this code is asking, so the second case joined without a
     flag day. Amber -- a destination that cannot be checked from here -- exits
-    0; ``probe_severity`` in the JSON says which.
+    0; ``probe_severity`` in the JSON says which. A ``--project`` that names no
+    project is a usage error, and exits 2 before anything is read: the
+    contract is about the lane, and a status for a project that is not there
+    has no lane to report (review of #172, D2 round 2, D6). It exited 1, the
+    red lane's code, so a script gating on this one could not tell a typo from
+    a red lane (review of #170's follow-ups, round 1, F6).
 
     Honours ``--json``, because this is the command a cutover gets scripted
     against: without it every check in the runbook is a grep against prose,
@@ -639,8 +758,9 @@ def status(
     # The key is resolved FOR the project a launch from here joins (#141) — the
     # one `env`, `launch` and the key commands use — so the origin shown is the
     # key a launch would authenticate with; a project with its own key shows
-    # that, everything else the machine's. `--project` names another one — the
-    # check `use --project` sends the operator to (#142).
+    # that, everything else the machine's. `--project` names another one (#142);
+    # the check `use` sends the operator to is `doctor --live --project`, which
+    # puts the key to the gateway, and this one does not.
     target = ops.resolve_target(settings, target_name, project_id=_key_project_id(project_ref))
     # One description of the proxy lane for both surfaces. It also decides
     # whether to probe at all: a machine that never configured tracing has
@@ -657,8 +777,9 @@ def status(
     # the gap was that the tool never said the right one.
     #
     # Fail open: this is decoration on a status line, and `status`'s exit code
-    # has exactly one documented meaning (tracing on, proxy refusing). A home
-    # that cannot be resolved costs the path, never the command.
+    # has exactly one documented meaning (tracing on, the proxy lane red; see
+    # the docstring). A home that cannot be resolved costs the path, never the
+    # command.
     try:
         queue_dir: str | None = str(outbox.queue_dir())
     except Exception:
@@ -673,6 +794,8 @@ def status(
                 {
                     "enabled": settings.enabled,
                     "target": target.name,
+                    # What named it: argument, destination, env or config (#142).
+                    "target_source": target.target_source,
                     "gateway": target.gateway_url,
                     "gateway_source": target.gateway_source,
                     # Where `key_project`'s traces land (#142); null until chosen.
@@ -733,7 +856,7 @@ def status(
         )
     else:
         typer.echo(f"enabled:  {settings.enabled}")
-        typer.echo(f"target:   {target.name}")
+        typer.echo(f"target:   {target.name}{_unused_env_note(target)}")
         typer.echo(f"gateway:  {target.gateway_url or '(unset)'} [{target.gateway_source}]")
         # `destination:` — the same word as the JSON key, because
         # tests/test_redaction_surface.py holds every human label to a key.
@@ -752,7 +875,7 @@ def status(
         # `remediation`, so the only surface carrying the fix was `doctor`.
         if proxy.remediation and proxy.severity is not CheckStatus.ok:
             typer.echo(f"          → {proxy.remediation}")
-        typer.echo(f"shipping: {state.reason}")
+        typer.echo(f"shipping: {state.reason}{ops.spool_key_note(target, state)}")
         # On THIS line and not a new one: "how much is queued" and "where is it"
         # are one question, and the empty case is exactly when someone goes
         # looking — so the path is printed at 0 queued too.
@@ -948,7 +1071,7 @@ def register(
     if not target.gateway_url:
         fail(
             f"target '{target.name}' has no gateway URL — set one with: "
-            f"aisquare explainability enable --target {target.name} --gateway-url <url>",
+            f"{ops.deployment_fix(target)}",
             error="unconfigured",
         )
     if not target.api_key:
@@ -1180,6 +1303,7 @@ def env(
         api_key=target.api_key,
         gateway_url=target.gateway_url if post_root else None,
         post_root=post_root,
+        key_env=target.api_key_env,
     )
     if not wiring.traced:
         fail(wiring.reason, error="untraced")

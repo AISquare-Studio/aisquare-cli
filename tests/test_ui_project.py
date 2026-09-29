@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import sqlite3
 import sys
 import threading
 import tomllib
@@ -57,7 +58,7 @@ from aisquare.cli.ui.views.settings import NO_PERSONA, SettingsView
 from aisquare.core import paths
 from aisquare.core import tmux as tmux_core
 from aisquare.core.config import ExplainabilityTarget, FleetRoleSettings, load_config, save_config
-from aisquare.core.store import store_session
+from aisquare.core.store import SqliteStore, store_session
 from aisquare.core.tmux import Capture, Completed, PaneFacts, TmuxServer
 from aisquare.models import (
     CheckStatus,
@@ -206,7 +207,7 @@ class ScriptedServer(TmuxServer):
         self.captures: list[tuple[str, int, int | None]] = []
         self.resizes: list[tuple[str, int, int]] = []
 
-    def version(self) -> tuple[int, int] | None:
+    def server_version(self) -> tuple[int, int] | None:
         return (3, 7)
 
     def capture(
@@ -542,6 +543,44 @@ def test_the_manager_tab_says_the_manager_exited_and_how_to_bring_it_back(
     assert "has no manager yet" in without and "exited" not in without  # the control
 
 
+def test_a_lost_manager_keeps_its_header_and_is_never_shown_or_typed_into(
+    project: ProjectInfo, monkeypatch: pytest.MonkeyPatch, no_real_tmux: NoTmux
+) -> None:
+    """Review of the #203 final-round fixes, F1: a manager row that outlived its tmux
+    server reads ``lost``, and the tab still attached its pane by id. After a reboot
+    that id is the next server's, most often ANOTHER project's manager: the tab showed
+    that manager under this one's ``✗ lost`` header and forwarded every key into it. A
+    lost manager keeps its header and gets no pane, from the tab's own read at mount as
+    from the shell's push; the working manager beside it is the control."""
+    manager = fake_agent(project, pane_id="%1")
+    lost = FleetAgentStatus(agent=manager, state="lost", detail="pane gone")
+    monkeypatch.setattr(fleet_service, "manager_of", lambda target: manager)
+    monkeypatch.setattr(fleet_service, "status_of", lambda agent: lost)
+
+    async def scenario(
+        pilot: Pilot[None], host: Host
+    ) -> tuple[str | None, str, list[str], str | None, str | None, str, bool]:
+        view = host.query_one(ProjectView)
+        pane = host.query_one("#manager-pane", TerminalPane)
+        at_mount, header = pane.pane_id, shown(host.query_one("#manager-header"))
+        built = list(no_real_tmux.sockets)
+        view.refresh_status([FleetAgentStatus(agent=manager, state="working")])
+        await pilot.pause()
+        working = pane.pane_id
+        view.refresh_status([lost])
+        await pilot.pause()
+        width, height = pane.content_size
+        first_row = pane.render_lines(Region(0, 0, width, height))[0].text.rstrip()
+        return at_mount, header, built, working, pane.pane_id, first_row, pane.display
+
+    at_mount, header, built, working, after, first_row, displayed = drive(project, scenario)
+    assert at_mount is None and built == []  # never attached, no server even built
+    assert "✗ lost" in header and "pane gone" in header  # the header still says what it is
+    assert working == "%1"  # the control: a manager that is there is shown
+    assert after is None  # …and detached once it reads lost
+    assert first_row == "(pane gone)" and displayed is True  # not "no agent selected"
+
+
 def test_refresh_routes_a_snapshot_and_a_bare_refresh_only_repaints(project: ProjectInfo) -> None:
     """The plan spells the push ``refresh(snapshot)``; Textual's own ``refresh()`` must survive."""
     manager = fake_agent(project, pane_id="%21")
@@ -794,7 +833,7 @@ def test_settings_saves_a_changed_permission_mode_to_config_toml(project: Projec
         host.query_one("#perm-coder", Select).value = "plan"
         host.query_one("#worktree-dir", Input).value = ".fleet-trees"
         host.query_one("#save-settings", Button).press()
-        await pilot.pause()
+        await settle(pilot)
         return host.notices
 
     notices = drive(project, scenario)
@@ -815,7 +854,7 @@ def test_settings_rejects_a_bad_agent_cap_and_writes_nothing(project: ProjectInf
         await pilot.pause()
         host.query_one("#max-agents", Input).value = "0"
         host.query_one("#save-settings", Button).press()
-        await pilot.pause()
+        await settle(pilot)
         return host.notices
 
     notices = drive(project, scenario)
@@ -846,11 +885,11 @@ def test_settings_rejects_an_invalid_codename_and_renames_a_valid_one(
         field = host.query_one("#codename", Input)
         field.value = "Not Valid!"
         host.query_one("#rename-codename", Button).press()
-        await pilot.pause()
+        await settle(pilot)
         after_invalid = len(renames)
         field.value = "amber-otter"
         host.query_one("#rename-codename", Button).press()
-        await pilot.pause()
+        await settle(pilot)
         return host.notices, after_invalid, field.value
 
     notices, after_invalid, shown_value = drive(project, scenario)
@@ -875,7 +914,7 @@ def test_a_rejected_codename_reaches_the_toast_with_its_brackets(project: Projec
         await pilot.pause()
         host.query_one("#codename", Input).value = "[amber]-otter"
         host.query_one("#rename-codename", Button).press()
-        await pilot.pause()
+        await settle(pilot)
         return [n for n in host._notifications if "not a valid codename" in n.message]
 
     notifications = drive(project, scenario)
@@ -1073,7 +1112,7 @@ def test_settings_binds_an_account_per_role_and_a_cleared_one_leaves_no_empty_pr
         labels = [str(label) for label, _value in select._options]
         select.value = "2"
         host.query_one("#save-settings", Button).press()
-        await pilot.pause()
+        await settle(pilot)
         return labels, host.notices
 
     labels, notices = drive(project, scenario)
@@ -1091,12 +1130,52 @@ def test_settings_binds_an_account_per_role_and_a_cleared_one_leaves_no_empty_pr
         shown_value = select.value
         select.value = ""
         host.query_one("#save-settings", Button).press()
-        await pilot.pause()
+        await settle(pilot)
         return str(shown_value)
 
     shown_value = drive(project, clear)
     assert shown_value == "2"  # the form opened on what the file held
     assert "coder" not in load_config().team.profiles  # nothing else bound: the table goes
+
+
+def test_settings_save_leaves_the_bindings_it_did_not_change_as_the_file_has_them(
+    project: ProjectInfo,
+) -> None:
+    """Final review of #203, accounts F3: Save wrote every role's account select back, so a
+    binding changed since the tab was read was reverted by a save of any other field. The
+    sharp case is ``accounts remove``, run from the Accounts page of the same app: it clears
+    a binding to a slot that had no login, so the next ``add`` into that slot is not
+    inherited by the role, and the kept-alive tab put the number straight back."""
+    from aisquare.core import claude_accounts as accounts_core
+    from aisquare.services import claude_accounts as accounts_service
+    from aisquare.services import settings as settings_service
+
+    removed = accounts_core.create_account()  # slot 2, never signed in
+    accounts_core.create_account()  # slot 3
+    settings_service.bind_role("coder", account="2")
+    settings_service.bind_role("tester", account="2")
+
+    async def scenario(pilot: Pilot[None], host: Host) -> tuple[list[str], list[tuple[str, str]]]:
+        host.query_one(ProjectView).active = "tab-settings"
+        await settle(pilot)  # the form holds coder → 2 and tester → 2
+        notes: list[str] = []
+        accounts_service.remove(removed, notes=notes)  # the Accounts page's Remove
+        settings_service.bind_role("reviewer", account="3")  # `team bind` in another shell
+        host.query_one("#acct-tester", Select).value = "3"  # the one change made here
+        host.query_one("#max-agents", Input).value = "7"
+        host.query_one("#save-settings", Button).press()
+        await settle(pilot)
+        return notes, host.notices
+
+    notes, notices = drive(project, scenario)
+    assert any(m.startswith("✓ fleet settings saved") for m, _ in notices), notices
+    assert any("role coder was bound to slot 2" in note for note in notes), notes
+    profiles = load_config().team.profiles
+    assert "coder" not in profiles or profiles["coder"].account is None  # the clear stands
+    assert profiles["reviewer"].account == "3"  # the other shell's binding stands
+    assert profiles["tester"].account == "3"  # what the operator changed here lands
+    assert load_config().fleet.max_agents_per_project == 7
+    assert accounts_core.create_account().slot == 2  # the slot the stale "2" would have named
 
 
 def test_the_settings_form_reads_its_file_once_and_the_slots_off_the_ui_thread(
@@ -1188,7 +1267,7 @@ def test_settings_saves_the_accounts_section_and_rejects_a_bad_line(project: Pro
         host.query_one("#accounts-on-limit", Select).value = "switch"
         host.query_one("#accounts-wait-minutes", Input).value = "5"
         host.query_one("#save-settings", Button).press()
-        await pilot.pause()
+        await settle(pilot)
         return host.notices
 
     notices = drive(project, scenario)
@@ -1208,7 +1287,7 @@ def test_settings_saves_the_accounts_section_and_rejects_a_bad_line(project: Pro
         shown_pick = str(host.query_one("#accounts-pick", Select).value)
         host.query_one("#accounts-switch-at", Input).value = "250"
         host.query_one("#save-settings", Button).press()
-        await pilot.pause()
+        await settle(pilot)
         return shown_pick, host.notices
 
     shown_pick, notices = drive(project, bad)
@@ -1352,6 +1431,138 @@ def test_the_explainability_tab_attaches_a_key_to_the_active_project_without_ech
     assert "its own key for target" in status and "pk-ui" not in status
 
 
+def test_save_setup_asks_git_and_writes_the_key_off_the_ui_thread(
+    project: ProjectInfo, quiet_explainability: dict[str, int], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """*Save setup* ran ``key_project`` (``git rev-parse``, 5 s timeouts) and the key's
+    store and file writes in the button's handler, where a slow git froze the whole
+    app (review of #170, B5/G6). The form's fields are still read on the UI thread."""
+    from aisquare.cli.ui.views import explainability as explainability_view
+
+    on_ui_thread: dict[str, list[bool]] = {"git": [], "write": []}
+    resolve, write = explainability_view.key_project, ops.attach_project_key
+
+    def key_project(page: ProjectInfo | None) -> ProjectInfo | None:
+        on_ui_thread["git"].append(threading.current_thread() is threading.main_thread())
+        return resolve(page)
+
+    def attach(*args: Any, **kwargs: Any) -> Any:
+        on_ui_thread["write"].append(threading.current_thread() is threading.main_thread())
+        return write(*args, **kwargs)
+
+    monkeypatch.setattr(explainability_view, "key_project", key_project)
+    monkeypatch.setattr(ops, "attach_project_key", attach)
+
+    async def scenario(pilot: Pilot[None], host: Host) -> tuple[list[tuple[str, str]], str]:
+        host.query_one(ProjectView).active = "tab-explainability"
+        await settle(pilot)
+        _attach_in_setup(host, "pk-worker-0123456789")
+        await settle(pilot)
+        return list(host.notices), host.query_one("#explainability-key", Input).value
+
+    notices, field = drive(project, scenario)
+    # The status worker asks `key_project` too, off the UI thread; none of the asks is on it.
+    assert on_ui_thread["git"] and not any(on_ui_thread["git"]), on_ui_thread
+    assert on_ui_thread["write"] == [False]
+    assert any(m.startswith("✓ key attached to") for m, _ in notices), notices
+    assert field == "", "cleared once the write began"
+
+
+def test_a_config_write_made_while_save_setup_runs_is_not_saved_over(
+    project: ProjectInfo, quiet_explainability: dict[str, int], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """In its worker, *Save setup* read the config, asked git (seconds), then saved the copy
+    it had read. *Disable* pressed meanwhile wrote ``enabled = false`` and said "✓ tracing
+    disabled", and the save put ``true`` back (review of #170's follow-ups, round 1, F1).
+    Enable and Disable are off while it runs, and the config is read once git has
+    answered, so another writer's change in that time (here the CLI's ``disable`` in a
+    shell) is kept."""
+    from aisquare.cli.ui.views import explainability as explainability_view
+
+    config = load_config()
+    config.explainability.enabled = True
+    save_config(config)
+    resolve = explainability_view.key_project
+    armed, asked, release = threading.Event(), threading.Event(), threading.Event()
+
+    def slow_git(page: ProjectInfo | None) -> ProjectInfo | None:
+        if armed.is_set() and threading.current_thread() is not threading.main_thread():
+            armed.clear()
+            asked.set()
+            release.wait(10)
+        return resolve(page)
+
+    monkeypatch.setattr(explainability_view, "key_project", slow_git)
+    switches = ("#explainability-enable", "#explainability-disable")
+
+    async def scenario(
+        pilot: Pilot[None], host: Host
+    ) -> tuple[list[bool], list[bool], list[tuple[str, str]]]:
+        host.query_one(ProjectView).active = "tab-explainability"
+        await settle(pilot)
+        armed.set()
+        _attach_in_setup(host, "pk-race-0123456789")
+        try:
+            for _ in range(500):
+                if asked.is_set():
+                    break
+                await pilot.pause(0.01)
+            assert asked.is_set(), "the save never asked git"
+            during = [host.query_one(switch, Button).disabled for switch in switches]
+            host.query_one("#explainability-disable", Button).press()
+            await pilot.pause()
+            elsewhere = load_config()
+            elsewhere.explainability.enabled = False
+            save_config(elsewhere)
+        finally:
+            release.set()
+        await settle(pilot)
+        after = [host.query_one(switch, Button).disabled for switch in switches]
+        return during, after, list(host.notices)
+
+    during, after, notices = drive(project, scenario)
+    assert during == [True, True], "the switches are off while the save runs"
+    assert after == [False, False], "and on again once it answered"
+    assert not any("tracing disabled" in m for m, _ in notices), notices
+    assert any(m.startswith("✓ key attached to") for m, _ in notices), notices
+    assert load_config().explainability.enabled is False, "the write made meanwhile is kept"
+
+
+def test_a_key_the_attach_could_not_put_back_is_named_on_the_form(
+    project: ProjectInfo, quiet_explainability: dict[str, int], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The attach's put-back failed, and the writer's note said what the key file holds
+    now and what to delete. The form rendered the error with ``f"{exc}"``, which leaves
+    the note out (review of #170's follow-ups, round 1, F3)."""
+    ops.attach_project_key(
+        project, "pk-earlier-0123456789", target=load_config().explainability.target
+    )
+    writes = explainability_service.store_project_api_key
+
+    def refuse(self: SqliteStore, *_args: object, **_kwargs: object) -> None:
+        raise sqlite3.OperationalError("database is locked")
+
+    def full_disk_for_the_put_back(project_id: str, key: str) -> Path:
+        if key == "pk-earlier-0123456789":
+            raise OSError(28, "No space left on device")
+        return writes(project_id, key)
+
+    monkeypatch.setattr(SqliteStore, "set_project_explainability", refuse)
+    monkeypatch.setattr(ops, "store_project_api_key", full_disk_for_the_put_back)
+
+    async def scenario(pilot: Pilot[None], host: Host) -> list[tuple[str, str]]:
+        host.query_one(ProjectView).active = "tab-explainability"
+        await settle(pilot)
+        _attach_in_setup(host, "pk-refused-0123456789")
+        await settle(pilot)
+        return list(host.notices)
+
+    notices = drive(project, scenario)
+    [failed] = [m for m, s in notices if s == "error" and "could not be attached" in m]
+    assert "database is locked" in failed
+    assert "could not be put back as it was" in failed and "it was removed" in failed
+
+
 def test_the_explainability_tab_has_one_key_field_and_the_box_says_whose_key(
     project: ProjectInfo, quiet_explainability: dict[str, int]
 ) -> None:
@@ -1433,6 +1644,232 @@ def test_a_project_key_for_a_deployment_nothing_answers_to_is_refused(
     assert load_config().explainability.target != "prod", "naming a deployment is not moving to it"
     path = explainability_service.project_key_path(project.id)
     assert path.read_text(encoding="utf-8") == "pk-prod-0123456789"
+
+
+def test_make_active_does_not_make_a_typo_a_known_deployment_for_the_key(
+    project: ProjectInfo, quiet_explainability: dict[str, int], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The known-target check ran after ``configure_target`` had made the typed name the
+    machine's target, so with 'make active' ticked a typo was in ``known`` and passed:
+    the machine moved to a target with no entry and the key was bound to it (review of
+    #170's Setup-form merge, G1). A blank field whose deployment an exported variable
+    names is the same question (G2)."""
+
+    async def scenario(pilot: Pilot[None], host: Host) -> list[tuple[str, str]]:
+        host.query_one(ProjectView).active = "tab-explainability"
+        await settle(pilot)
+        host.query_one("#explainability-switch", Checkbox).value = True
+        _attach_in_setup(host, "pk-typo-0123456789", target="prdo")
+        await settle(pilot)
+        host.query_one("#explainability-switch", Checkbox).value = False
+        host.query_one("#explainability-target", Input).value = ""
+        monkeypatch.setenv(ops.TARGET_ENV_VAR, "prdo")
+        _attach_in_setup(host, "pk-typo-0123456789")
+        await settle(pilot)
+        return list(host.notices)
+
+    notices = drive(project, scenario)
+    refused = [m for m, _ in notices if m.startswith("no target 'prdo' on this machine")]
+    assert len(refused) == 2, notices
+    assert f"named by ${ops.TARGET_ENV_VAR}" in refused[1]
+    assert load_config().explainability.target == "stg", "the machine did not move to the typo"
+    with store_session() as store:
+        assert store.project_explainability(project.id) is None
+    assert not explainability_service.project_key_path(project.id).exists()
+
+
+def test_make_active_does_not_make_a_typo_known_beside_a_destination(
+    project: ProjectInfo, quiet_explainability: dict[str, int]
+) -> None:
+    """G1 again, on the path a destination (#142) adds: its deployment joined the known
+    names through ``known_targets`` on the config ``configure_target`` had just changed,
+    so with 'make active' ticked the typed name was the machine's target and passed. The
+    machine moved to ``prdo``, which has no entry, and the key was bound to it under two
+    success toasts (final review of #203, EX2)."""
+    from aisquare.services import destinations, iam
+
+    config = load_config()
+    config.explainability.targets = {"prod": ExplainabilityTarget(gateway_url="https://p.example")}
+    save_config(config)
+    session = iam.Session(api_url="https://api.aisquare.studio", token="aisq_x", source="env")
+    with store_session() as store:
+        destinations.choose(
+            store,
+            project,
+            destinations.Workspace(id=42, uid="ws-uid-42", name="acme", role="ADMIN"),
+            destinations.Studio(id=301, uid="st-301", name="Frontend"),
+            session,
+        )
+
+    async def scenario(pilot: Pilot[None], host: Host) -> list[tuple[str, str]]:
+        host.query_one(ProjectView).active = "tab-explainability"
+        await settle(pilot)
+        host.query_one("#explainability-switch", Checkbox).value = True
+        _attach_in_setup(host, "pk-typo-0123456789", target="prdo")
+        await settle(pilot)
+        return list(host.notices)
+
+    notices = drive(project, scenario)
+    assert any(m.startswith("no target 'prdo' on this machine") for m, _ in notices), notices
+    assert not any("setup saved" in m for m, _ in notices), notices
+    assert load_config().explainability.target == "stg", "the machine did not move to the typo"
+    with store_session() as store:
+        assert store.project_explainability(project.id) is None
+    assert not explainability_service.project_key_path(project.id).exists()
+
+
+def test_a_prefix_no_header_carries_is_refused_with_advice_the_form_can_follow(
+    isolated_home: Path,
+) -> None:
+    """A full name in the prefix field (``arbind kumar``) is refused by the writer, whose
+    sentence the form showed as it is. It ended "try 'name-{role}'", and the prefix field
+    refuses braces, so the advice could not be followed there (review of the #203
+    final-review fixes, F5). Then it named a rendered agent name, ``arbind.kumar-planner``,
+    which typed as the prefix named every agent ``arbind.kumar-planner-<role>`` (round 2,
+    F3). It names the prefix to type, and typed, the agents are named as meant."""
+    from aisquare.cli.ui.views import explainability as explainability_view
+
+    def save(prefix: str) -> explainability_view.SetupOutcome:
+        form = explainability_view.SetupForm(
+            target="", switch=False, gateway="", proxy="", prefix=prefix, key_env="",
+            key="", own=False,
+        )  # fmt: skip
+        return explainability_view.save_setup(form, None)
+
+    (notice,) = save("arbind kumar").notices
+    assert notice.severity == "warning" and "cannot travel in a header" in notice.message
+    assert "{" not in notice.message, notice.message
+    assert notice.message.endswith("try 'arbind.kumar'"), notice.message
+    assert load_config().explainability.targets == {}
+    assert save("arbind.kumar").began
+    identity = ops.resolve_target(load_config().explainability).agent_name_template
+    assert identity == "arbind.kumar-{role}"
+
+
+def test_a_key_the_projects_launches_do_not_resolve_is_not_called_the_one_they_use(
+    project: ProjectInfo, quiet_explainability: dict[str, int]
+) -> None:
+    """Typed for prod with 'make active' unticked, on a machine that stays on stg, the key
+    is bound to prod and the launches keep resolving stg. The toast said "launches in
+    this project authenticate the proxy with it" (review of #170's Setup-form merge,
+    G3)."""
+
+    async def scenario(pilot: Pilot[None], host: Host) -> list[tuple[str, str]]:
+        host.query_one(ProjectView).active = "tab-explainability"
+        await settle(pilot)
+        _attach_in_setup(host, "pk-prod-0123456789", target="prod", gateway="https://p.example")
+        await settle(pilot)
+        return list(host.notices)
+
+    notices = drive(project, scenario)
+    [(attached, severity)] = [(m, s) for m, s in notices if m.startswith("✓ key attached to")]
+    assert "authenticate the proxy with it" not in attached, attached
+    assert "not used by this project's launches, which resolve target stg" in attached
+    assert "tick 'make active'" in attached and severity == "warning"
+
+
+def test_the_save_again_the_attach_asks_for_is_not_refused(
+    project: ProjectInfo, quiet_explainability: dict[str, int]
+) -> None:
+    """The notice says "tick 'make active' and save again". The save had cleared the key
+    and left 'this project only' ticked, so that press met the refusal of a ticked box
+    with no key (review of #170's follow-ups, round 1, F2). The box is unticked with the
+    key it attached."""
+
+    async def scenario(pilot: Pilot[None], host: Host) -> tuple[bool, list[tuple[str, str]]]:
+        host.query_one(ProjectView).active = "tab-explainability"
+        await settle(pilot)
+        _attach_in_setup(host, "pk-prod-0123456789", target="prod", gateway="https://p.example")
+        await settle(pilot)
+        box = host.query_one("#explainability-key-project", Checkbox).value
+        host.query_one("#explainability-switch", Checkbox).value = True
+        host.query_one("#explainability-save", Button).press()
+        await settle(pilot)
+        return box, list(host.notices)
+
+    box, notices = drive(project, scenario)
+    assert box is False, "unticked with the key it attached"
+    assert not any("attaches the workspace key typed beside it" in m for m, _ in notices), notices
+    assert load_config().explainability.target == "prod", "the machine moved, as the notice said"
+
+
+def test_this_project_only_with_no_key_is_refused_not_ignored(
+    project: ProjectInfo, quiet_explainability: dict[str, int]
+) -> None:
+    """The box ticked and the key blank: the box was dropped without a word and the other
+    settings saved as the machine's (review of #170's Setup-form merge, G4)."""
+
+    async def scenario(pilot: Pilot[None], host: Host) -> list[tuple[str, str]]:
+        host.query_one(ProjectView).active = "tab-explainability"
+        await settle(pilot)
+        _attach_in_setup(host, "", target="stg", gateway="https://g.example")
+        await settle(pilot)
+        return list(host.notices)
+
+    notices = drive(project, scenario)
+    assert any(
+        m.startswith("'this project only' attaches the workspace key") and s == "warning"
+        for m, s in notices
+    ), notices
+    assert "stg" not in load_config().explainability.targets, "nothing was saved"
+
+
+def test_a_machine_key_beside_its_own_variable_names_the_box_that_would_work(
+    project: ProjectInfo, quiet_explainability: dict[str, int], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """On a page, a project's own key is the fix that works beside a custom key variable,
+    and the refusal did not say so (review of #170's Setup-form merge, G8)."""
+    config = load_config()
+    config.explainability.targets = {
+        "stg": ExplainabilityTarget(gateway_url="https://stg.example", api_key_env="MY_KEY"),
+    }
+    save_config(config)
+    monkeypatch.delenv("MY_KEY", raising=False)
+
+    async def scenario(pilot: Pilot[None], host: Host) -> list[tuple[str, str]]:
+        host.query_one(ProjectView).active = "tab-explainability"
+        await settle(pilot)
+        host.query_one("#explainability-key", Input).value = "AIS_machine_0123456789"
+        host.query_one("#explainability-save", Button).press()
+        await settle(pilot)
+        return list(host.notices)
+
+    notices = drive(project, scenario)
+    [refused] = [m for m, _ in notices if "reads its key from $MY_KEY" in m]
+    assert "tick 'this project only'" in refused
+
+
+def test_under_a_hub_the_box_and_the_tab_say_whose_key_it_is(
+    project: ProjectInfo,
+    quiet_explainability: dict[str, int],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Under AISQUARE_TEAM_HUB the key goes to the hub project, which every project under
+    the hub launches with, and the box read "this project only" (G5). A key the page
+    had of its own vanished from the tab while its file stayed on disk (B7)."""
+    ops.attach_project_key(project, "pk-page-0123456789", target="stg")  # the page's own
+    hub = tmp_path / "hub"
+    hub.mkdir()
+    monkeypatch.setenv("AISQUARE_TEAM_HUB", str(hub))
+
+    async def scenario(pilot: Pilot[None], host: Host) -> tuple[str, list[tuple[str, str]], str]:
+        host.query_one(ProjectView).active = "tab-explainability"
+        await settle(pilot)
+        label = str(host.query_one("#explainability-key-project", Checkbox).label)
+        _attach_in_setup(host, "pk-hub-0123456789")
+        await settle(pilot)
+        _attach_in_setup(host, "", gateway="https://g.example")  # the box, and no key
+        await settle(pilot)
+        return label, list(host.notices), host.query_one(ExplainabilityView).status_text
+
+    label, notices, status = drive(project, scenario)
+    assert label == "the hub (hub) only", label
+    assert any(m.startswith("'the hub (hub) only' attaches") for m, _ in notices), notices
+    [attached] = [m for m, _ in notices if m.startswith("✓ key attached to")]
+    assert attached.startswith("✓ key attached to hub (the AISQUARE_TEAM_HUB project"), attached
+    assert "its own key for target stg is not used — its launches join hub" in status, status
+    assert f"key clear --project {project.id}" in status
 
 
 def test_a_project_key_lands_where_its_destination_does_and_never_over_a_minted_one(

@@ -474,6 +474,10 @@ def test_purge_empties_every_table_that_points_at_the_project_whatever_the_schem
         connection.commit()
     finally:
         connection.close()
+    # The one table keyed by the project that a purge must NOT empty: a revocation
+    # owed for a key the CLI minted (#142) outlives its project — it is how that key
+    # is still revoked after the purge that took its destination row.
+    outliving = {"pending_revocation": pointing.pop("pending_revocation")}
 
     with store_session() as store:  # the store's own purge: made-up rows are no models
         removed = store.purge_project(alpha)
@@ -484,6 +488,10 @@ def test_purge_empties_every_table_that_points_at_the_project_whatever_the_schem
             count = f'SELECT COUNT(*) FROM "{table}" WHERE "{column}" = ?'
             assert _raw(count, (alpha,)) == [(0,)], f"{table}.{column} kept the purged project"
             assert _raw(count, (beta,)) != [(0,)], f"{table}.{column} lost the bystander's row"
+    for table, columns in outliving.items():
+        for column in columns:
+            count = f'SELECT COUNT(*) FROM "{table}" WHERE "{column}" = ?'
+            assert _raw(count, (alpha,)) != [(0,)], f"{table}.{column} went with the project"
     assert _raw("SELECT COUNT(*) FROM project WHERE id = ?", (alpha,)) == [(0,)]
     assert _raw("PRAGMA foreign_key_check") == []
 

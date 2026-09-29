@@ -27,7 +27,9 @@ import pytest
 from aisquare.core import paths
 from aisquare.core.store import (
     _MIGRATIONS,
+    _PRODUCTS,
     SCHEMA_VERSION,
+    _Products,
     _statements,
     is_locked_error,
     store_session,
@@ -144,18 +146,22 @@ def test_splitting_a_script_builds_exactly_what_executescript_built() -> None:
     `executescript` issues an implicit COMMIT before running, so it cannot be
     used inside the transaction the fix holds. Statements are split with
     SQLite's own parser instead — and this compares the two schemas object for
-    object, SQL included, rather than trusting that they agree.
+    object, SQL included, rather than trusting that they agree. The columns a
+    step from v15 on adds are not in its script; both builds add them after it,
+    as the ladder does, since a later script (v23's) reads them.
     """
 
     def build(split: bool) -> list[tuple[str, str, str]]:
         conn = sqlite3.connect(":memory:")
         try:
-            for script in _MIGRATIONS:
+            for step, script in enumerate(_MIGRATIONS):
                 if split:
                     for statement in _statements(script):
                         conn.execute(statement)
                 else:
                     conn.executescript(script)
+                for table, column, declaration in _PRODUCTS.get(step, _Products()).columns:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
             return sorted(
                 conn.execute("SELECT type, name, sql FROM sqlite_master").fetchall(),
                 key=lambda row: (row[0], row[1]),

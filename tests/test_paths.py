@@ -112,6 +112,11 @@ def test_sddl_abbreviations_resolve_to_the_current_account() -> None:
 
 
 _ME = "S-1-5-21-111-222-333-1001"
+#: This machine's account domain, which ``LA`` and ``LG`` belong to.
+_HERE = "S-1-5-21-111-222-333"
+#: The Administrator of a DOMAIN the machine is joined to: its RID is 500 too.
+_DOMAIN_ADMIN = "S-1-5-21-777-888-999-500"
+_DOMAIN_GUEST = "S-1-5-21-777-888-999-501"
 
 
 @pytest.mark.parametrize(
@@ -119,20 +124,26 @@ _ME = "S-1-5-21-111-222-333-1001"
     [
         (f"D:PAI(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x12019f;;;{_ME})", _ME, True),
         (f"D:P(A;;0x12019f;;;{_ME})(A;;FR;;;IU)", _ME, False),
+        (f"D:P(A;;0x12019f;;;{_ME})(A;;FR;;;BU)", _ME, False),
         (f"D:P(A;;0x12019f;;;{_ME})(A;;FR;;;S-1-5-21-111-222-333-1002)", _ME, False),
         (f"D:P(D;;FA;;;BU)(A;;0x12019f;;;{_ME})", _ME, True),
-        ("D:P(A;;FA;;;SY)(A;;0x12019f;;;LA)", "S-1-5-21-111-222-333-500", True),
+        ("D:P(A;;FA;;;SY)(A;;0x12019f;;;LA)", f"{_HERE}-500", True),
         ("D:P(A;;FA;;;SY)(A;;0x12019f;;;LA)", _ME, False),
+        (f"D:P(A;;0x12019f;;;{_DOMAIN_ADMIN})(A;;FR;;;LA)", _DOMAIN_ADMIN, False),
+        (f"D:P(A;;0x12019f;;;{_DOMAIN_GUEST})(A;;FR;;;LG)", _DOMAIN_GUEST, False),
         ("D:NO_ACCESS_CONTROL", _ME, False),
         (f'D:P(A;;0x12019f;;;{_ME})(XA;;FR;;;WD;(@User.Dept=="x"))', _ME, False),
     ],
     ids=[
         "owner-and-privileged",
         "interactive",
+        "users",
         "another-account",
         "a-deny-narrows",
         "owner-as-LA",
         "LA-is-not-this-account",
+        "LA-is-not-a-domain-administrator",
+        "LG-is-not-a-domain-guest",
         "null-dacl",
         "conditional-ace",
     ],
@@ -142,8 +153,28 @@ def test_the_read_back_names_a_file_owner_only_only_when_it_is(
 ) -> None:
     """The judgement ``restrict_to_owner`` passes on the DACL it left, on every platform: any
     grant beyond this account, SYSTEM, Administrators and the owner placeholders is a file
-    other principals can read (review of #65, R3)."""
-    assert paths._grants_only_owner(sddl, sid) is owner_only
+    other principals can read (review of #65, R3).
+
+    Off Windows too, on purpose: ``LA`` is how a runner logged in as the built-in
+    Administrator sees its own account, a shape no desktop produces, and misreading it as
+    an intruder would make every sign-in on CI warn over a DACL that is correct. But
+    ``LA`` is THIS machine's Administrator: a domain's, whose SID ends in -500 as well,
+    counted a grant to the local one as its own (review of the #65 re-fold)."""
+    assert paths._grants_only_owner(sddl, sid, _HERE) is owner_only
+
+
+def test_with_no_local_domain_known_la_is_someone_elses() -> None:
+    """``LA`` can only be told apart from a domain's Administrator by the machine's account
+    domain. When that cannot be read, the grant is not vouched for, as any ACE this
+    cannot read is not."""
+    assert not paths._grants_only_owner("D:P(A;;0x12019f;;;LA)", f"{_HERE}-500", None)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="the account domain is a Windows fact")
+def test_the_local_account_domain_is_the_one_la_names() -> None:
+    """Read through the SDDL parser itself, so ``LA`` means here what it means in a DACL."""
+    domain = paths._local_account_domain()
+    assert domain is not None and domain.startswith("S-1-5-21-"), domain
 
 
 @pytest.fixture
@@ -162,6 +193,7 @@ def windows_tools(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[l
     monkeypatch.setattr(sys, "platform", "win32")
     monkeypatch.setenv("SYSTEMROOT", str(tmp_path / "Windows"))
     monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(paths, "_local_account_domain", lambda: _HERE)  # advapi32's answer
     paths._whoami_sid.cache_clear()
     yield ran
     paths._whoami_sid.cache_clear()

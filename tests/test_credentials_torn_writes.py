@@ -274,6 +274,35 @@ def test_a_file_that_is_not_utf8_reads_as_nothing_and_is_not_replaced(
     assert creds.read_bytes() == original
 
 
+@pytest.mark.parametrize("indent", [2, None], ids=["multi-line", "one line"])
+def test_a_file_saved_with_a_utf8_bom_reads_as_its_keys_and_a_store_keeps_them(
+    isolated_home: Path, indent: int | None
+) -> None:
+    """A UTF-8 BOM (Windows PowerShell 5.1's ``Set-Content -Encoding UTF8``, Notepad's
+    "UTF-8 with BOM") made ``json.loads`` refuse the document, a ``ValueError``, so even
+    ``strict`` read it through the legacy branch: a multi-line file was ``{}`` and the next
+    ``store`` replaced every secret in it, and a one-line file came back whole as
+    ``api_key`` (final review of #203, store F3). It decodes as ``utf-8-sig`` now, as
+    ``core.state_file`` does."""
+    paths.ensure_home()
+    creds = paths.credentials_path()
+    document = json.dumps({"api_key": _KEY, "serve_token": _TOKEN}, indent=indent)
+    creds.write_bytes(b"\xef\xbb\xbf" + document.encode("utf-8"))
+
+    assert credentials.load_all() == {"api_key": _KEY, "serve_token": _TOKEN}
+    assert credentials.load_all(strict=True) == {"api_key": _KEY, "serve_token": _TOKEN}
+    credentials.store(iam_token="new")
+    assert credentials.load_all() == {"api_key": _KEY, "serve_token": _TOKEN, "iam_token": "new"}
+
+
+def test_a_bare_key_saved_with_a_utf8_bom_is_migrated_without_it(isolated_home: Path) -> None:
+    """The pre-JSON file's key, re-saved by the same editors: the BOM is not part of it."""
+    paths.ensure_home()
+    paths.credentials_path().write_bytes(b"\xef\xbb\xbf" + _KEY.encode("utf-8") + b"\r\n")
+
+    assert credentials.load_all() == {"api_key": _KEY}
+
+
 @pytest.mark.parametrize("failing", ["before the lock", "under the lock"])
 def test_a_drop_that_cannot_read_the_file_fails_rather_than_dropping_nothing(
     isolated_home: Path, monkeypatch: pytest.MonkeyPatch, failing: str

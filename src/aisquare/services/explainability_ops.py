@@ -45,6 +45,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from http.client import HTTPException, IncompleteRead
 from importlib.metadata import PackageNotFoundError, version
+from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -70,6 +71,7 @@ from aisquare.services.explainability import (
     FALLBACK_ROLE,
     KEY_ENV_VAR,
     ProxyProbe,
+    ShippingState,
     clear_project_api_key,
     hosted_proxy_for,
     is_loopback,
@@ -112,8 +114,11 @@ _SDK_MODULE = "aisquare.explainability"
 #: this package rather than merging with it.
 INSTALL_HINT = _EXTRA_INSTALL_HINT
 
-#: Override the configured target for one command, e.g. during a cutover:
-#: ``AISQUARE_EXPLAINABILITY_TARGET=prod aisquare doctor --live``.
+#: Override the machine's configured target for one command, e.g. during a
+#: cutover: ``AISQUARE_EXPLAINABILITY_TARGET=prod aisquare doctor --live``. A
+#: project whose traces were pointed somewhere with ``use`` (#142) keeps its
+#: destination's deployment; ``--target`` is what overrides that (see
+#: :func:`resolve_target`).
 TARGET_ENV_VAR = "AISQUARE_EXPLAINABILITY_TARGET"
 
 #: The SDK's own name for the gateway; accepted as a fallback so a shell that
@@ -168,6 +173,26 @@ class ResolvedTarget:
     """The project the key was resolved FOR (#141); ``None`` for a machine-level read."""
     destination: TraceDestination | None = None
     """Where the project's traces land (#142), when one was chosen and ``project_id`` was given."""
+    target_source: str = "config"
+    """What named the target: "argument" (``--target``), "destination" (the project's,
+    #142), "env" (``$AISQUARE_EXPLAINABILITY_TARGET``) or "config" (the machine's)."""
+    unused_env_target: str | None = None
+    """The target an exported ``$AISQUARE_EXPLAINABILITY_TARGET`` names when the
+    project's destination won over it and names another, so a surface can say the
+    variable is not in play for this project; ``None`` otherwise."""
+    project_deployment: bool = False
+    """The deployment is the PROJECT's — its destination's, or the one its own key is
+    bound to off the machine's target — so the machine's top-level gateway and proxy
+    never stand in for it, and its fix is its own entry (:func:`deployment_fix`)."""
+    entry_shared: str | None = None
+    """For a project's own deployment that has the machine's own target's name, what
+    names that target: "config" (``settings.target``) or "env" (an exported
+    ``$AISQUARE_EXPLAINABILITY_TARGET``, when it is not what chose this deployment).
+    Its ``[explainability.targets."<name>"]`` is then also the entry every project
+    without a destination reads, so a fix written there moves them too
+    (:func:`deployment_fix`); ``None`` otherwise, and when the machine's target of that
+    name resolves this same deployment, whose entry it is too: in every shell, so not by
+    an exported ``$EXPLAINABILITY_GATEWAY_URL``."""
 
     @property
     def configured(self) -> bool:
@@ -184,20 +209,30 @@ class ResolvedTarget:
         mid-incident. The file case names the PATH rather than saying "a file",
         because the next thing anyone does with this line is go and look.
 
-        Names the SOURCE only. Whether a key is present is each surface's own
-        sentence — they already word it differently ("is NOT set", "(NOT set)")
-        and those phrasings are pinned — so folding presence in here would churn
-        three renderers to fix a provenance bug in one of them.
+        Names the SOURCE, with one exception. Whether a key is present is each
+        surface's own sentence — they already word it differently ("is NOT set",
+        "(NOT set)") and those phrasings are pinned — so folding presence in here
+        would churn three renderers to fix a provenance bug in one of them. The
+        exception is the key file that is there and reads as no key, below: it
+        is named with what is wrong with it, and each surface's own sentence
+        still follows.
 
         With nothing set anywhere there is no winning source, so it falls back
         to the variable the target NAMES: that is the thing an operator would
         populate next, and it is what every remediation line already tells them
-        to export.
+        to export. Unless that is the default variable and the key file is
+        there, holding no key (blank, not UTF-8 — PowerShell 5.1's ``>`` writes
+        UTF-16 — or unreadable: another owner's, or its mode). Then the file is
+        what its writer fixes next, and naming the variable alone left every
+        surface silent about it (review of the #203 final-review fixes, EX5a;
+        unreadable, round 2, F5).
         """
         if self.key_source == "project":
             return f"the project's own key ({project_key_path(self.project_id or '?')})"
         if self.key_source == "file":
             return str(key_path())
+        if self.key_source == "unset" and self.api_key_env == KEY_ENV_VAR and key_path().is_file():
+            return f"{key_path()} (holds no key: blank, not UTF-8, or unreadable)"
         return f"${self.api_key_env}"
 
     @property
@@ -222,6 +257,30 @@ class ResolvedTarget:
             if name not in names:
                 names.append(name)
         return tuple(names)
+
+
+def spool_key_note(target: ResolvedTarget, shipping: ShippingState) -> str:
+    """Said after the client lane's line when it reads as contradicting the key line above it.
+
+    The spool (``ship``) is the machine's: it drains every project's insights
+    with the machine's key to the machine's target (``shipping_state``), and a
+    project's own key (#141) authenticates that project's sessions only. So
+    ``status`` for a project with its own key printed "key: the project's own
+    key … is set" and, right under it, "but no workspace key: set $…" (review
+    of #172, D2 round 2, D3). Both are true, of two keys. The note says which is
+    which, rather than dropping either line. Empty otherwise, and so when the
+    lane is off or has no gateway: its line then names no key, and the note
+    said the spool ships while it does not (review of #170's follow-ups,
+    round 1, F5).
+    """
+    if target.key_source != "project" or shipping.has_key:
+        return ""
+    if not (shipping.configured and shipping.gateway_url):
+        return ""
+    return (
+        " (the spool is the machine's: it ships every project's insights with the "
+        "machine key; the project's own key above is for its sessions)"
+    )
 
 
 def unregistered_roles(target: ResolvedTarget) -> tuple[str, ...]:
@@ -277,16 +336,53 @@ def resolve_target(
 ) -> ResolvedTarget:
     """Fold the active target's overrides onto the top-level defaults.
 
+    THE TARGET is ``name`` (``--target``), then the project's destination
+    (#142, with ``project_id``), then ``$AISQUARE_EXPLAINABILITY_TARGET``, then
+    the machine's ``settings.target``, and ``target_source`` says which. The
+    destination comes BEFORE the variable, and this is the one place that
+    order is decided. The variable came first, so an exported
+    ``AISQUARE_EXPLAINABILITY_TARGET=stg`` moved every launch of a project whose
+    destination is on another deployment onto stg with the machine key, while
+    ``use``, which resolves the destination's deployment by name, reported that
+    deployment and the project's own key, and its next check passed (review of
+    #172, D2 round 2). The variable overrides the MACHINE's target for one
+    command. A destination is a choice recorded for one project, with a
+    workspace and a key of its own on its deployment. The explicit per-command
+    override over it is ``--target``. When the variable names another target
+    than the destination that won, ``unused_env_target`` carries it, so
+    ``status`` can say the variable is not in play for this project.
+
     Precedence for the gateway URL is the target, then the SDK's environment
     variable, then the top-level ``gateway_url`` — and the winning source is
     reported either way.
 
+    THE DESTINATION'S DEPLOYMENT IS ITS OWN (review of #203). When the target
+    resolved is the one the project's destination names — chosen by the
+    destination, or named by ``--target`` or the variable — it is read off the
+    destination (:func:`~aisquare.services.destinations.deployment_target`),
+    never out of the machine's ``targets`` map by name alone: ``use`` wrote it
+    there, where the machine's own target of the same name is read, and one
+    project's choice re-pointed every other. Neither
+    ``$EXPLAINABILITY_GATEWAY_URL`` nor the top-level gateway or proxy stands
+    in for what it lacks: those are the MACHINE's deployment, and
+    for an API host outside the table the project's minted key went to them —
+    the prod gateway and proxy for a self-hosted workspace's key. Nor for a
+    project's own key bound to another target than the machine's: the key
+    answers only for its deployment, and the top level is the machine's. Such
+    a resolution has no gateway (``gateway_source`` "unset") and no proxy
+    (``proxy_source`` "unset"), and every surface says so rather than tracing
+    somewhere else. The machine's own target keeps the top level, which is
+    what it is on the machine ``init --explainability`` writes.
+
     THE KEY, with ``project_id`` (#141): the project's own key first — attached
     with ``explainability key set`` and bound to ONE deployment, so it answers
-    only when that deployment is the one resolved here — then the target's
-    environment variable, then the machine key file under the same rule as
-    before. Without a project id the read is machine-level, as every caller
-    made it until now; ``doctor`` passes none and so opens no store.
+    only when that deployment is the one resolved here (:func:`binding_serves`:
+    a key attached for a destination's deployment never answers for the
+    machine's target of the same name, nor one bound to the machine's target
+    for a destination's deployment elsewhere) — then the target's environment
+    variable, then the machine key file under the same rule as before.
+    Without a project id the read is machine-level, as every caller made it
+    until now; ``doctor`` passes none and so opens no store.
 
     THE LAST FALLBACK IS THE SINGLE-DEPLOYMENT MACHINE, and it was missing.
     ``init --explainability`` writes ``settings.gateway_url`` and the key file
@@ -314,51 +410,68 @@ def resolve_target(
     ``tests/test_key_never_crosses_deployments.py``.
     """
     environ = os.environ if env is None else env
-    # THE DESTINATION NAMES THE TARGET (#142), between the explicit forms and
-    # the machine default: a project whose traces were pointed at a workspace
-    # on staging resolves the staging deployment, whatever the machine's
-    # default is — the same way its own key wins over the machine's. An
-    # explicit ``--target`` or the environment variable still wins, because
-    # both are someone saying so right now.
+    # THE DESTINATION NAMES THE TARGET (#142), after `--target` and before the
+    # variable and the machine default: a project whose traces were pointed at
+    # a workspace on staging resolves the staging deployment, whatever the
+    # machine's target is and whatever the shell exports — the same way its own
+    # key wins over the machine's. See the docstring for why the variable
+    # comes after it.
     destination = _project_destination(project_id)
-    explicit = name or environ.get(TARGET_ENV_VAR)
-    from_destination = not explicit and destination is not None
-    chosen = (
-        explicit
-        or (destination.environment if destination is not None else None)
-        or settings.target
-    )
-    target = settings.targets.get(chosen, ExplainabilityTarget())
-    if target.destination and not explicit and not from_destination:
-        # The machine default's NAME is a target `use` wrote for a destination —
-        # the default name is "stg", and so is staging's — and that target is the
-        # destination's, not the machine's. A project without a destination
-        # resolves exactly what it did before `use` ran: the top level, and the
-        # machine key (crew gate on #203, finding 1).
-        target = ExplainabilityTarget()
-    # A destination's target borrows nothing from the machine. The top-level
-    # gateway and proxy, and $EXPLAINABILITY_GATEWAY_URL, belong to the
-    # machine's own deployment; a target `use` wrote for another one — or the
-    # one a destination chose — must not post that deployment's key to them.
-    # An API host the CLI cannot place therefore resolves to NO gateway, said
-    # as "unset", never to prod's (crew gate on #203, finding 2).
-    borrows = not (target.destination or from_destination)
+    exported = environ.get(TARGET_ENV_VAR) or None
+    if name:
+        chosen, target_source = name, "argument"
+    elif destination is not None:
+        chosen, target_source = destination.environment, "destination"
+    elif exported is not None:
+        chosen, target_source = exported, "env"
+    else:
+        chosen, target_source = settings.target, "config"
+    unused_env_target = exported if target_source == "destination" and exported != chosen else None
+    if destination is not None and chosen == destination.environment:
+        from aisquare.services.destinations import deployment_target  # lazy: it imports this
 
-    gateway_url, source = target.gateway_url, "config"
-    if not gateway_url and borrows:
-        gateway_url, source = environ.get(GATEWAY_ENV_VAR, ""), "env"
-    if not gateway_url and borrows:
-        gateway_url, source = settings.gateway_url, "config"
-    if not gateway_url:
-        source = "unset"
+        target, placed = deployment_target(settings, destination), True
+    else:
+        target, placed = settings.targets.get(chosen, ExplainabilityTarget()), False
 
-    api_key, key_source = _project_api_key(project_id, chosen), "project"
+    api_key = _project_api_key(project_id, chosen, destination, settings, environ)
+    key_source = "project"
     if api_key is None:
         api_key, key_source = environ.get(target.api_key_env) or None, "env"
     if api_key is None and target.api_key_env == KEY_ENV_VAR:
         api_key, key_source = stored_api_key(), "file"
     if api_key is None:
         key_source = "unset"
+
+    # The machine's deployment stands in only for the machine's reads: never for
+    # a destination's, nor for a project's key bound elsewhere (see the docstring).
+    machine = not placed and (key_source != "project" or chosen == settings.target)
+    gateway_url, source = target.gateway_url, "config"
+    if not gateway_url and machine:
+        gateway_url, source = environ.get(GATEWAY_ENV_VAR, ""), "env"
+    if not gateway_url and machine:
+        gateway_url, source = settings.gateway_url, "config"
+    if not gateway_url:
+        source = "unset"
+    proxy_url = target.proxy_url or (settings.proxy_url if machine else "")
+    # The project's deployment, named like the machine's own target: one config entry
+    # for both, which `deployment_fix` must not name as this deployment's alone. Not
+    # when the variable chose this deployment itself: pointing it elsewhere moved the
+    # project off the entry the fix named (review of #203, round 3). And not when the
+    # machine resolves this same deployment by that name: the entry is rightly both's
+    # then, and the rename only unbound the keys attached for the name (review of the
+    # #203 final-review fixes, F3). The machine's read is the one resolver's, as in
+    # `binding_serves`, and without the gateway this shell exports: the entry is read by
+    # every shell, and a staging gateway exported here dropped the rename on the prod
+    # machine, so the fix moved every other shell's projects to the staging proxy (review
+    # of the #203 final-review fixes, round 2, F1).
+    entry_shared = None
+    named = chosen == settings.target or (chosen == exported and target_source != "env")
+    if not machine and named:
+        every_shell = {k: v for k, v in environ.items() if k != GATEWAY_ENV_VAR}
+        own = resolve_target(settings, chosen, env=every_shell).gateway_url
+        if not (own and _same_deployment(own, gateway_url)):
+            entry_shared = "config" if chosen == settings.target else "env"
 
     roles = target.roles if target.roles is not None else settings.roles
     return ResolvedTarget(
@@ -368,33 +481,223 @@ def resolve_target(
         api_key_env=target.api_key_env,
         api_key=api_key,
         key_source=key_source,
-        proxy_url=target.proxy_url or (settings.proxy_url if borrows else ""),
-        proxy_source=_proxy_source(settings, target) if borrows or target.proxy_url else "unset",
+        proxy_url=proxy_url,
+        proxy_source=_proxy_source(settings, target) if proxy_url else "unset",
         agent_name_template=target.agent_name_template or settings.agent_name_template,
         studio_id=target.studio_id,
         roles=tuple(roles),
         project_id=project_id,
         destination=destination,
+        target_source=target_source,
+        unused_env_target=unused_env_target,
+        project_deployment=not machine,
+        entry_shared=entry_shared,
     )
 
 
-def _project_api_key(project_id: str | None, target_name: str) -> str | None:
+def deployment_fix(
+    target: ResolvedTarget, *, what: str = "gateway", value: str | None = None
+) -> str:
+    """Where ``target``'s gateway (or proxy) is set: one wording for every surface.
+
+    For one of the machine's targets, ``enable --target … --gateway-url``. For a
+    project's own deployment (:attr:`ResolvedTarget.project_deployment`) that
+    command is the wrong one: it makes the named target the MACHINE's, which
+    moves every project without a destination onto it — the re-point ``use``
+    itself made (review of #203). The config entry moves that deployment alone.
+
+    With no ``value`` it says where both go, for a deployment that has neither;
+    with one — a URL to store, or a placeholder — it names that one setting,
+    for a remediation that corrects it (the doctor's and ``status``'s proxy and
+    gateway rows, which named ``enable --target`` for a project's deployment
+    too).
+
+    UNLESS THE MACHINE'S OWN TARGET HAS THE SAME NAME AND IS ANOTHER DEPLOYMENT
+    (:attr:`ResolvedTarget.entry_shared`): then the entry is its too, and every
+    project without a destination reads it. The machine ``init
+    --explainability`` writes is on prod and named ``stg`` by default, so for a
+    project on staging the proxy row's fix, followed word for word, moved every
+    other project's proxy to staging, with the prod gateway and key (review of
+    #203, round 2). The entry is still where the setting goes, and the fix says
+    the machine's target needs a name of its own first. A machine whose target
+    of that name resolves this same deployment gets the entry alone: the fix
+    moves both to where both belong, and the rename only unbound the keys
+    attached for the name. Resolves it in every shell, since every shell reads
+    the entry: a gateway exported in this one does not count.
+    """
+    if target.project_deployment:
+        entry = f'[explainability.targets."{target.name}"] in {paths.config_path()}'
+        setting = "gateway_url and proxy_url" if value is None else f'{what}_url = "{value}"'
+        fix = f"{setting} under {entry}"
+        if target.entry_shared == "config":
+            return (
+                f"{fix}, once this machine's own target has a name of its own: it is "
+                f'"{target.name}" too, so every project without a destination reads that '
+                f'entry. Rename it first: target = "<name>" under [explainability], its own '
+                "entry moved with it if it has one, and `key set` again for a project whose "
+                f'key was attached for "{target.name}"'
+            )
+        if target.entry_shared == "env":
+            return (
+                f"{fix}, once ${TARGET_ENV_VAR} names another target: it names "
+                f'"{target.name}" in this shell, so every project without a destination here '
+                "reads that entry too"
+            )
+        return fix
+    return f"aisquare explainability enable --target {target.name} --{what}-url {value or '<url>'}"
+
+
+def _project_api_key(
+    project_id: str | None,
+    target_name: str,
+    destination: TraceDestination | None,
+    settings: ExplainabilitySettings,
+    environ: Mapping[str, str],
+) -> str | None:
     """The project's own key, when one is attached FOR ``target_name`` and its file reads.
 
     Called from :func:`resolve_target` and nowhere else (the AST guard in
     ``tests/test_one_key_resolver.py`` pins that). A binding for another
-    deployment is not a key for this one — the cross-deployment rule — and a
+    deployment is not a key for this one — the cross-deployment rule, which
+    :func:`binding_serves` decides with the project's ``destination`` — and a
     binding whose file is gone reads as no project key, so the next rung
-    answers; ``explainability key show`` is where that is reported.
+    answers; ``explainability key show`` is where that is reported. So does a
+    file that is not UTF-8, which no key is: it raised ``UnicodeDecodeError``
+    out of the resolver, so ``status`` and ``key show`` failed on it and every
+    launch in the project read its target as unreadable (review of #170, D1b
+    round 2, B4).
     """
     if project_id is None:
         return None
     binding = project_key_binding(project_id)
-    if binding is None or binding.target != target_name:
+    if binding is None or not binding_serves(
+        binding, target_name, destination, settings, env=environ
+    ):
         return None
+    return read_project_key(binding.key_path)
+
+
+def binding_serves(
+    binding: ProjectExplainability,
+    target_name: str,
+    destination: TraceDestination | None,
+    settings: ExplainabilitySettings,
+    *,
+    env: Mapping[str, str] | None = None,
+) -> bool:
+    """Whether the project's key ``binding`` is a key for the deployment ``target_name`` names.
+
+    Its target, by name, and for a key attached for a destination's deployment
+    (``binding.api_url``, v24) only while the project's ``destination`` names that
+    deployment. The name alone let one name mean two deployments: on the machine
+    ``init --explainability`` writes, the destination's ``stg`` is staging and the
+    machine's ``stg`` is the top-level prod gateway. A staging key attached while
+    the project pointed at staging answered after ``use --clear`` as the machine's
+    ``stg``, and went to prod with the prod proxy; so did one read under
+    ``--target stg`` once the project pointed at prod, and one read while the
+    destination could not be (``_project_destination`` fails open). Such a key is
+    kept and not used until a destination names its deployment again, and the
+    machine's key applies meanwhile (review of #203).
+
+    The other way round too. A key bound to one of the machine's targets
+    (``api_url`` NULL) answered for a destination's deployment of the same name.
+    On that machine, a prod key attached with ``key set`` before any ``use`` is
+    bound to the machine's ``stg``. ``use`` on a staging workspace then took it
+    as the project's own key and bound the staging roster with it, and every
+    launch sent it to the staging gateway and proxy. The mint never overwrites
+    a hand key, so nothing replaced it (review of #203, round 2). Such a key
+    answers for the destination's deployment only while the machine's target
+    of that name is that deployment, and is kept and not used otherwise:
+
+    * **The machine's own target**, while the machine's read of it resolves the
+      destination's gateway (by scheme, host and port, so one typed with a
+      capital or its default port is still that gateway), or none at all (a
+      deployment by name only: ``key set`` on a machine whose target was set to
+      ``local`` before ``use``, #141). That read falls back to
+      ``$EXPLAINABILITY_GATEWAY_URL`` and the top-level gateway, as a key bound
+      to that target does.
+    * **Another of the machine's entries**, always. A key bound to it takes the
+      entry's own gateway and never the top-level one, and the destination
+      reads the same entry, a gateway set by hand included. Compared with the
+      machine's read of it, which does fall back, a key ``key set --target
+      local`` bound to an entry with no gateway stopped answering for the
+      ``local`` deployment (review of #203, round 3).
+    * **Never a name the machine no longer has** (not in :func:`known_targets`,
+      the rule ``key set`` binds by). The binding records the name and not
+      which deployment it had: once the doctor's fix had the machine's ``stg``
+      (on prod) renamed, a prod key bound to it answered for the destination's
+      ``stg`` and went to staging (same review, and the #203 final-review
+      fixes, R1). It answers for the destination once ``key set`` attaches it
+      there.
+
+    ONE rule, for the resolver and for the surfaces that say whether the key is
+    in use (``key show``, the Explainability page's key row, through
+    :func:`kept_key_note`), so neither calls a kept key the one in use, or a key
+    in use a missing file.
+    """
+    if binding.target != target_name:
+        return False
+    if destination is None or destination.environment != target_name:
+        return binding.api_url is None
+    if binding.api_url is not None:
+        return True
+    if target_name not in known_targets(settings):
+        return False
+    if target_name != settings.target:
+        return True
+    from aisquare.services.destinations import deployment_target  # lazy: it imports this
+
+    # Both resolved, the machine's by the one resolver: neither is read off the config.
+    # Compared on scheme, host and port: the same gateway typed with a capital or its
+    # default port written out kept the key unused (review of the #203 final-review
+    # fixes, F4).
+    machine = resolve_target(settings, target_name, env=env)
+    theirs = deployment_target(settings, destination)
+    return not machine.gateway_url or _same_deployment(machine.gateway_url, theirs.gateway_url)
+
+
+def kept_key_note(
+    binding: ProjectExplainability, target: ResolvedTarget, settings: ExplainabilitySettings
+) -> str:
+    """Why the project's key, bound to ``target``'s name, is kept and not used for it.
+
+    Empty when it is a key for ``target`` (:func:`binding_serves`), or is bound
+    to another name, which each surface words on its own. ONE sentence for
+    ``key show`` and the Explainability page's key row, which wrote it twice
+    (review of #203, round 2).
+    """
+    if binding.target != target.name or binding_serves(
+        binding, target.name, target.destination, settings
+    ):
+        return ""
+    if binding.api_url is not None:
+        return (
+            f"attached for the deployment of {binding.api_url}, which no destination of this "
+            f"project names now: not used for this machine's target {target.name}"
+        )
+    if binding.target not in known_targets(settings):  # `binding_serves`' rule, as it reads it
+        return (
+            f"attached for target {binding.target}, which this machine no longer has, so not "
+            "used for the deployment this project's destination names "
+            f"({target.gateway_url or 'no gateway known'}) until `key set` attaches it there"
+        )
+    return (
+        f"attached for this machine's own target {binding.target}, another deployment than "
+        f"the one this project's destination names ({target.gateway_url or 'no gateway known'}): "
+        "not used for it"
+    )
+
+
+def read_project_key(path: Path) -> str | None:
+    """The key in a project's key file; ``None`` when it is missing, unreadable, not UTF-8 or blank.
+
+    The one reading of the file, for the resolver (:func:`_project_api_key`)
+    and for ``key show``, which called a file the resolver reads as no key a
+    healthy binding (review of #170's follow-ups, round 1, F8).
+    """
     try:
-        value = binding.key_path.read_text(encoding="utf-8").strip()
-    except OSError:
+        value = path.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeDecodeError):
         return None
     return value or None
 
@@ -444,7 +747,7 @@ def project_key_binding(project_id: str) -> ProjectExplainability | None:
 def key_owner() -> str | None:
     """Who is attaching a key: the signed-in email when there is one, else the OS user.
 
-    ONE answer for ``key set`` and the UI's *Attach key*, so ``key show``
+    ONE answer for ``key set`` and the Setup form's *this project only*, so ``key show``
     names the same person for the same act wherever it was done — the UI
     recorded ``$USER`` alone while the CLI recorded the email (review of #170).
     """
@@ -459,8 +762,81 @@ def key_owner() -> str | None:
     return os.environ.get("USER") or None
 
 
-def attach_project_key(project: ProjectInfo, value: str, *, target: str) -> ProjectExplainability:
-    """Attach ``value`` as ``project``'s own key for ``target`` — ``key set`` and *Attach key*.
+class UnknownTarget(ValueError):
+    """A key was to be bound to a deployment this machine has no target for.
+
+    Raised by :func:`attach_project_key` before anything is written; the
+    message is the problem, and each surface adds its own way to fix it.
+    """
+
+    def __init__(self, target: str, known: Sequence[str]) -> None:
+        super().__init__(f"no target '{target}' on this machine (known: {', '.join(known)})")
+        self.target = target
+        self.known = tuple(known)
+
+
+def known_targets(
+    settings: ExplainabilitySettings, destination: TraceDestination | None = None
+) -> list[str]:
+    """The deployments a project's key may be bound to: the machine's target and every entry.
+
+    ``resolve_target`` answers for any name, so a binding to a name nothing
+    configures (``--target prdo``, or an exported
+    ``$AISQUARE_EXPLAINABILITY_TARGET=prdo``) traces nothing and still read
+    as success (review of #170). The machine's own target counts without an
+    entry: that is the single-deployment machine ``init --explainability``
+    writes, which resolves the top-level gateway. ONE rule, used by the
+    writer (:func:`attach_project_key`) and by the two surfaces that refuse
+    earlier (``key set`` before it reads the key, the Setup form before it
+    saves). The form used to judge a name after its own save had made it
+    the machine's target, so "make active" let a typo through (review of
+    #170's Setup-form merge, G1/G7).
+
+    With the project's ``destination`` (#142), its deployment counts too: it is
+    read off the destination, not written to the config (``use`` no longer
+    re-points the machine to record it, review of #203), and it is the target
+    ``key set`` binds to by default — the fallback ``use`` names when no key
+    could be minted.
+    """
+    named = [destination.environment] if destination is not None else []
+    return sorted({settings.target, *settings.targets, *named})
+
+
+def launches_elsewhere(
+    settings: ExplainabilitySettings, project_id: str, target: str
+) -> ResolvedTarget | None:
+    """What the project's launches resolve, when it is not ``target``; ``None`` when it is.
+
+    A key bound to a deployment the project's launches do not resolve is kept
+    and unused until they do. ``key set --target prod`` on a machine on stg,
+    and the Setup form with a deployment typed and 'make active' unticked,
+    both said "launches in this project authenticate the proxy with it" for
+    such a key (review of #170's Setup-form merge, G3).
+    """
+    launches = resolve_target(settings, None, project_id=project_id)
+    return None if launches.name == target else launches
+
+
+def unused_key_note(launches: ResolvedTarget) -> str:
+    """The one sentence both surfaces say about a key :func:`launches_elsewhere` found unused."""
+    why = {
+        "destination": "its destination's deployment",
+        "env": f"named by ${TARGET_ENV_VAR}",
+    }.get(launches.target_source, "this machine's target")
+    return f"not used by this project's launches, which resolve target {launches.name} ({why})"
+
+
+class MintedKeyInPlace(Exception):
+    """The project's key file holds a key the CLI minted (#142), and the caller will not replace it.
+
+    Raised by :func:`attach_project_key` with ``refuse_minted``, before anything is written.
+    """
+
+
+def attach_project_key(
+    project: ProjectInfo, value: str, *, target: str, refuse_minted: bool = False
+) -> ProjectExplainability:
+    """Attach ``value`` as ``project``'s own key for ``target``: ``key set``, and *Save setup*.
 
     Attaching a key is a deliberate act, so the project is REGISTERED first
     (``onboard_project``, as ``team on`` does): the binding is a FOREIGN KEY to
@@ -472,28 +848,105 @@ def attach_project_key(project: ProjectInfo, value: str, *, target: str) -> Proj
     keeps no credential that nothing names, and an earlier binding keeps the
     key it named. Keeping the NEW file under the OLD row handed the old
     binding's deployment the other deployment's key — a stg row answering
-    with the prod key (review of #170).
+    with the prod key (review of #170). Put back on an interrupt too: a
+    Ctrl-C between the write and the commit left the new key under the old
+    binding just the same.
+
+    A ``target`` that is not one of :func:`known_targets` raises
+    :class:`UnknownTarget` before anything is written. A ``target`` the
+    project's destination names is that destination's deployment, and the
+    binding records its API (``ProjectExplainability.api_url``): the key then
+    never answers for the machine's target of the same name
+    (:func:`binding_serves`).
+
+    Over a key the CLI minted (#142) the binding's commit also detaches it,
+    owing its revocation (``set_project_explainability``); the caller revokes
+    it once the store is closed. The minted key's OWN value attached again is
+    still that key: it stays minted, and nothing is owed — detached, the key
+    just attached would have been revoked under the project (review of #172).
+
+    ``refuse_minted`` is the fleet UI's, which leaves the revoke a replaced
+    minted key is owed, and saying what is still live, to ``key set``, so a
+    minted key raises :class:`MintedKeyInPlace` and nothing is written. Asked here,
+    in the session the write opens anyway: the tab asked it through a store
+    session of its own, then again beside this one (review of #172).
+
+    A raise from ``set_project_explainability`` means nothing was committed:
+    its commit is the last thing it does. A file that is not UTF-8 is no key
+    and is replaced like a missing one; reading it for the put-back raised on
+    every attach, so it could never be repaired (review of #170, D1b round 2,
+    B4). A put-back that fails does not replace the error that caused it. The
+    file is removed instead, so the earlier binding reads as having no file
+    (``key show`` says so) rather than holding the key just refused, and the
+    error carries a note saying so (B3).
     """
     from aisquare.core.store import store_session  # lazy, as in project_key_binding
 
+    settings = load_config().explainability
     with store_session() as store:
+        destination = store.project_destination(project.id)
+        # With its destination: that deployment is known without a config entry.
+        known = known_targets(settings, destination)
+        if target not in known:
+            raise UnknownTarget(target, known)
+        if refuse_minted and destination is not None and destination.key_uid:
+            raise MintedKeyInPlace(project.id)
         store.onboard_project(project)
         earlier = None
         if store.project_explainability(project.id) is not None:
             # A binding whose file is gone keeps no file: it stays as `key show` saw it.
-            with contextlib.suppress(OSError):
+            with contextlib.suppress(OSError, UnicodeDecodeError):
                 earlier = project_key_path(project.id).read_text(encoding="utf-8")
+        minted = None
+        if destination is not None and earlier is not None and earlier.strip() == value.strip():
+            minted = destination.key_uid
+        # The destination's deployment, when it is the one named: `resolve_target`
+        # reads that name off the destination for this project, not off the config.
+        api_url = None
+        if destination is not None and destination.environment == target:
+            api_url = destination.api_url
         path = store_project_api_key(project.id, value)
         try:
             return store.set_project_explainability(
-                project.id, target=target, key_path=path, set_by=key_owner()
+                project.id,
+                target=target,
+                key_path=path,
+                set_by=key_owner(),
+                minted=minted,
+                api_url=api_url,
             )
-        except Exception:
-            if earlier is None:
-                clear_project_api_key(project.id)
-            else:
-                store_project_api_key(project.id, earlier)
+        except BaseException as refused:
+            put_back_project_key(project.id, earlier, refused)
             raise
+
+
+def put_back_project_key(project_id: str, earlier: str | None, refused: BaseException) -> None:
+    """Put the project's key file back as it was before a binding that was refused.
+
+    ``None`` means there was no file (or none a binding named), so none is
+    left. When the earlier key cannot be written back, the file is removed and
+    ``refused`` gets a note. The new key must not stay under the earlier
+    binding, which may be for another deployment. The two writers of a
+    project's key share it: :func:`attach_project_key` and the mint
+    (``destinations.mint_key``), which kept the key it had just minted, and
+    then revoked, under the earlier binding when its own put-back failed
+    (review of #170's follow-ups, round 1, F4).
+    """
+    try:
+        if earlier is None:
+            clear_project_api_key(project_id)
+        else:
+            store_project_api_key(project_id, earlier)
+    except OSError as undo:
+        with contextlib.suppress(OSError):
+            clear_project_api_key(project_id)
+        path = project_key_path(project_id)
+        left = (
+            f"it still holds the key just refused: delete {path}"
+            if path.exists()
+            else "it was removed, so the project has no key file until one is attached again"
+        )
+        refused.add_note(f"the key file could not be put back as it was ({undo}); {left}")
 
 
 def effective_settings(
@@ -1006,8 +1459,13 @@ def checks(
     target_name: str | None = None,
     live: bool = False,
     env: Mapping[str, str] | None = None,
+    project_id: str | None = None,
 ) -> list[DoctorCheck]:
     """The explainability section of ``aisquare doctor``, in dependency order.
+
+    ``project_id`` resolves the key (and, through the project's destination,
+    the target) as that project's launches do (``doctor --project``); without
+    it the read is machine-level and opens no store.
 
     Severity follows a single rule: **an unwired machine is not a broken
     machine**. Nothing here fails while tracing is off — the section reads as
@@ -1022,11 +1480,11 @@ def checks(
             _warn(
                 "explainability",
                 f"could not read the config: {exc}",
-                "Fix or reset it: aisquare init --reinit",
+                "Fix it, or reset it to the defaults: aisquare init --reinit --yes",
             )
         ]
 
-    target = resolve_target(resolved_settings, target_name, env=env)
+    target = resolve_target(resolved_settings, target_name, env=env, project_id=project_id)
     on = resolved_settings.enabled
     switch = _check_switch(resolved_settings, target, live=live)
 
@@ -1161,8 +1619,7 @@ def _check_config(target: ResolvedTarget, *, on: bool) -> DoctorCheck:
         return degrade(
             name,
             f"target '{target.name}' has no gateway URL",
-            "Point it at a deployment: aisquare explainability enable "
-            f"--target {target.name} --gateway-url <url>",
+            f"Point it at a deployment: {deployment_fix(target)}",
         )
     # A gateway that is not a URL -- `stg.example`, the runbook command four
     # characters short. `configure_target` refuses it now, but a hand-edited
@@ -1178,18 +1635,40 @@ def _check_config(target: ResolvedTarget, *, on: bool) -> DoctorCheck:
             name,
             f"target '{target.name}' ({target.gateway_source}): {unusable} — nothing can "
             "be posted to it, and the proxy lane cannot tell whether the proxy agrees with it",
-            f"Store a full URL: aisquare explainability enable --target {target.name} "
-            "--gateway-url https://<host>",
+            f"Store a full URL: {deployment_fix(target, value='https://<host>')}",
         )
     if not target.api_key:
+        # For a project's own deployment, `enable --target … --key-env` would make it the
+        # machine's target, re-pointing every project without a destination (review of #203):
+        # the project's own key is the way in, as `use` says. With `--from-env`: from a
+        # terminal, `key set` with nothing on stdin refuses (review of #203, round 2).
+        other = (
+            "attach it to the project: aisquare explainability key set --project "
+            f"{shlex.quote(target.project_id or '<project>')} --from-env <VAR>"
+            if target.project_deployment
+            else "point the target at another variable: aisquare explainability enable "
+            f"--target {target.name} --key-env <VAR>"
+        )
+        if target.api_key_env == KEY_ENV_VAR and key_path().is_file():
+            # The key file is there and reads as no key. Its writer was told to export
+            # the variable "the CLI never stores" (review of the #203 final-review
+            # fixes, EX5a). `stored_api_key` reads a file it cannot open as no key too,
+            # which "not UTF-8" did not name (round 2, F5).
+            return degrade(
+                name,
+                f"target '{target.name}' -> {target.gateway_url} ({target.gateway_source}), "
+                f"but ${target.api_key_env} is not set in this shell and {key_path()} holds no "
+                "key (blank, not UTF-8, or unreadable)",
+                f"Write the workspace key into {key_path()} again, as UTF-8 text this user can "
+                f"read (PowerShell 5.1's `>` writes UTF-16), export it as "
+                f"${target.api_key_env}, or {other}",
+            )
         return degrade(
             name,
             f"target '{target.name}' -> {target.gateway_url} ({target.gateway_source}), "
             f"but ${target.api_key_env} is not set in this shell",
             f"Export the workspace key as ${target.api_key_env} (the CLI reads it from "
-            "the environment and never stores it), or point the target at another "
-            "variable: aisquare explainability enable --target "
-            f"{target.name} --key-env <VAR>",
+            f"the environment and never stores it), or {other}",
         )
     identities = ", ".join(target.agent_names) or "none"
     return _ok(
@@ -1354,25 +1833,22 @@ def proxy_state(
     * tracing is ON and the proxy does not answer — genuinely red: launches
       still succeed (they never block on this) but they go UNTRACED, silently,
       which is the whole failure this lane exists to prevent.
+
+    Before any of them: a project's own deployment with no proxy known
+    (:attr:`ResolvedTarget.project_deployment`) has none to dial, and its
+    launches go untraced — red while tracing is on, amber while it is off.
     """
     # Resolved here rather than bound as a default argument, so a test (or a
     # caller) can substitute a prober by patching this module.
     ask = prober or probe_proxy
     if not target.proxy_url:
-        # A destination's target with no proxy of its own borrows none from the
-        # machine (crew gate on #203, finding 2): launches under it run
-        # unproxied, so their model traffic is untraced. Red only while tracing
-        # is on — off, nothing is traced anyway — and nothing is dialled: there
-        # is no address to ask.
+        # A project's own deployment with no proxy known (review of #203): the
+        # machine's proxy is another deployment's, so nothing is dialled in its
+        # place and the project's launches go untraced. Amber while tracing is off.
         return ProxyState(
-            summary=(
-                f"no proxy known for the {target.name} deployment — launches under it run "
-                "unproxied, so their model traffic is not traced"
-            ),
-            severity=CheckStatus.warn if on else CheckStatus.ok,
-            remediation=(
-                f"aisquare explainability enable --target {target.name} --proxy-url <url>"
-            ),
+            summary=f"no proxy is known for target '{target.name}' — its launches go untraced",
+            severity=CheckStatus.fail if on else CheckStatus.warn,
+            remediation=f"Give it one: {deployment_fix(target, what='proxy')}",
         )
     if not on:
         if target.proxy_source == "default":
@@ -1506,10 +1982,7 @@ def _destination(target: ResolvedTarget, verdict: ProxyProbe) -> ProxyState:
                 f"{target.name!r}, so that cannot be compared with anything"
             ),
             severity=CheckStatus.warn,
-            remediation=(
-                f"Name the deployment: aisquare explainability enable --target {target.name} "
-                f"--gateway-url {adopt}"
-            ),
+            remediation=f"Name the deployment: {deployment_fix(target, value=adopt)}",
         )
     unusable = url_problem(target.gateway_url, what="gateway")
     if unusable:
@@ -1519,10 +1992,7 @@ def _destination(target: ResolvedTarget, verdict: ProxyProbe) -> ProxyState:
                 f"unusable ({unusable}), so where the proxy ships cannot be compared with it"
             ),
             severity=CheckStatus.warn,
-            remediation=(
-                f"Store a full URL: aisquare explainability enable --target {target.name} "
-                "--gateway-url https://<host>"
-            ),
+            remediation=f"Store a full URL: {deployment_fix(target, value='https://<host>')}",
         )
     if verdict.gateway:
         if foreign_view:
@@ -1613,8 +2083,8 @@ def _destination(target: ResolvedTarget, verdict: ProxyProbe) -> ProxyState:
             severity=CheckStatus.warn,
             remediation=(
                 f"Restart the local proxy with EXPLAINABILITY_GATEWAY_URL={target.gateway_url}, "
-                "or point this CLI at the deployment's own proxy: aisquare explainability "
-                f"enable --target {target.name} --proxy-url {hosted}"
+                "or point this CLI at the deployment's own proxy: "
+                f"{deployment_fix(target, what='proxy', value=hosted)}"
             ),
         )
     return ProxyState(
@@ -1630,8 +2100,7 @@ def _destination(target: ResolvedTarget, verdict: ProxyProbe) -> ProxyState:
             "is wrong: confirm on that host that it was started with "
             f"EXPLAINABILITY_GATEWAY_URL={target.gateway_url} (a proxy that reports its "
             "gateway from /health clears this on its own). Otherwise point this CLI at the "
-            f"deployment's proxy: aisquare explainability enable --target {target.name} "
-            f"--proxy-url {hosted}"
+            f"deployment's proxy: {deployment_fix(target, what='proxy', value=hosted)}"
         ),
     )
 
@@ -1723,8 +2192,7 @@ def _live_checks(target: ResolvedTarget, *, on: bool) -> list[DoctorCheck]:
             _warn(
                 "explainability gateway",
                 "skipped — no gateway URL and key for this target",
-                "Configure the target first: aisquare explainability enable "
-                f"--target {target.name} --gateway-url <url>",
+                f"Configure the target first: {deployment_fix(target)}",
             )
         ]
 
@@ -1751,7 +2219,7 @@ def _live_checks(target: ResolvedTarget, *, on: bool) -> list[DoctorCheck]:
                 "explainability ingest",
                 "skipped — the gateway did not answer /ready, so no span was posted; "
                 "this is not a verdict on ingest",
-                "Fix the gateway row above, then re-run: aisquare doctor --live",
+                f"Fix the gateway row above, then re-run: {_rerun_live(target)}",
             )
         )
         # `_sdk_checks` asks the SDK's own doctor and never touches the gateway,
@@ -1784,11 +2252,27 @@ def _live_checks(target: ResolvedTarget, *, on: bool) -> list[DoctorCheck]:
                 "traces land, but runs stay UNGOVERNED until a rule book is attached "
                 "to the studio (an ingest key cannot verify this from here)",
                 "Attach a rule book to the studio in the dashboard, then re-run "
-                "aisquare doctor --live",
+                f"{_rerun_live(target)}",
             )
         )
     results.extend(_sdk_checks(degrade=degrade))
     return results
+
+
+def _rerun_live(target: ResolvedTarget) -> str:
+    """``doctor --live`` for what this run checked, as the live rows' remedies name it.
+
+    Bare, the re-run checked the machine's target and key. For a project
+    (``doctor --live --project``, the check ``use`` names) whose destination is
+    on another deployment, that is another gateway and another key, and after
+    ``--target`` another deployment (review of #170's follow-ups, round 1, F7).
+    """
+    argv = ["aisquare", "doctor", "--live"]
+    if target.target_source == "argument":
+        argv += ["--target", target.name]
+    if target.project_id is not None:
+        argv += ["--project", target.project_id]
+    return shlex.join(argv)
 
 
 #: ``_fail`` when the operator has switched tracing on (broken now means
@@ -1911,14 +2395,15 @@ def apply_fixes(
     try:
         config = load_config()
     except Exception as exc:  # never crash the doctor we are called from
-        return [f"could not read the config ({exc}) — fix it first: aisquare init --reinit"]
+        return [
+            f"could not read the config ({exc}) — fix it first, or reset it to the "
+            "defaults: aisquare init --reinit --yes"
+        ]
 
     if not config.explainability.enabled:
         config.explainability.enabled = True
         if target:
             config.explainability.target = target
-            if target in config.explainability.targets:
-                config.explainability.targets[target].destination = False  # the operator's now
         try:
             save_config(config)
             actions.append("enabled explainability tracing for this machine")

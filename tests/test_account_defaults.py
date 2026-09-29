@@ -638,6 +638,26 @@ def test_a_project_default_lists_the_project_it_is_set_for(
     assert default is not None and default.slot == 2
 
 
+def test_clearing_a_forgotten_projects_default_leaves_it_forgotten(
+    fake_home: Path, work: ProjectInfo, runner: CliRunner
+) -> None:
+    """`accounts default --clear --project .` registered the directory before it cleared
+    the setting, which un-forgot a forgotten project: back as a capture, with every
+    later read reaching it (review of #168, round 2). A clear is a delete; it needs
+    no row."""
+    core.create_account()
+    service.set_default("2", project=work)
+    with store_session() as store:
+        store.forget_project(work.id)
+
+    cleared = runner.invoke(app, ["accounts", "default", "--clear", "--project", "."])
+
+    assert cleared.exit_code == 0, cleared.output
+    with store_session() as store:
+        assert store.get_project(work.id) is None, "still forgotten"
+        assert store.project_setting(work.id, service.PROJECT_ACCOUNT_KEY) is None
+
+
 def test_accounts_alias_order_move_disable_and_enable_commands(
     fake_home: Path, runner: CliRunner
 ) -> None:

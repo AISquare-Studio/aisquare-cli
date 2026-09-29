@@ -21,6 +21,7 @@ from aisquare.cli import auth as auth_cli
 from aisquare.cli.app import app
 from aisquare.cli.ui.sidebar import DoctorSection
 from aisquare.cli.ui.views.accounts import credits_text
+from aisquare.core.config import load_config
 from aisquare.core.store import store_session
 from aisquare.core.workspace import project_id_for
 from aisquare.models import ProjectInfo
@@ -32,6 +33,7 @@ from tests.test_credits import BALANCE, NOW
 from tests.test_ui_accounts import (
     _overview,
     _status,
+    accounts_read,
     drive,
     fleet_app,
     open_accounts,
@@ -156,36 +158,32 @@ def test_doctor_live_warns_on_the_servers_band(
     assert "workspace-credits" not in {c.name for c in diagnostics.doctor(live=False)}
 
 
-def test_a_forgotten_projects_workspace_is_neither_asked_about_nor_warned_on(
-    idp: IdentityProviderStub, pointed: ProjectInfo
+def test_a_forgotten_projects_workspace_is_asked_about_wherever_a_launch_there_traces(
+    runner: CliRunner, idp: IdentityProviderStub, pointed: ProjectInfo
 ) -> None:
-    """Review of #173, round 1: ``project forget`` tombstones the project and
-    leaves its ``project_destination`` row, which ``logout`` still needs for a
-    minted key. ``doctor --live`` and the Accounts page read every row, so a
-    workspace only a forgotten project pointed at was still asked about, drawn,
-    and warned on ("Top up the workspace … before spawning a fleet into it")."""
+    """One rule for a forgotten project's destination, on every surface. ``project
+    forget`` keeps the ``project_destination`` row, and a launch in that root still
+    traces into its workspace: the resolver reads the destination by project id, and
+    the launch's first prompt revives the row. ``whoami`` and ``explainability status``
+    said so, while ``doctor --live`` and the Accounts page (review of #173, round 1)
+    hid that workspace's credits, low or exhausted, from the operator whose next fleet
+    there traces into it (review of #173 after the stack's merge, J1)."""
     from aisquare.cli.ui.views.accounts import _read_credits
-    from aisquare.services import diagnostics
+    from aisquare.services import diagnostics, explainability_ops
 
     session = iam.current_session()
     assert session is not None
-    asked = len(_balance_calls(idp))
     with store_session() as store:
         store.forget_project(pointed.id)
-        assert store.project_destination(pointed.id) is not None, "logout still reaches it"
-    assert "workspace-credits" not in {c.name for c in diagnostics.doctor(live=True)}
-    assert _read_credits(session) == []
-    assert len(_balance_calls(idp)) == asked, "nobody asks about a forgotten project's workspace"
-    # A CAPTURED directory pointed at the same workspace still counts: a launch there joins it.
-    root = pointed.root.parent / "api"
-    root.mkdir()
-    captured = ProjectInfo(id=project_id_for(root), root=root, linked_repos=[])
-    with store_session() as store:
-        store.ensure_project(captured)
-        destination = store.project_destination(pointed.id)
-        assert destination is not None
-        store.set_project_destination(destination.model_copy(update={"project_id": captured.id}))
-    assert {c.name for c in diagnostics.doctor(live=True)} >= {"workspace-credits"}
+        assert store.get_project(pointed.id) is None
+    lands_in = explainability_ops.resolve_target(
+        load_config().explainability, None, project_id=pointed.id
+    ).destination
+    assert lands_in is not None and lands_in.workspace_name == "acme", "a launch there"
+
+    assert "credits: acme [low]" in runner.invoke(app, ["whoami"]).output
+    row = {c.name: c for c in diagnostics.doctor(live=True)}["workspace-credits"]
+    assert row.status == "warn" and "acme" in row.detail
     assert [r.workspace_name for r in _read_credits(session)] == ["acme"]
 
 
@@ -246,9 +244,9 @@ def test_signing_out_on_the_accounts_page_clears_the_credits_line(
     current: dict[str, iam.Session | None] = {"session": session}
     monkeypatch.setattr(iam, "current_session", lambda api_url=None: current["session"])
 
-    def sign_out(_session: iam.Session) -> bool:
+    def sign_out(_session: iam.Session) -> auth_service.SignedOut:
         current["session"] = None
-        return True
+        return auth_service.SignedOut(revoked=True, restricted=True)
 
     monkeypatch.setattr(auth_service, "sign_out", sign_out)
 
@@ -372,9 +370,32 @@ def test_the_explainability_views_row_says_why_it_has_no_reading(
     rows = dict(status_report(pointed).rows)
     assert rows["credits"] == (
         "(AISQUARE_TOKEN is used with https://api.aisquare.studio, not this workspace's API — "
-        f"set AISQUARE_API_URL={idp.url} and a token that API issued to read them)"
+        f"set AISQUARE_API_URL={idp.url} and a token that API issued to read them; every "
+        "command in that shell then talks to that API)"
     ), rows["credits"]
     assert len(_balance_calls(idp)) == 1, "none of these cases asks anyone"
+
+
+def test_whoami_says_why_a_session_for_another_api_has_no_credits_line(
+    runner: CliRunner,
+    idp: IdentityProviderStub,
+    pointed: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #173 after the stack's merge (J3): signed in to another API than the
+    destination's, ``whoami`` dropped its credits line in silence, while the tab's row
+    named the fix. It says the same thing now, from the same sentence."""
+    elsewhere = iam.Session(api_url="https://api.aisquare.studio", token="aisq_x", source="file")
+    monkeypatch.setattr(iam, "current_session", lambda api_url=None: elsewhere)
+
+    who = runner.invoke(app, ["whoami"])
+
+    assert who.exit_code == 0, who.output
+    assert (
+        "credits: (signed in to https://api.aisquare.studio, not this workspace's API — "
+        f"aisquare login --api-url {idp.url} to read them)"
+    ) in who.output
+    assert _balance_calls(idp) == [], "nobody was asked"
 
 
 def test_a_sign_in_or_out_in_another_terminal_follows_on_the_next_frame(
@@ -398,7 +419,7 @@ def test_a_sign_in_or_out_in_another_terminal_follows_on_the_next_frame(
         before = shown(line)
         current["session"] = None  # `aisquare logout` in another terminal
         app_.refresh_accounts()
-        await pilot.pause()
+        await accounts_read(app_)
         signed_out = shown(line)
         current["session"] = session  # and `aisquare login` again
         app_.refresh_accounts()
@@ -431,9 +452,9 @@ def test_a_reading_in_flight_at_sign_out_is_never_painted(
 
     monkeypatch.setattr(credits_service, "for_destination", slow)
 
-    def sign_out(_session: iam.Session) -> bool:
+    def sign_out(_session: iam.Session) -> auth_service.SignedOut:
         current["session"] = None
-        return True
+        return auth_service.SignedOut(revoked=True, restricted=True)
 
     monkeypatch.setattr(auth_service, "sign_out", sign_out)
 
@@ -500,7 +521,7 @@ def test_another_sign_in_while_the_page_is_hidden_never_shows_the_last_ones_bars
             current["session"] = other  # `aisquare login` as someone else, in another terminal
             idp.credits = json.loads(json.dumps(BALANCE)) | {"state": "exhausted"}
             app_.refresh_accounts()
-            await pilot.pause()
+            await accounts_read(app_)  # not `settle`: the credits reading is held on purpose
             hidden = shown(line)
         finally:
             hold.clear()

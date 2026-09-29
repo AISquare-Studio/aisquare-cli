@@ -24,6 +24,7 @@ from aisquare.models import (
     ContextEntry,
     FleetAgent,
     OnboardReport,
+    PendingRevocation,
     ProjectForgetReport,
     ProjectInfo,
     ProjectPruneReport,
@@ -146,7 +147,9 @@ def forget(ref: str, *, purge: bool = False) -> ProjectForgetReport:
     context entries, prompt history, board rows and ended fleet-agent rows stay
     in the store, hidden — reachable again only by registering the root again.
     With ``purge`` they are deleted, and so is ``~/.aisquare/projects/<id>/``
-    (the snapshot and brain), and a key the CLI minted for it is revoked.
+    (the snapshot and brain), and a key the CLI minted for it is revoked — or,
+    when it cannot be yet, kept owed and named in the report
+    (:func:`_revoke_owed`).
 
     If the project was the ACTIVE one — pinned, or the one the working
     directory resolves to — the pin moves to the most recently touched
@@ -158,7 +161,7 @@ def forget(ref: str, *, purge: bool = False) -> ProjectForgetReport:
         if live:
             raise ProjectBusyError(project, live)
         was_active = active_project(store).id == project.id
-        removed = _purge(store, project.id) if purge else {}
+        removed = store.purge_project(project.id) if purge else {}
         if not purge:
             store.forget_project(project.id)
         active, pin_error = _repin(store) if was_active else (None, None)
@@ -170,6 +173,7 @@ def forget(ref: str, *, purge: bool = False) -> ProjectForgetReport:
         active=active,
         active_changed=was_active,
         pin_error=pin_error,
+        keys_still_live=_revoke_owed([project.id]) if purge else [],
     )
 
 
@@ -263,7 +267,7 @@ def prune(candidates: list[PruneCandidate], *, purge: bool) -> ProjectPruneRepor
                 kept.append(candidate.model_copy(update={"live_agents": live}))
                 continue
             if purge:
-                _purge(store, project_id)
+                store.purge_project(project_id)
             else:
                 store.forget_project(project_id)
             dropped.append(project_id)
@@ -281,21 +285,28 @@ def prune(candidates: list[PruneCandidate], *, purge: bool) -> ProjectPruneRepor
         active=active,
         active_changed=active_changed,
         pin_error=pin_error,
+        keys_still_live=_revoke_owed(dropped) if purge else [],
     )
 
 
-def _purge(store: ContextStore, project_id: str) -> dict[str, int]:
-    """Delete what the project owns in the store, and revoke a key the CLI minted for it.
+def _revoke_owed(project_ids: list[str]) -> list[PendingRevocation]:
+    """Revoke the keys the CLI minted for purged projects; the ones still live.
 
-    The purge takes the destination row (#142) that names that key, and
-    ``logout`` finds a minted key by that row alone: once it is gone, nothing
-    on this machine could revoke the key any more (review of #172).
+    A purge deletes the destination row (#142) that names a minted key, and
+    ``store.purge_project`` owes the key's revocation in that same transaction.
+    The revokes happen here, after the store session has closed and after
+    every purge of a sweep — together, under one time budget
+    (``destinations.revoke_owed``): made one per project inside the loop, a
+    ``prune --purge`` held the store through a 10 s timeout per keyed project
+    (review of #172). Signed out, offline or signed in to another host, the
+    purge is still done; what is still live is reported, and stays owed for
+    the next ``use``, ``doctor --live`` or ``logout``.
     """
-    from aisquare.services import destinations  # lazy: the explainability modules, for a purge
+    if not project_ids:
+        return []
+    from aisquare.services import destinations, iam  # lazy: the explainability modules
 
-    with destinations.purging_minted_key(store, project_id):
-        removed = store.purge_project(project_id)
-    return removed
+    return destinations.revoke_owed(iam.signed_in_quietly(), project_ids=set(project_ids)).owed
 
 
 def _repin(store: ContextStore) -> tuple[ProjectInfo | None, str | None]:

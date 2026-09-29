@@ -32,9 +32,10 @@ from textual.pilot import Pilot
 from textual.widgets import Button, Static
 from textual.worker import Worker, WorkerState
 
-from aisquare.cli.ui.app import FleetApp
+from aisquare.cli.ui.app import ACCOUNTS_WORKER, FleetApp
 from aisquare.cli.ui.sidebar import AccountsSection, AccountsTitle
 from aisquare.cli.ui.terminal import TerminalPane
+from aisquare.cli.ui.views import accounts as accounts_view
 from aisquare.cli.ui.views.accounts import (
     SIGN_IN_WORKER,
     AccountRow,
@@ -180,13 +181,20 @@ def drive(
     overview: AccountsOverview | None = None,
     notifications: bool = False,
 ) -> T:
-    """Run ``fn`` against a mounted ``FleetApp`` whose Accounts reader answers ``overview``."""
+    """Run ``fn`` against a mounted ``FleetApp`` whose Accounts reader answers ``overview``.
+
+    The start-up doctor run has been painted before ``fn`` starts. Painting its report
+    resizes the Doctor section above the Accounts section and moves it (from row 30 to
+    row 34 here), and a report that landed between the press and the click of
+    ``open_accounts`` moved the section out from under the pointer: the click reached
+    another row and the page never opened (reproduced with every worker held 0.3 s).
+    """
     frame = overview if overview is not None else _overview(_status(1, "me@example.com"))
 
     async def run() -> T:
         app = FleetApp(refresh_seconds=3600, doctor=lambda: [], accounts=lambda: frame)
         async with app.run_test(size=SIZE, notifications=notifications) as pilot:
-            await pilot.pause()
+            await settle(app)  # the start-up doctor and the first accounts frame, painted
             return await fn(pilot)
 
     return asyncio.run(run())
@@ -200,7 +208,7 @@ def shown(widget: Static) -> str:
 
 
 async def settle(app: FleetApp) -> None:
-    """Let the page go quiet: every message queued on it handled, every worker of ours done.
+    """Let the page go quiet: nothing queued on the app or its screen, every worker of ours done.
 
     Not only the workers that exist when it is called: the page starts its usage
     reading from ``on_show``, and a ``Show`` still queued when a test settled left
@@ -210,6 +218,19 @@ async def settle(app: FleetApp) -> None:
     await settle_page(app)
 
 
+async def accounts_read(app: FleetApp) -> None:
+    """Wait until the shell's accounts read has answered and its frame is painted.
+
+    ``refresh_accounts`` reads in a thread worker (final review of #203, accounts
+    F2), so a test that asks for a frame and then reads the page waits for that
+    worker, and only that one: :func:`settle` would also wait for a worker a
+    test is holding on purpose. ``settle_page`` narrowed to the read's group, so
+    it goes round the same way (the answer is a message the app handles after
+    the worker has finished) and waits for a message still being handled.
+    """
+    await settle_page(app, group=ACCOUNTS_WORKER)
+
+
 def fleet_app(pilot: Pilot[None]) -> FleetApp:
     app = pilot.app
     assert isinstance(app, FleetApp)
@@ -217,9 +238,11 @@ def fleet_app(pilot: Pilot[None]) -> FleetApp:
 
 
 async def open_accounts(pilot: Pilot[None]) -> AccountsView:
+    """Click the section and wait for the page: the click posts ``AccountsSelected`` to the
+    app, whose handler mounts the page, so one pause could return before it existed."""
     app = fleet_app(pilot)
     await pilot.click(app.query_one(AccountsSection))
-    await pilot.pause()
+    await settle(app)
     view = app.query_one("#accounts", AccountsView)
     assert app.current_view() is view
     return view
@@ -358,6 +381,189 @@ def test_the_section_summarises_and_opens_the_page(no_network: dict[str, Any]) -
     assert rows[1].startswith("  2  account 2") and "two@example.com" in rows[1]
     assert "Signed in as me@aisquare.studio" in status
     assert claude.startswith("Claude Code 2.1.266")
+
+
+def test_the_shells_tick_reads_the_accounts_off_the_ui_thread_and_paints_the_answer(
+    no_network: dict[str, Any],
+) -> None:
+    """Final review of #203, accounts F2: ``refresh_accounts`` called the reader on the
+    event loop every two seconds. The real one reads ``context.db`` and may write the
+    registry's reconcile, which waits out the busy timeout behind another writer, so
+    the UI froze for as long as a hook held the lock. Held here as that writer would
+    hold it: the tick returns at once, the section keeps its frame, and the answer is
+    painted when it comes."""
+    no_network["session"] = _session()
+    frames = [
+        _overview(_status(1, "me@example.com")),
+        _overview(_status(1, "me@example.com"), _status(2, "two@example.com")),
+    ]
+    threads: list[str] = []
+    hold, asked, release = threading.Event(), threading.Event(), threading.Event()
+
+    def reader() -> AccountsOverview:
+        threads.append(threading.current_thread().name)
+        if hold.is_set():
+            asked.set()
+            release.wait(10)
+        return frames[0]
+
+    async def run() -> tuple[str, bool, str, str]:
+        app = FleetApp(refresh_seconds=3600, doctor=lambda: [], accounts=reader)
+        async with app.run_test(size=SIZE) as pilot:
+            await accounts_read(app)
+            detail = app.query_one(AccountsSection).query_one(".accounts-line", Static)
+            first = shown(detail)
+            hold.set()
+            frames.pop(0)
+            try:
+                app.refresh_data()  # the two-second tick, with the registry held
+                held = await asyncio.to_thread(asked.wait, 5)
+                await pilot.pause()
+                while_held = shown(detail)
+            finally:
+                release.set()
+            await accounts_read(app)
+            return first, held, while_held, shown(detail)
+
+    first, held, while_held, after = asyncio.run(run())
+    assert threads and threading.main_thread().name not in threads, threads
+    assert held, "the tick asked for the accounts"
+    assert first == while_held == "1 Claude · me@example.com"  # the last frame, kept
+    assert after == "2 Claude · me@example.com"  # the answer, painted when it came
+
+
+def test_ticks_while_the_accounts_read_waits_let_it_answer_and_read_once_more_after_it(
+    no_network: dict[str, Any],
+) -> None:
+    """Review of the fix above, round 1: the read was an ``exclusive`` worker, so every
+    tick cancelled the one still waiting and started another. A thread cannot be
+    stopped: the cancelled read kept its thread and its answer was dropped, so while
+    ``context.db`` stayed busy a read slower than the tick (a 5 s busy timeout against a
+    2 s tick) was never painted, and a thread piled up per tick. A tick that finds a read
+    waiting now leaves it be: its answer is painted, and the ticks it outlived come to ONE
+    more read, started after it, so a change made meanwhile (a ▲ click's write) is still
+    what the page shows next."""
+    no_network["session"] = _session()
+    hold = threading.Event()
+    asked = {n: threading.Event() for n in range(1, 6)}
+    gates = {n: threading.Event() for n in range(1, 6)}
+    held: list[int] = []  # the reads that ran while the registry was held, numbered
+    running, peak = [0], [0]
+    counting = threading.Lock()
+
+    def reader() -> AccountsOverview:
+        with counting:
+            n = 0
+            if hold.is_set():
+                held.append(len(held) + 1)
+                n = held[-1]
+            running[0] += 1
+            peak[0] = max(peak[0], running[0])
+        try:
+            if n:
+                asked[n].set()
+                gates[n].wait(10)  # as a writer holds the lock
+            emails = ["me@example.com", *(f"{i}@example.com" for i in range(2, n + 2))]
+            return _overview(*(_status(i, email) for i, email in enumerate(emails, 1)))
+        finally:
+            with counting:
+                running[0] -= 1
+
+    async def run() -> tuple[str, str, str]:
+        app = FleetApp(refresh_seconds=3600, doctor=lambda: [], accounts=reader)
+        async with app.run_test(size=SIZE) as pilot:
+            await accounts_read(app)
+            detail = app.query_one(AccountsSection).query_one(".accounts-line", Static)
+            hold.set()
+            try:
+                app.refresh_data()  # a tick: the first held read waits on the registry
+                assert await asyncio.to_thread(asked[1].wait, 5), "the tick asked"
+                app.refresh_data()  # two more ticks while it waits
+                app.refresh_data()
+                await pilot.pause()
+                while_held = shown(detail)
+                gates[1].set()  # the writer lets go
+                # The read the ticks were owed starts once the first one's answer is painted.
+                assert await asyncio.to_thread(asked[2].wait, 5), "a read after the wait"
+                await pilot.pause()
+                answered = shown(detail)
+                gates[2].set()
+                await accounts_read(app)
+            finally:
+                for gate in gates.values():
+                    gate.set()
+            return while_held, answered, shown(detail)
+
+    while_held, answered, after = asyncio.run(run())
+    assert while_held == "1 Claude · me@example.com"  # the last frame, kept
+    assert answered == "2 Claude · me@example.com"  # the waiting read's answer, painted
+    assert after == "3 Claude · me@example.com"  # and the one read after it
+    assert peak[0] == 1, f"{peak[0]} reads at once"
+    assert held == [1, 2], held  # three ticks during one wait cost one more read
+
+
+def test_a_tick_the_app_handles_before_a_reads_answer_still_lets_that_answer_paint(
+    no_network: dict[str, Any],
+) -> None:
+    """Review of the fix above, round 2. Textual marks a worker finished, and
+    ``refresh_accounts`` then starts the next read, BEFORE the app handles the
+    ``StateChanged`` that carries the answer. A tick or an ``AccountsChanged`` already
+    queued ahead of that message started the next read, and the answer that arrived
+    after it was dropped for no longer coming from the newest read: the page kept a
+    frame older than one it had been handed. Reads never overlap, so answers arrive in
+    the order they were read, and each one is painted."""
+    no_network["session"] = _session()
+    hold = threading.Event()
+    asked = {n: threading.Event() for n in range(1, 4)}
+    gates = {n: threading.Event() for n in range(1, 4)}
+    held: list[int] = []  # the reads that ran while the registry was held, numbered
+
+    def reader() -> AccountsOverview:
+        n = 0
+        if hold.is_set():
+            held.append(len(held) + 1)
+            n = held[-1]
+            asked[n].set()
+            gates[n].wait(10)  # as a writer holds the lock
+        emails = ["me@example.com", *(f"{i}@example.com" for i in range(2, n + 2))]
+        return _overview(*(_status(i, email) for i, email in enumerate(emails, 1)))
+
+    async def run() -> tuple[str, str]:
+        app = FleetApp(refresh_seconds=3600, doctor=lambda: [], accounts=reader)
+        async with app.run_test(size=SIZE) as pilot:
+            await accounts_read(app)
+            detail = app.query_one(AccountsSection).query_one(".accounts-line", Static)
+            hold.set()
+            try:
+                app.refresh_data()  # a tick: the first held read waits on the registry
+                assert await asyncio.to_thread(asked[1].wait, 5), "the tick asked"
+                [first] = [
+                    w for w in app.workers if w.group == ACCOUNTS_WORKER and not w.is_finished
+                ]
+
+                async def tick_ahead_of_the_answer() -> None:
+                    # The app handles nothing else while this callback runs, so the
+                    # first read's StateChanged queues behind the tick below, as it
+                    # does behind a tick that was already queued when the read ended.
+                    gates[1].set()
+                    await first.wait()
+                    app.refresh_data()
+
+                app.call_later(tick_ahead_of_the_answer)
+                assert await asyncio.to_thread(asked[2].wait, 5), "the tick read again"
+                await pilot.pause()
+                answered = shown(detail)
+                gates[2].set()
+                await accounts_read(app)
+            finally:
+                for gate in gates.values():
+                    gate.set()
+            return answered, shown(detail)
+
+    answered, after = asyncio.run(run())
+    assert answered == "2 Claude · me@example.com"  # the first read's answer, painted
+    assert after == "3 Claude · me@example.com"  # and the tick's read after it
+    assert held == [1, 2], held
 
 
 def test_buttons_follow_each_slots_state() -> None:
@@ -657,6 +863,75 @@ def test_sign_out_revokes_and_forgets(
     assert status.startswith("Not signed in") and not sign_out_shown
 
 
+def test_sign_out_takes_the_keys_the_cli_minted_with_it_as_logout_does(
+    monkeypatch: pytest.MonkeyPatch, no_network: dict[str, Any], tmp_path: Path
+) -> None:
+    """*Sign out* revoked the session alone, so every ingest key the CLI had minted
+    (#142) outlived the sign-in that obtained it — bound, in its file, and live on the
+    server — while ``aisquare logout`` forgot them (review of #172). They go first,
+    their revoke taking the session's Bearer, and one the server refuses is said and
+    stays owed."""
+    from aisquare.core.workspace import project_id_for
+    from aisquare.models import ProjectInfo
+    from aisquare.services import destinations
+    from aisquare.services import explainability as explainability_service
+
+    session = _session()
+    no_network["session"] = session
+    projects = [
+        ProjectInfo(id=project_id_for(tmp_path / name), root=tmp_path / name)
+        for name in ("web", "api")
+    ]
+    with store_session() as store:
+        for project, uid in zip(projects, ("key-web", "key-api"), strict=True):
+            destinations.choose(
+                store,
+                project,
+                destinations.Workspace(id=42, uid="ws-uid-42", name="acme", role="ADMIN"),
+                destinations.Studio(id=301, uid="st-301", name="Frontend"),
+                session,
+            )
+            path = explainability_service.store_project_api_key(project.id, f"AIS_{uid}")
+            store.set_project_explainability(
+                project.id, target="prod", key_path=path, set_by=None, minted=uid
+            )
+    order: list[str] = []
+
+    def revoke(path: str, **kwargs: Any) -> iam.HttpResult:
+        if not path.endswith("/revoke/"):  # the page's credits reading
+            return iam.HttpResult(404, {"detail": "Not found."}, {})
+        order.append(path.split("/")[-3])
+        return iam.HttpResult(403 if "key-api" in path else 204, {"detail": "not yours"}, {})
+
+    def sign_out(session: iam.Session) -> auth_service.SignedOut:
+        order.append("session")
+        no_network["session"] = None
+        return auth_service.SignedOut(revoked=True, restricted=True)
+
+    monkeypatch.setattr(iam, "request", revoke)
+    monkeypatch.setattr(auth_service, "sign_out", sign_out)
+
+    async def go(pilot: Pilot[None]) -> str:
+        app = fleet_app(pilot)
+        view = await open_accounts(pilot)
+        await pilot.click("#aisquare-sign-out")
+        await settle(app)
+        await pilot.pause()
+        return notice(view)
+
+    said = drive(go)
+    assert sorted(order[:2]) == ["key-api", "key-web"], order
+    assert order[2:] == ["session"], "the keys go before the session: their revoke takes it"
+    assert said.startswith("✓ Signed out of AISquare; 1 key the CLI minted is still live"), said
+    assert "acme for api (the API answered HTTP 403: not yours)" in said
+    assert not any(
+        explainability_service.project_key_path(project.id).exists() for project in projects
+    )
+    with store_session() as store:
+        assert [record.key_uid for record in store.pending_revocations()] == ["key-api"]
+        assert store.project_explainability_all() == []
+
+
 def test_a_sign_out_whose_rewrite_could_not_be_restricted_says_so_on_the_page(
     monkeypatch: pytest.MonkeyPatch, no_network: dict[str, Any]
 ) -> None:
@@ -735,10 +1010,11 @@ def test_quitting_mid_sign_in_cancels_the_device_flow(
 ) -> None:
     """Textual cancelling a thread worker does not stop its callable; the page's own flag must."""
     seen = _script_device_flow(monkeypatch, no_network, outcome={"access_token": "aisq_new"})
-    released = threading.Event()
+    waiting, released = threading.Event(), threading.Event()
     observed: dict[str, bool] = {}
 
     def wait(e: iam.Endpoints, g: iam.DeviceAuthorization, *, cancelled: Any) -> dict[str, Any]:
+        waiting.set()
         deadline = time.monotonic() + 5
         while not cancelled() and time.monotonic() < deadline:
             time.sleep(0.02)
@@ -751,7 +1027,9 @@ def test_quitting_mid_sign_in_cancels_the_device_flow(
     async def go(pilot: Pilot[None]) -> None:
         await open_accounts(pilot)
         await pilot.click("#aisquare-sign-in")
-        await pilot.pause()
+        # The quit must land while the wait runs. The press reaches the page as a message
+        # and the flow is a thread, so the wait's own start is what this waits for, bounded.
+        assert await asyncio.to_thread(waiting.wait, 5), "the sign-in never reached its wait"
 
     drive(go)  # the app exits here: the view unmounts while the wait is in flight
 
@@ -766,7 +1044,15 @@ def test_quitting_mid_sign_in_cancels_the_device_flow(
 def _script_claude_sign_in(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, lands: bool
 ) -> dict[str, Any]:
-    """A fresh slot whose sign-in either lands on the first poll or never does."""
+    """A fresh slot whose sign-in either lands on the first poll or never does.
+
+    The page's own poll is pushed out of reach: every test takes its ticks by hand. The
+    real tick came every second, and the recorder answers its pane check with "no server",
+    which is a window that closed. A test that took longer than that between its click and
+    its cancel read "Claude Code closed before a sign-in landed" instead of the cancel
+    (with every message held 15 ms).
+    """
+    monkeypatch.setattr(accounts_view, "LOGIN_POLL_SECONDS", 3600.0)
     seen: dict[str, Any] = {"opened": [], "completed": [], "abandoned": [], "landed_polls": 0}
     account = ClaudeAccount(
         slot=2,
@@ -824,7 +1110,7 @@ def test_add_opens_a_watched_window_and_records_the_account_when_the_login_lands
         app = fleet_app(pilot)
         view = await open_accounts(pilot)
         await pilot.click("#claude-add")
-        await pilot.pause()
+        await settle(app)
         box = view.query_one("#login-box", Vertical)
         pane = view.query_one("#login-pane", TerminalPane)
         box_shown, attached = box.display, pane.pane_id
@@ -857,7 +1143,7 @@ def test_a_window_that_closes_without_a_login_discards_the_fresh_slot(
         app = fleet_app(pilot)
         view = await open_accounts(pilot)
         await pilot.click("#claude-add")
-        await pilot.pause()
+        await settle(app)
         # The recorder answers "no server" to display-message, which is a pane that is gone.
         view._poll_login()
         await pilot.pause()
@@ -880,11 +1166,11 @@ def test_cancel_stops_a_sign_in_and_a_sign_in_of_an_existing_slot_is_never_disca
     async def go(pilot: Pilot[None]) -> tuple[int | None, str]:
         view = await open_accounts(pilot)
         await pilot.click("#account-sign-in-2")
-        await pilot.pause()
+        await settle(fleet_app(pilot))
         begun = seen.get("begin", "never")
         assert view.login is not None and not view.login.fresh
         await pilot.click("#login-cancel")
-        await pilot.pause()
+        await settle(fleet_app(pilot))
         return begun, notice(view)
 
     begun, said = drive(go, overview=overview)
@@ -901,7 +1187,7 @@ def test_quitting_mid_claude_sign_in_closes_the_window_and_discards_the_fresh_sl
     async def go(pilot: Pilot[None]) -> None:
         view = await open_accounts(pilot)
         await pilot.click("#claude-add")
-        await pilot.pause()
+        await settle(fleet_app(pilot))
         assert view.login is not None
 
     drive(go)  # the app exits with the sign-in window still open
@@ -925,7 +1211,7 @@ def test_quitting_after_the_login_landed_records_it_instead(
     async def go(pilot: Pilot[None]) -> None:
         view = await open_accounts(pilot)
         await pilot.click("#claude-add")
-        await pilot.pause()
+        await settle(fleet_app(pilot))
         assert view.login is not None
         landed["now"] = True  # the login lands, and the user quits before the next poll
 
@@ -1055,7 +1341,7 @@ def test_default_move_and_disable_buttons_write_through_the_service_and_refresh(
         # The shell's next frame is the arranged one; the page follows it.
         frames.pop(0)
         app.refresh_accounts()
-        await pilot.pause()
+        await accounts_read(app)
         order = [r.slot for r in view.rows()]
         await pilot.click("#account-down-2")
         await settle(app)
@@ -1067,7 +1353,7 @@ def test_default_move_and_disable_buttons_write_through_the_service_and_refresh(
     async def run() -> tuple[str, list[int], str]:
         app = FleetApp(refresh_seconds=3600, doctor=lambda: [], accounts=lambda: frames[0])
         async with app.run_test(size=SIZE) as pilot:
-            await pilot.pause()
+            await settle(app)  # the start-up doctor, painted before the click, as `drive` does
             return await go(pilot)
 
     after_default, order, last = asyncio.run(run())

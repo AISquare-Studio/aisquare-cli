@@ -410,6 +410,113 @@ def test_a_re_attach_that_cannot_be_recorded_leaves_the_earlier_bindings_key_in_
     assert not path.exists()
 
 
+def test_a_failure_after_the_bindings_commit_never_puts_the_earlier_key_under_it(
+    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The put-back is for a binding that was NOT recorded. ``set_project_explainability``
+    read the row back after its commit, and a read that failed there was taken for a
+    refused write: the stg key went back into the file under a row already committed
+    to prod (review of #170, D1b round 2, B2)."""
+    config = _settings()
+    project = _project(tmp_path / "api")
+    ops.attach_project_key(project, "stg-key-aaaa", target="stg")
+    reads = SqliteStore.project_explainability
+
+    def failing_once_committed(self: SqliteStore, project_id: str) -> Any:
+        found = reads(self, project_id)
+        if found is not None and found.target == "prod":
+            raise sqlite3.OperationalError("disk I/O error")
+        return found
+
+    monkeypatch.setattr(SqliteStore, "project_explainability", failing_once_committed)
+    binding = ops.attach_project_key(project, "prod-key-bbbb", target="prod")
+    monkeypatch.setattr(SqliteStore, "project_explainability", reads)
+
+    assert binding.target == "prod"
+    prod = ops.resolve_target(config.explainability, "prod", project_id=project.id)
+    assert (prod.api_key, prod.key_source) == ("prod-key-bbbb", "project")
+    stg = ops.resolve_target(config.explainability, "stg", project_id=project.id)
+    assert stg.key_source != "project", "the stg key is nowhere a prod row can hand it out"
+
+
+def test_a_put_back_that_fails_keeps_the_error_that_caused_it_and_not_the_refused_key(
+    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The put-back raised over the refusal, so the operator read ENOSPC and not "database
+    is locked", and the file kept the key just refused under the earlier binding
+    (review of #170, D1b round 2, B3)."""
+    config = _settings()
+    project = _project(tmp_path / "api")
+    ops.attach_project_key(project, "stg-key-aaaa", target="stg")
+    writes = service.store_project_api_key
+
+    def refuse(self: SqliteStore, *_args: object, **_kwargs: object) -> None:
+        raise sqlite3.OperationalError("database is locked")
+
+    def full_disk_for_the_put_back(project_id: str, key: str) -> Path:
+        if key == "stg-key-aaaa":
+            raise OSError(28, "No space left on device")
+        return writes(project_id, key)
+
+    record = SqliteStore.set_project_explainability
+    monkeypatch.setattr(SqliteStore, "set_project_explainability", refuse)
+    monkeypatch.setattr(ops, "store_project_api_key", full_disk_for_the_put_back)
+    with pytest.raises(sqlite3.OperationalError, match="database is locked") as refused:
+        ops.attach_project_key(project, "prod-key-bbbb", target="prod")
+    monkeypatch.setattr(SqliteStore, "set_project_explainability", record)
+    monkeypatch.setattr(ops, "store_project_api_key", writes)
+
+    assert any("could not be put back" in note for note in refused.value.__notes__)
+    path = service.project_key_path(project.id)
+    assert not path.exists(), "the refused prod key is not left under the stg binding"
+    stg = ops.resolve_target(config.explainability, "stg", project_id=project.id)
+    assert stg.key_source != "project" and stg.api_key != "prod-key-bbbb"
+
+
+def test_a_key_file_that_is_not_utf8_is_no_key_and_is_replaced_by_the_next_attach(
+    home: Path, tmp_path: Path, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The resolver raised ``UnicodeDecodeError`` on it, so ``key show`` and ``status``
+    failed, and the attach read it for its put-back and raised the same way, so the
+    one command that could repair it never could (review of #170, D1b round 2, B4)."""
+    config = _settings()
+    project = _project(tmp_path / "api")
+    path = _attach(project)
+    path.write_bytes(b"\xff\xfe not a key")
+    monkeypatch.chdir(project.root)
+
+    unreadable = ops.resolve_target(config.explainability, "stg", project_id=project.id)
+    assert unreadable.key_source != "project"
+    shown = runner.invoke(app, ["explainability", "key", "show"])
+    assert shown.exit_code == 0, shown.output
+
+    ops.attach_project_key(project, PROJECT_KEY, target="stg")
+    repaired = ops.resolve_target(config.explainability, "stg", project_id=project.id)
+    assert (repaired.api_key, repaired.key_source) == (PROJECT_KEY, "project")
+
+
+def test_key_show_says_a_file_that_is_not_utf8_holds_no_key(
+    home: Path, tmp_path: Path, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The resolver reads such a file as no key, like a missing one, and ``key show`` called
+    it a healthy binding: nothing on the human line, and ``file_present: true`` beside
+    ``key_source: unset`` (review of #170's follow-ups, round 1, F8)."""
+    _settings()
+    project = _project(tmp_path / "api")
+    path = _attach(project)
+    monkeypatch.chdir(project.root)
+    healthy = json.loads(runner.invoke(app, ["--json", "explainability", "key", "show"]).stdout)
+    assert (healthy["file_present"], healthy["file_holds_key"]) == (True, True)
+
+    path.write_bytes(b"\xff\xfe not a key")
+    shown = runner.invoke(app, ["explainability", "key", "show"])
+    assert shown.exit_code == 0, shown.output
+    assert f"at {path} (file holds no key: blank or not UTF-8" in shown.output
+    payload = json.loads(runner.invoke(app, ["--json", "explainability", "key", "show"]).stdout)
+    assert (payload["file_present"], payload["file_holds_key"]) == (True, False)
+    assert payload["key_source"] != "project"
+
+
 def test_key_set_refuses_a_target_this_machine_does_not_have(
     home: Path, tmp_path: Path, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -433,6 +540,113 @@ def test_key_set_refuses_a_target_this_machine_does_not_have(
         ).exit_code
         == 0
     )
+
+
+def test_the_writer_refuses_a_target_this_machine_does_not_have(
+    home: Path, tmp_path: Path, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The known-target rule lived in two callers that disagreed (review of #170's
+    Setup-form merge, G7): ``key set`` judged ``--target`` alone, so a deployment an
+    exported variable names was bound unchecked, and the writer judged nothing."""
+    _settings()
+    api = _project(tmp_path / "api")
+
+    with pytest.raises(ops.UnknownTarget, match="no target 'prdo' on this machine"):
+        ops.attach_project_key(api, PROJECT_KEY, target="prdo")
+    assert not service.project_key_path(api.id).exists(), "refused before anything is written"
+    with store_session() as store:
+        assert store.project_explainability(api.id) is None
+
+    monkeypatch.chdir(api.root)
+    monkeypatch.setenv(ops.TARGET_ENV_VAR, "prdo")
+    named = runner.invoke(app, ["explainability", "key", "set"], input=PROJECT_KEY + "\n")
+    assert named.exit_code != 0
+    assert f"no target 'prdo' on this machine, named by ${ops.TARGET_ENV_VAR}" in named.output
+    assert not service.project_key_path(api.id).exists()
+
+
+def test_key_set_says_when_the_projects_launches_will_not_use_the_key(
+    home: Path, tmp_path: Path, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``key set --target prod`` on a machine on stg said "launches and spawns in this
+    project authenticate the proxy with it" (review of #170's Setup-form merge, G3)."""
+    _settings()
+    api = _project(tmp_path / "api")
+    monkeypatch.chdir(api.root)
+
+    prod = runner.invoke(
+        app, ["explainability", "key", "set", "--target", "prod"], input=PROJECT_KEY + "\n"
+    )
+    assert prod.exit_code == 0, prod.output
+    assert "authenticate the proxy with it" not in prod.output
+    assert "not used by this project's launches, which resolve target stg" in prod.output
+    stg = runner.invoke(app, ["explainability", "key", "set"], input=PROJECT_KEY + "\n")
+    assert "launches and spawns in this project authenticate the proxy with it" in stg.output
+
+
+def test_status_says_the_spool_is_the_machines_when_the_key_above_it_is_the_projects(
+    home: Path, tmp_path: Path, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The key line said "the project's own key … is set" and the line under it "but no
+    workspace key: set $…": both true, of two keys, and read as one contradicting the
+    other (review of #172, D2 round 2, D3). The spool ships with the machine's key, so
+    it keeps its line, and the line says whose key that is."""
+    config = _settings()
+    config.explainability.ship = True
+    save_config(config)
+    monkeypatch.setattr(service, "probe_proxy", lambda url: service.ProxyProbe(True, "healthy"))
+    api = _project(tmp_path / "api")
+    monkeypatch.chdir(api.root)
+
+    machine = runner.invoke(app, ["explainability", "status"])
+    [line] = [ln for ln in machine.stdout.splitlines() if ln.startswith("shipping:")]
+    assert "no workspace key" in line and "the spool is the machine's" not in line
+
+    _attach(api)
+    status = runner.invoke(app, ["explainability", "status"])
+    assert "key:      the project's own key" in status.stdout
+    [line] = [ln for ln in status.stdout.splitlines() if ln.startswith("shipping:")]
+    assert "no workspace key" in line
+    assert "the spool is the machine's" in line and "the project's own key above" in line
+
+
+def test_status_says_nothing_about_the_spools_key_while_shipping_is_off(
+    home: Path, tmp_path: Path, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The note was said whenever the project had its own key and the machine none, so
+    with shipping off the line read "off — nothing is captured … (the spool is the
+    machine's: it ships every project's insights …)" (review of #170's follow-ups,
+    round 1, F5). Off, or on with no gateway, the line names no key to tell apart."""
+    _settings()
+    monkeypatch.setattr(service, "probe_proxy", lambda url: service.ProxyProbe(True, "healthy"))
+    api = _project(tmp_path / "api")
+    _attach(api)
+    monkeypatch.chdir(api.root)
+
+    status = runner.invoke(app, ["explainability", "status"])
+    assert "key:      the project's own key" in status.stdout
+    [line] = [ln for ln in status.stdout.splitlines() if ln.startswith("shipping:")]
+    assert line.startswith("shipping: off") and "the spool is the machine's" not in line
+
+
+def test_a_project_that_is_not_there_is_a_usage_error_and_not_a_red_lane(
+    home: Path, runner: CliRunner
+) -> None:
+    """``status --project <typo>`` exited 1, ``status``'s code for tracing on and the proxy
+    lane red, and ``doctor --project <typo>`` 1, its code for a failed check. A cutover
+    script gating on ``$?`` read the typo as either (review of #170's follow-ups, round 1,
+    F6). Both exit 2, a usage error, and the JSON error is still ``not_found``."""
+    _settings()
+    for argv in (
+        ["explainability", "status", "--project", "nope"],
+        ["doctor", "--project", "nope"],
+    ):
+        result = runner.invoke(app, argv)
+        assert result.exit_code == 2, (argv, result.output)
+        assert "no project matches 'nope'" in result.output
+    payload = runner.invoke(app, ["--json", "explainability", "status", "--project", "nope"])
+    assert payload.exit_code == 2
+    assert json.loads(payload.stdout)["error"] == "not_found"
 
 
 def test_key_set_records_the_signed_in_email_as_who_attached_it(

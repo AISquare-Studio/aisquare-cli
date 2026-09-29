@@ -22,7 +22,8 @@ command. Probes at a ~98k baseline passed. The fix is in the SDK
   sessions, read from their transcripts (``core.transcripts``), and whether
   any of them was refused;
 - :func:`doctor_check` — the ``explainability auto-mode`` doctor line, present
-  only when a fleet role runs ``auto`` behind a configured proxy;
+  only when a fleet role, or a running agent, runs ``auto`` behind a configured
+  proxy;
 - :func:`spawn_note` — the same warning on ``fleet spawn``'s receipt, when the
   evidence says the agent about to start will be refused;
 - :func:`record_refusals` — at a session's Stop hook: the refusal text in its
@@ -208,6 +209,32 @@ def auto_roles(config: FleetSettings | None = None) -> list[str]:
     ]
 
 
+def running_in_auto() -> list[str]:
+    """The live fleet agents LAUNCHED in ``auto``, as ``label (project)``.
+
+    Read off each row's launch spec, which a restart replays (#144), so a role
+    moved off ``auto`` in the config does not reach them: the doctor line read
+    the roles alone and went quiet while these agents still ran, and on every
+    restart or switch replayed, ``auto`` (review of #169, round 1). A row with
+    no spec (spawned before v18) replays today's role config, which
+    :func:`auto_roles` already reads. Forgotten projects are asked too: a
+    tombstone can still hold live rows (``list_projects``). Creates nothing,
+    and a store that cannot be read has no rows to report.
+    """
+    if not paths.db_path().exists():
+        return []
+    try:
+        with store_session() as store:
+            return [
+                f"{agent.label} ({project.root.name or project.id})"
+                for project in store.list_projects(include_forgotten=True)
+                for agent in store.fleet_agents(project.id, live_only=True)
+                if agent.launch_spec is not None and agent.launch_spec.permission_mode == "auto"
+            ]
+    except Exception:
+        return []
+
+
 def exposed(baseline: Baseline) -> bool:
     """Whether the evidence says the next auto-mode session behind the proxy will be refused."""
     if baseline.refused_sessions:
@@ -243,26 +270,46 @@ def _mode_step(role: str, config: FleetSettings) -> str:
 
 
 def _remedy(roles: list[str], config: FleetSettings) -> str:
-    # The example names a role `config set` can reach, when one of them is.
-    settable = [candidate for candidate in roles if candidate in config.roles]
-    role = (settable or roles or ["coder"])[0]
+    restart = f"aisquare fleet restart <label> {_RESTART_OFF_AUTO}"
+    if roles:
+        # The example names a role `config set` can reach, when one of them is.
+        settable = [candidate for candidate in roles if candidate in config.roles]
+        role = (settable or roles)[0]
+        mode = (
+            f"a non-classifier mode for the fleet roles — {_mode_step(role, config)} (per "
+            f"spawn: aisquare fleet spawn <role> --permission-mode acceptEdits; a running "
+            f"agent: {restart})"
+        )
+    else:
+        # Every role is off `auto` already; what is left are agents launched in it,
+        # which no role's config reaches (#144).
+        mode = f"a non-classifier mode for the agents launched in auto — {restart}"
     return (
-        f"Until the proxy fix ({SDK_ISSUE_URL}), one of: a non-classifier mode for the fleet "
-        f"roles — {_mode_step(role, config)} (per spawn: aisquare fleet spawn <role> "
-        "--permission-mode acceptEdits; a running agent: aisquare fleet restart <label> "
-        f"{_RESTART_OFF_AUTO}); a lighter Claude config dir for the fleet's account "
-        "(fewer MCP connectors — their schemas are most of the baseline); or run agents "
-        "untraced: aisquare explainability disable"
+        f"Until the proxy fix ({SDK_ISSUE_URL}), one of: {mode}; a lighter Claude config dir "
+        "for the fleet's account (fewer MCP connectors — their schemas are most of the "
+        "baseline); or run agents untraced: aisquare explainability disable"
     )
+
+
+def _who(roles: list[str], running: list[str]) -> str:
+    """``coder, manager run``: the line's subject, the running agents launched in ``auto``
+    included, and its verb."""
+    named = [", ".join(roles)] if roles else []
+    if running:
+        agents = "the running agent" if len(running) == 1 else "the running agents"
+        named.append(f"{agents} {', '.join(running)}")
+    return " and ".join(named) + (" runs" if len(roles) + len(running) == 1 else " run")
 
 
 def doctor_check() -> DoctorCheck | None:
     """The ``explainability auto-mode`` line — only when a fleet role runs ``auto`` behind a proxy.
 
-    Offline: config, the store, and the head of a few transcripts. ``None``
-    when tracing is off or no role uses the classifier, because then there is
-    nothing this line could warn about and doctor's output is read less for
-    every row that says "n/a".
+    Or a running agent does: :func:`running_in_auto` names the live agents
+    launched in ``auto``, which a restart replays whatever the role's config
+    says now. Offline: config, the store, and the head of a few transcripts.
+    ``None`` when tracing is off or nothing uses the classifier, because then
+    there is nothing this line could warn about and doctor's output is read
+    less for every row that says "n/a".
     """
     try:
         if not explainability_service.tracing_configured():
@@ -273,16 +320,17 @@ def doctor_check() -> DoctorCheck | None:
         roles = auto_roles(fleet)
     except Exception:  # a config that will not load is the config line's report
         return None
-    if not roles:
+    running = running_in_auto()
+    if not roles and not running:
         return None
     baseline = measure_baseline()
-    who = ", ".join(roles)
+    who = _who(roles, running)
     if baseline.refused_sessions:
         # Not "fails at this baseline": a refused session may have started
         # under the line and grown past it, so the baseline is stated beside
         # the measured line rather than as the size that failed.
         detail = (
-            f"{who} run in auto mode behind the explainability proxy, and "
+            f"{who} in auto mode behind the explainability proxy, and "
             f"{baseline.refused_sessions} of the last {len(baseline.samples)} sessions were "
             f"refused there ('cannot determine the safety of Bash'): the proxy has been "
             f"measured to fail the classifier's non-streaming request above "
@@ -294,7 +342,7 @@ def doctor_check() -> DoctorCheck | None:
         )
     if baseline.predicted is None:
         detail = (
-            f"{who} run in auto mode behind the explainability proxy; the session baseline is "
+            f"{who} in auto mode behind the explainability proxy; the session baseline is "
             f"{baseline.describe()} — above ~{_k(REFUSED_ABOVE_TOKENS)} tokens the proxy has "
             f"been measured to fail the classifier's non-streaming request ({SDK_ISSUE})"
         )
@@ -303,7 +351,7 @@ def doctor_check() -> DoctorCheck | None:
         )
     if baseline.predicted >= REFUSED_ABOVE_TOKENS:
         detail = (
-            f"{who} run in auto mode behind the explainability proxy, and this machine's session "
+            f"{who} in auto mode behind the explainability proxy, and this machine's session "
             f"baseline is {baseline.describe()} — above the ~{_k(REFUSED_ABOVE_TOKENS)} tokens "
             f"at which the proxy has been measured to fail the classifier's non-streaming "
             f"request, so tool calls are refused from the first one ({SDK_ISSUE})"
@@ -312,7 +360,7 @@ def doctor_check() -> DoctorCheck | None:
             name=CHECK_NAME, status=CheckStatus.warn, detail=detail, fix=_remedy(roles, fleet)
         )
     detail = (
-        f"{who} run in auto mode behind the explainability proxy; session baseline "
+        f"{who} in auto mode behind the explainability proxy; session baseline "
         f"{baseline.describe()}, under the ~{_k(REFUSED_ABOVE_TOKENS)} tokens at which the proxy "
         f"has been measured to fail the classifier call ({SDK_ISSUE}) — a session that grows "
         "past it is refused until /compact"
@@ -320,14 +368,40 @@ def doctor_check() -> DoctorCheck | None:
     return DoctorCheck(name=CHECK_NAME, status=CheckStatus.ok, detail=detail)
 
 
-def spawn_note(mode: str | None, *, role: str, label: str, config: FleetSettings) -> str | None:
+def spawn_evidence(mode: str | None) -> Baseline | None:
+    """What :func:`spawn_note` judges a spawn in ``mode`` by, or ``None`` for nothing to judge.
+
+    ``None`` unless the mode is ``auto`` and tracing is configured. Otherwise
+    this machine's baseline (:func:`measure_baseline`). ``fleet.spawn`` asks
+    BEFORE the agent's window starts. Asked after its row was written, the
+    store open and the dozen transcript reads sat between ``_record`` and the
+    hand-over's ``_take_over``, the window in which the agent's first hook
+    races that move. The new agent's own session could also be counted among
+    the recent ones and push out of the sample the refused session the
+    warning rested on (review of #169, round 2). Never raises: a warning is
+    not a reason not to spawn.
+    """
+    if mode != "auto":
+        return None
+    try:
+        if not explainability_service.tracing_configured():
+            return None
+        return measure_baseline()
+    except Exception:
+        return None
+
+
+def spawn_note(
+    baseline: Baseline | None, *, role: str, label: str, config: FleetSettings
+) -> str | None:
     """A receipt note for a spawn in ``auto`` mode that the evidence says will be refused.
 
-    Silent unless the mode is ``auto``, tracing is configured, AND a recent
-    session was refused or the measured baseline is above the line. A machine
-    with no transcript yet gets no note — the doctor line carries that case —
-    so a fresh install is not warned on every spawn about a size nobody has
-    measured. Never raises: a warning is not a reason not to spawn.
+    ``baseline`` is :func:`spawn_evidence`'s, measured before the window. Silent
+    unless there is some (the mode is ``auto`` and tracing is configured) AND a
+    recent session was refused or the measured baseline is above the line. A
+    machine with no transcript yet gets no note — the doctor line carries that
+    case — so a fresh install is not warned on every spawn about a size nobody
+    has measured.
 
     The way out it names has two steps: the ROLE's (:func:`_mode_step` on
     ``config``), for every agent spawned after it, and ``fleet restart <label>
@@ -344,15 +418,7 @@ def spawn_note(mode: str | None, *, role: str, label: str, config: FleetSettings
     it names ``fleet restart``'s flag, which every one of them can follow,
     never ``fleet spawn``'s (review of #164, round 1).
     """
-    if mode != "auto":
-        return None
-    try:
-        if not explainability_service.tracing_configured():
-            return None
-        baseline = measure_baseline()
-    except Exception:
-        return None
-    if not baseline.measured or not exposed(baseline):
+    if baseline is None or not baseline.measured or not exposed(baseline):
         return None
     if baseline.refused_sessions:
         why = (

@@ -291,6 +291,11 @@ for the long ones.
   slot a hand-over leaves; usage read once, concurrently; the first under
   `switch_at`, else the one with the most room; unreadable ones skipped with a
   note; nothing measurable → `None`, and `choose` falls to the machine default.
+  An account is as full as the fuller of its two windows (`headroom_percent`):
+  one that has spent its week builds no five-hour usage, and ranked on the
+  five-hour window alone it read as the emptiest, so a weekly limit — the case
+  `on_limit = "switch"` exists for — handed the agent to an account that
+  refused its first request (final review of #203).
   It is the `headroom` rung of `choose` (§9), switched on by `pick` or by
   `spread=True`, which `fleet switch` passes so a switch goes where the room is
   whatever `pick` says.

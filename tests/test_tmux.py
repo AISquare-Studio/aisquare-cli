@@ -28,6 +28,7 @@ import subprocess
 import sys
 import time
 from collections.abc import Callable, Iterator, Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -197,6 +198,19 @@ def test_version_asks_dash_V_without_a_server(fake_bin: Path, conf: Path) -> Non
 
     failing = FakeTmux(Completed(1, "", "boom"))
     assert _server(failing, fake_bin, conf).version() is None
+
+
+def test_server_version_asks_the_running_server_not_the_binary(fake_bin: Path, conf: Path) -> None:
+    """Final review of #203, F2: after an in-place upgrade ``tmux -V`` names the new
+    binary while the private server runs the old one, and the server is what parses
+    flags and key names. tmux prints ``#{version}`` bare (``3.4``); a server that
+    refuses the question answers nothing."""
+    fake = FakeTmux(Completed(0, "3.4\n", ""))
+    assert _server(fake, fake_bin, conf).server_version() == (3, 4)
+    assert fake.calls == [([*_prefix(fake_bin, conf), "display-message", "-p", "#{version}"], None)]
+
+    absent = FakeTmux(Completed(1, "", "no server running on /tmp/tmux-1000/sock\n"))
+    assert _server(absent, fake_bin, conf).server_version() is None
 
 
 def test_require_rejects_old_accepts_new_and_fails_open_on_unparseable(
@@ -497,6 +511,29 @@ def test_server_absent_reads_a_question_it_could_not_put_as_no_evidence(
 
     server = TmuxServer("asq-test", runner=times_out, binary=str(fake_bin), conf=conf)
     assert server.server_absent() is False
+
+
+def test_started_at_names_the_server_and_raises_only_when_it_could_not_ask(
+    fake_bin: Path, conf: Path
+) -> None:
+    """``#{start_time}`` is what tells a server from the one before it on the same
+    socket, whose pane ids the new one hands out again (review of #203, final round,
+    FLEET-1). No server, and a tmux that does not say, are answers — ``None`` — and a
+    socket that refused the question raises, as the strict reads do: "could not ask"
+    is never an answer about which server holds a pane."""
+    fake = FakeTmux(
+        Completed(0, "1790343472\n", ""),
+        Completed(1, "", "no server running on /tmp/tmux-1000/sock"),
+        Completed(0, "\n", ""),
+        Completed(1, "", "error connecting to /tmp/tmux-1000/sock (Permission denied)"),
+    )
+    server = _server(fake, fake_bin, conf)
+    assert server.started_at() == datetime(2026, 9, 25, 13, 37, 52, tzinfo=UTC)
+    assert fake.commands()[0] == ["display-message", "-p", "#{start_time}"]
+    assert server.started_at() is None
+    assert server.started_at() is None
+    with pytest.raises(TmuxError, match="Permission denied"):
+        server.started_at()
 
 
 def test_spawn_window_adds_a_window_when_the_session_exists(
@@ -1275,6 +1312,26 @@ def test_live_paste_delivers_every_line(live: TmuxServer) -> None:
 
 
 @requires_tmux
+def test_live_every_copy_is_a_new_buffer_even_with_the_same_text(live: TmuxServer) -> None:
+    """What the pane's paste-buffer mirror stands on (``TerminalPane._new_copy``):
+    a copy that names no buffer makes a NEW one, listed first, even when it holds
+    the text the newest already does, so a name the press did not list is a copy
+    made since. Compared by text, the same words copied twice read as no copy
+    (#207 follow-up). A buffer that is not there reads as none."""
+    _spawn(live, "asq-test-fox", "w0", CAT)
+    assert live.list_buffers() == []
+
+    live.run("set-buffer", "the same words")
+    first = live.list_buffers()
+    live.run("load-buffer", "-", stdin=b"the same words")
+    second = live.list_buffers()
+    assert len(first) == 1 and len(second) == 2, (first, second)
+    assert second[1:] == first, "the new buffer is listed first"
+    assert live.show_buffer(second[0]) == live.show_buffer(first[0]) == "the same words"
+    assert live.show_buffer("asq-test-no-such-buffer") is None
+
+
+@requires_tmux
 def test_live_two_pastes_at_once_reach_the_pane_they_were_addressed_to(live: TmuxServer) -> None:
     """The race, staged deterministically: B's whole paste runs inside A's.
 
@@ -1549,6 +1606,30 @@ def test_live_kill_session_then_kill_server(live: TmuxServer) -> None:
     assert live.list_sessions() == []
     with pytest.raises(TmuxError, match="no server running"):
         live.kill_server()
+
+
+@requires_tmux
+def test_live_a_new_server_reuses_pane_ids_and_says_when_it_started(live: TmuxServer) -> None:
+    """The measurement behind ``TmuxServer.started_at``: the next server on a socket
+    numbers its panes from the start again, so an id outlives the pane it named — and
+    ``#{start_time}``, in whole seconds, is what moves."""
+    first = _spawn(live, "asq-test-fox", "w0", CAT)
+    before = live.started_at()
+    assert before is not None and before <= datetime.now(tz=UTC)
+    live.kill_server()
+
+    def gone() -> bool:
+        try:
+            return live.started_at() is None
+        except TmuxError:  # "server exited unexpectedly": asked while it was going
+            return False
+
+    assert _wait(gone), "no server, no start"
+    time.sleep(1.1)  # the start is whole seconds
+    second = _spawn(live, "asq-test-owl", "w0", CAT)
+    after = live.started_at()
+    assert second.pane_id == first.pane_id
+    assert after is not None and after > before
 
 
 @requires_tmux

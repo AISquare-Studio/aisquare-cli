@@ -588,6 +588,23 @@ class Live:
         return selfcli.run(args, cwd=cwd, env=self.env, timeout=120.0)
 
 
+#: What ``snapshot._repomix_base`` runs to pack a directory: ``repomix``, else ``npx
+#: --yes repomix``. A child that can resolve either can pack.
+PACKERS = ("repomix", "npx")
+
+
+def _packer_free(entries: Sequence[str]) -> str:
+    """``entries`` as a PATH, less every directory in which a packer resolves.
+
+    Measured rather than assumed. Naming a directory believed to be packer-free is
+    what went wrong twice (see :func:`_hermetic_env`), so each entry is put to
+    ``shutil.which``, the lookup the child makes.
+    """
+    return os.pathsep.join(
+        entry for entry in entries if not any(shutil.which(tool, path=entry) for tool in PACKERS)
+    )
+
+
 def _hermetic_env(tmp_path: Path, **overrides: str) -> dict[str, str]:
     """This process's environment (the suite's isolated ``AISQUARE_HOME`` included).
 
@@ -623,15 +640,21 @@ def _hermetic_env(tmp_path: Path, **overrides: str) -> dict[str, str]:
     anyway.
 
     System32 stays on the Windows PATH. It is the OS's own directory, and no
-    Node installer writes to it.
+    Node installer writes to it. That is a belief about a machine, the kind that
+    was wrong twice above, so what either platform's base keeps is measured
+    (:func:`_packer_free`): a directory in which a packer resolves is dropped. The
+    #65 fold took that check out along with ``os.defpath``, and the Windows PATH
+    became a name nothing looked into, so the latch below could not fail there
+    (review of the #65 re-fold).
     """
     env = {**os.environ, **overrides, "NO_COLOR": "1"}
     if os.name == "posix":
         empty = tmp_path / "hermetic-path"
         empty.mkdir(exist_ok=True)
-        env["PATH"] = str(empty)
+        base = [str(empty)]
     else:
-        env["PATH"] = str(Path(os.environ.get("SYSTEMROOT", r"C:\Windows")) / "System32")
+        base = [str(Path(os.environ.get("SYSTEMROOT", r"C:\Windows")) / "System32")]
+    env["PATH"] = _packer_free(base)
     return env
 
 
@@ -664,6 +687,38 @@ def test_the_hermetic_env_hides_node_from_the_child_on_every_platform(
     assert shutil.which(tool, path=os.defpath) is not None, "the fake is not on the default path"
 
     assert shutil.which(tool, path=_hermetic_env(tmp_path)["PATH"]) is None
+
+
+@pytest.mark.parametrize("tool", PACKERS)
+def test_a_packer_in_the_directory_the_child_is_handed_is_dropped_with_it(
+    tool: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """What the cut KEEPS is measured too, on every platform: the empty directory on POSIX,
+    System32 on Windows. The latch above puts its fake somewhere the cut never looks, so it
+    could not see a packer inside the directory the child is given. On Windows that
+    directory was a name nothing looked into (review of the #65 re-fold). Here a packer is
+    planted in it, so the cut has to find it."""
+    if os.name == "posix":
+        kept = tmp_path / "hermetic-path"
+    else:
+        monkeypatch.setenv("SYSTEMROOT", str(tmp_path / "Windows"))
+        kept = tmp_path / "Windows" / "System32"
+    fakebin.executable_fake(kept, tool, posix="echo packed", windows="echo packed")
+
+    # The control: as a PATH on its own, the directory really does resolve the packer.
+    assert shutil.which(tool, path=str(kept)) is not None
+
+    assert shutil.which(tool, path=_hermetic_env(tmp_path)["PATH"]) is None
+
+
+def test_the_cut_keeps_a_directory_with_no_packer_in_it(tmp_path: Path) -> None:
+    """The other half: a directory that resolves no packer stays, so the child is not
+    handed an empty PATH whenever the check runs."""
+    ships_a_packer, innocent = tmp_path / "usr-bin", tmp_path / "plain-bin"
+    innocent.mkdir()
+    fakebin.executable_fake(ships_a_packer, "npx", posix="echo packed", windows="echo packed")
+
+    assert _packer_free([str(ships_a_packer), str(innocent)]) == str(innocent)
 
 
 def test_onboard_runs_the_real_cli_in_a_throwaway_home(tmp_path: Path) -> None:

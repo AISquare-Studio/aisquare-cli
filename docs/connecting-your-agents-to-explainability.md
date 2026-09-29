@@ -162,8 +162,12 @@ Two ways not to get it wrong:
     nothing will look. With **this project only** ticked, the key is the
     project's own instead (see *A key per project* below), which every target
     reads first, whatever variable it names.
-  - The **prefix** is a name: `nishil` becomes `nishil-{role}`. Braces are taken
-    off, and the toast quotes what was stored.
+  - The **prefix** is a name: `nishil` becomes `nishil-{role}`. A prefix with a
+    brace in it (`nishil-{role}`, `nishil}`) is refused with the reason, and
+    nothing is stored; the role is added for you. So is one a header cannot
+    carry — letters, digits, `.`, `_` and `-` only, so `arbind.kumar`, not
+    `arbind kumar` — and `--identity` is held to the same rule: a name with a
+    space or an `@` in it would launch every session untraced.
 - **On the command line** — pass it explicitly, as the examples above do.
 
 Either way, a gateway or proxy without a scheme (`stg.example`) is **refused**,
@@ -352,12 +356,14 @@ so the hub's under `$AISQUARE_TEAM_HUB` — and a *Register roster* button that
 registers under it. The **Setup** form's workspace key field attaches a key to
 that project when **this project only** is ticked (the key is pasted, never
 echoed), bound to the deployment the form names, or — when the field is blank —
-the one an exported `$AISQUARE_EXPLAINABILITY_TARGET` or the project's
-destination names (#142), else the active one, as `key set` resolves it; typed
+the one the project's destination names (#142), else the one an exported
+`$AISQUARE_EXPLAINABILITY_TARGET` names, else the active one, as `key set` and
+the project's launches resolve it; typed
 beside other settings that would go to a different deployment, it is refused
 until the field names one. The client lane — the insights this CLI buffers and `ship` drains — still
 ships under the machine key, and `doctor --live` checks the machine's
-workspace; per-project shipping is a follow-up.
+workspace (`doctor --live --project P` checks P's key instead); per-project
+shipping is a follow-up.
 `init --explainability` keeps writing the machine key, so a single-workspace
 machine is unaffected.
 
@@ -380,21 +386,51 @@ aisquare explainability use --clear
 reported on its own line:
 
 - **target** — the deployment the session belongs to becomes the explainability
-  target for this project (`stg-api.aisquare.studio` → `stg`, with the staging
-  gateway and hosted proxy filled in; `api.aisquare.studio` → `prod`). It fills
-  only what is empty, so a gateway or proxy you set by hand stays, and it does
-  **not** turn tracing on — that is still `aisquare explainability enable`. A
-  target `use` creates names its own key variable (`EXPLAINABILITY_PROD_API_KEY`,
-  …), so the machine key — issued for whichever deployment set the machine up —
-  never answers for another one; the exception is the machine whose top-level
-  gateway already is that deployment's. Launches, `fleet spawn` and
+  target for **this project only** (`stg-api.aisquare.studio` → `stg`, with the
+  staging gateway and hosted proxy filled in; `api.aisquare.studio` → `prod`). It
+  is read off the destination and never written to `config.toml`, so no other
+  project, the doctor and the shipper resolve exactly what they did before —
+  even when the machine's own target has the same name. A
+  `[explainability.targets.<name>]` you wrote for that deployment is used, and
+  only what it leaves empty is filled in: the hosted proxy only beside the
+  deployment's own gateway, never beside another one you set. The machine's
+  own target's entry counts only while that target is on the deployment's
+  gateway (`enable --gateway-url` with no `--target` writes into it). `use`
+  does **not** turn tracing on — that is still `aisquare explainability
+  enable`. Unless your entry names
+  an `api_key_env` other than the default `EXPLAINABILITY_API_KEY` (which is the
+  machine key's, so it is replaced like a missing one), the target names its
+  own key variable (`EXPLAINABILITY_PROD_API_KEY`, …), so the machine key —
+  issued for whichever deployment set the machine up — never answers for
+  another one; the exception is a deployment the machine key already goes to:
+  the machine's top-level gateway, or its own target's while that target reads
+  the machine key (names no variable of its own). An API host this CLI does not
+  know (a self-hosted API, `[::1]`) has no gateway or proxy it can fill in, and
+  the machine's never stand in: `use` says `(no gateway known)` and where to set
+  them — `gateway_url` and `proxy_url` under
+  `[explainability.targets."<host>"]`, not `enable --target`, which would make
+  it the whole machine's target, and that entry reads its key from
+  `EXPLAINABILITY_<HOST>_API_KEY` unless it names another variable — and until
+  then the project's launches go untraced, saying why. The doctor's and
+  `status`'s other fixes for a project's deployment name that entry, or `key set
+  --project … --from-env <VAR>`, for the same reason. When the machine's own
+  target has the deployment's name (its default name is `stg`, whatever gateway
+  `init --explainability` gave the machine) and resolves another gateway (as
+  every shell reads it: a `$EXPLAINABILITY_GATEWAY_URL` exported in one does not
+  count), that entry is its too and every project without a destination reads
+  it, so the fix says to give the machine's target a name of its own first.
+  Launches, `fleet spawn` and
   `explainability env` in the project take the proxy **and** the key from this
-  target. `use` asks about this target whatever `AISQUARE_EXPLAINABILITY_TARGET`
-  says, and once tracing is on it ends with the check for what it set up:
-  `aisquare explainability status --target <name>` (plus `--project` when you
-  named one) for the project's own key, because `doctor` resolves only the
-  machine's; `aisquare doctor --live --target <name>` for a machine key; and
-  `key set` when there is no key yet.
+  target, whatever `AISQUARE_EXPLAINABILITY_TARGET` says: a project's
+  destination comes before that variable, which moves only the projects without
+  one (`--target` overrides both, and `status` says when the variable is not in
+  play). `use` asks about the same target, and once tracing is on it ends with
+  the check for what it set up: `aisquare doctor --live --project <id>`, which
+  resolves the key the project's launches take (its own first, else the
+  machine's) and posts a real span with it, or
+  `aisquare explainability key set --project <id>` when there is no key yet.
+  `explainability status` probes only the proxy, so it is not that check: a
+  revoked key passes it.
 - **key** — ingest still needs a workspace key (neither the gateway nor the
   hosted proxy accepts a sign-in token), so the CLI obtains one on your behalf
   unless the project already has its own, scoped to `ingest:write`, named
@@ -404,21 +440,42 @@ reported on its own line:
   be the workspace's. The API does not accept a sign-in token on that endpoint
   yet; until AISquare-Studio-BE#3493 lands the line reads `key: none — …` and
   `aisquare explainability key set --from-env VAR` is the way in — it binds the
-  key to the project's destination unless you pass `--target`. A key you
+  key to the project's destination unless you pass `--target`. A key bound to
+  the destination's deployment (minted, or by `key set`) answers only while a
+  destination names that deployment: the machine's own target can have the
+  same name and be another deployment (its default name is `stg`, whatever
+  gateway `init --explainability` gave the machine), so after `use --clear`,
+  or a move onto another deployment, the key is kept and not used, the machine
+  key applies, and `key show` says why. The other way round too: a key `key set`
+  bound to the machine's own target before any `use` does not answer for a
+  destination's deployment of that name while the machine's target resolves
+  another gateway, so a prod key is never sent to staging. It is kept, answers
+  again once the project has no destination, and `key show` says why (`--json`
+  carries the binding's `api_url`, null for the machine's target, and whether it
+  `serves` the target asked about). Nor does a key bound to a target the
+  machine no longer has (renamed, as the fix above says) answer for a
+  destination until `key set` attaches it there. A key you
   attached by hand is used as is and never minted over; `key set` over a minted
   key revokes the minted one once the new key is recorded (a `key set` that
-  fails leaves the minted key working), and so do `use --clear`, a move into
-  another workspace, a new mint over it (when its file is gone), and
-  `project forget --purge` or `project prune --purge`.
+  fails leaves the minted key working), and so do `key clear`, `use --clear`, a
+  move into another workspace, a new mint over it (when its file is gone), and
+  `project forget --purge` or `project prune --purge`. A minted key that cannot
+  be revoked yet — you are signed out, signed in to another deployment than the
+  one that minted it, offline, or the API refuses — is not forgotten: the
+  command says it is still live, and `use`, `logout` and `doctor --live` try
+  again until the server confirms (`doctor` lists what is still owed in a
+  `minted-keys` row). The key is named `aisquare-cli <host> <project>` in the
+  dashboard's key list if you would rather revoke it there.
 - **routing** — a span lands in the studio its agent identity is bound to in
   that workspace (unbound identities go to the workspace's *Unassigned* inbox),
   so `use` binds this machine's identities (`aisquare-planner`, `aisquare-coder`,
-  …) to the chosen studio with the key. Binding needs a workspace OWNER/ADMIN
+  …) to the chosen studio with the project's own key — a machine key, unchecked
+  to be the workspace's, binds nothing. Binding needs a workspace OWNER/ADMIN
   key or the studio owner's; a refusal is reported per identity, and the
   destination is still recorded.
 - `whoami` gains a `traces:` line for the same project; `aisquare logout`
-  forgets every key the CLI minted (revoking each on the server when it can) and
-  leaves hand-attached keys alone.
+  forgets every key the CLI minted (revoking each on the server when it can, and
+  naming any it could not) and leaves hand-attached keys alone.
 
 `status --json` carries the choice under `destination`; `use --json` carries
 the destination, the target, the key's standing and the routing result. Only a
@@ -492,8 +549,9 @@ coders alike; probes at ~98k passed. `/compact` does not help a fresh agent —
 the baseline cannot be compacted.
 
 **What the CLI tells you.** `aisquare doctor` gains an `explainability
-auto-mode` line whenever a fleet role runs `auto` behind a configured proxy: it
-reads the first-turn size of your recent sessions from their transcripts and
+auto-mode` line whenever a fleet role runs `auto` behind a configured proxy, or
+a running agent was launched in `auto` (a restart replays that mode, whatever
+the role says now, so the line names the agent): it reads the first-turn size of your recent sessions from their transcripts and
 warns when that size is above ~100k tokens, or when a recent session was
 refused three times or more (one or two can be a real transient 5xx). `fleet
 spawn` puts the same warning on its receipt. A running session that was

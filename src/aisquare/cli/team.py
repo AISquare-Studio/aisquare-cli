@@ -566,8 +566,9 @@ def spawn(
                 effective = explainability_ops.effective_settings(tracing, project_id=spawn_project)
                 spawn_target = explainability_ops.resolve_target(tracing, project_id=spawn_project)
                 spawn_key, spawn_gateway = spawn_target.api_key, spawn_target.gateway_url
+                spawn_key_env: str | None = spawn_target.api_key_env
             except Exception as exc:
-                effective, spawn_key, spawn_gateway = tracing, None, None
+                effective, spawn_key, spawn_gateway, spawn_key_env = tracing, None, None, None
                 typer.echo(f"explainability: target unreadable ({exc})", err=True)
             wiring = explainability_service.wire_session(
                 effective,
@@ -576,6 +577,7 @@ def spawn(
                 base_env=env,
                 api_key=spawn_key,
                 gateway_url=spawn_gateway,
+                key_env=spawn_key_env,
             )
             env.update(wiring.env)
             typer.echo(f"explainability: {wiring.reason}", err=True)

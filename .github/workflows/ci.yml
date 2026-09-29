@@ -252,9 +252,11 @@ jobs:
           # written to prevent it.
           #
           # `|| true` is load-bearing, and NOT a swallowed error. `status` exits
-          # non-zero exactly when the configured proxy would not take a session —
-          # which is every proxy-down run, and the first moment of every proxy-up
-          # run, since the port has to be read BEFORE the stub can bind it. Under
+          # non-zero when the proxy lane is red — the configured proxy would not
+          # take a session, which is every proxy-down run and the first moment of
+          # every proxy-up run, since the port has to be read BEFORE the stub can
+          # bind it (the other red state, a live proxy that reports shipping to
+          # another deployment, cannot arise here: the stub reports none). Under
           # `set -eo pipefail` the read therefore killed the step before pytest in
           # both variants. Measured by running this script, not by reading it. The
           # exit code is tolerated HERE and asserted on LATER; the read failing for
@@ -275,9 +277,10 @@ jobs:
           # it probes whatever the config says (so it cannot drift from what the
           # suite reads), and it checks the `service`/`mode` contract rather than
           # "something answered 200 on a port". Its exit-code rule — non-zero only
-          # when tracing is on and the proxy would not take a session — is pinned
-          # by tests/test_proxy_state_wording.py, so this is not leaning on an
-          # incidental behaviour.
+          # when tracing is on and the proxy lane is red: the proxy would not take
+          # a session, or it is alive and reports shipping to another deployment;
+          # amber exits 0 — is pinned by tests/test_proxy_state_wording.py, so
+          # this is not leaning on an incidental behaviour.
           assert_proxy() {
             if [ "$AMBIENT" = "proxy-up" ]; then
               aisquare explainability status >/dev/null \

@@ -5,6 +5,7 @@ state, and ``project list --json`` exposes ``group``, ``position`` and ``pinned`
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 from typing import Any
 
@@ -114,6 +115,78 @@ def test_onboard_into_a_group_creates_it_when_new(
     assert _names(runner, "--group", "new-things") == ["fresh", "web"]
     listing = json.loads(runner.invoke(app, ["--json", "project", "group", "list"]).stdout)
     assert [g["name"] for g in listing["groups"]] == ["new-things"], "created once, reused after"
+
+
+def test_onboard_into_a_new_group_the_store_refuses_leaves_no_empty_group(
+    runner: CliRunner,
+    projects: dict[str, str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``onboard --group`` created a new group in one transaction and added the project
+    in another, so an add the store refused left an empty group behind (review of #203).
+    The group is made with its member, or not at all."""
+    from aisquare.services import project_groups
+
+    def refused(*_args: object, **_kwargs: object) -> None:
+        raise sqlite3.IntegrityError("FOREIGN KEY constraint failed")
+
+    fresh = tmp_path / "fresh"
+    fresh.mkdir()
+    monkeypatch.setattr(project_groups, "move_project", refused)
+    result = runner.invoke(app, ["project", "onboard", str(fresh), "--group", "new-things"])
+    assert result.exit_code != 0
+    listing = json.loads(runner.invoke(app, ["--json", "project", "group", "list"]).stdout)
+    assert [g["name"] for g in listing["groups"]] == [], "an empty group was left behind"
+
+
+def test_onboard_into_a_blank_group_is_refused_before_the_onboard(
+    runner: CliRunner, projects: dict[str, str], tmp_path: Path
+) -> None:
+    """``onboard --group ' '`` found no group by that name and asked ``create_group`` for
+    one, whose ``ValueError("a group needs a name")`` escaped uncaught, after the onboard
+    had committed (review of #203, round 2). It is refused as ``group create ' '`` is,
+    and nothing is onboarded."""
+    fresh = tmp_path / "fresh"
+    fresh.mkdir()
+    result = runner.invoke(app, ["--json", "project", "onboard", str(fresh), "--group", " "])
+    assert result.exit_code == 1 and isinstance(result.exception, SystemExit), result.output
+    assert json.loads(result.stdout)["error"] == "invalid_group"
+    assert "fresh" not in _names(runner, "--all"), "onboarded before the group was refused"
+
+
+def test_onboard_into_a_group_named_with_spaces_joins_the_group_of_that_name(
+    runner: CliRunner,
+    projects: dict[str, str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``onboard --group ' team '`` looked the group up as typed and found none, and
+    ``create_group``, which strips, collided with ``team``: its ``ValueError`` escaped
+    uncaught after the onboard had committed (review of #203, round 3). The name is read
+    as ``group create`` stores it, so the project joins ``team``. A group the store still
+    refuses to create (made meanwhile by another command) is ``invalid_group``, as
+    ``group create`` says it, not a traceback."""
+    from aisquare.services import project_groups
+
+    assert runner.invoke(app, ["project", "group", "create", "team"]).exit_code == 0
+    fresh = tmp_path / "fresh"
+    fresh.mkdir()
+    result = runner.invoke(app, ["--json", "project", "onboard", str(fresh), "--group", " team "])
+    assert result.exit_code == 0, result.output
+    assert _names(runner, "--group", "team") == ["fresh"]
+    listing = json.loads(runner.invoke(app, ["--json", "project", "group", "list"]).stdout)
+    assert [g["name"] for g in listing["groups"]] == ["team"], "a second group was made"
+
+    def made_meanwhile(_store: object, ref: str) -> None:
+        raise KeyError(ref)
+
+    monkeypatch.setattr(project_groups, "resolve_group", made_meanwhile)
+    again = runner.invoke(
+        app, ["--json", "project", "onboard", str(tmp_path / "web"), "--group", "team"]
+    )
+    assert again.exit_code == 1 and isinstance(again.exception, SystemExit), again.output
+    assert json.loads(again.stdout)["error"] == "invalid_group"
 
 
 def test_a_filter_that_matches_nothing_says_so_not_that_nothing_is_registered(

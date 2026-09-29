@@ -15,10 +15,11 @@ from aisquare.core.store import (
     SCHEMA_VERSION,
     AmbiguousIdError,
     ContextStore,
+    is_corrupt_error,
     open_store,
     store_session,
 )
-from aisquare.models import ContextEntry, Pool, ProjectInfo
+from aisquare.models import CheckStatus, ContextEntry, Pool, ProjectInfo
 
 PROJECT = ProjectInfo(id="prj_test", root=Path("/tmp/example-project"), linked_repos=[])
 
@@ -265,8 +266,9 @@ def test_add_and_list_prompts(store: ContextStore, monkeypatch: pytest.MonkeyPat
     ids = iter(["prm_zzz_written_first", "prm_aaa_written_second"])
     monkeypatch.setattr(store_module, "datetime", _Frozen)
     monkeypatch.setattr(store_module, "new_prompt_id", lambda: next(ids))
-    store.add_prompt("first prompt", PROJECT.id)
-    store.add_prompt("second prompt", PROJECT.id)
+    first = store.add_prompt("first prompt", PROJECT.id)
+    second = store.add_prompt("second prompt", PROJECT.id)
+    assert second.id < first.id, "the ids agree with insertion order; `id DESC` would pass too"
     prompts = store.recent_prompts(PROJECT.id)
     assert [p.created_at for p in prompts] == [frozen, frozen], "the tick was not shared"
     assert [p.text for p in prompts] == ["second prompt", "first prompt"]  # newest first
@@ -291,17 +293,19 @@ def test_migrations_reach_the_current_schema_version() -> None:
     # v11 fleet, v12 metric, v13 converges, v14 forgotten_at, v15 the account registry
     # (#145), v16 usage readings and the limited state (#146), v17 onboarded_at (#139),
     # v18 the launch spec and ui_state (#144), v19 the project explainability key (#141),
-    # v20 project groups, pins and manual order (#140), v21 project destinations (#142).
-    # The persona columns (#201) are no step of their own: `_PREPARE[15]` converges them
-    # onto every store passing 15, and `_converge_v15_shape` onto one already past it.
-    assert version == SCHEMA_VERSION == 21
+    # v20 project groups, pins and manual order (#140), v21 project destinations (#142),
+    # v22 the revocations owed for keys the CLI minted (#142), v23 the one-time repair of
+    # old tombstones (#139, #140), v24 the destination a project's key was attached for (#142).
+    # The persona columns (#201) are no step of their own: they are v15's products beside
+    # `account_slot` (`_PRODUCTS[14]`), which the presence pass adds to any store that lacks them.
+    assert version == SCHEMA_VERSION == 24
 
 
 def test_a_v14_store_gains_nullable_persona_columns_through_the_v15_converge() -> None:
     """P2's step (docs/plans/spawn-personas.md §7) as it lands after the v15 fork: rows
-    that existed at v14 survive, both tables gain a ``persona`` that reads NULL — from
-    ``_converge_v15_fork``, not a numbered step of its own — and a start that names no
-    persona keeps the one a row already records."""
+    that existed at v14 survive, both tables gain a ``persona`` that reads NULL — v15's
+    products beside ``account_slot`` (``_PRODUCTS[14]``), not a numbered step of their
+    own — and a start that names no persona keeps the one a row already records."""
     from datetime import UTC, datetime
 
     from aisquare.models import TeamSession
@@ -455,15 +459,16 @@ def test_a_populated_v10_database_migrates_to_the_current_version_with_its_rows_
 
 def _at_version(version: int, *, after: str = "", stamp: int | None = None) -> Path:
     """A database migrated by hand to ``version``, with ``after`` run last and
-    ``user_version`` stamped ``stamp`` (default: ``version``)."""
-    from aisquare.core.store import _MIGRATIONS
+    ``user_version`` stamped ``stamp`` (default: ``version``). Each step as the
+    ladder runs it, so a step from v15 on brings its columns too."""
+    from aisquare.core.store import _run_step
 
     db = _db_path()
     db.parent.mkdir(parents=True, exist_ok=True)
     raw = sqlite3.connect(str(db))
     try:
-        for migration in _MIGRATIONS[:version]:
-            raw.executescript(migration)
+        for step in range(version):
+            _run_step(raw, step)
         if after:
             raw.executescript(after)
         raw.execute(f"PRAGMA user_version = {stamp if stamp is not None else version}")
@@ -857,6 +862,1012 @@ def test_every_shape_of_user_version_11_converges_on_one_schema(
         assert "metric_v1_orphaned_2" in tables, "a taken orphan name must not wedge the rename"
 
 
+# --- stores another line stamped 15 or 17 (the note above _SCHEMA_V15) ----------------------
+#
+# v15-v17 were claimed by other lines of development while the accounts stack held
+# them. What each line's own steps above v14 left in its stores, verbatim from its
+# branch: #136 (codex/native-personas-workflow), #201 (rc/hackathon-v1) and #113
+# (feat/coding-agent-adapters), with a row in what each added.
+WORK_BRIEF_AT_15 = """
+CREATE TABLE IF NOT EXISTS work_brief (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    revision INTEGER NOT NULL,
+    data TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS work_brief_project ON work_brief(project_id);
+INSERT INTO work_brief (id, project_id, revision, data) VALUES ('wb_1', 'prj_used', 3, '{}');
+"""
+PERSONAS_AT_15 = """
+ALTER TABLE team_session ADD COLUMN persona TEXT;
+ALTER TABLE fleet_agent ADD COLUMN persona TEXT;
+INSERT INTO team_session (id, project_id, started_at, last_seen_at, persona)
+    VALUES ('ses_1', 'prj_used', '2026-09-01T00:00:00+00:00', '2026-09-01T00:00:00+00:00',
+            'architect');
+"""
+CODING_AGENTS_AT_17 = """
+ALTER TABLE team_session ADD COLUMN agent TEXT;
+ALTER TABLE team_session ADD COLUMN native_session_id TEXT;
+ALTER TABLE fleet_agent ADD COLUMN agent TEXT;
+UPDATE team_session SET agent = 'claude-code', native_session_id = id
+ WHERE account IS NOT NULL AND transcript_path LIKE '%/projects/%.jsonl';
+UPDATE fleet_agent SET agent = 'claude-code' WHERE binary = 'claude';
+ALTER TABLE team_meta ADD COLUMN updated_at INTEGER NOT NULL DEFAULT 0;
+UPDATE team_meta SET updated_at = CAST(strftime('%s', 'now') AS INTEGER);
+CREATE TRIGGER team_meta_insert_time AFTER INSERT ON team_meta BEGIN
+ UPDATE team_meta SET updated_at = CAST(strftime('%s', 'now') AS INTEGER) WHERE key = NEW.key;
+END;
+CREATE TRIGGER team_meta_update_time AFTER UPDATE OF value ON team_meta BEGIN
+ UPDATE team_meta SET updated_at = CAST(strftime('%s', 'now') AS INTEGER) WHERE key = NEW.key;
+END;
+UPDATE team_meta SET updated_at = CAST(strftime('%s', 'now') AS INTEGER)
+ WHERE updated_at = 0;
+INSERT INTO team_session (id, project_id, started_at, last_seen_at, agent, native_session_id)
+    VALUES ('ses_1', 'prj_used', '2026-09-01T00:00:00+00:00', '2026-09-01T00:00:00+00:00',
+            'codex', 'nat_1');
+"""
+
+# Two projects every cohort's store holds: one used on purpose (a context entry), which
+# the v17 backfill adopts, and one only ever captured (a prompt), which it leaves hidden.
+# The used one has a live fleet agent: a fleet read of it is what raised "no such
+# column: account_slot" on a store that skipped v15 (review of #203).
+_TWO_PROJECTS = """
+INSERT INTO project (id, root, name, linked_repos, created_at) VALUES
+    ('prj_used', '/w/used', 'used', '[]', '2026-09-01T00:00:00+00:00'),
+    ('prj_seen', '/w/seen', 'seen', '[]', '2026-09-01T00:00:00+00:00');
+INSERT INTO entry (id, pool, project_id, text, tags, source, created_at, updated_at)
+    VALUES ('ent_1', 'project', 'prj_used', 'a fact', '[]', 'cli',
+            '2026-09-01T00:00:00+00:00', '2026-09-01T00:00:00+00:00');
+INSERT INTO prompt (id, project_id, text, source, created_at)
+    VALUES ('prm_1', 'prj_seen', 'hello', 'claude-code', '2026-09-01T00:00:00+00:00');
+INSERT INTO fleet_agent (id, project_id, label, role, pane_id, cwd, created_at)
+    VALUES ('agt_1', 'prj_used', 'manager', 'manager', '%0', '/w/used',
+            '2026-09-01T00:00:00+00:00');
+"""
+
+# (label, what the line's steps left, the stamp, a query over it, what it must still read)
+_FOREIGN_COHORTS: tuple[tuple[str, str, int, str, list[tuple[object, ...]]], ...] = (
+    (
+        "#136 at 15: work_brief",
+        WORK_BRIEF_AT_15,
+        15,
+        "SELECT id, revision FROM work_brief",
+        [("wb_1", 3)],
+    ),
+    (
+        "#201 at 15: persona columns",
+        PERSONAS_AT_15,
+        15,
+        "SELECT persona FROM team_session",
+        [("architect",)],
+    ),
+    # The maintainer's own store is this cohort: a backup of it (31 projects) holds
+    # exactly these tables, indexes, triggers and columns, object for object.
+    (
+        "#113 at 17: coding-agent columns",
+        CODING_AGENTS_AT_17,
+        17,
+        "SELECT session.agent, session.native_session_id, agent.agent"
+        " FROM team_session AS session, fleet_agent AS agent",
+        [("codex", "nat_1", "claude-code")],
+    ),
+)
+
+
+def _shape(conn: sqlite3.Connection) -> set[tuple[str, str]]:
+    """Every table, index and trigger by name, and every column as ``table.column``.
+
+    SQLite's automatic indexes are left out: they come and go with their table."""
+    shape: set[tuple[str, str]] = set()
+    for kind, name in conn.execute(
+        "SELECT type, name FROM sqlite_master WHERE name NOT GLOB 'sqlite_*'"
+    ).fetchall():
+        shape.add((kind, name))
+        if kind == "table":
+            columns = conn.execute(f"PRAGMA table_info({name})").fetchall()
+            shape |= {("column", f"{name}.{column[1]}") for column in columns}
+    return shape
+
+
+def _built(steps: int, after: str = "") -> set[tuple[str, str]]:
+    """The shape of a database built in memory by the first ``steps`` steps, then ``after``."""
+    from aisquare.core.store import _run_step
+
+    conn = sqlite3.connect(":memory:")
+    try:
+        for step in range(steps):
+            _run_step(conn, step)
+        if after:
+            conn.executescript(after)
+        return _shape(conn)
+    finally:
+        conn.close()
+
+
+def _contents(db: Path) -> tuple[list[tuple[object, ...]], dict[str, list[tuple[object, ...]]]]:
+    """``db``'s whole schema, SQL included, and every row of every table, with its version."""
+    raw = sqlite3.connect(str(db))
+    try:
+        schema = raw.execute("SELECT type, name, tbl_name, sql FROM sqlite_master").fetchall()
+        rows = {
+            name: sorted(raw.execute(f"SELECT * FROM {name}").fetchall(), key=repr)
+            for kind, name, _, _ in schema
+            if kind == "table"
+        }
+        rows["PRAGMA user_version"] = raw.execute("PRAGMA user_version").fetchall()
+        return sorted(schema, key=repr), rows
+    finally:
+        raw.close()
+
+
+def _open_a_foreign_cohort(db: Path, query: str) -> dict[str, object]:
+    """Open ``db`` with this build, write through the store to the tables whose absence
+    was "no such table", read from the ones a fleet read and ``accounts list`` failed
+    on, open it once more, and read back what :func:`_converged` says it must hold."""
+    store = open_store()  # a wedge raises out of here
+    try:
+        store.upsert_claude_account(1, Path("/h/.claude"))
+        store.set_project_setting("prj_used", "claude_account", "1")
+        read: dict[str, object] = {
+            "listed": [p.id for p in store.list_projects()],
+            "listed with --all": sorted(p.id for p in store.list_projects(all=True)),
+            "account setting": store.project_setting("prj_used", "claude_account"),
+            "accounts": [(r.slot, r.config_dir) for r in store.claude_accounts()],
+            "fleet": [(a.id, a.account_slot) for a in store.fleet_agents("prj_used")],
+            "live fleet": [a.id for a in store.fleet_agents("prj_used", live_only=True)],
+            "missing": store.missing_schema(),
+        }
+    finally:
+        store.close()
+    schema, rows = _contents(db)
+    open_store().close()
+    schema_again, rows_again = _contents(db)
+    read["a second open changed"] = sorted(
+        name for name in rows.keys() | rows_again.keys() if rows.get(name) != rows_again.get(name)
+    ) + (["the schema"] if schema_again != schema else [])
+    raw = sqlite3.connect(str(db))
+    try:
+        read["version"] = raw.execute("PRAGMA user_version").fetchone()[0]
+        read["shape"] = _shape(raw)
+        read["their rows"] = raw.execute(query).fetchall()
+    finally:
+        raw.close()
+    return read
+
+
+def _converged(ddl: str, their_rows: list[tuple[object, ...]]) -> dict[str, object]:
+    """What a foreign store reads once this build has opened it: the project used on
+    purpose listed (the v17 backfill ran) and the captured one not, the account and the
+    fleet agent read back, nothing ``doctor`` would report missing, a second open that
+    changes no row and no schema, every table, index and column of this build and of
+    the other line and nothing else, and the other line's rows as it left them."""
+    theirs = _built(14, _TWO_PROJECTS + ddl) - _built(14, _TWO_PROJECTS)
+    return {
+        "listed": ["prj_used"],
+        "listed with --all": ["prj_seen", "prj_used"],
+        "account setting": "1",
+        "accounts": [(1, Path("/h/.claude"))],
+        "fleet": [("agt_1", None)],
+        "live fleet": ["agt_1"],
+        "missing": [],
+        "a second open changed": [],
+        "version": SCHEMA_VERSION,
+        "shape": _built(SCHEMA_VERSION) | theirs,
+        "their rows": their_rows,
+    }
+
+
+@pytest.mark.parametrize(
+    ("label", "ddl", "stamp", "query", "expected"),
+    _FOREIGN_COHORTS,
+    ids=[c[0] for c in _FOREIGN_COHORTS],
+)
+def test_a_store_another_line_stamped_converges_on_this_schema_and_keeps_its_own(
+    label: str, ddl: str, stamp: int, query: str, expected: list[tuple[object, ...]]
+) -> None:
+    """A store stamped 15 or 17 by another line never ran this line's steps below its
+    stamp. Counted positionally, it had no ``claude_account``, so every accounts
+    command failed with "no such table". Stamped 17, it had no ``onboarded_at`` either:
+    v23 failed on that column and the store stopped opening. It converges instead:
+    every table and column this build makes, the v17 backfill (so its projects stay
+    listed), and the other line's tables, columns, triggers and rows left alone."""
+    db = _at_version(14, after=_TWO_PROJECTS + ddl, stamp=stamp)
+
+    assert _open_a_foreign_cohort(db, query) == _converged(ddl, expected), label
+
+
+@pytest.mark.parametrize(
+    ("label", "ddl", "stamp", "query", "expected"),
+    _FOREIGN_COHORTS,
+    ids=[c[0] for c in _FOREIGN_COHORTS],
+)
+def test_a_foreign_store_a_build_without_the_pass_carried_on_converges_too(
+    label: str, ddl: str, stamp: int, query: str, expected: list[tuple[object, ...]]
+) -> None:
+    """A foreign store that a build without the presence pass has already opened ran
+    this line's steps from its stamp on and none below it. Stamped 15, it reached the
+    current version without v15's tables, and the ladder never runs for it again, so
+    only the pass after the ladder can give them back. Stamped 17, it stopped at 22:
+    v23 failed on the missing ``onboarded_at``, and the pass before v23 adds it."""
+    from aisquare.core.store import _run_step
+
+    carried_to = SCHEMA_VERSION if stamp == 15 else 22  # v23 is the step it failed on
+    db = _at_version(14, after=_TWO_PROJECTS + ddl, stamp=stamp)
+    raw = sqlite3.connect(str(db))
+    try:
+        for step in range(stamp, carried_to):
+            _run_step(raw, step)
+        raw.execute(f"PRAGMA user_version = {carried_to}")
+        raw.commit()
+        tables = {r[0] for r in raw.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    finally:
+        raw.close()
+    assert "claude_account" not in tables, "the fixture is the store that build left"
+
+    assert _open_a_foreign_cohort(db, query) == _converged(ddl, expected), label
+
+
+# --- one schema from the three shapes this RC meets: its own v21, main's v24, fresh -----------
+#
+# rc/captain-v1 stamped 21 with the v15 fork converged in place: the account registry AND the
+# persona columns. Main's 0.7.0 stamps 24, with the presence pass and no persona column. A
+# fresh store runs this ladder. Each starting shape is replayed from a FROZEN dump of its
+# schema (tests/fixtures/store_schemas), never built by this ladder, so no pin over it can
+# pass by construction. Both of the owner's stores are the RC's v21, by two histories.
+
+_SCHEMAS = Path(__file__).parent / "fixtures" / "store_schemas"
+_RC_V21_SCHEMAS = ("rc_v21_owner_home.sql", "rc_v21_owner_asqui.sql", "rc_v21_fresh.sql")
+_PERSONA_COLUMNS = {("column", "team_session.persona"), ("column", "fleet_agent.persona")}
+# Main's v22 to v24 by name: SQLite's automatic index for the primary key is left out.
+_MAINS_STEPS_PAST_21 = {
+    ("table", "pending_revocation"),
+    *(
+        ("column", f"pending_revocation.{column}")
+        for column in (
+            "key_uid",
+            "api_url",
+            "workspace_id",
+            "workspace_name",
+            "project_id",
+            "project_name",
+            "detached_at",
+            "last_error",
+        )
+    ),
+    ("column", "project_explainability.api_url"),
+}
+_AT = "'2026-09-01T00:00:00+00:00'"
+# A row in every table both lines share, among them what each step past 21 reads: a
+# forgotten project that holds no mark (v23 leaves it as it is), and a destination with a
+# key bound to its deployment (v24's backfill binds it).
+_EVERY_TABLE = f"""
+INSERT INTO project_group (id, name, created_at) VALUES ('grp_1', 'work', {_AT});
+INSERT INTO project (id, root, name, linked_repos, created_at, codename, onboarded_at,
+                     group_id, position)
+    VALUES ('prj_live', '/w/live', 'live', '[]', {_AT}, 'kestrel', {_AT}, 'grp_1', 0);
+INSERT INTO project (id, root, name, linked_repos, created_at, forgotten_at)
+    VALUES ('prj_gone', '/w/gone', 'gone', '[]', {_AT}, {_AT});
+INSERT INTO entry (id, pool, project_id, text, tags, source, created_at, updated_at)
+    VALUES ('ent_1', 'project', 'prj_live', 'a fact', '[]', 'cli', {_AT}, {_AT});
+INSERT INTO prompt (id, project_id, text, source, created_at)
+    VALUES ('prm_1', 'prj_live', 'hello', 'claude-code', {_AT});
+INSERT INTO team_session (id, project_id, role, started_at, last_seen_at, account)
+    VALUES ('ses_1', 'prj_live', 'coder', {_AT}, {_AT}, '1');
+INSERT INTO team_event (id, project_id, session_id, kind, text, created_at)
+    VALUES ('evt_1', 'prj_live', 'ses_1', 'note', 'on the board', {_AT});
+INSERT INTO team_task (id, project_id, key, title, created_at, updated_at)
+    VALUES ('tsk_1', 'prj_live', 'k1', 'a task', {_AT}, {_AT});
+INSERT INTO team_meta (key, value) VALUES ('note', 'kept');
+INSERT INTO fleet_agent (id, project_id, label, role, pane_id, cwd, created_at, account_slot)
+    VALUES ('agt_1', 'prj_live', 'coder-1', 'coder', '%1', '/w/live', {_AT}, 1);
+INSERT INTO metric (trace_id, project_id, started_at) VALUES ('trc_1', 'prj_live', {_AT});
+INSERT INTO claude_account (slot, config_dir, position, is_default, created_at)
+    VALUES (1, '/h/.claude', 0, 1, {_AT});
+INSERT INTO claude_usage (slot, fetched_at, session_percent) VALUES (1, {_AT}, 12.5);
+INSERT INTO project_setting (project_id, key, value, set_at)
+    VALUES ('prj_live', 'claude_account', '1', {_AT});
+INSERT INTO ui_state (key, value, updated_at) VALUES ('fleet.selected', '"agt_1"', {_AT});
+INSERT INTO project_destination (project_id, api_url, environment, workspace_id,
+                                 workspace_name, set_at)
+    VALUES ('prj_live', 'https://stg-api.example', 'stg', 7, 'the workspace', {_AT});
+INSERT INTO project_explainability (project_id, target, key_path, set_at)
+    VALUES ('prj_live', 'stg', '/h/stg.key', {_AT});
+"""
+# What only the RC's v21 holds: a persona on the session and on the agent.
+_THE_RCS_OWN_ROWS = """
+UPDATE team_session SET persona = 'architect';
+UPDATE fleet_agent SET persona = 'architect';
+"""
+# What only main's v24 holds: a revocation still owed, and the key's deployment recorded.
+_MAINS_OWN_ROWS = f"""
+INSERT INTO pending_revocation (key_uid, api_url, workspace_id, workspace_name, project_id,
+                                project_name, detached_at)
+    VALUES ('key_1', 'https://api.example', 7, 'the workspace', 'prj_live', 'live', {_AT});
+UPDATE project_explainability SET api_url = 'https://stg-api.example';
+"""
+
+
+def _replay(schema: str, rows: str = "", db: Path | None = None) -> Path:
+    """The store ``schema`` froze, stamped with its version, holding ``rows``."""
+    text = (_SCHEMAS / schema).read_text(encoding="utf-8")
+    version = int(text.split("\n", 1)[0].removeprefix("-- user_version "))
+    if db is None:
+        db = _db_path()
+        db.parent.mkdir(parents=True, exist_ok=True)
+    raw = sqlite3.connect(str(db))
+    try:
+        raw.executescript(text + rows)
+        raw.execute(f"PRAGMA user_version = {version}")
+        raw.commit()
+    finally:
+        raw.close()
+    return db
+
+
+def _replayed_shape(schema: str) -> set[tuple[str, str]]:
+    """The shape of the store ``schema`` froze (:func:`_shape`), built in memory."""
+    conn = sqlite3.connect(":memory:")
+    try:
+        text = (_SCHEMAS / schema).read_text(encoding="utf-8")
+        conn.executescript(text)
+        return _shape(conn)
+    finally:
+        conn.close()
+
+
+Columns = dict[str, list[str]]
+
+
+def _rows(db: Path, columns: Columns | None = None) -> tuple[dict[str, object], Columns]:
+    """Every row of every table, read on ``columns`` (default: the columns each has now)."""
+    raw = sqlite3.connect(str(db))
+    try:
+        if columns is None:
+            tables = raw.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
+            columns = {
+                table: [row[1] for row in raw.execute(f'PRAGMA table_info("{table}")')]
+                for (table,) in tables
+            }
+        rows: dict[str, object] = {}
+        for table, names in columns.items():
+            quoted = ", ".join(f'"{name}"' for name in names)
+            rows[table] = sorted(
+                raw.execute(f'SELECT {quoted} FROM "{table}"').fetchall(), key=repr
+            )
+        return rows, columns
+    finally:
+        raw.close()
+
+
+@pytest.mark.parametrize("schema", _RC_V21_SCHEMAS)
+def test_the_rcs_v21_store_reaches_this_schema_with_every_row_it_held(schema: str) -> None:
+    """Both of the owner's stores are the RC's v21: the account registry and the persona
+    columns in place, none of main's v22 to v24. This build runs v22
+    (``pending_revocation``), v23 (a repair no row here needs) and v24
+    (``project_explainability.api_url``, whose backfill binds the key to its destination's
+    deployment). The store ends in exactly the schema a fresh store has, every row it held
+    reads back unchanged on every column it had, and a second open changes nothing."""
+    db = _replay(schema, _EVERY_TABLE + _THE_RCS_OWN_ROWS)
+    before, columns = _rows(db)
+
+    with store_session() as store:
+        missing = store.missing_schema()
+        agent = store.get_fleet_agent("agt_1")
+        session = store.get_session("ses_1")
+    after, _ = _rows(db, columns)
+    once = _contents(db)
+    open_store().close()
+
+    raw = sqlite3.connect(str(db))
+    try:
+        version = raw.execute("PRAGMA user_version").fetchone()[0]
+        shape = _shape(raw)
+        bound = raw.execute("SELECT api_url FROM project_explainability").fetchall()
+    finally:
+        raw.close()
+    assert (version, missing) == (SCHEMA_VERSION, [])
+    assert shape == _built(SCHEMA_VERSION), "not the schema a fresh store has"
+    assert after == before, "a row the store held changed on a column it had"
+    assert bound == [("https://stg-api.example",)], "v24's backfill did not bind the key"
+    assert agent is not None and (agent.persona, agent.account_slot) == ("architect", 1)
+    assert session is not None and session.persona == "architect"
+    assert _contents(db) == once, "a second open changed the store"
+
+
+def test_mains_v24_store_gains_the_persona_columns_and_keeps_every_row() -> None:
+    """A store main's 0.7.0 made: stamped 24, with no persona column. The ladder is not
+    entered. The presence pass after it finds v15's products incomplete and adds
+    ``team_session.persona`` and ``fleet_agent.persona``, which read NULL (no persona).
+    Nothing else is created, no row changes, and a second open changes nothing."""
+    db = _replay("main_v24_fresh.sql", _EVERY_TABLE + _MAINS_OWN_ROWS)
+    before, columns = _rows(db)
+
+    with store_session() as store:
+        missing = store.missing_schema()
+        agent = store.get_fleet_agent("agt_1")
+        session = store.get_session("ses_1")
+    after, _ = _rows(db, columns)
+    once = _contents(db)
+    open_store().close()
+
+    raw = sqlite3.connect(str(db))
+    try:
+        version = raw.execute("PRAGMA user_version").fetchone()[0]
+        shape = _shape(raw)
+    finally:
+        raw.close()
+    assert (version, missing) == (SCHEMA_VERSION, [])
+    assert shape == _replayed_shape("main_v24_fresh.sql") | _PERSONA_COLUMNS
+    assert shape == _built(SCHEMA_VERSION), "not the schema a fresh store has"
+    assert after == before, "a row the store held changed on a column it had"
+    assert agent is not None and (agent.persona, agent.account_slot) == (None, 1)
+    assert session is not None and session.persona is None
+    assert _contents(db) == once, "a second open changed the store"
+
+
+def test_one_schema_is_mains_v24_with_the_persona_columns_and_the_rcs_v21_with_mains_steps() -> (
+    None
+):
+    """The schema all three shapes reach, by name. A fresh store holds main's v24 and the
+    two persona columns, and nothing else. That is also the RC's v21 (each of the three
+    dumps) plus main's v22 to v24, and nothing else. The persona columns take no number of
+    their own: they are v15's products beside ``account_slot``, so the version stays main's
+    24, and main's next step cannot collide with one of this line's."""
+    fresh = _built(SCHEMA_VERSION)
+
+    assert SCHEMA_VERSION == 24
+    assert fresh == _replayed_shape("main_v24_fresh.sql") | _PERSONA_COLUMNS
+    for schema in _RC_V21_SCHEMAS:
+        assert fresh == _replayed_shape(schema) | _MAINS_STEPS_PAST_21, schema
+    open_store().close()
+    raw = sqlite3.connect(str(_db_path()))
+    try:
+        assert _shape(raw) == fresh, "a store opened fresh is not the ladder's schema"
+    finally:
+        raw.close()
+
+
+# --- doctor's database row reads the schema, not only the file (review of #203) ---------------
+
+
+def test_doctor_names_what_a_store_lacks_instead_of_calling_it_readable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Measured on #203 by the crew: a store #201 stamped 15, opened by a build that
+    trusted the stamp, reached the current version with no ``claude_account`` and no
+    ``fleet_agent.account_slot``. Every fleet read failed on the column, and doctor's
+    database row said "context.db is readable". That build is this one with the
+    presence pass taken out. The row fails and names each thing missing once (the
+    table, not its indexes as well). Its remedy is not the corrupt-store move: the
+    history in the file is intact."""
+    from aisquare.services import diagnostics
+
+    _at_version(14, after=_TWO_PROJECTS + PERSONAS_AT_15, stamp=15)
+    monkeypatch.setattr(store_module, "_converge_by_presence", lambda connection, below: None)
+    with store_session() as store, pytest.raises(sqlite3.OperationalError, match="account_slot"):
+        store.fleet_agents("prj_used")
+
+    row = diagnostics._check_database()
+
+    assert row.status is CheckStatus.fail, row
+    assert (
+        "schema: column fleet_agent.account_slot, table claude_account, table project_setting;"
+        in row.detail
+    ), row.detail
+    assert "claude_account_alias" not in row.detail, "an index of a missing table is noise"
+    assert "persona" not in row.detail, "another line's columns are not this build's to report"
+    assert row.fix is not None and f"cp {_db_path()}" in row.fix, row.fix
+    assert "mv " not in row.fix, "the corrupt-store move would drop an intact history"
+    assert "github.com/AISquare-Studio/aisquare-cli/issues" in row.fix, "report it where?"
+
+
+def test_doctor_fails_on_what_no_step_of_this_build_puts_back() -> None:
+    """The open restores only what a step from v15 on makes. A table or an index from
+    before that, gone from a store another build or a hand edit changed, stays gone
+    whatever the open does, and doctor's database row is where it shows. It names six
+    and counts the rest, so the row stays one line an operator can read. It says what
+    each kind the store lacks costs, and it still counts the notes, whose table is
+    whole."""
+    from aisquare.services import diagnostics
+
+    indexes = (
+        "entry_pool_project",
+        "metric_open_session",
+        "metric_project_started",
+        "team_event_project_seq",
+        "team_session_project",
+        "team_task_project_status",
+    )
+    with store_session() as store:
+        store.add(_entry())
+    raw = sqlite3.connect(str(_db_path()))
+    try:
+        raw.executescript("DROP TABLE prompt;" + "".join(f"DROP INDEX {i};" for i in indexes))
+    finally:
+        raw.close()
+
+    with store_session() as store:
+        missing = store.missing_schema()
+    row = diagnostics._check_database()
+
+    assert missing[0] == "table prompt", "a missing table is named before any index"
+    assert sorted(missing[1:]) == [f"index {i}" for i in indexes], missing
+    assert row.status is CheckStatus.fail, row
+    assert f"schema: {', '.join(missing[:6])} and 1 more;" in row.detail, row.detail
+    assert row.detail.startswith("context.db opens (1 user entries) but"), row.detail
+    assert row.detail.endswith(
+        "; a command that reads a missing table or column fails with 'no such table' or "
+        "'no such column'; a missing index that is not unique only slows the reads it served"
+    ), row.detail
+
+
+def test_a_store_without_its_full_text_index_lacks_one_table_not_five() -> None:
+    """``entry_fts`` is an FTS5 table, and SQLite keeps what it indexes in shadow tables
+    the module makes and drops with it (``entry_fts_data``, ``entry_fts_idx`` …). Read as
+    this build's tables, a store without ``entry_fts`` lacked five, and they took five of
+    the six names doctor's database row shows, crowding out what else the store lacked
+    (review of the #203 side merges, F7). It lacks one table."""
+    from aisquare.services import diagnostics
+
+    open_store().close()
+    raw = sqlite3.connect(str(_db_path()))
+    try:
+        raw.executescript("DROP TABLE entry_fts; DROP INDEX team_session_project;")
+    finally:
+        raw.close()
+
+    with store_session() as store:
+        missing = store.missing_schema()
+    row = diagnostics._check_database()
+
+    assert missing == ["table entry_fts", "index team_session_project"], missing
+    assert row.status is CheckStatus.fail, row
+    assert f"schema: {', '.join(missing)};" in row.detail, row.detail
+
+
+@pytest.mark.parametrize(
+    "shadow", ["entry_fts_data", "entry_fts_idx", "entry_fts_docsize", "entry_fts_config"]
+)
+def test_doctor_fails_on_a_full_text_index_that_lost_a_shadow_table(shadow: str) -> None:
+    """A shadow table gone with ``entry_fts`` is that table's absence, named once. Gone
+    alone, the index is damaged: no note can be added, and SQLite's answer reads as a
+    damaged store, or without ``_config`` ends in a traceback. Left out of this build's
+    schema whatever else was there, a store without ``entry_fts_data`` lacked nothing and
+    doctor's row said "context.db is readable"; without ``entry_fts_config`` the row's
+    own column read raised and called the store unreadable, with the corrupt-store move
+    (review of the #203 side merges, R2-F1). The row fails naming the shadow table, says
+    what it costs, and still counts the notes, which are intact."""
+    from aisquare.services import diagnostics
+
+    with store_session() as store:
+        store.add(_entry())
+    raw = sqlite3.connect(str(_db_path()))
+    try:
+        raw.executescript(f"DROP TABLE {shadow};")
+    finally:
+        raw.close()
+
+    with store_session() as store:
+        missing = store.missing_schema()
+        with pytest.raises(sqlite3.DatabaseError) as raised:
+            store.add(_entry())
+    row = diagnostics._check_database()
+
+    if shadow == "entry_fts_config":
+        # Not damage to the CLI, so a traceback: the row's sentence says so, where it
+        # said every shadow table's error reads as a damaged store (review of #203,
+        # round 3, F9).
+        assert "vtable constructor failed" in str(raised.value), raised.value
+        assert not is_corrupt_error(raised.value), raised.value
+    assert missing == [f"shadow table {shadow}"], missing
+    assert row.status is CheckStatus.fail, row
+    assert row.detail == (
+        "context.db opens (1 user entries) but lacks part of this build's schema: shadow "
+        f"table {shadow}; without a shadow table the notes' full-text index can be neither "
+        "written nor searched: adding a note and `aisquare context search` fail, with an "
+        "error that reads as a damaged store or, without entry_fts_config, a traceback "
+        "ending 'vtable constructor failed', though the notes are intact"
+    ), row.detail
+
+
+@pytest.mark.parametrize(
+    "script",
+    ["DELETE FROM entry_fts_config;", "UPDATE entry_fts_config SET v = 99 WHERE k = 'version';"],
+)
+def test_doctor_names_a_full_text_index_fts5_cannot_open_instead_of_calling_the_store_unreadable(
+    script: str,
+) -> None:
+    """With every shadow table there, FTS5 still cannot open ``entry_fts`` when its
+    ``_config`` lost the version row or holds one the module does not read. The row's
+    own column read opened it and raised "invalid fts5 file format", and the row called
+    the store unreadable, with the corrupt-store move for its remedy, while every note
+    still read (review of #203, round 3, F1). It names the index, says what that costs,
+    counts the notes and keeps the file."""
+    from aisquare.services import diagnostics
+
+    with store_session() as store:
+        store.add(_entry())
+    raw = sqlite3.connect(str(_db_path()))
+    try:
+        raw.executescript(script)
+    finally:
+        raw.close()
+
+    with store_session() as store:
+        missing = store.missing_schema()
+        with pytest.raises(sqlite3.OperationalError, match="invalid fts5 file format") as raised:
+            store.add(_entry())
+    row = diagnostics._check_database()
+
+    assert not is_corrupt_error(raised.value), raised.value
+    assert missing == ["unreadable table entry_fts"], missing
+    assert row.status is CheckStatus.fail, row
+    assert row.detail == (
+        "context.db opens (1 user entries) but lacks part of this build's schema: "
+        "unreadable table entry_fts; FTS5 cannot open an unreadable table, the notes' "
+        "full-text index, so it can be neither written nor searched: adding a note and "
+        "`aisquare context search` fail with a traceback ending in SQLite's error, though "
+        "the notes are intact"
+    ), row.detail
+    assert row.fix is not None and "mv " not in row.fix, row.fix
+
+
+def test_a_lock_on_the_full_text_index_is_not_taken_for_an_unreadable_one() -> None:
+    """Only a read the module refuses names ``entry_fts`` unreadable. "database is
+    locked" says nothing about the file, so it raises as it did before the read was
+    guarded, and is not reported as a gap in the schema."""
+    from typing import cast
+
+    class LockedIndex:
+        """A connection whose read of ``entry_fts``'s columns meets a writer's lock."""
+
+        def __init__(self, real: sqlite3.Connection) -> None:
+            self._real = real
+
+        def execute(self, sql: str) -> sqlite3.Cursor:
+            if sql == "PRAGMA table_info(entry_fts)":
+                raise sqlite3.OperationalError("database is locked")
+            return self._real.execute(sql)
+
+    open_store().close()
+    raw = sqlite3.connect(str(_db_path()))
+    try:
+        with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+            store_module._missing_from(
+                cast(sqlite3.Connection, LockedIndex(raw)), store_module._ladder_schema()
+            )
+    finally:
+        raw.close()
+
+
+def test_a_table_named_after_the_full_text_index_is_not_taken_for_its_shadow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Shadow tables are told apart by FTS5's suffixes (``_data``, ``_idx`` …). Told apart
+    by the prefix ``entry_fts_`` alone, a table of this build's named that way was left
+    out of its schema and never reported missing (review of the #203 side merges,
+    R2-F3). A step that makes ``entry_fts_meta`` stands in for one."""
+    ladder = store_module._MIGRATIONS
+    monkeypatch.setattr(
+        store_module,
+        "_MIGRATIONS",
+        (*ladder[:-1], ladder[-1] + "CREATE TABLE entry_fts_meta (note TEXT);"),
+    )
+    open_store().close()
+    raw = sqlite3.connect(str(_db_path()))
+    try:
+        raw.executescript("DROP TABLE entry_fts; DROP TABLE entry_fts_meta;")
+    finally:
+        raw.close()
+
+    with store_session() as store:
+        missing = store.missing_schema()
+
+    assert missing == ["table entry_fts", "table entry_fts_meta"], missing
+
+
+def test_doctor_says_what_a_trigger_it_only_counts_costs() -> None:
+    """The row names six missing objects and counts the rest, but says what each kind
+    the store lacks costs, a counted one too: what it costs is what the operator will
+    meet. A trigger's sentence names the trigger, so a note trigger that falls into
+    "and 1 more" still comes with its warning, and says which it is."""
+    from aisquare.services import diagnostics
+
+    tables = ("prompt", "team_event", "team_task", "team_meta", "metric")
+    open_store().close()
+    raw = sqlite3.connect(str(_db_path()))
+    try:
+        raw.executescript(
+            "ALTER TABLE project DROP COLUMN linked_repos;"
+            + "".join(f"DROP TABLE {table};" for table in tables)
+            + "DROP TRIGGER entry_ai;"
+        )
+    finally:
+        raw.close()
+
+    row = diagnostics._check_database()
+
+    assert row.status is CheckStatus.fail, row
+    assert row.detail.startswith(
+        "context.db opens (0 user entries) but lacks part of this build's schema: column "
+        f"project.linked_repos, {', '.join(f'table {table}' for table in tables)} and 1 "
+        "more; a command that reads a missing table or column fails"
+    ), row.detail
+    assert row.detail.endswith(f"; {diagnostics._TRIGGER_COSTS['entry_ai']}"), row.detail
+
+
+@pytest.mark.parametrize(
+    ("named", "script"),
+    [
+        ("table entry", "DROP TABLE entry;"),
+        (
+            "column entry.deleted_at",
+            "DROP INDEX entry_pool_project; ALTER TABLE entry DROP COLUMN deleted_at;",
+        ),
+    ],
+)
+def test_doctor_names_a_store_without_its_notes_table_instead_of_calling_it_unreadable(
+    named: str, script: str
+) -> None:
+    """The row counted the notes before it read the schema, and the count reads
+    ``entry``. A store without that table, or a column of it, raised "no such table:
+    entry" there and read as unreadable, with the corrupt-store move for its remedy: an
+    intact history moved aside over a table the file merely lacks. The schema is read
+    first, the count is left out when ``entry`` is what is missing, and the row names
+    the gap like any other."""
+    from aisquare.services import diagnostics
+
+    open_store().close()
+    raw = sqlite3.connect(str(_db_path()))
+    try:
+        raw.executescript(script)
+    finally:
+        raw.close()
+
+    row = diagnostics._check_database()
+
+    assert row.status is CheckStatus.fail, row
+    assert row.detail.startswith(
+        f"context.db opens but lacks part of this build's schema: {named}"
+    ), row.detail
+    assert row.fix is not None and "mv " not in row.fix, row.fix
+
+
+@pytest.mark.parametrize(
+    ("script", "said", "not_said"),
+    [
+        (
+            "DROP TRIGGER entry_ai;",
+            "schema: trigger entry_ai; without trigger entry_ai a new note is not indexed: "
+            "`aisquare context search` misses it, and editing or removing it, or purging its "
+            "project, fails as 'database disk image is malformed', which the CLI calls a "
+            "damaged store though the notes are intact",
+            ("stays indexed", "duplicates", "slows"),
+        ),
+        (
+            "DROP TRIGGER entry_ad;",
+            "schema: trigger entry_ad; without trigger entry_ad a note purged with its "
+            "project stays indexed, and `aisquare context search` can match a later note on "
+            "the purged one's words",
+            ("malformed", "old text", "duplicates", "slows"),
+        ),
+        (
+            "DROP TRIGGER entry_au;",
+            "schema: trigger entry_au; without trigger entry_au an edited note stays indexed "
+            "under its old text, so `aisquare context search` matches what it said, not what "
+            "it says",
+            ("malformed", "purged", "duplicates", "slows"),
+        ),
+        (
+            "DROP INDEX fleet_agent_live_label;",
+            "schema: unique index fleet_agent_live_label; a missing unique index raises "
+            "nothing and lets in the duplicates it refused",
+            ("context search", "slows"),
+        ),
+        (
+            "DROP INDEX prompt_project;",
+            "schema: index prompt_project; a missing index that is not unique only slows the "
+            "reads it served",
+            ("context search", "duplicates"),
+        ),
+    ],
+    ids=["entry_ai", "entry_ad", "entry_au", "unique index", "index"],
+)
+def test_doctor_says_what_a_missing_index_or_trigger_costs(
+    script: str, said: str, not_said: tuple[str, ...]
+) -> None:
+    """A missing table or column fails its readers with "no such table" or "no such
+    column"; nothing raises on a missing index or trigger, so the row says what each
+    costs, and only of the kinds the store lacks. It once said a missing index or
+    trigger "fails nothing", and then gave every trigger the cost of `entry_ai`: a note
+    it did not index hands FTS5 a 'delete' for text it never held when that note is
+    edited, removed or purged, and SQLite answers "database disk image is malformed",
+    which the CLI calls a damaged store and answers with the corrupt-store move. Without
+    `entry_ad` or `entry_au` nothing fails, and search goes stale in a way of its own,
+    so each trigger gets its own sentence (the tests after this one measure each)."""
+    from aisquare.services import diagnostics
+
+    open_store().close()
+    raw = sqlite3.connect(str(_db_path()))
+    try:
+        raw.executescript(script)
+    finally:
+        raw.close()
+
+    row = diagnostics._check_database()
+
+    assert row.status is CheckStatus.fail, row
+    assert row.detail.endswith(said), row.detail
+    assert "fails nothing" not in row.detail and "no such" not in row.detail, row.detail
+    assert not [cost for cost in not_said if cost in row.detail], row.detail
+
+
+def test_doctor_reports_a_schema_gap_where_the_package_says_issues_go() -> None:
+    """The database row's remedy says where to report a gap it cannot close. The address
+    is a copy of pyproject's ``[project.urls] Issues``, so a tracker that moves there
+    must move here too."""
+    import tomllib
+
+    from aisquare.services import diagnostics
+
+    pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
+    urls = tomllib.loads(pyproject.read_text(encoding="utf-8"))["project"]["urls"]
+
+    assert urls["Issues"] == diagnostics._ISSUES_URL
+
+
+def _drop_trigger(name: str) -> None:
+    """A store whose ``name`` trigger a hand edit or another build dropped."""
+    open_store().close()
+    raw = sqlite3.connect(str(_db_path()))
+    try:
+        raw.execute(f"DROP TRIGGER {name}")
+        raw.commit()
+    finally:
+        raw.close()
+
+
+def test_without_entry_ai_a_new_note_is_unsearchable_and_changing_it_is_malformed() -> None:
+    """What doctor's row says of a missing `entry_ai`, measured: the new note never
+    reaches the search index, and each later change hands FTS5 a 'delete' for text it
+    never held, which SQLite answers as a corrupt file though nothing in it is."""
+    _drop_trigger("entry_ai")
+    with store_session() as store:
+        store.ensure_project(PROJECT)
+        note = store.add(_entry("alpha beta", pool="project", project_id=PROJECT.id))
+
+        assert store.search("alpha", project_id=PROJECT.id) == []
+        for change in (
+            lambda: store.update(note.id, text="gamma delta"),
+            lambda: store.delete(note.id),
+            lambda: store.purge_project(PROJECT.id),
+        ):
+            with pytest.raises(sqlite3.DatabaseError, match="database disk image is malformed"):
+                change()
+
+
+def test_without_entry_ad_a_later_note_matches_a_purged_notes_words() -> None:
+    """What doctor's row says of a missing `entry_ad`, measured: a purge deletes the
+    project's notes for real, their text stays in the search index, and a note that
+    takes the freed rowid is found by words it does not hold. Nothing fails."""
+    _drop_trigger("entry_ad")
+    with store_session() as store:
+        store.ensure_project(PROJECT)
+        store.add(_entry("alpha beta", pool="project", project_id=PROJECT.id))
+        store.purge_project(PROJECT.id)
+        later = store.add(_entry("gamma delta"))
+
+        assert [entry.id for entry in store.search("alpha")] == [later.id]
+
+
+def test_without_entry_au_an_edited_note_is_found_by_its_old_text() -> None:
+    """What doctor's row says of a missing `entry_au`, measured: an edit leaves the
+    search index on the text the note had. Nothing fails, a removal included."""
+    _drop_trigger("entry_au")
+    with store_session() as store:
+        note = store.add(_entry("alpha beta"))
+        store.update(note.id, text="gamma delta")
+
+        assert [entry.text for entry in store.search("alpha")] == ["gamma delta"]
+        assert store.search("gamma") == []
+        store.delete(note.id)
+
+
+def test_doctor_has_a_cost_for_every_trigger_of_this_build() -> None:
+    """Doctor's database row says what a missing trigger costs from a sentence per
+    trigger, in the ladder's order. A trigger the ladder makes without one would be
+    named in the row with no word of what its absence does, so a new trigger fails
+    here until it has its sentence."""
+    from aisquare.services import diagnostics
+
+    connection = sqlite3.connect(":memory:")
+    try:
+        store_module._migrate(connection)
+        triggers = connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'trigger' ORDER BY rowid"
+        ).fetchall()
+    finally:
+        connection.close()
+
+    assert [name for (name,) in triggers] == list(diagnostics._TRIGGER_COSTS)
+
+
+def test_each_step_from_v15_on_declares_what_it_builds_and_builds_nothing_twice() -> None:
+    """``_PRODUCTS`` is what the presence pass looks for: a step whose entry drifts from
+    its script is a table the pass never restores, or one it restores on every open.
+    Checked by building: each step's new tables, indexes and columns are exactly its
+    entry, and applying the step again, as the pass does, changes nothing."""
+    from aisquare.core.store import _PRODUCTS, _Products, _run_step
+
+    assert all(14 <= step < SCHEMA_VERSION for step in _PRODUCTS)
+    conn = sqlite3.connect(":memory:")
+    try:
+        for step in range(SCHEMA_VERSION):
+            before = _shape(conn)
+            _run_step(conn, step)
+            after = _shape(conn)
+            if step < 14:
+                continue  # v1-v14 run once, below every stamp another line made
+            new = after - before
+            objects = {name for kind, name in new if kind != "column"}
+            columns = {
+                column
+                for kind, column in new
+                if kind == "column" and column.split(".")[0] not in objects
+            }
+            declared = _PRODUCTS.get(step, _Products())
+            assert objects == set(declared.objects), f"v{step + 1}"
+            assert columns == {f"{t}.{c}" for t, c, _ in declared.columns}, f"v{step + 1}"
+            _run_step(conn, step)
+            assert _shape(conn) == after, f"v{step + 1} applied twice"
+    finally:
+        conn.close()
+
+
+def test_the_ladder_from_v15_run_again_over_a_current_store_changes_nothing() -> None:
+    """Every step from v15 on is idempotent, so a store that meets them twice (stamped
+    back to 14 here) opens with the same schema and the same rows. That includes the
+    rows the v17 backfill reads: a captured project with a context entry stays
+    captured, because the backfill runs only when it adds the column."""
+    with store_session() as store:
+        store.onboard_project(PROJECT)
+        store.ensure_project(ProjectInfo(id="prj_captured", root=Path("/w/captured")))
+        store.add(_entry("a fact", pool="project", project_id="prj_captured"))
+        store.upsert_claude_account(1, Path("/h/.claude"))
+        store.set_project_setting(PROJECT.id, "claude_account", "1")
+        assert [p.id for p in store.list_projects()] == [PROJECT.id]
+
+    def dump() -> tuple[list[tuple[object, ...]], dict[str, list[tuple[object, ...]]]]:
+        raw = sqlite3.connect(str(_db_path()))
+        try:
+            schema = raw.execute("SELECT type, name, tbl_name, sql FROM sqlite_master").fetchall()
+            rows = {
+                name: sorted(raw.execute(f"SELECT * FROM {name}").fetchall(), key=repr)
+                for kind, name, _, _ in schema
+                if kind == "table"
+            }
+            return sorted(schema, key=repr), rows
+        finally:
+            raw.close()
+
+    before = dump()
+    raw = sqlite3.connect(str(_db_path()))
+    try:
+        raw.execute("PRAGMA user_version = 14")
+        raw.commit()
+    finally:
+        raw.close()
+
+    with store_session() as store:
+        assert [p.id for p in store.list_projects()] == [PROJECT.id]
+    raw = sqlite3.connect(str(_db_path()))
+    try:
+        assert raw.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+    finally:
+        raw.close()
+    assert dump() == before
+
+
 # --- the Claude account registry and per-project settings (v15, #145) ----------------------
 
 
@@ -968,38 +1979,93 @@ def test_ensure_project_captures_and_only_onboard_project_shows() -> None:
         store.close()
 
 
-def test_a_capture_revives_a_tombstone_captured_even_one_that_kept_its_mark() -> None:
+def test_v23_repairs_the_tombstones_older_cuts_left_holding_a_mark_or_a_place() -> None:
     """The first cut of the v17 backfill (c716094) had no ``forgotten_at`` guard, so a
-    store migrated by it holds forgotten rows stamped onboarded. The revival kept the
-    mark, and the next prompt in such a directory put it back on the list — the bug
-    #139 is about — until a second forget cleared it. A live row keeps its mark."""
+    store migrated by it holds forgotten rows stamped onboarded, and a forget written
+    before #171's first round left the group, the position and the pin on its tombstone.
+    Revived as they were, the next prompt there put the project back on the list, pinned
+    and grouped (the bug #139 is about), and an onboarding kept the stale mark. Both were
+    answered by a CASE on every capture; v23 clears them once, as a forget does now (review
+    of #168 at the fold). A live row keeps its mark and its place."""
+    legacy = "'2026-09-01T00:00:00+00:00'"
+    _at_version(
+        22,
+        after=f"""
+        INSERT INTO project_group (id, name, position, created_at)
+            VALUES ('grp_1', 'tools', 0, {legacy});
+        INSERT INTO project (id, root, name, linked_repos, created_at, onboarded_at,
+                             forgotten_at, group_id, position, pinned_at)
+        VALUES
+            ('prj_old', '/w/old', 'old', '[]', {legacy}, {legacy},
+             '2026-09-02T00:00:00+00:00', 'grp_1', 0, {legacy}),
+            ('prj_gone', '/w/gone', 'gone', '[]', {legacy}, {legacy},
+             '2026-09-02T00:00:00+00:00', NULL, NULL, {legacy}),
+            ('prj_live', '/w/live', 'live', '[]', {legacy}, {legacy}, NULL, 'grp_1', 1, {legacy});
+    """,
+    )
+
     store = open_store()
     try:
-        old = ProjectInfo(id="prj_old", root=Path("/w/old"))
-        live = ProjectInfo(id="prj_live", root=Path("/w/live"))
-        store.onboard_project(old)
-        store.onboard_project(live)
         raw = sqlite3.connect(str(_db_path()))
-        try:  # the state the unguarded backfill left: forgotten AND onboarded
-            raw.execute(
-                "UPDATE project SET forgotten_at = ? WHERE id = ?",
-                ("2026-09-02T00:00:00+00:00", old.id),
-            )
-            raw.commit()
+        try:
+            tombstones = raw.execute(
+                "SELECT onboarded_at, group_id, position, pinned_at FROM project "
+                "WHERE forgotten_at IS NOT NULL"
+            ).fetchall()
         finally:
             raw.close()
-        assert [p.id for p in store.list_projects()] == ["prj_live"]
+        assert tombstones == [(None, None, None, None)] * 2, "repaired as a forget clears them"
 
-        store.ensure_project(old)  # the next prompt there
-        store.ensure_project(live)  # and one in a project that is listed
+        store.ensure_project(ProjectInfo(id="prj_old", root=Path("/w/old")))  # a prompt there
+        store.ensure_project(ProjectInfo(id="prj_live", root=Path("/w/live")))  # one here
+        onboarded = store.onboard_project(ProjectInfo(id="prj_gone", root=Path("/w/gone")))
 
-        assert [p.id for p in store.list_projects()] == ["prj_live"], "forget sticks"
+        assert {p.id for p in store.list_projects()} == {"prj_live", "prj_gone"}
         revived = store.get_project("prj_old")
-        assert revived is not None and revived.onboarded_at is None, "captured, not a tombstone"
+        assert revived is not None, "captured, not a tombstone"
+        assert (revived.onboarded_at, revived.group_id, revived.position) == (None, None, None)
+        assert revived.pinned_at is None
+        assert onboarded.onboarded_at is not None
+        assert onboarded.onboarded_at.isoformat() > "2026-09-02", "marked now, not the old mark"
         kept = store.get_project("prj_live")
         assert kept is not None and kept.onboarded_at is not None
+        assert (kept.group_id, kept.position) == ("grp_1", 1) and kept.pinned_at is not None
     finally:
         store.close()
+
+
+def test_v24_marks_the_keys_bound_to_their_destinations_deployment() -> None:
+    """A binding named its deployment by target name alone, and the destination's ``stg``
+    and the machine's ``stg`` can be two deployments (review of #203). v24 records the
+    destination's API on a key bound to the deployment its destination names, as ``use``
+    and ``key set`` bind it; a key bound to another target stays one of the machine's."""
+    legacy = "'2026-09-01T00:00:00+00:00'"
+    _at_version(
+        23,
+        after=f"""
+        INSERT INTO project (id, root, name, linked_repos, created_at) VALUES
+            ('prj_dest', '/w/dest', 'dest', '[]', {legacy}),
+            ('prj_elsewhere', '/w/elsewhere', 'elsewhere', '[]', {legacy}),
+            ('prj_machine', '/w/machine', 'machine', '[]', {legacy});
+        INSERT INTO project_destination (project_id, api_url, environment, workspace_id,
+                                         workspace_name, set_at)
+        VALUES
+            ('prj_dest', 'https://stg-api.aisquare.studio', 'stg', 42, 'acme', {legacy}),
+            ('prj_elsewhere', 'https://api.aisquare.studio', 'prod', 42, 'acme', {legacy});
+        INSERT INTO project_explainability (project_id, target, key_path, set_at) VALUES
+            ('prj_dest', 'stg', '/k/dest', {legacy}),
+            ('prj_elsewhere', 'stg', '/k/elsewhere', {legacy}),
+            ('prj_machine', 'stg', '/k/machine', {legacy});
+    """,
+    )
+
+    with store_session() as store:
+        marked = {row.project_id: row.api_url for row in store.project_explainability_all()}
+    assert marked == {
+        "prj_dest": "https://stg-api.aisquare.studio",
+        "prj_elsewhere": None,
+        "prj_machine": None,
+    }
 
 
 def test_the_v17_migration_adopts_the_rows_already_used_on_purpose(
@@ -1076,6 +2142,46 @@ def test_the_v17_migration_adopts_the_rows_already_used_on_purpose(
     assert "prj_gone_used" not in listed_after_prompt
 
 
+def test_an_unreadable_snapshot_is_no_evidence_and_the_store_still_opens(
+    isolated_home: Path,
+) -> None:
+    """The v17 backfill looks for each captured row's snapshot on disk, and ``Path.exists``
+    raises for a directory this user cannot search. The ``PermissionError`` escaped the
+    migration, which rolls back only on ``sqlite3.Error``, so the open failed with a raw
+    traceback and the write transaction left open, on every command until the directory
+    was readable again (review of #203). It is no evidence: the row stays captured."""
+    from aisquare.core import snapshot as snapshot_core
+
+    after = "".join(
+        "INSERT INTO project (id, root, name, linked_repos, created_at) VALUES "
+        f"('{pid}', '/w/{pid}', '{pid}', '[]', '2026-09-01T00:00:00+00:00');\n"
+        for pid in ("prj_locked", "prj_snap")
+    )
+    _at_version(16, after=after)
+    for pid in ("prj_locked", "prj_snap"):
+        snapshot_core.meta_path(pid).parent.mkdir(parents=True, exist_ok=True)
+        snapshot_core.meta_path(pid).write_text("{}", encoding="utf-8")
+    locked = snapshot_core.snapshot_dir("prj_locked")
+    locked.chmod(0o000)
+    try:
+        try:
+            snapshot_core.exists("prj_locked")
+        except PermissionError:
+            pass
+        else:
+            pytest.skip("this user can search a directory with no permissions (root, or no modes)")
+        store = open_store()
+        try:
+            shown = {p.id for p in store.list_projects()}
+            everything = {p.id for p in store.list_projects(all=True)}
+        finally:
+            store.close()
+    finally:
+        locked.chmod(0o700)
+    assert shown == {"prj_snap"}, "a readable snapshot still adopts its row"
+    assert everything == {"prj_snap", "prj_locked"}, "the unreadable one stays captured"
+
+
 # --- the launch spec and ui_state (#144) ----------------------------------------------------
 
 
@@ -1127,22 +2233,6 @@ ALTER TABLE fleet_agent ADD COLUMN persona TEXT;
 """
 
 
-def test_the_if_absent_twin_of_v15_names_every_table_and_index_v15_creates() -> None:
-    """``_SCHEMA_V15_IF_ABSENT`` is derived from ``_SCHEMA_V15``; this pins that the
-    derivation covers all of it, so a table added to v15 later is converged too."""
-    import re
-
-    from aisquare.core.store import _SCHEMA_V15, _SCHEMA_V15_IF_ABSENT
-
-    creates = re.findall(r"CREATE (?:UNIQUE )?(?:TABLE|INDEX) (\w+)", _SCHEMA_V15)
-    guarded = re.findall(
-        r"CREATE (?:UNIQUE )?(?:TABLE|INDEX) IF NOT EXISTS (\w+)", _SCHEMA_V15_IF_ABSENT
-    )
-    assert creates and guarded == creates
-    # the one column goes through _add_column_if_absent, never a bare ALTER
-    assert "ALTER TABLE" not in _SCHEMA_V15_IF_ABSENT
-
-
 @pytest.mark.parametrize(
     ("label", "cohort"),
     [
@@ -1163,23 +2253,32 @@ def test_every_shape_of_user_version_15_converges_on_one_schema(label: str, coho
     the converge step stamps 21 with no ``claude_account`` and no
     ``fleet_agent.account_slot``, and nothing raises until the first fleet read.
     The last two cohorts are stores that ALREADY went past 15 that way, stamped
-    16 (the crew's own board store, 2026-09-24) and 21: no migration will ever
-    run on them again, so only the open-time shape convergence can reach them.
+    16 (the crew's own board store, 2026-09-24) and 21: no ladder step will ever
+    run on them again, so only the presence pass after the ladder can reach them.
+    Each history is built as the build that made it ran it: a step past 15 with the
+    columns it added (``_run_step``), and this branch's own v15 as it was, the
+    registry and ``account_slot`` with no persona column.
     """
     from pathlib import Path
 
-    from aisquare.core.store import _MIGRATIONS
+    from aisquare.core.store import _SCHEMA_V15, _run_step
 
     if cohort == "V14":
         db = _at_version(14)
-    elif cohort == "PERSONA15":
-        db = _at_version(14, after=PERSONA_V15_DDL, stamp=15)
-    elif cohort == "THISBOX16":
-        db = _at_version(14, after=PERSONA_V15_DDL + _MIGRATIONS[15], stamp=16)
-    elif cohort == "RANTO21":
-        db = _at_version(14, after=PERSONA_V15_DDL + "".join(_MIGRATIONS[15:]), stamp=21)
+    elif cohort == "ACCOUNTS15":
+        accounts = _SCHEMA_V15 + "ALTER TABLE fleet_agent ADD COLUMN account_slot INTEGER;\n"
+        db = _at_version(14, after=accounts, stamp=15)
     else:
-        db = _at_version(15)
+        carried_to = {"PERSONA15": 15, "THISBOX16": 16, "RANTO21": 21}[cohort]
+        db = _at_version(14, after=PERSONA_V15_DDL, stamp=15)
+        raw = sqlite3.connect(str(db))
+        try:
+            for step in range(15, carried_to):
+                _run_step(raw, step)
+            raw.execute(f"PRAGMA user_version = {carried_to}")
+            raw.commit()
+        finally:
+            raw.close()
 
     store = open_store()  # migrates on open; a wedge raises out of here
     try:

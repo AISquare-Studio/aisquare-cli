@@ -29,6 +29,7 @@ from aisquare.models import (
     InjectionRecord,
     MetricsSummary,
     OnboardReport,
+    PendingRevocation,
     Pool,
     ProjectForgetReport,
     ProjectInfo,
@@ -58,6 +59,31 @@ def refuse_conflicting_scope(every: bool, project: str | None) -> None:
             "drop one of them",
             param_hint="--all",
         )
+
+
+def project_for_ref(ref: str) -> ProjectInfo:
+    """The project a ``--project`` names, by codename, name or id prefix; a usage error if none.
+
+    Exit 2, as for every usage error, and not ``fail``'s 1: ``explainability
+    status`` exits 1 for a red proxy lane and ``doctor`` for a failed check, so
+    a cutover script gating on ``$?`` read a typo'd ``--project`` as either one
+    (review of #170's follow-ups, round 1, F6). One lookup for the
+    explainability commands and ``doctor``, which carried a copy of it (F9).
+    The JSON error stays ``not_found`` or ``ambiguous_project``.
+
+    The project service is imported here, not at module scope: this module is
+    imported by every command, and the service brings the store (``sqlite3``,
+    ``hashlib``) with it, which the commands that never name a project do not
+    pay for (tests/test_import_cost_of_the_integration.py).
+    """
+    from aisquare.services import project as project_service  # lazy: see above
+
+    try:
+        return project_service.resolve(ref)
+    except KeyError:
+        fail(f"no project matches '{ref}'", error="not_found", ref=ref, exit_code=2)
+    except ValueError as exc:
+        fail(str(exc), error="ambiguous_project", ref=ref, exit_code=2)
 
 
 def local_time(value: datetime) -> datetime:
@@ -343,9 +369,21 @@ def emit_project_forget(report: ProjectForgetReport) -> None:
             "  its context entries, prompt history and board rows stay in the store, hidden "
             "— --purge deletes them; registering the root again brings them back"
         )
+    _say_keys_still_live(report.keys_still_live)
     note = _active_note(report.active, changed=report.active_changed, pin_error=report.pin_error)
     if note is not None:
         console.print(f"  {note}")
+
+
+def _say_keys_still_live(owed: list[PendingRevocation]) -> None:
+    """A purge whose minted keys (#142) could not be revoked yet: which, why, and who retries."""
+    if not owed:
+        return
+    from aisquare.services import destinations  # lazy: the explainability modules
+
+    stdout_console().print(
+        f"  ⚠ {destinations.describe_owed(owed)} — {destinations.REVOKE_RETRY}", markup=False
+    )
 
 
 def emit_prune(report: ProjectPruneReport) -> None:
@@ -393,6 +431,7 @@ def emit_prune(report: ProjectPruneReport) -> None:
             "  their context entries, prompt history and board rows stay in the store, hidden "
             "— --purge deletes them"
         )
+    _say_keys_still_live(report.keys_still_live)
     note = _active_note(report.active, changed=report.active_changed, pin_error=report.pin_error)
     if note is not None:
         console.print(f"  {note}")

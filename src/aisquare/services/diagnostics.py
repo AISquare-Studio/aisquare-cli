@@ -43,6 +43,7 @@ from aisquare.services import (
     ci_client,
     ci_descriptor,
     ci_override,
+    destinations,
     explainability_ops,
     iam,
 )
@@ -103,7 +104,11 @@ def _shipping_status() -> ShippingStatus | None:
 
 
 def doctor(
-    *, live: bool = False, target: str | None = None, cwd: Path | None = None
+    *,
+    live: bool = False,
+    target: str | None = None,
+    cwd: Path | None = None,
+    project_id: str | None = None,
 ) -> list[DoctorCheck]:
     """Run health checks over the install, dependencies and integration.
 
@@ -117,6 +122,10 @@ def doctor(
     must not ``os.chdir`` (docs/plans/fleet-tui.md §5.6), so it passes the
     selected project's root here and gets that project's report in-process.
     The machine-wide checks ignore it — they are about this machine.
+
+    ``project_id`` is the project whose explainability key the explainability
+    section resolves, as its launches do (``doctor --project``); ``None`` is
+    the machine's key.
     """
     return [
         _check_python(),
@@ -150,7 +159,10 @@ def doctor(
         _check_browser_tools(cwd),
         _check_fleet_terminal(),
         *_experiment_checks(),
-        *explainability_ops.checks(live=live, target_name=target),
+        *explainability_ops.checks(live=live, target_name=target, project_id=project_id),
+        # Only while a key the CLI minted is owed a revocation (#142); --live
+        # tries each again first — one request per key, on the API that minted it.
+        *_optional(_minted_keys_check(live)),
         # Only when a fleet role runs `auto` behind a configured proxy (#150);
         # offline — config, the store, the head of a few transcripts.
         *_optional(auto_mode.doctor_check()),
@@ -414,7 +426,9 @@ def _check_config() -> DoctorCheck:
         load_config()
     except Exception as exc:  # diagnostics must never crash
         return _fail(
-            "config", f"config.toml is invalid: {exc}", "Fix or reset: aisquare init --reinit"
+            "config",
+            f"config.toml is invalid: {exc}",
+            "Fix it, or reset it to the defaults: aisquare init --reinit --yes",
         )
     return _ok("config", "config.toml is valid")
 
@@ -447,13 +461,51 @@ def _uncreated_home(name: str) -> DoctorCheck | None:
     return _ok(name, "not created yet — set it up: aisquare init")
 
 
+#: How many missing tables, columns, indexes or triggers the database row names before
+#: "and N more".
+_MISSING_SHOWN = 6
+
+#: Where the database row sends a schema gap this build cannot close: a copy of
+#: pyproject's ``[project.urls] Issues``, kept in step by the tests.
+_ISSUES_URL = "https://github.com/AISquare-Studio/aisquare-cli/issues"
+
+#: What the database row says each missing trigger costs. Every trigger of this build
+#: keeps `aisquare context search` in step with the notes, and each one's absence puts
+#: it out of step in its own way, measured with it dropped (the tests repeat each
+#: measurement). One per trigger the ladder makes, in its order (pinned by the tests),
+#: so a trigger added without its sentence fails a test, not the operator.
+_TRIGGER_COSTS = {
+    "entry_ai": (
+        "without trigger entry_ai a new note is not indexed: `aisquare context search` "
+        "misses it, and editing or removing it, or purging its project, fails as "
+        "'database disk image is malformed', which the CLI calls a damaged store though "
+        "the notes are intact"
+    ),
+    "entry_ad": (
+        "without trigger entry_ad a note purged with its project stays indexed, and "
+        "`aisquare context search` can match a later note on the purged one's words"
+    ),
+    "entry_au": (
+        "without trigger entry_au an edited note stays indexed under its old text, so "
+        "`aisquare context search` matches what it said, not what it says"
+    ),
+}
+
+
 def _check_database() -> DoctorCheck:
     absent = _uncreated_home("database")
     if absent is not None:
         return absent
     try:
         with store_session() as store:
-            count = len(store.entries("user"))
+            missing = store.missing_schema()
+            # The count reads `entry`, so it waits for the schema. Counted first, a store
+            # without that table (or a column of it) raised "no such table: entry" here
+            # and was sent the corrupt-store move below, its intact history with it.
+            lacks_entry = any(
+                item == "table entry" or item.startswith("column entry.") for item in missing
+            )
+            count = None if lacks_entry else len(store.entries("user"))
     except Exception as exc:  # diagnostics must never crash
         # "Re-initialise: aisquare init" was measured CRASHING on every state
         # that reaches this line — 59 lines of traceback on a corrupt file, 72
@@ -465,6 +517,84 @@ def _check_database() -> DoctorCheck:
         # error the CLI prints, so the two cannot drift apart again — a
         # remediation nobody re-runs is how this one rotted.
         return _fail("database", f"context.db is unreadable: {exc}", damaged_store_recovery())
+    if missing:
+        # Readable is not usable. A store another line stamped 15, opened by a
+        # build that trusted the stamp, reached the current version with no
+        # `claude_account` and no `fleet_agent.account_slot`. Every fleet read and
+        # every accounts command then failed with "no such table/column" while
+        # this row said "context.db is readable" (review of #203, measured on a
+        # hackathon-build store). The open above converges what this build can,
+        # so what is still missing it cannot, and the row fails naming it. The
+        # history in the file is intact, so the remedy is not the corrupt-store
+        # move.
+        shown = ", ".join(missing[:_MISSING_SHOWN])
+        if len(missing) > _MISSING_SHOWN:
+            shown += f" and {len(missing) - _MISSING_SHOWN} more"
+        # What the gap costs depends on what is missing, so the row says it of each
+        # kind the store lacks, a kind counted in "and N more" too: what it costs is
+        # what the operator will meet. A table or column fails its readers loudly. A
+        # missing index or trigger raises nothing itself, and each trigger costs
+        # something of its own (:data:`_TRIGGER_COSTS`, whose sentences name it). The
+        # costly one is `entry_ai`: a note it did not index, once edited, removed or
+        # purged, hands FTS5 a 'delete' for text it never held, and SQLite answers
+        # "database disk image is malformed", which the CLI reports as a damaged store
+        # with the corrupt-store move (measured: `context add`, then `context remove`
+        # or `project forget --purge`). Warned here, the operator who meets it knows
+        # the notes are intact. Without `entry_au` or `entry_ad` nothing fails; search
+        # only goes stale. A shadow table is where FTS5 keeps the notes' index, and
+        # without one no note can be added and nothing searched: SQLite answers "fts5:
+        # corruption found", "database disk image is malformed" or, without
+        # `entry_fts_config`, "vtable constructor failed" (measured: `context add`,
+        # `remember`, `context search`), while `context list` reads every note. The
+        # last is not an error the CLI takes for damage and ends in a traceback. An
+        # unreadable table is the index FTS5 cannot open though its shadow tables are
+        # all there (its `_config` lost the version row or holds one this SQLite does
+        # not read). SQLite answers "invalid fts5 file format", which the CLI does not
+        # take for damage, so adding a note or searching ends in a traceback (measured:
+        # `context add`, `context search`), while `context list` reads every note.
+        kinds = {item.rsplit(" ", 1)[0] for item in missing}
+        costs: list[str] = []
+        if kinds & {"table", "column"}:
+            costs.append(
+                "a command that reads a missing table or column fails with 'no such "
+                "table' or 'no such column'"
+            )
+        if "shadow table" in kinds:
+            costs.append(
+                "without a shadow table the notes' full-text index can be neither written "
+                "nor searched: adding a note and `aisquare context search` fail, with an "
+                "error that reads as a damaged store or, without entry_fts_config, a "
+                "traceback ending 'vtable constructor failed', though the notes are intact"
+            )
+        if "unreadable table" in kinds:
+            costs.append(
+                "FTS5 cannot open an unreadable table, the notes' full-text index, so it can "
+                "be neither written nor searched: adding a note and `aisquare context "
+                "search` fail with a traceback ending in SQLite's error, though the notes "
+                "are intact"
+            )
+        costs += [
+            cost for trigger, cost in _TRIGGER_COSTS.items() if f"trigger {trigger}" in missing
+        ]
+        if "unique index" in kinds:
+            costs.append(
+                "a missing unique index raises nothing and lets in the duplicates it refused"
+            )
+        if "index" in kinds:
+            costs.append("a missing index that is not unique only slows the reads it served")
+        counted = "" if count is None else f" ({count} user entries)"
+        lacks = f"context.db opens{counted} but lacks part of this build's schema: {shown}"
+        database = paths.db_path()
+        return _fail(
+            "database",
+            "; ".join([lacks, *costs]),
+            "The open that just ran adds back the tables and columns this build knows "
+            "another line can skip, and these are not among them: another build or a "
+            "hand edit changed the store in a way this build does not know. The history "
+            f"in it is intact, so do not move it aside: keep a copy (cp {database} "
+            f"{database}.bak) and report this line, with the output of `aisquare "
+            f"--version`, at {_ISSUES_URL}",
+        )
     marker = paths.truncation_marker_path()
     if marker.exists():
         # The store opens and is perfectly valid — it is simply not the one this
@@ -972,12 +1102,16 @@ def _claude_account_limit_checks() -> list[DoctorCheck]:
 
 
 def _claude_account_headroom_check() -> DoctorCheck | None:
-    """``--live`` only: every enabled, signed-in account's five-hour window, against ``switch_at``.
+    """``--live`` only: every enabled, signed-in account's windows, against ``switch_at``.
 
     Leaves the machine (the usage endpoint, one request per account), which is
     why it runs only on ``doctor --live``. Warns when EVERY account is over the
     line — a fleet about to stall with nowhere to switch to — and reports the
     numbers otherwise so the operator can see them without opening the page.
+    An account is as full as the fuller of its two windows, the rule the pick
+    itself applies (``claude_accounts.headroom_percent``): an account that has
+    spent its week read "ok" here on an empty five-hour window, beside a pick
+    that could not use it (final review of #203, accounts F1).
     ``None`` when there is nothing to measure (no signed-in account) — and
     ``None`` before ``context.db`` exists, like its two siblings: the arranged
     list is read through the store, and a doctor run must not create the home
@@ -995,10 +1129,11 @@ def _claude_account_headroom_check() -> DoctorCheck | None:
         return None
     settings = claude_accounts_service.accounts_settings()
     readings = claude_accounts_service.read_usage(accounts)
+    fullness = claude_accounts_service.headroom_percent
     measured = [
-        (account, reading.session_percent)
+        (account, percent)
         for account in accounts
-        if (reading := readings[account.slot]).available and reading.session_percent is not None
+        if (percent := fullness(readings[account.slot])) is not None
     ]
     unreadable = [
         f"{claude_accounts_core.label(account)}: {readings[account.slot].reason or 'no reading'}"
@@ -1006,14 +1141,16 @@ def _claude_account_headroom_check() -> DoctorCheck | None:
         if account.slot not in {a.slot for a, _ in measured}
     ]
     summary = " · ".join(
-        f"{claude_accounts_core.label(account)} {pct:.0f}%" for account, pct in measured
+        claude_accounts_service.describe_headroom(account, readings[account.slot])
+        for account, _pct in measured
     )
     if unreadable:
         summary = (summary + " · " if summary else "") + "unreadable: " + "; ".join(unreadable)
     if measured and all(pct >= settings.switch_at for _, pct in measured):
         return _warn(
             "claude-account-headroom",
-            f"every account is at or over {settings.switch_at}% of its five-hour window: {summary}",
+            f"every account is at or over {settings.switch_at}% of its five-hour or weekly "
+            f"window: {summary}",
             "Add or sign in another account (aisquare accounts add), or wait for a reset — "
             "a fleet spawned now has nowhere to switch to",
         )
@@ -1025,7 +1162,7 @@ def _claude_account_headroom_check() -> DoctorCheck | None:
         )
     return _ok(
         "claude-account-headroom",
-        f"five-hour windows ({settings.switch_at}% is the line): {summary}",
+        f"five-hour and weekly windows ({settings.switch_at}% is the line): {summary}",
     )
 
 
@@ -1034,10 +1171,13 @@ def _workspace_credits_check() -> DoctorCheck | None:
 
     Reads the destinations only when ``context.db`` exists (a doctor run must not
     create the store) and asks only with a session for the destination's host.
-    Only a project a launch can join counts: a forgotten one keeps its
-    destination row for ``logout`` (the minted key it may name), but no fleet
-    is spawned into its workspace, so it is neither asked about nor warned on
-    (review of #173, round 1). Warns on the server's own band — ``low`` or
+    Every destination counts, a forgotten project's too: a forget keeps the row,
+    and a launch in that root still traces into its workspace (the destination
+    is read by project id, and the launch's first prompt revives the row), as
+    ``whoami`` and ``explainability status`` say. Hiding it here and on the
+    Accounts page told the operator nothing about the workspace the next fleet
+    there traces into (review of #173 after the stack's merge). Warns on the
+    server's own band — ``low`` or
     ``exhausted`` — and when a balance could not be read at all, because a
     fleet spawned into an exhausted workspace traces nothing. ``None`` when
     there is nothing to ask.
@@ -1052,8 +1192,7 @@ def _workspace_credits_check() -> DoctorCheck | None:
         return None
     try:
         with store_session() as store:
-            visible = {p.id for p in store.list_projects(all=True)}  # captured ones launch too
-            destinations = [d for d in store.project_destinations() if d.project_id in visible]
+            destinations = store.project_destinations()
     except Exception:
         return None
     readings: list[credits_service.WorkspaceCredits] = []
@@ -1087,6 +1226,43 @@ def _workspace_credits_check() -> DoctorCheck | None:
             "Sign in again (aisquare login) or check the API; the row reads once it answers",
         )
     return _ok("workspace-credits", summary)
+
+
+def _minted_keys_check(live: bool) -> DoctorCheck | None:
+    """Keys the CLI minted and took off their projects that the server has not revoked (#142).
+
+    A key is detached — by a move into another workspace, ``use --clear``,
+    ``key set``/``key clear``, a new mint, a purge or a sign-out — in the same
+    commit that records its revocation as owed, and the record goes only on the
+    server's confirmation. Until then it is a live ``ingest:write`` key nothing
+    else on this machine names, so this row says so. Offline it reads the
+    record; with ``--live`` it tries each again first (as ``use`` and ``logout``
+    do), which is the only part that leaves the machine. ``None`` when nothing
+    is owed, and before ``context.db`` exists — a doctor run must not create
+    the store it is diagnosing.
+    """
+    if not paths.db_path().exists():
+        return None
+    try:
+        if live:
+            report = destinations.revoke_owed(iam.signed_in_quietly())
+            owed, revoked = report.owed, report.revoked
+        else:
+            with store_session() as store:
+                owed, revoked = store.pending_revocations(), []
+    except Exception:  # the database row says why the store is broken; this adds nothing
+        return None
+    if owed:
+        fix = destinations.REVOKE_RETRY
+        if not live:
+            fix = "Run aisquare doctor --live to try again now — " + fix
+        return _warn("minted-keys", destinations.describe_owed(owed), fix)
+    if revoked:
+        return _ok(
+            "minted-keys",
+            f"revoked {len(revoked)} key(s) the CLI minted that were still owed a revocation",
+        )
+    return None
 
 
 def _claude_account_default_checks() -> list[DoctorCheck]:
@@ -1314,13 +1490,14 @@ def _check_fleet_terminal(
     Three facts an operator otherwise learns one broken chord at a time: whether
     the terminal this shell runs in speaks the kitty keyboard protocol (without
     it shift+enter arrives as enter and the UI never fakes it), whether the tmux
-    here carries extended keys (3.5+; below it shift+enter travels as ``C-j``,
-    the same newline to Claude Code), and — only when the private server is
-    already running, never started for this — whether that server still has a
-    prefix key (a server started with the pre-#147 conf keeps ``C-b``, Claude
-    Code's background-tasks chord, in ``fleet attach``) and which of the desktop
-    variables it holds stale (each new spawn carries this shell's, agents
-    already running keep the server's).
+    the keys cross carries extended keys (3.5+; below it shift+enter travels as
+    ``C-j``, the same newline to Claude Code; the running server's version, which
+    an in-place upgrade leaves older than the binary here, else the binary's),
+    and — only when the private server is already running, never started for
+    this — whether that server still has a prefix key (a server started with the
+    pre-#147 conf keeps ``C-b``, Claude Code's background-tasks chord, in
+    ``fleet attach``) and which of the desktop variables it holds stale (each new
+    spawn carries this shell's, agents already running keep the server's).
 
     ``ok`` for everything but the stale prefix, which only a server restart
     fixes and which eats a documented Claude Code key.
@@ -1352,10 +1529,26 @@ def _check_fleet_terminal(
         srv = server or _fleet_server(fleet_service.settings().tmux_socket)
         if not srv.available():
             return _ok(name, f"{outer}; tmux not installed (see the tmux check)")
-        parts = [outer, _extended_keys_note(srv.version())]
+        client = srv.version()
         if srv.server_absent():
-            parts.append("fleet server not running (nothing to compare)")
+            parts = [
+                outer,
+                _extended_keys_note(client),
+                "fleet server not running (nothing to compare)",
+            ]
             return _ok(name, "; ".join(parts))
+        # The keys cross the RUNNING server, which parses them, and after an
+        # in-place upgrade it still runs the binary it started with: the note
+        # is about its version, as the pane's gate is. Read off ``tmux -V``, a
+        # 3.4 server was "tmux 3.7 carries extended keys" (final review of
+        # #203, F2).
+        running = srv.server_version()
+        parts = [outer, _extended_keys_note(running or client)]
+        if running is not None and client is not None and running != client:
+            parts.append(
+                f"this shell's tmux is {client[0]}.{client[1]}; the running server keeps "
+                f"{running[0]}.{running[1]} until it restarts"
+            )
         prefix = srv.run("show-options", "-gv", "prefix").strip()
         stale = _stale_server_environment(srv, env)
         if stale:
@@ -2267,6 +2460,14 @@ def _check_fleet(
     socket IT was spawned on — the socket is a default the user may change
     (§3.10), and a row must not read as lost because the config moved after it.
     ``server_for`` builds the server for a socket; tests hand in fakes.
+
+    A pane that answers is the row's only on a server that was already running
+    when the row was written (``fleet._outlived``): after a reboot the next
+    server hands the same ids out again, and the row that outlived its server
+    counted as a healthy pane — another agent's — while ``fleet ls`` read it
+    ``✗ lost`` and this check never prescribed the ``reap`` that records it
+    (review of the #203 final-round fixes, F4). The server is asked when it
+    started once per socket, and only once a pane there has answered.
     """
     absent = _uncreated_home("fleet")
     if absent is not None:
@@ -2286,15 +2487,25 @@ def _check_fleet(
             live = [a for p in projects for a in store.fleet_agents(p.id, live_only=True)]
         gone: list[FleetAgent] = []
         exited: list[FleetAgent] = []
+        started: dict[str, datetime | None] = {}
         for agent in live:
             server = servers.setdefault(agent.tmux_socket, server_for(agent.tmux_socket))
             try:
                 facts = server.pane_facts(agent.pane_id)
             except tmux_core.TmuxError:
                 facts = None
+            if facts is not None and agent.tmux_socket not in started:
+                try:
+                    started[agent.tmux_socket] = server.started_at()
+                except tmux_core.TmuxError:
+                    started[agent.tmux_socket] = None  # judges nothing, as in the fleet
             # tmux 3.7c answers a vanished target with exit 0 and every field
             # empty, so "gone" is "no facts OR facts about no pane", not only None.
-            if facts is None or facts.pane_id != agent.pane_id:
+            if (
+                facts is None
+                or facts.pane_id != agent.pane_id
+                or fleet_service._outlived(agent, started[agent.tmux_socket])
+            ):
                 gone.append(agent)
             elif facts.dead:
                 exited.append(agent)

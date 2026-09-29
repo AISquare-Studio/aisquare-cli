@@ -6,7 +6,7 @@ stubbed. Unknown keys in the file are ignored so old configs keep loading.
 
 from __future__ import annotations
 
-import contextlib
+import codecs
 import errno
 import os
 import tomllib
@@ -38,7 +38,9 @@ class ExplainabilityTarget(BaseModel):
     """One explainability deployment (stg, prod, …) this machine can point at.
 
     Every field falls back to the top-level ``[explainability]`` default when
-    unset, so a target is usually two lines. ``api_key_env`` is a *key source*,
+    unset, so a target is usually two lines — except the gateway and proxy of a
+    project's own deployment (a destination's, #142), which the machine's never
+    stand in for. ``api_key_env`` is a *key source*,
     never a key: the CLI reads the named environment variable at the moment it
     needs it. No path to a secrets file is ever baked into config or source —
     the operator sources their own file into the shell (or exports the var by
@@ -51,14 +53,6 @@ class ExplainabilityTarget(BaseModel):
     proxy_url: str | None = None
     agent_name_template: str | None = None
     roles: list[str] | None = None
-    #: Written by ``explainability use`` for a destination (``destinations.ensure_target``)
-    #: and not yet taken over by the operator. The machine default never resolves such
-    #: a target — ``use`` for one project must change nothing for a project without a
-    #: destination — and it borrows no gateway or proxy from the machine, so a key
-    #: minted for a deployment the CLI cannot place is never posted to another one
-    #: (crew gate on #203, findings 1 and 2). ``enable --target``, the Setup form's
-    #: "make active" or any setting written for it makes it the operator's and clears this.
-    destination: bool = False
 
 
 class ExplainabilitySettings(BaseModel):
@@ -220,6 +214,18 @@ class TeamSettings(BaseModel):
     profiles: dict[str, RoleLaunchProfile] = Field(default_factory=dict)
 
 
+CLAUDE_PERMISSION_MODES: tuple[str, ...] = (
+    "auto",
+    "acceptEdits",
+    "bypassPermissions",
+    "manual",
+    "dontAsk",
+    "plan",
+)
+"""Claude Code's ``--permission-mode`` values (2.1.250): the Settings page offers them,
+and ``fleet restart --permission-mode`` takes nothing else, or ``""`` for no flag."""
+
+
 class FleetRoleSettings(BaseModel):
     """How the fleet launches one role — every field is a DEFAULT the user may change.
 
@@ -353,9 +359,10 @@ class AccountsSettings(BaseModel):
     ``pick`` is how a launch chooses an account when nothing names one (no
     ``--account``, no role binding, no project default): ``default`` takes the
     machine default (#145); ``headroom`` reads each enabled, signed-in account's
-    five-hour usage and takes, in priority order, the first one under
-    ``switch_at`` percent — or, when every account is over it, the one with the
-    most room left. Usage is the undocumented endpoint Claude Code's own
+    usage and takes, in priority order, the first one under ``switch_at``
+    percent of the fuller of its two windows (five-hour and weekly) — or, when
+    every account is over it, the one with the most room left. Usage is the
+    undocumented endpoint Claude Code's own
     ``/usage`` reads (docs/plans/claude-accounts.md §5), so ``headroom`` is best
     effort: an account whose usage cannot be read is skipped with a note, and
     when none can be read the machine default decides as before.
@@ -416,14 +423,17 @@ def _keep_unknown(existing: Any, dumped: Any, model: Any) -> Any:
     builds knew about.
 
     A field whose value is a MAPPING of sub-models (``targets: dict[str,
-    Target]``, ``[fleet.roles.<role>]``) keeps two rules apart. Its keys are data,
-    so the model owns WHICH entries exist: a removed target or role stays
-    removed, and a stale entry is a stale deployment, not an unknown field. But
-    every entry the model kept is still a model, and an unknown field INSIDE it
-    survives like any other. Before that second rule, a build without
-    ``FleetRoleSettings.persona`` erased ``[fleet.roles.coder].persona`` on any
-    save — the whole mapping was replaced wholesale (docs/plans/spawn-personas.md
-    §8). A mapping of plain values has nothing to recurse into and is the model's.
+    Target]``, ``[team.profiles.<role>]``, ``[fleet.roles.<role>]``) keeps two
+    rules apart. Its keys are data, so the model owns WHICH entries exist: a
+    removed target or role stays removed, and a stale entry is a stale
+    deployment, not an unknown field. But every entry the model kept is still a
+    model, and an unknown field INSIDE it survives like any other. The mapping
+    used to be replaced wholesale, so any save from this build erased what
+    other builds keep in those entries — ``[team.profiles.coder].agent`` (#113),
+    ``[fleet.roles.coder].persona`` (#201) — while an unknown top-level section
+    beside them survived (final review of #203, store F2). The recursion is
+    #201's, so the two builds agree on it. A mapping of plain values has
+    nothing to recurse into and is the model's.
     """
     if not isinstance(existing, dict) or not isinstance(dumped, dict):
         return dumped
@@ -447,6 +457,37 @@ def _keep_unknown(existing: Any, dumped: Any, model: Any) -> Any:
     return merged
 
 
+#: The byte-order marks UTF-16 opens with, little-endian first: Windows PowerShell
+#: 5.1's ``>``, ``Out-File`` and ``Set-Content -Encoding Unicode`` write ``FF FE``.
+_UTF16_BOMS = (codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)
+
+
+def _parse_toml(raw: bytes) -> dict[str, Any]:
+    """The TOML document in ``raw``, decoded by the byte-order mark it opens with.
+
+    ``tomllib`` refuses a leading U+FEFF ("Invalid statement (at line 1,
+    column 1)"), so a config saved by Windows PowerShell 5.1's ``Set-Content
+    -Encoding UTF8`` or Notepad's "UTF-8 with BOM" made ``load_config`` raise
+    for every command, and ``save_config``'s merge read dropped the unknown
+    keys it exists to keep. Decoded as ``utf-8-sig``, as ``core.credentials``
+    and ``core.state_file`` read theirs; a file without a BOM reads exactly as
+    before (review of the #203 store fixes, round 1).
+
+    A file that opens with a UTF-16 mark is decoded as UTF-16. PowerShell 5.1's
+    ``>`` and ``Out-File`` write that, and ``load_config`` refused it, so
+    ``init --reinit`` could not see the explainability section in it, took it
+    for a file with nothing to protect, and replaced it with the defaults
+    without the refusal a readable one gets (review of the #203 final-review
+    fixes). Read, it is protected like any other, and a save writes it back as
+    UTF-8. Anything else that is not UTF-8 still raises ``UnicodeDecodeError``,
+    as ``tomllib.load`` did: ``load_config`` reports it, and ``save_config``
+    will not write over it unless told to discard it.
+    """
+    encoding = "utf-16" if raw.startswith(_UTF16_BOMS) else "utf-8-sig"
+    loaded: dict[str, Any] = tomllib.loads(raw.decode(encoding))
+    return loaded
+
+
 def load_config(path: Path | None = None) -> AppConfig:
     """Load configuration from ``path`` (default: the standard location).
 
@@ -456,19 +497,26 @@ def load_config(path: Path | None = None) -> AppConfig:
     if not target.exists():
         return AppConfig()
 
-    def _read() -> dict[str, Any]:
-        with target.open("rb") as fh:
-            loaded: dict[str, Any] = tomllib.load(fh)
-            return loaded
-
-    data = despite_windows_contention(_read)
+    data = _parse_toml(despite_windows_contention(target.read_bytes))
     return AppConfig.model_validate(data)
 
 
-def save_config(config: AppConfig, path: Path | None = None) -> Path:
+def save_config(
+    config: AppConfig, path: Path | None = None, *, discard_unreadable: bool = False
+) -> Path:
     """Write ``config`` as TOML to ``path`` (default: the standard location).
 
     Parent directories are created on demand. Returns the written path.
+
+    **A file already there that cannot be read is not written over** unless
+    ``discard_unreadable`` says to: its read error is raised and the file is
+    left as it was. The save keeps what the file holds that ``config`` does
+    not know (:func:`_keep_unknown`), and a file it cannot read could hold
+    anything, a configured explainability section included, which nothing
+    would report missing afterwards. ``init --reinit --yes`` is the one caller
+    that passes it: the operator asked for the defaults over whatever is
+    there. Every other writer loads the file first, and ``load_config``
+    raises on the same file.
 
     ``exclude_none`` because **TOML has no null**: ``tomli_w`` raises
     ``TypeError`` on ``None`` rather than writing anything, so an optional
@@ -544,9 +592,15 @@ def save_config(config: AppConfig, path: Path | None = None) -> Path:
     dumped = config.model_dump(mode="json", exclude_none=True)
     if written.exists():
         # Keys this build has never heard of belong to whoever wrote them; see
-        # _keep_unknown. Reading fails open on purpose — a config we cannot parse
-        # is exactly the state a write is most likely trying to repair, and
-        # refusing to write would strand the operator with the broken file.
+        # _keep_unknown. A file this read cannot parse or decode is written over
+        # only when the caller says to discard it (see the docstring). Reading
+        # failed open here: a config we cannot parse is the state a reset repairs.
+        # But the reset is the operator's call, and failing open made it for them.
+        # A config.toml PowerShell 5.1 saved as UTF-16 was replaced by
+        # `init --reinit` with no `--yes`, explainability targets and all,
+        # because nothing could read the section that would have refused it
+        # (review of the #203 final-review fixes). `init` now refuses that reset
+        # without `--yes`, and passes `discard_unreadable` with it.
         #
         # THROUGH THE RETRY, like the rename in `write_replacing` below and
         # `load_config` above. A `PermissionError` IS an `OSError`, so under the
@@ -554,15 +608,16 @@ def save_config(config: AppConfig, path: Path | None = None) -> Path:
         # the unknown-key preservation — and `_keep_unknown`'s own docstring says
         # what that costs: "exit 0, no warning, and because the tracing seam is
         # fail-open the result is a green-looking machine with no tracing".
-        # Failing open is right for a config we cannot PARSE; it is not right for
-        # one that is busy for 40 microseconds.
-        def _read_existing() -> dict[str, Any]:
-            with written.open("rb") as handle:
-                loaded: dict[str, Any] = tomllib.load(handle)
-                return loaded
-
-        with contextlib.suppress(OSError, tomllib.TOMLDecodeError):
-            dumped = _keep_unknown(despite_windows_contention(_read_existing), dumped, config)
+        # A file that is busy for 40 microseconds is not one we cannot read.
+        try:
+            existing = _parse_toml(despite_windows_contention(written.read_bytes))
+        except FileNotFoundError:
+            pass  # gone since `exists()`: nothing is left to keep
+        except (OSError, tomllib.TOMLDecodeError, UnicodeDecodeError):
+            if not discard_unreadable:
+                raise
+        else:
+            dumped = _keep_unknown(existing, dumped, config)
     payload = tomli_w.dumps(dumped)
 
     # Written BESIDE the target and renamed over it, never into the target

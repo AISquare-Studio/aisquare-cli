@@ -127,7 +127,7 @@ def restrict_to_owner(path: Path) -> bool:
     if result.returncode != 0:
         return False
     sddl = _dacl_sddl(path)
-    return sddl is not None and _grants_only_owner(sddl, sid)
+    return sddl is not None and _grants_only_owner(sddl, sid, _local_account_domain())
 
 
 def _system32(program: str) -> str:
@@ -195,14 +195,16 @@ _PRIVILEGED_TRUSTEES = frozenset(
 
 #: SDDL abbreviates two ACCOUNT SIDs by their RID, so this account can come
 #: back as one of these instead of spelled out: the built-in Administrator (a
-#: GitHub runner's login) and Guest.
+#: GitHub runner's login) and Guest. Both are THIS MACHINE's accounts: the SID
+#: is the local account domain's, and a domain's own Administrator, whose SID
+#: ends in -500 too, is spelled out.
 _ACCOUNT_ABBREVIATIONS = {"LA": "-500", "LG": "-501"}
 
 #: ACE types that deny. Every other type in a DACL grants something.
 _DENYING_ACES = frozenset({"D", "OD", "XD"})
 
 
-def _grants_only_owner(sddl: str, sid: str) -> bool:
+def _grants_only_owner(sddl: str, sid: str, local_domain: str | None) -> bool:
     """Whether the DACL in ``sddl`` grants nobody but ``sid`` and the privileged trustees.
 
     Each ACE is ``(type;flags;rights;object;inherited object;trustee)``. A
@@ -210,6 +212,14 @@ def _grants_only_owner(sddl: str, sid: str) -> bool:
     one carries a nested expression) counts as a grant to someone else: a
     restriction this cannot vouch for is not reported as one. A NULL DACL
     grants everyone everything.
+
+    ``LA`` and ``LG`` are this account only when ``sid`` is that account of
+    ``local_domain``, this machine's account domain
+    (:func:`_local_account_domain`). Judged by the RID alone, a DOMAIN
+    Administrator (``S-1-5-21-<domain>-500``) counted a grant to the LOCAL
+    Administrator as its own, and the file was reported owner-only while
+    another account could read the secret (review of the #65 re-fold). With
+    no domain known, they are someone else's.
     """
     if "NO_ACCESS_CONTROL" in sddl:
         return False
@@ -221,9 +231,53 @@ def _grants_only_owner(sddl: str, sid: str) -> bool:
         if kind in _DENYING_ACES or trustee in _PRIVILEGED_TRUSTEES or trustee == sid:
             continue
         suffix = _ACCOUNT_ABBREVIATIONS.get(trustee)
-        if suffix is None or not sid.endswith(suffix):
+        if suffix is None or local_domain is None or sid != f"{local_domain}{suffix}":
             return False
     return True
+
+
+@functools.cache
+def _local_account_domain() -> str | None:
+    """This machine's account domain SID (``S-1-5-21-a-b-c``); ``None`` when it cannot be read.
+
+    What ``LA`` stands for, less its RID: ``ConvertStringSidToSidW`` resolves an
+    SDDL abbreviation as the DACL's own text means it, so there is no second
+    rule to keep in step with SDDL's. Read in process through ``advapi32``, as
+    :func:`_dacl_sddl` reads the DACL. Cached: the machine's domain does not
+    change under a running process.
+    """
+    if sys.platform != "win32":
+        return None
+    import ctypes
+    from ctypes import wintypes
+
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    to_sid = advapi32.ConvertStringSidToSidW
+    to_sid.argtypes = [wintypes.LPCWSTR, ctypes.POINTER(ctypes.c_void_p)]
+    to_sid.restype = wintypes.BOOL
+    to_text = advapi32.ConvertSidToStringSidW
+    to_text.argtypes = [ctypes.c_void_p, ctypes.POINTER(wintypes.LPWSTR)]
+    to_text.restype = wintypes.BOOL
+    local_free = kernel32.LocalFree
+    local_free.argtypes = [ctypes.c_void_p]
+    local_free.restype = ctypes.c_void_p
+
+    binary = ctypes.c_void_p()
+    if not to_sid("LA", ctypes.byref(binary)):
+        return None
+    try:
+        text = wintypes.LPWSTR()
+        if not to_text(binary, ctypes.byref(text)):
+            return None
+        try:
+            administrator = text.value or ""
+        finally:
+            local_free(ctypes.cast(text, ctypes.c_void_p))
+    finally:
+        local_free(binary)
+    domain, _, rid = administrator.rpartition("-")
+    return domain if rid == "500" and domain.startswith("S-1-5-21-") else None
 
 
 def _dacl_sddl(path: Path) -> str | None:

@@ -69,6 +69,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from http.client import HTTPException
 from pathlib import Path
+from string import Formatter
 from typing import Any
 from urllib.error import URLError
 from urllib.parse import SplitResult, urlsplit
@@ -775,6 +776,7 @@ def wire_session(
     gateway_url: str | None = None,
     root_opener: RootOpener | None = None,
     post_root: bool = True,
+    key_env: str | None = None,
 ) -> SessionWiring:
     """Build the env delta that traces one session, or explain why not.
 
@@ -816,6 +818,8 @@ def wire_session(
     by the caller because only the caller knows which variable the target names;
     it becomes the ``X-AISquare-Key`` header a hosted proxy authenticates on, and
     is omitted entirely when absent so a loopback sidecar is unaffected.
+    ``key_env`` is the variable that target names (``None``: the default), so
+    the reason an untraced launch gives names the one the resolver reads.
 
     ``prober`` resolves HERE rather than as a default argument. A default binds
     the function object at def time, so patching ``probe_proxy`` on this module
@@ -831,6 +835,17 @@ def wire_session(
     if not _SAFE_ROLE.match(role or ""):
         return SessionWiring(
             traced=False, reason=f"role {role!r} is not header-safe — launching untraced"
+        )
+
+    # No proxy at all is a project's own deployment that none is known for — a
+    # destination on an API host outside the table — and the machine's is another
+    # deployment's, which the project's key must never reach (review of #203).
+    if not settings.proxy_url:
+        return SessionWiring(
+            traced=False,
+            reason="explainability.proxy_url is empty: no proxy is known for the deployment "
+            "this project's traces go to — launching untraced (aisquare explainability "
+            "status says where to set one)",
         )
 
     # The one value here that can cost a LAUNCH rather than a trace. The agent
@@ -920,12 +935,21 @@ def wire_session(
         )
 
     if not api_key and not is_loopback(settings.proxy_url):
+        # The target's own variable, and the key file only when the target
+        # names the default one — the resolver reads nothing else. A target
+        # `explainability use` creates names its own (EXPLAINABILITY_PROD_API_KEY),
+        # and this line sent the operator to the two places it never reads
+        # (review of #172).
+        variable = key_env or KEY_ENV_VAR
+        where = f"export {variable}=…"
+        if variable == KEY_ENV_VAR:
+            where += f" or write {key_path()}"
         return SessionWiring(
             traced=False,
             reason=(
                 f"{settings.proxy_url} is not a local proxy and no workspace key resolved, "
-                "so every model call would be denied — launching untraced. Set the key: "
-                f"export {KEY_ENV_VAR}=… or write {key_path()}"
+                f"so every model call would be denied — launching untraced. Set the key: "
+                f"{where}; or attach this project's own: aisquare explainability key set"
             ),
         )
 
@@ -1074,10 +1098,16 @@ def stored_api_key() -> str | None:
     and ``explainability_ops.resolve_target``, which is where the fallback
     belongs — see that function for why the operational surfaces used to
     disagree with the shipping path about whether a key exists.
+
+    A file that is not UTF-8 holds no key, as a project's key file does not
+    (``read_project_key``). ``UnicodeDecodeError`` is a ``ValueError``, not an
+    ``OSError``, and it rose out of the resolver: a key file written by
+    PowerShell 5.1's ``>`` (UTF-16) crashed ``doctor`` and ``explainability
+    status``, and the shipper, which never raises (final review of #203, EX5).
     """
     try:
         stored = key_path().read_text(encoding="utf-8").strip()
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         return None
     return stored or None
 
@@ -1092,11 +1122,7 @@ def resolve_api_key() -> str | None:
     from_env = os.environ.get(KEY_ENV_VAR, "").strip()
     if from_env:
         return from_env
-    try:
-        stored = key_path().read_text(encoding="utf-8").strip()
-    except OSError:
-        return None
-    return stored or None
+    return stored_api_key()
 
 
 #: Port the deployment convention puts the hosted claude_code proxy on, beside
@@ -1139,6 +1165,16 @@ def hosted_proxy_for(gateway_url: str) -> str | None:
     return f"{split.scheme}://{host}:{HOSTED_PROXY_PORT}"
 
 
+def header_safe(name: str) -> str:
+    """``name`` with every run of characters a header refuses made one ``.``.
+
+    ``arbind kumar`` is ``arbind.kumar``. The one spelling both doors suggest
+    for an identity :data:`_SAFE_ROLE` refuses: :func:`identity_problem` for a
+    template, the Setup form for its prefix.
+    """
+    return re.sub(r"[^A-Za-z0-9._-]+", ".", name)
+
+
 def identity_problem(template: str) -> str | None:
     """Why ``template`` cannot name agents, or ``None``.
 
@@ -1148,6 +1184,13 @@ def identity_problem(template: str) -> str | None:
     ``ValueError: Single '}'``), and one that renders every role to the same
     name because ``{role}`` is not in it. Rendered twice with different roles
     rather than searched for the literal, so ``{role!s}`` and friends count.
+
+    And a third that ends the same way with the identities listed: a name
+    :data:`_SAFE_ROLE` refuses, which ``wire_session`` will not put in a header.
+    ``arbind kumar-{role}`` — a full name in the form's prefix field — was
+    stored, ``status``, the tab and the doctor listed ``arbind kumar-planner``
+    and the rest, and every launch went untraced as not header-safe (final
+    review of #203, EX3).
     """
     try:
         one, two = template.format(role="planner"), template.format(role="coder")
@@ -1157,6 +1200,24 @@ def identity_problem(template: str) -> str | None:
         return (
             f"identity template {template!r} has no {{role}} in it, so every agent would "
             "share one name — try 'name-{role}'"
+        )
+    unsafe = next((name for name in (one, two) if not _SAFE_ROLE.match(name)), None)
+    if unsafe is not None:
+        # The example is the TEMPLATE made header-safe, its text and not its {role}: a
+        # rendered name (`arbind.kumar-planner`) typed back as `--identity` was refused
+        # for having no {role}, and as the Setup form's prefix named every agent
+        # `arbind.kumar-planner-<role>`. The form, whose field takes a name, says the
+        # prefix to type before this runs (`save_setup`; review of the #203
+        # final-review fixes, round 2, F3). Every field left is the role's: any other
+        # raised above.
+        example = "".join(
+            header_safe(text) + ("{role}" if field_name is not None else "")
+            for text, field_name, _spec, _conversion in Formatter().parse(template)
+        )
+        return (
+            f"identity template {template!r} names agents like {unsafe!r}, which cannot "
+            "travel in a header, so every launch would go untraced — letters, digits, '.', "
+            f"'_' and '-' only, as in {example!r}"
         )
     return None
 
@@ -1263,13 +1324,8 @@ def configure_target(
     name = target_name or settings.target
     if target_name and make_active:
         settings.target = target_name
-        if target_name in settings.targets:
-            # Chosen by the operator: no longer a destination's alone — the machine
-            # default resolves it, and it may borrow the machine's gateway again.
-            settings.targets[target_name].destination = False
     if gateway_url or key_env or proxy_url or identity:
         target = settings.targets.get(name, ExplainabilityTarget())
-        target.destination = False  # a setting written for it makes it the operator's
         # Stored as VALIDATED: stripped, no trailing slash. `url_problem` judged
         # that spelling, and every comparison downstream (`_proxy_source`
         # against the shipped default, `chosen_proxy`, the remediation lines)

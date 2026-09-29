@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import partial
 from typing import Literal
 
@@ -30,8 +30,14 @@ from textual.containers import Horizontal, VerticalScroll
 from textual.widgets import Button, Checkbox, Input, Label, Static
 from textual.worker import Worker, WorkerState
 
-from aisquare.core import orchestrator, outbox
-from aisquare.core.config import AppConfig, ExplainabilityTarget, load_config, save_config
+from aisquare.core import orchestrator, outbox, paths
+from aisquare.core.config import (
+    AppConfig,
+    ExplainabilitySettings,
+    ExplainabilityTarget,
+    load_config,
+    save_config,
+)
 from aisquare.core.store import store_session
 from aisquare.models import CheckStatus, ProjectInfo
 from aisquare.services import credits as credits_service
@@ -43,6 +49,7 @@ from aisquare.services.explainability import KEY_ENV_VAR, RESERVED_ENV_VARS
 STATUS_WORKER = "explainability-status"
 REGISTER_WORKER = "explainability-register"
 SHIP_WORKER = "explainability-ship"
+SAVE_WORKER = "explainability-save"
 SHIP_LIMIT = 500
 """Most records one press of Ship drains — the CLI's default."""
 
@@ -55,6 +62,36 @@ class Notice:
 
     message: str
     severity: Severity = "information"
+    timeout: float = 8
+    """Seconds on screen, for the notices a save returns; a refusal to read closely stays 10."""
+
+
+@dataclass(frozen=True)
+class SetupForm:
+    """What the Setup form held when *Save setup* was pressed, read on the UI thread."""
+
+    target: str
+    switch: bool
+    gateway: str
+    proxy: str
+    prefix: str
+    key_env: str
+    key: str
+    own: bool
+    """*This project only*: the key is the page's project's own (#141), not the machine's."""
+
+    @property
+    def typed(self) -> bool:
+        """Whether any field besides the deployment was filled in."""
+        return any((self.gateway, self.proxy, self.prefix, self.key_env, self.key))
+
+
+@dataclass(frozen=True)
+class SetupOutcome:
+    """A save's notices, and whether it began writing: the key field is cleared once it has."""
+
+    notices: tuple[Notice, ...]
+    began: bool = False
 
 
 @dataclass(frozen=True)
@@ -86,6 +123,17 @@ def key_project(page: ProjectInfo | None) -> ProjectInfo | None:
     return orchestrator.team_project(page.root) if page is not None else None
 
 
+def own_key_label() -> str:
+    """The words on the box that makes the key the project's own (#141), and in every hint to it.
+
+    Under ``AISQUARE_TEAM_HUB`` the key goes to the HUB project, which every
+    project under the hub launches with, and "this project only" said the
+    opposite (review of #170's Setup-form merge, G5).
+    """
+    hub = orchestrator.team_hub()
+    return "this project only" if hub is None else f"the hub ({hub.name}) only"
+
+
 def status_report(page: ProjectInfo | None = None) -> StatusReport:
     """Gather what ``status`` shows: the proxy lane, the client lane, the spool.
 
@@ -114,7 +162,7 @@ def status_report(page: ProjectInfo | None = None) -> StatusReport:
         ("lands in", destinations.describe(target.destination, key_source=target.key_source)),
         ("credits", _credits_row(target)),
         ("key", f"{target.key_origin} {'is set' if target.api_key else 'is NOT set'}"),
-        ("project", _project_key_row(project, target)),
+        ("project", _project_key_row(project, target, settings, page)),
         ("proxy", target.proxy_url),
         ("identity", target.agent_name_template),
         ("agents", ", ".join(target.agent_names) or "(none)"),
@@ -127,7 +175,7 @@ def status_report(page: ProjectInfo | None = None) -> StatusReport:
                 else ""
             ),
         ),
-        ("shipping", shipping.reason),
+        ("shipping", shipping.reason + ops.spool_key_note(target, shipping)),
         (
             "spool",
             f"{shipping.queued} queued, {shipping.sent} sent, {shipping.dead} dead-letter{located}",
@@ -156,39 +204,62 @@ def _credits_row(target: ops.ResolvedTarget) -> str:
     if session is None:
         return "(sign in to read them — aisquare login)"
     reading = credits_service.for_destination(session, destination)
-    if reading is None and session.source == "env":
-        # `aisquare login` refuses while the variable is set (`env_token_set`):
-        # the token goes to the API the environment names, so that is the fix,
-        # with a token that API issued. The one set now most likely came from
-        # the other server (docs/signing-in.md: set it only where every command
-        # talks to the server that issued it); pointed at this API alone, the
-        # row read a 401 instead (review of #173, round 2).
-        return (
-            f"({iam.TOKEN_ENV_VAR} is used with {session.api_url}, not this workspace's API — "
-            f"set {iam.API_URL_ENV_VAR}={destination.api_url} and a token that API issued "
-            "to read them)"
-        )
     if reading is None:  # the session belongs to another API than the workspace's
-        return (
-            f"(signed in to {session.api_url}, not this workspace's API — "
-            f"aisquare login --api-url {destination.api_url} to read them)"
-        )
+        # For an AISQUARE_TOKEN session the fix is the environment's, with a token
+        # that API issued: pointed at this API alone, the row read a 401 (review of
+        # #173, round 2). `credits.why_unread` words both, for `whoami` too.
+        return f"({credits_service.why_unread(session, destination)})"
     return credits_service.describe(reading)
 
 
-def _project_key_row(project: ProjectInfo | None, target: ops.ResolvedTarget) -> str:
-    """``<name>: its own key for stg`` / ``<name>: the machine key`` — the origin per project."""
+def _project_key_row(
+    project: ProjectInfo | None,
+    target: ops.ResolvedTarget,
+    settings: ExplainabilitySettings,
+    page: ProjectInfo | None = None,
+) -> str:
+    """``<name>: its own key for stg`` / ``<name>: the machine key`` — the origin per project.
+
+    When the page's launches join another project (the hub's, under a hub), a
+    key the PAGE has of its own is named too, as not used. The row used to show
+    only the hub's, so the page's binding vanished from the tab while its key
+    file stayed on disk (review of #170, D1b round 2, B7).
+    """
     if project is None:
         return "(no project)"
+    return _key_origin_row(project, target, settings) + _unused_page_key(page, project)
+
+
+def _unused_page_key(page: ProjectInfo | None, project: ProjectInfo) -> str:
+    if page is None or page.id == project.id:
+        return ""
+    binding = ops.project_key_binding(page.id)
+    if binding is None:
+        return ""
+    return (
+        f"\n  {page.root.name or page.id}: its own key for target {binding.target} is not used — "
+        f"its launches join {project.root.name or project.id}; remove it with: aisquare "
+        f"explainability key clear --project {page.id}"
+    )
+
+
+def _key_origin_row(
+    project: ProjectInfo, target: ops.ResolvedTarget, settings: ExplainabilitySettings
+) -> str:
     name = project.root.name or project.id
     binding = ops.project_key_binding(project.id)
     if binding is None:
         return (
             f"{name}: no key of its own — the machine's applies (attach one below: the "
-            "workspace key, 'this project only' ticked)"
+            f"workspace key, '{own_key_label()}' ticked)"
         )
+    # `key show`'s words, from one renderer: attached for another deployment than the
+    # one this name resolves now (review of #203).
+    kept = ops.kept_key_note(binding, target, settings)
     if binding.target != target.name:
         state = f"not used for target {target.name}"
+    elif kept:
+        state = kept
     elif target.key_source == "project":
         state = "in use"
     else:
@@ -199,25 +270,38 @@ def _project_key_row(project: ProjectInfo | None, target: ops.ResolvedTarget) ->
     return f"{name}: its own key for target {binding.target} ({state})"
 
 
+_MINTED_KEY_REFUSAL = Notice(
+    "this project's key was minted by the CLI — replace it with "
+    "aisquare explainability key set, which revokes the minted one",
+    "warning",
+)
+
+
 def minted_key_refusal(project: ProjectInfo) -> Notice | None:
     """The refusal when ``project``'s key file holds a key the CLI minted (#142), else ``None``.
 
-    Replacing it here would leave that key live and forgotten — revoking it is
-    a network call, and this tab's handlers run on the UI thread — so the CLI
-    does it instead: ``key set`` revokes the minted key once its own is written.
+    Replacing it here would owe that key a revocation, a network call whose
+    outcome, and what stays live, the CLI reports, so the CLI does it instead:
+    ``key set`` revokes the minted key once its own is written. The form asks
+    this BEFORE any write of its own, so a refusal keeps what was typed; the
+    writer asks again inside its own session (:func:`attach_project_key`).
+
+    No ``context.db`` means nothing was ever minted here, and the answer is
+    ``None`` without opening one: a store session creates the database, and on
+    a fresh machine this read ran before anything was saved (review of #172).
     """
+    if not paths.db_path().exists():
+        return None
     with store_session() as store:
         minted = store.project_destination(project.id)
     if minted is None or not minted.key_uid:
         return None
-    return Notice(
-        "this project's key was minted by the CLI — replace it with "
-        "aisquare explainability key set, which revokes the minted one",
-        "warning",
-    )
+    return _MINTED_KEY_REFUSAL
 
 
-def attach_project_key(value: str, project: ProjectInfo, target: str) -> Notice:
+def attach_project_key(
+    value: str, project: ProjectInfo, target: str, *, launches: ops.ResolvedTarget | None = None
+) -> Notice:
     """What *Save setup* does with a key and *this project only* ticked (#141).
 
     ``project`` is the one the page's agents launch into (:func:`key_project`),
@@ -227,21 +311,58 @@ def attach_project_key(value: str, project: ProjectInfo, target: str) -> Notice:
     field: two key inputs on one tab, writing to two places under two rules for
     the deployment. One field now, and the box says whose key it is.
 
-    Never over a key the CLI minted (#142): :func:`minted_key_refusal` is
-    returned instead, and nothing is written. The form asks it before any write
-    of its own; asked here too, so no caller of this writer can skip it.
+    Never over a key the CLI minted (#142): the writer refuses it in its own
+    session (``refuse_minted``), nothing is written, and the refusal
+    :func:`minted_key_refusal` gives is returned instead — so no caller of this
+    writer can skip the check, and it costs no store session of its own.
+
+    ``launches`` is what the project's launches resolve when it is not
+    ``target`` (:func:`ops.launches_elsewhere`, asked by the caller), and the
+    notice then says the key is not theirs.
     """
-    refused = minted_key_refusal(project)
-    if refused is not None:
-        return refused
-    binding = ops.attach_project_key(project, value.strip(), target=target)
+    try:
+        binding = ops.attach_project_key(project, value.strip(), target=target, refuse_minted=True)
+    except ops.MintedKeyInPlace:
+        return _MINTED_KEY_REFUSAL
     name = project.root.name or project.id
+    if project.root == orchestrator.team_hub():
+        # 'this project only' under a hub is the HUB's key, and every project
+        # under it launches with it: said, since the box's own words say the
+        # opposite (review of #170's Setup-form merge, G5).
+        name += " (the AISQUARE_TEAM_HUB project: every project under the hub launches with it)"
+    if launches is not None:
+        # Attached, and not what the project's launches take: the success line
+        # said they did (review of #170's Setup-form merge, G3).
+        move = (
+            " — tick 'make active' and save again to move this machine to it"
+            if launches.target_source == "config"
+            else ""
+        )
+        return Notice(
+            f"✓ key attached to {name} for target {target} — {binding.key_path} (mode 600); "
+            f"{ops.unused_key_note(launches)}{move}",
+            "warning",
+            timeout=10,
+        )
     return Notice(
         f"✓ key attached to {name} for target {target} — {binding.key_path} (mode 600); "
         "launches in this project authenticate the proxy with it. If that workspace has not "
         "registered this machine's agents yet, press Register roster",
         "information",
     )
+
+
+def _launches_elsewhere(
+    config: AppConfig, project: ProjectInfo, target: str
+) -> ops.ResolvedTarget | None:
+    """:func:`ops.launches_elsewhere` for the notice; a resolver that fails says nothing.
+
+    It decorates a success line, so it must not stop the attach it is asked beside.
+    """
+    try:
+        return ops.launches_elsewhere(config.explainability, project.id, target)
+    except Exception:  # decoration on a success line
+        return None
 
 
 #: The probe row's style per verdict — one mapping, so a new severity is one
@@ -277,7 +398,7 @@ def register_roster(page: ProjectInfo | None = None) -> Notice:
     if not target.gateway_url:
         return Notice(
             f"target '{target.name}' has no gateway URL — set one with: "
-            f"aisquare explainability enable --target {target.name} --gateway-url <url>",
+            f"{ops.deployment_fix(target)}",
             "error",
         )
     if not target.api_key:
@@ -339,6 +460,208 @@ def stale_shell_export(config: AppConfig) -> str | None:
     if ambient and ambient == target.proxy_url and target.proxy_source != "default":
         return ambient
     return None
+
+
+def _refused(message: str) -> SetupOutcome:
+    """A save refused before anything was written: a warning to read, the fields kept."""
+    return SetupOutcome((Notice(message, "warning", timeout=10),))
+
+
+def save_setup(form: SetupForm, page: ProjectInfo | None) -> SetupOutcome:
+    """What *Save setup* does once the form's own checks passed, off the UI thread.
+
+    Everything here reads or writes something: the config, git (for the
+    project whose key it is, :func:`key_project`), the store and the key file.
+    It ran in the button's handler, on the UI thread, where git's timeouts
+    froze the whole app (review of #170, B5/G6). It returns what the handler
+    used to notify, and whether a write began.
+
+    The config is read AFTER git has answered, and saved whole a few store
+    reads later. Read first, a config write made while git ran (the tab's
+    *Disable*, which the handler now disables meanwhile, or any other writer)
+    was saved over with the copy read before it: tracing stayed on after the
+    toast said it was off (review of #170's follow-ups, round 1, F1).
+    """
+    target, gateway, proxy, prefix, key_env, key = (
+        form.target, form.gateway, form.proxy, form.prefix, form.key_env, form.key,
+    )  # fmt: skip
+    # The page's project is looked up here, in the worker: `team_project` asks
+    # git, in subprocesses with 5 s timeouts, and this ran on the UI thread
+    # (review of #170, B5/G6).
+    owner = key_project(page) if key and form.own else None
+    try:
+        config = load_config()
+    except Exception as exc:  # a broken config.toml: say so, change nothing
+        return SetupOutcome((Notice(f"config unreadable — nothing changed: {exc}", "error"),))
+    settings = config.explainability
+    name = target or settings.target
+    # The key FILE answers for ONE variable, the default: it holds a single
+    # unlabelled key, and a staging key must never satisfy a prod target
+    # (`resolve_target`; tests/test_key_never_crosses_deployments.py). So a
+    # key typed for a target that names its own variable would be written
+    # where nothing reads it -- `✓ setup saved` over `$MY_VAR is NOT set`.
+    # Judged against the variable the target will HAVE after this save (the
+    # typed one, else the stored one), not against the field alone: a
+    # target configured with `--key-env MY_VAR` last month fails the same way.
+    # A project's own key is the resolver's FIRST rung, read whatever variable
+    # the target names, so the rule is the file's alone.
+    reads_from = key_env or settings.targets.get(name, ExplainabilityTarget()).api_key_env
+    if key and owner is None and reads_from != KEY_ENV_VAR:
+        # A project's own key is read whatever variable the target names, so on
+        # a page that box is the fix that works, and it is named (review of
+        # #170's Setup-form merge, G8).
+        own_key = (
+            f", or tick '{own_key_label()}' to make it the project's own key"
+            if page is not None
+            else ""
+        )
+        return _refused(
+            f"target '{name}' reads its key from ${reads_from}, and the key file is read "
+            f"only for ${KEY_ENV_VAR} — a key typed here would never be used. Export "
+            f"${reads_from} in the shell instead, or leave 'key variable' blank to use "
+            f"the file{own_key}"
+        )
+    # Offered, not imposed -- and only where nothing was CHOSEN. `chosen_proxy`
+    # is the resolver's own fold minus the shipped default: the target's
+    # proxy, else a deliberate top-level one. Testing the per-target value
+    # alone let a top-level `[explainability] proxy_url` be shadowed by a
+    # suggestion; testing the blank FIELD, before that, replaced a stored
+    # one. `hosted_proxy_for` is silent for a loopback gateway, whose own
+    # port is the shipped 9090 default and not 9443.
+    if gateway and not proxy and ops.chosen_proxy(settings, target or None) is None:
+        suggested = explainability_service.hosted_proxy_for(gateway)
+        if suggested is not None:
+            proxy = suggested
+    identity = f"{prefix}-{{role}}" if prefix else None
+    # A prefix whose names no header carries: the writer refuses it naming a template to
+    # try, which `enable --identity` takes and this field refuses (braces). The rule is
+    # the writer's, the name to type is said here: a rendered name typed back named every
+    # agent `arbind.kumar-planner-<role>` (review of the #203 final-review fixes, round
+    # 2, F3). A prefix with a brace is the handler's to word, and the writer's below.
+    if (
+        identity
+        and not {"{", "}"} & set(prefix)
+        and explainability_service.identity_problem(identity)
+    ):
+        return _refused(
+            f"prefix {prefix!r} names agents like {identity.format(role='planner')!r}, which "
+            "cannot travel in a header, so every launch would go untraced — letters, digits, "
+            f"'.', '_' and '-' only: try {explainability_service.header_safe(prefix)!r}"
+        )
+    # The deployments a key may be bound to, judged on the config AS IT WAS:
+    # `configure_target` below makes a typed name the machine's target when
+    # 'make active' is ticked, and judged after it, a typo passed as known
+    # (review of #170's Setup-form merge, G1). A name this save gives an
+    # entry — typed with a gateway, proxy, prefix or key variable — is
+    # known once it is saved.
+    known = ops.known_targets(settings)
+    if target and any((gateway, proxy, prefix, key_env)):
+        known = sorted({*known, target})
+    try:
+        name = explainability_service.configure_target(
+            config,
+            target_name=target or None,
+            gateway_url=gateway or None,
+            key_env=key_env or None,
+            proxy_url=proxy or None,
+            identity=identity,
+            enable=False,
+            make_active=form.switch,
+        )
+    except ValueError as exc:  # the writer refused a URL or template; nothing changed
+        return SetupOutcome((Notice(str(exc), "warning"),))
+    # The project key's deployment: the one typed, else the one a launch
+    # resolves — `key set`'s default. A name no target answers to after this
+    # save is refused as `key set` refuses it, typed or named by an exported
+    # variable: a binding to a deployment nothing configures traces nothing
+    # (review of #170). The writer refuses it too, by the same rule.
+    key_target = name
+    if owner is not None:
+        # With the project, as `key set` resolves it: its destination (#142)
+        # names the deployment its traces go to when the field does not.
+        resolved = ops.resolve_target(settings, target or None, project_id=owner.id)
+        key_target = resolved.name
+        if resolved.destination is not None:
+            # Its destination's deployment is read off the destination, not the
+            # config (review of #203), so it is known without an entry. That name
+            # alone: `known_targets(settings, …)` read the machine's target off
+            # the config `configure_target` had just changed, and with 'make
+            # active' ticked the typo was known again (final review of #203, EX2).
+            known = sorted({*known, resolved.destination.environment})
+        if key_target not in known:
+            named = f", named by ${ops.TARGET_ENV_VAR}" if resolved.target_source == "env" else ""
+            return _refused(
+                f"no target '{key_target}' on this machine{named} (known: "
+                f"{', '.join(known)}) — give it a gateway URL here first, then attach the key"
+            )
+        # The field blank, the settings go to the machine's target and the
+        # key to the project's: two deployments from one press, and the
+        # project's launches never read the gateway just typed (review of
+        # #172). Refused before a write began, so the fields keep it all.
+        if key_target != name and any((gateway, proxy, prefix, key_env)):
+            return _refused(
+                f"this project's key belongs to target '{key_target}', where its traces "
+                f"go, and the other settings would be saved for '{name}' — type a "
+                "deployment to save both to it, or save the key on its own"
+            )
+        # A key the CLI minted (#142) is the CLI's to replace, and refused
+        # here, before a write began, the field keeps what was typed. A store
+        # that cannot say is a refusal too: guessing "not minted" could
+        # overwrite one.
+        try:
+            refused = minted_key_refusal(owner)
+        except Exception as exc:
+            refused = Notice(f"the store could not be read — nothing changed: {exc}", "error")
+        if refused is not None:
+            return SetupOutcome((replace(refused, timeout=10),))
+    # From here a write has begun, and the handler clears the key field
+    # whatever happens after (`began`): a masked Input still holds its value,
+    # and a failed key write used to leave the plaintext live in the widget for
+    # the rest of the session -- against this view's own "never shown back".
+    try:
+        save_config(config)
+    except OSError as exc:  # the operator's filesystem saying no — the foreseeable failure
+        return SetupOutcome((Notice(f"could not write the config: {exc}", "error"),), began=True)
+    said: list[Notice] = []
+    # The key AFTER the config: a written key with no target to use it is
+    # inert, while a target whose key failed to land is a red check that
+    # names its own fix. The cheaper failure is the one left behind.
+    if owner is not None:
+        # What the launches resolve, asked of the config just saved, before
+        # the writer's one store session.
+        launches = _launches_elsewhere(config, owner, key_target)
+        try:
+            attached = attach_project_key(key, owner, key_target, launches=launches)
+        except Exception as exc:  # the store or the filesystem said no: a notice
+            # With the writer's notes: when the file could not be put back, a
+            # note says what it holds now and what to delete, and `{exc}` alone
+            # left it out (review of #170's follow-ups, round 1, F3).
+            said_why = "; ".join([str(exc), *getattr(exc, "__notes__", ())])
+            return _failed_after_save(f"the key could not be attached: {said_why}")
+        said.append(attached)
+    elif key:
+        try:
+            explainability_service.store_api_key(key)
+        except OSError as exc:
+            return _failed_after_save(f"the key could not be written: {exc}")
+    active = settings.target
+    if not form.typed:
+        done = f"✓ this machine now uses target '{name}' — press Enable tracing to trace to it"
+    elif name != active:
+        done = (
+            f"✓ setup saved for target '{name}' — this machine stays on '{active}'; tick "
+            "'make active' and save again to switch"
+        )
+    else:
+        done = f"✓ setup saved for target '{name}' — press Enable tracing, then Register roster"
+    return SetupOutcome((*said, Notice(done)), began=True)
+
+
+def _failed_after_save(what: str) -> SetupOutcome:
+    """The settings were saved and the key did not land: say so, and ask for it again."""
+    return SetupOutcome(
+        (Notice(f"settings saved, but {what} — type it again", "error"),), began=True
+    )
 
 
 class ExplainabilityView(VerticalScroll):
@@ -415,7 +738,7 @@ class ExplainabilityView(VerticalScroll):
             yield Input(placeholder="AIS_…", password=True, id="explainability-key")
             # A key per project (#141), in the one key field: no page, no project to own it.
             yield Checkbox(
-                "this project only",
+                own_key_label(),
                 id="explainability-key-project",
                 disabled=self.project is None,
             )
@@ -439,7 +762,8 @@ class ExplainabilityView(VerticalScroll):
         self.status_text = rendered.plain
         self.query_one("#explainability-status", Static).update(rendered)
 
-    # --- the switches (config writes, on the UI thread: local and immediate) -------------
+    # --- the switches (config writes, on the UI thread: local and immediate; Save setup's
+    # git, store and key writes run in a worker) ------------------------------------------
 
     def _read_config(self) -> AppConfig | None:
         try:
@@ -500,13 +824,23 @@ class ExplainabilityView(VerticalScroll):
         "this project only" ticked, the key is attached to the project this
         page's agents launch into, instead of written to the machine file —
         ``key set``'s write, the one :func:`attach_project_key` makes — and for
-        ``key set``'s deployment: the one typed, else the one an exported
-        ``$AISQUARE_EXPLAINABILITY_TARGET`` or the project's destination names
-        (#142), else the machine's. When that is not the deployment the other
-        typed settings go to, the save is refused before anything is written:
-        one press wrote a gateway to one deployment and bound the key to
-        another (review of #172). Never over a key the CLI minted (#142): that
-        is refused before anything is written too.
+        ``key set``'s deployment: the one typed, else the one the project's
+        launches resolve — its destination (#142), else an exported
+        ``$AISQUARE_EXPLAINABILITY_TARGET``, else the machine's. When that is not
+        the deployment the other typed settings go to, the save is refused before
+        anything is written: one press wrote a gateway to one deployment and bound
+        the key to another (review of #172). Never over a key the CLI minted
+        (#142): that is refused before anything is written too.
+
+        Only the form's own checks run here, on the UI thread. The rest reads
+        the config, asks git which project the key is for, opens the store and
+        writes files, so it runs in a worker (:func:`save_setup`), as *Register
+        roster* does, and Save is disabled until it answers, and so are Enable
+        and Disable: the worker saves the whole config it read, so a switch
+        pressed meanwhile was saved over and its toast was wrong (review of
+        #170's follow-ups, round 1, F1). The key stays in the masked field
+        until then. It is cleared once a write has begun, whatever happened
+        after, and kept when the save was refused before anything was written.
         """
         target = self.query_one("#explainability-target", Input).value.strip()
         switch = self.query_one("#explainability-switch", Checkbox).value
@@ -514,13 +848,9 @@ class ExplainabilityView(VerticalScroll):
         proxy = self.query_one("#explainability-proxy", Input).value.strip()
         prefix = self.query_one("#explainability-prefix", Input).value.strip()
         key_env = self.query_one("#explainability-key-env", Input).value.strip()
-        key_field = self.query_one("#explainability-key", Input)
-        key = key_field.value.strip()
-        # The project is looked up here, on the press, as every git lookup this tab
-        # makes is kept off the page's build. A view with no page has the box
-        # disabled, and so no project to own a key.
+        key = self.query_one("#explainability-key", Input).value.strip()
+        # A view with no page has the box disabled, and so no project to own a key.
         own = self.query_one("#explainability-key-project", Checkbox).value
-        owner = key_project(self.project) if key and own else None
         typed = any((gateway, proxy, prefix, key_env, key))
         if not typed and not (target and switch):
             message = (
@@ -530,6 +860,19 @@ class ExplainabilityView(VerticalScroll):
                 else "nothing to save — every field is blank"
             )
             self.notify(message, severity="warning", timeout=8, markup=False)
+            return
+
+        # The box makes the key typed beside it the project's own; with no key it
+        # was silently ignored and the other settings saved as the machine's
+        # (review of #170's Setup-form merge, G4). Refused, the fields kept.
+        if own and not key:
+            self.notify(
+                f"'{own_key_label()}' attaches the workspace key typed beside it, and that "
+                "field is blank — type the key, or untick the box to save the other settings",
+                severity="warning",
+                timeout=8,
+                markup=False,
+            )
             return
 
         # The writer's own question about the key variable, asked FIRST — it is
@@ -549,8 +892,9 @@ class ExplainabilityView(VerticalScroll):
         # became `nishil`) while the CLI's `--identity` refused the same input
         # through `identity_problem`. Two doors, two answers again (review of
         # #132). The writer's own check still runs on the composed template
-        # below, so this is guidance for the one shape it cannot word: a name
-        # with the template's braces in it.
+        # below, so this is guidance for a shape it cannot word for this field:
+        # a name with the template's braces in it (`save_setup` words the
+        # other, a name no header carries).
         if prefix and ("{" in prefix or "}" in prefix):
             self.notify(
                 f"prefix {prefix!r} is a name, not a template — the agent's role is added "
@@ -561,150 +905,59 @@ class ExplainabilityView(VerticalScroll):
             )
             return
 
-        config = self._read_config()
-        if config is None:
-            return
-        settings = config.explainability
-        name = target or settings.target
-        # The key FILE answers for ONE variable, the default: it holds a single
-        # unlabelled key, and a staging key must never satisfy a prod target
-        # (`resolve_target`; tests/test_key_never_crosses_deployments.py). So a
-        # key typed for a target that names its own variable would be written
-        # where nothing reads it -- `✓ setup saved` over `$MY_VAR is NOT set`.
-        # Judged against the variable the target will HAVE after this save (the
-        # typed one, else the stored one), not against the field alone: a
-        # target configured with `--key-env MY_VAR` last month fails the same way.
-        # A project's own key is the resolver's FIRST rung, read whatever variable
-        # the target names, so the rule is the file's alone.
-        reads_from = key_env or settings.targets.get(name, ExplainabilityTarget()).api_key_env
-        if key and owner is None and reads_from != KEY_ENV_VAR:
+        self._set_config_writers(disabled=True)
+        form = SetupForm(
+            target=target,
+            switch=switch,
+            gateway=gateway,
+            proxy=proxy,
+            prefix=prefix,
+            key_env=key_env,
+            key=key,
+            own=own,
+        )
+        self.run_worker(
+            partial(save_setup, form, self.project), name=SAVE_WORKER, group=SAVE_WORKER,
+            exclusive=True, thread=True, exit_on_error=False,
+        )  # fmt: skip
+
+    def _saved(self, event: Worker.StateChanged) -> None:
+        """What :func:`save_setup` returned, said; the key field cleared once a write began."""
+        if event.state is WorkerState.SUCCESS and isinstance(event.worker.result, SetupOutcome):
+            outcome = event.worker.result
+            if outcome.began:
+                self._clear_key()
+            for notice in outcome.notices:
+                self.notify(
+                    notice.message, severity=notice.severity, timeout=notice.timeout, markup=False
+                )
+            if outcome.began:
+                self.refresh_status()
+        elif event.state is WorkerState.ERROR:
+            # How far it got is unknown, so the key does not stay in the widget.
+            self._clear_key()
             self.notify(
-                f"target '{name}' reads its key from ${reads_from}, and the key file is read "
-                f"only for ${KEY_ENV_VAR} — a key typed here would never be used. Export "
-                f"${reads_from} in the shell instead, or leave 'key variable' blank to use "
-                "the file",
-                severity="warning",
-                timeout=10,
-                markup=False,
+                f"save failed: {event.worker.error}", severity="error", timeout=10, markup=False
             )
-            return
-        # Offered, not imposed -- and only where nothing was CHOSEN. `chosen_proxy`
-        # is the resolver's own fold minus the shipped default: the target's
-        # proxy, else a deliberate top-level one. Testing the per-target value
-        # alone let a top-level `[explainability] proxy_url` be shadowed by a
-        # suggestion; testing the blank FIELD, before that, replaced a stored
-        # one. `hosted_proxy_for` is silent for a loopback gateway, whose own
-        # port is the shipped 9090 default and not 9443.
-        if gateway and not proxy and ops.chosen_proxy(settings, target or None) is None:
-            suggested = explainability_service.hosted_proxy_for(gateway)
-            if suggested is not None:
-                proxy = suggested
-        identity = f"{prefix}-{{role}}" if prefix else None
-        try:
-            name = explainability_service.configure_target(
-                config,
-                target_name=target or None,
-                gateway_url=gateway or None,
-                key_env=key_env or None,
-                proxy_url=proxy or None,
-                identity=identity,
-                enable=False,
-                make_active=switch,
-            )
-        except ValueError as exc:  # the writer refused a URL or template; nothing changed
-            self.notify(str(exc), severity="warning", timeout=8, markup=False)
-            return
-        # The project key's deployment: the one typed, else the one a launch
-        # resolves — `key set`'s default. A typed name that no target answers to
-        # after this save is refused as `key set --target` refuses it: a binding
-        # to a deployment nothing resolves traces nothing (review of #170).
-        key_target = name
-        if owner is not None:
-            # With the project, as `key set` resolves it: its destination (#142)
-            # names the deployment its traces go to when the field does not.
-            key_target = ops.resolve_target(settings, target or None, project_id=owner.id).name
-            known = sorted({settings.target, *settings.targets})
-            if target and key_target not in known:
-                self.notify(
-                    f"no target '{key_target}' on this machine (known: {', '.join(known)}) — "
-                    "give it a gateway URL here first, then attach the key",
-                    severity="warning",
-                    timeout=10,
-                    markup=False,
-                )
-                return
-            # The field blank, the settings go to the machine's target and the
-            # key to the project's: two deployments from one press, and the
-            # project's launches never read the gateway just typed (review of
-            # #172). Refused before a write began, so the fields keep it all.
-            if key_target != name and any((gateway, proxy, prefix, key_env)):
-                self.notify(
-                    f"this project's key belongs to target '{key_target}', where its traces "
-                    f"go, and the other settings would be saved for '{name}' — type a "
-                    "deployment to save both to it, or save the key on its own",
-                    severity="warning",
-                    timeout=10,
-                    markup=False,
-                )
-                return
-            # A key the CLI minted (#142) is the CLI's to replace, and refused
-            # here, before a write began, the field keeps what was typed. A store
-            # that cannot say is a refusal too: this runs on the UI thread, where
-            # a raise ends the app, and guessing "not minted" could overwrite one.
-            try:
-                refused = minted_key_refusal(owner)
-            except Exception as exc:
-                refused = Notice(f"the store could not be read — nothing changed: {exc}", "error")
-            if refused is not None:
-                self.notify(refused.message, severity=refused.severity, timeout=10, markup=False)
-                return
-        # Cleared the moment a write begins, whatever happens after: a masked
-        # Input still holds its value, and a failed key write used to return
-        # before this line and leave the plaintext live in the widget for the
-        # rest of the session -- against this view's own "never shown back".
-        key_field.value = ""
-        if not self._write_config(config):
-            return
-        # The key AFTER the config: a written key with no target to use it is
-        # inert, while a target whose key failed to land is a red check that
-        # names its own fix. The cheaper failure is the one left behind.
-        if owner is not None:
-            try:
-                attached = attach_project_key(key, owner, key_target)
-            except Exception as exc:  # the store or the filesystem said no: a notice
-                self.notify(
-                    f"settings saved, but the key could not be attached: {exc} — type it again",
-                    severity="error",
-                    timeout=8,
-                    markup=False,
-                )
-                self.refresh_status()
-                return
-            self.notify(attached.message, severity=attached.severity, timeout=8, markup=False)
-        elif key:
-            try:
-                explainability_service.store_api_key(key)
-            except OSError as exc:
-                self.notify(
-                    f"settings saved, but the key could not be written: {exc} — type it again",
-                    severity="error",
-                    timeout=8,
-                    markup=False,
-                )
-                self.refresh_status()
-                return
-        active = settings.target
-        if not typed:
-            done = f"✓ this machine now uses target '{name}' — press Enable tracing to trace to it"
-        elif name != active:
-            done = (
-                f"✓ setup saved for target '{name}' — this machine stays on '{active}'; tick "
-                "'make active' and save again to switch"
-            )
-        else:
-            done = f"✓ setup saved for target '{name}' — press Enable tracing, then Register roster"
-        self.notify(done, timeout=8, markup=False)
-        self.refresh_status()
+            self.refresh_status()
+        if event.state in (WorkerState.SUCCESS, WorkerState.ERROR, WorkerState.CANCELLED):
+            self._set_config_writers(disabled=False)
+
+    def _clear_key(self) -> None:
+        """Empty the key field once a write began, and untick the box that makes it the project's.
+
+        The box attaches the key typed beside it, and ticked with no key the form
+        refuses the press (G4). Left ticked, the next press was refused, and it was
+        the one the notices ask for: "tick 'make active' and save again" (review of
+        #170's follow-ups, round 1, F2).
+        """
+        self.query_one("#explainability-key", Input).value = ""
+        self.query_one("#explainability-key-project", Checkbox).value = False
+
+    def _set_config_writers(self, *, disabled: bool) -> None:
+        """Save, Enable and Disable, the buttons that write config.toml: off while a save runs."""
+        for name in ("save", "enable", "disable"):
+            self.query_one(f"#explainability-{name}", Button).disabled = disabled
 
     @on(Button.Pressed, "#explainability-enable")
     def _turn_tracing_on(self) -> None:
@@ -775,6 +1028,9 @@ class ExplainabilityView(VerticalScroll):
 
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
         name = event.worker.name
+        if name == SAVE_WORKER:
+            self._saved(event)
+            return
         if name == STATUS_WORKER:
             if event.state is WorkerState.SUCCESS and isinstance(event.worker.result, StatusReport):
                 self._show_status(event.worker.result)

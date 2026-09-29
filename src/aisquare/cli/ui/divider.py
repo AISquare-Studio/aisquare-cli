@@ -202,6 +202,20 @@ class Divider(Widget):
         if event.button != 1:
             return
         event.stop()
+        if self._dragging:
+            # Button 1 pressed while a press of it still holds the drag: that
+            # release was lost, on a terminal that reports no motion without a
+            # button, so no buttonless move ended the drag (``on_mouse_move``
+            # does where one is reported; ``DragHandle.on_mouse_down`` is the
+            # sidebar's side of the same case). This press reached the divider
+            # only because it still held the mouse. The old drag settles where
+            # it got to, the mouse is let go, and this press starts nothing:
+            # its release is a click on whatever is under the pointer.
+            # Re-armed here, the divider kept the mouse and the release set the
+            # width: a click on a title opened nothing and saved the floor as
+            # the navigator's width (final review of #203, F3).
+            self._end_drag()
+            return
         self._dragging = True
         self._moved = False
         self.add_class("-dragging")

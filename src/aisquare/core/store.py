@@ -33,17 +33,19 @@ from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import EllipsisType
-from typing import Any, Protocol
+from typing import Any, NamedTuple, Protocol
 
 from aisquare.core import paths
 from aisquare.core.ids import new_prompt_id
 from aisquare.models import (
     CLAIM_KEEPING_STATUSES,
     CLOSED_STATUSES,
+    UNKNOWN_KEY_UID,
     ClaudeAccountRecord,
     ContextEntry,
     FleetAgent,
     LaunchSpec,
+    PendingRevocation,
     Pool,
     ProjectExplainability,
     ProjectGroup,
@@ -439,7 +441,7 @@ def _free_name(connection: sqlite3.Connection, base: str) -> str:
 
 def _add_column_if_absent(
     connection: sqlite3.Connection, table: str, column: str, declaration: str
-) -> None:
+) -> bool:
     """``ALTER TABLE … ADD COLUMN`` only when the column is not already there.
 
     SQLite has no ``ADD COLUMN IF NOT EXISTS``, and a second ALTER raises
@@ -447,14 +449,18 @@ def _add_column_if_absent(
     store unopenable. A missing *table* is not this function's business either:
     a cohort that has no ``metric`` yet gets the column from the CREATE in
     _SCHEMA_V12, so there is nothing to add.
+
+    True when it added the column. A backfill that belongs to the column
+    (:data:`_BACKFILLS`) runs then, and only then.
     """
     query = "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?"
     if connection.execute(query, (table,)).fetchone() is None:
-        return
+        return False
     columns = {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
     if column in columns:
-        return
+        return False
     connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
+    return True
 
 
 def _converge_v11_fork(connection: sqlite3.Connection) -> None:
@@ -474,100 +480,21 @@ def _converge_v11_fork(connection: sqlite3.Connection) -> None:
     )
 
 
-def _converge_v15_fork(connection: sqlite3.Connection) -> None:
-    """Before v16's statements: bring every ``user_version 15`` to ONE shape.
-
-    Two branches each claimed v15 while the other was open, the third fork of
-    this ladder after v11 and v13/v14. This branch's v15 is the account registry
-    (``claude_account``, ``project_setting``, ``fleet_agent.account_slot``); the
-    hackathon branch's v15 (#201) is ``team_session.persona`` and
-    ``fleet_agent.persona``. A store that took the persona v15 is stamped 15 with
-    no account table, and a renumber can never reach it: v15 is already stamped,
-    so this ladder would run v16 onward over it and stamp 21 with
-    ``claude_account`` missing and ``fleet_agent.account_slot`` missing, every
-    fleet read raising ``no such column`` while ``doctor`` still reads ok
-    (measured on a copy of a hackathon-build store, 2026-09-24). Numbering the
-    persona step above 21 instead fails the other way: ``duplicate column name``
-    on the stores that already carry it.
-
-    So both v15s are made idempotent and applied here: the account DDL as
-    ``IF NOT EXISTS``, the three columns through :func:`_add_column_if_absent`.
-    Every statement is a no-op on a database that already has it. It runs TWICE
-    over, from two callers: as ``_PREPARE[15]`` for a store passing through 15
-    (a fresh store, main's v14), and from :func:`_converge_v15_shape` at every
-    open once a store is at 15 or ABOVE, keyed by what the catalog holds rather
-    than by the number. The second caller is the one the crew's own machine
-    needs: its board store took the persona v15 and was then run through v16 by
-    a build without this step, so it reads 16 with no ``claude_account``, and a
-    step keyed only on passing through 15 can never reach it (nor a persona
-    store already run to 21 the same way). The persona columns therefore come
-    from HERE, and the persona branch drops its own v15 script when it lands
-    rather than renumbering it.
-
-    Statements run one at a time on the migration's own connection, never through
-    ``executescript``, for the reason :func:`_migrate` gives.
-    """
-    for statement in _statements(_SCHEMA_V15_IF_ABSENT):
-        connection.execute(statement)
-    _add_column_if_absent(connection, "fleet_agent", "account_slot", "INTEGER")
-    _add_column_if_absent(connection, "team_session", "persona", "TEXT")
-    _add_column_if_absent(connection, "fleet_agent", "persona", "TEXT")
-
-
-def _v15_shape_is_missing(connection: sqlite3.Connection) -> bool:
-    """Whether anything :func:`_converge_v15_fork` creates is absent: catalog reads only."""
-    tables = {
-        row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
-    }
-    if not {"claude_account", "project_setting"} <= tables:
-        return True
-    fleet = {row[1] for row in connection.execute("PRAGMA table_info(fleet_agent)")}
-    session = {row[1] for row in connection.execute("PRAGMA table_info(team_session)")}
-    return not ({"account_slot", "persona"} <= fleet and "persona" in session)
-
-
-def _converge_v15_shape(connection: sqlite3.Connection) -> None:
-    """At every open, once a store is at 15 or above: converge by SHAPE, not number.
-
-    ``_PREPARE[15]`` reaches a store only when the ladder passes through 15. A
-    store the fork has already carried past that point, stamped 16 to 21 with
-    the persona shape and none of the registry (the crew's own board store is
-    one, at 16), is never touched by any migration again, so the same idempotent
-    step is applied here whenever the catalog says something is missing. Reads
-    first, and the write transaction only when something is missing, so the
-    hooks' first-open race stays exactly as :func:`_migrate` describes it; the
-    shape is re-read under the lock, since another opener may have converged the
-    store between the read and the ``BEGIN IMMEDIATE``.
-    """
-    if int(connection.execute("PRAGMA user_version").fetchone()[0]) < 15:
-        return  # the ladder itself brings it to 15, and _PREPARE[15] does the rest
-    if not _v15_shape_is_missing(connection):
-        return
-    try:
-        connection.execute("BEGIN IMMEDIATE")
-        if _v15_shape_is_missing(connection):
-            _converge_v15_fork(connection)
-        connection.execute("COMMIT")
-    except sqlite3.Error:
-        with contextlib.suppress(sqlite3.Error):
-            connection.execute("ROLLBACK")
-        raise
-
-
 # Python that must run before a migration's statements, inside its transaction,
 # keyed by the version being upgraded FROM. Kept apart from _MIGRATIONS so the
 # scripts stay plain SQL that executescript and _statements build identically.
 _PREPARE: dict[int, Callable[[sqlite3.Connection], None]] = {
     11: _retire_v1_metric_table,
     12: _converge_v11_fork,
-    15: _converge_v15_fork,
 }
 
 
 def _adopt_onboarded_projects(connection: sqlite3.Connection) -> None:
     """v16 → v17's backfill (#139): rows already used on purpose become onboarded.
 
-    Runs AFTER the column exists (a :data:`_FINISH` step, same transaction).
+    Runs right after ``project.onboarded_at`` is added, in the same transaction,
+    and only then (:data:`_BACKFILLS`): by v17, or by the presence pass for a
+    store another line stamped past 17 without ever running it.
     "On purpose" is read off what the row already carries: context entries, a
     codename (it entered the fleet), linked repos, board activity, a fleet
     agent — and a codebase snapshot on disk, which ``project onboard`` and
@@ -593,12 +520,10 @@ def _adopt_onboarded_projects(connection: sqlite3.Connection) -> None:
         "  OR id IN (SELECT project_id FROM fleet_agent)"
         ")"
     )
-    from aisquare.core import snapshot as snapshot_core  # lazy: keeps store import-light
-
     rows = connection.execute(
         "SELECT id FROM project WHERE onboarded_at IS NULL AND forgotten_at IS NULL"
     ).fetchall()
-    with_snapshot = [row[0] for row in rows if snapshot_core.exists(str(row[0]))]
+    with_snapshot = [row[0] for row in rows if _snapshot_on_disk(str(row[0]))]
     for project_id in with_snapshot:
         connection.execute(
             "UPDATE project SET onboarded_at = created_at WHERE id = ? AND onboarded_at IS NULL",
@@ -606,10 +531,59 @@ def _adopt_onboarded_projects(connection: sqlite3.Connection) -> None:
         )
 
 
-#: Steps run AFTER a migration's statements, in its transaction — the mirror of
-#: :data:`_PREPARE` for work that needs the columns the migration just added.
-_FINISH: dict[int, Callable[[sqlite3.Connection], None]] = {
-    16: _adopt_onboarded_projects,
+def _snapshot_on_disk(project_id: str) -> bool:
+    """Whether the project's snapshot is on disk; one that cannot be looked at is no evidence.
+
+    ``Path.exists`` answers ``False`` for a path that is not there and RAISES for a
+    snapshot directory this user cannot search (``PermissionError``). Raised out of
+    the backfill, it escaped the migration's ``sqlite3.Error`` handler with the
+    transaction still open, so every command failed on the open with a raw
+    traceback until the directory was readable again (review of #203). The row
+    stays captured, as one without a snapshot does, and a later ``project
+    onboard`` adds it.
+    """
+    from aisquare.core import snapshot as snapshot_core  # lazy: keeps store import-light
+
+    try:
+        return snapshot_core.exists(project_id)
+    except OSError:
+        return False
+
+
+def _bind_keys_to_their_destinations(connection: sqlite3.Connection) -> None:
+    """v23 → v24's backfill (#142): a key bound to its destination's deployment says so.
+
+    Runs right after ``project_explainability.api_url`` is added, in the same
+    transaction, and only then (:data:`_BACKFILLS`). A binding whose target is
+    the deployment the project's destination names now was minted for it, or
+    attached by ``key set``, which binds to the destination's deployment by
+    default, so it gets that destination's API. Every other binding stays NULL:
+    bound to one of the machine's targets. A key the operator had bound to the
+    machine's target before choosing a destination of the same name is marked
+    too. It then answers for that destination as it did, and after ``use
+    --clear`` it no longer answers for the machine's target, whose deployment it
+    may not be: the machine key applies there instead.
+    """
+    connection.execute(
+        "UPDATE project_explainability SET api_url = ("
+        "  SELECT destination.api_url FROM project_destination AS destination"
+        "  WHERE destination.project_id = project_explainability.project_id"
+        "  AND destination.environment = project_explainability.target"
+        ") WHERE api_url IS NULL"
+    )
+
+
+#: Backfills that belong to a column, keyed ``(table, column)``. Each runs in the
+#: transaction that adds its column, right after the ALTER, and only when the
+#: column was actually added: by its step on the ladder or by
+#: :func:`_converge_by_presence`, whichever gets there. Rows that predate the
+#: column get their value from what they already carry, and a store that
+#: already has the column is not backfilled again. That makes a step met twice
+#: a no-op, and the presence pass, which runs on every open, changes no row.
+#: A step's statements have all run by then (:func:`_run_step`).
+_BACKFILLS: dict[tuple[str, str], Callable[[sqlite3.Connection], None]] = {
+    ("project", "onboarded_at"): _adopt_onboarded_projects,
+    ("project_explainability", "api_url"): _bind_keys_to_their_destinations,
 }
 
 # v14: ``project forget`` — a tombstone on the registration, in the same spirit as
@@ -630,6 +604,23 @@ _SCHEMA_V14 = """
 ALTER TABLE project ADD COLUMN forgotten_at TEXT;
 """
 
+# v15 onward: every step is IDEMPOTENT, and what it produces is also looked for
+# by name after the ladder (:data:`_PRODUCTS`, :func:`_converge_by_presence`).
+# Other lines of development claimed v15-v17 while this one was in flight, as
+# v11 was claimed twice before them: #136 stamps 15 for ``work_brief``, #201
+# stamps 15 for the persona columns, and #113 stamps 15-17 for its coding-agent
+# columns. ``_migrate`` counts positionally, so a store stamped 15 or 17 by one
+# of those lines never runs this line's steps below its stamp. It has no
+# ``claude_account``, and every accounts command fails with "no such table";
+# stamped 17, it has no ``onboarded_at`` either, and v23 fails on that column,
+# so the store stops opening. Renumbering would strand the stores that ran
+# these steps under these numbers (the accounts stack's own), so the numbers
+# stay and the ladder converges instead: each CREATE is ``IF NOT EXISTS``, each
+# column is added by :func:`_add_column_if_absent` (a script cannot add a column
+# conditionally, so the columns are listed in :data:`_PRODUCTS`, not written as
+# ALTERs here), and a step whose products a store lacks is applied again,
+# whatever ``user_version`` says.
+#
 # v15: the Claude account REGISTRY and per-project settings (#145).
 #
 # ``claude_account`` is the operator's arrangement of the account slots — an
@@ -646,20 +637,28 @@ ALTER TABLE project ADD COLUMN forgotten_at TEXT;
 # (a partial unique index on ``alias``). ``ALTER TABLE`` cannot add a UNIQUE
 # constraint in SQLite, and a CHECK cannot span rows, so both are indexes.
 #
-# ``project_setting`` is a small key/value table per project — the "per-project
-# settings table" #141 and #142 also need (an explainability key reference, a
-# workspace/studio selection). Introduced here for one key, ``claude_account``
-# (the project's default account), and shaped for the rest so the next feature
-# adds a key rather than a table.
+# ``project_setting`` is a small key/value table per project, introduced here for
+# one key, ``claude_account`` (the project's default account). #141 and #142 were
+# planned as keys here and each has a table of its own instead: v19's
+# ``project_explainability`` and v21's ``project_destination``. A key binding and
+# a destination need typed columns and exactly one row per project, which a
+# key/value row cannot hold for them. This table is for plain per-project values.
 #
-# ``fleet_agent.account_slot`` records which account a fleet window was launched
-# under, as resolved at spawn: the flag, the role binding, the project default or
-# the machine default. ``team_session.account`` (v8) carries the config DIRECTORY
-# once the session's first hook reports a transcript path; this is the slot, known
-# before the agent has said a word, which is what a restart (#144) or a hand-over
-# (#146) needs.
+# ``fleet_agent.account_slot`` (in :data:`_PRODUCTS`) records which account a
+# fleet window was launched under, as resolved at spawn: the flag, the role
+# binding, the project default or the machine default. ``team_session.account``
+# (v8) carries the config DIRECTORY once the session's first hook reports a
+# transcript path; this is the slot, known before the agent has said a word,
+# which is what a restart (#144) or a hand-over (#146) needs.
+#
+# ``team_session.persona`` and ``fleet_agent.persona`` (#201, in :data:`_PRODUCTS`
+# beside it) name the persona a session or a fleet agent runs as, NULL for none.
+# #201 stamped 15 for them alone; this line takes them as v15's products rather
+# than a number of their own, so a store #201 stamped holds them already, the
+# presence pass gives them to a store that never met #201 (main's 0.7.0 among
+# them), and a later step of main's cannot collide with one of this line's.
 _SCHEMA_V15 = """
-CREATE TABLE claude_account (
+CREATE TABLE IF NOT EXISTS claude_account (
     slot        INTEGER PRIMARY KEY,
     config_dir  TEXT NOT NULL,
     alias       TEXT,
@@ -668,28 +667,19 @@ CREATE TABLE claude_account (
     disabled    INTEGER NOT NULL DEFAULT 0 CHECK (disabled IN (0, 1)),
     created_at  TEXT NOT NULL
 );
-CREATE UNIQUE INDEX claude_account_alias ON claude_account (alias) WHERE alias IS NOT NULL;
-CREATE UNIQUE INDEX claude_account_default ON claude_account (is_default) WHERE is_default = 1;
+CREATE UNIQUE INDEX IF NOT EXISTS claude_account_alias ON claude_account (alias)
+    WHERE alias IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS claude_account_default ON claude_account (is_default)
+    WHERE is_default = 1;
 
-CREATE TABLE project_setting (
+CREATE TABLE IF NOT EXISTS project_setting (
     project_id  TEXT NOT NULL REFERENCES project (id),
     key         TEXT NOT NULL,
     value       TEXT NOT NULL,
     set_at      TEXT NOT NULL,
     PRIMARY KEY (project_id, key)
 );
-ALTER TABLE fleet_agent ADD COLUMN account_slot INTEGER;
 """
-
-# The same DDL as ``IF NOT EXISTS``, for :func:`_converge_v15_fork`: derived rather
-# than copied so a table added to v15 is converged too, and pinned by a test. The
-# one ALTER is left out because SQLite has no conditional form of it; the column
-# goes through :func:`_add_column_if_absent` instead.
-_SCHEMA_V15_IF_ABSENT = (
-    _SCHEMA_V15.replace("CREATE TABLE ", "CREATE TABLE IF NOT EXISTS ")
-    .replace("CREATE UNIQUE INDEX ", "CREATE UNIQUE INDEX IF NOT EXISTS ")
-    .replace("ALTER TABLE fleet_agent ADD COLUMN account_slot INTEGER;\n", "")
-)
 
 # v16: usage-aware accounts (#146).
 #
@@ -700,12 +690,12 @@ _SCHEMA_V15_IF_ABSENT = (
 # older than a week are pruned on write. Derived convenience, never the record:
 # a missing table costs a trend line, nothing else.
 #
-# ``team_session.limit_resets_at`` carries the reset time a usage-limit error
-# named, for the ``limited`` state the StopFailure hook writes; it is read only
-# while ``state = 'limited'`` and a prompt that lifts the session back to
-# ``working`` leaves the stale time behind unread.
+# ``team_session.limit_resets_at`` (in :data:`_PRODUCTS`) carries the reset time
+# a usage-limit error named, for the ``limited`` state the StopFailure hook
+# writes; it is read only while ``state = 'limited'`` and a prompt that lifts
+# the session back to ``working`` leaves the stale time behind unread.
 _SCHEMA_V16 = """
-CREATE TABLE claude_usage (
+CREATE TABLE IF NOT EXISTS claude_usage (
     slot               INTEGER NOT NULL,
     fetched_at         TEXT NOT NULL,
     session_percent    REAL,
@@ -713,24 +703,23 @@ CREATE TABLE claude_usage (
     week_percent       REAL,
     week_resets_at     TEXT
 );
-CREATE INDEX claude_usage_slot_time ON claude_usage (slot, fetched_at);
-ALTER TABLE team_session ADD COLUMN limit_resets_at TEXT;
+CREATE INDEX IF NOT EXISTS claude_usage_slot_time ON claude_usage (slot, fetched_at);
 """
 
 # v17: captured is not shown (#139). Hooks register every directory a session
 # runs in — that must stay, prompt history and injection depend on it — but only
 # a project added ON PURPOSE (init, project onboard/link, the sidebar's +, team
-# on, a fleet spawn) carries ``onboarded_at``, and only those are listed. A
-# plain ALTER; the backfill is :func:`_adopt_onboarded_projects` (_FINISH).
-_SCHEMA_V17 = """
-ALTER TABLE project ADD COLUMN onboarded_at TEXT;
-"""
+# on, a fleet spawn) carries ``onboarded_at``, and only those are listed. The
+# column is the whole step, so the script is empty: the column is in
+# :data:`_PRODUCTS`, its backfill (:func:`_adopt_onboarded_projects`) in
+# :data:`_BACKFILLS`.
+_SCHEMA_V17 = ""
 # v18 (#144): the launch spec a restart replays, and a home for UI state that
 # used to live in scattered files — one key/value table, read at mount and
-# written on change, so what was open comes back after a restart.
+# written on change, so what was open comes back after a restart. The column,
+# ``fleet_agent.launch_spec``, is in :data:`_PRODUCTS`.
 _SCHEMA_V18 = """
-ALTER TABLE fleet_agent ADD COLUMN launch_spec TEXT;
-CREATE TABLE ui_state (
+CREATE TABLE IF NOT EXISTS ui_state (
     key        TEXT PRIMARY KEY,
     value      TEXT NOT NULL,
     updated_at TEXT NOT NULL
@@ -739,7 +728,7 @@ CREATE TABLE ui_state (
 # v19 (#141): a project's own explainability key — its deployment and where the
 # mode-600 file is. Never the value: this database is mode 644.
 _SCHEMA_V19 = """
-CREATE TABLE project_explainability (
+CREATE TABLE IF NOT EXISTS project_explainability (
     project_id TEXT PRIMARY KEY REFERENCES project (id),
     target     TEXT NOT NULL,
     key_path   TEXT NOT NULL,
@@ -749,9 +738,11 @@ CREATE TABLE project_explainability (
 """
 # v20 (#140): project groups, pinning and manual order — a management layer over
 # projects. One group per project (like a browser tab), positions per scope,
-# pins on projects and groups. Nothing else references a group.
+# pins on projects and groups. Nothing else references a group. The project's
+# three columns, ``group_id``, ``position`` and ``pinned_at``, are in
+# :data:`_PRODUCTS`, added once this table exists.
 _SCHEMA_V20 = """
-CREATE TABLE project_group (
+CREATE TABLE IF NOT EXISTS project_group (
     id         TEXT PRIMARY KEY,
     name       TEXT NOT NULL UNIQUE,
     position   INTEGER NOT NULL DEFAULT 0,
@@ -759,9 +750,6 @@ CREATE TABLE project_group (
     collapsed  INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL
 );
-ALTER TABLE project ADD COLUMN group_id TEXT REFERENCES project_group (id);
-ALTER TABLE project ADD COLUMN position INTEGER;
-ALTER TABLE project ADD COLUMN pinned_at TEXT;
 """
 # v21 (#142): where a project's traces land — a workspace and a studio picked by a
 # signed-in user, from the API environment the session belongs to. Its own table
@@ -771,7 +759,7 @@ ALTER TABLE project ADD COLUMN pinned_at TEXT;
 # path every reader of the binding would then have to reason about. Two rows
 # per project at most, each with one job; the resolver joins them by target.
 _SCHEMA_V21 = """
-CREATE TABLE project_destination (
+CREATE TABLE IF NOT EXISTS project_destination (
     project_id     TEXT PRIMARY KEY REFERENCES project (id),
     api_url        TEXT NOT NULL,
     environment    TEXT NOT NULL,
@@ -786,6 +774,55 @@ CREATE TABLE project_destination (
     set_by         TEXT
 );
 """
+# v22 (#142, review of the accounts stack's fold): the revocations still owed for
+# keys the CLI minted. A minted key's uid lived on its destination row alone, and
+# every path that took it off — a move, `use --clear`, `key set`, `key clear`, a
+# new mint, a purge, `logout` — dropped it whether or not the server had revoked
+# the key, so a revoke that could not be made (signed out, another host, offline)
+# left a live `ingest:write` key nothing here remembered. A row is written in the
+# transaction that detaches the key and deleted on the server's confirmation.
+# No foreign key to `project`: the record must outlive a purge of its project,
+# which is one of the ways a key gets here. IF NOT EXISTS, so a store that meets
+# this step twice (a cohort renumbered onto it) converges instead of failing.
+_SCHEMA_V22 = """
+CREATE TABLE IF NOT EXISTS pending_revocation (
+    key_uid        TEXT PRIMARY KEY,
+    api_url        TEXT NOT NULL,
+    workspace_id   INTEGER NOT NULL,
+    workspace_name TEXT NOT NULL,
+    project_id     TEXT NOT NULL,
+    project_name   TEXT NOT NULL,
+    detached_at    TEXT NOT NULL,
+    last_error     TEXT
+);
+"""
+# v23 (#139 and #140, review of #168 at the fold): the one-time repair of the
+# tombstones two early cuts left holding what a revival must not bring back. The
+# first cut of the v17 backfill (c716094) had no ``forgotten_at`` guard and
+# stamped forgotten rows with history as onboarded, and a forget written before
+# #171's first round kept the group, the position and the pin. Each was answered
+# per write instead: a CASE in the capture every prompt runs, and in the
+# onboarding, for a state only stores that met those cuts hold. Cleared here
+# once, as ``forget_project`` clears them now, a tombstone carries none of the
+# four, and nothing writes them onto one (``update_project_layout`` refuses a
+# forgotten row), so a revival keeps a live row's values and has no tombstone
+# left to reason about. A plain UPDATE: a store that meets it twice converges.
+_SCHEMA_V23 = """
+UPDATE project SET onboarded_at = NULL, group_id = NULL, position = NULL, pinned_at = NULL
+WHERE forgotten_at IS NOT NULL;
+"""
+# v24 (#142, review of #203): which deployment a project's key was attached FOR.
+# ``project_explainability.api_url`` is the API of the project's destination when
+# the key was minted or attached for that destination's deployment, and NULL for
+# a key bound to one of the machine's targets. The binding named its deployment
+# by target name alone, and one name can mean two deployments: the destination's
+# ``stg`` is staging, while on the machine ``init --explainability`` writes the
+# machine's ``stg`` is the top-level prod gateway. A staging key attached while
+# the project pointed at staging answered, after ``use --clear``, as the
+# machine's ``stg`` and went to prod. The column is the whole step, so the script
+# is empty: the column is in :data:`_PRODUCTS`, its backfill
+# (:func:`_bind_keys_to_their_destinations`) in :data:`_BACKFILLS`.
+_SCHEMA_V24 = ""
 # Ordered migrations; index i upgrades the db from user_version i to i+1.
 _MIGRATIONS = (
     _SCHEMA_V1,
@@ -809,19 +846,64 @@ _MIGRATIONS = (
     _SCHEMA_V19,
     _SCHEMA_V20,
     _SCHEMA_V21,
+    _SCHEMA_V22,
+    _SCHEMA_V23,
+    _SCHEMA_V24,
 )
 SCHEMA_VERSION = len(_MIGRATIONS)
+
+
+class _Products(NamedTuple):
+    """What one step of the ladder leaves in the store, looked for by name."""
+
+    objects: tuple[str, ...] = ()
+    """The tables and indexes its script creates, each ``IF NOT EXISTS``."""
+    columns: tuple[tuple[str, str, str], ...] = ()
+    """``(table, column, declaration)``, added after the script by
+    :func:`_add_column_if_absent`, since a script cannot add a column
+    conditionally."""
+
+
+#: What each step from v15 on produces, keyed like :data:`_PREPARE` by the version
+#: upgraded FROM (14 is v15). The ladder adds the columns (:func:`_run_step`), and
+#: :func:`_converge_by_presence` looks for everything here whatever
+#: ``user_version`` says (the note above _SCHEMA_V15 says why). v23 is a repair
+#: and produces nothing. A later step that creates or adds anything needs an
+#: entry, and a test compares every entry with what its step builds.
+_PRODUCTS: dict[int, _Products] = {
+    14: _Products(
+        ("claude_account", "claude_account_alias", "claude_account_default", "project_setting"),
+        (
+            ("fleet_agent", "account_slot", "INTEGER"),
+            ("team_session", "persona", "TEXT"),
+            ("fleet_agent", "persona", "TEXT"),
+        ),
+    ),
+    15: _Products(
+        ("claude_usage", "claude_usage_slot_time"),
+        (("team_session", "limit_resets_at", "TEXT"),),
+    ),
+    16: _Products(columns=(("project", "onboarded_at", "TEXT"),)),
+    17: _Products(("ui_state",), (("fleet_agent", "launch_spec", "TEXT"),)),
+    18: _Products(("project_explainability",)),
+    19: _Products(
+        ("project_group",),
+        (
+            ("project", "group_id", "TEXT REFERENCES project_group (id)"),
+            ("project", "position", "INTEGER"),
+            ("project", "pinned_at", "TEXT"),
+        ),
+    ),
+    20: _Products(("project_destination",)),
+    21: _Products(("pending_revocation",)),
+    23: _Products(columns=(("project_explainability", "api_url", "TEXT"),)),
+}
 
 _PROJECT_COLUMNS = "id, root, linked_repos, codename, onboarded_at, group_id, position, pinned_at"
 _GROUP_COLUMNS = "id, name, position, pinned_at, collapsed, created_at"
 _DESTINATION_COLUMNS = (
     "project_id, api_url, environment, workspace_id, workspace_uid, workspace_name, "
     "studio_id, studio_uid, studio_name, key_uid, set_at, set_by"
-)
-_LAYOUT_KEPT_BY_A_LIVE_ROW = (
-    "group_id = CASE WHEN project.forgotten_at IS NULL THEN project.group_id END, "
-    "position = CASE WHEN project.forgotten_at IS NULL THEN project.position END, "
-    "pinned_at = CASE WHEN project.forgotten_at IS NULL THEN project.pinned_at END"
 )
 """A revival's SET for the arrangement (#140): a live row keeps its place, a tombstone
 comes back loose and unpinned (:meth:`SqliteStore.ensure_project` says why)."""
@@ -963,6 +1045,7 @@ class ContextStore(Protocol):
         self, session_id: str, *, cursor: int | None = None, state: str | None = None
     ) -> None: ...
     def replace_session_state(self, session_id: str, expected: str, state: str) -> bool: ...
+    def mark_handover(self, session_id: str, *, held_after: datetime) -> bool: ...
     def mark_attention(self, session_id: str) -> bool: ...
     def mark_limited(self, session_id: str, resets_at: datetime | None) -> None: ...
     def unmark_handover(self, session_id: str, state: str) -> None: ...
@@ -1046,6 +1129,7 @@ class ContextStore(Protocol):
         collapsed: bool | None = None,
     ) -> ProjectGroup: ...
     def delete_project_group(self, group_id: str) -> list[str]: ...
+    def layout_change(self) -> contextlib.AbstractContextManager[None]: ...
     def update_project_layout(
         self,
         project_id: str,
@@ -1057,7 +1141,14 @@ class ContextStore(Protocol):
     def project_explainability(self, project_id: str) -> ProjectExplainability | None: ...
     def project_explainability_all(self) -> list[ProjectExplainability]: ...
     def set_project_explainability(
-        self, project_id: str, *, target: str, key_path: Path, set_by: str | None
+        self,
+        project_id: str,
+        *,
+        target: str,
+        key_path: Path,
+        set_by: str | None,
+        minted: str | None = None,
+        api_url: str | None = None,
     ) -> ProjectExplainability: ...
     def clear_project_explainability(self, project_id: str) -> bool: ...
     # Where a project's traces land (v21, #142).
@@ -1065,7 +1156,12 @@ class ContextStore(Protocol):
     def project_destinations(self) -> list[TraceDestination]: ...
     def set_project_destination(self, destination: TraceDestination) -> TraceDestination: ...
     def set_project_destination_key(self, project_id: str, key_uid: str | None) -> None: ...
+    def detach_minted_key(self, project_id: str) -> tuple[bool, ProjectExplainability | None]: ...
     def clear_project_destination(self, project_id: str) -> bool: ...
+    # The revocations owed for keys the CLI minted (v22, #142).
+    def pending_revocations(self) -> list[PendingRevocation]: ...
+    def settle_revocation(self, key_uid: str) -> bool: ...
+    def note_revocation_failure(self, key_uid: str, reason: str) -> None: ...
     def fleet_agent_by_label(
         self, project_id: str, label: str, *, live_only: bool = True
     ) -> FleetAgent | None: ...
@@ -1092,6 +1188,8 @@ class ContextStore(Protocol):
     def set_project_setting(self, project_id: str, key: str, value: str) -> None: ...
     def clear_project_setting(self, project_id: str, key: str) -> bool: ...
     def project_settings(self, key: str) -> dict[str, str]: ...
+    # What the open could not converge (doctor's database row).
+    def missing_schema(self) -> list[str]: ...
     def close(self) -> None: ...
 
 
@@ -1186,6 +1284,7 @@ def _row_to_project_explainability(row: sqlite3.Row) -> ProjectExplainability:
         key_path=Path(row["key_path"]),
         set_at=datetime.fromisoformat(row["set_at"]),
         set_by=row["set_by"],
+        api_url=row["api_url"],
     )
 
 
@@ -1401,6 +1500,7 @@ class SqliteStore:
 
     def __init__(self, connection: sqlite3.Connection) -> None:
         self._conn = connection
+        self._layout_depth = 0  # open :meth:`layout_change` blocks
 
     def add(self, entry: ContextEntry) -> ContextEntry:
         self._conn.execute(
@@ -1522,23 +1622,16 @@ class SqliteStore:
         directory again. Before #139 this revival also re-listed the project,
         which is how ``project forget`` came undone on the next prompt.
 
-        The revival clears ``onboarded_at`` itself rather than trusting the
-        tombstone to carry none. ``forget`` clears it, but the first cut of the
-        v17 backfill had no ``forgotten_at`` guard and stamped forgotten rows
-        with history as onboarded, and stores already past v17 keep them. A
-        live row keeps its mark: the SET reads the row as it was before the
-        update. The same goes for its place in the arrangement (#140): a forget
-        clears the group, the position and the pin, but a tombstone written
-        before it did keeps all three, and revived as it was, the project came
-        back pinned and grouped at a number its scope had since given away
-        (review of #171, round 2).
+        Nothing else is written. A forget clears the mark and the place in the
+        arrangement (#140), so a revived row comes back captured, loose and
+        unpinned, and a live one keeps its own. The tombstones that older cuts
+        left holding either were repaired once, by v23, rather than on every
+        prompt (review of #168 at the fold).
         """
         self._conn.execute(
             "INSERT INTO project (id, root, name, linked_repos, created_at) "
             "VALUES (?, ?, ?, ?, ?) "
-            "ON CONFLICT (id) DO UPDATE SET forgotten_at = NULL, onboarded_at = "
-            "CASE WHEN project.forgotten_at IS NULL THEN project.onboarded_at END, "
-            f"{_LAYOUT_KEPT_BY_A_LIVE_ROW}",
+            "ON CONFLICT (id) DO UPDATE SET forgotten_at = NULL",
             (
                 project.id,
                 str(project.root),
@@ -1558,7 +1651,8 @@ class SqliteStore:
         ``onboarded_at`` is set once and kept; ``forgotten_at`` is cleared, so
         the row comes back with whatever history it still carries (see v14).
         A revived row comes back loose and unpinned, as :meth:`ensure_project`
-        says; a live one keeps its place.
+        says, and marked now: a tombstone holds no mark to keep (v23). A live
+        one keeps its place.
         """
         if _is_the_home(project.root):
             # The aisquare home's row is the captain's HOME BOARD (services.captain):
@@ -1573,8 +1667,7 @@ class SqliteStore:
             "INSERT INTO project (id, root, name, linked_repos, created_at, onboarded_at) "
             "VALUES (?, ?, ?, ?, ?, ?) "
             "ON CONFLICT (id) DO UPDATE SET forgotten_at = NULL, "
-            "onboarded_at = COALESCE(project.onboarded_at, excluded.onboarded_at), "
-            f"{_LAYOUT_KEPT_BY_A_LIVE_ROW}",
+            "onboarded_at = COALESCE(project.onboarded_at, excluded.onboarded_at)",
             (
                 project.id,
                 str(project.root),
@@ -1701,6 +1794,13 @@ class SqliteStore:
         :meth:`_purge_team_meta`. LIVE fleet agents are the caller's problem to
         refuse before getting here: this deletes their rows too, and a pane that
         is still running would then be unaccounted for.
+
+        A key the CLI minted for the project (#142) is detached first, in the
+        same transaction, and its revocation owed (:meth:`_owe_revocation`):
+        the destination row is how anything here found that key, and a purge
+        that deleted it took a live ``ingest:write`` key off every list this
+        machine keeps (review of #172). The caller revokes it once the store
+        session is closed.
         """
         sessions = [
             str(row["id"])
@@ -1710,6 +1810,7 @@ class SqliteStore:
         ]
         removed: dict[str, int] = {}
         with self._conn:  # one BEGIN…COMMIT: a purge is whole or it is nothing
+            self._owe_revocation(project_id)
             for table, column in self._tables_referencing_project():
                 cursor = self._conn.execute(
                     f'DELETE FROM "{table}" WHERE "{column}" = ?', (project_id,)
@@ -2044,6 +2145,30 @@ class SqliteStore:
         cursor = self._conn.execute(
             "UPDATE team_session SET state = ? WHERE id = ? AND state = ?",
             (state, session_id, expected),
+        )
+        self._conn.commit()
+        return cursor.rowcount == 1
+
+    def mark_handover(self, session_id: str, *, held_after: datetime) -> bool:
+        """Set a hand-over's mark (``'switching'``) where no other hand-over holds one.
+
+        A compare-and-set. ``fleet switch`` and ``restart`` of a running agent read
+        the session, refused one a hand-over held, and then marked it with
+        :meth:`touch_session`, which writes unconditionally. Two of them on one
+        agent (two restarts, a restart and a switch, a switch by hand and the
+        automatic one) both got past that read and both marked it, and both
+        started a replacement (review of #203). The mark is held when the state
+        is ``'switching'`` and was written after ``held_after``, which is the
+        caller's rule (``fleet._handed_over``: after the row being moved was
+        created, and within the grace). Then nothing is written and this returns
+        False. Otherwise it is the heartbeat :meth:`touch_session` is, with the
+        mark as its state, and returns True. A session row that is not there
+        returns False too, as there is nothing to mark.
+        """
+        cursor = self._conn.execute(
+            "UPDATE team_session SET state = 'switching', last_seen_at = ?, ended_at = NULL "
+            "WHERE id = ? AND NOT (state = 'switching' AND last_seen_at > ?)",
+            (_now_iso(), session_id, held_after.astimezone(UTC).isoformat()),
         )
         self._conn.commit()
         return cursor.rowcount == 1
@@ -2751,6 +2876,39 @@ class SqliteStore:
 
     # --- project groups, pins and order (#140) ------------------------------------------
 
+    @contextmanager
+    def layout_change(self) -> Iterator[None]:
+        """One change to the arrangement (a move, a group made or deleted, an undo) as ONE
+        transaction.
+
+        Each layout writer below commits on its own, and a change is several of
+        them: a move renumbers the scope it leaves and the one it joins, and a
+        group move renumbers every group. When the store refused a write part-way
+        (a FOREIGN KEY failure on a group deleted from a shell since the change
+        read it, a locked database), the rows written before it stayed committed.
+        The layout was half-applied, and no undo entry was recorded for it,
+        because the change raised (review of #203). Inside this block those
+        writers leave the commit to the block: everything lands, or a raise rolls
+        all of it back, the commit included. Blocks nest, and only the outermost
+        one commits.
+        """
+        self._layout_depth += 1
+        try:
+            yield
+            if self._layout_depth == 1:
+                self._conn.commit()
+        except BaseException:
+            if self._layout_depth == 1:
+                self._conn.rollback()
+            raise
+        finally:
+            self._layout_depth -= 1
+
+    def _commit_layout(self) -> None:
+        """A layout writer's commit, unless a :meth:`layout_change` block makes it."""
+        if not self._layout_depth:
+            self._conn.commit()
+
     def project_groups(self) -> list[ProjectGroup]:
         rows = self._conn.execute(
             f"SELECT {_GROUP_COLUMNS} FROM project_group ORDER BY position, name"
@@ -2790,7 +2948,7 @@ class SqliteStore:
             )
         except sqlite3.IntegrityError as exc:
             raise ValueError(f"a group named {name!r} already exists") from exc
-        self._conn.commit()
+        self._commit_layout()
         created = self.get_project_group(new_id)
         assert created is not None
         return created
@@ -2830,7 +2988,7 @@ class SqliteStore:
                 )
             except sqlite3.IntegrityError as exc:
                 raise ValueError(f"a group named {name!r} already exists") from exc
-            self._conn.commit()
+            self._commit_layout()
             if cursor.rowcount != 1:
                 raise KeyError(group_id)
         updated = self.get_project_group(group_id)
@@ -2850,7 +3008,7 @@ class SqliteStore:
             "UPDATE project SET group_id = NULL, position = NULL WHERE group_id = ?", (group_id,)
         )
         cursor = self._conn.execute("DELETE FROM project_group WHERE id = ?", (group_id,))
-        self._conn.commit()
+        self._commit_layout()
         if cursor.rowcount != 1:
             raise KeyError(group_id)
         return members
@@ -2887,7 +3045,7 @@ class SqliteStore:
                 f"UPDATE project SET {', '.join(sets)} WHERE id = ? AND forgotten_at IS NULL",
                 (*params, project_id),
             )
-            self._conn.commit()
+            self._commit_layout()
             if cursor.rowcount != 1:
                 raise KeyError(project_id)
         updated = self._conn.execute(
@@ -2902,41 +3060,92 @@ class SqliteStore:
 
     def project_explainability(self, project_id: str) -> ProjectExplainability | None:
         row = self._conn.execute(
-            "SELECT project_id, target, key_path, set_at, set_by FROM project_explainability "
-            "WHERE project_id = ?",
+            "SELECT project_id, target, key_path, set_at, set_by, api_url "
+            "FROM project_explainability WHERE project_id = ?",
             (project_id,),
         ).fetchone()
         return _row_to_project_explainability(row) if row is not None else None
 
     def project_explainability_all(self) -> list[ProjectExplainability]:
         rows = self._conn.execute(
-            "SELECT project_id, target, key_path, set_at, set_by FROM project_explainability "
-            "ORDER BY project_id"
+            "SELECT project_id, target, key_path, set_at, set_by, api_url "
+            "FROM project_explainability ORDER BY project_id"
         ).fetchall()
         return [_row_to_project_explainability(row) for row in rows]
 
     def set_project_explainability(
-        self, project_id: str, *, target: str, key_path: Path, set_by: str | None
+        self,
+        project_id: str,
+        *,
+        target: str,
+        key_path: Path,
+        set_by: str | None,
+        minted: str | None = None,
+        api_url: str | None = None,
     ) -> ProjectExplainability:
-        """Attach (or re-point) the project's key: one row per project, the newest wins."""
-        self._conn.execute(
-            "INSERT INTO project_explainability (project_id, target, key_path, set_at, set_by) "
-            "VALUES (?, ?, ?, ?, ?) "
-            "ON CONFLICT (project_id) DO UPDATE SET target = excluded.target, "
-            "key_path = excluded.key_path, set_at = excluded.set_at, set_by = excluded.set_by",
-            (project_id, target, str(key_path), _now_iso(), set_by),
+        """Attach (or re-point) the project's key: one row per project, the newest wins.
+
+        The binding and the destination's ``key_uid`` describe one file, so they
+        are written together (#142). ``minted`` is the uid of a key the CLI has
+        just minted into that file; ``None`` is a key attached by hand. A minted
+        key the file held before, other than ``minted``, has been overwritten:
+        it is detached and its revocation owed in this same transaction
+        (:meth:`_owe_revocation`), so a hand key never goes on being described
+        as minted and the key it replaced is never forgotten while still live.
+        ``minted`` itself, if it was still owed, is owed no more
+        (:meth:`_owe_no_revocation`): it is the project's key again.
+
+        ``api_url`` is the destination's API when the key is for the deployment
+        that destination names, and ``None`` for one of the machine's targets
+        (:attr:`ProjectExplainability.api_url`, v24). Every attach writes it, so
+        a re-point never keeps the earlier key's.
+
+        THE COMMIT IS THE LAST THING THAT CAN FAIL. The binding returned is
+        built from the values written, not read back after the commit. Both
+        callers (``attach_project_key`` and ``destinations.mint_key``) take a
+        raise from here to mean "nothing was recorded" and put the key file
+        back as it was. A read-back that failed after the commit put the
+        earlier key under a row already committed to the new target: a prod
+        binding answering with the stg key (review of #170, D1b round 2, B2).
+        """
+        now = _now_iso()
+        stored = ProjectExplainability(
+            project_id=project_id,
+            target=target,
+            key_path=Path(str(key_path)),
+            set_at=datetime.fromisoformat(now),
+            set_by=set_by,
+            api_url=api_url,
         )
-        self._conn.commit()
-        stored = self.project_explainability(project_id)
-        assert stored is not None  # just written
+        with self._conn:
+            self._conn.execute(
+                "INSERT INTO project_explainability (project_id, target, key_path, set_at, "
+                "set_by, api_url) VALUES (?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT (project_id) DO UPDATE SET target = excluded.target, "
+                "key_path = excluded.key_path, set_at = excluded.set_at, "
+                "set_by = excluded.set_by, api_url = excluded.api_url",
+                (project_id, target, str(key_path), now, set_by, api_url),
+            )
+            self._owe_revocation(project_id, keep=minted)
+            if minted is not None:
+                self._conn.execute(
+                    "UPDATE project_destination SET key_uid = ? WHERE project_id = ?",
+                    (minted, project_id),
+                )
+                self._owe_no_revocation(project_id, minted)
         return stored
 
     def clear_project_explainability(self, project_id: str) -> bool:
-        """Detach the project's key; ``False`` when there was none."""
-        cursor = self._conn.execute(
-            "DELETE FROM project_explainability WHERE project_id = ?", (project_id,)
-        )
-        self._conn.commit()
+        """Detach the project's key; ``False`` when there was none.
+
+        A key the CLI minted goes with its binding, its revocation owed in the
+        same transaction (:meth:`_owe_revocation`).
+        """
+        with self._conn:
+            self._owe_revocation(project_id)
+            cursor = self._conn.execute(
+                "DELETE FROM project_explainability WHERE project_id = ?", (project_id,)
+            )
         return cursor.rowcount > 0
 
     # --- where a project's traces land (#142) -------------------------------------------
@@ -2960,52 +3169,189 @@ class SqliteStore:
         ``set_at`` is stamped here, not trusted from the caller, so the row says
         when the choice was made on THIS machine. A re-point keeps ``key_uid``
         only when the caller carries it over — a destination in another
-        workspace is not served by a key minted for the old one.
+        workspace is not served by a key minted for the old one — and a minted
+        key it does not carry over is detached, its binding with it, and its
+        revocation owed in the same transaction (:meth:`_owe_revocation`).
         """
-        self._conn.execute(
-            f"INSERT INTO project_destination ({_DESTINATION_COLUMNS}) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
-            "ON CONFLICT (project_id) DO UPDATE SET api_url = excluded.api_url, "
-            "environment = excluded.environment, workspace_id = excluded.workspace_id, "
-            "workspace_uid = excluded.workspace_uid, workspace_name = excluded.workspace_name, "
-            "studio_id = excluded.studio_id, studio_uid = excluded.studio_uid, "
-            "studio_name = excluded.studio_name, key_uid = excluded.key_uid, "
-            "set_at = excluded.set_at, set_by = excluded.set_by",
-            (
-                destination.project_id,
-                destination.api_url,
-                destination.environment,
-                destination.workspace_id,
-                destination.workspace_uid,
-                destination.workspace_name,
-                destination.studio_id,
-                destination.studio_uid,
-                destination.studio_name,
-                destination.key_uid,
-                _now_iso(),
-                destination.set_by,
-            ),
-        )
-        self._conn.commit()
+        with self._conn:
+            if self._owe_revocation(destination.project_id, keep=destination.key_uid) and (
+                destination.key_uid is None
+            ):
+                self._drop_binding(destination.project_id)
+            self._conn.execute(
+                f"INSERT INTO project_destination ({_DESTINATION_COLUMNS}) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT (project_id) DO UPDATE SET api_url = excluded.api_url, "
+                "environment = excluded.environment, workspace_id = excluded.workspace_id, "
+                "workspace_uid = excluded.workspace_uid, "
+                "workspace_name = excluded.workspace_name, "
+                "studio_id = excluded.studio_id, studio_uid = excluded.studio_uid, "
+                "studio_name = excluded.studio_name, key_uid = excluded.key_uid, "
+                "set_at = excluded.set_at, set_by = excluded.set_by",
+                (
+                    destination.project_id,
+                    destination.api_url,
+                    destination.environment,
+                    destination.workspace_id,
+                    destination.workspace_uid,
+                    destination.workspace_name,
+                    destination.studio_id,
+                    destination.studio_uid,
+                    destination.studio_name,
+                    destination.key_uid,
+                    _now_iso(),
+                    destination.set_by,
+                ),
+            )
+            if destination.key_uid is not None:
+                self._owe_no_revocation(destination.project_id, destination.key_uid)
         stored = self.project_destination(destination.project_id)
         assert stored is not None  # just written
         return stored
 
     def set_project_destination_key(self, project_id: str, key_uid: str | None) -> None:
-        """Remember (or forget) the ingest key the CLI minted for this destination."""
-        self._conn.execute(
-            "UPDATE project_destination SET key_uid = ? WHERE project_id = ?",
-            (key_uid, project_id),
-        )
-        self._conn.commit()
+        """Remember the ingest key the CLI minted for this destination; ``None``: it has none.
+
+        The uid it replaces is owed a revocation, in the same transaction
+        (:meth:`_owe_revocation`); with ``None`` the key's binding goes too, as
+        :meth:`detach_minted_key` takes it.
+        """
+        with self._conn:
+            detached = self._owe_revocation(project_id, keep=key_uid)
+            if key_uid is not None:
+                self._conn.execute(
+                    "UPDATE project_destination SET key_uid = ? WHERE project_id = ?",
+                    (key_uid, project_id),
+                )
+                self._owe_no_revocation(project_id, key_uid)
+            elif detached:
+                self._drop_binding(project_id)
+
+    def detach_minted_key(self, project_id: str) -> tuple[bool, ProjectExplainability | None]:
+        """Take the key the CLI minted off the project: its revocation owed, its binding gone.
+
+        One transaction: the destination's ``key_uid`` is cleared, the uid is
+        written to ``pending_revocation``, and the binding that named the key's
+        file is deleted — a binding left on a key about to be revoked is a
+        project whose launches authenticate with a dead key. Returns whether a
+        key was detached, and that binding, whose file the caller deletes
+        (``None`` when there was none). Two facts, not one: a uid with no
+        binding left is detached all the same, and counting detachments by the
+        binding undercounted what ``logout`` forgot (review of #172's
+        follow-ups, round 1, F5).
+        """
+        with self._conn:
+            if not self._owe_revocation(project_id):
+                return False, None
+            binding = self.project_explainability(project_id)
+            self._drop_binding(project_id)
+        return True, binding
 
     def clear_project_destination(self, project_id: str) -> bool:
-        """Forget where the project's traces land; ``False`` when nothing was recorded."""
-        cursor = self._conn.execute(
-            "DELETE FROM project_destination WHERE project_id = ?", (project_id,)
+        """Forget where the project's traces land; ``False`` when nothing was recorded.
+
+        A minted key goes with the row, as :meth:`detach_minted_key` takes it.
+        """
+        with self._conn:
+            if self._owe_revocation(project_id):
+                self._drop_binding(project_id)
+            cursor = self._conn.execute(
+                "DELETE FROM project_destination WHERE project_id = ?", (project_id,)
+            )
+        return cursor.rowcount > 0
+
+    def _owe_revocation(self, project_id: str, *, keep: str | None = None) -> bool:
+        """Inside the caller's transaction: detach the project's minted key, owing its revocation.
+
+        THE ONE PLACE a minted key's uid leaves its destination row. Every write
+        that takes it off — the binding replaced or cleared, the row re-pointed,
+        re-keyed or deleted, the project purged — calls this first, in its own
+        transaction, so the uid moves to ``pending_revocation`` in the same
+        commit that detaches it: no crash, lock or interrupt between two writes
+        can leave a live key that nothing here remembers, and no caller can
+        detach one without owing it. The revoke itself is a network call and
+        happens after the store session closes (``destinations.revoke_owed``),
+        which deletes the record only on the server's confirmation.
+
+        ``keep`` is a uid the row may go on naming (the key a new mint just
+        stored, a re-point within the workspace): nothing is detached then. A
+        uid that never arrived (:data:`UNKNOWN_KEY_UID`) is detached with nothing
+        owed, since nothing could revoke it. The INSERT goes first: as the
+        transaction's first write it takes the write lock, so the row it reads
+        cannot change under it. Returns whether a key was detached.
+        """
+        self._conn.execute(
+            "INSERT INTO pending_revocation (key_uid, api_url, workspace_id, workspace_name, "
+            "project_id, project_name, detached_at) "
+            "SELECT d.key_uid, d.api_url, d.workspace_id, d.workspace_name, d.project_id, "
+            "COALESCE(p.name, d.project_id), ? "
+            "FROM project_destination AS d LEFT JOIN project AS p ON p.id = d.project_id "
+            "WHERE d.project_id = ? AND d.key_uid IS NOT NULL AND d.key_uid IS NOT ? "
+            "AND d.key_uid <> ? "
+            "ON CONFLICT (key_uid) DO NOTHING",
+            (_now_iso(), project_id, keep, UNKNOWN_KEY_UID),
         )
+        cursor = self._conn.execute(
+            "UPDATE project_destination SET key_uid = NULL "
+            "WHERE project_id = ? AND key_uid IS NOT NULL AND key_uid IS NOT ?",
+            (project_id, keep),
+        )
+        return cursor.rowcount > 0
+
+    def _owe_no_revocation(self, project_id: str, key_uid: str) -> None:
+        """Inside the caller's transaction: ``key_uid`` is the project's key again, so owed nothing.
+
+        The other half of :meth:`_owe_revocation`, called by every write that
+        stores a uid on a destination row. A uid still owed can come back — a
+        mint that answers with the uid it answered before, a re-point that
+        carries the row's uid over — and left owed, the same command's
+        ``revoke_owed`` revoked the key the project had just been given
+        (review of #172's follow-ups, round 1, F2). Only while the row names
+        it: a record whose uid no row holds is still owed.
+        """
+        self._conn.execute(
+            "DELETE FROM pending_revocation WHERE key_uid = ? AND EXISTS "
+            "(SELECT 1 FROM project_destination WHERE project_id = ? AND key_uid = ?)",
+            (key_uid, project_id, key_uid),
+        )
+
+    def _drop_binding(self, project_id: str) -> None:
+        self._conn.execute("DELETE FROM project_explainability WHERE project_id = ?", (project_id,))
+
+    # --- revocations owed for keys the CLI minted (v22, #142) -----------------------------
+
+    def pending_revocations(self) -> list[PendingRevocation]:
+        """Every minted key detached from its project and not confirmed revoked, oldest first."""
+        rows = self._conn.execute(
+            "SELECT key_uid, api_url, workspace_id, workspace_name, project_id, project_name, "
+            "detached_at, last_error FROM pending_revocation ORDER BY detached_at, key_uid"
+        ).fetchall()
+        return [
+            PendingRevocation(
+                key_uid=row["key_uid"],
+                api_url=row["api_url"],
+                workspace_id=int(row["workspace_id"]),
+                workspace_name=row["workspace_name"],
+                project_id=row["project_id"],
+                project_name=row["project_name"],
+                detached_at=datetime.fromisoformat(row["detached_at"]),
+                last_error=row["last_error"],
+            )
+            for row in rows
+        ]
+
+    def settle_revocation(self, key_uid: str) -> bool:
+        """The server confirmed the key is revoked: nothing is owed for it any more."""
+        cursor = self._conn.execute("DELETE FROM pending_revocation WHERE key_uid = ?", (key_uid,))
         self._conn.commit()
         return cursor.rowcount > 0
+
+    def note_revocation_failure(self, key_uid: str, reason: str) -> None:
+        """Why the last attempt to revoke ``key_uid`` did not: what every report of it says."""
+        self._conn.execute(
+            "UPDATE pending_revocation SET last_error = ? WHERE key_uid = ?", (reason, key_uid)
+        )
+        self._conn.commit()
 
     # --- UI state (#144) ---------------------------------------------------------------
 
@@ -3404,6 +3750,19 @@ class SqliteStore:
         events = [_row_to_event(row) for row in rows]
         return {event.task_id: event for event in events if event.task_id is not None}
 
+    def missing_schema(self) -> list[str]:
+        """This build's tables, indexes, triggers and columns that this store lacks.
+
+        The open has already converged what it can (:func:`_migrate`), so this is
+        what it could not: an object no step from v15 on produces, missing from a
+        store another build or a hand edit changed. Each is named for the operator,
+        ``table claude_account``, ``column fleet_agent.account_slot``, ``unique index
+        project_codename``, ``shadow table entry_fts_data`` or ``unreadable table
+        entry_fts``. Empty for a store that holds this build's whole schema; tables and
+        columns of another line's are not this build's and are never reported.
+        """
+        return _missing_from(self._conn, _ladder_schema())
+
     def close(self) -> None:
         self._conn.close()
 
@@ -3570,6 +3929,63 @@ def _statements(script: str) -> Iterator[str]:
         yield buffer
 
 
+def _run_step(connection: sqlite3.Connection, version: int) -> None:
+    """Step ``version`` → ``version + 1``, in the caller's transaction, without the bump.
+
+    :data:`_PREPARE`, the script, then the step's columns from :data:`_PRODUCTS`,
+    each followed by its :data:`_BACKFILLS` entry when it was added. This is also
+    how :func:`_converge_by_presence` applies a step again, which every step
+    from v15 on allows: each CREATE is ``IF NOT EXISTS``, each column is added
+    only when absent, and v23's repair leaves a repaired row as it is.
+    """
+    prepare = _PREPARE.get(version)
+    if prepare is not None:
+        prepare(connection)
+    for statement in _statements(_MIGRATIONS[version]):
+        connection.execute(statement)
+    for table, column, declaration in _PRODUCTS.get(version, _Products()).columns:
+        if _add_column_if_absent(connection, table, column, declaration):
+            backfill = _BACKFILLS.get((table, column))
+            if backfill is not None:
+                backfill(connection)
+
+
+def _steps_missing(connection: sqlite3.Connection, below: int) -> list[int]:
+    """The steps under ``below``, from v15 on, that left something out of this store.
+
+    A store stamped ``below`` claims to have run them all; one that another line
+    stamped has run that line's steps under these numbers instead. Only reads:
+    one ``sqlite_master`` query and a ``table_info`` per table a column belongs to.
+    """
+    steps = sorted(step for step in _PRODUCTS if step < below)
+    if not steps:
+        return []
+    names = {row[0] for row in connection.execute("SELECT name FROM sqlite_master")}
+    tables = {table for step in steps for table, _, _ in _PRODUCTS[step].columns}
+    columns = {
+        table: {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
+        for table in tables
+    }
+    return [
+        step
+        for step in steps
+        if not names.issuperset(_PRODUCTS[step].objects)
+        or any(column not in columns[table] for table, column, _ in _PRODUCTS[step].columns)
+    ]
+
+
+def _converge_by_presence(connection: sqlite3.Connection, below: int) -> None:
+    """Apply again each step under ``below`` whose products this store does not hold.
+
+    In the caller's transaction, which holds the write lock, so a racing opener
+    finds the products in place and does nothing. A store that holds them pays
+    the reads in :func:`_steps_missing` and nothing more. A column added here
+    brings its backfill, so a store that skipped v17 lists its projects.
+    """
+    for step in _steps_missing(connection, below):
+        _run_step(connection, step)
+
+
 def _migrate(connection: sqlite3.Connection) -> None:
     """Bring the schema to the current version, safely under concurrency.
 
@@ -3598,31 +4014,162 @@ def _migrate(connection: sqlite3.Connection) -> None:
 
     A loser whose script still fails re-reads the version: if another process
     advanced it, that's victory by other means; otherwise the error is real.
+
+    THE VERSION ALONE IS NOT TRUSTED FROM v15 ON: other lines of development
+    stamped 15-17 for steps of their own (the note above _SCHEMA_V15), so a
+    store may claim steps it never ran. Before each step, and once more after
+    the last, :func:`_converge_by_presence` applies again any step below the
+    version whose tables, indexes or columns the store lacks. Before each step,
+    because a later step can need an earlier one's products: v23 updates
+    ``onboarded_at``, which a store stamped 17 by #113 does not have. After the
+    last, because a store stamped current never enters the loop, including one
+    that a build without this pass carried to current past a step it skipped.
     """
-    _converge_v15_shape(connection)
     while True:
         if int(connection.execute("PRAGMA user_version").fetchone()[0]) >= len(_MIGRATIONS):
-            return
+            break
         try:
             connection.execute("BEGIN IMMEDIATE")
             version = int(connection.execute("PRAGMA user_version").fetchone()[0])
             if version >= len(_MIGRATIONS):
                 connection.execute("COMMIT")
-                return
-            prepare = _PREPARE.get(version)
-            if prepare is not None:
-                prepare(connection)
-            for statement in _statements(_MIGRATIONS[version]):
-                connection.execute(statement)
-            finish = _FINISH.get(version)
-            if finish is not None:
-                finish(connection)
+                break
+            _converge_by_presence(connection, version)
+            _run_step(connection, version)
             connection.execute(f"PRAGMA user_version = {version + 1}")
             connection.execute("COMMIT")
         except sqlite3.Error:
             with contextlib.suppress(sqlite3.Error):
                 connection.execute("ROLLBACK")
             raise
+    if not _steps_missing(connection, len(_MIGRATIONS)):
+        return
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        _converge_by_presence(connection, len(_MIGRATIONS))
+        connection.execute("COMMIT")
+    except sqlite3.Error:
+        with contextlib.suppress(sqlite3.Error):
+            connection.execute("ROLLBACK")
+        raise
+
+
+#: The suffixes of the shadow tables FTS5 keeps a table's index in, ``entry_fts_data``
+#: and so on (sqlite.org/fts5.html). Which of them a table has depends on its options:
+#: ``entry_fts`` reads its text from ``entry`` and has no ``_content``.
+_FTS5_SHADOWS = ("data", "idx", "content", "docsize", "config")
+
+
+class _Schema(NamedTuple):
+    """A database's schema by name, as :func:`_missing_from` compares it."""
+
+    tables: dict[str, frozenset[str]]
+    """Each table, ordinary, virtual or shadow, with its columns."""
+    objects: dict[str, tuple[str, str]]
+    """Each index and trigger: its kind (``index``, ``unique index`` or ``trigger``) and
+    the table it belongs to."""
+    shadows: dict[str, str]
+    """Each FTS5 shadow table among :attr:`tables` and the virtual table it belongs to."""
+
+
+def _ladder_schema() -> _Schema:
+    """What the ladder builds on an empty database: this build's whole schema.
+
+    Built, not listed, so it cannot drift from the steps: every step from v1 on,
+    run by :func:`_migrate` itself in memory (a few milliseconds). SQLite's own
+    objects (``sqlite_sequence``, automatic indexes) come and go with the tables
+    that cause them and are left out. FTS5's shadow tables are the module's own
+    storage, made and dropped with their virtual table, and are kept with it: a
+    store without ``entry_fts`` lacks one table, not five, and one that lost only
+    ``entry_fts_data`` lacks that, without which no note can be added. Told apart
+    by FTS5's suffixes, not by the virtual table's name alone, so a table of this
+    build's named ``entry_fts_…`` is not taken for one.
+    """
+    connection = sqlite3.connect(":memory:")
+    try:
+        _migrate(connection)
+        tables: dict[str, frozenset[str]] = {}
+        objects: dict[str, tuple[str, str]] = {}
+        shadows = {
+            f"{owner}_{suffix}": owner
+            for (owner,) in connection.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type = 'table' AND sql LIKE 'CREATE VIRTUAL TABLE %USING fts5%'"
+            ).fetchall()
+            for suffix in _FTS5_SHADOWS
+        }
+        for kind, name, table in connection.execute(
+            "SELECT type, name, tbl_name FROM sqlite_master "
+            "WHERE name NOT GLOB 'sqlite_*' ORDER BY rowid"
+        ).fetchall():
+            if kind == "table":
+                columns = connection.execute(f"PRAGMA table_info({name})").fetchall()
+                tables[name] = frozenset(column[1] for column in columns)
+            elif kind == "index":
+                # Told apart because their absence costs different things: a missing
+                # unique index lets in the duplicates it refused, any other only slows
+                # the reads it served, and doctor's database row says which.
+                listed = connection.execute(f"PRAGMA index_list({table})").fetchall()
+                unique = any(row[1] == name and row[2] for row in listed)
+                objects[name] = ("unique index" if unique else kind, table)
+            elif kind == "trigger":
+                objects[name] = (kind, table)
+        return _Schema(
+            tables, objects, {name: owner for name, owner in shadows.items() if name in tables}
+        )
+    finally:
+        connection.close()
+
+
+def _missing_from(connection: sqlite3.Connection, expected: _Schema) -> list[str]:
+    """``expected``'s tables, columns, indexes and triggers that ``connection`` lacks.
+
+    Tables first, in the order the ladder made them, each followed by its missing
+    columns by name; then indexes and triggers, again in the ladder's order. A
+    missing table is named once, not with each of its columns and indexes, and a
+    missing FTS5 table not with its shadow tables. A shadow table missing beside
+    its FTS5 table is named ``shadow table …``, since it costs something of its
+    own: the index can be neither written nor searched. An FTS5 table the module
+    cannot open though its shadow tables are all there is named ``unreadable table
+    …``, at the same cost. Only reads, and only this build's tables: another line's
+    are not looked at.
+    """
+    present = {row[0] for row in connection.execute("SELECT name FROM sqlite_master")}
+    missing: list[str] = []
+    for table, columns in expected.tables.items():
+        owner = expected.shadows.get(table)
+        if owner is not None:
+            # Its layout is the module's, so only its presence is compared.
+            if owner in present and table not in present:
+                missing.append(f"shadow table {table}")
+            continue
+        if table not in present:
+            missing.append(f"table {table}")
+            continue
+        if any(shadow not in present for shadow, of in expected.shadows.items() if of == table):
+            # Listing an FTS5 table's columns opens it, and the module reads its
+            # `_config` shadow to do that: without it this read raised "vtable
+            # constructor failed", which doctor's row took for an unreadable store.
+            continue
+        try:
+            found = {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
+        except sqlite3.DatabaseError as exc:
+            if table not in expected.shadows.values() or is_locked_error(exc):
+                raise
+            # Every shadow table is there and the module still cannot open it: its
+            # `_config` lost its version row, or holds a version this SQLite does not
+            # read, and FTS5 answers "invalid fts5 file format". It is the index that
+            # is unreadable, not the store, whose notes all read, so the row names it
+            # instead of calling the store unreadable and offering the move.
+            missing.append(f"unreadable table {table}")
+            continue
+        missing += [f"column {table}.{column}" for column in sorted(columns - found)]
+    missing += [
+        f"{kind} {name}"
+        for name, (kind, table) in expected.objects.items()
+        if name not in present and table in present
+    ]
+    return missing
 
 
 def open_store() -> ContextStore:

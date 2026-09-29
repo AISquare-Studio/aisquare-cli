@@ -520,6 +520,20 @@ def current_session(api_url: str | None = None) -> Session | None:
     return env_session(api_url) or stored_session()
 
 
+def signed_in_quietly() -> Session | None:
+    """The sign-in when there is one, else ``None`` — for a call that must never cost the command.
+
+    :func:`current_session` raises when the credentials file cannot be read.
+    The callers are best-effort revokes of keys the CLI minted, and one that has
+    no session to revoke with leaves the key owed, not lost
+    (``destinations.revoke_owed``), so an unreadable file is simply no session.
+    """
+    try:
+        return current_session()
+    except IamError:
+        return None
+
+
 def store_session(
     *,
     api_url: str,

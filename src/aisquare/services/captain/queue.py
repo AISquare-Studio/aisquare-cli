@@ -7,8 +7,8 @@ so a request the owner snoozed on the phone is still snoozed from the TUI,
 and a row's history survives the captain's restart. A file rather than a
 ``captain_queue`` table (the card allows either): the store's migration ladder
 is shared by every card on the train, and the fork the two v15 ladders left
-(``store._converge_v15_fork``) is what a table would risk again; nothing here
-needs a join.
+(converged since by ``store._converge_by_presence``) is what a table would risk
+again; nothing here needs a join.
 
 Sources, read on every refresh through the :class:`Sources` seam (the store
 and the fleet by default, plain lists in tests): ``question`` events that are

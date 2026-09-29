@@ -365,6 +365,7 @@ def logout() -> None:
                         "env_token_still_set": env_set,
                         # The signed-in branch's shape (#142); no session, nothing to revoke with.
                         "minted_keys_cleared": 0,
+                        "minted_keys_still_live": [],
                     }
                 )
             )
@@ -374,7 +375,7 @@ def logout() -> None:
                 _say(f"⚠ {iam.TOKEN_ENV_VAR} is still set in this shell.")
         return
     # Before the session is revoked: revoking a minted key needs the Bearer.
-    keys_cleared = _forget_minted_keys(session)
+    keys = destinations.forget_minted_keys(session)
     revoked = auth_service.sign_out(session).revoked
     if get_state().json_output:
         typer.echo(
@@ -383,13 +384,17 @@ def logout() -> None:
                     "signed_out": True,
                     "server_revoked": revoked,
                     "env_token_still_set": env_set,
-                    "minted_keys_cleared": keys_cleared,
+                    "minted_keys_cleared": keys.detached,
+                    "minted_keys_still_live": keys.revocations.as_json()["still_live"],
                 }
             )
         )
         return
-    if keys_cleared:
-        _say(f"✓ Forgot {keys_cleared} ingest key(s) the CLI had minted for your projects.")
+    if keys.detached:
+        _say(f"✓ Forgot {keys.detached} ingest key(s) the CLI had minted for your projects.")
+    if keys.revocations.owed:
+        # Kept owed, not forgotten: the next sign-in's `use` or `doctor --live` tries again.
+        _say(f"⚠ {destinations.describe_owed(keys.revocations.owed)} — {destinations.REVOKE_RETRY}")
     if revoked:
         _say("✓ Signed out. The session was revoked on the server.")
     else:
@@ -402,7 +407,10 @@ def logout() -> None:
 
 
 def whoami() -> None:
-    """Show which account this machine is signed in as (from the file; credits ask the API)."""
+    """Show which account this machine is signed in as (credits ask the API).
+
+    The session is `AISQUARE_TOKEN` when that is set, else the stored file.
+    """
     try:
         session = iam.current_session()
     except iam.IamError as exc:
@@ -411,9 +419,10 @@ def whoami() -> None:
         fail("Not signed in. Run aisquare login.", error="not_authenticated")
     lands_in = _destination_here()
     # The one request `whoami` makes (#143), and only with a destination for
-    # the project here: that workspace's balance, cached a minute and given at
-    # most `credits.TIMEOUT_SECONDS`. It said "(offline)" before the credits
-    # line, which is no longer so (review of #173, round 1).
+    # the project here: that workspace's balance, a reading reused for a minute,
+    # each network operation given `credits.TIMEOUT_SECONDS`. It said
+    # "(offline)" before the credits line, which is no longer so (review of
+    # #173, round 1).
     credits = credits_service.for_destination(session, lands_in)
     if get_state().json_output:
         typer.echo(
@@ -439,6 +448,12 @@ def whoami() -> None:
         stdout_console().print(f"traces: {lands_in.label} · {lands_in.environment}")
     if credits is not None:
         stdout_console().print(f"credits: {credits_service.describe(credits)}")
+    elif lands_in is not None:
+        # A session for another API than the destination's: said, as the tab says it
+        # (review of #173 after the stack's merge, J3).
+        stdout_console().print(
+            f"credits: ({credits_service.why_unread(session, lands_in)})", markup=False
+        )
 
 
 def _destination_here() -> TraceDestination | None:
@@ -458,17 +473,6 @@ def _destination_here() -> TraceDestination | None:
             return store.project_destination(project_id)
     except Exception:
         return None
-
-
-def _forget_minted_keys(session: iam.Session) -> int:
-    """``logout``: the ingest keys the CLI minted go with the session (#142). Never raises."""
-    if not destinations.derived_credentials_exist():
-        return 0
-    try:
-        with store_session() as store:
-            return len(destinations.revoke_minted_keys(store, session))
-    except Exception:
-        return 0
 
 
 # --------------------------------------------------------------------------- aisquare auth

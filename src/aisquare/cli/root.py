@@ -19,6 +19,7 @@ from aisquare.cli.common import (
     emit_status,
     expected_config_write_errors,
     fail,
+    project_for_ref,
     resolve_pool,
 )
 from aisquare.models import CheckStatus
@@ -79,6 +80,14 @@ def init(
                 assume_yes=yes,
                 explainability=_explainability_decision(explainability),
             )
+    except lifecycle_service.UnreadableConfigResetRefused as refused:
+        fail(
+            f"--reinit would replace config.toml, which cannot be read ({refused.summary}), "
+            "so whether it holds this machine's explainability configuration cannot be "
+            "checked. Fix the file, or re-run with --yes to replace it with the defaults.",
+            error="reinit_would_discard_unreadable_config",
+            hint="aisquare init --reinit --yes",
+        )
     except lifecycle_service.ExplainabilityResetRefused as refused:
         fail(
             f"--reinit would discard this machine's explainability configuration "
@@ -141,14 +150,33 @@ def doctor(
     yes: Annotated[
         bool, typer.Option("--yes", "-y", help="Answer yes to every --fix prompt.")
     ] = False,
+    project: Annotated[
+        str | None,
+        typer.Option(
+            "--project",
+            "-P",
+            help="Check the explainability key this project's launches use, by codename, "
+            "name or id prefix (default: the machine's key).",
+        ),
+    ] = None,
 ) -> None:
-    """Run diagnostics and suggest fixes for common problems."""
+    """Run diagnostics and suggest fixes for common problems.
+
+    ``--project`` resolves the explainability section's key for one project,
+    its own key (#141) first, as ``launch`` does. Without it the section reads
+    the machine's key and opens no store. With ``--live`` that is the check that
+    puts a project's key to the gateway: ``use`` names it once tracing is on,
+    and ``explainability status``, which it used to name, only probes the
+    proxy, so a revoked or wrong-workspace key passed it (review of #172, D2
+    round 2).
+    """
+    project_id = project_for_ref(project).id if project is not None else None
     if fix:
         for action in explainability_ops.apply_fixes(
             target=target, assume_yes=yes, confirm=typer.confirm
         ):
             typer.echo(f"fix: {action}")
-    checks = diagnostics_service.doctor(live=live, target=target)
+    checks = diagnostics_service.doctor(live=live, target=target, project_id=project_id)
     emit_doctor(checks)
     if any(check.status is CheckStatus.fail for check in checks):
         raise typer.Exit(1)

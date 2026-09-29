@@ -1580,7 +1580,8 @@ def hook_prompt_heartbeat(
         shown = events[:_DELTA_LIMIT]
         store.touch_session(session.id, cursor=shown[-1].seq, state="working")
         roles = {s.id: s.role for s in store.team_sessions(session.project_id)}
-        return collision + briefing + _render_delta(shown, roles, truncated=truncated)
+        board = _board_of(store, session.project_id).name
+        return collision + briefing + _render_delta(shown, roles, truncated=truncated, board=board)
 
 
 def hook_stop(
@@ -1745,10 +1746,12 @@ def _manager_wakeup(
     truncated = len(events) > _DELTA_LIMIT
     shown = events[:_DELTA_LIMIT]
     roles = {s.id: s.role for s in store.team_sessions(me.project_id)}
+    board = _board_of(store, me.project_id).name
     store.set_meta(key, str(used + 1))
     store.touch_session(me.id, cursor=shown[-1].seq, state="working")
     return StopDecision(
-        reason=_render_wakeup(shown, roles, truncated=truncated), cursor=shown[-1].seq
+        reason=_render_wakeup(shown, roles, truncated=truncated, board=board),
+        cursor=shown[-1].seq,
     )
 
 
@@ -2902,12 +2905,17 @@ def event_line(event: TeamEvent, roles: dict[str, str]) -> str:
     return f"{who} {kind}{target}:{task} {event.text}"
 
 
-def _render_delta(events: list[TeamEvent], roles: dict[str, str], *, truncated: bool) -> str:
+def _render_delta(
+    events: list[TeamEvent], roles: dict[str, str], *, truncated: bool, board: str
+) -> str:
+    """The per-prompt delta. Each line names its board (fix 5 of the fleet-board card,
+    tsk_01m3k89bkhpj): two fleets' updates once mixed in one delta, because the seats of
+    both registered on a third board, and no line said which board it came from."""
     count = f"{len(events)}{'+' if truncated else ''}"
     lines = [
         "<aisquare-team-delta>",
         f"{count} teammate update(s) since your last prompt:",
-        *(f"- {event_line(event, roles)}" for event in events),
+        *(f"- [{board}] {event_line(event, roles)}" for event in events),
     ]
     if truncated:
         lines.append("… more waiting — run `aisquare board` for the full picture.")
@@ -2974,7 +2982,9 @@ def _shorten(text: str, keep: int) -> str:
 _ELLIPSIS_COST = _output_cost("…")
 
 
-def _render_wakeup(events: list[TeamEvent], roles: dict[str, str], *, truncated: bool) -> str:
+def _render_wakeup(
+    events: list[TeamEvent], roles: dict[str, str], *, truncated: bool, board: str
+) -> str:
     """The Stop reason: the delta in the same lines the prompt hook would have used,
     framed as the instruction Claude Code continues the turn with.
 
@@ -3002,5 +3012,10 @@ def _render_wakeup(events: list[TeamEvent], roles: dict[str, str], *, truncated:
     spent = _output_cost(head) + sum(_output_cost(line) + 2 for line in frame)
     share = max((_WAKEUP_REASON_BUDGET - spent) // max(len(events), 1) - 4, _ELLIPSIS_COST)
     per_line = min(_WAKEUP_LINE_BUDGET, share)
-    lines = [head, *(f"- {_clip(event_line(event, roles), per_line)}" for event in events), *frame]
+    # The board label is inside the clipped text, so the budget above still holds.
+    lines = [
+        head,
+        *(f"- {_clip(f'[{board}] {event_line(event, roles)}', per_line)}" for event in events),
+        *frame,
+    ]
     return "\n".join(lines)

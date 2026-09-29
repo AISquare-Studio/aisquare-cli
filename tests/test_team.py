@@ -1711,3 +1711,37 @@ def test_notification_lines_stay_out_of_teammate_deltas(
     delta = _prompt(runner, PLANNER, work_dir).stdout
     assert "real work item" in delta and "1 teammate update" in delta
     assert "A sub-agent finished" not in delta
+
+
+def test_each_delta_line_names_its_board_and_only_the_sessions_own_board_is_read(
+    runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fix 5 of the fleet-board card (tsk_01m3k89bkhpj). Two fleets' updates once mixed in
+    one delta, because the seats of both registered on a third board, and no line said
+    which board it came from. Each update now names its board, and the delta reads only
+    the session's own board: another board's news never shows."""
+    from aisquare.models import ProjectInfo
+
+    monkeypatch.setenv("AISQUARE_ROLE", "planner")
+    _start(runner, PLANNER, work_dir)
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
+    _start(runner, CODER, work_dir)
+    monkeypatch.delenv("AISQUARE_ROLE")
+    runner.invoke(app, ["task", "add", "wire auth", "--as", "bbbb2222"])
+    other_root = work_dir.parent / "other-train"
+    other_root.mkdir()
+    with store_session() as store:
+        mine = store.get_session(PLANNER)
+        assert mine is not None
+        board = store.get_project(mine.project_id)
+        assert board is not None
+        other = ProjectInfo(id="prj_othertrain0000000000000", root=other_root, linked_repos=[])
+        store.ensure_project(other)
+        team_service._emit(store, other.id, "note", "the other train's news")
+
+    delta = _prompt(runner, PLANNER, work_dir).stdout
+
+    lines = [line for line in delta.splitlines() if line.startswith("- ")]
+    assert lines, delta
+    assert all(line.startswith(f"- [{board.root.name}] ") for line in lines), lines
+    assert "wire auth" in delta and "the other train's news" not in delta

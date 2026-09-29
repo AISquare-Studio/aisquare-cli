@@ -56,6 +56,7 @@ aisquare 0.6.0
 # recorded at a7592d1d; since main-sync (#233) it reads: aisquare 0.7.0
 ✓ browser tools: no browser MCP/plugin declared in 1 config dir(s) or /tmp/proj/alpha/.mcp.json; Claude in Chrome cannot be detected from here (a browser extension); the ui-tester role passes --chrome and learns at its first tool call. Without one the ui-tester reopens UI tasks as 'not browser-verified' rather than passing them on code alone — add the Chrome DevTools MCP with `claude mcp add -s user chrome-devtools npx chrome-devtools-mcp`, or install the Claude in Chrome extension (claude.ai/chrome)
 ✓ fleet terminal: outer terminal unknown (TERM=xterm-256color) (protocol unknown: try shift+enter in a pane); tmux 3.5 carries extended keys; server prefix None (every key reaches the agent in fleet attach; F12 detaches)
+# recorded at a7592d1d; since the fleet-board follow-up (#237) a "fleet server env" row follows here, a warning only when the fleet server pins a team variable
 ✓ ci test bed: off — no requests, no added latency (AISQUARE_CI=1 enables)
 ✓ explainability: tracing is off (turn it on with: aisquare explainability enable)
 captain voice page: http://localhost:8749/#token=<redacted: a throwaway fixture home>

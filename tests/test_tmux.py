@@ -1796,3 +1796,52 @@ def test_the_default_geometry_stays_under_claude_codes_diff_panel_line(
     assert new_session[x + 1] == str(DEFAULT_WINDOW_WIDTH) == "120"
     assert new_session[y + 1] == str(DEFAULT_WINDOW_HEIGHT) == "40"
     assert len(fake.commands()) == 2  # a new session's first window needs no second step
+
+
+# --- a server we start holds no team variable (fleet-board fix 3, tsk_01m3k89bkhpj) -------------
+
+
+def test_the_seam_strips_the_team_variables_a_server_must_never_hold(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fix 3 of the fleet-board card. A tmux server copies the environment of the client
+    that starts it into its global environment, and every window inherits that. The
+    owner's asqui launcher exported the launch folder's git root as AISQUARE_TEAM_HUB,
+    so the server it started pinned every window opened there by hand to that board.
+    No tmux client carries a team variable now: a server we start holds none, and each
+    fleet window gets its own through ``-e``. AISQUARE_HOME stays, since the windows
+    need the home."""
+    assert set(spawn.TEAM_ENV_VARS) == {
+        "AISQUARE_TEAM_HUB",
+        "AISQUARE_FLEET_AGENT",
+        "AISQUARE_ROLE",
+        "AISQUARE_PERSONA",
+    }
+    for name in spawn.TEAM_ENV_VARS:
+        monkeypatch.setenv(name, f"parent-{name}")
+    monkeypatch.setenv("AISQUARE_HOME", "/tmp/asq-home-kept")
+    probe = "import os,sys; print(' '.join(os.environ.get(n, '<unset>') for n in sys.argv[1:]))"
+    names = [*spawn.TEAM_ENV_VARS, "AISQUARE_HOME"]
+    completed = _tmux([sys.executable, "-c", probe, *names], None)
+    assert completed.returncode == 0
+    assert completed.stdout.split() == ["<unset>"] * len(spawn.TEAM_ENV_VARS) + [
+        "/tmp/asq-home-kept"
+    ]
+
+
+@requires_tmux
+def test_a_server_the_fleet_starts_holds_no_team_variable(
+    live: TmuxServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same on a real server: started through our seam from a process that exports
+    every team variable, its global environment holds none of them, and keeps the home."""
+    for name in spawn.TEAM_ENV_VARS:
+        monkeypatch.setenv(name, f"/parent/{name}")
+    monkeypatch.setenv("AISQUARE_HOME", "/tmp/asq-home-kept")
+
+    live.run("new-session", "-d", "-s", "probe", "sleep 30")
+
+    held = live.run("show-environment", "-g").splitlines()
+    names = {line.partition("=")[0] for line in held if "=" in line and not line.startswith("-")}
+    assert not names & set(spawn.TEAM_ENV_VARS), held
+    assert "AISQUARE_HOME=/tmp/asq-home-kept" in held

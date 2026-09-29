@@ -1433,3 +1433,69 @@ def test_the_resume_line_reads_only_the_newest_row_under_each_label(
     assert check.detail.startswith("1 exited agent can be resumed"), check.detail
     assert "coder-2 (repo)" in check.detail and check.detail.count("coder-2") == 1
     assert "coder-1" not in check.detail, "live again: nothing to resume"
+
+
+# --- the fleet server's team variables (fleet-board fix 4, tsk_01m3k89bkhpj) -------------------
+
+
+def _server_env_row(server: FakeServer, boards: tuple[Path, ...]) -> DoctorCheck:
+    return diagnostics._check_fleet_server_env(server, boards=boards)
+
+
+def test_the_fleet_server_row_warns_about_a_hub_unlike_a_fleets_board(tmp_path: Path) -> None:
+    """Fix 4. A server whose global environment pins AISQUARE_TEAM_HUB puts every window
+    opened on it by hand on that board. A fleet spawn sets its own (#230), so the row
+    warns only when the pinned hub is unlike the board of a fleet on the server. It names
+    that board and gives the one command that clears the variable."""
+    here, there = tmp_path / "here", tmp_path / "there"
+    here.mkdir()
+    there.mkdir()
+    server = FakeServer(absent=False, socket="asqui")
+    server.scripted = {("show-environment", "-g"): f"AISQUARE_HOME=/h\nAISQUARE_TEAM_HUB={there}\n"}
+
+    check = _server_env_row(server, (here, there))
+
+    assert check.name == "fleet server env" and check.status is CheckStatus.warn
+    assert f"AISQUARE_TEAM_HUB={there}" in check.detail
+    assert "unlike the board of here" in check.detail
+    assert check.fix == "tmux -L asqui set-environment -gu AISQUARE_TEAM_HUB"
+
+    same = _server_env_row(server, (there,))
+    assert same.status is CheckStatus.ok and "the board of every fleet on it" in same.detail
+
+
+def test_the_fleet_server_row_is_ok_without_a_team_variable_and_never_starts_a_server() -> None:
+    server = FakeServer(absent=False)
+    server.scripted = {
+        ("show-environment", "-g"): "AISQUARE_HOME=/h\nDISPLAY=:1\n-AISQUARE_TEAM_HUB\n"
+    }
+    check = _server_env_row(server, ())
+    assert check.status is CheckStatus.ok and "pins no team variable" in check.detail
+
+    down = FakeServer(absent=True)
+    assert "fleet server not running" in _server_env_row(down, ()).detail
+    assert not any(q.startswith("show-") for q in down.asked), down.asked
+    assert "tmux not installed" in _server_env_row(FakeServer(present=False), ()).detail
+
+
+def test_the_fleet_server_row_warns_about_a_seats_identity_on_the_server(tmp_path: Path) -> None:
+    """A seat's row id, role or persona on a server is always foreign: every window opened
+    there by hand would claim that seat or run as that role."""
+    server = FakeServer(absent=False, socket="asqui")
+    server.scripted = {
+        ("show-environment", "-g"): "AISQUARE_FLEET_AGENT=agt_x\nAISQUARE_ROLE=coder\n"
+    }
+
+    check = _server_env_row(server, (tmp_path,))
+
+    assert check.status is CheckStatus.warn
+    assert "AISQUARE_FLEET_AGENT=agt_x" in check.detail and "AISQUARE_ROLE=coder" in check.detail
+    assert check.fix == (
+        "tmux -L asqui set-environment -gu AISQUARE_FLEET_AGENT; "
+        "tmux -L asqui set-environment -gu AISQUARE_ROLE"
+    )
+
+
+def test_the_fleet_server_row_reaches_the_real_doctor_after_the_fleet_terminal() -> None:
+    names = [check.name for check in diagnostics.doctor()]
+    assert names.index("fleet terminal") < names.index("fleet server env"), names

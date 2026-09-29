@@ -82,7 +82,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from aisquare.core import paths
-from aisquare.core.spawn import untraced_env
+from aisquare.core.spawn import tmux_client_env
 
 DEFAULT_SOCKET = "asq"
 MIN_VERSION = (3, 2)
@@ -279,7 +279,8 @@ Runner = Callable[[Sequence[str], bytes | None], Completed]
 
 
 def _tmux(argv: Sequence[str], stdin: bytes | None) -> Completed:
-    """THE seam: run one tmux invocation with the tracing identity stripped.
+    """THE seam: run one tmux invocation with the tracing identity and the team variables
+    stripped (:func:`~aisquare.core.spawn.tmux_client_env`), so a server it starts holds none.
 
     Every way the process can fail to run at all is mapped onto the module's
     own exceptions, so a caller that catches :class:`TmuxError` has caught
@@ -292,7 +293,7 @@ def _tmux(argv: Sequence[str], stdin: bytes | None) -> Completed:
             list(argv),
             input=stdin,
             capture_output=True,
-            env=untraced_env(),
+            env=tmux_client_env(),
             timeout=_COMMAND_TIMEOUT,
             check=False,
         )

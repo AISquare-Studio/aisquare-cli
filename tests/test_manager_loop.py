@@ -663,7 +663,10 @@ def test_the_wakeup_budget_leaves_the_delta_limit_room_to_grow() -> None:
             )
             for index in range(count)
         ]
-        reason = team_service._render_wakeup(events, {CODER: "coder"}, truncated=True)
+        # A board name as long as the owner's longest, inside the clipped text (fix 5).
+        reason = team_service._render_wakeup(
+            events, {CODER: "coder"}, truncated=True, board="aisquare-workspace-rc"
+        )
         payload = json.dumps({"decision": "block", "reason": reason})
 
         assert len(payload) < _HOOK_OUTPUT_CAP, (count, len(payload))
@@ -1236,3 +1239,20 @@ def test_every_harness_role_is_a_registered_identity() -> None:
     """Asked of the two modules, not of two literals: a role added to the harness
     without joining the roster would ship under a name the gateway 409s."""
     assert set(harness.ROLE_PROFILES) <= set(ExplainabilitySettings().roles)
+
+
+def test_each_wakeup_line_names_its_board(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, work_dir: Path
+) -> None:
+    """Fix 5 of the fleet-board card (tsk_01m3k89bkhpj): the Stop reason is the delta
+    delivered a turn early, so its lines name their board as the prompt hook's do."""
+    _fleet(runner, monkeypatch, work_dir)
+    _coder_reviews(work_dir)
+
+    reason = _decision(_stop(runner, MANAGER, work_dir, stop_hook_active=False))["reason"]
+
+    with store_session() as store:
+        board = store.get_project(_session(MANAGER).project_id)
+    assert board is not None
+    lines = [line for line in reason.splitlines() if line.startswith("- ")]
+    assert lines and all(line.startswith(f"- [{board.root.name}] ") for line in lines), lines

@@ -168,6 +168,17 @@ MARKER_ENV_VARS = ("AISQUARE_PIPELINE_ID", "AISQUARE_TRACE_AGENT_NAME", "AISQUAR
 #: user-visible output and the reserved-var guard.
 IDENTITY_ENV_VARS = (*TRACING_ENV_VARS, *MARKER_ENV_VARS)
 
+#: The variables that tie a process to one board, seat or role. A fleet window gets
+#: each of its own (``fleet.spawn``'s ``-e`` pairs, #230). A tmux server copies the
+#: environment of the client that starts it into its global environment, and every
+#: window opened on it inherits that, so none of these may reach a server (fix 3 of
+#: the fleet-board card, follow-up tsk_01m3k89bkhpj): the owner's asqui launcher
+#: exported the launch folder's git root as AISQUARE_TEAM_HUB, and the server it
+#: started pinned every window opened there by hand to that board. The switches
+#: (``AISQUARE_TEAM``, ``AISQUARE_TEAM_DELTA``) are not here: a shell that sets one
+#: has made a choice for its whole fleet.
+TEAM_ENV_VARS = ("AISQUARE_TEAM_HUB", "AISQUARE_FLEET_AGENT", "AISQUARE_ROLE", "AISQUARE_PERSONA")
+
 TRACED = "traced"
 EXCLUDED = "excluded"
 
@@ -331,3 +342,13 @@ def untraced_env(base: Mapping[str, str] | None = None) -> dict[str, str]:
     """
     source = os.environ if base is None else base
     return {key: value for key, value in source.items() if key not in IDENTITY_ENV_VARS}
+
+
+def tmux_client_env(base: Mapping[str, str] | None = None) -> dict[str, str]:
+    """What a tmux client runs with: :func:`untraced_env` less :data:`TEAM_ENV_VARS`.
+
+    The client that finds no server starts one, and the server keeps that client's
+    environment as its global one, so a server the fleet starts holds no team
+    variable. The home (``AISQUARE_HOME``) stays: the windows need it.
+    """
+    return {k: v for k, v in untraced_env(base).items() if k not in TEAM_ENV_VARS}

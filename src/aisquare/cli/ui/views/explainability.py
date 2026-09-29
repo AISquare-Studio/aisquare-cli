@@ -112,26 +112,30 @@ class StatusReport:
 def key_project(page: ProjectInfo | None) -> ProjectInfo | None:
     """The project whose key a launch from ``page`` authenticates with (#141).
 
-    A fleet window runs ``launch`` in the page's root, and ``launch`` joins
-    ``orchestrator.team_project`` from there — ``AISQUARE_TEAM_HUB`` when it is
-    set, else this checkout — the one answer the CLI's ``key``, ``env``,
-    ``status`` and ``register`` give. This tab answered with the page itself,
-    so under a hub it showed and attached the page's key while the page's
-    agents launched with the hub's (review of #170). The row names whichever
-    project it is, so a hub is visible as the hub.
+    A launch from the page is a fleet window's. Every fleet window carries its
+    fleet's own root as ``AISQUARE_TEAM_HUB`` and names its row, so inside it
+    ``orchestrator.team_project`` answers the page's project whatever hub this
+    process or the tmux server has (#230). So under a hub the tab follows the
+    page, as its seats do: the owner's decision (card tsk_01m3nwrzqe61fy5t6tph5z7wv3).
+    Main's 0.7.0 answered the hub's project here, when a window carried its
+    spawner's hub (review of #170). With no hub it is the checkout's project, the
+    answer the CLI's ``key``, ``env``, ``status`` and ``register`` give.
     """
-    return orchestrator.team_project(page.root) if page is not None else None
+    if page is None:
+        return None
+    if orchestrator.team_hub() is not None:
+        return page
+    return orchestrator.team_project(page.root)
 
 
 def own_key_label() -> str:
     """The words on the box that makes the key the project's own (#141), and in every hint to it.
 
-    Under ``AISQUARE_TEAM_HUB`` the key goes to the HUB project, which every
-    project under the hub launches with, and "this project only" said the
-    opposite (review of #170's Setup-form merge, G5).
+    The key goes to the page's project whether or not a hub is exported, since the
+    page's seats launch with it (:func:`key_project`). Under main's 0.7.0 it went to
+    the hub project, and the box said so (review of #170's Setup-form merge, G5).
     """
-    hub = orchestrator.team_hub()
-    return "this project only" if hub is None else f"the hub ({hub.name}) only"
+    return "this project only"
 
 
 def status_report(page: ProjectInfo | None = None) -> StatusReport:
@@ -220,10 +224,11 @@ def _project_key_row(
 ) -> str:
     """``<name>: its own key for stg`` / ``<name>: the machine key`` — the origin per project.
 
-    When the page's launches join another project (the hub's, under a hub), a
-    key the PAGE has of its own is named too, as not used. The row used to show
-    only the hub's, so the page's binding vanished from the tab while its key
-    file stayed on disk (review of #170, D1b round 2, B7).
+    When the page's launches join another project (with no hub, a page whose root
+    is another project's checkout), a key the PAGE has of its own is named too, as
+    not used. The row used to show only the other project's, so the page's binding
+    vanished from the tab while its key file stayed on disk (review of #170, D1b
+    round 2, B7).
     """
     if project is None:
         return "(no project)"
@@ -325,11 +330,6 @@ def attach_project_key(
     except ops.MintedKeyInPlace:
         return _MINTED_KEY_REFUSAL
     name = project.root.name or project.id
-    if project.root == orchestrator.team_hub():
-        # 'this project only' under a hub is the HUB's key, and every project
-        # under it launches with it: said, since the box's own words say the
-        # opposite (review of #170's Setup-form merge, G5).
-        name += " (the AISQUARE_TEAM_HUB project: every project under the hub launches with it)"
     if launches is not None:
         # Attached, and not what the project's launches take: the success line
         # said they did (review of #170's Setup-form merge, G3).
@@ -712,8 +712,8 @@ class ExplainabilityView(VerticalScroll):
                 "the entry these settings belong to; this machine keeps using its current one "
                 "unless 'make active' is ticked. The key is written to "
                 "~/.aisquare/explainability-key at mode 600 and never shown back; with "
-                "'this project only' ticked it is this page's project's own key instead (the "
-                "hub's under a hub), for that deployment alone.",
+                "'this project only' ticked it is this page's project's own key instead, for "
+                "that deployment alone.",
             ),
             id="explainability-setup-note",
         )

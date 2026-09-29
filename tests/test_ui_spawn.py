@@ -23,6 +23,7 @@ import asyncio
 import os
 import re
 import threading
+import time
 from collections.abc import Callable, Coroutine, Iterator, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
@@ -80,10 +81,14 @@ from aisquare.services import fleet as fleet_service
 from aisquare.services import personas as personas_service
 from aisquare.services import settings as settings_service
 from aisquare.services import team as team_service
+from tests.ui_workers import settle_page, settle_workers
 
 T = TypeVar("T")
 SIZE = (120, 50)
 PRIVATE_SOCKET = f"asq-test-{os.getpid()}-ui-spawn"
+LATE = 0.3
+"""How long a scripted refusal holds its worker: past the click's own pause, so it lands
+while ``settle`` already waits, the order windows-latest met by chance."""
 """The socket the spawned agent lives on. NOT ``asq``: the default, and the
 developer's real fleet — see the module docstring."""
 
@@ -299,10 +304,14 @@ def drive(
 
 
 async def settle(pilot: Pilot[Any]) -> None:
-    """Let every worker finish, its state-change handler run, and the screen refresh."""
-    await pilot.app.workers.wait_for_complete()
-    await pilot.pause()
-    await pilot.pause()
+    """Let the dialog go quiet: every worker of ours ended, whatever its state, its
+    state-change handler run and the screen refreshed (``settle_page``).
+
+    Not ``workers.wait_for_complete()``: a scripted refusal ends its worker in an error,
+    which that call raised as ``WorkerFailed`` whenever the worker was still registered
+    when the wait began, as it sometimes was on windows-latest (card tsk_01m3pt9eme0h).
+    """
+    await settle_page(pilot.app)
 
 
 def shown(widget: Static) -> str:
@@ -820,6 +829,37 @@ def test_a_fleet_error_keeps_the_dialog_open_with_the_message_and_spawn_re_enabl
     assert len(spawns.calls) == 2 and results == []
 
 
+def test_a_fleet_error_that_lands_while_the_test_waits_keeps_the_dialog_open(
+    git_project: ProjectInfo, spawns: SpawnRecorder
+) -> None:
+    """The fleet error above, landing after ``settle`` began: windows-latest's order, every run.
+
+    ``settle`` was ``workers.wait_for_complete()``, which raises ``WorkerFailed`` for a
+    worker that failed on purpose while it is still registered, and a refusal held past
+    the click's pause always is (card tsk_01m3pt9eme0h, #234's Windows leg).
+    """
+
+    def refuse(project: ProjectInfo, role: str) -> fleet_service.SpawnReceipt:
+        time.sleep(LATE)
+        raise fleet_service.FleetError("already runs 8 agents [max_agents_per_project = 8]")
+
+    spawns.answer = refuse
+
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
+        await pilot.click("#spawn-submit")
+        await settle(pilot)
+        return [
+            isinstance(host.screen, SpawnDialog),
+            note(dialog, "#spawn-status"),
+            submit(dialog).disabled,
+        ]
+
+    open_, status, disabled = drive(git_project, scenario)
+    assert open_ is True
+    assert status == "already runs 8 agents [max_agents_per_project = 8]"
+    assert disabled is False
+
+
 def test_any_other_exception_lands_in_the_status_line_with_its_class_name(
     git_project: ProjectInfo, spawns: SpawnRecorder
 ) -> None:
@@ -927,8 +967,7 @@ def test_a_receipt_dismisses_toasts_it_and_its_notes_refreshes_and_opens_the_new
         await pilot.pause()
         assert isinstance(app.screen, SpawnDialog)
         await pilot.click("#spawn-submit")
-        ours = [worker for worker in app.workers if worker.group != "_loader"]
-        await app.workers.wait_for_complete(ours)
+        await settle_workers(app)
         for _ in range(3):
             await pilot.pause()
         return [type(app.screen).__name__, app.notices, len(refreshes), app.content.current]

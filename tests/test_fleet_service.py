@@ -10553,3 +10553,315 @@ def test_a_clean_automatic_hand_over_puts_no_note_beside_switched(
     [receipt] = receipts
     assert any(note.startswith("launched as recorded") for note in receipt.notes)
     assert receipt.failures == []
+
+
+# --- a hand-off from a teammate, in the Spawn dialog (HANDOFF, tsk_01m3ns5a736s) ------------
+
+
+def _ready_windows(tmux: FakeTmux, monkeypatch: pytest.MonkeyPatch) -> None:
+    """New panes show Claude Code at its prompt, so a multi-line first message is typed."""
+    original = tmux.spawn_window
+
+    def ready(*args: Any, **kwargs: Any) -> WindowInfo:
+        window = original(*args, **kwargs)
+        tmux.set_command(window.pane_id, "claude")
+        return window
+
+    monkeypatch.setattr(tmux, "spawn_window", ready)
+
+
+def _pasted(tmux: FakeTmux, pane_id: str) -> list[str]:
+    return [text for pane, kind, text in tmux.typed if pane == pane_id and kind == "paste"]
+
+
+def _on_disk(agent: FleetAgent, tmp_path: Path) -> Path:
+    """The agent's transcript, written where its board session says it is."""
+    transcript = tmp_path / f"{agent.session_id}.jsonl"
+    transcript.write_text('{"type":"user"}\n', encoding="utf-8")
+    _with_transcript(agent, transcript)
+    return transcript
+
+
+def test_the_hand_off_picker_lists_this_projects_open_teammates_and_no_other(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, plain_project: ProjectInfo
+) -> None:
+    """The owner's ask: "any current running or stopped but still open/attached teammate".
+    Open is a row that has not ended and whose window is still there: running, waiting,
+    asking, or exited with the dead window tmux keeps. A lost row (its window gone), an
+    ended one and another project's are nobody to hand off from."""
+    running = _coder(project)
+    exited = _coder(project)
+    lost = _coder(project)
+    ended = _coder(project)
+    elsewhere = fleet_service.spawn(plain_project, "coder", worktree=False).agent
+    tmux.die(exited.pane_id, 0)
+    tmux.vanish(lost.pane_id)
+    fleet_service.stop(project, ended.label)
+
+    listed = {status.agent.id: status.state for status in fleet_service.handoff_sources(project)}
+
+    assert set(listed) == {running.id, exited.id}
+    assert listed[exited.id] == "exited" and listed[running.id] != "lost"
+    assert elsewhere.id not in listed
+
+
+def test_a_fork_resumes_the_sources_session_as_a_new_one_and_shares_nothing(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, tmp_path: Path
+) -> None:
+    """Fork, the default. The source keeps running, untouched. The new agent resumes the
+    source's transcript as a FORKED session: ``--resume <transcript> --fork-session``, its
+    own id minted and passed as ``--session-id`` (Claude Code takes the two together only
+    when it forks), so the row joins the new id and the source's is never shared. A new
+    label, its own worktree, no claim; and the launch it records holds no session flag,
+    so a restart of the fork resumes the fork, never the source."""
+    task = _add_task(project, "Ship auth")
+    source = _coder(project, task_id=task.id)
+    old = source.session_id or ""
+    transcript = _on_disk(source, tmp_path)
+    team_service.claim_task(task.id, session_ref=old)
+
+    receipt = fleet_service.hand_off(project, source.label)
+
+    fork = receipt.started.agent
+    command = _command(tmux)
+    assert (receipt.mode, receipt.resumed, receipt.stopped) == ("fork", True, None)
+    assert _flag(command, "--resume") == str(transcript) and "--fork-session" in command
+    assert fork.session_id is not None and fork.session_id != old
+    assert _flag(command, "--session-id") == fork.session_id
+    assert fork.launch_spec is not None
+    chosen = {"--resume", "--fork-session", "--session-id", "--continue"}
+    assert not chosen & set(fork.launch_spec.extra_args), fork.launch_spec.extra_args
+    assert fork.label != source.label and fork.task_id is None
+    assert fork.worktree and fork.cwd != source.cwd
+    with store_session() as store:
+        kept = store.get_fleet_agent(source.id)
+    assert kept is not None and kept.ended_at is None and kept.session_id == old
+    held = _task_now(task.id)
+    assert (held.status, held.claimed_by) == ("doing", old), "the source's claim never moved"
+    [line] = _pasted(tmux, fork.pane_id)
+    assert "\n" not in line and f"a fork of {source.label}" in line
+    [event] = _events(project, "forked")
+    assert event.startswith(f"{fork.label} forked from {source.label}")
+
+
+def test_a_forks_own_worktree_branches_from_the_commit_the_source_is_on(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """A fork's own worktree is a new branch, cut at the commit the source's tree is on, so the
+    fork starts from the source's committed work and never works in the source's tree.
+    What the source has not committed stays with the source."""
+    task = _add_task(project, "Ship auth")
+    source = fleet_service.spawn(project, "coder", task_id=task.id, worktree=True).agent
+    tree = Path(source.cwd)
+    (tree / "done.txt").write_text("committed\n", encoding="utf-8")
+    _git("add", "done.txt", cwd=tree)
+    _git("commit", "-q", "-m", "work in the source", cwd=tree)
+    (tree / "wip.txt").write_text("not committed\n", encoding="utf-8")
+    head = _git("rev-parse", "HEAD", cwd=tree)
+
+    fork = fleet_service.hand_off(project, source.label, fresh=True).started.agent
+
+    own = Path(fork.cwd)
+    assert fork.worktree and own != tree
+    assert _git("rev-parse", "HEAD", cwd=own) == head
+    branch = _git("rev-parse", "--abbrev-ref", "HEAD", cwd=own)
+    assert branch != _git("rev-parse", "--abbrev-ref", "HEAD", cwd=tree)
+    assert (own / "done.txt").is_file() and not (own / "wip.txt").exists()
+
+
+@pytest.mark.parametrize("why", ["asked", "no transcript"])
+def test_a_fork_starts_fresh_when_asked_or_without_a_transcript(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    why: str,
+) -> None:
+    """Start fresh checked, or no transcript on disk: no ``--resume``, an id minted as any
+    spawn mints one, and a first message built from the board that names the source as
+    where the fork came from and its task as the source's work, not the fork's."""
+    _ready_windows(tmux, monkeypatch)
+    task = _add_task(project, "Ship auth")
+    source = _coder(project, task_id=task.id)
+    if why == "asked":
+        _on_disk(source, tmp_path)
+    else:
+        _with_transcript(source, tmp_path / "missing.jsonl")
+
+    receipt = fleet_service.hand_off(project, source.label, fresh=why == "asked")
+
+    fork = receipt.started.agent
+    command = _command(tmux)
+    assert receipt.resumed is False
+    assert "--resume" not in command and "--fork-session" not in command
+    assert fork.session_id is not None and fork.session_id != source.session_id
+    assert _flag(command, "--session-id") == fork.session_id
+    [message] = _pasted(tmux, fork.pane_id)
+    assert f"a fork of {source.label}" in message and task.id in message
+    assert any("no transcript" in note for note in receipt.notes) is (why == "no transcript")
+
+
+def test_take_over_is_the_sources_restart_with_the_dialogs_changes(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Take over is the source's own hand-over, which ``restart`` already is: a running
+    agent stopped with its claims parked for the replacement (an exited one simply started
+    again), under the same label, task and tree, resumed or fresh as asked. The dialog's
+    changes ride along, and the row it read is the row restarted."""
+    source = _coder(project)
+    asked: list[dict[str, Any]] = []
+
+    def restart(on: ProjectInfo, label: str, **kwargs: Any) -> fleet_service.RestartReceipt:
+        asked.append({"project": on.id, "label": label, **kwargs})
+        return fleet_service.RestartReceipt(
+            replaced=source,
+            started=source,
+            resumed=True,
+            was_running=True,
+            tmux_session="asq-x",
+            notes=["kept"],
+        )
+
+    monkeypatch.setattr(fleet_service, "restart", restart)
+
+    receipt = fleet_service.hand_off(
+        project, source.label, mode="take_over", fresh=True, role="tester", persona=""
+    )
+
+    assert asked == [
+        {
+            "project": project.id,
+            "label": source.label,
+            "fresh": True,
+            "role": "tester",
+            "account": None,
+            "persona": "",
+            "size": None,
+            "spawned_by": "user",
+            "agent_id": source.id,
+        }
+    ]
+    assert (receipt.mode, receipt.resumed, receipt.stopped) == ("take_over", True, source)
+    assert receipt.started.agent == source and receipt.notes == ["kept"]
+
+
+@pytest.mark.parametrize("fresh", [False, True])
+def test_restart_as_another_role_keeps_the_label_the_task_and_the_claims(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fresh: bool,
+) -> None:
+    """A take-over with the role and the persona changed in the dialog. The source stops as a
+    hand-over; the replacement runs under its label and task, as the new role, with no
+    persona. Resumed, it keeps the session id and with it the claims; fresh, the claims
+    move onto its new id with the row, never through the pool."""
+    _ready_windows(tmux, monkeypatch)
+    task = _add_task(project, "Ship auth")
+    source = _coder(project, task_id=task.id)
+    old = source.session_id or ""
+    _on_disk(source, tmp_path)
+    team_service.claim_task(task.id, session_ref=old)
+
+    receipt = fleet_service.restart(project, source.label, fresh=fresh, role="tester", persona="")
+
+    started = receipt.started
+    assert receipt.was_running and receipt.resumed is not fresh
+    assert (started.label, started.role, started.task_id) == (source.label, "tester", task.id)
+    assert not started.persona
+    held = _task_now(task.id)
+    assert held.status == "doing" and held.claimed_by == started.session_id
+    assert (started.session_id == old) is not fresh
+
+
+def test_restart_on_another_account_starts_the_replacement_there(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _two_slots_with_usage(monkeypatch, work=10, personal=10)
+    source = fleet_service.spawn(project, "coder", worktree=False, account="1").agent
+
+    receipt = fleet_service.restart(project, source.label, account="2")
+
+    assert receipt.started.account_slot == 2
+    assert _flag(_command(tmux), "--account") == "2"
+
+
+def test_a_role_the_replacement_cannot_run_as_is_refused_before_anything_stops(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    source = _coder(project)
+
+    with pytest.raises(FleetError, match="nope"):
+        fleet_service.restart(project, source.label, role="nope")
+
+    assert source.pane_id not in tmux.killed
+    with store_session() as store:
+        kept = store.get_fleet_agent(source.id)
+    assert kept is not None and kept.ended_at is None
+
+
+def test_a_take_over_whose_replacement_cannot_start_gives_the_claims_back(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The source is stopped as a hand-over, so its claims wait for the replacement; a
+    replacement that then fails to start must give them back, never leave them parked."""
+    task = _add_task(project, "Ship auth")
+    source = _coder(project, task_id=task.id)
+    old = source.session_id or ""
+    _on_disk(source, tmp_path)
+    team_service.claim_task(task.id, session_ref=old)
+
+    def spawn_refuses(*args: Any, **kwargs: Any) -> fleet_service.SpawnReceipt:
+        raise FleetError("tmux could not start the window: boom")
+
+    monkeypatch.setattr(fleet_service, "spawn", spawn_refuses)
+    with pytest.raises(FleetError, match="boom"):
+        fleet_service.restart(project, source.label, role="tester")
+
+    held = _task_now(task.id)
+    assert held.claimed_by != old or held.status != "doing", "left parked on the stopped session"
+
+
+def test_a_fork_on_this_shells_account_runs_where_a_plain_spawn_runs(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """runner2-1's reopen of #234: Account edited to (this shell's) was dropped, because the
+    dialog sent None, and None keeps the teammate's own slot. THIS_SHELL_ACCOUNT says it
+    explicitly: no --account, the ladder a plain spawn runs, never the teammate's slot."""
+    _two_slots_with_usage(monkeypatch, work=10, personal=10)
+    source = fleet_service.spawn(project, "coder", worktree=False, account="2").agent
+    plain = fleet_service.spawn(project, "coder", worktree=False).agent
+    plain_flag = _flag(_command(tmux), "--account")
+    assert source.account_slot == 2 and plain.account_slot != 2, "the pin needs two answers"
+
+    fork = fleet_service.hand_off(
+        project, source.label, fresh=True, account=fleet_service.THIS_SHELL_ACCOUNT
+    ).started.agent
+
+    assert fork.account_slot == plain.account_slot
+    assert _flag(_command(tmux), "--account") == plain_flag
+
+
+def test_a_take_over_on_this_shells_account_runs_where_a_plain_spawn_runs(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same through Take over, which is the teammate's restart."""
+    _two_slots_with_usage(monkeypatch, work=10, personal=10)
+    source = fleet_service.spawn(project, "coder", worktree=False, account="2").agent
+    plain = fleet_service.spawn(project, "coder", worktree=False).agent
+    plain_flag = _flag(_command(tmux), "--account")
+    assert source.account_slot == 2 and plain.account_slot != 2, "the pin needs two answers"
+
+    receipt = fleet_service.hand_off(
+        project, source.label, mode="take_over", account=fleet_service.THIS_SHELL_ACCOUNT
+    )
+
+    assert receipt.started.agent.account_slot == plain.account_slot
+    assert _flag(_command(tmux), "--account") == plain_flag

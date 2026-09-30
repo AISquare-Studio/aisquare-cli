@@ -153,6 +153,19 @@ class ExperimentSettings(BaseModel):
     run: str = ""
 
 
+class ExperimentalSettings(BaseModel):
+    """``[experimental]`` — features that ship OFF until the owner turns them on.
+
+    ``captain``: the home-level agent (``docs/captain.md``). Off, ``aisquare captain``
+    refuses, the fleet UI shows no insignia or captain view, the bundled ``captain``
+    persona is absent and the voice page does not serve. ``AISQUARE_EXPERIMENTAL_CAPTAIN``
+    wins over this field either way; ``core.experimental.captain_enabled`` is the one
+    reader of both.
+    """
+
+    captain: bool = False
+
+
 class RoleLaunchProfile(BaseModel):
     """One role's launch spec, carried verbatim and never interpreted.
 
@@ -400,6 +413,7 @@ class AppConfig(BaseModel):
     accounts: AccountsSettings = Field(default_factory=AccountsSettings)
     snapshot: SnapshotSettings = Field(default_factory=SnapshotSettings)
     experiment: ExperimentSettings = Field(default_factory=ExperimentSettings)
+    experimental: ExperimentalSettings = Field(default_factory=ExperimentalSettings)
     persona: PersonaSettings = Field(default_factory=PersonaSettings)
 
 

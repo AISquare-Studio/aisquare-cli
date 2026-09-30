@@ -935,8 +935,10 @@ class Sidebar(Vertical):
 
     can_focus = True
 
-    def __init__(self, *, id: str | None = None) -> None:
+    def __init__(self, *, id: str | None = None, captain: bool = True) -> None:
         super().__init__(id=id)
+        self.captain = captain
+        """Whether the experimental captain is on: off, no insignia and no captain section."""
         self.selected_key: str | None = None
         """What is highlighted: ``project:<id>``, ``agent:<id>``, ``accounts``, ``doctor``."""
         self._prev_states: dict[str, str] = {}
@@ -953,9 +955,11 @@ class Sidebar(Vertical):
     def compose(self) -> ComposeResult:
         with Horizontal(id="fleet-header"):
             yield Static(Text("Fleet"), id="fleet-title")
-            yield CaptainButton()
+            if self.captain:
+                yield CaptainButton()
             yield AddButton()
-        yield CaptainSection(id="captain-section")
+        if self.captain:
+            yield CaptainSection(id="captain-section")
         yield Static("", id="projects-notice")
         # can_focus=False: the rows are Statics, so a mouse-down on one focuses
         # the nearest focusable ancestor. Left focusable, this scroll would take
@@ -977,8 +981,11 @@ class Sidebar(Vertical):
         """The home's captain row, above the projects (``None``: there is none).
 
         ``notice``: why the read failed — the row is then the last frame's, kept.
-        The insignia in the header follows the same row (T4).
+        The insignia in the header follows the same row (T4). With the captain off
+        there is neither, and nothing to show.
         """
+        if not self.captain:
+            return
         self.query_one(CaptainSection).show(status, notice=notice)
         self.query_one(CaptainButton).show(status)
 

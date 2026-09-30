@@ -84,7 +84,7 @@ from aisquare.cli.ui.views.doctor import DoctorRefreshed, DoctorView
 from aisquare.cli.ui.views.onboard import OnboardFailed, OnboardView, ProjectOnboarded
 from aisquare.cli.ui.views.project import ProjectView
 from aisquare.cli.ui.views.welcome import WelcomeView
-from aisquare.core import paths
+from aisquare.core import experimental, paths
 from aisquare.core.console import stderr_console
 from aisquare.core.store import ContextStore, store_session
 from aisquare.core.workspace import project_id_for
@@ -416,12 +416,16 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         """Whether the sidebar also lists the directories sessions merely ran in (#139)."""
         self._undo: list[project_groups.UndoEntry] = []
         """The layout gestures of this session, newest last; ``u`` reverts the last (#140)."""
+        self.captain_on = experimental.captain_enabled()
+        """The experimental captain, read once at the start: off, there is no insignia,
+        captain row or captain view, and the ui receiver refuses the captain's actions.
+        Turned on while asq runs, it shows at asq's next start (``core.experimental``)."""
 
     # --- layout -------------------------------------------------------------------
 
     def compose(self) -> ComposeResult:
         with Panes(id="main"):
-            yield Sidebar(id="sidebar")
+            yield Sidebar(id="sidebar", captain=self.captain_on)
             # The partition is a widget, not a border: drag it, or step it with
             # < > = from the sidebar; the width is remembered (#137).
             yield Divider("#sidebar", state_key=SIDEBAR_WIDTH_KEY, id="divider")
@@ -608,7 +612,9 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             except Exception as exc:  # a bug in the fleet path must not take the view down
                 agents[project.id] = []
                 notices[project.id] = f"agents unavailable — {type(exc).__name__}: {exc}"
-        home, captain, captain_notice = self._captain(home_id)
+        home, captain, captain_notice = (
+            self._captain(home_id) if self.captain_on else (None, None, None)
+        )
         if home is not None:
             agents[home.id] = [captain] if captain is not None else []
         self.store_error = None
@@ -957,6 +963,8 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         the star showed: lit is a live row (``ALIVE_STATES``), dim is none — or one
         that is gone, which a start replaces (``brain.find`` reaps it first).
         """
+        if not self.captain_on:
+            return  # the insignia is not there to click; nothing else may start one
         # Imported here, not at the top: the shell starts without the captain's modules.
         from aisquare.services.captain import brain
         from aisquare.services.captain import state as captain_state

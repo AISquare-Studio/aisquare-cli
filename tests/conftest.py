@@ -25,6 +25,7 @@ import pytest
 from typer.testing import CliRunner
 
 import aisquare
+from aisquare.core import experimental
 from aisquare.core.paths import HOME_ENV_VAR
 from aisquare.core.state import reset_state
 from aisquare.services import ci_client
@@ -734,3 +735,14 @@ def no_model_probe(monkeypatch: pytest.MonkeyPatch) -> None:
     Tests that exercise probing override ``harness.probe_model`` with a fake.
     """
     monkeypatch.setenv("AISQUARE_HARNESS_PROBE", "0")
+
+
+@pytest.fixture(autouse=True)
+def captain_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The suite runs with the experimental captain ON (``AISQUARE_EXPERIMENTAL_CAPTAIN=1``).
+
+    It ships off (``core.experimental``), and on must be the captain exactly as it was
+    before the switch: every Phase 1 pin runs with it on, unchanged. The switch's own
+    pins (``tests/test_captain_flag.py``) unset it or set it themselves.
+    """
+    monkeypatch.setenv(experimental.CAPTAIN_ENV, "1")

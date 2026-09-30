@@ -25,6 +25,7 @@ from typer.core import TyperGroup
 from aisquare.cli import captain_verbs, captain_voice
 from aisquare.cli.common import fail
 from aisquare.cli.serve import dependency_error
+from aisquare.core import experimental
 from aisquare.core.console import stderr_console, stdout_console
 from aisquare.core.state import get_state
 
@@ -143,7 +144,18 @@ def captain(
     know the owner's spelling; the group's ``parse_args`` has already rewritten
     it to the ``voice`` leaf before this callback runs, so the flag itself is
     never seen true here.
+
+    It runs before every subcommand, so it is where the experimental switch holds
+    them all: off, each exits 2 with one line saying how to turn it on
+    (``core.experimental``).
     """
+    if not experimental.captain_enabled():
+        fail(
+            experimental.CAPTAIN_OFF,
+            error="captain_off",
+            hint=experimental.CAPTAIN_OFF,
+            exit_code=2,
+        )
     if ctx.invoked_subcommand is not None:
         return
     if voice:  # pragma: no cover — parse_args routes --voice to the leaf first

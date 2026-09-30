@@ -44,6 +44,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `aisquare fleet reap -P <home> --server-down`. The captain is spawned with
   Claude Code's session-rating survey off (`CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY`),
   so a survey never blocks the voice path from a phone that cannot answer it.
+- **The captain is experimental, and ships off.** Turn it on with
+  `aisquare config set experimental.captain true` (`[experimental] captain` in
+  `config.toml`), or for one shell with `AISQUARE_EXPERIMENTAL_CAPTAIN=1`. The
+  variable wins over the config either way, and `0` turns it off. Off,
+  `aisquare captain` and every subcommand exit 2 with one line saying how to turn
+  it on. The fleet UI shows no insignia, captain row or captain view, and its ui
+  receiver refuses the captain's actions. The bundled `captain` persona is absent
+  from every picker and the catalogue, and the voice page does not serve.
+  `aisquare doctor` shows one ok row, `captain: off (experimental)`. On, the captain
+  is exactly as above; asq reads the switch when it starts. Nothing else reads it:
+  fleets, boards and the store (schema v24) are the same either way.
 - **The persona rides the system prompt too, and a replay keeps it.** For Claude
   Code the launch appends the persona block to the default system prompt
   (`--append-system-prompt-file`, a file under `~/.aisquare/cache/persona-prompts/`;

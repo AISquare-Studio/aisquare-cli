@@ -31,6 +31,29 @@ Three ideas carry the feature:
 > **Phase 2** section at the end names what does not. CI validates every
 > shell-fenced `aisquare …` line here against the live command tree.
 
+## Experimental: off until you turn it on
+
+The captain ships **off**. While it is off:
+
+- `aisquare captain` and every subcommand exit 2 with one line saying how to turn
+  it on.
+- The fleet UI (`asq`) shows no insignia, captain row or captain view, and its ui
+  receiver refuses the captain's actions.
+- The bundled `captain` persona is absent from every picker and the catalogue.
+- The voice page does not serve.
+- `aisquare doctor` shows one ok row, `captain: off (experimental)`.
+
+Turn it on for this home:
+
+```sh
+aisquare config set experimental.captain true
+```
+
+To turn it on for one shell only, set `AISQUARE_EXPERIMENTAL_CAPTAIN=1`. The
+variable wins over the config either way, and `0` turns it off. `asq` reads the
+switch when it starts, so restart it to see the insignia. Turning it off stops
+nothing that is already running. On, everything below holds exactly as written.
+
 ## Setup, once
 
 1. Install with the voice extra if you want the page and the speaker:

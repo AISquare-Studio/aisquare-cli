@@ -19,7 +19,7 @@ from urllib.parse import urlsplit
 from aisquare.core import agents as agent_core
 from aisquare.core import brain as brain_core
 from aisquare.core import claude_accounts as claude_accounts_core
-from aisquare.core import harness, orchestrator, paths
+from aisquare.core import experimental, harness, orchestrator, paths
 from aisquare.core import snapshot as snapshot_core
 from aisquare.core import tmux as tmux_core
 from aisquare.core.config import load_config
@@ -163,6 +163,9 @@ def doctor(
         # fleet-board card): it can warn, so it waits with the other late rows.
         _check_fleet_server_env(cwd=cwd),
         *_experiment_checks(),
+        # Only while the experimental captain is off: one ok row saying how to turn it
+        # on. On, doctor is as it was before the switch.
+        *_optional(_captain_check()),
         *explainability_ops.checks(live=live, target_name=target, project_id=project_id),
         # Only while a key the CLI minted is owed a revocation (#142); --live
         # tries each again first — one request per key, on the API that minted it.
@@ -2174,6 +2177,21 @@ def _check_brain(cwd: Path | None = None) -> DoctorCheck:
             "brain", f"gbrain {version}, brain ready{embed} ({lag} pipe events awaiting distill)"
         )
     return _ok("brain", f"gbrain {version}, brain ready and fully distilled{embed}")
+
+
+def _captain_check() -> DoctorCheck | None:
+    """``captain: off (experimental)`` while the switch is off; ``None`` while it is on.
+
+    Ok, not a warning, as the CI test bed's off row is: off is the shipped state
+    (``core.experimental``), and the row is there to say how to turn it on.
+    """
+    if experimental.captain_enabled():
+        return None
+    return _ok(
+        "captain",
+        "off (experimental) — turn it on with: aisquare config set experimental.captain true "
+        f"(or {experimental.CAPTAIN_ENV}=1)",
+    )
 
 
 def _experiment_checks() -> list[DoctorCheck]:

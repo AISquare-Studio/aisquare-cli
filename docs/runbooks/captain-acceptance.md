@@ -19,7 +19,13 @@ How current is this file? Ask git: `git log -1 --format='%h %ad' -- docs/runbook
 
 ## 0. Preflight
 
+The captain ships off (experimental, card tsk_01m3qvghrpgg), so turn it on
+first. In a home where it is off, every step below refuses with one line saying
+how to turn it on, and `asq` shows no insignia. The pastes below were recorded
+before the switch existed, with the captain on; on, they read the same.
+
 ```sh
+aisquare config set experimental.captain true
 aisquare --version
 aisquare doctor
 aisquare captain voice --show-token

@@ -660,7 +660,7 @@ def locate(name: str, root: Path | None) -> tuple[Layer, Path]:
     the one that wins once it is valid, and so the one to edit or remove."""
     if _is_skill_name(name):
         for layer, base in core.layer_dirs(root):
-            if (base / name).is_dir():
+            if (base / name).is_dir() and not core.hidden(layer, name):
                 return layer, base / name
     core.resolve(name, root)  # raises, listing the known names
     raise AssertionError("unreachable: resolve found a directory locate did not")
@@ -671,7 +671,7 @@ def shadows(persona: Persona, root: Path | None) -> list[Layer]:
     below = False
     found: list[Layer] = []
     for layer, base in core.layer_dirs(root):
-        if below and (base / persona.name).is_dir():
+        if below and (base / persona.name).is_dir() and not core.hidden(layer, persona.name):
             found.append(layer)
         below = below or layer == persona.layer
     return found

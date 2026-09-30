@@ -86,6 +86,7 @@ from aisquare.cli.ui.sidebar import (
     StopAgent,
     project_name,
 )
+from aisquare.core import experimental
 from aisquare.models import FleetAgentStatus, ProjectInfo
 from aisquare.services.captain import state as captain_state
 
@@ -396,6 +397,8 @@ def _run(action: str, app: FleetApp, arg: str | None, landed: threading.Event) -
     handles its messages in order, each to its end (an ``async`` handler's awaits
     included), so a callback queued behind them runs only after them.
     """
+    if not app.captain_on:
+        return False, experimental.CAPTAIN_OFF  # every action here is the captain's
     handler = ACTIONS.get(action)
     if handler is None:
         return False, f"unknown ui action {_quoted(action)} — known: {', '.join(sorted(ACTIONS))}"

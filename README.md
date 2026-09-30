@@ -159,7 +159,13 @@ captain's 24 tools, each leaving one audit event with your words and a receipt;
 or its project, or when you say yes to the captain's one-sentence question; a
 refusal is said, never faked. The guide is [`docs/captain.md`](docs/captain.md).
 
+The captain is **experimental, and off by default**. Turn it on once with
+`aisquare config set experimental.captain true`, or for one shell with
+`AISQUARE_EXPERIMENTAL_CAPTAIN=1`. While it is off, `aisquare captain` refuses
+with one line saying so, and `asq` shows no captain.
+
 ```sh
+aisquare config set experimental.captain true
 aisquare captain
 aisquare captain say "what is up"
 aisquare captain attention

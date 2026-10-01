@@ -128,8 +128,11 @@ def team_hub() -> Path | None:
     """The hub this process honours: ``AISQUARE_TEAM_HUB`` as an absolute path, else ``None``.
 
     :func:`team_project`'s rule without its warning: a relative value is
-    ignored. For a surface that has to say it is under a hub, such as the fleet
-    UI's Explainability tab, whose key then belongs to the hub project.
+    ignored. For a surface that has to say it is under a hub: the explainability
+    key commands, whose default project is then the hub's while a fleet seat
+    traces as its own fleet's (``cli/explainability.py``). The fleet UI's
+    Explainability tab asked it too while its key belonged to the hub project;
+    its key is the page's own now, hub or no hub (#235; review of #240, finding 12).
     """
     hub = os.environ.get(TEAM_HUB_ENV_VAR, "").strip()
     if not hub or not Path(hub).expanduser().is_absolute():

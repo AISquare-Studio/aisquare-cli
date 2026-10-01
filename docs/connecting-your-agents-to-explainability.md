@@ -337,7 +337,12 @@ when it is set, else this checkout (a worktree resolves to its principal) —
 never the `project switch` pin, which launches ignore. Every surface without a
 `--project` asks the same question, so the key `status` and `key show` report
 is the key `launch`, `team spawn` and `explainability env` authenticate with.
-Name another project with `--project P`.
+Name another project with `--project P`. Under a hub that default is the hub's
+project, while a fleet seat spawned from the same shell traces as its own
+fleet's project (`fleet spawn -P repoA` gives a seat of `repoA`): so under a
+hub each of these commands says in one line on stderr whose project it speaks
+for, naming the project a `fleet spawn` here joins when that is not the hub's,
+and `--project <name>` addresses a seat's.
 
 The key lands in the project's data directory, mode 600
 (`~/.aisquare/projects/<id>/explainability-key`); the store records only the

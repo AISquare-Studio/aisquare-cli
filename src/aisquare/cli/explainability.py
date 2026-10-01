@@ -23,6 +23,7 @@ newline included, in every shell.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shlex
@@ -32,7 +33,7 @@ from typing import Annotated
 import typer
 
 from aisquare.cli.common import expected_config_write_errors, fail, project_for_ref
-from aisquare.core import orchestrator, outbox
+from aisquare.core import orchestrator, outbox, paths
 from aisquare.core.config import ExplainabilitySettings, load_config, save_config
 from aisquare.core.state import get_state
 from aisquare.core.store import store_session
@@ -65,7 +66,8 @@ _PROJECT_OPTION = typer.Option(
     "--project",
     "-P",
     help="Project by codename, name or id prefix (default: the one a launch here joins — "
-    "$AISQUARE_TEAM_HUB, else this checkout).",
+    "$AISQUARE_TEAM_HUB, else this checkout). Under a hub, fleet seats trace as their own "
+    "project: name it here to address theirs.",
 )
 
 
@@ -79,12 +81,86 @@ def _project_for(ref: str | None) -> ProjectInfo:
     used to resolve through the pin, so with project X pinned, ``env`` in
     project Y — and the printed ``team spawn`` line that evals it — handed Y's
     agent X's workspace key while ``launch`` in the same directory used Y's
-    (review of #170). It opens no store either, so ``env`` and ``status`` stay
-    reads that a damaged ``context.db`` cannot fail.
+    (review of #170). A damaged ``context.db`` cannot fail it either, so ``env``
+    and ``status`` stay reads: the store is asked only for a fleet window's row
+    and for the line below, and both fail open.
+
+    Under a hub that default is the hub's project, while a fleet seat spawned
+    from the same shell traces as its own fleet's (#230). The default stays,
+    since it is still true of a launch here, and one line on stderr says whose
+    project it is (:func:`_hub_note`). The line is decoration on a read: whatever goes wrong
+    while it is worked out costs the line, never the command, and never the
+    project, which ``status`` and ``register`` resolve inside a guard that takes
+    any failure for "no project" (:func:`_key_project_id`).
     """
-    if ref is None:
-        return orchestrator.team_project(None)
-    return project_for_ref(ref)
+    if ref is not None:
+        return project_for_ref(ref)
+    project = orchestrator.team_project(None)
+    with contextlib.suppress(Exception):
+        note = _hub_note(project)
+        if note is not None:
+            typer.echo(note, err=True)
+    return project
+
+
+def _hub_note(project: ProjectInfo) -> str | None:
+    """The line a key command owes when it speaks for a hub's project: whose project that is.
+
+    Since #230 a fleet window carries its own fleet's root as its hub and names
+    its row, so a seat traces as its own fleet's project whatever hub the shell
+    that spawned it exports, while this command's default, and a plain
+    ``launch`` from that shell, stay the hub's. ``key set`` and ``register``
+    then configured the hub's project while the seats traced with another key,
+    and ``status`` kept reporting the hub: #170's mismatch again (review of
+    #240, finding 12). The default stays, since it is still true of a launch
+    from this shell; the line says which project it is, and that ``--project``
+    addresses a seat's.
+
+    ``None``, so nothing is said, with no hub exported (or a relative one, which
+    ``team_project`` ignores) and in a fleet window, where ``project`` is the
+    seat's own already. The caller asks only when no ``--project`` was given.
+    Otherwise the line is said whichever directory the shell is in: ``fleet
+    spawn -P repoA`` from the hub's own checkout gives a seat of ``repoA`` too,
+    so a shell whose own spawns would join the hub is owed it as well. It names
+    the project a ``fleet spawn`` here with no ``-P`` joins when that is not the
+    hub's (:func:`_spawned_here`).
+    """
+    if orchestrator.team_hub() is None or orchestrator._fleet_board() is not None:
+        return None
+    said = (
+        f"note: this command speaks for {project.root.name or project.id}, the "
+        f"${orchestrator.TEAM_HUB_ENV_VAR} project. Fleet seats trace as their own project"
+    )
+    spawned = _spawned_here()
+    if spawned is None or spawned.id == project.id:
+        return f"{said}: --project <name> addresses the key of a seat spawned with -P <name>."
+    theirs = spawned.codename or spawned.root.name or spawned.id
+    return (
+        f"{said}: a fleet spawn here joins {theirs}, and --project {shlex.quote(theirs)} "
+        "addresses its key."
+    )
+
+
+def _spawned_here() -> ProjectInfo | None:
+    """The project a ``fleet spawn`` here with no ``-P`` joins (the ``project switch`` pin,
+    else this checkout), or ``None`` when that cannot be read.
+
+    The lookup opens the store, so a machine with no ``context.db`` is answered
+    without it: opening creates the file, and ``env`` and ``status`` are reads
+    that create nothing (review of #170). Any failure costs the name, never the
+    line or the command.
+    """
+    if not paths.db_path().exists():
+        return None
+    # Imported here: the fleet service brings tmux, the team service and the
+    # personas with it, and at module scope every command would pay for them
+    # (tests/test_import_cost_of_the_integration.py).
+    from aisquare.services import fleet as fleet_service
+
+    try:
+        return fleet_service.resolve_project(None)
+    except Exception:  # the name is decoration on the line, as the line is on the command
+        return None
 
 
 def _key_project_id(ref: str | None) -> str | None:

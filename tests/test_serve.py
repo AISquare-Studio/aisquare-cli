@@ -634,7 +634,7 @@ def test_a_crashed_tool_is_an_error_result_logged_server_side(
     team_service.activate()
     ours = "aisquare.services.mcp_server"
 
-    def fell_over() -> object:
+    def fell_over(**_asked: object) -> object:  # the tool names the kinds it leaves out
         raise RuntimeError("the board renderer fell over")
 
     monkeypatch.setattr(team_service, "board_data", fell_over)

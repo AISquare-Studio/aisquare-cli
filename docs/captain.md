@@ -219,6 +219,12 @@ next prompt. `since` shows what happened on a board since you last looked, and
 `--advance` moves that watermark. `log` is the audit: the `captain_action`
 events, newest last.
 
+The audit is written on the board each call is about, and `log` is where it is
+read. `aisquare board` and its watch leave those lines out of their recent
+updates, and no agent is shown them: not in a briefing, a delta, a manager's
+wake-up or the MCP `team_board`. So however often you ask the captain about a
+project, its board still shows that project's own decisions and results.
+
 ### The action list
 
 Named sequences of the captain's primitives, run as one tool call (`act`):

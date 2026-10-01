@@ -1241,7 +1241,12 @@ def board(
         _watch_board(max(interval, 0.5))
         return
     try:
-        project, sessions, tasks, events = team_service.board_data()
+        # The captain's audit is left out before the recent updates are counted: one
+        # line per captain tool call filled the list (review of #240, finding 11). The
+        # bell and the notices are this board's own; `aisquare captain log` is the audit.
+        project, sessions, tasks, events = team_service.board_data(
+            exclude_kinds=team_service.CAPTAIN_AUDIT_KINDS
+        )
     except STORE_ERRORS as exc:
         _fail_team(exc)
     warn_board_scope(None)

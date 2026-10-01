@@ -467,13 +467,14 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
             with VerticalScroll(id="spawn-fields"):
                 if not self._captain:
                     # A hand-off from a teammate (card tsk_01m3ns5a736s). ``(none)`` is
-                    # the plain spawn below, field for field.
+                    # the plain spawn below, field for field. Each teammate is its ROW's
+                    # id: two rows can carry one label (_source_changed).
                     with Horizontal(classes="spawn-row"):
                         yield Label("Hand off from")
                         yield Select(
                             [
                                 ("(none)", NO_SOURCE),
-                                *((source_choice(s), s.agent.label) for s in self._sources),
+                                *((source_choice(s), s.agent.id) for s in self._sources),
                             ],
                             value=NO_SOURCE,
                             allow_blank=False,
@@ -750,8 +751,17 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
 
     @on(Select.Changed, "#spawn-from")
     def _source_changed(self, event: Select.Changed) -> None:
+        """The teammate chosen, by its row's id.
+
+        Two rows of a project can carry one label over time, an exited coder-1 and the
+        coder-1 started since, and the list read when the form opened can show either or
+        both. By label the form took the first row under it, and the service the newest:
+        the fork or the take-over acted on a teammate the owner did not choose (review of
+        #240, "also confirmed": hand-off by label). The id goes with the hand-off
+        (:meth:`handoff_kwargs`), and the service acts on that row or refuses.
+        """
         chosen = event.value if isinstance(event.value, str) else NO_SOURCE
-        source = next((s for s in self._sources if s.agent.label == chosen), None)
+        source = next((s for s in self._sources if s.agent.id == chosen), None)
         if source is self._source:
             return
         self._source = source
@@ -889,6 +899,8 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
             "persona": None if persona == (agent.persona or NO_PERSONA) else persona,
             "label": None if take_over or label == self._prefill else label,
             "prompt": None if take_over or not prompt.strip() else prompt,
+            # The row the form shows, not whoever carries its label by the time it runs.
+            "agent_id": agent.id,
         }
 
     @on(Input.Changed, "#spawn-label")

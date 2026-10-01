@@ -263,6 +263,21 @@ def hand_off(
     return dataclasses.replace(result.started, notes=list(result.notes))
 
 
+@dataclasses.dataclass(frozen=True)
+class PlainFields:
+    """Role, Account and Persona as the plain form held them before a teammate filled them.
+
+    What *Hand off from* gives back when it returns to ``(none)`` (review of #240, the
+    stale slot).
+    """
+
+    role: str
+    account: str
+    preset_account: str | None
+    persona: str
+    persona_touched: bool
+
+
 class ConfirmTakeOverScreen(ModalScreen[bool]):
     """The one question before a take-over stops its source (card tsk_01m3ns5a736s)."""
 
@@ -383,6 +398,8 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         )
         self._source: FleetAgentStatus | None = None
         """The teammate the form hands off from; ``None`` is the plain spawn."""
+        self._plain: PlainFields | None = None
+        """What the teammate's prefill replaced, kept while one is chosen (``_give_back``)."""
 
     # --- what the form reads when it opens ----------------------------------------------
 
@@ -768,10 +785,14 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         source = next((s for s in self._sources if s.agent.label == chosen), None)
         if source is self._source:
             return
+        if self._source is None:
+            self._plain = self._plain_fields()
         self._source = source
         self.query_one("#spawn-how-row").display = source is not None
         if source is not None:
             self._prefill_from(source)
+        else:
+            self._give_back()
         self._apply_handoff()
 
     @on(RadioSet.Changed, "#spawn-how")
@@ -788,7 +809,10 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         """Role, Account and Persona from the teammate, all still editable (the owner's call).
 
         The persona is marked chosen, so the role's own change handler, which runs after
-        this, does not replace it with the role's default.
+        this, does not replace it with the role's default. All three from EVERY teammate:
+        the Account was filled only from one that has a slot, so a teammate on this
+        shell's account kept showing the slot of the one chosen before it, and that was
+        sent as a choice (review of #240, the stale slot).
         """
         agent = source.agent
         if agent.role not in self._roles:
@@ -803,12 +827,48 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         field = self.query_one("#spawn-persona", Select)
         field.set_options(self._persona_options())
         field.value = persona
-        if agent.account_slot is not None:
-            self._preset_account = str(agent.account_slot)
-            accounts = self.query_one("#spawn-account", Select)
-            accounts.set_options(self._account_options(self._account_statuses))
-            accounts.value = self._preset_account
+        own = str(agent.account_slot) if agent.account_slot is not None else THIS_SHELL
+        self._preset_account = own or None
+        accounts = self.query_one("#spawn-account", Select)
+        accounts.set_options(self._account_options(self._account_statuses))
+        accounts.value = own
         self._describe_persona()
+
+    def _plain_fields(self) -> PlainFields:
+        """The three fields a teammate fills, as the form holds them now."""
+        account = self.query_one("#spawn-account", Select).value
+        return PlainFields(
+            role=self._role,
+            account=account if isinstance(account, str) else THIS_SHELL,
+            preset_account=self._preset_account,
+            persona=self._persona_value(),
+            persona_touched=self._persona_touched,
+        )
+
+    def _give_back(self) -> None:
+        """``(none)`` again: Role, Account and Persona as they were before a teammate filled them.
+
+        They stayed the teammate's, and the plain spawn went out with its role, its
+        persona and its account slot, none of them chosen (review of #240, the stale
+        slot). The persona goes back silently, with whether it was the owner's pick: a
+        ``Select.Changed`` from here would be read as one (``_persona_changed``).
+        """
+        plain, self._plain = self._plain, None
+        if plain is None:
+            return
+        self._preset_account = plain.preset_account
+        options = self._account_options(self._account_statuses)
+        accounts = self.query_one("#spawn-account", Select)
+        accounts.set_options(options)
+        if plain.account in {value for _, value in options}:
+            accounts.value = plain.account
+        self._persona_touched, self._persona_shown = plain.persona_touched, plain.persona
+        field = self.query_one("#spawn-persona", Select)
+        with self.prevent(Select.Changed):
+            field.set_options(self._persona_options())
+            field.value = plain.persona
+        self._describe_persona()
+        self.query_one("#spawn-role", Select).value = plain.role
 
     def _apply_handoff(self) -> None:
         """Lock or free what a hand-off decides, and name the button for what it does."""

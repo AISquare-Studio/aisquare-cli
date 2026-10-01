@@ -270,3 +270,106 @@ def test_the_editor_opens_on_a_skill_md_that_holds_the_date_which_is_how_it_gets
     )
     assert disabled is True and status.startswith(f"✗ {NOT_VALID_YAML}")
     assert mended_disabled is False and mended_status.startswith("✓ parses")
+
+
+# --- what loads, and will not print ---------------------------------------------------------
+#
+# The same finding, one step later (the owner's ruling on the report of it). PyYAML reads a
+# hex literal of any length, and Python refuses to print an integer past
+# ``sys.get_int_max_str_digits()``: so the document loaded, and the ``str()`` of a key, of a
+# role or tag hint, or of the ``name`` label raised ``ValueError`` from ``parse_skill``,
+# ``_hints`` or ``core.warnings``, and ``--json`` raised it for any value at all. A
+# frontmatter that cannot be turned into text is not valid frontmatter for a persona.
+
+BEYOND_PRINTING = "0x" + "f" * 5000
+"""6,021 decimal digits: PyYAML loads it, ``str()`` will not print it."""
+
+#: A frontmatter line holding that integer where a persona reads text. PyYAML raises
+#: nothing for any of them: what failed was ours.
+UNPRINTABLE = [
+    pytest.param(f"? {BEYOND_PRINTING}\n: x\n", id="as-a-key"),
+    pytest.param(f"metadata:\n  persona-roles: [{BEYOND_PRINTING}]\n", id="as-a-role-hint"),
+    pytest.param(f"metadata:\n  persona-tags: [{BEYOND_PRINTING}]\n", id="as-a-tag-hint"),
+    pytest.param(f"name: {BEYOND_PRINTING}\n", id="as-the-name-label"),
+    pytest.param(f"carried: {BEYOND_PRINTING}\n", id="as-a-value-that-is-only-carried"),
+]
+
+
+@pytest.mark.parametrize("line", UNPRINTABLE)
+def test_a_frontmatter_that_loads_and_will_not_print_is_refused_the_same_way(
+    tmp_path: Path, line: str
+) -> None:
+    frontmatter = f"description: fine\n{line}"
+    loaded = yaml.safe_load(frontmatter)  # the premise: PyYAML loads it ...
+    with pytest.raises(ValueError):  # ... and Python will not print it
+        str(loaded)
+
+    with pytest.raises(PersonaError) as caught:
+        core.parse_skill(
+            f"---\n{frontmatter}---\nbody\n", name="ok", path=tmp_path / "ok", layer="user"
+        )
+
+    assert caught.value.code == "not_recognised"
+    assert caught.value.rule.startswith(NOT_VALID_YAML)
+    assert str(caught.value).startswith(f"{tmp_path / 'ok' / 'SKILL.md'}: ")
+
+
+@pytest.mark.parametrize("line", UNPRINTABLE)
+def test_a_directory_whose_frontmatter_will_not_print_is_listed_invalid_and_the_rest_load(
+    repo: Path, line: str
+) -> None:
+    bad = _project_layer(repo) / "x"
+    bad.mkdir(parents=True)
+    (bad / "SKILL.md").write_text(
+        f"---\ndescription: Holds a number.\n{line}---\nWork carefully.\n", encoding="utf-8"
+    )
+    cli_suite._skill(_project_layer(repo), "pair", description="Pairs on the work.")
+
+    personas, invalid = core.catalogue(repo)
+
+    assert [persona.name for persona in personas] == sorted([*BUNDLED, "pair"])
+    assert [path for path, _reason in invalid] == [bad]
+    assert invalid[0][1].startswith(NOT_VALID_YAML)
+    for persona in personas:  # nothing downstream is left to raise
+        assert core.warnings(persona) is not None
+
+
+def test_show_and_validate_of_a_label_that_will_not_print_answer_in_one_line(
+    runner: CliRunner, repo: Path
+) -> None:
+    bad = _project_layer(repo) / "x"
+    bad.mkdir(parents=True)
+    (bad / "SKILL.md").write_text(
+        f"---\nname: {BEYOND_PRINTING}\ndescription: Labelled with a number.\n---\nWork.\n",
+        encoding="utf-8",
+    )
+
+    listed = runner.invoke(app, ["persona", "list"])
+    by_its_name = runner.invoke(app, ["--json", "persona", "show", "x"])
+    validated = runner.invoke(app, ["persona", "validate", str(bad)])
+
+    assert listed.exit_code == 0, repr(listed.exception)
+    assert [row.split()[0] for row in listed.stdout.splitlines() if row[:1] != "✗"] == BUNDLED
+    assert isinstance(by_its_name.exception, SystemExit), repr(by_its_name.exception)
+    assert json.loads(by_its_name.stdout)["error"] == "unknown_persona"
+    assert isinstance(validated.exception, SystemExit), repr(validated.exception)
+    assert NOT_VALID_YAML in validated.stderr
+
+
+def test_the_integer_check_asks_each_value_once_however_often_it_is_aliased() -> None:
+    """Aliases let a few hundred bytes of YAML print as an astronomically long text, so the
+    check must never print the frontmatter whole: it asks each value once, by identity."""
+    asked: list[int] = []
+
+    class Counted(int):
+        def __str__(self) -> str:
+            asked.append(1)
+            return "7"
+
+    shared: list[object] = [Counted(7)]
+    for _ in range(3):  # three levels of ten aliases each: a thousand paths to one integer
+        shared = [shared] * 10
+
+    core._print_integers({"carried": shared})
+
+    assert asked == [1]

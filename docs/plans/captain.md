@@ -101,6 +101,7 @@ owner ── TUI captain view (T4) ─────────┘               
 | 13570 | a bare yes answers the captain's own named question, recorded pending for 120 s (`CONFIRM_TTL_S`); words naming another agent or project refuse |
 | 13614 / 14375 | ok, okay, sure, yup, roger, copy and affirmative count only as the whole answer, and a no only alone; the persona calls the tool first |
 | 14404 / 14427 | any other owner line closes a pending question; the persona passes the owner's exact words, a no included |
+| review of #240, finding 1 | 2026-09-30, the owner: a refusal that names the target is still a no. Clear refusals only, not any negation anywhere: words that begin with a no, a negation right before the tool's own verb, leave or keep within two words before the target's name (`words.refusal`); this overturns "a no only alone" of 13614. And a name is read whole: a hyphen is part of a label or project name, and another name is looked for on every row of the board, ended agents included, before the call's own names are set aside |
 | 14476 | T1e: the captain is spawned with Claude Code's session-rating survey off |
 | 14560 | T1e: the refusal for words that name nothing is the question itself; the rule and the seq stay in the audit |
 
@@ -141,6 +142,20 @@ owner ── TUI captain view (T4) ─────────┘               
   on, or the tool refuses and records its question pending for 120 s. A yes
   answers it; a no, or any other owner line through `say`, `send` or the voice
   page, closes it. The server never relies on the model passing a no.
+- **A refusal that names the agent is still a no — clear refusals only** (review
+  of #240, finding 1; the owner, 2026-09-30): the persona passes a no with
+  `confirm=true` like every answer, and "No, leave coder-1 running" names
+  coder-1, so the gate took it for the confirmation and coder-1 was stopped.
+  The review proposed "any negation anywhere"; the owner chose clear refusals,
+  for fewer repeat questions: words that begin with a no, a negation right
+  before the tool's own verb, *leave* or *keep* within two words before the
+  target's name (`words.refusal`). "Stop coder-1, no need for it anymore"
+  stays an order, and a refusal in other words can still get through:
+  accepted. It overturns "a no only as the whole utterance" (13614): "No
+  problem, go ahead" is a no now. In the same gate a name is read whole: a
+  hyphen is part of a label or a project name (`coder-1-2` is never
+  `coder-1`), and another name is looked for on every row of the board, ended
+  agents included, before the call's own names are set aside.
 - **The refusal for unnamed words is the question itself** (T1e, 14560): the
   captain says a refusal as it came, so it asks; the rule and the seq stay in
   the audit.

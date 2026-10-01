@@ -144,6 +144,14 @@ class _Dialog(ModalScreen[Any]):
         widget.update(Text(text, style=style) if text else "")
         widget.display = bool(text)
 
+    def warn_links(self, skipped: list[str]) -> None:
+        """The symbolic links an import or export left out, in the sentence the CLI
+        prints. A toast, not the status line: the dialog closes on the result, and the
+        Spawn dialog, which opens Import too, shows no warnings of its own."""
+        warning = personas_service.link_warning(skipped)
+        if warning is not None:
+            self.notify(warning, severity="warning", timeout=10, markup=False)
+
 
 # --- Import -------------------------------------------------------------------------------
 
@@ -322,6 +330,7 @@ class ImportPersonaScreen(_Dialog):
             return
         if event.state is WorkerState.SUCCESS:
             if isinstance(worker.result, personas_service.ImportResult):
+                self.warn_links(worker.result.skipped_links)
                 self.dismiss(worker.result)
                 return
             self._refused(f"the import answered without a result ({type(worker.result).__name__})")
@@ -632,7 +641,7 @@ class EditPersonaScreen(_Dialog):
         layer = chosen_layer(self.query_one("#save-as-layer", RadioSet))
         try:
             base = dict(core.layer_dirs(self.root))[layer]
-            personas_service.export(
+            written = personas_service.export(
                 self.persona_name,
                 root=self.root,
                 to=base,
@@ -642,6 +651,8 @@ class EditPersonaScreen(_Dialog):
         except (PersonaError, KeyError, OSError) as exc:
             self.note("#edit-status", failure(exc), style="bold red")
             return
+        if isinstance(written, personas_service.ExportResult):
+            self.warn_links(written.skipped_links)
         self.dismiss(True)
 
     @on(Button.Pressed, "#edit-cancel")
@@ -756,7 +767,12 @@ class ExportPersonaScreen(_Dialog):
         except (PersonaError, OSError) as exc:
             self.note("#export-status", failure(exc), style="bold red")
             return
-        self.dismiss(ExportDone(self.persona_name, Path(written), kwargs["skill"]))
+        if isinstance(written, personas_service.ExportResult):
+            self.warn_links(written.skipped_links)
+            where = written.path
+        else:
+            where = Path(written)
+        self.dismiss(ExportDone(self.persona_name, where, kwargs["skill"]))
 
     @on(Button.Pressed, "#export-cancel")
     def _cancel(self) -> None:

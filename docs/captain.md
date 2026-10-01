@@ -233,8 +233,11 @@ a failing step stops it and says which. `aisquare captain actions` lists them.
 On Claude Code's permission chooser, yes is the digit of the option that says
 Yes (usually `1`), and no is Esc. On a `[y/N]` line they are `y` and `n`. The
 letter `y` does nothing on Claude Code's chooser. `1` to `9` press a digit.
-After a key that answers a prompt, the pane is read back, and a prompt still
-showing is an error: the captain never reports a press the prompt ignored.
+After a key that answers a prompt, the pane is read back, and the same prompt
+still showing is an error: the captain never reports a press the prompt ignored.
+The prompt is compared whole (what it asks about, its question, its options).
+The next prompt in line often asks the same question about another command, and
+it is not taken for the one just answered: it waits for you to read it.
 The trust dialog is refused by name for every key, because trusting a folder is
 yours to answer. An agent is ready for a key or a paste when it is waiting or asking. It
 is also ready when the fleet still reads it working but its screen shows a

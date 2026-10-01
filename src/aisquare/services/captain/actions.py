@@ -104,9 +104,11 @@ ANSWERS = ("yes", "no")
 """The semantic keys: read off the pane at the moment of the press (``screen.prompt_showing``)."""
 
 ANSWERING_KEYS = frozenset({"yes", "no", "y", "n", "enter", "esc", *(str(d) for d in range(1, 10))})
-"""Keys that answer a prompt: pressed while one shows, the pane is read back, and a prompt
-still showing is a said failure — the captain never reports a press the prompt ignored.
-The arrows, tab, space and ctrl-c move or interrupt; they only report what shows after."""
+"""Keys that answer a prompt: pressed while one shows, the pane is read back, and the SAME
+prompt still showing is a said failure — the captain never reports a press the prompt
+ignored. The same by the whole of it (``screen.Prompt.whole``): the next prompt in line
+often asks the very same question. The arrows, tab, space and ctrl-c move or interrupt;
+they only report what shows after."""
 
 READBACK_POLLS = 10
 READBACK_POLL_S = 0.2
@@ -856,9 +858,18 @@ def _press(target: ProjectInfo, label: str, key: str) -> Outcome:
             after = screen.prompt_showing(_screen(srv, agent.pane_id))
         except TmuxError:
             continue
-        if after is None or after.question != before.question:
+        # The WHOLE prompt, never its question line alone (review of #240, finding 10):
+        # Claude Code asks every queued Bash command the same question. Read as "still
+        # showing", the next prompt made a press that worked a retryable failure, and
+        # the retry's yes approved a command nobody had read.
+        if after is None or after.whole != before.whole:
             data["answered"] = True
-            return Outcome(data, said=f"pressed {shown} in {label}: the prompt is gone")
+            now = (
+                "the prompt is gone"
+                if after is None
+                else f"the prompt is answered; another shows now: {after.question}"
+            )
+            return Outcome(data, said=f"pressed {shown} in {label}: {now}")
     raise Failed(
         f"pressed {shown} in {label} but the prompt is still showing: {before.question} — "
         "the key did not answer it"
@@ -1843,8 +1854,8 @@ def press(project: str, label: str, key: str, utterance: str = "") -> str:
     digit of its Yes option and no is Esc; on a [y/N] line, y and n; refused when no
     prompt shows, and on the trust dialog (the owner's to answer). Literal keys: 1-9 y n
     enter esc up down left right tab space ctrl-c. After a key that answers, the pane is
-    read back: a prompt still showing is an error, never a success. Only into an agent
-    that is waiting or asking — never a busy one.
+    read back: the same prompt still showing is an error, never a success. Only into an
+    agent that is waiting or asking — never a busy one.
     """
     return _run(
         "press",

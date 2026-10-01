@@ -80,6 +80,12 @@ class Prompt:
     yes_key: str | None
     """tmux's key for yes — the digit of the first option that says Yes, or ``y``."""
     no_key: str | None
+    whole: str
+    """Everything the prompt shows (:func:`dialog_region`), as one line: what its question
+    is about (the command, the file), the question, the options, the footer. Whitespace is
+    collapsed and the highlight dropped, so the same prompt redrawn — the mark moved, the
+    pane resized — reads the same, and the NEXT prompt, which asks the same question about
+    another command, does not (review of #240, finding 10)."""
 
 
 def strip_escapes(lines: Sequence[str]) -> list[str]:
@@ -162,10 +168,11 @@ def prompt_showing(lines: Sequence[str]) -> Prompt | None:
     region = dialog_region(rows)
     if not region:
         return None
+    whole = " ".join(" ".join(region).replace(PROMPT_MARK, " ").split())
     footer = any(MODAL_FOOTER.search(row) for row in region[-2:])
     if footer and any(TRUST.search(row) for row in region):
         question = next((row.strip() for row in region if "Quick safety check" in row), "")
-        return Prompt("trust", question or "the trust dialog", None, None)
+        return Prompt("trust", question or "the trust dialog", None, None, whole)
     numbered = [(index, match) for index, match in enumerate(map(OPTION.match, region)) if match]
     if footer and len(numbered) >= 2:
         digits = [match.group(2) for _, match in numbered]
@@ -179,9 +186,9 @@ def prompt_showing(lines: Sequence[str]) -> Prompt | None:
             yes = next(
                 (m.group(2) for _, m in numbered if m.group(3).lower().startswith("yes")), None
             )
-            return Prompt("chooser", question, yes, "Escape")
+            return Prompt("chooser", question, yes, "Escape", whole)
     if YES_NO.search(region[-1]):
-        return Prompt("yn", region[-1].strip(), "y", "n")
+        return Prompt("yn", region[-1].strip(), "y", "n", whole)
     return None
 
 

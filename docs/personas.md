@@ -198,8 +198,12 @@ layer, a name, *Condense*, the engine and model for the LLM path, and *Force*.
 Progress appears under the form while it runs; a draft an LLM wrote is shown in
 full — engine, model, size, frontmatter, body, what it dropped — before *Save*
 keeps it or *Discard* leaves it under `.drafts`. A refusal stays in the form
-with its reason. **+ New** asks for a name, a layer and a description, creates
-the scaffold, and opens it in the editor.
+with its reason. *Cancel* (or `Esc`) while it runs imports nothing and, under
+*Force*, replaces nothing (a draft an LLM already wrote stays under `.drafts`);
+once the persona is being written it is too late to cancel, so the form waits
+and a toast says what was imported. **+ New** asks
+for a name, a layer and a description, creates the scaffold, and opens it in
+the editor.
 
 ## Attach in two steps
 

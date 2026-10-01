@@ -634,12 +634,17 @@ its choice presets Role/Binary/Account. So the agent-first path from the
 `services.fleet.attach_persona(project, label, persona_name, *, sender=None)
 -> AttachReceipt`: resolve the persona (unknown → the known names); update
 `fleet_agent.persona` and, when the agent has a joined session row,
-`team_session.persona`; deliver the briefing **now** through the existing
-`fleet_service.tell(...)` — one preface line ("aisquare: the operator attached
-persona <name> to you — it applies from now on; it replaces <old>") followed by
-`briefing(persona)` — which types into a waiting agent and files a board note
-for a busy one, exactly as `fleet tell` does today; the receipt says which
-(`typed` / `noted`); one board event. To make the attachment survive `/clear`
+`team_session.persona`; **type** the briefing into an agent that is waiting, by
+`fleet tell`'s own readiness test — one preface line ("aisquare: the operator
+attached persona <name> to you — it applies from now on; it replaces <old>")
+followed by `briefing(persona)` — and file nothing in its place for a busy one:
+`fleet tell`'s board note would carry the body to every other session (§3.1;
+review of #240, finding 7), so a busy agent is owed the briefing: a `team_meta`
+marker under its fleet row, which its own next prompt's hook turns into the same
+preface and block, once and for it alone (a session start that comes first
+briefs it instead and settles the marker); the receipt says which (`typed` /
+`noted`); one board event
+(`persona_attached`: name, never body). To make the attachment survive `/clear`
 and a restart, `hook_session_start` resolves the persona as the `fleet_agent`
 row `AISQUARE_FLEET_AGENT` names, when that row carries one (the latest recorded
 intent: `fleet spawn` writes its `--persona` there and `attach` replaces it) >
@@ -760,7 +765,7 @@ core.config.PersonaImportSettings(engine="auto", api_model="claude-opus-5")   # 
 models.TeamSession.persona: str | None = None                   # recorded at session start
 models.FleetAgent.persona: str | None = None                    # recorded at spawn
 services.fleet.spawn(..., persona: str | None = None)           # None → role config → none
-services.fleet.attach_persona(project, label, name, *, sender=None) -> AttachReceipt   # P8: record + tell; receipt.delivered is "typed" | "noted"
+services.fleet.attach_persona(project, label, name, *, sender=None) -> AttachReceipt   # P8: record + type into a waiting agent (a busy one: privately, with its next prompt); receipt.delivered is "typed" | "noted"
 services.settings.bind_role(role, *, agent_bin, env, unset, args)   # existing writer, reused by NewBindScreen
 cli.ui.spawn.SpawnDialog(project, *, persona=None, role=None, binary=None, account=None)   # presets (P4)
 ```
@@ -1034,9 +1039,17 @@ exists; validator once all eight are done.
   `fleet_agent.persona` (and `team_session.persona` when the agent has a joined
   session), types the preface line plus `briefing()` into the pane, emits one
   board event, and the receipt reads `typed`; attaching to a **busy** agent
-  files a board note instead and the receipt reads `noted`; an unknown persona
+  types nothing and files no note — the one `persona_attached` event is all the
+  board gets, so no other session's delta, `aisquare board` or briefing carries
+  the body — and the receipt reads `noted` and says the persona reaches the
+  agent with its next prompt, for it alone: that prompt's hook output carries
+  the preface and the block once and a second prompt nothing more, a `/clear`
+  first briefs it at the session start instead, and two attaches while busy
+  deliver the later one (review of #240, finding 7); an unknown persona
   refuses before any tmux call and lists the known names; an unknown label
-  raises `NoSuchAgent`; replacing a persona makes the preface name the old one.
+  raises `NoSuchAgent`; replacing a persona makes the preface name the old one,
+  the one the agent ran as: a persona owed to it and never handed over is not
+  named.
 - Hook fallback (`tests/test_persona_briefing.py`): with no `AISQUARE_PERSONA`
   but `AISQUARE_FLEET_AGENT` naming a row whose persona is `skeptic`, the
   SessionStart injection carries exactly one block; env beats the row; the row

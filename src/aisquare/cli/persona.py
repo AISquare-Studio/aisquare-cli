@@ -484,8 +484,9 @@ def attach(
     project: ProjectRef = None,
     as_session: SessionRef = None,
 ) -> None:
-    """Give a running fleet agent a persona now — delivered as `fleet tell` delivers,
-    kept on its rows so a /clear or a restart briefs it again."""
+    """Give a running fleet agent a persona: typed into it now when it is waiting; a busy
+    agent gets it privately, with its next prompt. Kept on its rows, so a /clear or a
+    restart briefs it again."""
     target = _project(project)
     try:
         receipt = fleet_service.attach_persona(target, to, name, sender=as_session)

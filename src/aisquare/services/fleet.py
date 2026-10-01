@@ -648,8 +648,9 @@ def _fixed_label(role: str, wanted: str | None) -> str | None:
 
     The rules :func:`next_label` applies before it asks who holds a label: ``wanted`` must
     be a label, and a reserved one belongs to its role. Asked on their own by a fork, whose
-    label nothing at all may hold (:func:`_fork_label`), so both pick under one copy of
-    them.
+    label nothing at all may hold (:func:`_fork_label`), and by a take-over as another
+    role, which must keep the label it has (:func:`_refuse_a_take_over_that_would_move`),
+    so all three go by one copy of them.
     """
     if wanted is not None and not is_label(wanted):
         raise FleetError(
@@ -4530,6 +4531,58 @@ def _refuse_a_replay_that_cannot_start(agent: FleetAgent, session: TeamSession |
     )
 
 
+def _refuse_a_take_over_that_would_move(project: ProjectInfo, agent: FleetAgent, role: str) -> None:
+    """Raise now what running ``agent`` on as another ``role`` would meet in :func:`spawn`.
+
+    BEFORE its source is stopped, as :func:`_refuse_a_replay_that_cannot_start` asks about
+    the binary. For a role change ``restart`` asked the new role's binary, the persona and
+    the account first and left the rest of ``spawn``'s rules for that role to ``spawn``,
+    which runs after the stop (review of #240, finding 6). *Take over* as ``manager`` from
+    a worktree coder holding a task sent the coder ``/exit``; ``spawn`` then forced the
+    label to ``manager`` and its ``git worktree add`` failed, the task's branch being
+    checked out in the tree the coder had just left; the abandoned hand-over returned the
+    task to the pool, and the project had no live agent. A coder with no task came back as
+    a manager in a brand-new tree cut from the root's HEAD, away from what it had not
+    committed.
+
+    Asked in ``spawn``'s order: one manager per project, then the label, then the tree. A
+    take-over is the same agent carrying on (:func:`_respawn`), under its source's label
+    and in its source's tree, so a role that would move either is refused here: one whose
+    label is fixed (the manager's, the captain's), one that cannot keep the label its
+    source has (the manager's own, for any other role), and one whose worktree today's
+    ``[fleet] worktree_dir`` puts somewhere else. That simple rule is the acting manager's
+    ruling: the owner can stop the agent and spawn the other role by hand. A role that
+    keeps both starts as it always did, and a restart with no role change never comes
+    here.
+    """
+    existing = manager_of(project) if role == "manager" else None
+    if existing is not None:
+        raise FleetError(
+            f"{_name(project)} already has a manager ({existing.id}) — one per project; "
+            "nothing was stopped"
+        )
+    keeps = (
+        "a take-over keeps its source's label and tree, so nothing was stopped: stop "
+        f"{agent.label!r} and spawn the {role} by hand"
+    )
+    try:
+        fixed = _fixed_label(role, agent.label)
+    except FleetError as exc:
+        raise FleetError(f"{exc}, which a {role} cannot keep — {keeps}") from exc
+    if fixed is not None and fixed != agent.label:
+        where = f", in that label's worktree rather than {agent.cwd}" if agent.worktree else ""
+        raise FleetError(
+            f"as {role} it would be labelled {fixed!r}, not {agent.label!r}{where} — {keeps}"
+        )
+    if agent.worktree:
+        path = project.root / settings().worktree_dir / agent.label
+        if path.resolve() != agent.cwd.resolve():
+            raise FleetError(
+                f"as {role} it would start in {path}, not in {agent.cwd} where it works now "
+                f"— {keeps}"
+            )
+
+
 @dataclass
 class RestartReceipt:
     """What ``fleet restart`` did: the row it replaced, the one it started, and how."""
@@ -4607,7 +4660,10 @@ def restart(
     :data:`THIS_SHELL_ACCOUNT` runs where a plain spawn with no ``--account`` runs.
     Another role launches as today's config says for it, since the recorded launch was
     the old role's; a persona of ``""`` is none. Each is checked with the rest, before
-    anything is stopped.
+    anything is stopped, and so is what ``spawn`` asks of another role: a second manager
+    is refused here, and so is a role under which the agent could not keep its label and
+    its tree, the manager's fixed label above all
+    (:func:`_refuse_a_take_over_that_would_move`).
 
     ``permission_mode`` is refused first when Claude Code does not take it
     (:data:`~aisquare.core.config.CLAUDE_PERMISSION_MODES`, or ``""`` for no
@@ -4662,6 +4718,9 @@ def restart(
         if runs_as == agent.role:
             _refuse_a_replay_that_cannot_start(agent, session)
         else:
+            # What else `spawn` asks of another role, and the take-over's own rule: it
+            # keeps its source's label and tree (review of #240, finding 6).
+            _refuse_a_take_over_that_would_move(project, agent, runs_as)
             # Another role launches as today's config says for it, not as the row
             # recorded the old one: that binary is the one to ask about.
             _launch_binary(
@@ -4863,7 +4922,9 @@ def hand_off(
     **Take over** is the source's own hand-over, which :func:`restart` already is: a
     running source is stopped with its claims parked for the replacement (an exited one
     is simply started again), under the same label, task and tree, resumed or fresh as
-    asked. The row read here is the row restarted (``agent_id``).
+    asked. The row read here is the row restarted (``agent_id``). A role that would move
+    it out of that label or that tree is refused before the stop
+    (:func:`_refuse_a_take_over_that_would_move`).
 
     ``role``, ``account`` and ``persona`` are the dialog's changes, ``None`` keeping the
     source's; a persona of ``""`` is none, and an account of :data:`THIS_SHELL_ACCOUNT`

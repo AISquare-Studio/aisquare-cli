@@ -52,6 +52,16 @@ dialog stays open; anything else lands there too, with its class name — never
 a crash of the app. A spawn cannot be taken back once it has started, so while
 one runs *Cancel* and ``Esc`` wait for its answer rather than pretend to cancel.
 
+That answer closes THIS dialog and no other (review of #240, finding 5).
+``Screen.dismiss`` pops whatever screen is on top (Textual 8.2), so a receipt
+that landed under the import dialog closed that one and left this one on
+"spawning …" for good, every way out disabled. So while a spawn runs, *Pick…*
+and *Import…*, which open a screen over this one, are disabled with *Cancel*
+and *Spawn*; an answer that finds another screen on top all the same waits
+until this dialog is the active screen again, a refusal as much as a receipt;
+and the picker's *+ New account*, which leaves the dialog, is not followed
+before the answer has landed: it dismissed with ``None`` and lost the receipt.
+
 Keys: ``Esc`` cancels; ``Tab``/``Shift+Tab`` move; the buttons are the only
 submit. Nothing else is bound — the modal owns focus while it is open, and the
 agent pane behind it keeps every key it had.
@@ -253,6 +263,21 @@ def hand_off(
     return dataclasses.replace(result.started, notes=list(result.notes))
 
 
+@dataclasses.dataclass(frozen=True)
+class PlainFields:
+    """Role, Account and Persona as the plain form held them before a teammate filled them.
+
+    What *Hand off from* gives back when it returns to ``(none)`` (review of #240, the
+    stale slot).
+    """
+
+    role: str
+    account: str
+    preset_account: str | None
+    persona: str
+    persona_touched: bool
+
+
 class ConfirmTakeOverScreen(ModalScreen[bool]):
     """The one question before a take-over stops its source (card tsk_01m3ns5a736s)."""
 
@@ -365,11 +390,16 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         self._kept_label: str | None = None
         """What the user had typed, kept while the manager role locks the field."""
         self._spawning = False
+        self._answer: tuple[Worker[Any], WorkerState] | None = None
+        """A spawn's answer that found another screen on top of this one, kept until this
+        dialog is the active screen again (review of #240, finding 5)."""
         self._sources, self._sources_unavailable = (
             ([], None) if self._captain else self._read_sources()
         )
         self._source: FleetAgentStatus | None = None
         """The teammate the form hands off from; ``None`` is the plain spawn."""
+        self._plain: PlainFields | None = None
+        """What the teammate's prefill replaced, kept while one is chosen (``_give_back``)."""
 
     # --- what the form reads when it opens ----------------------------------------------
 
@@ -467,13 +497,14 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
             with VerticalScroll(id="spawn-fields"):
                 if not self._captain:
                     # A hand-off from a teammate (card tsk_01m3ns5a736s). ``(none)`` is
-                    # the plain spawn below, field for field.
+                    # the plain spawn below, field for field. Each teammate is its ROW's
+                    # id: two rows can carry one label (_source_changed).
                     with Horizontal(classes="spawn-row"):
                         yield Label("Hand off from")
                         yield Select(
                             [
                                 ("(none)", NO_SOURCE),
-                                *((source_choice(s), s.agent.label) for s in self._sources),
+                                *((source_choice(s), s.agent.id) for s in self._sources),
                             ],
                             value=NO_SOURCE,
                             allow_blank=False,
@@ -707,7 +738,8 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         mode.set_options(permission_options(keep))
         mode.value = keep
         if not self._persona_touched:
-            # Every role default is already an option (_persona_options), so this
+            # Every role default is already an option (_persona_options, and
+            # _offer_role_personas for a role that joined the list since), so this
             # never needs set_options — which would post a Changed for "(none)".
             self._persona_shown = self._persona_default(role)
             self.query_one("#spawn-persona", Select).value = self._persona_shown
@@ -750,14 +782,27 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
 
     @on(Select.Changed, "#spawn-from")
     def _source_changed(self, event: Select.Changed) -> None:
+        """The teammate chosen, by its row's id.
+
+        Two rows of a project can carry one label over time, an exited coder-1 and the
+        coder-1 started since, and the list read when the form opened can show either or
+        both. By label the form took the first row under it, and the service the newest:
+        the fork or the take-over acted on a teammate the owner did not choose (review of
+        #240, "also confirmed": hand-off by label). The id goes with the hand-off
+        (:meth:`handoff_kwargs`), and the service acts on that row or refuses.
+        """
         chosen = event.value if isinstance(event.value, str) else NO_SOURCE
-        source = next((s for s in self._sources if s.agent.label == chosen), None)
+        source = next((s for s in self._sources if s.agent.id == chosen), None)
         if source is self._source:
             return
+        if self._source is None:
+            self._plain = self._plain_fields()
         self._source = source
         self.query_one("#spawn-how-row").display = source is not None
         if source is not None:
             self._prefill_from(source)
+        else:
+            self._give_back()
         self._apply_handoff()
 
     @on(RadioSet.Changed, "#spawn-how")
@@ -774,7 +819,10 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         """Role, Account and Persona from the teammate, all still editable (the owner's call).
 
         The persona is marked chosen, so the role's own change handler, which runs after
-        this, does not replace it with the role's default.
+        this, does not replace it with the role's default. All three from EVERY teammate:
+        the Account was filled only from one that has a slot, so a teammate on this
+        shell's account kept showing the slot of the one chosen before it, and that was
+        sent as a choice (review of #240, the stale slot).
         """
         agent = source.agent
         if agent.role not in self._roles:
@@ -789,12 +837,48 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         field = self.query_one("#spawn-persona", Select)
         field.set_options(self._persona_options())
         field.value = persona
-        if agent.account_slot is not None:
-            self._preset_account = str(agent.account_slot)
-            accounts = self.query_one("#spawn-account", Select)
-            accounts.set_options(self._account_options(self._account_statuses))
-            accounts.value = self._preset_account
+        own = str(agent.account_slot) if agent.account_slot is not None else THIS_SHELL
+        self._preset_account = own or None
+        accounts = self.query_one("#spawn-account", Select)
+        accounts.set_options(self._account_options(self._account_statuses))
+        accounts.value = own
         self._describe_persona()
+
+    def _plain_fields(self) -> PlainFields:
+        """The three fields a teammate fills, as the form holds them now."""
+        account = self.query_one("#spawn-account", Select).value
+        return PlainFields(
+            role=self._role,
+            account=account if isinstance(account, str) else THIS_SHELL,
+            preset_account=self._preset_account,
+            persona=self._persona_value(),
+            persona_touched=self._persona_touched,
+        )
+
+    def _give_back(self) -> None:
+        """``(none)`` again: Role, Account and Persona as they were before a teammate filled them.
+
+        They stayed the teammate's, and the plain spawn went out with its role, its
+        persona and its account slot, none of them chosen (review of #240, the stale
+        slot). The persona goes back silently, with whether it was the owner's pick: a
+        ``Select.Changed`` from here would be read as one (``_persona_changed``).
+        """
+        plain, self._plain = self._plain, None
+        if plain is None:
+            return
+        self._preset_account = plain.preset_account
+        options = self._account_options(self._account_statuses)
+        accounts = self.query_one("#spawn-account", Select)
+        accounts.set_options(options)
+        if plain.account in {value for _, value in options}:
+            accounts.value = plain.account
+        self._persona_touched, self._persona_shown = plain.persona_touched, plain.persona
+        field = self.query_one("#spawn-persona", Select)
+        with self.prevent(Select.Changed):
+            field.set_options(self._persona_options())
+            field.value = plain.persona
+        self._describe_persona()
+        self.query_one("#spawn-role", Select).value = plain.role
 
     def _apply_handoff(self) -> None:
         """Lock or free what a hand-off decides, and name the button for what it does."""
@@ -804,8 +888,9 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         label = self.query_one("#spawn-label", Input)
         worktree = self.query_one("#spawn-worktree", Switch)
         prompt = self.query_one("#spawn-prompt", TextArea)
-        for selector in ("#spawn-binary", "#spawn-permission", "#spawn-args", "#spawn-pick"):
+        for selector in ("#spawn-binary", "#spawn-permission", "#spawn-args"):
             self.query_one(selector).disabled = source is not None
+        self._lock_other_screens()  # Pick…: the teammate's lock, and a running spawn's
         submit = self.query_one("#spawn-submit", Button)
         if label.disabled and self._role not in ("manager", fleet_service.CAPTAIN_ROLE):
             label.value = self._prefill  # a take-over's lock, never the user's typing
@@ -889,6 +974,8 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
             "persona": None if persona == (agent.persona or NO_PERSONA) else persona,
             "label": None if take_over or label == self._prefill else label,
             "prompt": None if take_over or not prompt.strip() else prompt,
+            # The row the form shows, not whoever carries its label by the time it runs.
+            "agent_id": agent.id,
         }
 
     @on(Input.Changed, "#spawn-label")
@@ -931,6 +1018,12 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         if target is None:
             return
         if target.kind == "new-account":
+            if self._spawning:
+                # As Cancel: the answer of a started spawn is on the way, or waits for
+                # this dialog to be on top (``on_screen_resume``). Leaving for the Accounts
+                # page dismissed with ``None``, and the new agent's receipt and notes were
+                # lost (review of #240, finding 5).
+                return
             self.post_message(NewAccountRequested())
             self.dismiss(None)
             return
@@ -950,6 +1043,7 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
             if role not in self._roles:
                 self._roles.append(role)
                 roles.set_options([(self._role_prompt(r), r) for r in self._roles])
+                self._offer_role_personas()
                 if self._manager_live:
                     self.call_after_refresh(self._grey_out_manager)
             roles.value = role
@@ -960,6 +1054,25 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
             slots = self.query_one("#spawn-account", Select)
             slots.set_options(self._account_options(self._account_statuses))
             slots.value = account
+
+    def _offer_role_personas(self) -> None:
+        """Rebuild what the Persona field offers once the role list has grown, its value kept.
+
+        ``_role_changed`` sets the field to the role's default and counts on that being
+        an option, and the options were built from the roles the list held at compose. A
+        role that joined later (a seat bound since, a picked agent's) with a default this
+        project lacks was no option: ``InvalidSelectValueError`` in a message handler, the
+        end of the TUI. Now it is offered as every missing default is (``_persona_options``).
+        No ``Select.Changed`` leaves the rebuild: it passes through *(none)*, which
+        ``_persona_changed`` would read as the owner's pick (review of #240, the role picker).
+        """
+        field = self.query_one("#spawn-persona", Select)
+        current = field.value
+        options = self._persona_options()
+        with self.prevent(Select.Changed):
+            field.set_options(options)
+            if current in {value for _, value in options}:
+                field.value = current
 
     # --- import a persona from here ------------------------------------------------------
 
@@ -1055,8 +1168,22 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
     def _set_spawning(self, running: bool) -> None:
         self._spawning = running
         self.query_one("#spawn-cancel", Button).disabled = running
+        self._lock_other_screens()
         self._note("#spawn-status", f"spawning {self._role} …" if running else None, style="dim")
         self._validate()
+
+    def _lock_other_screens(self) -> None:
+        """*Pick…* and *Import…* open a screen over this one: neither does while a spawn runs.
+
+        The spawn's answer has to find this dialog on top (``_spawn_changed``). Both come
+        back with *Cancel* and *Spawn* once it has answered, *Pick…* as far as the form
+        offers it: never to the captain, nor over a teammate's hand-off (``_apply_handoff``).
+        Review of #240, finding 5.
+        """
+        self.query_one("#spawn-pick", Button).disabled = (
+            self._spawning or self._captain or self._source is not None
+        )
+        self.query_one("#spawn-import", Button).disabled = self._spawning
 
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
         if event.worker.name == ACCOUNTS_WORKER:
@@ -1065,6 +1192,13 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
             self._spawn_changed(event.worker, event.state)
 
     def _spawn_changed(self, worker: Worker[Any], state: WorkerState) -> None:
+        if state in (WorkerState.SUCCESS, WorkerState.ERROR) and not self.is_active:
+            # Another screen is on top, and ``dismiss`` pops the TOP one (Textual 8.2): a
+            # receipt closed that screen and left this dialog on "spawning …" for good.
+            # The answer is kept, a refusal with it, until ``on_screen_resume`` (review of
+            # #240, finding 5).
+            self._answer = (worker, state)
+            return
         if state is WorkerState.SUCCESS:
             receipt = worker.result
             if isinstance(receipt, fleet_service.SpawnReceipt):
@@ -1079,6 +1213,25 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
                 self._refused(f"{type(error).__name__}: {error}")
         elif state is WorkerState.CANCELLED:
             self._set_spawning(False)
+
+    def on_screen_resume(self) -> None:
+        """On top again: the answer that waited for this lands, a receipt or a refusal.
+
+        Through ``call_next``, not at once. What the screen that closed handed back (a
+        pick, an import) reaches this dialog as a ``call_next`` too, queued before the
+        screen popped, and Textual may run it before this event or after it. Behind it
+        in the same queue, the answer lands after the hand-back in either order, so
+        *+ New account* always meets ``_spawning`` and is not followed (``_picked``),
+        whichever answer then lands (review of #240, finding 5).
+        """
+        if self._answer is not None:
+            self.call_next(self._land_answer)
+
+    def _land_answer(self) -> None:
+        """Give the dialog the answer it kept; kept again if a screen is back on top."""
+        answer, self._answer = self._answer, None
+        if answer is not None:
+            self._spawn_changed(*answer)
 
     def _refused(self, reason: str) -> None:
         """The service said no (or broke): say why, stay open, let the user try again."""

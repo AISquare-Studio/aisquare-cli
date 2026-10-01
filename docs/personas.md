@@ -124,16 +124,20 @@ aisquare persona attach skeptic --to coder-auth
 ```
 
 `persona attach` records the persona on the agent's fleet row (and on its board
-session, once it has joined) and delivers the briefing the way `fleet tell`
-delivers anything: typed into the agent when it is waiting, filed as a board note
-addressed to it when it is busy — the receipt says `typed` or `noted`. The board
-gets one `persona_attached` line, with the name and never the body. Because the
-session-start hook reads the fleet row first, the agent is briefed with the
-persona again after a `/clear` or a restart. That includes an agent spawned with
-`--persona`, whose `AISQUARE_PERSONA` holds only the value it was launched with.
-The variable applies when the agent has no fleet row, or a row with no persona,
-and either one wins over a persona a session recorded earlier. Attaching another
-persona replaces it, and the agent is told which one it replaces.
+session, once it has joined). An agent that is waiting has the briefing typed
+into it, the way `fleet tell` types anything, and the receipt says `typed`. An
+agent that is busy is typed nothing, and no note is filed in the briefing's
+place: the receipt says `noted`, and that the persona is recorded and reaches the
+agent with its next prompt, for it alone. That prompt's hook hands the agent the
+same preface and block, once, and no other session reads them. Either way the
+board gets one `persona_attached` line, with the name and never the body. Because
+the session-start hook reads the fleet row first, every session start after that
+— a `/clear` or a restart — briefs the agent with the persona, and one that comes
+before a busy agent's next prompt is its briefing. That includes an agent spawned
+with `--persona`, whose `AISQUARE_PERSONA` holds only the value it was launched
+with. The variable applies when the agent has no fleet row, or a row with no
+persona, and either one wins over a persona a session recorded earlier. Attaching
+another persona replaces it, and the agent is told which one it replaces.
 In `asq`, the Spawn dialog (`＋ spawn agent` under a project) asks for the
 persona right after who runs the agent — role, account, binary — with the role's
 default preselected and the persona's description under the field; `(none)`
@@ -198,8 +202,12 @@ layer, a name, *Condense*, the engine and model for the LLM path, and *Force*.
 Progress appears under the form while it runs; a draft an LLM wrote is shown in
 full — engine, model, size, frontmatter, body, what it dropped — before *Save*
 keeps it or *Discard* leaves it under `.drafts`. A refusal stays in the form
-with its reason. **+ New** asks for a name, a layer and a description, creates
-the scaffold, and opens it in the editor.
+with its reason. *Cancel* (or `Esc`) while it runs imports nothing and, under
+*Force*, replaces nothing (a draft an LLM already wrote stays under `.drafts`);
+once the persona is being written it is too late to cancel, so the form waits
+and a toast says what was imported. **+ New** asks
+for a name, a layer and a description, creates the scaffold, and opens it in
+the editor.
 
 ## Attach in two steps
 
@@ -213,8 +221,8 @@ who runs it.
    - **Agents** — this project's running agents, each with the persona it runs
      now. Choosing one asks once ("attach skeptic to coder-auth? It replaces
      mentor."), then attaches exactly as `persona attach` does; the toast says
-     whether the briefing was `typed` into a waiting agent or `noted` on the
-     board for a busy one.
+     whether the briefing was `typed` into a waiting agent or, for a busy one,
+     `noted`: recorded, to reach it privately with its next prompt.
    - **Binds** — the seats `aisquare team bind` pinned, with the binary and the
      account each one's environment points at. Choosing one opens the Spawn
      dialog with that seat as the role, its binary, and the persona filled in.
@@ -269,6 +277,15 @@ the name of a skill from `import --list`. The directory is copied byte for byte
 — aisquare never rewrites a file it did not author — and a `.persona.json` beside
 it records the source and its sha256. A bare file becomes `<name>/SKILL.md`,
 named by `--name`, else its frontmatter `name`, else its file name.
+
+A symbolic link inside a skill directory, at any depth, is never followed. The
+import copies everything else and leaves the link out — link and target both —
+so what it points at (a key file, a whole directory outside the skill) never
+reaches a layer, least of all the project's, which is committed. One warning
+line names the links it skipped (`skipped_links` under `--json`; the dialogs in
+`asq` show the same sentence). One link cannot be skipped: a `SKILL.md` that is
+itself a link is refused (`symlink_refused`), since there is no persona without
+it — replace it with a real file.
 
 `import --list` marks a skill `imported` when a user or project persona's
 `.persona.json` names that skill as its source, whatever the persona was called.
@@ -347,7 +364,9 @@ directory as `DIR/<name>/`. `--skill --user` writes it into Claude Code's
 personal skills (`$CLAUDE_CONFIG_DIR/skills`, else `~/.claude/skills`), and
 `--skill --project` into the repository's `.claude/skills` — after either, the
 persona is `/<name>` in Claude Code. An existing target is refused unless you
-pass `--force`.
+pass `--force`. `--to` and `--skill` leave symbolic links out of the copy as
+import does and name the ones they skipped; a persona whose `SKILL.md` is itself
+a link is refused.
 
 To change a bundled persona, copy it out and back in:
 

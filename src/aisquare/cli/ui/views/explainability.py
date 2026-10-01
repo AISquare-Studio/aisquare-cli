@@ -30,7 +30,7 @@ from textual.containers import Horizontal, VerticalScroll
 from textual.widgets import Button, Checkbox, Input, Label, Static
 from textual.worker import Worker, WorkerState
 
-from aisquare.core import orchestrator, outbox, paths
+from aisquare.core import outbox, paths
 from aisquare.core.config import (
     AppConfig,
     ExplainabilitySettings,
@@ -110,22 +110,28 @@ class StatusReport:
 
 
 def key_project(page: ProjectInfo | None) -> ProjectInfo | None:
-    """The project whose key a launch from ``page`` authenticates with (#141).
+    """The project whose key a launch from ``page`` authenticates with (#141): the page's own.
 
     A launch from the page is a fleet window's. Every fleet window carries its
     fleet's own root as ``AISQUARE_TEAM_HUB`` and names its row, so inside it
     ``orchestrator.team_project`` answers the page's project whatever hub this
-    process or the tmux server has (#230). So under a hub the tab follows the
-    page, as its seats do: the owner's decision (card tsk_01m3nwrzqe61fy5t6tph5z7wv3).
-    Main's 0.7.0 answered the hub's project here, when a window carried its
-    spawner's hub (review of #170). With no hub it is the checkout's project, the
-    answer the CLI's ``key``, ``env``, ``status`` and ``register`` give.
+    process or the tmux server has, and whatever git says of the page's root
+    (#230). So the tab follows the page, as its seats do, hub or no hub: the
+    owner's decision (card tsk_01m3nwrzqe61fy5t6tph5z7wv3). Main's 0.7.0
+    answered the hub's project here, when a window carried its spawner's hub
+    (review of #170).
+
+    #235 followed the page under a hub only. With no hub this still answered
+    ``team_project(page.root)``, which for a page rooted at a sub-directory of a
+    repository is the ENCLOSING repository's project: the tab attached the key
+    there, registered the roster under that project's key, and called the page's
+    own key "not used" while the page's seats traced with exactly that key
+    (review of #240, finding 12). The CLI's ``key``, ``env``, ``status`` and
+    ``register`` answer another question, the project a launch from their shell
+    joins, and under a hub say in one line whose project that is
+    (``cli/explainability.py``).
     """
-    if page is None:
-        return None
-    if orchestrator.team_hub() is not None:
-        return page
-    return orchestrator.team_project(page.root)
+    return page
 
 
 def own_key_label() -> str:
@@ -143,7 +149,7 @@ def status_report(page: ProjectInfo | None = None) -> StatusReport:
 
     The probe dials only when tracing is on (``ops.proxy_state`` decides, as it
     does for the CLI), so a machine that never asked for tracing costs nothing.
-    The key is resolved for the project ``page``'s launches join (:func:`key_project`).
+    The key is resolved for ``page``'s own project, the one its seats join (:func:`key_project`).
     """
     project = key_project(page)
     config = load_config()
@@ -166,7 +172,7 @@ def status_report(page: ProjectInfo | None = None) -> StatusReport:
         ("lands in", destinations.describe(target.destination, key_source=target.key_source)),
         ("credits", _credits_row(target)),
         ("key", f"{target.key_origin} {'is set' if target.api_key else 'is NOT set'}"),
-        ("project", _project_key_row(project, target, settings, page)),
+        ("project", _project_key_row(project, target, settings)),
         ("proxy", target.proxy_url),
         ("identity", target.agent_name_template),
         ("agents", ", ".join(target.agent_names) or "(none)"),
@@ -217,35 +223,21 @@ def _credits_row(target: ops.ResolvedTarget) -> str:
 
 
 def _project_key_row(
-    project: ProjectInfo | None,
-    target: ops.ResolvedTarget,
-    settings: ExplainabilitySettings,
-    page: ProjectInfo | None = None,
+    project: ProjectInfo | None, target: ops.ResolvedTarget, settings: ExplainabilitySettings
 ) -> str:
     """``<name>: its own key for stg`` / ``<name>: the machine key`` — the origin per project.
 
-    When the page's launches join another project (with no hub, a page whose root
-    is another project's checkout), a key the PAGE has of its own is named too, as
-    not used. The row used to show only the other project's, so the page's binding
-    vanished from the tab while its key file stayed on disk (review of #170, D1b
-    round 2, B7).
+    One project, the page's (:func:`key_project`). While the tab answered for
+    another one (the hub's under 0.7.0, then the repository around the page's
+    root), a second line named the key the PAGE had of its own as "not used —
+    … remove it with: aisquare explainability key clear" (review of #170, D1b
+    round 2, B7). That was never true of the page's seats, which trace with
+    exactly that key, so the line is gone with the other project (review of
+    #240, finding 12).
     """
     if project is None:
         return "(no project)"
-    return _key_origin_row(project, target, settings) + _unused_page_key(page, project)
-
-
-def _unused_page_key(page: ProjectInfo | None, project: ProjectInfo) -> str:
-    if page is None or page.id == project.id:
-        return ""
-    binding = ops.project_key_binding(page.id)
-    if binding is None:
-        return ""
-    return (
-        f"\n  {page.root.name or page.id}: its own key for target {binding.target} is not used — "
-        f"its launches join {project.root.name or project.id}; remove it with: aisquare "
-        f"explainability key clear --project {page.id}"
-    )
+    return _key_origin_row(project, target, settings)
 
 
 def _key_origin_row(
@@ -385,8 +377,8 @@ def render_status(report: StatusReport) -> Text:
 def register_roster(page: ProjectInfo | None = None) -> Notice:
     """What ``aisquare explainability register`` does, as a notice instead of an exit code.
 
-    Under the key of the project ``page``'s launches join (:func:`key_project`)
-    when that project has its own (#141), as the CLI's ``register`` does:
+    Under the key of ``page``'s own project, the one its seats join
+    (:func:`key_project`), when it has its own (#141), as the CLI's ``register`` does:
     registering at machine level left a project pointed at another workspace
     refused 409 on every span (review of #170).
     """
@@ -470,14 +462,15 @@ def _refused(message: str) -> SetupOutcome:
 def save_setup(form: SetupForm, page: ProjectInfo | None) -> SetupOutcome:
     """What *Save setup* does once the form's own checks passed, off the UI thread.
 
-    Everything here reads or writes something: the config, git (for the
-    project whose key it is, :func:`key_project`), the store and the key file.
-    It ran in the button's handler, on the UI thread, where git's timeouts
-    froze the whole app (review of #170, B5/G6). It returns what the handler
-    used to notify, and whether a write began.
+    Everything here reads or writes something: the config, the store and the
+    key file. It ran in the button's handler, on the UI thread, with a git
+    lookup of the project whose key it is, whose timeouts froze the whole app
+    (review of #170, B5/G6). That project is the page itself now and asks
+    nothing (:func:`key_project`). It returns what the handler used to notify,
+    and whether a write began.
 
-    The config is read AFTER git has answered, and saved whole a few store
-    reads later. Read first, a config write made while git ran (the tab's
+    The config is read AFTER the key's project is known, and saved whole a few
+    store reads later. Read first, a config write made while git ran (the tab's
     *Disable*, which the handler now disables meanwhile, or any other writer)
     was saved over with the copy read before it: tracing stayed on after the
     toast said it was off (review of #170's follow-ups, round 1, F1).
@@ -485,9 +478,9 @@ def save_setup(form: SetupForm, page: ProjectInfo | None) -> SetupOutcome:
     target, gateway, proxy, prefix, key_env, key = (
         form.target, form.gateway, form.proxy, form.prefix, form.key_env, form.key,
     )  # fmt: skip
-    # The page's project is looked up here, in the worker: `team_project` asks
-    # git, in subprocesses with 5 s timeouts, and this ran on the UI thread
-    # (review of #170, B5/G6).
+    # The page's project is looked up here, in the worker: it was `team_project`,
+    # which asks git in subprocesses with 5 s timeouts, and this ran on the UI
+    # thread (review of #170, B5/G6).
     owner = key_project(page) if key and form.own else None
     try:
         config = load_config()
@@ -763,7 +756,7 @@ class ExplainabilityView(VerticalScroll):
         self.query_one("#explainability-status", Static).update(rendered)
 
     # --- the switches (config writes, on the UI thread: local and immediate; Save setup's
-    # git, store and key writes run in a worker) ------------------------------------------
+    # store and key writes run in a worker) -----------------------------------------------
 
     def _read_config(self) -> AppConfig | None:
         try:
@@ -833,8 +826,8 @@ class ExplainabilityView(VerticalScroll):
         (#142): that is refused before anything is written too.
 
         Only the form's own checks run here, on the UI thread. The rest reads
-        the config, asks git which project the key is for, opens the store and
-        writes files, so it runs in a worker (:func:`save_setup`), as *Register
+        the config, opens the store and writes files (it asked git which project
+        the key is for, too), so it runs in a worker (:func:`save_setup`), as *Register
         roster* does, and Save is disabled until it answers, and so are Enable
         and Disable: the worker saves the whole config it read, so a switch
         pressed meanwhile was saved over and its toast was wrong (review of

@@ -137,7 +137,8 @@ tmux can see and its row says so (`no hooks`).
    the agent limit, a binary not on your `PATH` — stays in the dialog with its
    reason; a spawn toasts its receipt and notes and opens the new agent's pane.
    `Esc` cancels, except while a spawn is already running: that one cannot be
-   taken back, so the dialog waits for its answer.
+   taken back, so the dialog waits for its answer, and *Pick…* and *Import…*
+   are disabled until it has it.
 5. Selecting an agent gives its pane the keyboard at once — type, and it reaches
    Claude Code. **Press `F12`** to hand focus back to the sidebar (it is the one key the pane
    never forwards; configurable). With the sidebar focused: `t` picks a theme,
@@ -315,13 +316,17 @@ aisquare fleet tell coder-auth "use the existing JWT helper, do not add a depend
 
 Types the text into the agent — **only** when it is *waiting* and its pane is
 alive. Otherwise the message is filed as a board note addressed to that agent,
-and the output says which happened (`✓` typed, `→` noted). Never interrupts an
-agent that is working or sitting on a permission prompt. Takes `--as SESSION`.
+and the output says which happened (`✓` typed, `→` noted). The note goes on the
+agent's own project's board, the one its next prompt reads, whatever hub or fleet
+window the command runs in. Never interrupts an agent that is working or sitting
+on a permission prompt. Takes `--as SESSION`.
 
-`aisquare persona attach <name> --to <label>` uses the same delivery to give a
-running agent a persona, and keeps it on the agent's row so a `/clear` or a restart
-briefs it again ([docs/personas.md](personas.md)); its receipt reads `typed` or
-`noted`.
+`aisquare persona attach <name> --to <label>` types a persona's briefing into a
+waiting agent the same way, and keeps the persona on the agent's row so a `/clear`
+or a restart briefs it again ([docs/personas.md](personas.md)). A busy agent gets
+no note in the briefing's place: the board names the persona and never carries its
+body, and the agent's own next prompt hands it the briefing, for it alone. The
+receipt reads `typed` or `noted`.
 
 ### `fleet stop`
 

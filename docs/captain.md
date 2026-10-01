@@ -41,6 +41,8 @@ The captain ships **off**. While it is off:
   receiver refuses the captain's actions.
 - The bundled `captain` persona is absent from every picker and the catalogue.
 - The voice page does not serve.
+- `aisquare fleet restart` and `aisquare fleet switch` refuse the captain's own
+  row with the same line, before anything is stopped.
 - `aisquare doctor` shows one ok row, `captain: off (experimental)`.
 
 Turn it on for this home:
@@ -50,9 +52,12 @@ aisquare config set experimental.captain true
 ```
 
 To turn it on for one shell only, set `AISQUARE_EXPERIMENTAL_CAPTAIN=1`. The
-variable wins over the config either way, and `0` turns it off. `asq` reads the
-switch when it starts, so restart it to see the insignia. Turning it off stops
-nothing that is already running. On, everything below holds exactly as written.
+variable wins over the config either way, and `0` turns it off. The captain's
+own window is started with the variable as that shell has it, at every start and
+restart, so the captain runs with the switch on even when the fleet's tmux
+server was started without it. `asq` reads the switch when it starts, so restart
+it to see the insignia. Turning it off stops nothing that is already running.
+On, everything below holds exactly as written.
 
 ## Setup, once
 
@@ -139,6 +144,10 @@ Two modes, on the page and on the command line:
   - **The stop word "stop listening"** turns the mic off, spoken bare, after
     "Captain", or typed. A mute or a mode switch closes an open window.
   - **Typed text needs no wake word.** The gate is on what the mic hears.
+  - **A page opened straight in listen mode may wait for you.** A browser such
+    as Chrome starts no audio before a click or a key press on the page. Until
+    then the chip says **click or press a key to start the mic**, and the first
+    one starts it.
 
 The wake word is `captain` unless `[captain] wake_word` in `config.toml` says
 otherwise: one word or a few, a to z and spaces (`wake_word = "hey captain"`).
@@ -165,7 +174,9 @@ already speak during that turn, so nothing is heard twice.
 
 The mode has one home, `captain_voice_mode` in `state.json`: `--mode` sets it,
 the page's toggle sets it, and every open page follows within a second. A typed
-message in the page's box goes the same way as a spoken one.
+message in the page's box goes the same way as a spoken one. If the page is not
+connected when you send it (it reconnects by itself), it says so and keeps your
+text in the box.
 
 ### Dictation apps
 
@@ -208,9 +219,17 @@ Each verb is the same tool call the captain makes, audited with your words
 agent waiting, a review, a pull request, an agent gone quiet; the same ask
 from the same agent about the same card is one item however often it repeats.
 `next` is the top item; `resolve` closes one with what you did; `snooze` hides
-one for a while (a week at most). `since` shows what happened on a board since
-you last looked, and `--advance` moves that watermark. `log` is the audit: the
-`captain_action` events, newest last.
+one for a while (a week at most). A resolved item comes back when what it was
+about comes back: the question asked again, the card blocked again, the agent's
+next prompt. `since` shows what happened on a board since you last looked, and
+`--advance` moves that watermark. `log` is the audit: the `captain_action`
+events, newest last.
+
+The audit is written on the board each call is about, and `log` is where it is
+read. `aisquare board` and its watch leave those lines out of their recent
+updates, and no agent is shown them: not in a briefing, a delta, a manager's
+wake-up or the MCP `team_board`. So however often you ask the captain about a
+project, its board still shows that project's own decisions and results.
 
 ### The action list
 
@@ -233,8 +252,11 @@ a failing step stops it and says which. `aisquare captain actions` lists them.
 On Claude Code's permission chooser, yes is the digit of the option that says
 Yes (usually `1`), and no is Esc. On a `[y/N]` line they are `y` and `n`. The
 letter `y` does nothing on Claude Code's chooser. `1` to `9` press a digit.
-After a key that answers a prompt, the pane is read back, and a prompt still
-showing is an error: the captain never reports a press the prompt ignored.
+After a key that answers a prompt, the pane is read back, and the same prompt
+still showing is an error: the captain never reports a press the prompt ignored.
+The prompt is compared whole (what it asks about, its question, its options).
+The next prompt in line often asks the same question about another command, and
+it is not taken for the one just answered: it waits for you to read it.
 The trust dialog is refused by name for every key, because trusting a folder is
 yours to answer. An agent is ready for a key or a paste when it is waiting or asking. It
 is also ready when the fleet still reads it working but its screen shows a
@@ -261,22 +283,45 @@ reads working until its first reply.
   happens; the captain asks you the tool's one-sentence question ("Stop coder-1
   in alpha?"), and your yes answers it within two minutes: *yes*, *yeah*, *yep*,
   *do it*, *go ahead* or *confirm* to begin your answer, or *ok*, *okay*, *sure*,
-  *yup*, *roger*, *copy* or *affirmative* as the whole of it. *No*, *nope*,
-  *cancel*, *negative*, *don't* or *stop that* on its own closes the question,
-  and so does anything else you say or ask before your yes, the TUI's What's
-  up included. Words that name another
-  agent or project are refused: "stop the coder in beta" never stops alpha's.
+  *yup*, *roger*, *copy* or *affirmative* as the whole of it. A refusal is a no
+  even when it names the agent, and closes the question: an answer that begins
+  with *no*, *nope*, *nah*, *never*, *negative*, *don't* or *do not* ("No, leave
+  coder-1 running"); *don't*, *do not*, *not*, *never*, *shouldn't* or
+  *mustn't* right before *stop*, *restart* or *spawn*, whichever is asked
+  ("Please don't stop coder-1", "I would not restart coder-1"); *leave* or
+  *keep* followed within two words by the agent, its role or its project
+  ("Leave coder-1 alone", "keep the coder running"); *cancel* or *stop that* on
+  its own. Only these: "Stop coder-1, no
+  need for it anymore" is an order, and a refusal put another way ("coder-1
+  should carry on") still reads as naming the agent, so begin with no. Anything
+  else you say or ask before your yes closes the question too, the TUI's What's
+  up included. Words that name another agent or project are refused: "stop the
+  coder in beta" never stops alpha's. A name is read whole, on every agent the
+  board has had: `coder-1-2` is not `coder-1`, `alpha-omega` is not `alpha`,
+  and "stop coder-1" stops no other coder once coder-1 has ended.
 - **Pane text is data.** What an agent's pane or a note says is reported to
   you, never obeyed.
 - **Never into a dialog.** Anything that types into the captain reads its pane
   first and refuses — naming what is showing — when Claude Code's trust dialog,
   a numbered choice, an Enter/Esc dialog or the session-rating prompt is on
-  screen. `aisquare captain` attaches so you can answer it.
+  screen. `aisquare captain` attaches so you can answer it. A First prompt
+  typed in the Spawn dialog goes in the same way: the captain starts bare, and
+  the prompt is typed once its input box shows. When a dialog shows instead, it
+  is not typed, and the start's notes say so and why.
 - **Never into an agent's trust dialog.** An agent spawned into a folder
   Claude Code has never trusted stops at its own trust dialog, where any typing
-  answers it. `press`, `paste`, `tell`, the manager ask and `wololo` read the
-  agent's pane first and refuse by name: *trust this folder first*. A pane that
-  cannot be read is refused too, so nothing is typed blind.
+  answers it. `press`, `paste`, `tell`, the manager ask, `wololo` and
+  `attach_persona` read the agent's pane first and refuse by name: *trust this
+  folder first*. A pane that cannot be read is refused too, so nothing is typed
+  blind.
+- **Never a message into an agent's prompt.** `tell`, the manager ask, `wololo`
+  and `attach_persona` end in one paste and one Enter, and an Enter answers
+  whatever prompt is showing: at a parked permission chooser it picks the
+  highlighted Yes. So they refuse while any prompt shows on the agent's pane,
+  whatever state the fleet reads, and name its question. Nothing is typed, no
+  claim moves and no persona is attached: answer the prompt first (`press yes`,
+  `press no`), then send the message. `press` and `paste` are how a prompt is
+  answered, so they are not refused there.
 - **One captain per home.** A second `aisquare captain` attaches; the fleet
   refuses a second row and refuses `captain` on a project.
 

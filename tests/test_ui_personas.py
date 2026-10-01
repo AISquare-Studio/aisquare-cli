@@ -807,6 +807,7 @@ def test_the_import_recorder_receives_exactly_the_chosen_options(
     first, second = importer.calls
     for call in (first, second):
         assert callable(call.pop("confirm")) and callable(call.pop("progress"))
+        assert callable(call.pop("cancelled"))  # the import's last question (review of #240)
     assert first == {
         "args": [],
         "source": "./skills/x",
@@ -1262,7 +1263,11 @@ def test_choosing_an_agent_confirms_then_attaches_and_says_how_it_was_delivered(
         calls.append((target.id, label, name))
         agent = targets[0].agent.model_copy(update={"persona": name})
         return fleet_service.AttachReceipt(
-            agent=agent, persona=name, replaced="mentor", delivered="noted", how="a board note"
+            agent=agent,
+            persona=name,
+            replaced="mentor",
+            delivered="noted",
+            how="it reaches it with its next prompt",
         )
 
     monkeypatch.setattr(fleet_service, "attach_persona", attach)
@@ -1282,7 +1287,10 @@ def test_choosing_an_agent_confirms_then_attaches_and_says_how_it_was_delivered(
     question, notices, screen = drive(scenario, project=project)
     assert question.startswith("Attach pair to coder-auth?") and "It replaces mentor." in question
     assert calls == [(project.id, "coder-auth", "pair")]
-    assert ("✓ attached pair to coder-auth (noted)", "information") in notices
+    # A `noted` toast carries the receipt's sentence: nothing reached the agent yet, and
+    # the bare "(noted)" read as a briefing waiting on the board (review of #240, finding 7).
+    said = "✓ attached pair to coder-auth (noted) — it reaches it with its next prompt"
+    assert (said, "information") in notices
     assert screen == "Screen"
 
 

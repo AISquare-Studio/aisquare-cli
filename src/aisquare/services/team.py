@@ -19,7 +19,7 @@ import os
 import re
 import sqlite3
 import sys
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Collection, Mapping
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -149,7 +149,21 @@ MANAGER_WAKE_KINDS: frozenset[str] = frozenset(
 #: ``captain_action`` is the captain's audit line (``services.captain.actions``):
 #: one per tool call, reads included, for the owner — the effects it records
 #: (a note, a claim, a tell) reach teammates as their own events.
+#:
+#: No agent-facing reader shows any of them: not the delta or the wake-up, and not
+#: the recent updates of a briefing (:func:`_briefing_events`) or of the MCP
+#: ``team_board``. Each leaves them out IN its query, before the LIMIT (the store's
+#: ``exclude_kinds``). Dropped after it, or not at all, a few questions to the
+#: captain briefed the next coder with five audit lines and no decision, and a run
+#: of 62 of them hid a coder's result from a waiting manager's wake-up (review of
+#: #240, finding 11).
 HUMAN_BOARD_KINDS: frozenset[str] = frozenset({"attention", "notice", "captain_action"})
+
+#: The one of them the human board's own recent list leaves out too (``aisquare
+#: board``, its watch): the audit is one line per captain tool call, with the tool's
+#: arguments and the owner's words, and it filled that list. The bell and the notices
+#: stay, they are that board's own; ``aisquare captain log`` reads the audit.
+CAPTAIN_AUDIT_KINDS: frozenset[str] = frozenset({"captain_action"})
 
 #: The last sentence of every wake-up reason. Claude Code continues the turn with
 #: the reason as its instruction, so the instruction must license stopping — a
@@ -558,6 +572,7 @@ def board_data(
     events: int = _BOARD_EVENTS,
     since_seq: int | None = None,
     project: ProjectInfo | None = None,
+    exclude_kinds: Collection[str] = (),
 ) -> tuple[ProjectInfo, list[TeamSession], list[TeamTask], list[TeamEvent]]:
     """Everything the board shows: sessions, tasks and recent events.
 
@@ -565,14 +580,20 @@ def board_data(
     watch UI polling every few seconds does not rehydrate its whole window.
     ``project`` lets a long-lived caller resolve identity once and pass it in,
     sparing a ``git rev-parse`` per call (the watch TUI does this).
+    ``exclude_kinds`` leaves those event kinds out of either fetch, inside the
+    query, so ``events`` counts what is shown: the human board passes
+    :data:`CAPTAIN_AUDIT_KINDS`, an agent's (the MCP ``team_board``)
+    :data:`HUMAN_BOARD_KINDS`. By default nothing is left out.
     """
     _require_enabled()
     with store_session() as store:
         resolved = project if project is not None else _project(store, cwd)
         if since_seq is None:
-            fetched = store.recent_events(resolved.id, limit=events)
+            fetched = store.recent_events(resolved.id, exclude_kinds=exclude_kinds, limit=events)
         else:
-            fetched = store.events_since(resolved.id, since_seq, limit=events)
+            fetched = store.events_since(
+                resolved.id, since_seq, exclude_kinds=exclude_kinds, limit=events
+            )
         return (
             resolved,
             store.team_sessions(resolved.id),
@@ -946,13 +967,25 @@ def add_note(
     to_role: str | None = None,
     kind: str = "note",
     cwd: Path | None = None,
+    project_id: str | None = None,
 ) -> TeamEvent:
-    """Put a note/decision/question/result on the team pipe."""
+    """Put a note/decision/question/result on the team pipe.
+
+    ``project_id`` names the board outright, for a caller whose note is FOR a project
+    rather than from wherever the caller stands: ``fleet tell``'s fallback for a busy
+    agent, which that agent reads on its own fleet's board. Everything else that can
+    pick a board can pick another one: an exported ``AISQUARE_TEAM_HUB`` and the
+    caller's own fleet row both win over ``cwd``, and a session delivers to the board it
+    is registered on. So with an id the session still says who filed the note, and no
+    longer where (review of #240, finding 8); ``_board_of`` as in :func:`set_signal`.
+    """
     _require_enabled()
     _DELIVERY.set(None)
     with store_session() as store:
         session = _resolve_session(store, session_ref)
-        board = _board(store, session, cwd)
+        board = (
+            _board_of(store, project_id) if project_id is not None else _board(store, session, cwd)
+        )
         task_id: str | None = None
         if task_ref is not None:
             task = store.get_task(task_ref)
@@ -1413,6 +1446,17 @@ def _shared_row_banner(
     )
 
 
+def _briefing_events(store: ContextStore, project_id: str) -> list[TeamEvent]:
+    """The recent updates an agent is briefed with: the board's last :data:`_BOARD_EVENTS`
+    that are an agent's to read, :data:`HUMAN_BOARD_KINDS` left out in the query.
+
+    Read unfiltered, the five were whatever came last — and after the owner had asked
+    the captain about the board a few times, that was five audit lines carrying the
+    owner's words, with the decisions and results pushed out (review of #240, finding 11).
+    """
+    return store.recent_events(project_id, exclude_kinds=HUMAN_BOARD_KINDS, limit=_BOARD_EVENTS)
+
+
 def hook_session_start(
     session_id: str,
     cwd: Path | None,
@@ -1469,6 +1513,7 @@ def hook_session_start(
             # `/clear` left the row on the ended id and `say` waited on a session that
             # would never answer. The captain has no task, so there is nothing to brief.
             _assignment(store, session.id, project.id)
+            _settle_owed_persona(store, session)  # this start briefs the persona itself
             if source != _COMPACT_SOURCE:
                 # A captain that just started, cleared or resumed sits at its prompt
                 # until something is typed — whose own hook says `working`. Left at
@@ -1485,13 +1530,14 @@ def hook_session_start(
         # claims onto its new id, and a board read first still named the old one.
         # ``source`` plays no part — see rule 1 of the fleet-row section.
         assigned = _assignment(store, session.id, project.id)
+        _settle_owed_persona(store, session)  # this start briefs the persona itself
         # Presence is board state, not feed traffic: /clear cycles, resumes and
         # ephemeral `claude -p` children would otherwise spam join/left pairs.
         return collision + _render_board(
             project,
             store.team_sessions(project.id),
             store.team_tasks(project.id),
-            store.recent_events(project.id, limit=_BOARD_EVENTS),
+            _briefing_events(store, project.id),
             me=session,
             assigned=assigned,
             briefing=True,
@@ -1547,7 +1593,7 @@ def hook_prompt_heartbeat(
                 project,
                 store.team_sessions(project.id),
                 store.team_tasks(project.id),
-                store.recent_events(project.id, limit=_BOARD_EVENTS),
+                _briefing_events(store, project.id),
                 me=session,
                 assigned=assigned,
                 labels=lambda: slot_labels_via(store),
@@ -1562,18 +1608,31 @@ def hook_prompt_heartbeat(
         # and the briefing it was owed comes with it (rule 2, second half).
         late = _late_assignment(store, session)
         briefing = "\n".join(_assignment_lines(late, session)) + "\n" if late is not None else ""
+        # What `persona attach` owed an agent that was busy is handed over here, to it alone.
+        briefing += _owed_persona_briefing(store, session)
         lease = _now() + timedelta(minutes=orchestrator.lease_minutes())
         store.renew_leases(session.id, lease)
-        raw = store.events_since(
+        # The board's newest seq, read BEFORE the delta: with nothing to deliver the
+        # cursor moves there, past the rows the query left out. Read first, it cannot
+        # pass an event the delta did not see — whatever is written after has a later seq.
+        newest = store.latest_seq(session.project_id)
+        # Bells, notification lines and the captain's audit are for the human, not
+        # teammate context — left out IN the query, so the limit counts what is
+        # delivered: dropped after it, a run of audit lines was the whole page, prompt
+        # after prompt, with a coder's result behind it (review of #240, finding 11).
+        events = store.events_since(
             session.project_id,
             session.cursor,
             exclude_session=session.id,
+            exclude_kinds=HUMAN_BOARD_KINDS,
             limit=_DELTA_LIMIT * 3 + 1,
         )
-        # Bells and notification lines are for the human board, not teammate context.
-        events = [event for event in raw if event.kind not in HUMAN_BOARD_KINDS]
         if not events or not orchestrator.delta_enabled():
-            cursor = raw[-1].seq if raw else None
+            # Nothing delivered is still something read: the cursor moves past it, the
+            # left-out rows included, rather than stay in front of them for every later
+            # prompt to scan again.
+            read_to = events[-1].seq if events else newest
+            cursor = read_to if read_to > session.cursor else None
             store.touch_session(session.id, cursor=cursor, state="working")
             return collision + briefing
         truncated = len(events) > _DELTA_LIMIT
@@ -1681,13 +1740,19 @@ def _wake_candidates(store: ContextStore, me: TeamSession) -> list[TeamEvent]:
 
     One function so the wake-up and the deferral below can never disagree about
     the window they are judging — same source, same exclusions, same limit as
-    :func:`hook_prompt_heartbeat`. Bells and notification lines
-    (:data:`HUMAN_BOARD_KINDS`) are for the human board, not teammate context.
+    :func:`hook_prompt_heartbeat`. Bells, notification lines and the captain's audit
+    (:data:`HUMAN_BOARD_KINDS`) are for the human, not teammate context, and are left
+    out IN the query: a Stop that wakes nobody moves no cursor, so dropped after the
+    LIMIT, a run of audit lines was the whole page at every Stop, and the result behind
+    it woke nobody until something else was written (review of #240, finding 11).
     """
-    raw = store.events_since(
-        me.project_id, me.cursor, exclude_session=me.id, limit=_DELTA_LIMIT * 3 + 1
+    return store.events_since(
+        me.project_id,
+        me.cursor,
+        exclude_session=me.id,
+        exclude_kinds=HUMAN_BOARD_KINDS,
+        limit=_DELTA_LIMIT * 3 + 1,
     )
-    return [event for event in raw if event.kind not in HUMAN_BOARD_KINDS]
 
 
 def _deferred_wake_reason(store: ContextStore, me: TeamSession) -> str | None:
@@ -2838,14 +2903,15 @@ def _captain_briefing(project: ProjectInfo, me: TeamSession, persona_note: str |
     return "\n".join(lines)
 
 
-def _persona_briefing(name: str, root: Path) -> list[str]:
+def _persona_briefing(name: str, root: Path, *, without: str = "launched without it") -> list[str]:
     """The persona block for a session start (docs/plans/spawn-personas.md §3.2).
 
     NEVER raises: a raise here loses the whole team block, role cycle and lane
     rule included (``harness._lane_rule``'s docstring). A persona removed or
     broken since launch — or anything else going wrong — is one line saying so,
-    and the session runs without it. Imported here, not at module level, so a
-    session with no persona pays nothing for the persona code.
+    and the session runs without it. ``without`` ends that line for the caller
+    that is not a launch (:func:`_owed_persona_briefing`). Imported here, not at
+    module level, so a session with no persona pays nothing for the persona code.
     """
     try:
         from aisquare.core import personas
@@ -2853,7 +2919,7 @@ def _persona_briefing(name: str, root: Path) -> list[str]:
         return personas.briefing(personas.resolve(name, root))
     except Exception as exc:
         reason = getattr(exc, "rule", None) or f"{type(exc).__name__}: {exc}"
-        return [f'persona "{name}": {reason} — launched without it']
+        return [f'persona "{name}": {reason} — {without}']
 
 
 def _asked_persona(store: ContextStore, project_id: str) -> tuple[str | None, str | None]:
@@ -2891,6 +2957,158 @@ def _asked_persona(store: ContextStore, project_id: str) -> tuple[str | None, st
     if row is not None and row.persona:
         return row.persona, None
     return orchestrator.env_persona(), None
+
+
+# --- a persona attached to a BUSY agent: owed, then handed over by its own prompt --------
+#
+# ``fleet.attach_persona`` types its briefing into an agent that is waiting. For one it
+# cannot type into, it may put nothing of the persona on the board: a note carried the
+# fenced body into every other session's delta, ``aisquare board`` and the next
+# teammate's briefing (review of #240, finding 7). So the briefing is OWED to that one
+# agent: a ``team_meta`` marker under its fleet row's id, which the agent's own
+# ``UserPromptSubmit`` hook turns into the preface and the block the typed path pastes,
+# once. A session start briefs the row's persona itself, and settles the marker. No
+# table and no column: the marker is a key like the nudge debounce and the continuation
+# counters, and ``team_meta`` has no delete, so settled is an empty value.
+
+_OWED = "owed"
+"""A marker's value while the briefing is owed, and ``owed:<persona>`` when the
+attachment replaced that persona."""
+
+_ATTACHED_WITHOUT = "attached to you without its briefing"
+"""How :func:`_persona_briefing`'s one line ends when an owed persona cannot be loaded."""
+
+
+def persona_attached_preface(name: str, replaced: str | None) -> str:
+    """The line an agent reads above an attached persona's block, on either path: typed
+    into a waiting agent (``fleet.attach_persona``), or handed to a busy one by its own
+    next prompt (:func:`_owed_persona_briefing`)."""
+    tail = f"; it replaces {replaced}" if replaced else ""
+    return f"aisquare: the operator attached persona {name} to you — it applies from now on{tail}"
+
+
+def _persona_owed_key(agent_id: str) -> str:
+    return f"persona_owed:{agent_id}"
+
+
+def owe_persona_briefing(store: ContextStore, agent_id: str, *, replaced: str | None) -> None:
+    """Record that the agent of fleet row ``agent_id`` has yet to be given its persona's
+    briefing, because it could not be typed. ``replaced`` is the persona the attachment
+    replaced, for the preface. The persona itself is not recorded: the row holds it, and
+    what is handed over is the row's persona at that moment."""
+    store.set_meta(_persona_owed_key(agent_id), f"{_OWED}:{replaced}" if replaced else _OWED)
+
+
+def settle_persona_briefing(
+    store: ContextStore, agent_id: str, *, replaced: str | None
+) -> str | None:
+    """Forget what fleet row ``agent_id`` is owed, if anything: it is about to be typed
+    the briefing, or owed it afresh.
+
+    Returns the persona the next preface says is replaced, as the AGENT knows it:
+    ``replaced`` (the row's) when nothing was owed, else the one the owed briefing would
+    have replaced, since that briefing never reached the agent. Skeptic attached over
+    mentor while the agent was busy, then careful: the agent still runs as mentor and
+    has never been told of skeptic.
+    """
+    key = _persona_owed_key(agent_id)
+    value = store.get_meta(key)
+    if not value:
+        return replaced
+    store.set_meta(key, "")
+    return value.partition(":")[2] or None
+
+
+class _OwedPersona(NamedTuple):
+    """A standing marker, and the row it stands under: the session's own."""
+
+    key: str
+    row: FleetAgent
+    replaced: str | None
+
+
+def _owed_persona(store: ContextStore, session: TeamSession) -> _OwedPersona | None:
+    """What ``session``'s OWN fleet row is owed, or ``None``; free to raise.
+
+    Outside a fleet window nothing is read at all. Inside one, the window's variable is
+    the row's id, so a row that is owed nothing costs one indexed read of ``team_meta``
+    and never the row. Only a standing marker pays for the row, and then the variable
+    alone is not enough: the agent's child processes inherit it (rule 1 of the fleet-row
+    section above), so the marker is honoured only for the session the row is bound to.
+    A nested ``claude -p`` is handed nothing, and uses nothing up.
+    """
+    agent_id = orchestrator.env_fleet_agent()
+    if agent_id is None:
+        return None
+    key = _persona_owed_key(agent_id)
+    value = store.get_meta(key)
+    if not value:
+        return None
+    row = _fleet_row(store, session.id, session.project_id, allow_unbound=False)
+    if row is None or row.id != agent_id:
+        return None
+    return _OwedPersona(key, row, value.partition(":")[2] or None)
+
+
+def _owed_persona_briefing(store: ContextStore, session: TeamSession) -> str:
+    """The briefing ``session``'s own fleet row is owed, handed over ONCE; else ``""``.
+
+    The preface the typed path uses, then the block of the row's CURRENT persona: two
+    attaches while the agent was busy deliver the later one. A persona that no longer
+    loads is the one line saying so, without the preface. The marker is settled before
+    the text is returned, and the text is returned only if that write held, so a store
+    that refuses it costs this prompt the briefing instead of repeating it on every one.
+
+    NEVER raises, and says what it swallowed (a hook's stderr is its log): this runs on
+    every prompt of every fleet agent, and a failure here may cost the briefing, never
+    the delta, the collision banner or the late assignment it is returned with.
+    """
+    try:
+        owed = _owed_persona(store, session)
+        if owed is None:
+            return ""
+        lines: list[str] = []
+        name = owed.row.persona
+        if name:
+            root = _project_root(store, session.project_id) or owed.row.cwd
+            lines = _persona_briefing(name, root, without=_ATTACHED_WITHOUT)
+            if len(lines) > 1:  # the block; a single line is why it could not be loaded
+                replaced = owed.replaced if owed.replaced != name else None
+                lines = [persona_attached_preface(name, replaced), *lines]
+        store.set_meta(owed.key, "")
+        return "\n".join(lines) + "\n" if lines else ""
+    except Exception as exc:
+        _log.warning(
+            "the persona briefing owed to fleet row %s could not be handed to session %s, "
+            "so this prompt goes without it (%s: %s)",
+            orchestrator.env_fleet_agent(),
+            session.id,
+            type(exc).__name__,
+            exc,
+        )
+        return ""
+
+
+def _settle_owed_persona(store: ContextStore, session: TeamSession) -> None:
+    """A session start briefs its fleet row's persona itself: nothing is owed after it.
+
+    Called once the start has bound the session to its row, because only the row's own
+    session settles (:func:`_owed_persona`). Never raises: an unsettled marker costs a
+    second copy of the block at the next prompt, and a raise here would cost the board.
+    """
+    try:
+        owed = _owed_persona(store, session)
+        if owed is not None:
+            store.set_meta(owed.key, "")
+    except Exception as exc:
+        _log.warning(
+            "the persona briefing owed to fleet row %s could not be settled at the start of "
+            "session %s, so its next prompt may carry the block again (%s: %s)",
+            orchestrator.env_fleet_agent(),
+            session.id,
+            type(exc).__name__,
+            exc,
+        )
 
 
 def event_line(event: TeamEvent, roles: dict[str, str]) -> str:

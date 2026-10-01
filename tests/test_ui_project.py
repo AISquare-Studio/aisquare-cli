@@ -2135,7 +2135,10 @@ def test_the_tabs_project_under_a_hub_is_the_one_its_seats_join(
 ) -> None:
     """The card's pin. Under a hub, the project whose key the tab shows is the one a seat
     spawned for the page joins inside its window, whose hub is the fleet's own root and
-    whose row names it (#230). With no hub nothing changes: ``team_project(page.root)``."""
+    whose row names it (#230). With no hub it is the page too. This pinned
+    ``team_project(page.root)`` there, which is the enclosing repository's project for a
+    page rooted inside one, and no seat of the page joins that (review of #240, finding 12;
+    tests/test_the_explainability_tab_speaks_for_its_page_with_no_hub.py)."""
     from aisquare.cli.ui.views import explainability as explainability_view
     from aisquare.core import orchestrator
 
@@ -2151,8 +2154,7 @@ def test_the_tabs_project_under_a_hub_is_the_one_its_seats_join(
                 created_at=datetime.now(tz=UTC),
             )
         )
-    unchanged = orchestrator.team_project(project.root)
-    assert explainability_view.key_project(project) == unchanged
+    assert explainability_view.key_project(project) == project, "with no hub: the page"
     assert explainability_view.own_key_label() == "this project only"
 
     hub = tmp_path / "hub"

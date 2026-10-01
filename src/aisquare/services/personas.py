@@ -7,6 +7,10 @@ ignores. Every write lands in a dot-named staging directory inside the target's
 parent and is renamed into place, so a reader never sees half a persona and a
 failed write leaves the old one untouched.
 
+A copy never follows a symbolic link. Import and export leave every link out, link and
+target both, and say which (``skipped_links``, :func:`link_warning`); a SKILL.md that is
+itself a link is refused, since there is no persona without it.
+
 A source that is already a skill takes the RECOGNISED path — bytes copied. Anything
 else (or ``--llm``/``--condense``) takes the LLM path: an engine from
 ``services.persona_import`` drafts a skill, the same validator as the recognised path
@@ -98,6 +102,16 @@ class ImportResult(BaseModel):
     source: str
     replaced: bool = False
     warnings: list[str] = []
+    skipped_links: list[str] = []
+    """The symbolic links the copy left out, relative to the skill directory: never
+    followed, never copied. :func:`link_warning` is the sentence for them."""
+
+
+class ExportResult(BaseModel):
+    """A written export: where it landed, and the symbolic links the copy left out."""
+
+    path: Path
+    skipped_links: list[str] = []
 
 
 class DraftKept(PersonaError):
@@ -139,6 +153,7 @@ def import_source(
     confirm: Callable[[PersonaDraftView], bool],
     progress: Callable[[str], None] | None = None,
     stdin: bytes | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> ImportResult:
     """Import ``source`` into ``layer``: ``-`` (stdin — or ``stdin``'s bytes, for a UI
     that has no stdin to hand over), a skill directory, a SKILL.md or other file, an
@@ -149,6 +164,17 @@ def import_source(
     ``[persona.import]``); ``llm="never"`` refuses instead. ``confirm`` and
     ``progress`` are the UI's seam (§4.3): the CLI passes y/N and a stderr printer,
     the TUI passes modals.
+
+    A symbolic link in a skill directory is never followed: the copy leaves it out and
+    the result names it (``skipped_links``). A SKILL.md that is itself a link is refused
+    (``symlink_refused``) before it is read, whichever path the import would take.
+
+    ``cancelled`` is the recognised path's LAST question (review of #240): asked
+    once, after every refusal and right before the copy is published, with nothing
+    written yet. ``True`` ends the import there (``PersonaError``, code
+    ``cancelled``); ``False`` means the publish is next and can no longer be
+    stopped. The TUI passes it because its user can leave the dialog while this
+    runs; without it nothing is asked. The LLM path's last question is ``confirm``.
     """
     base = _layer_dir(layer, root)
     if engine is not None and engine not in _ENGINES:
@@ -219,16 +245,12 @@ def import_source(
     if progress is not None:
         progress("recognised skill — copying")
 
+    skipped: list[str] = []
+
     def fill(staged: Path) -> None:
         if src.directory is not None:
-            origin = src.directory
-            shutil.copytree(
-                origin,
-                staged,
-                dirs_exist_ok=True,
-                ignore=lambda folder, _names: (
-                    [core.PROVENANCE_FILE] if Path(folder) == origin else []
-                ),
+            skipped.extend(
+                _copy_without_links(src.directory, staged, leave_out=(core.PROVENANCE_FILE,))
             )
         (staged / core.SKILL_FILE).write_bytes(src.skill_bytes)
         carried = _engine_provenance(src)
@@ -240,6 +262,10 @@ def import_source(
         else:
             _write_provenance(staged, source=src.origin, skill_bytes=src.skill_bytes)
 
+    if cancelled is not None and cancelled():
+        # A recognised skill needs no confirmation, so nothing else stood between a
+        # user who had backed out and the copy — or, under --force, the replacement.
+        raise PersonaError("the import was cancelled — nothing was written", code="cancelled")
     replaced = _publish(dest, fill)
     persona = core.load(dest, layer=layer)
     return ImportResult(
@@ -248,6 +274,7 @@ def import_source(
         source=src.origin,
         replaced=replaced,
         warnings=core.warnings(persona),
+        skipped_links=skipped,
     )
 
 
@@ -434,10 +461,11 @@ def _engine_provenance(src: _Source) -> Provenance | None:
     """An engine's sidecar on a source directory — a kept draft being finished."""
     if src.directory is None:
         return None
+    sidecar = src.directory / core.PROVENANCE_FILE
+    if sidecar.is_symlink():
+        return None  # never followed: the copy leaves a link out, this one included
     try:
-        carried = Provenance.model_validate_json(
-            (src.directory / core.PROVENANCE_FILE).read_bytes()
-        )
+        carried = Provenance.model_validate_json(sidecar.read_bytes())
     except (OSError, ValueError):
         return None
     return carried if carried.engine != "copy" else None
@@ -478,6 +506,7 @@ def _read_source(source: str, root: Path | None, *, stdin: bytes | None = None) 
                 path=directory,
                 code="not_recognised",
             )
+        _refuse_a_linked_skill_md(directory, "import")  # before a byte of it is read
         return _Source(
             origin=str(directory), skill_bytes=skill.read_bytes(), directory=directory, stem=None
         )
@@ -758,14 +787,19 @@ def export(
     to: Path | None,
     skill: Literal["user", "project"] | None,
     force: bool,
-) -> Path | str:
-    """The SKILL.md text (no destination), or the directory written: ``to/<name>/``,
-    ``<config dir>/skills/<name>/`` or ``<repo>/.claude/skills/<name>/``."""
+) -> ExportResult | str:
+    """The SKILL.md text (no destination), or the directory written — ``to/<name>/``,
+    ``<config dir>/skills/<name>/`` or ``<repo>/.claude/skills/<name>/`` — with the
+    symbolic links the copy left out: a link is never followed. A persona whose SKILL.md
+    is itself a link is not written anywhere (``symlink_refused``).
+    """
     persona = core.resolve(name, root)
     if to is not None and skill is not None:
         raise PersonaError("choose one destination: --to DIR or --skill", code="usage")
     if to is None and skill is None:
         return (persona.path / core.SKILL_FILE).read_bytes().decode("utf-8")
+    # Before the destination's parent is made:
+    _refuse_a_linked_skill_md(persona.path, "export")
     if skill == "user":
         base = _claude_home() / "skills"
     elif skill == "project":
@@ -782,8 +816,10 @@ def export(
     if _occupied(dest) and not force:
         raise PersonaError(f"{dest} already exists — --force replaces it", code="target_exists")
 
+    skipped: list[str] = []
+
     def fill(staged: Path) -> None:
-        shutil.copytree(persona.path, staged, dirs_exist_ok=True)
+        skipped.extend(_copy_without_links(persona.path, staged))
         if not (staged / core.PROVENANCE_FILE).exists():
             # A bundled or hand-authored persona has no sidecar; the exported copy
             # still says where it came from (§7: DIR/<name>/ is SKILL.md + .persona.json).
@@ -794,7 +830,16 @@ def export(
             )
 
     _publish(dest, fill)
-    return dest
+    return ExportResult(path=dest, skipped_links=skipped)
+
+
+def link_warning(skipped: list[str]) -> str | None:
+    """The one sentence for the symbolic links a copy left out — the CLI's warning line
+    and the dialogs' toast — or ``None`` when it left none."""
+    if not skipped:
+        return None
+    links = "1 symbolic link" if len(skipped) == 1 else f"{len(skipped)} symbolic links"
+    return f"skipped {links}, never followed and not copied: {', '.join(skipped)}"
 
 
 def validate(path: Path) -> tuple[Persona, list[str]]:
@@ -847,6 +892,47 @@ def _bundled_refusal(name: str, verb: Literal["edited", "removed"]) -> PersonaEr
             f"`aisquare persona import DIR/{name} --user` (or `persona new NAME`)"
         )
     return PersonaError(rule, code="bundled_read_only")
+
+
+def _refuse_a_linked_skill_md(directory: Path, action: Literal["import", "export"]) -> None:
+    """Refuse a skill directory whose SKILL.md is a symbolic link: the one link a copy
+    cannot leave out, since there is no persona without it, and following it would read
+    a file outside the skill. Both callers run this first: import before a byte of the
+    source is read, export before the destination's parent is made."""
+    if (directory / core.SKILL_FILE).is_symlink():
+        raise PersonaError(
+            f"'{core.SKILL_FILE}' is a symbolic link — {action} never follows a link, and "
+            f"there is no persona without its {core.SKILL_FILE}; replace it with a real file",
+            path=directory,
+            code="symlink_refused",
+        )
+
+
+def _copy_without_links(
+    origin: Path, staged: Path, *, leave_out: tuple[str, ...] = ()
+) -> list[str]:
+    """Copy the tree at ``origin`` into ``staged`` without its symbolic links, and return
+    the links left out, relative to ``origin``.
+
+    ``shutil.copytree`` follows a link and writes what it points at as a regular
+    file, so a cloned repository's ``.claude/skills/helper/env.txt ->
+    /proc/self/environ`` or ``refs -> ../../../../.ssh`` reached
+    ``<repo>/.aisquare/personas``, the layer that is committed, and an export wrote it
+    out again (review of #240, finding 15). The owner's ruling is to skip and say so: a
+    link, to a file or a directory, at any depth and wherever it points, is never
+    followed, its target never copied and the link itself not recreated. Everything else
+    is copied as before; ``leave_out`` names what the top level also leaves behind.
+    """
+    skipped: list[str] = []
+
+    def ignore(folder: str, names: list[str]) -> list[str]:
+        here = Path(folder)
+        links = [name for name in names if (here / name).is_symlink()]
+        skipped.extend((here / name).relative_to(origin).as_posix() for name in links)
+        return [*links, *leave_out] if here == origin else links
+
+    shutil.copytree(origin, staged, dirs_exist_ok=True, ignore=ignore)
+    return sorted(skipped)
 
 
 def _write_provenance(

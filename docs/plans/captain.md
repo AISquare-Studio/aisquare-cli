@@ -101,6 +101,7 @@ owner ── TUI captain view (T4) ─────────┘               
 | 13570 | a bare yes answers the captain's own named question, recorded pending for 120 s (`CONFIRM_TTL_S`); words naming another agent or project refuse |
 | 13614 / 14375 | ok, okay, sure, yup, roger, copy and affirmative count only as the whole answer, and a no only alone; the persona calls the tool first |
 | 14404 / 14427 | any other owner line closes a pending question; the persona passes the owner's exact words, a no included |
+| review of #240, finding 1 | 2026-09-30, the owner: a refusal that names the target is still a no. Clear refusals only, not any negation anywhere: words that begin with a no, a negation right before the tool's own verb, leave or keep within two words before the target's name (`words.refusal`); this overturns "a no only alone" of 13614. And a name is read whole: a hyphen is part of a label or project name, and another name is looked for on every row of the board, ended agents included, before the call's own names are set aside |
 | 14476 | T1e: the captain is spawned with Claude Code's session-rating survey off |
 | 14560 | T1e: the refusal for words that name nothing is the question itself; the rule and the seq stay in the audit |
 
@@ -121,6 +122,15 @@ owner ── TUI captain view (T4) ─────────┘               
   Enter/Esc dialog, the session-rating prompt — and a fresh captain is started
   bare and typed into once its prompt shows (13227). Pre-trusting the brain
   folder in Claude Code's config is the owner's Phase 2 call.
+- **No message is typed into a prompt, and a first prompt is never the fleet's**
+  (review of #240, finding 2): `tell`, the manager ask, `wololo` and
+  `attach_persona` end in `fleet.tell`'s paste and Enter, and the fleet reads an
+  agent parked at a permission prompt as waiting once its attention row is
+  stale. T1c's refusal of the trust dialog (13505) now holds for every prompt
+  `screen.prompt_showing` reads, whatever the fleet reads, and `attach_persona`
+  reads the pane too; `press` and `paste`, which answer prompts, are unchanged.
+  `brain.start(prompt)` starts the captain bare and types the prompt through
+  `say`'s guarded door, or its receipt says why it was not typed.
 - **After a reboot**: the row is ended and a fresh captain started only when the
   server is provably gone (its socket file absent where the fleet resolves it);
   a present socket with nothing behind it, or a question tmux could not answer,
@@ -141,6 +151,20 @@ owner ── TUI captain view (T4) ─────────┘               
   on, or the tool refuses and records its question pending for 120 s. A yes
   answers it; a no, or any other owner line through `say`, `send` or the voice
   page, closes it. The server never relies on the model passing a no.
+- **A refusal that names the agent is still a no — clear refusals only** (review
+  of #240, finding 1; the owner, 2026-09-30): the persona passes a no with
+  `confirm=true` like every answer, and "No, leave coder-1 running" names
+  coder-1, so the gate took it for the confirmation and coder-1 was stopped.
+  The review proposed "any negation anywhere"; the owner chose clear refusals,
+  for fewer repeat questions: words that begin with a no, a negation right
+  before the tool's own verb, *leave* or *keep* within two words before the
+  target's name (`words.refusal`). "Stop coder-1, no need for it anymore"
+  stays an order, and a refusal in other words can still get through:
+  accepted. It overturns "a no only as the whole utterance" (13614): "No
+  problem, go ahead" is a no now. In the same gate a name is read whole: a
+  hyphen is part of a label or a project name (`coder-1-2` is never
+  `coder-1`), and another name is looked for on every row of the board, ended
+  agents included, before the call's own names are set aside.
 - **The refusal for unnamed words is the question itself** (T1e, 14560): the
   captain says a refusal as it came, so it asks; the rule and the seq stay in
   the audit.

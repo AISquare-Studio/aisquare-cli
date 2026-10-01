@@ -191,7 +191,12 @@ def team_board() -> str:
 
     def run() -> str:
         _ensure_virtual_session()
-        project, sessions, tasks, events = team_service.board_data()
+        # An agent's board: the human's kinds — the bell, the notices, the captain's
+        # audit with the owner's words in it — are left out before the recent updates
+        # are counted, as in a briefing (review of #240, finding 11).
+        project, sessions, tasks, events = team_service.board_data(
+            exclude_kinds=team_service.HUMAN_BOARD_KINDS
+        )
         return team_service.render_board(project, sessions, tasks, events)
 
     return _guard(run)

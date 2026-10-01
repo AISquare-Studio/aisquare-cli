@@ -104,9 +104,11 @@ ANSWERS = ("yes", "no")
 """The semantic keys: read off the pane at the moment of the press (``screen.prompt_showing``)."""
 
 ANSWERING_KEYS = frozenset({"yes", "no", "y", "n", "enter", "esc", *(str(d) for d in range(1, 10))})
-"""Keys that answer a prompt: pressed while one shows, the pane is read back, and a prompt
-still showing is a said failure — the captain never reports a press the prompt ignored.
-The arrows, tab, space and ctrl-c move or interrupt; they only report what shows after."""
+"""Keys that answer a prompt: pressed while one shows, the pane is read back, and the SAME
+prompt still showing is a said failure — the captain never reports a press the prompt
+ignored. The same by the whole of it (``screen.Prompt.whole``): the next prompt in line
+often asks the very same question. The arrows, tab, space and ctrl-c move or interrupt;
+they only report what shows after."""
 
 READBACK_POLLS = 10
 READBACK_POLL_S = 0.2
@@ -765,9 +767,10 @@ def _no_trust_dialog(srv: TmuxServer, agent: FleetAgent, label: str, verb: str) 
     An agent spawned into a folder Claude Code has never trusted parks at its own trust
     dialog, and anything typed there answers it: Enter picks "No, exit" and the agent dies
     (the dry run's paste, 13504, which said success as it did). Every door that types into
-    an agent asks here first: press and paste through :func:`_ready`, and tell, ask_manager
-    and wololo before ``fleet.tell``. A pane that cannot be read is refused too: nothing is
-    typed blind. Returns what the pane shows, for the caller that reads it next.
+    an agent asks here first: press and paste through :func:`_ready`, and the doors that
+    end in ``fleet.tell`` through :func:`_no_prompt`. A pane that cannot be read is refused
+    too: nothing is typed blind. Returns what the pane shows, for the caller that reads it
+    next.
     """
     try:
         lines = _screen(srv, agent.pane_id)
@@ -784,13 +787,37 @@ def _no_trust_dialog(srv: TmuxServer, agent: FleetAgent, label: str, verb: str) 
     return lines
 
 
+def _no_prompt(srv: TmuxServer, agent: FleetAgent, label: str, verb: str) -> None:
+    """Refuse ANY prompt showing on the agent's pane, by its question (review of #240,
+    finding 2).
+
+    For the doors that end in ``fleet.tell`` — tell, ask_manager, wololo, attach_persona —
+    which pastes a message and presses Enter without reading the pane. The fleet reads an
+    agent parked at a permission prompt as waiting once its attention row has gone stale,
+    and there the Enter picks the highlighted "1. Yes": the command is approved by a
+    message that asked for something else, and the tool says "typed". So the trust dialog's
+    rule (:func:`_no_trust_dialog`, an unreadable pane included) holds for every prompt the
+    reader sees, and whatever the fleet reads, as it does there: ``fleet.tell`` asks the
+    state again after this, and the screen is the evidence. ``press`` and ``paste`` are how
+    a prompt IS answered, so they do not ask here. The refusal sends the captain to the
+    owner before it sends it to ``press``: the answer is theirs, as every confirm is.
+    """
+    showing = screen.prompt_showing(_no_trust_dialog(srv, agent, label, verb))
+    if showing is not None:
+        raise Refused(
+            f"a prompt is showing on {label}: {showing.question} — text typed there would "
+            f"answer it: ask the owner and answer it first (press) — nothing {verb}"
+        )
+
+
 def _before_telling(target: ProjectInfo, label: str, verb: str) -> None:
-    """``fleet.tell`` types into a waiting agent's pane without reading it: its trust dialog
-    is refused here first. An agent with no live row is ``fleet.tell``'s to answer."""
+    """``fleet.tell`` types into a waiting agent's pane without reading it, and its Enter
+    answers whatever shows there: any prompt, the trust dialog first, is refused here
+    (:func:`_no_prompt`). An agent with no live row is ``fleet.tell``'s to answer."""
     with store_session() as store:
         agent = store.fleet_agent_by_label(target.id, label, live_only=True)
     if agent is not None:
-        _no_trust_dialog(fleet.server_for(agent.tmux_socket), agent, label, verb)
+        _no_prompt(fleet.server_for(agent.tmux_socket), agent, label, verb)
 
 
 def _asking_or_idle(lines: Sequence[str]) -> bool:
@@ -832,9 +859,18 @@ def _press(target: ProjectInfo, label: str, key: str) -> Outcome:
             after = screen.prompt_showing(_screen(srv, agent.pane_id))
         except TmuxError:
             continue
-        if after is None or after.question != before.question:
+        # The WHOLE prompt, never its question line alone (review of #240, finding 10):
+        # Claude Code asks every queued Bash command the same question. Read as "still
+        # showing", the next prompt made a press that worked a retryable failure, and
+        # the retry's yes approved a command nobody had read.
+        if after is None or after.whole != before.whole:
             data["answered"] = True
-            return Outcome(data, said=f"pressed {shown} in {label}: the prompt is gone")
+            now = (
+                "the prompt is gone"
+                if after is None
+                else f"the prompt is answered; another shows now: {after.question}"
+            )
+            return Outcome(data, said=f"pressed {shown} in {label}: {now}")
     raise Failed(
         f"pressed {shown} in {label} but the prompt is still showing: {before.question} — "
         "the key did not answer it"
@@ -1264,7 +1300,7 @@ def _wololo(target: ProjectInfo, label: str, task: str) -> Outcome:
     if status.state != "waiting":
         raise Refused(f"{label} is {status.state} — wololo converts an idle agent only")
     # Before any claim moves: the reassignment is typed into its pane (T1c, 13503).
-    _no_trust_dialog(fleet.server_for(agent.tmux_socket), agent, label, "converted")
+    _no_prompt(fleet.server_for(agent.tmux_socket), agent, label, "converted")
     card = _card(target, task)
     if card.status != "todo":
         raise Refused(f"{card.id} is {card.status} — wololo takes a card from the pool")
@@ -1446,7 +1482,10 @@ def read_pane(project: str, label: str, lines: int = READ_DEFAULT, utterance: st
 
 
 def tell(project: str, label: str, text: str, utterance: str = "") -> str:
-    """Type a message into a waiting agent; a busy one gets it as a board note addressed to it."""
+    """Type a message into a waiting agent; a busy one gets it as a board note addressed to it.
+
+    Refused while a prompt shows on its pane: the message's Enter would answer it.
+    """
     return _run(
         "tell",
         {"project": project, "label": label, "text": text},
@@ -1470,7 +1509,9 @@ def ask_manager(project: str, text: str, timeout: int = 120, utterance: str = ""
     )
 
 
-_WORDS = re.compile(r"[a-z0-9]+")
+_WORDS = words.WORDS
+"""One reading of the owner's words for the gate and for :func:`words.refusal`, which is
+handed indexes into them."""
 
 ROLE_WORDS: dict[str, tuple[str, ...]] = {"coder": ("coding agent", "coding agents")}
 """How the owner names a role besides the role's own name and its plural (T1d)."""
@@ -1479,31 +1520,73 @@ ROLE_WORDS: dict[str, tuple[str, ...]] = {"coder": ("coding agent", "coding agen
 CONFIRM_TTL_S = 120.0
 """How long the captain's own confirmation question stays answerable by a bare yes (13570)."""
 
-
-def _says(said: list[str], phrase: str) -> tuple[int, int] | None:
-    """Where ``phrase``'s words stand in ``said``, as whole words, or ``None``."""
-    words = _WORDS.findall(phrase.lower())
-    for index in range(len(said) - len(words) + 1):
-        if words and said[index : index + len(words)] == words:
-            return index, index + len(words)
-    return None
+_Heard = tuple[list[str], list[bool]]
+"""The owner's words, and for each whether a hyphen ties it to the word before it."""
 
 
-def _target_names(label: str | None, role: str | None, project: ProjectInfo) -> list[str]:
+def _heard(utterance: str) -> _Heard:
+    """The owner's words, and which of them a hyphen ties to the word before.
+
+    A hyphen is part of a name: "coder-1-2" is one label and "alpha-omega" one project,
+    never coder-1 or alpha with something after (review of #240, finding 1).
+    """
+    low = utterance.lower()
+    found = list(_WORDS.finditer(low))
+    # Positions through span(): the config-write guard reads calls by bare name, and a
+    # match's .start() counts as the fleet's start (tests/test_config_writes_stay_in_the_cli.py).
+    spans = [match.span() for match in found]
+    tied = [
+        index > 0 and low[spans[index - 1][1] : here] == "-"
+        for index, (here, _) in enumerate(spans)
+    ]
+    return [match.group() for match in found], tied
+
+
+def _stands(heard: _Heard, name: str, *, whole: bool = True) -> list[tuple[int, int]]:
+    """Every place ``name``'s words stand in the owner's, as ``(start, end)`` word indexes.
+
+    Words, not substrings: "stop it" names nothing, "coder-1" and "coder 1" are one label.
+    ``whole`` takes the name as ONE name, with nothing tied on before or after it: "coder-1"
+    does not stand whole in "coder-1-2", nor "alpha" in "alpha-omega". That is how the call's
+    own names are read. A role word is read without it ("coder" is part of "coder-01", as a
+    label is often said), and so is another agent's or project's name: whatever holds it is
+    not what the call acts on.
+    """
+    said, tied = heard
+    parts = _WORDS.findall(name.lower())
+    spans: list[tuple[int, int]] = []
+    for start in range(len(said) - len(parts) + 1):
+        end = start + len(parts)
+        if not parts or said[start:end] != parts:
+            continue
+        if whole and (tied[start] or (end < len(said) and tied[end])):
+            continue
+        spans.append((start, end))
+    return spans
+
+
+def _own_names(label: str | None, project: ProjectInfo) -> list[str]:
+    """What a call acts on, by the names that are one name each: its label, its project's."""
     names = [label or "", project.root.name, project.codename or "", project.id]
-    if role:
-        names += [role, f"{role}s", *ROLE_WORDS.get(role, ())]
     return [name for name in names if name]
 
 
-def _named(utterance: str, *, label: str | None, role: str | None, project: ProjectInfo) -> bool:
-    """Whether the owner's words NAME what a quota-spending or destructive call acts on: the
-    agent's label, its role, or its project (T1d, 13548).
+def _role_names(role: str | None) -> list[str]:
+    return [role, f"{role}s", *ROLE_WORDS.get(role, ())] if role else []
 
-    Words, not substrings: "stop it" names nothing, "coder-1" and "coder 1" are one label.
+
+def _named_at(
+    utterance: str, *, label: str | None, role: str | None, project: ProjectInfo
+) -> list[int]:
+    """Where the owner's words NAME what a quota-spending or destructive call acts on: the
+    agent's label, its role, or its project (T1d, 13548), as indexes into their words.
+
+    Empty when they name nothing: "stop it".
     """
-    said = _WORDS.findall(utterance.lower())
-    return any(_says(said, name) for name in _target_names(label, role, project))
+    heard = _heard(utterance)
+    spans = [span for name in _own_names(label, project) for span in _stands(heard, name)]
+    spans += [span for name in _role_names(role) for span in _stands(heard, name, whole=False)]
+    return [start for start, _ in spans]
 
 
 def _names_another(
@@ -1512,32 +1595,61 @@ def _names_another(
     """A different project, or (for an agent's call) a different agent of this project, that
     the words name — ``(what they named, what the call acts on)`` — or ``None`` (13570, M1).
 
-    The call's own label and project names are masked first, so a project called "aisquare"
-    is not read into "aisquare cli" (role words are not: "coder" is part of "coder-2").
     Closes 13545's misresolution one step removed: "stop the coder in beta" is no
-    confirmation for alpha's coder.
+    confirmation for alpha's coder. Read on the words as they were said (review of #240,
+    finding 1: the call's own names were masked FIRST, and "alpha" taken out of "alpha-omega"
+    left nothing to find):
+
+    - Every row of the board counts, ended agents too: once coder-1 has ended, "Stop
+      coder-1" is still no confirmation for coder-2.
+    - Another name counts wherever its words stand, except INSIDE one of the call's own
+      said whole: a project called "aisquare" is not read into "aisquare cli", and coder-1
+      is not read into "coder-1-2" when the call is for coder-1-2. The call's own name hides
+      nothing longer: alpha's leaves "alpha omega" to be found. Role words are no own names:
+      "coder" is part of "coder-2".
+    - A hyphenated name that merely holds one of the call's own ("coder-1-2" for coder-1,
+      "alpha-omega" for alpha) is another name too, whether the board carries it or the
+      captain guessed.
     """
-    said = _WORDS.findall(utterance.lower())
-    for name in _target_names(label, None, project):
-        while (span := _says(said, name)) is not None:
-            said[span[0] : span[1]] = [""] * (span[1] - span[0])
+    heard = _heard(utterance)
+    said, tied = heard
+    own_names = _own_names(label, project)
+    own = [span for name in own_names for span in _stands(heard, name)]
+
+    def inside_own(span: tuple[int, int]) -> bool:
+        return any(start <= span[0] and span[1] <= end for start, end in own)
+
+    def stands_apart(name: str) -> bool:
+        return any(not inside_own(span) for span in _stands(heard, name, whole=False))
+
     home = captain_state.home_project().id
     with store_session() as store:
         others = [p for p in store.list_projects() if p.id not in (project.id, home)]
-        agents = store.fleet_agents(project.id, live_only=True) if label else []
+        labels = [agent.label for agent in store.fleet_agents(project.id)] if label else []
     for other in others:
         for name in (other.root.name, other.codename or "", other.id):
-            if name and _says(said, name):
+            if name and stands_apart(name):
                 return name, _name(project)
-    for agent in agents:
-        if agent.label != label and _says(said, agent.label):
-            return agent.label, label or ""
+    for other_label in labels:
+        if other_label != label and stands_apart(other_label):
+            return other_label, label or ""
+    # One of the call's own names with more tied on: the whole hyphenated word is the name.
+    for name in own_names:
+        for start, end in _stands(heard, name, whole=False):
+            while tied[start]:
+                start -= 1
+            while end < len(said) and tied[end]:
+                end += 1
+            if not inside_own((start, end)):
+                acts_on = label if label and name == label else _name(project)
+                return "-".join(said[start:end]), acts_on
     return None
 
 
 def _confirmation(
     utterance: str,
     *,
+    tool: str,
     action: str,
     label: str | None,
     role: str | None,
@@ -1547,18 +1659,26 @@ def _confirmation(
 
     Taken when the owner's words name the target, or when they are a bare yes (an
     affirmative) answering the captain's own question about this very action, asked under
-    :data:`CONFIRM_TTL_S` ago. Words that name a different agent or project refuse. Every
-    refusal keeps its question, and records it, so the owner's "yes" can answer it.
+    :data:`CONFIRM_TTL_S` ago. Words that name a different agent or project refuse. So do
+    words that are a refusal, though they name the target (:func:`words.refusal`; review of
+    #240, finding 1): the persona passes a no with confirm=true like every answer, so "No,
+    leave coder-1 running" is read here, and closes the question as a bare no does. Every
+    other refusal keeps its question, and records it, so the owner's "yes" can answer it.
     """
     key = f"{action} [{project.id}]"
-    if words.negative(utterance):
+    other = _names_another(utterance, label=label, role=role, project=project)
+    # A role word names the target only in words that name no other agent or project:
+    # the "coder" of "leave coder-2 alone" is coder-2's label, not this coder's role.
+    named_at = _named_at(
+        utterance, label=label, role=role if other is None else None, project=project
+    )
+    if words.refusal(utterance, tool=tool, named_at=named_at):
         captain_state.answer_pending(key, _wall(), ttl=CONFIRM_TTL_S)  # cleared, never revived
         return Refused(
             f"the owner said no ({utterance.strip()[:80]!r}) — nothing done, and the question "
             f'"{action}?" is closed; ask again only if they raise it again'
         )
-    other = _names_another(utterance, label=label, role=role, project=project)
-    if other is None and _named(utterance, label=label, role=role, project=project):
+    if other is None and named_at:
         captain_state.answer_pending(key, _wall(), ttl=CONFIRM_TTL_S)  # answered in full
         return None
     if (
@@ -1621,7 +1741,12 @@ def spawn(
                 "ask the owner, then call spawn again with confirm=true"
             )
         refusal = _confirmation(
-            utterance, action=f"spawn a {role} in {_name(on)}", label=label, role=role, project=on
+            utterance,
+            tool="spawn",
+            action=f"spawn a {role} in {_name(on)}",
+            label=label,
+            role=role,
+            project=on,
         )
         if refusal is not None:
             raise refusal
@@ -1673,6 +1798,7 @@ def stop(
         on = _on(target)
         refusal = _confirmation(
             utterance,
+            tool="stop",
             action=f"{'force-stop' if force else 'stop'} {label} in {_name(on)}",
             label=label,
             role=_role_of(on, label),
@@ -1717,6 +1843,7 @@ def restart(project: str, label: str, confirm: bool = False, utterance: str = ""
             )
         refusal = _confirmation(
             utterance,
+            tool="restart",
             action=f"restart {label} in {_name(on)}",
             label=label,
             role=_role_of(on, label),
@@ -1754,6 +1881,10 @@ def attach_persona(project: str, label: str, name: str, utterance: str = "") -> 
 
     def run(target: ProjectInfo | None) -> Outcome:
         on = _on(target)
+        # The briefing goes in through ``fleet.tell``, and the fleet reads no screen: a
+        # prompt on the agent's pane, its trust dialog too, is refused before anything is
+        # attached (review of #240, finding 2).
+        _before_telling(on, label, "attached")
         before = _seq_now(on.id)
         receipt = fleet.attach_persona(on, label, name, sender=captain_state.ensure_session(on))
         attached = _effect_seq(
@@ -1812,8 +1943,8 @@ def press(project: str, label: str, key: str, utterance: str = "") -> str:
     digit of its Yes option and no is Esc; on a [y/N] line, y and n; refused when no
     prompt shows, and on the trust dialog (the owner's to answer). Literal keys: 1-9 y n
     enter esc up down left right tab space ctrl-c. After a key that answers, the pane is
-    read back: a prompt still showing is an error, never a success. Only into an agent
-    that is waiting or asking — never a busy one.
+    read back: the same prompt still showing is an error, never a success. Only into an
+    agent that is waiting or asking — never a busy one.
     """
     return _run(
         "press",

@@ -139,6 +139,7 @@ def import_source(
     confirm: Callable[[PersonaDraftView], bool],
     progress: Callable[[str], None] | None = None,
     stdin: bytes | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> ImportResult:
     """Import ``source`` into ``layer``: ``-`` (stdin — or ``stdin``'s bytes, for a UI
     that has no stdin to hand over), a skill directory, a SKILL.md or other file, an
@@ -149,6 +150,13 @@ def import_source(
     ``[persona.import]``); ``llm="never"`` refuses instead. ``confirm`` and
     ``progress`` are the UI's seam (§4.3): the CLI passes y/N and a stderr printer,
     the TUI passes modals.
+
+    ``cancelled`` is the recognised path's LAST question (review of #240): asked
+    once, after every refusal and right before the copy is published, with nothing
+    written yet. ``True`` ends the import there (``PersonaError``, code
+    ``cancelled``); ``False`` means the publish is next and can no longer be
+    stopped. The TUI passes it because its user can leave the dialog while this
+    runs; without it nothing is asked. The LLM path's last question is ``confirm``.
     """
     base = _layer_dir(layer, root)
     if engine is not None and engine not in _ENGINES:
@@ -240,6 +248,10 @@ def import_source(
         else:
             _write_provenance(staged, source=src.origin, skill_bytes=src.skill_bytes)
 
+    if cancelled is not None and cancelled():
+        # A recognised skill needs no confirmation, so nothing else stood between a
+        # user who had backed out and the copy — or, under --force, the replacement.
+        raise PersonaError("the import was cancelled — nothing was written", code="cancelled")
     replaced = _publish(dest, fill)
     persona = core.load(dest, layer=layer)
     return ImportResult(

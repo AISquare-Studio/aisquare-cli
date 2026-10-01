@@ -807,6 +807,7 @@ def test_the_import_recorder_receives_exactly_the_chosen_options(
     first, second = importer.calls
     for call in (first, second):
         assert callable(call.pop("confirm")) and callable(call.pop("progress"))
+        assert callable(call.pop("cancelled"))  # the import's last question (review of #240)
     assert first == {
         "args": [],
         "source": "./skills/x",

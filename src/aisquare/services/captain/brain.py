@@ -32,7 +32,7 @@ import os
 import sys
 import time
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -224,23 +224,58 @@ def start(
     choices from the Spawn dialog (T4), each passed to ``fleet.spawn`` as its CLI
     flag would be (``None``: the role's default). What makes it the captain — its
     home board, its label, its brain folder, its one server — is never a choice.
+
+    ``prompt`` is the dialog's First prompt, and it is never the FLEET's first prompt
+    (13227; review of #240, finding 2): the fleet's first-prompt typing reads the pane's
+    process, not its text, and its Enter at the trust dialog a fresh captain parks at
+    picks "No, exit" while the receipt says typed. The captain is started bare, as ``say``
+    starts it, and the prompt goes in through the same guarded door once the input box
+    shows (:func:`_first_prompt`). The receipt says which: ``prompt_typed``, and when it
+    was not typed, a note that says why.
     """
     home = captain_state.home_project()
     brain_dir().mkdir(parents=True, exist_ok=True)
     write_mcp_config()
-    return fleet.spawn(
+    receipt = fleet.spawn(
         home,
         fleet.CAPTAIN_ROLE,
         label=fleet.CAPTAIN_LABEL,
         persona=persona,
         cwd=brain_dir(),
         agent_args=launch_args(home.root),
-        prompt=prompt,
         size=size,
         account=account,
         binary=binary,
         permission_mode=permission_mode,
     )
+    return _first_prompt(receipt, prompt) if prompt else receipt
+
+
+def _first_prompt(receipt: fleet.SpawnReceipt, prompt: str) -> fleet.SpawnReceipt:
+    """Type a start's first prompt through the guarded door; the receipt says how it went.
+
+    :func:`send`'s guard, for the captain this start has just made: one delivery at a
+    time, the fleet asked first, the pane read by structure, any dialog refused by name,
+    the drawn box as the evidence typing needs, and its one settle, because the box is
+    new. :data:`SEND_TIMEOUT_S` bounds the wait: the caller is a button. A prompt that did
+    not go in is a note and a failure on the receipt, in the door's own words, and never
+    ``prompt_typed=True``. It is not raised: the captain is up, and the caller shows its
+    pane, where the owner answers what is showing.
+    """
+    deadline = _now() + timedelta(seconds=SEND_TIMEOUT_S)
+    try:
+        with _one_at_a_time(deadline, SEND_TIMEOUT_S):
+            srv = _wait_until_ready(receipt.agent, deadline, SEND_TIMEOUT_S, settle=True)
+            _type(srv, receipt.agent, prompt)
+    except NoReply as exc:
+        note = f"the first prompt was NOT typed: {exc}"
+        return replace(
+            receipt,
+            notes=[*receipt.notes, note],
+            prompt_typed=False,
+            failures=[*receipt.failures, note],
+        )
+    return replace(receipt, prompt_typed=True)
 
 
 def say(text: str, *, timeout: float = SAY_TIMEOUT_S) -> Reply:

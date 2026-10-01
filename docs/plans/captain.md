@@ -121,6 +121,15 @@ owner ── TUI captain view (T4) ─────────┘               
   Enter/Esc dialog, the session-rating prompt — and a fresh captain is started
   bare and typed into once its prompt shows (13227). Pre-trusting the brain
   folder in Claude Code's config is the owner's Phase 2 call.
+- **No message is typed into a prompt, and a first prompt is never the fleet's**
+  (review of #240, finding 2): `tell`, the manager ask, `wololo` and
+  `attach_persona` end in `fleet.tell`'s paste and Enter, and the fleet reads an
+  agent parked at a permission prompt as waiting once its attention row is
+  stale. T1c's refusal of the trust dialog (13505) now holds for every prompt
+  `screen.prompt_showing` reads, whatever the fleet reads, and `attach_persona`
+  reads the pane too; `press` and `paste`, which answer prompts, are unchanged.
+  `brain.start(prompt)` starts the captain bare and types the prompt through
+  `say`'s guarded door, or its receipt says why it was not typed.
 - **After a reboot**: the row is ended and a fresh captain started only when the
   server is provably gone (its socket file absent where the fleet resolves it);
   a present socket with nothing behind it, or a question tmux could not answer,

@@ -765,9 +765,10 @@ def _no_trust_dialog(srv: TmuxServer, agent: FleetAgent, label: str, verb: str) 
     An agent spawned into a folder Claude Code has never trusted parks at its own trust
     dialog, and anything typed there answers it: Enter picks "No, exit" and the agent dies
     (the dry run's paste, 13504, which said success as it did). Every door that types into
-    an agent asks here first: press and paste through :func:`_ready`, and tell, ask_manager
-    and wololo before ``fleet.tell``. A pane that cannot be read is refused too: nothing is
-    typed blind. Returns what the pane shows, for the caller that reads it next.
+    an agent asks here first: press and paste through :func:`_ready`, and the doors that
+    end in ``fleet.tell`` through :func:`_no_prompt`. A pane that cannot be read is refused
+    too: nothing is typed blind. Returns what the pane shows, for the caller that reads it
+    next.
     """
     try:
         lines = _screen(srv, agent.pane_id)
@@ -784,13 +785,36 @@ def _no_trust_dialog(srv: TmuxServer, agent: FleetAgent, label: str, verb: str) 
     return lines
 
 
+def _no_prompt(srv: TmuxServer, agent: FleetAgent, label: str, verb: str) -> None:
+    """Refuse ANY prompt showing on the agent's pane, by its question (review of #240,
+    finding 2).
+
+    For the doors that end in ``fleet.tell`` — tell, ask_manager, wololo, attach_persona —
+    which pastes a message and presses Enter without reading the pane. The fleet reads an
+    agent parked at a permission prompt as waiting once its attention row has gone stale,
+    and there the Enter picks the highlighted "1. Yes": the command is approved by a
+    message that asked for something else, and the tool says "typed". So the trust dialog's
+    rule (:func:`_no_trust_dialog`, an unreadable pane included) holds for every prompt the
+    reader sees, and whatever the fleet reads, as it does there: ``fleet.tell`` asks the
+    state again after this, and the screen is the evidence. ``press`` and ``paste`` are how
+    a prompt IS answered, so they do not ask here.
+    """
+    showing = screen.prompt_showing(_no_trust_dialog(srv, agent, label, verb))
+    if showing is not None:
+        raise Refused(
+            f"a prompt is showing on {label}: {showing.question} — answer it first (press): "
+            f"text typed there would answer it — nothing {verb}"
+        )
+
+
 def _before_telling(target: ProjectInfo, label: str, verb: str) -> None:
-    """``fleet.tell`` types into a waiting agent's pane without reading it: its trust dialog
-    is refused here first. An agent with no live row is ``fleet.tell``'s to answer."""
+    """``fleet.tell`` types into a waiting agent's pane without reading it, and its Enter
+    answers whatever shows there: any prompt, the trust dialog first, is refused here
+    (:func:`_no_prompt`). An agent with no live row is ``fleet.tell``'s to answer."""
     with store_session() as store:
         agent = store.fleet_agent_by_label(target.id, label, live_only=True)
     if agent is not None:
-        _no_trust_dialog(fleet.server_for(agent.tmux_socket), agent, label, verb)
+        _no_prompt(fleet.server_for(agent.tmux_socket), agent, label, verb)
 
 
 def _asking_or_idle(lines: Sequence[str]) -> bool:
@@ -1264,7 +1288,7 @@ def _wololo(target: ProjectInfo, label: str, task: str) -> Outcome:
     if status.state != "waiting":
         raise Refused(f"{label} is {status.state} — wololo converts an idle agent only")
     # Before any claim moves: the reassignment is typed into its pane (T1c, 13503).
-    _no_trust_dialog(fleet.server_for(agent.tmux_socket), agent, label, "converted")
+    _no_prompt(fleet.server_for(agent.tmux_socket), agent, label, "converted")
     card = _card(target, task)
     if card.status != "todo":
         raise Refused(f"{card.id} is {card.status} — wololo takes a card from the pool")
@@ -1446,7 +1470,10 @@ def read_pane(project: str, label: str, lines: int = READ_DEFAULT, utterance: st
 
 
 def tell(project: str, label: str, text: str, utterance: str = "") -> str:
-    """Type a message into a waiting agent; a busy one gets it as a board note addressed to it."""
+    """Type a message into a waiting agent; a busy one gets it as a board note addressed to it.
+
+    Refused while a prompt shows on its pane: the message's Enter would answer it.
+    """
     return _run(
         "tell",
         {"project": project, "label": label, "text": text},
@@ -1754,6 +1781,10 @@ def attach_persona(project: str, label: str, name: str, utterance: str = "") -> 
 
     def run(target: ProjectInfo | None) -> Outcome:
         on = _on(target)
+        # The briefing goes in through ``fleet.tell``, and the fleet reads no screen: a
+        # prompt on the agent's pane, its trust dialog too, is refused before anything is
+        # attached (review of #240, finding 2).
+        _before_telling(on, label, "attached")
         before = _seq_now(on.id)
         receipt = fleet.attach_persona(on, label, name, sender=captain_state.ensure_session(on))
         attached = _effect_seq(

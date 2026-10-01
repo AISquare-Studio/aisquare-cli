@@ -79,6 +79,16 @@ _FRAME_TAG = re.compile(r"</?\s*aisquare-", re.IGNORECASE)
 _DELIMITER_REMOVED = "[aisquare: a frame delimiter was removed from the persona body]"
 _CLOSE = "</aisquare-persona>"
 
+#: What PyYAML's safe loader raises that is not a ``yaml.YAMLError`` (review of #240,
+#: finding 4; each measured on PyYAML 6.0.3). Its constructors hand a scalar to
+#: ``datetime``, ``int`` and ``float`` and let their errors through bare, and its
+#: composer recurses once per nesting level: ``ValueError`` for an impossible date
+#: (``reviewed: 2026-09-31``), ``AttributeError`` for ``!!timestamp soon``,
+#: ``TypeError`` for ``!!timestamp {=: 2026-01-01}``, ``LookupError`` for ``!!bool
+#: maybe`` (a ``KeyError``) and ``!!int ""`` (an ``IndexError``), and
+#: ``RecursionError`` for a few hundred nested ``[``.
+_LOADER_ERRORS = (ValueError, TypeError, AttributeError, LookupError, RecursionError)
+
 
 class Provenance(BaseModel):
     """``.persona.json`` — where a persona aisquare wrote or imported came from."""
@@ -158,7 +168,12 @@ def split_frontmatter(text: str) -> tuple[str, str]:
 
 def parse_skill(text: str, *, name: str, path: Path, layer: Layer) -> Persona:
     """The recognised test (§3.5, §3.9): a YAML map with a non-empty
-    ``description``, a non-empty body, and a directory name Claude Code accepts."""
+    ``description``, a non-empty body, and a directory name Claude Code accepts.
+
+    Whatever the frontmatter makes PyYAML raise is a :class:`PersonaError` here, the
+    bare exceptions of :data:`_LOADER_ERRORS` included: one class is what ``catalogue``,
+    ``resolve`` and every surface that shows a refusal catch.
+    """
     where = path / SKILL_FILE
     try:
         raw, body_text = split_frontmatter(text)
@@ -186,6 +201,16 @@ def parse_skill(text: str, *, name: str, path: Path, layer: Layer) -> Persona:
             f"the frontmatter is not valid YAML ({problem})",
             path=where,
             line=line,
+            code="not_recognised",
+        ) from None
+    except _LOADER_ERRORS as exc:
+        # Not an error PyYAML raises itself, so there is no mark to take a line from.
+        # Uncaught, one such SKILL.md in any layer took down every surface that lists or
+        # resolves personas, and the editor's check with it.
+        problem = str(exc).split("\n", 1)[0]
+        raise PersonaError(
+            f"the frontmatter is not valid YAML ({type(exc).__name__}: {problem})",
+            path=where,
             code="not_recognised",
         ) from None
     if not isinstance(data, dict):

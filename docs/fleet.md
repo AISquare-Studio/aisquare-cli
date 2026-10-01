@@ -324,8 +324,8 @@ on a permission prompt. Takes `--as SESSION`.
 waiting agent the same way, and keeps the persona on the agent's row so a `/clear`
 or a restart briefs it again ([docs/personas.md](personas.md)). A busy agent gets
 no note in the briefing's place: the board names the persona and never carries its
-body, and the agent is briefed at its next session start. The receipt reads `typed`
-or `noted`.
+body, and the agent's own next prompt hands it the briefing, for it alone. The
+receipt reads `typed` or `noted`.
 
 ### `fleet stop`
 

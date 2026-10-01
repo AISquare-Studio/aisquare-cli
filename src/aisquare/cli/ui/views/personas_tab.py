@@ -18,7 +18,7 @@ module at call time, so a test replaces each with a recorder.
 tab answers itself with the target picker (``cli/ui/attach.py``): an agent is
 attached to after one confirmation (``fleet_service.attach_persona`` in a thread
 worker; the toast says whether the briefing was typed, or noted for the agent's
-next session start), a bind or an account opens the Spawn dialog preset with the
+own next prompt), a bind or an account opens the Spawn dialog preset with the
 persona, and *+ New account* hands over to the Accounts page. The message is not
 stopped, so the shell can see it.
 
@@ -423,8 +423,8 @@ class PersonasTab(Vertical):
                 said = f"✓ attached {receipt.persona} to {label} ({receipt.delivered})"
                 noted = receipt.delivered == "noted"
                 if noted:
-                    # Nothing reached the agent: say why, and when the persona applies, as
-                    # the CLI's second line does (review of #240, finding 7).
+                    # Nothing reached the agent yet: say why, and how the persona gets to
+                    # it, as the CLI's second line does (review of #240, finding 7).
                     said = f"{said} — {receipt.how}"
                 self.notify(said, timeout=10 if noted else 6, markup=False)
             self.reload()

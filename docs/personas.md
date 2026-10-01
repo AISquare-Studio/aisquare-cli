@@ -127,15 +127,17 @@ aisquare persona attach skeptic --to coder-auth
 session, once it has joined). An agent that is waiting has the briefing typed
 into it, the way `fleet tell` types anything, and the receipt says `typed`. An
 agent that is busy is typed nothing, and no note is filed in the briefing's
-place: the receipt says `noted`, and that the persona applies at the agent's next
-session start. Either way the board gets one `persona_attached` line, with the
-name and never the body. Because the session-start hook reads the fleet row
-first, every session start after that — a `/clear` or a restart — briefs the
-agent with the persona. That includes an agent spawned with
-`--persona`, whose `AISQUARE_PERSONA` holds only the value it was launched with.
-The variable applies when the agent has no fleet row, or a row with no persona,
-and either one wins over a persona a session recorded earlier. Attaching another
-persona replaces it, and the agent is told which one it replaces.
+place: the receipt says `noted`, and that the persona is recorded and reaches the
+agent with its next prompt, for it alone. That prompt's hook hands the agent the
+same preface and block, once, and no other session reads them. Either way the
+board gets one `persona_attached` line, with the name and never the body. Because
+the session-start hook reads the fleet row first, every session start after that
+— a `/clear` or a restart — briefs the agent with the persona, and one that comes
+before a busy agent's next prompt is its briefing. That includes an agent spawned
+with `--persona`, whose `AISQUARE_PERSONA` holds only the value it was launched
+with. The variable applies when the agent has no fleet row, or a row with no
+persona, and either one wins over a persona a session recorded earlier. Attaching
+another persona replaces it, and the agent is told which one it replaces.
 In `asq`, the Spawn dialog (`＋ spawn agent` under a project) asks for the
 persona right after who runs the agent — role, account, binary — with the role's
 default preselected and the persona's description under the field; `(none)`
@@ -216,7 +218,7 @@ who runs it.
      now. Choosing one asks once ("attach skeptic to coder-auth? It replaces
      mentor."), then attaches exactly as `persona attach` does; the toast says
      whether the briefing was `typed` into a waiting agent or, for a busy one,
-     `noted`: recorded, to apply at its next session start.
+     `noted`: recorded, to reach it privately with its next prompt.
    - **Binds** — the seats `aisquare team bind` pinned, with the binary and the
      account each one's environment points at. Choosing one opens the Spawn
      dialog with that seat as the role, its binary, and the persona filled in.

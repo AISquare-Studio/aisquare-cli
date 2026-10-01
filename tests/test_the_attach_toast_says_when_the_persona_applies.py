@@ -1,12 +1,12 @@
 """The Personas tab's toast after an attach says what the CLI's two lines say.
 
 Review of #240, finding 7. Attaching to a busy agent no longer files the briefing on the
-board: the persona is recorded on the agent's rows and applies at its next session start
-(``tests/test_attaching_to_a_busy_agent_keeps_the_persona_off_the_board.py``). The toast
-read ``✓ attached pair to coder-auth (noted)`` and stopped there, which told the owner
-the briefing was waiting on the board for the agent's next prompt. For ``noted`` it now
-carries the receipt's own sentence, as ``persona attach`` prints it on its second line;
-a ``typed`` attach, which is done when the toast shows, reads as it did.
+board: the persona is recorded, and the agent's own next prompt hands it the briefing,
+for it alone (``tests/test_a_busy_agent_is_briefed_privately_at_its_next_prompt.py``).
+The toast read ``✓ attached pair to coder-auth (noted)`` and stopped there, which told
+the owner the briefing was waiting on the board. For ``noted`` it now carries the
+receipt's own sentence, as ``persona attach`` prints it on its second line; a ``typed``
+attach, which is done when the toast shows, reads as it did.
 
 Driven like ``tests/test_ui_personas.py``: the picker and the confirmation are real, and
 ``fleet_service.attach_persona`` is a recorder that answers with the receipt under test.
@@ -34,8 +34,8 @@ catalogue = ui_suite.catalogue
 targets = ui_suite.targets
 
 LATER = (
-    "it is working, so the briefing was not typed: pair is recorded on its fleet row and "
-    "applies at its next session start (a /clear or a restart)"
+    "it is working, so the briefing was not typed: pair is recorded and reaches it with its "
+    "next prompt, for it alone; the board carries the name only"
 )
 """``AttachReceipt.how`` for a busy agent, as ``fleet.attach_persona`` words it."""
 
@@ -72,7 +72,7 @@ def _toasts_after_attaching(
     return drive(scenario, project=project)
 
 
-def test_the_toast_for_a_busy_agent_says_the_persona_applies_at_its_next_session_start(
+def test_the_toast_for_a_busy_agent_says_the_persona_reaches_it_with_its_next_prompt(
     project: ProjectInfo,
     catalogue: dict[str, Path],
     targets: list[FleetAgentStatus],

@@ -1266,7 +1266,7 @@ def test_choosing_an_agent_confirms_then_attaches_and_says_how_it_was_delivered(
             persona=name,
             replaced="mentor",
             delivered="noted",
-            how="it applies at its next session start",
+            how="it reaches it with its next prompt",
         )
 
     monkeypatch.setattr(fleet_service, "attach_persona", attach)
@@ -1288,7 +1288,7 @@ def test_choosing_an_agent_confirms_then_attaches_and_says_how_it_was_delivered(
     assert calls == [(project.id, "coder-auth", "pair")]
     # A `noted` toast carries the receipt's sentence: nothing reached the agent yet, and
     # the bare "(noted)" read as a briefing waiting on the board (review of #240, finding 7).
-    said = "✓ attached pair to coder-auth (noted) — it applies at its next session start"
+    said = "✓ attached pair to coder-auth (noted) — it reaches it with its next prompt"
     assert (said, "information") in notices
     assert screen == "Screen"
 

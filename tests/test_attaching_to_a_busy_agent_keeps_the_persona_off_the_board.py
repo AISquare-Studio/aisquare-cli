@@ -13,9 +13,11 @@ carries persona text.
 
 The rule these pins hold: only an agent that is waiting is typed the briefing. For any
 other, nothing is filed in its place: the board carries the one ``persona_attached``
-line, the persona is on the agent's rows, and the agent is briefed by its next session
-start, as a ``/clear`` or a restart already briefed it. The receipt and the CLI say
-that, not that anything was delivered; the Personas tab's toast is pinned in
+line, the persona is on the agent's rows, and the agent is handed the briefing by its
+own next prompt, for it alone
+(``tests/test_a_busy_agent_is_briefed_privately_at_its_next_prompt.py``), or by a
+session start that comes first. The receipt and the CLI say that, not that anything was
+delivered; the Personas tab's toast is pinned in
 ``tests/test_the_attach_toast_says_when_the_persona_applies.py``.
 """
 
@@ -55,8 +57,8 @@ CLEARED = "44444444-5555-6666-7777-888888888888"
 LINE = "persona skeptic attached to coder-1"
 """All the board says about an attachment: who got which persona."""
 LATER = (
-    "so the briefing was not typed: skeptic is recorded on its fleet row and applies at "
-    "its next session start (a /clear or a restart)"
+    "so the briefing was not typed: skeptic is recorded and reaches it with its next "
+    "prompt, for it alone; the board carries the name only"
 )
 """What a caller is told when the agent could not be typed into, after the reason."""
 
@@ -129,13 +131,13 @@ def test_no_other_session_reads_the_persona_after_an_attach_to_a_busy_agent(
     }
 
 
-def test_the_busy_agent_itself_is_briefed_once_at_its_next_session_start(
+def test_a_session_start_of_the_busy_agent_briefs_it_once_from_its_rows(
     busy: FleetAgent, project: ProjectInfo, tmux: FakeTmux, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """What the receipt promises. The rows record the persona, and the session-start hook
-    reads the fleet row, so the start that follows a ``/clear`` in the agent's own pane
-    carries the block: once, in its place before the closing tag, and not a second time
-    among the board's recent updates."""
+    """The rows record the persona, and the session-start hook reads the fleet row, so a
+    start that follows a ``/clear`` in the agent's own pane carries the block: once, in
+    its place before the closing tag, and not a second time among the board's recent
+    updates."""
     fleet_service.attach_persona(project, "coder-1", "skeptic")
 
     assert busy.session_id is not None
@@ -190,7 +192,7 @@ def test_whatever_keeps_the_briefing_from_being_typed_nothing_is_filed_in_its_pl
     assert row is not None and row.persona == "skeptic"
 
 
-def test_the_cli_says_when_the_persona_applies_and_claims_no_delivery(
+def test_the_cli_says_how_the_persona_reaches_the_agent_and_claims_no_delivery(
     busy: FleetAgent, project: ProjectInfo, runner: CliRunner
 ) -> None:
     said = runner.invoke(app, ["persona", "attach", "skeptic", "--to", "coder-1", "-P", project.id])

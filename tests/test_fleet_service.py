@@ -2329,7 +2329,7 @@ def test_attaching_to_a_busy_agent_records_it_and_files_no_briefing_on_the_board
 
     receipt = fleet_service.attach_persona(project, "coder-1", "skeptic")
 
-    assert receipt.delivered == "noted" and "next session start" in receipt.how
+    assert receipt.delivered == "noted" and "with its next prompt" in receipt.how
     assert tmux.typed == [], "never typed into a busy agent"
     assert _events(project, "note") == [], "and nothing filed on the board in its place"
     assert _events(project, "persona_attached") == ["persona skeptic attached to coder-1"]

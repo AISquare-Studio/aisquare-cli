@@ -137,7 +137,8 @@ tmux can see and its row says so (`no hooks`).
    the agent limit, a binary not on your `PATH` — stays in the dialog with its
    reason; a spawn toasts its receipt and notes and opens the new agent's pane.
    `Esc` cancels, except while a spawn is already running: that one cannot be
-   taken back, so the dialog waits for its answer.
+   taken back, so the dialog waits for its answer, and *Pick…* and *Import…*
+   are disabled until it has it.
 5. Selecting an agent gives its pane the keyboard at once — type, and it reaches
    Claude Code. **Press `F12`** to hand focus back to the sidebar (it is the one key the pane
    never forwards; configurable). With the sidebar focused: `t` picks a theme,

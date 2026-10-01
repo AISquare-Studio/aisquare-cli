@@ -213,9 +213,11 @@ Each verb is the same tool call the captain makes, audited with your words
 agent waiting, a review, a pull request, an agent gone quiet; the same ask
 from the same agent about the same card is one item however often it repeats.
 `next` is the top item; `resolve` closes one with what you did; `snooze` hides
-one for a while (a week at most). `since` shows what happened on a board since
-you last looked, and `--advance` moves that watermark. `log` is the audit: the
-`captain_action` events, newest last.
+one for a while (a week at most). A resolved item comes back when what it was
+about comes back: the question asked again, the card blocked again, the agent's
+next prompt. `since` shows what happened on a board since you last looked, and
+`--advance` moves that watermark. `log` is the audit: the `captain_action`
+events, newest last.
 
 ### The action list
 

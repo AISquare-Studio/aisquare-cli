@@ -70,6 +70,7 @@ from aisquare.services import fleet as fleet_service
 from aisquare.services import personas as personas_service
 from aisquare.services import settings as settings_service
 from aisquare.services import team as team_service
+from tests.ui_workers import settle_page
 
 T = TypeVar("T")
 SIZE = (120, 50)
@@ -289,10 +290,14 @@ def drive(
 
 
 async def settle(pilot: Pilot[Any]) -> None:
-    """Let every worker finish, its state-change handler run, and the screen refresh."""
-    await pilot.app.workers.wait_for_complete()
-    await pilot.pause()
-    await pilot.pause()
+    """Let the dialog go quiet: every worker of ours ended, whatever its state, its
+    state-change handler run and the screen refreshed (``settle_page``).
+
+    Not ``workers.wait_for_complete()``: a scripted refusal ends its worker in an error,
+    which that call raised as ``WorkerFailed`` whenever the worker was still registered
+    when the wait began (as on rc/captain-v1, #238, card tsk_01m3pt9eme0h).
+    """
+    await settle_page(pilot.app)
 
 
 def shown(widget: Static) -> str:

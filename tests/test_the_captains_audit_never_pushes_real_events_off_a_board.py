@@ -139,11 +139,20 @@ def test_the_kinds_the_boards_leave_out_are_the_captains_and_the_humans() -> Non
 # --- the agent-facing readers -----------------------------------------------------------
 
 
-def _is_the_real_news_alone(text: str) -> None:
-    assert "recent updates:" in text
-    assert "JWT it is" in text and "the auth suite is green" in text, "the real events"
-    assert AUDIT not in text and OWNER_ASKED not in text, "none of the owner's audit"
-    assert BELL not in text and NOTICE not in text, "nor the human board's own lines"
+def _what_hides_the_real_news(text: str) -> list[str]:
+    """What is wrong with a briefing or a board's recent updates; empty when they show
+    the real events alone. Each test asserts on it in its own body, so none of them is
+    incapable of failing (tests/test_every_test_can_fail.py)."""
+    wrong = []
+    if "recent updates:" not in text:
+        wrong.append("no recent updates")
+    if "JWT it is" not in text or "the auth suite is green" not in text:
+        wrong.append("the real events are missing")
+    if AUDIT in text or OWNER_ASKED in text:
+        wrong.append("the owner's audit is shown")
+    if BELL in text or NOTICE in text:
+        wrong.append("the human board's own lines are shown")
+    return wrong
 
 
 def test_a_coder_that_starts_after_the_owner_asked_the_captain_is_briefed_on_the_real_events(
@@ -153,8 +162,9 @@ def test_a_coder_that_starts_after_the_owner_asked_the_captain_is_briefed_on_the
     'board', …, 'utterance': '<the owner's words>'}`` and no decision, no result."""
     _a_board_the_owner_asked_the_captain_about(runner, monkeypatch, work_dir)
     monkeypatch.setenv("AISQUARE_ROLE", "coder")
-    _is_the_real_news_alone(team_service.hook_session_start(NEWCOMER, work_dir, "startup"))
-    _is_the_real_news_alone(team_service.hook_session_start(NEWCOMER, work_dir, "clear"))
+    for source in ("startup", "clear"):
+        briefing = team_service.hook_session_start(NEWCOMER, work_dir, source)
+        assert _what_hides_the_real_news(briefing) == [], source
 
 
 def test_a_session_that_joins_late_is_briefed_on_the_real_events(
@@ -162,14 +172,14 @@ def test_a_session_that_joins_late_is_briefed_on_the_real_events(
 ) -> None:
     """A session the board has never seen, prompting in an active project: the same board."""
     _a_board_the_owner_asked_the_captain_about(runner, monkeypatch, work_dir)
-    _is_the_real_news_alone(team_service.hook_prompt_heartbeat(LATECOMER, work_dir))
+    assert _what_hides_the_real_news(team_service.hook_prompt_heartbeat(LATECOMER, work_dir)) == []
 
 
 def test_the_mcp_board_shows_a_remote_agent_the_real_events(
     runner: CliRunner, monkeypatch: pytest.MonkeyPatch, work_dir: Path
 ) -> None:
     _a_board_the_owner_asked_the_captain_about(runner, monkeypatch, work_dir)
-    _is_the_real_news_alone(mcp_server.team_board())
+    assert _what_hides_the_real_news(mcp_server.team_board()) == []
 
 
 # --- the delta and the manager's wake-up ------------------------------------------------

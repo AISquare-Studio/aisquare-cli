@@ -22,25 +22,36 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import typer
 import yaml
 from textual.pilot import Pilot
 from textual.widgets import Button, Static, TextArea
 from typer.testing import CliRunner
 
+from aisquare.cli import launch as launch_cli
 from aisquare.cli.app import app
 from aisquare.cli.ui.persona_dialogs import PARSE_DEBOUNCE, EditPersonaScreen
 from aisquare.core import personas as core
+from aisquare.core.orchestrator import team_project
 from aisquare.core.personas import PersonaError
+from aisquare.core.store import store_session
 from aisquare.models import ProjectInfo
+from aisquare.services import fleet as fleet_service
+from tests import test_fleet_service as fleet_suite
 from tests import test_persona_cli as cli_suite
 from tests import test_ui_personas as ui_suite
+from tests.test_fleet_service import FakeTmux
 from tests.test_persona_cli import BUNDLED
 from tests.test_ui_personas import Host, drive, rows, shown
 
-# The suites' fixtures, bound here so pytest finds them for this module's tests.
+# The suites' fixtures, bound here so pytest finds them for this module's tests. The fleet
+# suite's clock is autouse there and so here: it only makes the fleet service's waits instant.
 claude_dir = cli_suite.claude_dir
 repo = cli_suite.repo
 no_real_tmux = ui_suite.no_real_tmux
+tmux = fleet_suite.tmux
+clock = fleet_suite.clock
+claude_on_path = fleet_suite.claude_on_path
 
 IMPOSSIBLE_DATE = "metadata: {reviewed: 2026-09-31}\n"
 """The review's document: September has thirty days, and PyYAML reads a bare date as one."""
@@ -204,6 +215,51 @@ def test_import_list_still_lists_the_skills_and_says_which_one_cannot_load(
     assert (by_name["notes"]["recognised"], by_name["notes"]["description"]) == (True, "Mine.")
     assert by_name["dated"]["recognised"] is False
     assert by_name["dated"]["reason"].startswith(NOT_VALID_YAML)
+
+
+# --- launch, spawn and a restart -----------------------------------------------------------
+
+
+def test_launch_spawn_and_a_restart_step_past_the_directory_holding_the_date(
+    repo: Path, tmux: FakeTmux, claude_on_path: Path
+) -> None:
+    """``launch --persona``, ``fleet spawn --persona`` and a restart's replay resolve through
+    the same catalogue, and each raised the ``ValueError``. A replay never refuses over a
+    persona (``_persona_for_replay``): one whose SKILL.md took the date since steps down to
+    none, and says so on the receipt."""
+    fleet_suite._git("commit", "-q", "--allow-empty", "-m", "init", cwd=repo)
+    project = team_project(repo)
+    with store_session() as store:
+        store.ensure_project(project)
+    tempo = cli_suite._skill(_project_layer(repo), "tempo", description="A steady tempo.")
+    _dated(_project_layer(repo), "x")
+
+    launch_cli._check_persona("careful", project)  # nothing to refuse
+    with pytest.raises(typer.Exit) as launch_refused:
+        launch_cli._check_persona("x", project)
+    with pytest.raises(fleet_service.FleetError) as spawn_refused:
+        fleet_service.spawn(project, "coder", label="coder-x", persona="x")
+    kept = fleet_service.spawn(project, "coder", label="coder-kept", persona="careful").agent
+    gone = fleet_service.spawn(project, "tester", label="tester-gone", persona="tempo").agent
+    (tempo / "SKILL.md").write_text(  # the date arrives after the spawn
+        f"---\nname: tempo\ndescription: A steady tempo.\n{IMPOSSIBLE_DATE}---\nWork.\n",
+        encoding="utf-8",
+    )
+    for agent in (kept, gone):
+        tmux.die(agent.pane_id, 0)
+    kept_again = fleet_service.restart(project, "coder-kept")
+    gone_again = fleet_service.restart(project, "tester-gone")
+
+    assert launch_refused.value.exit_code == 1
+    assert "no persona named 'x'" in str(spawn_refused.value)
+    assert (kept.persona, kept_again.started.persona) == ("careful", "careful")
+    assert gone.persona == "tempo" and gone_again.started.persona is None
+    assert [
+        note
+        for note in gone_again.notes
+        if note.startswith("persona tempo no longer resolves")
+        and note.endswith("started without a persona")
+    ]
 
 
 # --- the TUI --------------------------------------------------------------------------------

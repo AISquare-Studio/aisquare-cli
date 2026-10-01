@@ -4906,6 +4906,7 @@ def hand_off(
     prompt: str | None = None,
     size: tuple[int, int] | None = None,
     spawned_by: str = "user",
+    agent_id: str | None = None,
 ) -> HandoffReceipt:
     """Start an agent from teammate ``source``: the Spawn dialog's *Hand off from*.
 
@@ -4930,9 +4931,24 @@ def hand_off(
     source's; a persona of ``""`` is none, and an account of :data:`THIS_SHELL_ACCOUNT`
     runs where a plain spawn with no ``--account`` runs. ``label`` and ``prompt`` are a
     fork's own: a take-over keeps the source's label, and continues its work.
+
+    ``agent_id`` names the source's ROW, for a caller that means one teammate rather than
+    whoever carries the label now, as it does for :func:`stop` and :func:`restart`. The
+    label alone names the newest row under it, and two rows of a project can carry one
+    label over time: by label, choosing an exited coder-1 forked, or stopped and
+    restarted, the coder-1 started since (:func:`_handoff_row`). Given, the hand-off acts
+    on exactly that row, which must be this project's and carry ``source``. A fork forks
+    its conversation and its commit, live or ended, whatever newer row shares the label. A
+    take-over acts on it only while it is still the row its label names: replaced by a
+    newer one, it is refused as ``restart`` refuses it, with neither row touched. ``None``
+    resolves the label as before.
     """
     with store_session() as store:
-        agent = store.fleet_agent_by_label(project.id, source, live_only=False)
+        agent = (
+            store.fleet_agent_by_label(project.id, source, live_only=False)
+            if agent_id is None
+            else _handoff_row(store, project, source, agent_id)
+        )
         if agent is None:
             raise NoSuchAgent(f"no teammate {source!r} in {_name(project)} to hand off from")
         session = store.get_session(agent.session_id) if agent.session_id else None
@@ -5031,6 +5047,41 @@ def hand_off(
         notes=[*notes, *receipt.notes],
         failures=list(receipt.failures),
     )
+
+
+def _handoff_row(
+    store: ContextStore, project: ProjectInfo, label: str, agent_id: str
+) -> FleetAgent:
+    """The row a hand-off was GIVEN (``agent_id``): this project's, under ``label``, or refused.
+
+    The label alone names the newest row that carries it, and two rows of a project can
+    carry one label over time: an exited coder-1 and the coder-1 started since. The Spawn
+    dialog's *Hand off from* can show the older one, so by label its fork forked, and its
+    take-over stopped and restarted, the NEWER agent (review of #240, "also confirmed":
+    hand-off by label). A caller that means one teammate names its row, as the agent view
+    does for :func:`stop` and :func:`restart`: by its whole id, as theirs is. A row of
+    another project, or one under another label, is a refusal that says which, before
+    anything is stopped or made, and never a quiet fall back to the row the label names.
+    """
+    try:
+        agent = store.get_fleet_agent(agent_id)
+    except AmbiguousIdError:
+        agent = None  # the start of several ids is no row's id
+    if agent is None or agent.id != agent_id:
+        raise NoSuchAgent(
+            f"no agent {agent_id} to hand off from — `aisquare fleet ls --all` shows every "
+            "row; nothing was done"
+        )
+    if agent.project_id != project.id:
+        raise FleetError(
+            f"{agent_id} ({agent.label}) is another project's agent, not one of "
+            f"{_name(project)}'s — nothing was done"
+        )
+    if agent.label != label:
+        raise FleetError(
+            f"{agent_id} is labelled {agent.label!r}, not {label!r} — nothing was done"
+        )
+    return agent
 
 
 def _account_wanted(account: str | None, slot: int | None) -> str | None:

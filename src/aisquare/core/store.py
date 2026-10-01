@@ -1090,9 +1090,17 @@ class ContextStore(Protocol):
     def get_event_by_seq(self, seq: int) -> TeamEvent | None: ...
     def find_event_by_id(self, ref: str) -> TeamEvent | None: ...
     def events_since(
-        self, project_id: str, seq: int, *, exclude_session: str | None = None, limit: int = 50
+        self,
+        project_id: str,
+        seq: int,
+        *,
+        exclude_session: str | None = None,
+        exclude_kinds: Collection[str] = (),
+        limit: int = 50,
     ) -> list[TeamEvent]: ...
-    def recent_events(self, project_id: str, *, limit: int = 10) -> list[TeamEvent]: ...
+    def recent_events(
+        self, project_id: str, *, exclude_kinds: Collection[str] = (), limit: int = 10
+    ) -> list[TeamEvent]: ...
     def filtered_events(
         self,
         project_id: str,
@@ -2790,22 +2798,40 @@ class SqliteStore:
         return [_row_to_event(row) for row in (rows if paging else reversed(rows))]
 
     def events_since(
-        self, project_id: str, seq: int, *, exclude_session: str | None = None, limit: int = 50
+        self,
+        project_id: str,
+        seq: int,
+        *,
+        exclude_session: str | None = None,
+        exclude_kinds: Collection[str] = (),
+        limit: int = 50,
     ) -> list[TeamEvent]:
+        """A cursor page: the OLDEST ``limit`` events past ``seq``, oldest first.
+
+        ``exclude_kinds`` leaves those kinds out INSIDE the query, as
+        :meth:`filtered_events` does, so ``limit`` counts rows the caller can use.
+        Dropped after the LIMIT, a run of the captain's audit lines filled the whole
+        page, and the event behind it was not read at all (review of #240, finding 11).
+        """
         rows = self._conn.execute(
             f"SELECT {_EVENT_COLUMNS} FROM team_event "
             "WHERE project_id = ? AND seq > ? "
             "AND (session_id IS NULL OR session_id != ?) "
-            "ORDER BY seq LIMIT ?",
-            (project_id, seq, exclude_session or "", limit),
+            f"{_and_not_kinds(exclude_kinds)}ORDER BY seq LIMIT ?",
+            (project_id, seq, exclude_session or "", *exclude_kinds, limit),
         ).fetchall()
         return [_row_to_event(row) for row in rows]
 
-    def recent_events(self, project_id: str, *, limit: int = 10) -> list[TeamEvent]:
+    def recent_events(
+        self, project_id: str, *, exclude_kinds: Collection[str] = (), limit: int = 10
+    ) -> list[TeamEvent]:
+        """A window: the NEWEST ``limit`` events, oldest first. ``exclude_kinds`` is left
+        out inside the query, as in :meth:`events_since`: the window stays ``limit`` long
+        however many of those kinds are newer than the events it shows."""
         rows = self._conn.execute(
             f"SELECT {_EVENT_COLUMNS} FROM team_event "
-            "WHERE project_id = ? ORDER BY seq DESC LIMIT ?",
-            (project_id, limit),
+            f"WHERE project_id = ? {_and_not_kinds(exclude_kinds)}ORDER BY seq DESC LIMIT ?",
+            (project_id, *exclude_kinds, limit),
         ).fetchall()
         return [_row_to_event(row) for row in reversed(rows)]
 
@@ -3771,6 +3797,12 @@ def _glob_prefix(ref: str) -> str:
     """Escape GLOB metacharacters in ``ref`` and append a wildcard."""
     escaped = ref.translate({ord("*"): None, ord("?"): None, ord("["): None})
     return f"{escaped}*"
+
+
+def _and_not_kinds(kinds: Collection[str]) -> str:
+    """``AND kind NOT IN (?, …) `` for a query that leaves ``kinds`` out, or nothing; the
+    caller hands ``*kinds`` to the query at that place."""
+    return f"AND kind NOT IN ({', '.join('?' * len(kinds))}) " if kinds else ""
 
 
 _DEFAULT_BUSY_MS = 5000

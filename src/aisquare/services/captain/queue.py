@@ -30,9 +30,12 @@ task id, the agent id), so its text may change without minting a new row. A
 state item clears itself when the condition is gone on a refresh (``cleared``
 in its history, with what the state is now); a question is only ever resolved
 by the owner. A resolved row that comes back re-opens with its history: a
-question on a NEW event, a state item only after its condition went away and
+question on a NEW event, a state item after its condition went away and
 returned — so "I told the coder to go ahead" does not bounce back on the next
-tick while the pane is still drawing the prompt.
+tick while the pane is still drawing the prompt. A parked pane re-opens also
+when the prompt observed is not the one that was resolved, by its hook's stamp
+or its words (:func:`_a_new_prompt`): a refresh runs only on demand, and the
+agent's next prompt can be up before any refresh has seen the first one clear.
 """
 
 from __future__ import annotations
@@ -239,7 +242,8 @@ class QueueItem(BaseModel):
     snoozed_until: datetime | None = None
     absent_since: datetime | None = None
     """For a state item: when its condition was last seen GONE; ``None`` while it
-    persists. A resolved state item re-opens only from an absence."""
+    persists. A resolved state item re-opens from an absence — and a prompt also when
+    it is not the prompt that was resolved (:func:`_a_new_prompt`)."""
     history: list[HistoryEntry] = Field(default_factory=list)
 
 
@@ -1073,7 +1077,7 @@ def _fold(state: _State, seen: Observed, now: datetime) -> QueueSnapshot:
         # a world that did not move is a file that does not move (gate 1, item 13).
         item.project_name = obs.project_name
         if item.status == "resolved":
-            if item.absent_since is not None:
+            if item.absent_since is not None or _a_new_prompt(item, obs):
                 item.count += 1
                 item.text = obs.text
                 item.last_seen = max(item.last_seen, obs.seen_at)
@@ -1163,6 +1167,30 @@ def _reopen(item: QueueItem, now: datetime) -> None:
     item.status = "open"
     item.snoozed_until = None
     item.history.append(HistoryEntry(at=now, action="reopened"))
+
+
+def _a_new_prompt(item: QueueItem, obs: Observation) -> bool:
+    """Whether a resolved ``waiting`` row is looking at a prompt that is not the one resolved.
+
+    A parked pane's row is keyed by the agent, so the agent's next prompt is the same
+    row. Resolved by hand, it re-opened only from an absence an earlier refresh had
+    recorded, and a refresh runs only on demand: the captain pressed yes and resolved,
+    the next permission prompt came up before any refresh saw the first one clear, and
+    ``attention()`` answered "nothing needs you" while the agent waited — until it went
+    stale half an hour later, below every review and pull request (review of #240,
+    finding 9). So the observation is compared with what was resolved, which is what
+    the row had seen: a source stamp newer than the row's (the Notification hook stamps
+    each prompt, a parked session's included — ``store.mark_attention``), or other
+    words (a hook-less pane has no stamp but its start, so its prompt line is all there
+    is). Newer than the ROW, not than the resolve: the press and the resolve are two
+    calls, and a quick command puts the next prompt up between them. The same stamp
+    and the same words are the prompt the owner already answered, still being drawn.
+
+    Prompts only. A stale row's words count the minutes, a pull request has no stamp
+    but the tick's own clock, and a card's moves with every write to it: each would
+    come back on every refresh. Those keep the absence rule.
+    """
+    return item.kind == "waiting" and (obs.seen_at > item.last_seen or obs.text != item.text)
 
 
 # --- the four names T1's tools call (seq 13010), and the refresh that is T7's own ---------------

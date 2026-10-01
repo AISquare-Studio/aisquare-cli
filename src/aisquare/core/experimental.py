@@ -11,9 +11,13 @@ set turns it off (``0``, and a typo), and unset or empty defers to the config.
 Off: ``aisquare captain`` and every subcommand exit 2 with :data:`CAPTAIN_OFF`, the
 fleet UI shows no insignia, captain row or captain view and its ui receiver refuses
 the captain's actions, the bundled ``captain`` persona is absent, the voice page does
-not serve (it is a subcommand), and doctor says so in one ok row. On, all of it is as
-it was before the switch. Nothing else reads it: fleets, boards and the store are the
-same either way.
+not serve (it is a subcommand), ``fleet restart`` and ``fleet switch`` refuse the
+captain's own row with the same line, and doctor says so in one ok row. On, all of it
+is as it was before the switch. Nothing else reads it: every other fleet row, the
+boards and the store are the same either way.
+
+The captain's own window is handed the variable as its starter has it
+(:func:`captain_environment`), so a switch set for one shell holds in the window too.
 """
 
 from __future__ import annotations
@@ -47,3 +51,20 @@ def captain_enabled() -> bool:
         return load_config().experimental.captain
     except Exception:  # an unreadable config is no opt-in
         return False
+
+
+def captain_environment() -> dict[str, str]:
+    """The variable as THIS process has it, as the pair a window is started with; unset
+    here, nothing.
+
+    For the captain's own window (``services.fleet.spawn``; review of #240, finding 13).
+    Its launcher looks the bundled ``captain`` persona up again, and a window's
+    environment is the tmux SERVER's plus the pairs its spawn passes: a switch set for one
+    shell, the way :data:`CAPTAIN_OFF` itself suggests, passed the spawner's check and
+    was off in the window — "no persona named 'captain'", a dead pane, and "started the
+    captain" said over it. The value travels as it is, so the window decides exactly as
+    its starter did. Unset here, the window reads the server's environment and the
+    config, as it always did.
+    """
+    value = os.environ.get(CAPTAIN_ENV)
+    return {} if value is None else {CAPTAIN_ENV: value}

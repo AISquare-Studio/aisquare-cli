@@ -19,7 +19,7 @@ import os
 import re
 import sqlite3
 import sys
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Collection, Mapping
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -149,7 +149,21 @@ MANAGER_WAKE_KINDS: frozenset[str] = frozenset(
 #: ``captain_action`` is the captain's audit line (``services.captain.actions``):
 #: one per tool call, reads included, for the owner — the effects it records
 #: (a note, a claim, a tell) reach teammates as their own events.
+#:
+#: No agent-facing reader shows any of them: not the delta or the wake-up, and not
+#: the recent updates of a briefing (:func:`_briefing_events`) or of the MCP
+#: ``team_board``. Each leaves them out IN its query, before the LIMIT (the store's
+#: ``exclude_kinds``). Dropped after it, or not at all, a few questions to the
+#: captain briefed the next coder with five audit lines and no decision, and a run
+#: of 62 of them hid a coder's result from a waiting manager's wake-up (review of
+#: #240, finding 11).
 HUMAN_BOARD_KINDS: frozenset[str] = frozenset({"attention", "notice", "captain_action"})
+
+#: The one of them the human board's own recent list leaves out too (``aisquare
+#: board``, its watch): the audit is one line per captain tool call, with the tool's
+#: arguments and the owner's words, and it filled that list. The bell and the notices
+#: stay, they are that board's own; ``aisquare captain log`` reads the audit.
+CAPTAIN_AUDIT_KINDS: frozenset[str] = frozenset({"captain_action"})
 
 #: The last sentence of every wake-up reason. Claude Code continues the turn with
 #: the reason as its instruction, so the instruction must license stopping — a
@@ -558,6 +572,7 @@ def board_data(
     events: int = _BOARD_EVENTS,
     since_seq: int | None = None,
     project: ProjectInfo | None = None,
+    exclude_kinds: Collection[str] = (),
 ) -> tuple[ProjectInfo, list[TeamSession], list[TeamTask], list[TeamEvent]]:
     """Everything the board shows: sessions, tasks and recent events.
 
@@ -565,14 +580,20 @@ def board_data(
     watch UI polling every few seconds does not rehydrate its whole window.
     ``project`` lets a long-lived caller resolve identity once and pass it in,
     sparing a ``git rev-parse`` per call (the watch TUI does this).
+    ``exclude_kinds`` leaves those event kinds out of either fetch, inside the
+    query, so ``events`` counts what is shown: the human board passes
+    :data:`CAPTAIN_AUDIT_KINDS`, an agent's (the MCP ``team_board``)
+    :data:`HUMAN_BOARD_KINDS`. By default nothing is left out.
     """
     _require_enabled()
     with store_session() as store:
         resolved = project if project is not None else _project(store, cwd)
         if since_seq is None:
-            fetched = store.recent_events(resolved.id, limit=events)
+            fetched = store.recent_events(resolved.id, exclude_kinds=exclude_kinds, limit=events)
         else:
-            fetched = store.events_since(resolved.id, since_seq, limit=events)
+            fetched = store.events_since(
+                resolved.id, since_seq, exclude_kinds=exclude_kinds, limit=events
+            )
         return (
             resolved,
             store.team_sessions(resolved.id),
@@ -1413,6 +1434,17 @@ def _shared_row_banner(
     )
 
 
+def _briefing_events(store: ContextStore, project_id: str) -> list[TeamEvent]:
+    """The recent updates an agent is briefed with: the board's last :data:`_BOARD_EVENTS`
+    that are an agent's to read, :data:`HUMAN_BOARD_KINDS` left out in the query.
+
+    Read unfiltered, the five were whatever came last — and after the owner had asked
+    the captain about the board a few times, that was five audit lines carrying the
+    owner's words, with the decisions and results pushed out (review of #240, finding 11).
+    """
+    return store.recent_events(project_id, exclude_kinds=HUMAN_BOARD_KINDS, limit=_BOARD_EVENTS)
+
+
 def hook_session_start(
     session_id: str,
     cwd: Path | None,
@@ -1491,7 +1523,7 @@ def hook_session_start(
             project,
             store.team_sessions(project.id),
             store.team_tasks(project.id),
-            store.recent_events(project.id, limit=_BOARD_EVENTS),
+            _briefing_events(store, project.id),
             me=session,
             assigned=assigned,
             briefing=True,
@@ -1547,7 +1579,7 @@ def hook_prompt_heartbeat(
                 project,
                 store.team_sessions(project.id),
                 store.team_tasks(project.id),
-                store.recent_events(project.id, limit=_BOARD_EVENTS),
+                _briefing_events(store, project.id),
                 me=session,
                 assigned=assigned,
                 labels=lambda: slot_labels_via(store),
@@ -1564,16 +1596,27 @@ def hook_prompt_heartbeat(
         briefing = "\n".join(_assignment_lines(late, session)) + "\n" if late is not None else ""
         lease = _now() + timedelta(minutes=orchestrator.lease_minutes())
         store.renew_leases(session.id, lease)
-        raw = store.events_since(
+        # The board's newest seq, read BEFORE the delta: with nothing to deliver the
+        # cursor moves there, past the rows the query left out. Read first, it cannot
+        # pass an event the delta did not see — whatever is written after has a later seq.
+        newest = store.latest_seq(session.project_id)
+        # Bells, notification lines and the captain's audit are for the human, not
+        # teammate context — left out IN the query, so the limit counts what is
+        # delivered: dropped after it, a run of audit lines was the whole page, prompt
+        # after prompt, with a coder's result behind it (review of #240, finding 11).
+        events = store.events_since(
             session.project_id,
             session.cursor,
             exclude_session=session.id,
+            exclude_kinds=HUMAN_BOARD_KINDS,
             limit=_DELTA_LIMIT * 3 + 1,
         )
-        # Bells and notification lines are for the human board, not teammate context.
-        events = [event for event in raw if event.kind not in HUMAN_BOARD_KINDS]
         if not events or not orchestrator.delta_enabled():
-            cursor = raw[-1].seq if raw else None
+            # Nothing delivered is still something read: the cursor moves past it, the
+            # left-out rows included, rather than stay in front of them for every later
+            # prompt to scan again.
+            read_to = events[-1].seq if events else newest
+            cursor = read_to if read_to > session.cursor else None
             store.touch_session(session.id, cursor=cursor, state="working")
             return collision + briefing
         truncated = len(events) > _DELTA_LIMIT
@@ -1681,13 +1724,19 @@ def _wake_candidates(store: ContextStore, me: TeamSession) -> list[TeamEvent]:
 
     One function so the wake-up and the deferral below can never disagree about
     the window they are judging — same source, same exclusions, same limit as
-    :func:`hook_prompt_heartbeat`. Bells and notification lines
-    (:data:`HUMAN_BOARD_KINDS`) are for the human board, not teammate context.
+    :func:`hook_prompt_heartbeat`. Bells, notification lines and the captain's audit
+    (:data:`HUMAN_BOARD_KINDS`) are for the human, not teammate context, and are left
+    out IN the query: a Stop that wakes nobody moves no cursor, so dropped after the
+    LIMIT, a run of audit lines was the whole page at every Stop, and the result behind
+    it woke nobody until something else was written (review of #240, finding 11).
     """
-    raw = store.events_since(
-        me.project_id, me.cursor, exclude_session=me.id, limit=_DELTA_LIMIT * 3 + 1
+    return store.events_since(
+        me.project_id,
+        me.cursor,
+        exclude_session=me.id,
+        exclude_kinds=HUMAN_BOARD_KINDS,
+        limit=_DELTA_LIMIT * 3 + 1,
     )
-    return [event for event in raw if event.kind not in HUMAN_BOARD_KINDS]
 
 
 def _deferred_wake_reason(store: ContextStore, me: TeamSession) -> str | None:

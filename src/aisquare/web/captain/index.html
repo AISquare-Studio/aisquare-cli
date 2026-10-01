@@ -145,7 +145,8 @@ function say(cls, text) {
   log.prepend(el);
 }
 function setStatus(text, cls = '') { status.textContent = text; status.className = 'chip ' + cls; }
-function send(obj) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj)); }
+// True when the socket took it. A typed request is shown as said, and its box cleared, on that alone.
+function send(obj) { if (!ws || ws.readyState !== 1) return false; ws.send(JSON.stringify(obj)); return true; }
 
 function connect() {
   if (!token) { setStatus('no token — open the URL aisquare captain voice printed', 'bad'); return; }
@@ -257,10 +258,24 @@ function finishStream(then) {
 async function startStream() {
   if (mode !== 'listen' || muted || streaming) return;
   if (!(await ensureGraph())) return;
+  // Chrome leaves an AudioContext made with no user gesture suspended, and listen mode makes its
+  // from the websocket's hello: the chip said listening and no frame left the page until the mic
+  // was muted and unmuted (review of #240, finding 14). So the stream starts only once the context
+  // runs. Until then the chip says what it waits for, a gesture resumes the context
+  // (resumeContext), and the context's next change of state brings this back.
+  if (ctx.state !== 'running') {
+    setStatus('click or press a key to start the mic');
+    ctx.addEventListener('statechange', () => { if (listening) startStream(); }, { once: true });
+    return;
+  }
   burstGeneration += 1; if (drainTimer) { clearTimeout(drainTimer); drainTimer = null; }
   streaming = true; source.connect(node); setStatus(awake ? 'listening' : idleListenLabel(), 'on');
 }
 function stopStream() { finishStream(); setStatus('connected', 'on'); }
+// resume() from a websocket handler is no gesture; from any of these it is one (a touch grants
+// it on release). Nothing to do while the context runs, or before there is one.
+function resumeContext() { if (ctx && ctx.state === 'suspended') ctx.resume().catch(() => {}); }
+for (const gesture of ['pointerdown', 'pointerup', 'touchend', 'keydown']) window.addEventListener(gesture, resumeContext, true);
 
 talk.addEventListener('pointerdown', (e) => { e.preventDefault(); pressStart(); });
 talk.addEventListener('pointerup', pressEnd);
@@ -275,9 +290,14 @@ speakerBtn.addEventListener('click', () => { const on = speakerBtn.textContent.e
 $('typed').addEventListener('submit', (e) => {
   e.preventDefault();
   const text = textInput.value.trim(); if (!text) return;
+  const stop = /^stop listening[.!?]?$/i.test(text);
+  // Shown as said, and the box cleared, only once it is SENT. Both came first, and in the 1.5 s
+  // before a reconnect "stop coder-1" was shown, cleared and sent to nobody (review of #240,
+  // finding 14). Unsent, it stays in the box and the page says so.
+  if (!send(stop ? { t: 'stop' } : { t: 'text', text })) { say('note', '✗ not sent: the page is not connected. Your text is still in the box, send it again once the page says connected.'); return; }
   textInput.value = '';
-  if (/^stop listening[.!?]?$/i.test(text)) { muted = true; muteBtn.textContent = 'unmute'; send({ t: 'stop' }); return; }
-  say('said', text); send({ t: 'text', text });
+  if (stop) { muted = true; muteBtn.textContent = 'unmute'; return; }
+  say('said', text);
 });
 connect();
 </script>

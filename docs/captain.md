@@ -41,6 +41,8 @@ The captain ships **off**. While it is off:
   receiver refuses the captain's actions.
 - The bundled `captain` persona is absent from every picker and the catalogue.
 - The voice page does not serve.
+- `aisquare fleet restart` and `aisquare fleet switch` refuse the captain's own
+  row with the same line, before anything is stopped.
 - `aisquare doctor` shows one ok row, `captain: off (experimental)`.
 
 Turn it on for this home:
@@ -50,9 +52,12 @@ aisquare config set experimental.captain true
 ```
 
 To turn it on for one shell only, set `AISQUARE_EXPERIMENTAL_CAPTAIN=1`. The
-variable wins over the config either way, and `0` turns it off. `asq` reads the
-switch when it starts, so restart it to see the insignia. Turning it off stops
-nothing that is already running. On, everything below holds exactly as written.
+variable wins over the config either way, and `0` turns it off. The captain's
+own window is started with the variable as that shell has it, at every start and
+restart, so the captain runs with the switch on even when the fleet's tmux
+server was started without it. `asq` reads the switch when it starts, so restart
+it to see the insignia. Turning it off stops nothing that is already running.
+On, everything below holds exactly as written.
 
 ## Setup, once
 
@@ -139,6 +144,10 @@ Two modes, on the page and on the command line:
   - **The stop word "stop listening"** turns the mic off, spoken bare, after
     "Captain", or typed. A mute or a mode switch closes an open window.
   - **Typed text needs no wake word.** The gate is on what the mic hears.
+  - **A page opened straight in listen mode may wait for you.** A browser such
+    as Chrome starts no audio before a click or a key press on the page. Until
+    then the chip says **click or press a key to start the mic**, and the first
+    one starts it.
 
 The wake word is `captain` unless `[captain] wake_word` in `config.toml` says
 otherwise: one word or a few, a to z and spaces (`wake_word = "hey captain"`).
@@ -165,7 +174,9 @@ already speak during that turn, so nothing is heard twice.
 
 The mode has one home, `captain_voice_mode` in `state.json`: `--mode` sets it,
 the page's toggle sets it, and every open page follows within a second. A typed
-message in the page's box goes the same way as a spoken one.
+message in the page's box goes the same way as a spoken one. If the page is not
+connected when you send it (it reconnects by itself), it says so and keeps your
+text in the box.
 
 ### Dictation apps
 
@@ -208,9 +219,17 @@ Each verb is the same tool call the captain makes, audited with your words
 agent waiting, a review, a pull request, an agent gone quiet; the same ask
 from the same agent about the same card is one item however often it repeats.
 `next` is the top item; `resolve` closes one with what you did; `snooze` hides
-one for a while (a week at most). `since` shows what happened on a board since
-you last looked, and `--advance` moves that watermark. `log` is the audit: the
-`captain_action` events, newest last.
+one for a while (a week at most). A resolved item comes back when what it was
+about comes back: the question asked again, the card blocked again, the agent's
+next prompt. `since` shows what happened on a board since you last looked, and
+`--advance` moves that watermark. `log` is the audit: the `captain_action`
+events, newest last.
+
+The audit is written on the board each call is about, and `log` is where it is
+read. `aisquare board` and its watch leave those lines out of their recent
+updates, and no agent is shown them: not in a briefing, a delta, a manager's
+wake-up or the MCP `team_board`. So however often you ask the captain about a
+project, its board still shows that project's own decisions and results.
 
 ### The action list
 

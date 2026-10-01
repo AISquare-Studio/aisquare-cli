@@ -21,6 +21,12 @@ seq 13121), with four things of its own:
 
 Every path handed to the window is ABSOLUTE (:func:`_home`): the window starts in
 the brain folder, where a relative ``AISQUARE_HOME`` would name another folder.
+
+The window is also started with the experimental switch as its starter has it
+(``fleet.spawn``, ``core.experimental.captain_environment``): its launcher looks the
+bundled ``captain`` persona up again, in the tmux server's environment. It is the
+window's own pair, set at every start, and never one of :func:`launch_args`, which the
+row records and a restart replays (review of #240, finding 13).
 """
 
 from __future__ import annotations

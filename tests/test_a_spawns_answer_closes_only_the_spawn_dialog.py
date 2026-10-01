@@ -260,7 +260,7 @@ def test_a_hand_off_locks_import_while_it_runs_and_pick_stays_locked_for_the_tea
     )
 
     async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
-        select(dialog, "from").value = "coder-1"
+        select(dialog, "from").value = teammates[0].agent.id
         await settle(pilot)
         seen: list[Any] = [locked(dialog)]
         try:
@@ -318,7 +318,7 @@ def test_unpicking_a_teammate_during_a_spawn_does_not_bring_pick_back_before_the
         seen: list[Any] = []
         try:
             await spawn_and_hold(pilot, held)
-            select(dialog, "from").value = "coder-1"
+            select(dialog, "from").value = teammates[0].agent.id
             await quiet(pilot)
             select(dialog, "from").value = ""  # back to (none): the plain form frees Pick…
             await quiet(pilot)

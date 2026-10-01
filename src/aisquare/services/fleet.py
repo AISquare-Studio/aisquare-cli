@@ -44,7 +44,7 @@ from types import ModuleType
 from typing import Any, Literal
 
 from aisquare.core import claude_accounts as claude_accounts_core
-from aisquare.core import codenames, harness, orchestrator, paths, personas, selfcli
+from aisquare.core import codenames, experimental, harness, orchestrator, paths, personas, selfcli
 from aisquare.core import tmux as tmux_core
 from aisquare.core.config import (
     CLAUDE_PERMISSION_MODES,
@@ -1723,6 +1723,14 @@ def spawn(
         # send (rightly) never types into a dialog: every voice line was refused, and from the
         # phone the owner cannot answer it (T1e). screen.py's refusal stays the backstop.
         env["CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY"] = "1"
+        # The experimental switch as THIS process has it, when it has it. The window's
+        # launcher looks the bundled `captain` persona up again, and with the switch set
+        # only in the starting shell — the server started without it — the window said
+        # "no persona named 'captain'" and exited under "started the captain" (review of
+        # #240, finding 13). A window pair, never a `launch -e` one: those reach the
+        # agent after that lookup, and the row would record the value for every restart
+        # to replay. Read at each start instead, a restart's included.
+        env.update(experimental.captain_environment())
     if config.disable_native_agent_teams:
         env["CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"] = "0"
     # The deployment override as THIS process sees it: the UI's Explainability tab
@@ -4093,6 +4101,7 @@ def switch(
             else []
         )
     _require_role(agent.role)  # `spawn`'s first refusal, before the stop as the task's
+    _refuse_the_captain_while_off(agent)
     current = _account_slot_of(agent, session)
     notes: list[str] = []
     failures: list[str] = []  # the notes that say what did not happen (`SwitchReceipt`)
@@ -4371,6 +4380,19 @@ def _persona_for_replay(project: ProjectInfo, agent: FleetAgent, notes: list[str
     return fallback
 
 
+def _refuse_the_captain_while_off(agent: FleetAgent) -> None:
+    """Refuse to start the captain's row again while the experimental captain is off.
+
+    :func:`restart` and :func:`switch` replay the row, and off, the bundled ``captain``
+    persona does not resolve: a replay drops a persona that no longer resolves rather
+    than refuse (:func:`_persona_for_replay`), so the captain came back with its tools
+    and without its rules. Asked before anything is stopped, and said in the one line
+    every captain refusal says (review of #240, finding 13).
+    """
+    if agent.role == CAPTAIN_ROLE and not experimental.captain_enabled():
+        raise FleetError(experimental.CAPTAIN_OFF)
+
+
 def _refuse_a_replay_that_cannot_start(agent: FleetAgent, session: TeamSession | None) -> None:
     """Raise now what replaying ``agent``'s launch spec would refuse — BEFORE it is stopped.
 
@@ -4520,6 +4542,7 @@ def restart(
             if agent.session_id is not None
             else []
         )
+    _refuse_the_captain_while_off(agent)
     # `spawn`'s refusals for the binary and the account, asked here for the same
     # reason. The account is resolved as `switch` resolves its target — the row's
     # slot, else the one its session ran under, whose number outlives a removed

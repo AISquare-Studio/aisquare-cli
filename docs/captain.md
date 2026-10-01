@@ -41,6 +41,8 @@ The captain ships **off**. While it is off:
   receiver refuses the captain's actions.
 - The bundled `captain` persona is absent from every picker and the catalogue.
 - The voice page does not serve.
+- `aisquare fleet restart` and `aisquare fleet switch` refuse the captain's own
+  row with the same line, before anything is stopped.
 - `aisquare doctor` shows one ok row, `captain: off (experimental)`.
 
 Turn it on for this home:
@@ -50,9 +52,12 @@ aisquare config set experimental.captain true
 ```
 
 To turn it on for one shell only, set `AISQUARE_EXPERIMENTAL_CAPTAIN=1`. The
-variable wins over the config either way, and `0` turns it off. `asq` reads the
-switch when it starts, so restart it to see the insignia. Turning it off stops
-nothing that is already running. On, everything below holds exactly as written.
+variable wins over the config either way, and `0` turns it off. The captain's
+own window is started with the variable as that shell has it, at every start and
+restart, so the captain runs with the switch on even when the fleet's tmux
+server was started without it. `asq` reads the switch when it starts, so restart
+it to see the insignia. Turning it off stops nothing that is already running.
+On, everything below holds exactly as written.
 
 ## Setup, once
 

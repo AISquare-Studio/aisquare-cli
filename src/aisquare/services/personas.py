@@ -7,6 +7,9 @@ ignores. Every write lands in a dot-named staging directory inside the target's
 parent and is renamed into place, so a reader never sees half a persona and a
 failed write leaves the old one untouched.
 
+A copy never follows a symbolic link: import and export refuse a directory that holds
+one, before anything is written (:func:`_refuse_links`).
+
 A source that is already a skill takes the RECOGNISED path — bytes copied. Anything
 else (or ``--llm``/``--condense``) takes the LLM path: an engine from
 ``services.persona_import`` drafts a skill, the same validator as the recognised path
@@ -149,6 +152,10 @@ def import_source(
     ``[persona.import]``); ``llm="never"`` refuses instead. ``confirm`` and
     ``progress`` are the UI's seam (§4.3): the CLI passes y/N and a stderr printer,
     the TUI passes modals.
+
+    A skill directory that holds a symbolic link is refused (``symlink_refused``)
+    whichever path it would take: nothing of it is copied, handed to an engine or
+    written.
     """
     base = _layer_dir(layer, root)
     if engine is not None and engine not in _ENGINES:
@@ -222,6 +229,7 @@ def import_source(
     def fill(staged: Path) -> None:
         if src.directory is not None:
             origin = src.directory
+            # No link in here for copytree to follow: _read_source refused a tree with one.
             shutil.copytree(
                 origin,
                 staged,
@@ -478,6 +486,7 @@ def _read_source(source: str, root: Path | None, *, stdin: bytes | None = None) 
                 path=directory,
                 code="not_recognised",
             )
+        _refuse_links(directory, "import")  # before a byte of it is read
         return _Source(
             origin=str(directory), skill_bytes=skill.read_bytes(), directory=directory, stem=None
         )
@@ -760,12 +769,15 @@ def export(
     force: bool,
 ) -> Path | str:
     """The SKILL.md text (no destination), or the directory written: ``to/<name>/``,
-    ``<config dir>/skills/<name>/`` or ``<repo>/.claude/skills/<name>/``."""
+    ``<config dir>/skills/<name>/`` or ``<repo>/.claude/skills/<name>/``. A persona
+    directory that holds a symbolic link is not written anywhere (``symlink_refused``).
+    """
     persona = core.resolve(name, root)
     if to is not None and skill is not None:
         raise PersonaError("choose one destination: --to DIR or --skill", code="usage")
     if to is None and skill is None:
         return (persona.path / core.SKILL_FILE).read_bytes().decode("utf-8")
+    _refuse_links(persona.path, "export")  # before the destination's parent is made
     if skill == "user":
         base = _claude_home() / "skills"
     elif skill == "project":
@@ -847,6 +859,35 @@ def _bundled_refusal(name: str, verb: Literal["edited", "removed"]) -> PersonaEr
             f"`aisquare persona import DIR/{name} --user` (or `persona new NAME`)"
         )
     return PersonaError(rule, code="bundled_read_only")
+
+
+def _refuse_links(directory: Path, action: Literal["import", "export"]) -> None:
+    """Refuse to copy a skill directory that holds a symbolic link, at any depth.
+
+    ``shutil.copytree`` follows a link and writes what it points at as a regular
+    file, so a cloned repository's ``.claude/skills/helper/env.txt ->
+    /proc/self/environ`` or ``refs -> ../../../../.ssh`` reached
+    ``<repo>/.aisquare/personas``, the layer that is committed, and an export wrote it
+    out again (review of #240, finding 15). A link is refused wherever it points,
+    inside the directory too: it is never followed and its target never copied. Both
+    callers run this first: import before a byte of the source is read, export before
+    the destination's parent is made. The link named is the first one found: the
+    shallowest, then in name order.
+    """
+    pending = [directory]
+    while pending:
+        folder = pending.pop(0)
+        for entry in sorted(folder.iterdir()):
+            if entry.is_symlink():
+                raise PersonaError(
+                    f"'{entry.relative_to(directory).as_posix()}' is a symbolic link — "
+                    f"{action} never follows a link or copies what it points at; replace it "
+                    "with a real file or directory",
+                    path=directory,
+                    code="symlink_refused",
+                )
+            if entry.is_dir():
+                pending.append(entry)
 
 
 def _write_provenance(

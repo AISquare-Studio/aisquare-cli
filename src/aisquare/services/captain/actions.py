@@ -799,13 +799,14 @@ def _no_prompt(srv: TmuxServer, agent: FleetAgent, label: str, verb: str) -> Non
     rule (:func:`_no_trust_dialog`, an unreadable pane included) holds for every prompt the
     reader sees, and whatever the fleet reads, as it does there: ``fleet.tell`` asks the
     state again after this, and the screen is the evidence. ``press`` and ``paste`` are how
-    a prompt IS answered, so they do not ask here.
+    a prompt IS answered, so they do not ask here. The refusal sends the captain to the
+    owner before it sends it to ``press``: the answer is theirs, as every confirm is.
     """
     showing = screen.prompt_showing(_no_trust_dialog(srv, agent, label, verb))
     if showing is not None:
         raise Refused(
-            f"a prompt is showing on {label}: {showing.question} — answer it first (press): "
-            f"text typed there would answer it — nothing {verb}"
+            f"a prompt is showing on {label}: {showing.question} — text typed there would "
+            f"answer it: ask the owner and answer it first (press) — nothing {verb}"
         )
 
 

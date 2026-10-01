@@ -17,6 +17,8 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import timedelta
+from pathlib import Path
 
 import pytest
 
@@ -29,7 +31,10 @@ from aisquare.services.captain import actions
 from aisquare.services.captain import state as captain_state
 from aisquare.services.captain.errors import Failed, Refused
 from tests import captain_screens as shots
+from tests import test_a_captains_first_prompt_is_never_typed_into_a_dialog as first_prompt_suite
 from tests import test_captain_actions as actions_suite
+from tests import test_fleet_service as fleet_suite
+from tests.test_a_captains_first_prompt_is_never_typed_into_a_dialog import ScreenTmux
 from tests.test_captain_actions import (
     Clock,
     FakeServer,
@@ -47,6 +52,11 @@ projects = actions_suite.projects
 alpha = actions_suite.alpha
 agents = actions_suite.agents
 clock = actions_suite.clock
+# And for the one test that uses no recorder at all: the fleet suite's fake tmux with a
+# screen, its fake ``claude``, and its project that is no git checkout.
+tmux = first_prompt_suite.tmux
+claude_on_path = fleet_suite.claude_on_path
+plain_project = fleet_suite.plain_project
 
 
 @pytest.fixture
@@ -160,6 +170,25 @@ def test_no_door_types_a_message_into_a_parked_permission_prompt(
     assert CHOOSER_ASKS in last["said"]
 
 
+def test_the_repro_holds_with_the_real_fleet_reading_a_long_parked_prompt_as_waiting(
+    tmux: ScreenTmux, claude_on_path: Path, plain_project: ProjectInfo
+) -> None:
+    """No recorder here: the real ``fleet.status_of`` and ``fleet.tell`` over the fleet
+    suite's fake tmux. coder-1 asked for permission and has sat at the chooser past its
+    attention row's freshness (``team._STALE_AFTER``), so the fleet stops believing the row,
+    sees a quiet pane and reads it waiting — which is where the told text was typed and its
+    Enter approved the command."""
+    agent = fleet.spawn(plain_project, "coder", label="coder-1", worktree=False).agent
+    fleet_suite._stale_board_session(
+        agent, "attention", seen_ago=team_service._STALE_AFTER + timedelta(minutes=1)
+    )
+    tmux.screen = list(shots.REAL_CHOOSER)
+    assert fleet.status_of(agent).state == "waiting", "the stale attention row is not believed"
+    said = _said(lambda: actions.tell(agent.project_id, "coder-1", TOLD))
+    assert tmux.reached() == [], "nothing reached the chooser"
+    assert said.startswith(f"refused: a prompt is showing on coder-1: {CHOOSER_ASKS}")
+
+
 @pytest.mark.parametrize(
     ("prompt", "asks"),
     [
@@ -183,7 +212,7 @@ def test_tell_refuses_every_prompt_the_reader_sees_and_files_no_note_either(
     said = _said(lambda: actions.tell("alpha", "coder-1", TOLD))
     assert pane.typed == []
     assert said.startswith(f"refused: a prompt is showing on coder-1: {asks}")
-    assert "answer it first (press)" in said and "nothing told" in said
+    assert "ask the owner and answer it first (press)" in said and "nothing told" in said
     assert _notes_to(alpha, "coder-1") == []
 
 

@@ -1354,7 +1354,8 @@ NO_CHANGE: Kwargs = {
     "label": None,
     "prompt": None,
 }
-"""What a hand-off sends for a form that shows the teammate's own: its role, account and persona."""
+"""What a hand-off sends for a form that shows the teammate's own: its role, account and persona.
+Its ``agent_id``, the row the form shows, is sent as well, and is each test's own."""
 
 
 def test_the_hand_off_field_lists_the_open_teammates_and_none_is_todays_spawn(
@@ -1400,7 +1401,7 @@ def test_a_teammate_prefills_role_account_and_persona_and_forks_by_default(
     teammates.append(teammate(git_project, role="tester", label="tester-1"))
 
     async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
-        select(dialog, "from").value = "tester-1"
+        select(dialog, "from").value = teammates[0].agent.id
         await settle(pilot)
         assert dialog.query_one("#spawn-how-row").display
         assert dialog.query_one("#spawn-fork", RadioButton).value
@@ -1416,7 +1417,8 @@ def test_a_teammate_prefills_role_account_and_persona_and_forks_by_default(
         return list(host.results)
 
     results = drive(git_project, scenario)
-    assert hand_offs.calls == [(git_project.id, "tester-1", NO_CHANGE)] and spawns.calls == []
+    sent = {**NO_CHANGE, "agent_id": teammates[0].agent.id}
+    assert hand_offs.calls == [(git_project.id, "tester-1", sent)] and spawns.calls == []
     [receipt] = results
     assert isinstance(receipt, fleet_service.SpawnReceipt)
     assert receipt.notes == ["a hand-off note", "a spawn note"]
@@ -1433,7 +1435,7 @@ def test_take_over_locks_the_label_and_task_to_the_teammates_and_asks_first(
     teammates.append(teammate(git_project, task_id=task.id))
 
     async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
-        select(dialog, "from").value = "coder-1"
+        select(dialog, "from").value = teammates[0].agent.id
         await settle(pilot)
         dialog.query_one("#spawn-take-over", RadioButton).value = True
         await settle(pilot)
@@ -1453,7 +1455,8 @@ def test_take_over_locks_the_label_and_task_to_the_teammates_and_asks_first(
         return list(host.results)
 
     results = drive(git_project, scenario)
-    assert hand_offs.calls == [(git_project.id, "coder-1", {**NO_CHANGE, "mode": "take_over"})]
+    sent = {**NO_CHANGE, "mode": "take_over", "agent_id": teammates[0].agent.id}
+    assert hand_offs.calls == [(git_project.id, "coder-1", sent)]
     assert len(results) == 1
 
 
@@ -1463,7 +1466,7 @@ def test_start_fresh_and_a_changed_role_are_sent(
     teammates.append(teammate(git_project))
 
     async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> None:
-        select(dialog, "from").value = "coder-1"
+        select(dialog, "from").value = teammates[0].agent.id
         await settle(pilot)
         dialog.query_one("#spawn-fresh", Checkbox).value = True
         select(dialog, "role").value = "tester"
@@ -1502,7 +1505,7 @@ def test_account_set_to_this_shells_is_sent_as_this_shells(
     teammates.append(teammate(git_project))
 
     async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> None:
-        select(dialog, "from").value = "coder-1"
+        select(dialog, "from").value = teammates[0].agent.id
         await settle(pilot)
         if take_over:
             dialog.query_one("#spawn-take-over", RadioButton).value = True

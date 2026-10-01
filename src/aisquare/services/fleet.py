@@ -643,16 +643,14 @@ def _is_the_captains_launch(cwd: Path | None, agent_args: Sequence[str] | None) 
     return cwd is not None and "--strict-mcp-config" in args and no_tools
 
 
-def next_label(
-    project: ProjectInfo,
-    role: str,
-    *,
-    wanted: str | None = None,
-    task_id: str | None = None,
-    store: ContextStore | None = None,
-) -> str:
-    """The label a new agent gets: the asked one, or ``<role>-<task>`` / ``<role>-<n>``,
-    suffixed ``-2``, ``-3`` while a LIVE agent already holds it (§5.7)."""
+def _fixed_label(role: str, wanted: str | None) -> str | None:
+    """The one label ``role`` may run under, the manager's or the captain's, else ``None``.
+
+    The rules :func:`next_label` applies before it asks who holds a label: ``wanted`` must
+    be a label, and a reserved one belongs to its role. Asked on their own by a fork, whose
+    label nothing at all may hold (:func:`_fork_label`), so both pick under one copy of
+    them.
+    """
     if wanted is not None and not is_label(wanted):
         raise FleetError(
             f"label {wanted!r} is not valid — lowercase letters, digits and '-', "
@@ -666,6 +664,22 @@ def next_label(
         raise FleetError(f"the label {CAPTAIN_LABEL!r} is reserved for the captain")
     if role == CAPTAIN_ROLE:
         return CAPTAIN_LABEL
+    return None
+
+
+def next_label(
+    project: ProjectInfo,
+    role: str,
+    *,
+    wanted: str | None = None,
+    task_id: str | None = None,
+    store: ContextStore | None = None,
+) -> str:
+    """The label a new agent gets: the asked one, or ``<role>-<task>`` / ``<role>-<n>``,
+    suffixed ``-2``, ``-3`` while a LIVE agent already holds it (§5.7)."""
+    fixed = _fixed_label(role, wanted)
+    if fixed is not None:
+        return fixed
 
     def pick(store: ContextStore) -> str:
         live = {agent.label for agent in store.fleet_agents(project.id, live_only=True)}
@@ -688,6 +702,86 @@ def next_label(
         return pick(store)
     with store_session() as opened:
         return pick(opened)
+
+
+def _fork_label(
+    project: ProjectInfo,
+    role: str,
+    wanted: str | None,
+    *,
+    store: ContextStore,
+    trees: Path | None,
+    codename: str | None,
+) -> str:
+    """The label a FORK takes: ``wanted``, or the next ``<role>-<n>``, that NOTHING holds.
+
+    :func:`next_label` keeps the LIVE agents apart, which is a spawn's rule: a label an
+    ended agent left is free again, and the tree and the branch under it are the next
+    agent's to carry on in (:func:`_ensure_worktree`). A fork is not that agent. The
+    Spawn dialog prefills ``next_label``'s answer and sends ``None`` for it, so a fork of
+    an EXITED teammate was handed that teammate's own label: it ran in the source's tree,
+    on top of its uncommitted work, or moved that tree to another branch; spawn's
+    :func:`_supersede` removed the source's last screen; ``fleet restart <label>`` meant
+    the fork from then on; and under a label an earlier agent had left, the fork was that
+    agent's stale branch checked out, while its first message said "you run in your own
+    worktree on your own branch" (review of #240, finding 3).
+
+    So a fork's label is held by nothing: no row of the project in ANY state (live,
+    exited, lost or ended) and, where it gets a worktree (``trees`` is where those go,
+    ``None`` when it gets none), no directory at the place its own would be made and no
+    local branch it would be cut on, named by ``codename`` as :func:`spawn` names it.
+    ``wanted`` that something holds is refused, naming the holder, where a spawn would
+    suffix it or take it: the owner typed it, and nothing has been made yet. The manager's
+    label is the only one its role has, so a fork as the manager is refused the same way
+    while any manager's row holds it. With no ``wanted``, ``<role>-1``, ``-2`` … are
+    walked to the first that is free, however far that is: every label the project ever
+    used is held, so the walk has no count to run out at.
+
+    Asked where :func:`spawn` picks every label, in the same store session as its other
+    refusals; a parallel spawn that takes the label after that is :func:`_record`'s to
+    settle, as it is for any spawn.
+    """
+    # The newest row under each label (the store lists them oldest first): the live one
+    # when there is one.
+    holders = {row.label: row for row in store.fleet_agents(project.id, live_only=False)}
+
+    def held_by(label: str) -> str | None:
+        """What holds ``label``, in a refusal's words; ``None`` when nothing does."""
+        holder = holders.get(label)
+        if holder is not None:
+            state = "a live agent" if holder.ended_at is None else "an agent that has ended"
+            return f"it is the label of {state} ({holder.id})"
+        if trees is None:
+            return None
+        if (trees / label).exists():
+            return f"its worktree would be {trees / label}, which already exists"
+        if codename is None:
+            return None  # no branch can be named yet; `_ensure_worktree` asks once it can
+        branch = branch_name(codename, task_id=None, title=label)
+        found = _git(project.root, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}")
+        if found.returncode == 0:
+            return f"its branch would be {branch}, which already exists"
+        return None
+
+    fixed = _fixed_label(role, wanted)
+    label = fixed if fixed is not None else wanted
+    if label is None:
+        n = 1
+        while held_by(f"{role}-{n}") is not None:
+            n += 1
+        return f"{role}-{n}"
+    held = held_by(label)
+    if held is None:
+        return label
+    way_out = (
+        f", and the {role} has no other label; take it over or spawn one instead"
+        if fixed is not None
+        else "; pick another label"
+    )
+    raise FleetError(
+        f"cannot fork as {label!r}: {held} — a fork takes a label, a worktree and a branch "
+        f"that nothing holds{way_out}"
+    )
 
 
 # --- git: the fleet's one process seam besides tmux (§3.5) --------------------------
@@ -837,8 +931,17 @@ def _ensure_worktree(
 ) -> Path:
     """``<root>/<worktree_dir>/<label>`` on ``branch``, created or reused.
 
-    ``start_point`` is where a NEW ``branch`` is cut (``git worktree add -b``), the
-    checkout's HEAD when ``None``; a branch that exists already is checked out as it is.
+    ``start_point`` is a FORK's (:func:`hand_off`): the commit its source's tree is on,
+    where the fork's own ``branch`` is cut (``git worktree add -b``). With it nothing is
+    reused: a tree already at the path, or a branch already under the name, is another
+    agent's work, and the spawn is refused with that tree not started in or switched, and
+    that branch not checked out. A fork handed the label of its exited source ran in that
+    source's tree, on top of its uncommitted work, or moved that tree to another branch;
+    under a label an earlier agent had left, its "own" worktree was that agent's stale
+    branch, not its source's commit (review of #240, finding 3). :func:`_fork_label` picks
+    a label that has neither, so what is refused here was made since, by a parallel spawn.
+    Without a start point, every other spawn's case, a new branch is cut at the checkout's
+    HEAD and everything below applies.
 
     Reuse is deliberate: a coder respawned on the same task after review
     findings must land in the tree that holds its branch, not beside it. A
@@ -864,6 +967,11 @@ def _ensure_worktree(
     """
     path = root / worktree_dir / label
     if path.exists():
+        if start_point is not None:
+            raise FleetError(
+                f"{path} already exists — a fork's worktree is made new, at the commit its "
+                "source is on, and never one that is already there; fork under another label"
+            )
         if (path / ".git").exists():
             if own is not None and path.resolve() == own.resolve():
                 notes.append(f"kept the agent's worktree at {path} as it stands")
@@ -883,6 +991,12 @@ def _ensure_worktree(
     # `add` at the same path; prune is idempotent and cheap.
     _git(root, "worktree", "prune")
     if _git(root, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}").returncode == 0:
+        if start_point is not None:
+            raise FleetError(
+                f"branch {branch} already exists — a fork's branch is cut new, at the commit "
+                "its source is on, and never one that is already there; fork under another "
+                "label"
+            )
         _git_ok(root, "worktree", "add", str(path), branch)
         notes.append(f"branch {branch} already existed — checked it out")
     else:
@@ -1381,6 +1495,7 @@ def spawn(
     bin_flag: bool = True,
     own_worktree: Path | None = None,
     start_point: str | None = None,
+    fork: bool = False,
 ) -> SpawnReceipt:
     """Start an agent for ``project`` in the fleet's tmux server and record it.
 
@@ -1467,9 +1582,14 @@ def spawn(
     a bound row — and the hand-off prompt still names the task (review of
     #205, fifth round: this used to promise the move came first).
 
-    ``start_point`` is the commit a NEW worktree branch is cut at, instead of the
-    checkout's HEAD: a fork's, at the commit its source's tree is on (:func:`hand_off`).
-    A branch that already exists is checked out as it is.
+    ``fork`` and ``start_point`` are a fork's (:func:`hand_off`), which takes nothing that
+    is already there. Its label is one NOTHING holds (:func:`_fork_label`): no row of the
+    project in any state, no worktree and no branch, where every other spawn's is kept
+    apart from the live agents only and carries on in what an ended one left. And
+    ``start_point`` is the commit its source's tree is on, where its own worktree branch
+    is cut instead of at the checkout's HEAD: that worktree is made new or the spawn is
+    refused, since with a start point no tree and no branch that already exists is reused
+    (:func:`_ensure_worktree`).
 
     ``size`` is the ``(columns, rows)`` the window is born with. The UI passes
     the pane it is about to attach, so the agent never runs wider than it will
@@ -1537,6 +1657,7 @@ def spawn(
     for ended in _end_dead_rows(live, views):
         live = [agent for agent in live if agent.id != ended.id]
         rows = [ended if agent.id == ended.id else agent for agent in rows]
+    use_worktree = role_config.worktree if worktree is None else worktree
     with store_session() as store:
         if role == "manager":
             existing = next((agent for agent in live if agent.role == "manager"), None)
@@ -1560,14 +1681,24 @@ def spawn(
             )
         task = _task_for(store, project, task_id)
         resolved_task_id = task.id if task is not None else None
-        picked = next_label(project, role, wanted=label, task_id=resolved_task_id, store=store)
+        if fork:
+            # Held by nothing, where a spawn's label is kept apart from the live agents
+            # only: a fork is not the next agent under a label (review of #240, finding 3).
+            picked = _fork_label(
+                project,
+                role,
+                label,
+                store=store,
+                trees=project.root / config.worktree_dir if use_worktree else None,
+                codename=observed,
+            )
+        else:
+            picked = next_label(project, role, wanted=label, task_id=resolved_task_id, store=store)
     if label is not None and picked != label:
         if role == "manager":
             notes.append(f"the manager is always labelled {MANAGER_LABEL!r} (asked: {label!r})")
         else:
             notes.append(f"label {label!r} is held by a live agent — using {picked!r}")
-
-    use_worktree = role_config.worktree if worktree is None else worktree
 
     def refuse_if_taken() -> None:
         _refuse_occupied_worktree(project, config.worktree_dir, picked)
@@ -4719,9 +4850,11 @@ def hand_off(
 ) -> HandoffReceipt:
     """Start an agent from teammate ``source``: the Spawn dialog's *Hand off from*.
 
-    **Fork**, the default, touches nothing of the source: no mark, no stop, no claim. The
-    new agent takes a new label (``label``, else the next free one), its own worktree cut
-    at the commit the source's tree is on, and no task. With the source's transcript on
+    **Fork**, the default, touches nothing of the source: no mark, no stop, no claim, and
+    neither its row, its window, its tree nor its branch. The new agent takes a label that
+    nothing holds (:func:`_fork_label`: ``label``, refused when a row, a worktree or a
+    branch already has it, else the next free one), its own worktree made new at the
+    commit the source's tree is on, and no task. With the source's transcript on
     disk and ``fresh`` not asked, it resumes that conversation as a FORK
     (``ResumeSpec(fork=True)``: ``--resume <transcript> --fork-session`` under a new id),
     and is told in one line what it is. Otherwise it starts fresh, with a first message
@@ -4817,6 +4950,7 @@ def hand_off(
         ),
         claude_code=session is not None,
         start_point=_head_of(Path(agent.cwd)) if own else None,
+        fork=True,
     )
     resumed = resume is not None
     how = "resumed its session as a fork" if resumed else "started fresh"

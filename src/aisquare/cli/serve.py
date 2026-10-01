@@ -78,6 +78,12 @@ def _dependency_error() -> str | None:
     )
 
 
+def dependency_error() -> str | None:
+    """Why an MCP server cannot start here, or ``None`` — for every command that serves one
+    (``serve``, ``captain serve``)."""
+    return _dependency_error()
+
+
 def _installed_mcp() -> str:
     """``" (mcp 1.29.1)"`` when the version is knowable, else nothing.
 
@@ -171,7 +177,8 @@ def serve(
             "--close-after",
             min=0,
             envvar="AISQUARE_SERVE_CLOSE_AFTER",
-            help="stdio only: exit after this many seconds without a client message "
+            help="stdio only: exit after this many seconds without a client message or a "
+            "running tool call "
             "(default 300; 0 = run forever — set it for persistent clients like "
             "Claude Desktop). HTTP mode ignores it.",
         ),

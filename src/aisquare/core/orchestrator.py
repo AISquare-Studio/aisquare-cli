@@ -13,7 +13,9 @@ branch is the gate:
 - ``AISQUARE_ROLE``        — role for this session (also activates the orchestrator
                              for the project on session start).
 - ``AISQUARE_TEAM_HUB``    — pin every session/command to one board rooted at
-                             this directory (multi-repo executions).
+                             this directory (multi-repo executions). Inside a
+                             fleet window the fleet row's board wins; see
+                             ``team_project``.
 - ``AISQUARE_TEAM_DELTA=0``— mute the per-prompt teammate delta injection.
 - ``AISQUARE_TEAM_LEASE_MIN`` — claim lease in minutes (default 120; long
                              agentic turns only renew on prompt submit).
@@ -51,6 +53,17 @@ def env_role() -> str | None:
     """The role this session was launched with, if any (``AISQUARE_ROLE``)."""
     role = os.environ.get("AISQUARE_ROLE", "").strip()
     return role or None
+
+
+def env_persona() -> str | None:
+    """The persona this session was launched as, if any (``AISQUARE_PERSONA``).
+
+    What ``launch --persona`` exports and the session-start hook reads — not a
+    config input, so a hand-typed ``AISQUARE_PERSONA=skeptic aisquare launch
+    coder`` works with no fleet at all (docs/plans/spawn-personas.md §3.8).
+    """
+    persona = os.environ.get("AISQUARE_PERSONA", "").strip()
+    return persona or None
 
 
 FLEET_AGENT_ENV_VAR = "AISQUARE_FLEET_AGENT"
@@ -106,41 +119,50 @@ def lease_minutes() -> int:
 
 TEAM_HUB_ENV_VAR = "AISQUARE_TEAM_HUB"
 """The hub that pins every session to one board (:func:`team_project`). ``fleet
-spawn`` sets it on every window it starts, as :func:`window_team_hub` says."""
-
-
-def window_team_hub() -> str:
-    """``AISQUARE_TEAM_HUB`` for a window this process spawns: the hub it honours, else blank.
-
-    A window inherits the tmux SERVER's environment, which was frozen when the
-    private server first started, and ``launch`` inside the window joins
-    ``team_project`` from there. The fleet UI's Explainability tab resolves the
-    same question in THIS process (``key_project``). With the hub exported in
-    one and not the other, the tab showed and attached one project's key while
-    the window's launches took another's: a 409 ``agent_not_registered`` on
-    every span, or traces in the other project's workspace (review of #170,
-    D1b round 2, B1). Set on the window, the window resolves as its spawner
-    does. The value is the hub's absolute path when this process honours one,
-    else blank. ``team_project`` reads blank as unset, and a relative value,
-    which this process ignores, becomes blank too. Blank, not absent, because
-    ``tmux -e`` can only set, and the server's retained value must not leak in
-    as ours.
-    """
-    hub = team_hub()
-    return str(hub) if hub is not None else ""
+spawn`` sets it on every window it starts, to the fleet's own root
+(``services.fleet.spawn``), and inside a fleet window the row's board wins anyway
+(:func:`_fleet_board`)."""
 
 
 def team_hub() -> Path | None:
     """The hub this process honours: ``AISQUARE_TEAM_HUB`` as an absolute path, else ``None``.
 
     :func:`team_project`'s rule without its warning: a relative value is
-    ignored. For a surface that has to say it is under a hub, such as the fleet
-    UI's Explainability tab, whose key then belongs to the hub project.
+    ignored. For a surface that has to say it is under a hub: the explainability
+    key commands, whose default project is then the hub's while a fleet seat
+    traces as its own fleet's (``cli/explainability.py``). The fleet UI's
+    Explainability tab asked it too while its key belonged to the hub project;
+    its key is the page's own now, hub or no hub (#235; review of #240, finding 12).
     """
     hub = os.environ.get(TEAM_HUB_ENV_VAR, "").strip()
     if not hub or not Path(hub).expanduser().is_absolute():
         return None
     return Path(hub).expanduser().resolve()
+
+
+def _fleet_board() -> ProjectInfo | None:
+    """The project of the fleet row ``AISQUARE_FLEET_AGENT`` names, or ``None``.
+
+    ``None`` outside a fleet window, for an id with no row or no project, and on
+    any failure to read the store: a stale or foreign id never strands a command,
+    and the resolution below stands as before. Read each time, never cached: a row
+    id is unique within ONE store, and a process can read another (a test, or a
+    command pointed at another ``AISQUARE_HOME``).
+    """
+    agent_id = env_fleet_agent()
+    if agent_id is None:
+        return None
+    try:
+        from aisquare.core.store import store_session  # lazy: this module is on every hook path
+
+        with store_session() as store:
+            row = store.get_fleet_agent(agent_id)
+            project = store.get_project(row.project_id) if row is not None else None
+    except Exception:  # fail open: the board falls back to the hub or the checkout
+        return None
+    if project is None:
+        return None
+    return ProjectInfo(id=project.id, root=project.root, linked_repos=[])
 
 
 #: Relative hub values already reported, so a command that resolves the board
@@ -152,13 +174,34 @@ _WARNED_HUBS: set[str] = set()
 def team_project(cwd: Path | None = None) -> ProjectInfo:
     """The project this directory's team traffic belongs to.
 
-    ``AISQUARE_TEAM_HUB`` overrides everything: an execution that spans
+    Inside a fleet window (``AISQUARE_FLEET_AGENT`` names a row) the board is
+    the fleet row's project, ahead of everything below: the window's hub may be
+    one its tmux server inherited, and the seat belongs to its own fleet.
+    Otherwise ``AISQUARE_TEAM_HUB`` overrides: an execution that spans
     several repositories (planner in one, coders and runner in others) sets
     it to one hub directory so every session shares a single board. Otherwise
     worktrees resolve to their principal checkout, so the team shares one board
     regardless of which worktree a session sits in.
     """
     hub = os.environ.get(TEAM_HUB_ENV_VAR, "").strip()
+    fleet = _fleet_board()
+    if fleet is not None:
+        # Inside a fleet window the seat belongs to its fleet's board, ahead of any
+        # hub the window inherited from its tmux server (card
+        # tsk_01m3k89b2f96tt7xc6crzvxzjk: a server started from a shell with a hub
+        # exported put every seat of two fleets on a third board).
+        pinned = Path(hub).expanduser()
+        differs = hub and pinned.is_absolute() and pinned.resolve() != fleet.root
+        if differs and hub not in _WARNED_HUBS:
+            _WARNED_HUBS.add(hub)
+            print(
+                # The path as typed, in plain quotes: repr doubled every backslash of a
+                # Windows path, and the owner could not find their own path in it (#230).
+                f"⚠ AISQUARE_TEAM_HUB='{hub}' names another board, but this is a fleet "
+                f"window of {fleet.root.name or fleet.id}, so the fleet's own board wins.",
+                file=sys.stderr,
+            )
+        return fleet
     if hub and not Path(hub).expanduser().is_absolute():
         # A RELATIVE hub inverts the feature. `Path('./').resolve()` is the
         # process cwd, so "one board for sessions in several repositories"

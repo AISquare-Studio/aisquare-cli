@@ -1,13 +1,19 @@
 """The Settings tab: a form over ``[fleet]`` — every default the plan calls a default.
 
-docs/plans/fleet-tui.md §3.10, §4.2: permission mode and worktree per role, the
-escape key, ``max_agents_per_project``, the worktree root, the native-agent-teams
-switch and the project's codename are all user-changeable here, written through
-``core.config.save_config`` (the one writer) and re-read after every save so the
-form shows what the file holds. Precedence: a per-spawn flag beats this file
-beats the built-in default — the form edits the middle rung. There is no
-environment rung for ``[fleet]``: no value in that section is read from an env
-var (the orchestrator's own knobs are a different surface).
+docs/plans/fleet-tui.md §3.10, §4.2: permission mode, worktree and persona per
+role, the escape key, ``max_agents_per_project``, the worktree root, the
+native-agent-teams switch and the project's codename are all user-changeable
+here, written through ``core.config.save_config`` (the one writer) and re-read
+after every save so the form shows what the file holds. Precedence: a per-spawn
+flag beats this file beats the built-in default — the form edits the middle
+rung. There is no environment rung for ``[fleet]``: no value in that section is
+read from an env var (the orchestrator's own knobs are a different surface).
+
+The persona per role (docs/plans/spawn-personas.md §3.8, P4) lists this project's
+personas — ``core.personas.catalogue(project.root)``, the set ``fleet spawn``
+checks a default against — plus a configured name the catalogue lacks, shown as
+``<name> (custom)`` so saving the form never silently drops it (the spawn then
+refuses it, naming the key).
 
 Model, effort and binary per role are NOT here on purpose: they live in
 ``team harness`` / ``team bind`` / ``AISQUARE_MODEL_<ROLE>`` — one home per
@@ -24,6 +30,7 @@ role, and it is the middle rung of the account ladder a launch walks
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from typing import ClassVar
 
 from rich.text import Text
@@ -34,7 +41,7 @@ from textual.widgets import Button, Input, Label, Select, Static, Switch
 from textual.worker import Worker, WorkerState
 
 from aisquare.core import claude_accounts as accounts_core
-from aisquare.core import codenames, paths
+from aisquare.core import codenames, paths, personas
 from aisquare.core.config import (
     CLAUDE_PERMISSION_MODES,
     AccountsSettings,
@@ -55,6 +62,9 @@ PERMISSION_MODES: tuple[tuple[str, str], ...] = (
     ("(no flag)", ""),
 )
 """Claude Code's ``--permission-mode`` choices (``core.config``), plus "pass no flag"."""
+
+NO_PERSONA = ""
+"""A role's ``(none)``: no ``persona`` key is written for it."""
 
 DEFAULT_ESCAPE_KEY = FleetSettings().escape_key
 DEFAULT_WORKTREE_DIR = FleetSettings().worktree_dir
@@ -89,6 +99,14 @@ def permission_options(current: str) -> list[tuple[str, str]]:
     """The mode list, with a value the list does not know appended so it still shows."""
     options = list(PERMISSION_MODES)
     if current not in {value for _, value in options}:
+        options.append((f"{current} (custom)", current))
+    return options
+
+
+def persona_options(current: str | None, names: Iterable[str]) -> list[tuple[str, str]]:
+    """``(none)`` and the persona names, with a configured name they lack appended so it shows."""
+    options = [("(none)", NO_PERSONA), *((name, name) for name in names)]
+    if current and current not in {value for _, value in options}:
         options.append((f"{current} (custom)", current))
     return options
 
@@ -128,11 +146,14 @@ class SettingsView(VerticalScroll):
     SettingsView .row Input { width: 26; }
     SettingsView .row Switch { margin-left: 1; }
     SettingsView .row .worktree-label { width: 10; margin-left: 2; }
+    SettingsView .row .persona-label { width: 9; margin-left: 2; }
     SettingsView .section { text-style: bold; margin-top: 1; }
     SettingsView #settings-buttons Button { margin-right: 1; }
     SettingsView #settings-note { color: $text-muted; margin-top: 1; height: auto; }
+    SettingsView #settings-personas-unavailable { display: none; color: $warning; height: auto; }
+    SettingsView #settings-personas-unavailable.shown { display: block; }
     """
-    ROLE_SECTION: ClassVar[str] = "roles — permission mode, worktree and account per role"
+    ROLE_SECTION: ClassVar[str] = "roles — permission mode, worktree, account and persona per role"
     ACCOUNTS_SECTION: ClassVar[str] = "accounts — how launches pick one; what a usage limit does"
 
     def __init__(self, project: ProjectInfo, *, id: str | None = None) -> None:
@@ -145,6 +166,7 @@ class SettingsView(VerticalScroll):
         self._account_bindings: dict[str, str] = settings_service.role_account_bindings(config)
         self._accounts: list[ClaudeAccount] = []
         """The slots the account selects offer — filled by :meth:`_load_accounts`'s worker."""
+        self._persona_names, self._personas_unavailable = self._read_persona_names()
 
     @staticmethod
     def _read_config() -> AppConfig:
@@ -216,6 +238,20 @@ class SettingsView(VerticalScroll):
             offered = {value for _label, value in options}
             select.value = shown if shown in offered else (bound or NO_ACCOUNT)
 
+    def _read_persona_names(self) -> tuple[list[str], str | None]:
+        """This project's persona names — or none, and the reason, which the form shows.
+
+        ``catalogue`` never raises for one bad directory, so whatever reaches the
+        ``except`` is a real failure (an unreadable layer, a bug). It costs the list,
+        never the tab, and it is said under the roles, the way the Spawn dialog says
+        it under its Persona field.
+        """
+        try:
+            found, _invalid = personas.catalogue(self.project.root)
+        except Exception as exc:
+            return [], f"personas unavailable — {type(exc).__name__}: {exc}"
+        return [persona.name for persona in found], None
+
     # --- layout ----------------------------------------------------------------------
 
     def compose(self) -> ComposeResult:
@@ -230,6 +266,11 @@ class SettingsView(VerticalScroll):
             )
             yield Button("Rename", id="rename-codename")
         yield Static(self.ROLE_SECTION, classes="section")
+        yield Static(
+            Text(self._personas_unavailable or ""),
+            id="settings-personas-unavailable",
+            classes="shown" if self._personas_unavailable else "",
+        )
         for role in self._roles:
             settings = self.fleet.roles.get(role, FleetRoleSettings())
             suffix = widget_suffix(role)
@@ -243,6 +284,13 @@ class SettingsView(VerticalScroll):
                 )
                 yield Label("worktree", classes="worktree-label")
                 yield Switch(settings.worktree, id=f"worktree-{suffix}")
+                yield Label("persona", classes="persona-label")
+                yield Select(
+                    persona_options(settings.persona, self._persona_names),
+                    value=settings.persona or NO_PERSONA,
+                    allow_blank=False,
+                    id=f"persona-{suffix}",
+                )
                 bound = self._account_bindings.get(role)
                 yield Select(
                     account_options(self._accounts, bound),
@@ -320,6 +368,10 @@ class SettingsView(VerticalScroll):
         config = self._read_config()
         self.fleet = config.fleet
         self._roles = role_order(self.fleet)
+        self._persona_names, self._personas_unavailable = self._read_persona_names()
+        unavailable = self.query_one("#settings-personas-unavailable", Static)
+        unavailable.update(Text(self._personas_unavailable or ""))
+        unavailable.set_class(bool(self._personas_unavailable), "shown")
         self._account_bindings = settings_service.role_account_bindings(config)
         self.query_one("#codename", Input).value = self.project.codename or ""
         self.query_one("#escape-key", Input).value = self.fleet.escape_key
@@ -339,12 +391,15 @@ class SettingsView(VerticalScroll):
             try:
                 select = self.query_one(f"#perm-{suffix}", Select)
                 switch = self.query_one(f"#worktree-{suffix}", Switch)
+                persona = self.query_one(f"#persona-{suffix}", Select)
                 account = self.query_one(f"#acct-{suffix}", Select)
             except Exception:  # a role bound since this form was composed; shown after a reopen
                 continue
             select.set_options(permission_options(settings.permission_mode))
             select.value = settings.permission_mode
             switch.value = settings.worktree
+            persona.set_options(persona_options(settings.persona, self._persona_names))
+            persona.value = settings.persona or NO_PERSONA
             bound = self._account_bindings.get(role)
             account.set_options(account_options(self._accounts, bound))
             account.value = bound or NO_ACCOUNT
@@ -364,17 +419,16 @@ class SettingsView(VerticalScroll):
         roles = dict(current.roles)
         for role in self._roles:
             suffix = widget_suffix(role)
-            value = self.query_one(f"#perm-{suffix}", Select).value
-            mode = (
-                value
-                if isinstance(value, str)
-                else current.roles.get(role, FleetRoleSettings()).permission_mode
-            )
             existing = current.roles.get(role, FleetRoleSettings())
+            value = self.query_one(f"#perm-{suffix}", Select).value
+            mode = value if isinstance(value, str) else existing.permission_mode
+            chosen = self.query_one(f"#persona-{suffix}", Select).value
+            persona = chosen if isinstance(chosen, str) else (existing.persona or NO_PERSONA)
             roles[role] = existing.model_copy(
                 update={
                     "permission_mode": mode,
                     "worktree": self.query_one(f"#worktree-{suffix}", Switch).value,
+                    "persona": persona or None,
                 }
             )
         return current.model_copy(

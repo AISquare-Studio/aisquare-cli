@@ -5033,10 +5033,13 @@ def test_agent_view_offers_stop_and_restart_and_routes_them_through_the_service(
 ) -> None:
     """#138: the two actions §4.2 promised. Stop shows while there is a process or,
     on the 💤 row, a dead window to remove; Restart always (an exited row is exactly
-    its case). Both run the service off the UI thread, then ask the app for a fresh
-    frame — the view guesses nothing."""
+    its case). Restart runs the service off the UI thread, then asks the app for a
+    fresh frame — the view guesses nothing. Stop only ASKS: it posts ``StopAgent``
+    and the shell's dialog owns the service call (P21, ``cli/ui/stop.py``), so the
+    view never calls ``stop`` itself."""
     from textual.widgets import Button
 
+    from aisquare.cli.ui.sidebar import StopAgent
     from aisquare.cli.ui.views import agent as agent_view_module
     from aisquare.models import ProjectInfo
     from aisquare.services import fleet as fleet_service
@@ -5066,6 +5069,7 @@ def test_agent_view_offers_stop_and_restart_and_routes_them_through_the_service(
     monkeypatch.setattr(fleet_service, "stop", fake_stop)
     monkeypatch.setattr(fleet_service, "restart", fake_restart)
     posted: list[FleetAgent] = []
+    asked: list[tuple[str, str]] = []
     tips: list[str] = []
 
     class ViewHost(App[None]):
@@ -5077,6 +5081,9 @@ def test_agent_view_offers_stop_and_restart_and_routes_them_through_the_service(
 
         def on_agent_restarted(self, event: agent_view_module.AgentRestarted) -> None:
             posted.append(event.agent)
+
+        def on_stop_agent(self, event: StopAgent) -> None:
+            asked.append((event.project_id, event.agent_id))
 
     async def drive() -> tuple[bool, str, bool, str, tuple[int, int]]:
         host = ViewHost()
@@ -5094,7 +5101,7 @@ def test_agent_view_offers_stop_and_restart_and_routes_them_through_the_service(
             stop_on_working, restart_label_working = stop.display, str(restart.label)
             tips.extend([exited_tip, str(stop.tooltip)])
             await pilot.click("#agent-stop")
-            await wait_until(pilot, lambda: len(refreshed) >= 2)
+            await wait_until(pilot, lambda: len(asked) == 1)
             return (
                 stop_on_exited,
                 restart_label,
@@ -5109,14 +5116,13 @@ def test_agent_view_offers_stop_and_restart_and_routes_them_through_the_service(
     exited_tip, working_tip = tips
     assert "dead window" in exited_tip and "/exit" not in exited_tip  # nothing to /exit
     assert working_tip.startswith("/exit, a grace period")
-    # Pinned to the view's own row: a view outlives its row, and by label a Stop on a
-    # 💤 view whose label a replacement had taken stopped that replacement.
-    assert calls == [
-        ("restart", "prj_1", "coder-1", size, "fa_1"),
-        ("stop", "prj_1", "coder-1", "fa_1"),
-    ]
+    # Pinned to the view's own row: a view outlives its row, and by label a Restart on
+    # a 💤 view whose label a replacement had taken restarted that replacement.
+    assert calls == [("restart", "prj_1", "coder-1", size, "fa_1")]
+    # Stop asked the shell for its dialog, naming this row — and called nothing.
+    assert asked == [("prj_1", "fa_1")]
     assert [agent.id for agent in posted] == ["fa_2"]  # the shell is told which row to show
-    assert len(refreshed) == 2  # one fresh frame per action, never an optimistic repaint
+    assert len(refreshed) == 1  # one fresh frame per action, never an optimistic repaint
 
 
 def test_agent_view_buttons_come_back_when_their_own_worker_ends_whatever_other_views_run(
@@ -5124,10 +5130,12 @@ def test_agent_view_buttons_come_back_when_their_own_worker_ends_whatever_other_
 ) -> None:
     """Review of #138. "Busy" was any stop/restart worker in the APP, and a finished
     worker is still in that list when its ``StateChanged`` arrives — so a restart that
-    failed left Restart greyed with nothing to retry it, a Stop left both buttons dead,
-    and one view's running Stop greyed every other view's. Nothing else repaints them:
-    the shell hands a view a new status only when the status changed. Pressed here
-    with no ``refresh_status`` between the steps, which is what hid it."""
+    failed left Restart greyed with nothing to retry it, and one view's running worker
+    greyed every other view's. Nothing else repaints them: the shell hands a view a new
+    status only when the status changed. Pressed here with no ``refresh_status``
+    between the steps, which is what hid it. Since P21 a stop runs inside its own
+    modal dialog and greys nothing here, so the rule is Restart's: a view's OWN
+    running restart greys its buttons, another view's does not."""
     import threading
 
     from textual.containers import Vertical
@@ -5141,26 +5149,26 @@ def test_agent_view_buttons_come_back_when_their_own_worker_ends_whatever_other_
     project = ProjectInfo(id="prj_1", root=Path("/home/me/repo"), linked_repos=[])
     exited = _status(state="exited", exit_status=0)
     other = _status(label="coder-2", pane_id="%2", state="working")
+    started = _status(pane_id="%3").agent.model_copy(update={"id": "fa_3"})
     restarts: list[str] = []
-    stopped: list[str] = []
     release = threading.Event()
     refreshed: list[bool] = []
 
-    def failing_restart(
+    def fake_restart(
         target: ProjectInfo, label: str, **kwargs: object
     ) -> fleet_service.RestartReceipt:
         restarts.append(label)
-        raise fleet_service.FleetError("task tsk_0123456789abcdef is done")
-
-    def fake_stop(target: ProjectInfo, label: str, **kwargs: object) -> fleet_service.StopReceipt:
         if label == "coder-2":
-            release.wait(5)  # the OTHER view's stop, still running while this one acts
-        stopped.append(label)
-        return fleet_service.StopReceipt(exited.agent, [])
+            release.wait(5)  # the OTHER view's restart, still running while this one acts
+        elif restarts.count("coder-1") == 1:
+            raise fleet_service.FleetError("task tsk_0123456789abcdef is done")
+        return fleet_service.RestartReceipt(
+            replaced=exited.agent, started=started, resumed=False, was_running=False,
+            tmux_session="asq-amber-otter", notes=[],
+        )  # fmt: skip
 
     monkeypatch.setattr(fleet_service, "project_of", lambda agent: project)
-    monkeypatch.setattr(fleet_service, "restart", failing_restart)
-    monkeypatch.setattr(fleet_service, "stop", fake_stop)
+    monkeypatch.setattr(fleet_service, "restart", fake_restart)
 
     class ViewHost(App[None]):
         def compose(self) -> ComposeResult:
@@ -5183,8 +5191,8 @@ def test_agent_view_buttons_come_back_when_their_own_worker_ends_whatever_other_
             mine = host.query_one("#mine", AgentView)
             theirs = host.query_one("#theirs", AgentView)
             await pilot.pause()
-            theirs.query_one("#agent-stop", Button).press()
-            await wait_until(pilot, lambda: not enabled(theirs)[0])
+            theirs.query_one("#agent-restart", Button).press()
+            await wait_until(pilot, lambda: not enabled(theirs)[1])
             mine.query_one("#agent-restart", Button).press()
             await wait_until(pilot, lambda: len(refreshed) == 1)
             await pilot.pause()
@@ -5193,24 +5201,22 @@ def test_agent_view_buttons_come_back_when_their_own_worker_ends_whatever_other_
             mine.query_one("#agent-restart", Button).press()
             await wait_until(pilot, lambda: len(refreshed) == 2)
             await pilot.pause()
-            mine.query_one("#agent-stop", Button).press()
-            await wait_until(pilot, lambda: len(refreshed) == 3)
-            await pilot.pause()
-            seen.append(enabled(mine))  # a finished Stop greys nothing
-            seen.append(enabled(theirs))  # …while the other view's Stop still runs
+            seen.append(enabled(mine))  # a finished Restart greys nothing
+            seen.append(enabled(theirs))  # …while the other view's Restart still runs
             release.set()
-            await wait_until(pilot, lambda: len(refreshed) == 4)
+            await wait_until(pilot, lambda: len(refreshed) == 3)
             await pilot.pause()
             seen.append(enabled(theirs))
         return seen
 
-    after_failure, after_stop, theirs_running, theirs_done = run(drive())
+    after_failure, after_restart, theirs_running, theirs_done = run(drive())
     assert after_failure == (True, True)
-    assert restarts == ["coder-1", "coder-1"], "the failed restart could be pressed again"
-    assert after_stop == (True, True)
+    assert restarts == ["coder-2", "coder-1", "coder-1"], (
+        "the failed restart could be pressed again"
+    )
+    assert after_restart == (True, True)
     assert theirs_running == (False, False)  # a view's own running worker still greys it
     assert theirs_done == (True, True)
-    assert stopped == ["coder-1", "coder-2"]
 
 
 def test_agent_view_stop_says_a_release_the_store_refused(
@@ -5219,7 +5225,9 @@ def test_agent_view_stop_says_a_release_the_store_refused(
     """The release train's ``stop`` REPORTS a claim release the store refused on its
     receipt, and ``fleet stop`` prints it and exits 1. The Stop button said only
     "✓ stopped" over it — the one surface that left a task held by the ended session
-    unmentioned."""
+    unmentioned. Since P21 the dialog (``cli/ui/stop.py``) owns the call, so it is the
+    dialog that must say it, beside dismissing with the ended row as before."""
+    from aisquare.cli.ui.stop import StopAgentScreen
     from aisquare.models import ProjectInfo
     from aisquare.services import fleet as fleet_service
 
@@ -5229,11 +5237,20 @@ def test_agent_view_stop_says_a_release_the_store_refused(
     refused = "could not be released (OperationalError: database is locked (fake))"
     refreshed: list[bool] = []
 
-    def fake_stop(target: ProjectInfo, label: str, **kwargs: object) -> fleet_service.StopReceipt:
+    def fake_stop(
+        target: ProjectInfo,
+        label: str,
+        *,
+        force: bool = False,
+        grace: float = 5.0,
+        agent_id: str | None = None,
+    ) -> fleet_service.StopReceipt:
+        # The full signature: the dialog reads ``grace`` off it to word its question.
         return fleet_service.StopReceipt(working.agent, [], refused)
 
     monkeypatch.setattr(fleet_service, "project_of", lambda agent: project)
     monkeypatch.setattr(fleet_service, "stop", fake_stop)
+    closed: list[FleetAgent | None] = []
 
     class ViewHost(App[None]):
         def compose(self) -> ComposeResult:
@@ -5246,12 +5263,14 @@ def test_agent_view_stop_says_a_release_the_store_refused(
         host = ViewHost()
         async with host.run_test(size=(80, 12)) as pilot:
             await pilot.pause()
-            await pilot.click("#agent-stop")
-            await wait_until(pilot, lambda: len(refreshed) >= 1)
+            host.push_screen(StopAgentScreen(project, working), callback=closed.append)
+            await pilot.pause()
+            await pilot.click("#stop-confirm")
+            await wait_until(pilot, lambda: len(closed) == 1)
             return [(str(toast.message), str(toast.severity)) for toast in host._notifications]
 
     said = run(drive())
-    assert ("✓ stopped coder-1", "information") in said
+    assert closed == [working.agent]  # dismissed with the receipt's row, as a clean stop is
     assert (f"claims: {refused}", "warning") in said
 
 

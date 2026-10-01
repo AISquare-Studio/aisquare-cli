@@ -230,12 +230,18 @@ class BoardPanel(Vertical):
     # --- data ---------------------------------------------------------------------
 
     def refresh_data(self) -> None:
-        """Re-read the board; keep the last frame when the store is briefly busy."""
+        """Re-read the board; keep the last frame when the store is briefly busy.
+
+        The captain's audit is left out of the feed, first read and every tick, as
+        ``aisquare board`` leaves it out (``team.CAPTAIN_AUDIT_KINDS``; review of #240,
+        finding 11): ``aisquare captain log`` reads it.
+        """
         try:
             project, sessions, tasks, events = team_service.board_data(
                 events=400 if self._last_seq == 0 else 200,
                 since_seq=self._last_seq or None,
                 project=self.project,
+                exclude_kinds=team_service.CAPTAIN_AUDIT_KINDS,
             )
         except team_service.TeamDisabledError:
             self.query_one("#sessions", Static).update(

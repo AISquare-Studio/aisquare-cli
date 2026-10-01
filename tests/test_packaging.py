@@ -41,8 +41,13 @@ def test_the_base_install_gains_no_dependencies() -> None:
 
     ``textual`` is in the set because the fleet UI made it core in 0.6.0, not
     because the experiment wants it: the CI transport is stdlib ``urllib`` so
-    that the hook path works in a base install. ``tzdata`` is Windows' zone
-    database, and only Windows installs it (the test below)."""
+    that the hook path works in a base install.
+
+    ``pyyaml`` is in the set because a persona is a Claude Code skill directory
+    and a skill's frontmatter is full YAML (docs/plans/spawn-personas.md §3.3,
+    accepted by the owner for interchange fidelity); it is imported inside the
+    parser only. ``tzdata`` is Windows' zone database, and only Windows installs
+    it (the test below)."""
     import re
     import tomllib
 
@@ -51,7 +56,7 @@ def test_the_base_install_gains_no_dependencies() -> None:
     # Split on every specifier character, so a future `foo<2` upper bound reads
     # as `foo` rather than failing with a confusing diff.
     required = {re.split(r"[<>=!~\[; ]", dep)[0].strip() for dep in data["project"]["dependencies"]}
-    assert required == {"typer", "rich", "pydantic", "tomli-w", "textual", "tzdata"}
+    assert required == {"typer", "rich", "pydantic", "tomli-w", "textual", "pyyaml", "tzdata"}
 
 
 def test_windows_installs_a_time_zone_database_and_nothing_else_does() -> None:
@@ -102,6 +107,25 @@ def test_the_experiment_extra_is_a_real_extra_in_the_built_metadata() -> None:
             "its metadata is another build's; reinstall with `make install` to check it here"
         )
     assert "experiment" in (metadata("aisquare-cli").get_all("Provides-Extra") or [])
+
+
+def test_the_wheel_carries_the_bundled_personas(tmp_path: Path) -> None:
+    """The bundled personas are data files, not modules. An editable install
+    reads them from the tree whether or not a wheel would ship them, so only a
+    real build proves `pip install aisquare-cli` gets `persona list`'s bundled five.
+    Built with hatchling — the project's own backend — from THIS tree."""
+    import zipfile
+
+    from hatchling.builders.wheel import WheelBuilder
+
+    root = Path(__file__).resolve().parents[1]
+    wheels = list(WheelBuilder(str(root)).build(directory=str(tmp_path), versions=["standard"]))
+
+    assert len(wheels) == 1
+    with zipfile.ZipFile(wheels[0]) as archive:
+        names = set(archive.namelist())
+    for persona in ("captain", "careful", "mentor", "minimalist", "skeptic"):
+        assert f"aisquare/personas/{persona}/SKILL.md" in names
 
 
 def test_the_rich_floor_provides_split_graphemes() -> None:

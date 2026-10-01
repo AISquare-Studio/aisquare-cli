@@ -17,6 +17,7 @@ from aisquare.cli import (
     accounts,
     agents,
     auth,
+    captain,
     capture,
     connectors,
     context,
@@ -25,6 +26,7 @@ from aisquare.cli import (
     fleet,
     hook,
     launch,
+    persona,
     policy,
     project,
     root,
@@ -154,6 +156,8 @@ app.command("recall")(team.recall)
 launch.register(app)  # needs context_settings to forward agent args
 app.command("serve")(serve.serve)
 app.add_typer(fleet.app, name="fleet")
+app.add_typer(persona.app, name="persona")
+app.add_typer(captain.app, name="captain")
 app.command("ui")(fleet.ui)
 app.add_typer(hook.app, name="hook", hidden=True)
 # Visible: unlike the roadmap groups above, every leaf here does something on a

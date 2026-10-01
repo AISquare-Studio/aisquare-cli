@@ -10,7 +10,7 @@ import re
 import shutil
 import string
 import sys
-from collections.abc import Callable, Container, Mapping, Sequence
+from collections.abc import Callable, Collection, Container, Mapping, Sequence
 from datetime import UTC, datetime
 from importlib import metadata
 from pathlib import Path, PurePath
@@ -19,16 +19,17 @@ from urllib.parse import urlsplit
 from aisquare.core import agents as agent_core
 from aisquare.core import brain as brain_core
 from aisquare.core import claude_accounts as claude_accounts_core
-from aisquare.core import harness, orchestrator, paths
+from aisquare.core import experimental, harness, orchestrator, paths
 from aisquare.core import snapshot as snapshot_core
 from aisquare.core import tmux as tmux_core
 from aisquare.core.config import load_config
 from aisquare.core.injection import load_last
 from aisquare.core.keys import EXTENDED_MINIMUM
+from aisquare.core.spawn import TEAM_ENV_VARS
 from aisquare.core.store import damaged_store_recovery, store_session
 from aisquare.core.stubs import stub
 from aisquare.core.version import DISTRIBUTION, __version__
-from aisquare.core.workspace import active_project
+from aisquare.core.workspace import active_project, git_common_root
 from aisquare.models import (
     CheckStatus,
     DoctorCheck,
@@ -158,7 +159,13 @@ def doctor(
         # prefix, so it waits here with them rather than beside tmux.
         _check_browser_tools(cwd),
         _check_fleet_terminal(),
+        # Beside the fleet terminal row, which reads the same running server (fix 4 of the
+        # fleet-board card): it can warn, so it waits with the other late rows.
+        _check_fleet_server_env(cwd=cwd),
         *_experiment_checks(),
+        # Only while the experimental captain is off: one ok row saying how to turn it
+        # on. On, doctor is as it was before the switch.
+        *_optional(_captain_check()),
         *explainability_ops.checks(live=live, target_name=target, project_id=project_id),
         # Only while a key the CLI minted is owed a revocation (#142); --live
         # tries each again first — one request per key, on the API that minted it.
@@ -1586,16 +1593,107 @@ def _extended_keys_note(version: tuple[int, int] | None) -> str:
     )
 
 
-def _stale_server_environment(srv: tmux_core.TmuxServer, env: Mapping[str, str]) -> list[str]:
-    """The desktop variables whose value on the running server differs from this shell's."""
+def _server_environment(srv: tmux_core.TmuxServer) -> dict[str, str]:
+    """The running server's global environment, less the ``-NAME`` unset markers."""
     held: dict[str, str] = {}
     for line in srv.run("show-environment", "-g").splitlines():
         if line.startswith("-") or "=" not in line:
             continue  # `-NAME` is an unset marker
         key, _, value = line.partition("=")
         held[key] = value
+    return held
+
+
+def _stale_server_environment(srv: tmux_core.TmuxServer, env: Mapping[str, str]) -> list[str]:
+    """The desktop variables whose value on the running server differs from this shell's."""
+    held = _server_environment(srv)
     current = tmux_core.desktop_environment(env)
     return [var for var, value in current.items() if held.get(var) != value]
+
+
+def _check_fleet_server_env(
+    server: tmux_core.TmuxServer | None = None,
+    *,
+    boards: Collection[Path] | None = None,
+    cwd: Path | None = None,
+) -> DoctorCheck:
+    """``fleet server env``: a team variable the running fleet server hands every window.
+
+    A tmux server copies the environment of the client that started it into its global
+    environment, and every window opened on it inherits that. The fleet's own starts are
+    clean now (fix 3, ``core.spawn.TEAM_ENV_VARS``), but a server started by anything
+    else keeps what it got: the owner's asqui launcher exported the launch folder's git
+    root as AISQUARE_TEAM_HUB (fix 4 of the fleet-board card, tsk_01m3k89bkhpj). A fleet
+    spawn sets each window's own hub (#230), so a pinned hub reaches only a window opened
+    there by hand, and the row warns when it is unlike the board of a fleet on the
+    server. A seat's row id, role or persona on a server is foreign to every window, so
+    it always warns. ``boards`` are the fleets' board roots; ``None`` reads them from the
+    store. Never starts a server.
+    """
+    name = "fleet server env"
+    try:
+        if server is None and _uncreated_home(name) is not None:
+            return _ok(name, "no fleet home yet")
+        srv = server or _fleet_server(fleet_service.settings().tmux_socket)
+        if not srv.available():
+            return _ok(name, "tmux not installed (see the tmux check)")
+        if srv.server_absent():
+            return _ok(name, "fleet server not running (nothing to read)")
+        held = _server_environment(srv)
+        pinned = {var: held[var] for var in TEAM_ENV_VARS if var in held}
+        where = f"the fleet server (-L {srv.socket})"
+        if not pinned:
+            return _ok(name, f"{where} pins no team variable")
+        wanted = list(boards) if boards is not None else _fleet_boards(srv.socket, cwd)
+        hub = pinned.get("AISQUARE_TEAM_HUB")
+        unlike: list[str] = []
+        if hub is not None:
+            at = _resolved(Path(hub))
+            unlike = sorted({b.name or str(b) for b in wanted if _resolved(b) != at})
+        clear = [var for var in pinned if var != "AISQUARE_TEAM_HUB" or unlike]
+        if not clear:
+            return _ok(
+                name, f"{where} pins AISQUARE_TEAM_HUB={hub}, the board of every fleet on it"
+            )
+        said = [
+            f"AISQUARE_TEAM_HUB={hub}, unlike the board of {', '.join(unlike)}"
+            if var == "AISQUARE_TEAM_HUB"
+            else f"{var}={pinned[var]}"
+            for var in clear
+        ]
+        return _warn(
+            name,
+            f"{where} pins {'; '.join(said)}: a window opened on it by hand inherits "
+            "them (a fleet spawn sets its own)",
+            "; ".join(f"tmux -L {srv.socket} set-environment -gu {var}" for var in clear),
+        )
+    except Exception as exc:  # diagnostics must never crash
+        return _ok(name, f"not evaluated ({exc})")
+
+
+def _fleet_boards(socket: str, cwd: Path | None) -> list[Path]:
+    """The board roots of the fleets on ``socket``: each project with a live row there.
+
+    With none, the checkout ``cwd`` is in, read without the hub: the hub a shell exports
+    is the value being checked, so it cannot also be the answer.
+    """
+    roots: list[Path] = []
+    with store_session() as store:
+        for project in store.list_projects(all=True):
+            rows = store.fleet_agents(project.id, live_only=True)
+            if any(row.tmux_socket in (None, socket) for row in rows):
+                roots.append(project.root)
+    if roots:
+        return roots
+    here = cwd if cwd is not None else Path.cwd()
+    return [git_common_root(here) or here]
+
+
+def _resolved(path: Path) -> Path:
+    try:
+        return path.expanduser().resolve()
+    except OSError:
+        return path
 
 
 def _gh_config_dir() -> Path:
@@ -2079,6 +2177,21 @@ def _check_brain(cwd: Path | None = None) -> DoctorCheck:
             "brain", f"gbrain {version}, brain ready{embed} ({lag} pipe events awaiting distill)"
         )
     return _ok("brain", f"gbrain {version}, brain ready and fully distilled{embed}")
+
+
+def _captain_check() -> DoctorCheck | None:
+    """``captain: off (experimental)`` while the switch is off; ``None`` while it is on.
+
+    Ok, not a warning, as the CI test bed's off row is: off is the shipped state
+    (``core.experimental``), and the row is there to say how to turn it on.
+    """
+    if experimental.captain_enabled():
+        return None
+    return _ok(
+        "captain",
+        "off (experimental) — turn it on with: aisquare config set experimental.captain true "
+        f"(or {experimental.CAPTAIN_ENV}=1)",
+    )
 
 
 def _experiment_checks() -> list[DoctorCheck]:

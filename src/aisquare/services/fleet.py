@@ -34,16 +34,17 @@ import shutil
 import sqlite3
 import subprocess
 import time
+import uuid
 from collections.abc import Callable, Collection, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import ModuleType
-from typing import Any
+from typing import Any, Literal
 
 from aisquare.core import claude_accounts as claude_accounts_core
-from aisquare.core import codenames, harness, orchestrator, selfcli
+from aisquare.core import codenames, experimental, harness, orchestrator, paths, personas, selfcli
 from aisquare.core import tmux as tmux_core
 from aisquare.core.config import (
     CLAUDE_PERMISSION_MODES,
@@ -61,7 +62,7 @@ from aisquare.core.tmux import (
     TmuxUnavailable,
     WindowInfo,
 )
-from aisquare.core.workspace import active_project
+from aisquare.core.workspace import active_project, project_id_for
 from aisquare.models import (
     CLOSED_STATUSES,
     FleetAgent,
@@ -81,7 +82,12 @@ FLEET_ROLES: tuple[str, ...] = ("manager", "coder", "tester", "reviewer", "valid
 """The fleet's own roles (§3.3). Any harness or ``team bind`` role is accepted too."""
 
 MANAGER_LABEL = "manager"
-"""The one label the fleet reserves: exactly one manager per project."""
+"""A label the fleet reserves: exactly one manager per project."""
+
+CAPTAIN_ROLE = "captain"
+CAPTAIN_LABEL = "captain"
+"""The home-level captain (services.captain): one per HOME, on the home board — its role
+and its label are one word, as the manager's are, and the label is reserved (T2, 13121)."""
 
 LABEL = re.compile(r"^[a-z][a-z0-9-]{1,23}$")
 """An agent label: ≤ 24 chars, no ``.``, ``:`` or spaces (tmux target separators)."""
@@ -183,6 +189,12 @@ class ResumeSpec:
 
     session_id: str
     transcript_path: Path
+    fork: bool = False
+    """Resume it as a FORK (the Spawn dialog's hand-off, card tsk_01m3ns5a736s): the source's
+    conversation under a NEW session id, minted by :func:`spawn` and passed as
+    ``--session-id`` beside ``--resume <transcript> --fork-session``, so the new row joins
+    its own session and the source's id is never shared. ``session_id`` is then the
+    source's, the one forked from."""
 
 
 @dataclass(frozen=True)
@@ -242,6 +254,24 @@ class TellResult:
 
     delivered: bool
     how: str
+
+
+@dataclass(frozen=True)
+class AttachReceipt:
+    """What :func:`attach_persona` did (docs/plans/spawn-personas.md §4.7)."""
+
+    agent: FleetAgent
+    persona: str
+    replaced: str | None
+    """The persona the agent ran as before, when it was a different one."""
+    delivered: Literal["typed", "noted"]
+    """``typed`` into a waiting agent's pane, or ``noted``: an agent that could not be
+    typed into gets no note on the board in its place. The board's ``persona_attached``
+    line and its rows are the record, and the agent's own next prompt hands it the
+    briefing, for it alone."""
+    how: str
+    """What happened, in words to show the caller: ``tell``'s own for a briefing that was
+    typed; otherwise why it was not, and how the persona reaches the agent."""
 
 
 @dataclass(frozen=True)
@@ -442,6 +472,43 @@ def server_for(socket: str, config: FleetSettings | None = None) -> TmuxServer:
     return server(config)
 
 
+ServerState = Literal["up", "gone", "silent"]
+"""An agent's tmux server: answering, provably gone (no socket file), or not answering."""
+
+
+def server_state(agent: FleetAgent) -> tuple[ServerState, str]:
+    """Whether an agent's tmux server is up, provably gone, or merely not answering.
+
+    One answer for every caller that must not act on a pane nobody hosts: the
+    captain's delivery (T2's reboot rule, 13189) and ``bt``'s re-claim for a
+    converted agent (T5, 13371) — a row that reads ``waiting`` after a reboot is
+    not an agent that can work.
+
+    ``reachable`` is the one question that separates every state: True is a server
+    that answered; False is tmux's own word that no server is behind the socket;
+    a client that could not run, a denied socket or a wedged server RAISE, and
+    that is no evidence either way. "No server" is ``gone`` only when the socket
+    file is absent where the fleet resolves it (13189: a swept ``/tmp``); a file
+    with nothing behind it is ``silent`` — a kill-server leaves the file, and so
+    does a server alive under another ``TMUX_TMPDIR``.
+    """
+    srv = server_for(agent.tmux_socket)
+    try:
+        if srv.reachable():
+            return "up", ""
+    except TmuxUnavailable as exc:
+        return "silent", f"tmux could not be run ({exc})"
+    except TmuxError as exc:
+        return "silent", f"tmux could not be asked ({exc})"
+    try:
+        path = srv.socket_path()
+    except TmuxError as exc:
+        return "silent", str(exc)
+    if not path.exists():
+        return "gone", f"no socket file at {path}"
+    return "silent", f"nothing answers on {path}"
+
+
 def _team() -> ModuleType:
     """``services.team``, imported on first use (see the module docstring)."""
     from aisquare.services import team
@@ -563,6 +630,48 @@ def ensure_codename(project: ProjectInfo, store: ContextStore | None = None) -> 
         return assign(opened)
 
 
+def _is_home_project(project: ProjectInfo) -> bool:
+    """Whether ``project`` is the aisquare home's own row — the captain's home board."""
+    home = paths.aisquare_home().resolve()
+    return project.id == project_id_for(home)
+
+
+def _is_the_captains_launch(cwd: Path | None, agent_args: Sequence[str] | None) -> bool:
+    """Whether a captain spawn carries what makes it the captain: a folder of its own and
+    no tool but its server (``services.captain.brain.launch_args``, replayed by a restart)."""
+    args = list(agent_args or ())
+    no_tools = any(
+        word == "--tools" and index + 1 < len(args) and args[index + 1] == ""
+        for index, word in enumerate(args)
+    )
+    return cwd is not None and "--strict-mcp-config" in args and no_tools
+
+
+def _fixed_label(role: str, wanted: str | None) -> str | None:
+    """The one label ``role`` may run under, the manager's or the captain's, else ``None``.
+
+    The rules :func:`next_label` applies before it asks who holds a label: ``wanted`` must
+    be a label, and a reserved one belongs to its role. Asked on their own by a fork, whose
+    label nothing at all may hold (:func:`_fork_label`), and by a take-over as another
+    role, which must keep the label it has (:func:`_refuse_a_take_over_that_would_move`),
+    so all three go by one copy of them.
+    """
+    if wanted is not None and not is_label(wanted):
+        raise FleetError(
+            f"label {wanted!r} is not valid — lowercase letters, digits and '-', "
+            "2 to 24 characters, no '.', ':' or spaces"
+        )
+    if wanted == MANAGER_LABEL and role != "manager":
+        raise FleetError(f"the label {MANAGER_LABEL!r} is reserved for the manager role")
+    if role == "manager":
+        return MANAGER_LABEL
+    if wanted == CAPTAIN_LABEL and role != CAPTAIN_ROLE:
+        raise FleetError(f"the label {CAPTAIN_LABEL!r} is reserved for the captain")
+    if role == CAPTAIN_ROLE:
+        return CAPTAIN_LABEL
+    return None
+
+
 def next_label(
     project: ProjectInfo,
     role: str,
@@ -573,15 +682,9 @@ def next_label(
 ) -> str:
     """The label a new agent gets: the asked one, or ``<role>-<task>`` / ``<role>-<n>``,
     suffixed ``-2``, ``-3`` while a LIVE agent already holds it (§5.7)."""
-    if wanted is not None and not is_label(wanted):
-        raise FleetError(
-            f"label {wanted!r} is not valid — lowercase letters, digits and '-', "
-            "2 to 24 characters, no '.', ':' or spaces"
-        )
-    if wanted == MANAGER_LABEL and role != "manager":
-        raise FleetError(f"the label {MANAGER_LABEL!r} is reserved for the manager role")
-    if role == "manager":
-        return MANAGER_LABEL
+    fixed = _fixed_label(role, wanted)
+    if fixed is not None:
+        return fixed
 
     def pick(store: ContextStore) -> str:
         live = {agent.label for agent in store.fleet_agents(project.id, live_only=True)}
@@ -604,6 +707,86 @@ def next_label(
         return pick(store)
     with store_session() as opened:
         return pick(opened)
+
+
+def _fork_label(
+    project: ProjectInfo,
+    role: str,
+    wanted: str | None,
+    *,
+    store: ContextStore,
+    trees: Path | None,
+    codename: str | None,
+) -> str:
+    """The label a FORK takes: ``wanted``, or the next ``<role>-<n>``, that NOTHING holds.
+
+    :func:`next_label` keeps the LIVE agents apart, which is a spawn's rule: a label an
+    ended agent left is free again, and the tree and the branch under it are the next
+    agent's to carry on in (:func:`_ensure_worktree`). A fork is not that agent. The
+    Spawn dialog prefills ``next_label``'s answer and sends ``None`` for it, so a fork of
+    an EXITED teammate was handed that teammate's own label: it ran in the source's tree,
+    on top of its uncommitted work, or moved that tree to another branch; spawn's
+    :func:`_supersede` removed the source's last screen; ``fleet restart <label>`` meant
+    the fork from then on; and under a label an earlier agent had left, the fork was that
+    agent's stale branch checked out, while its first message said "you run in your own
+    worktree on your own branch" (review of #240, finding 3).
+
+    So a fork's label is held by nothing: no row of the project in ANY state (live,
+    exited, lost or ended) and, where it gets a worktree (``trees`` is where those go,
+    ``None`` when it gets none), no directory at the place its own would be made and no
+    local branch it would be cut on, named by ``codename`` as :func:`spawn` names it.
+    ``wanted`` that something holds is refused, naming the holder, where a spawn would
+    suffix it or take it: the owner typed it, and nothing has been made yet. The manager's
+    label is the only one its role has, so a fork as the manager is refused the same way
+    while any manager's row holds it. With no ``wanted``, ``<role>-1``, ``-2`` … are
+    walked to the first that is free, however far that is: every label the project ever
+    used is held, so the walk has no count to run out at.
+
+    Asked where :func:`spawn` picks every label, in the same store session as its other
+    refusals; a parallel spawn that takes the label after that is :func:`_record`'s to
+    settle, as it is for any spawn.
+    """
+    # The newest row under each label (the store lists them oldest first): the live one
+    # when there is one.
+    holders = {row.label: row for row in store.fleet_agents(project.id, live_only=False)}
+
+    def held_by(label: str) -> str | None:
+        """What holds ``label``, in a refusal's words; ``None`` when nothing does."""
+        holder = holders.get(label)
+        if holder is not None:
+            state = "a live agent" if holder.ended_at is None else "an agent that has ended"
+            return f"it is the label of {state} ({holder.id})"
+        if trees is None:
+            return None
+        if (trees / label).exists():
+            return f"its worktree would be {trees / label}, which already exists"
+        if codename is None:
+            return None  # no branch can be named yet; `_ensure_worktree` asks once it can
+        branch = branch_name(codename, task_id=None, title=label)
+        found = _git(project.root, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}")
+        if found.returncode == 0:
+            return f"its branch would be {branch}, which already exists"
+        return None
+
+    fixed = _fixed_label(role, wanted)
+    label = fixed if fixed is not None else wanted
+    if label is None:
+        n = 1
+        while held_by(f"{role}-{n}") is not None:
+            n += 1
+        return f"{role}-{n}"
+    held = held_by(label)
+    if held is None:
+        return label
+    way_out = (
+        f", and the {role} has no other label; take it over or spawn one instead"
+        if fixed is not None
+        else "; pick another label"
+    )
+    raise FleetError(
+        f"cannot fork as {label!r}: {held} — a fork takes a label, a worktree and a branch "
+        f"that nothing holds{way_out}"
+    )
 
 
 # --- git: the fleet's one process seam besides tmux (§3.5) --------------------------
@@ -749,8 +932,21 @@ def _ensure_worktree(
     *,
     refuse_if_taken: Callable[[], None] | None = None,
     own: Path | None = None,
+    start_point: str | None = None,
 ) -> Path:
     """``<root>/<worktree_dir>/<label>`` on ``branch``, created or reused.
+
+    ``start_point`` is a FORK's (:func:`hand_off`): the commit its source's tree is on,
+    where the fork's own ``branch`` is cut (``git worktree add -b``). With it nothing is
+    reused: a tree already at the path, or a branch already under the name, is another
+    agent's work, and the spawn is refused with that tree not started in or switched, and
+    that branch not checked out. A fork handed the label of its exited source ran in that
+    source's tree, on top of its uncommitted work, or moved that tree to another branch;
+    under a label an earlier agent had left, its "own" worktree was that agent's stale
+    branch, not its source's commit (review of #240, finding 3). :func:`_fork_label` picks
+    a label that has neither, so what is refused here was made since, by a parallel spawn.
+    Without a start point, every other spawn's case, a new branch is cut at the checkout's
+    HEAD and everything below applies.
 
     Reuse is deliberate: a coder respawned on the same task after review
     findings must land in the tree that holds its branch, not beside it. A
@@ -776,6 +972,11 @@ def _ensure_worktree(
     """
     path = root / worktree_dir / label
     if path.exists():
+        if start_point is not None:
+            raise FleetError(
+                f"{path} already exists — a fork's worktree is made new, at the commit its "
+                "source is on, and never one that is already there; fork under another label"
+            )
         if (path / ".git").exists():
             if own is not None and path.resolve() == own.resolve():
                 notes.append(f"kept the agent's worktree at {path} as it stands")
@@ -795,10 +996,16 @@ def _ensure_worktree(
     # `add` at the same path; prune is idempotent and cheap.
     _git(root, "worktree", "prune")
     if _git(root, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}").returncode == 0:
+        if start_point is not None:
+            raise FleetError(
+                f"branch {branch} already exists — a fork's branch is cut new, at the commit "
+                "its source is on, and never one that is already there; fork under another "
+                "label"
+            )
         _git_ok(root, "worktree", "add", str(path), branch)
         notes.append(f"branch {branch} already existed — checked it out")
     else:
-        _git_ok(root, "worktree", "add", str(path), "-b", branch)
+        _git_ok(root, "worktree", "add", str(path), "-b", branch, *filter(None, [start_point]))
     _exclude_worktrees(root, worktree_dir, notes)
     return path
 
@@ -1179,6 +1386,17 @@ def _require_tmux(srv: TmuxServer) -> None:
         raise FleetUnavailable(str(exc)) from exc
 
 
+def role_ok(role: str) -> bool:
+    """The seat rule: whether ``spawn`` accepts ``role``.
+
+    A role is accepted when it is a fleet or harness role, a numbered seat of one
+    (``coder2``), or a role declared in ``team.profiles`` (``aisquare team bind``).
+    ``spawn`` refuses anything else, ``aisquare launch`` applies the same rule, and
+    the UI's New bind form asks it before saving a seat, so all three agree.
+    """
+    return _role_ok(role)
+
+
 def _role_ok(role: str) -> bool:
     """A fleet role, a harness role, or anything ``aisquare launch`` would accept."""
     if role in FLEET_ROLES or role in harness.ROLE_PROFILES:
@@ -1271,14 +1489,18 @@ def spawn(
     agent_args: Sequence[str] = (),
     spawned_by: str = "user",
     account: str | None = None,
+    persona: str | None = None,
     resume: ResumeSpec | None = None,
     size: tuple[int, int] | None = None,
     spec: LaunchSpec | None = None,
     claude_code: bool = False,
     takes_over: str | None = None,
+    cwd: Path | None = None,
     onboard: bool = True,
     bin_flag: bool = True,
     own_worktree: Path | None = None,
+    start_point: str | None = None,
+    fork: bool = False,
 ) -> SpawnReceipt:
     """Start an agent for ``project`` in the fleet's tmux server and record it.
 
@@ -1316,9 +1538,15 @@ def spawn(
     ``extra_args`` and the caller's ``agent_args``. ``AISQUARE_FLEET_AGENT``
     carries the row id into the window; ``CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=0``
     keeps Claude's native teams out of the fleet unless configured otherwise (§7.6);
-    ``AISQUARE_TEAM_HUB`` is set to this process's hub, or blank
-    (:func:`orchestrator.window_team_hub`), and ``AISQUARE_EXPLAINABILITY_TARGET``
-    to this process's value, or blank.
+    ``AISQUARE_TEAM_HUB`` is set to the fleet's own root, so the window joins its
+    fleet's board whatever hub the server or this process carries (card
+    tsk_01m3k89b2f96tt7xc6crzvxzjk), and ``AISQUARE_EXPLAINABILITY_TARGET`` to this
+    process's value, or blank.
+
+    ``persona`` — the flag, else ``[fleet.roles.<role>].persona``, else none — is
+    checked against the project's personas before anything starts, travels to the
+    window as ``launch --persona`` and is recorded on the row
+    (docs/plans/spawn-personas.md §3.7, §3.8).
     Every variable set here is THIS window's: none reaches the tmux session's
     environment, so a later spawn sets its own account and opt-out rather than
     inheriting the first spawn's, and a window the operator opens by hand keeps
@@ -1359,6 +1587,15 @@ def spawn(
     a bound row — and the hand-off prompt still names the task (review of
     #205, fifth round: this used to promise the move came first).
 
+    ``fork`` and ``start_point`` are a fork's (:func:`hand_off`), which takes nothing that
+    is already there. Its label is one NOTHING holds (:func:`_fork_label`): no row of the
+    project in any state, no worktree and no branch, where every other spawn's is kept
+    apart from the live agents only and carries on in what an ended one left. And
+    ``start_point`` is the commit its source's tree is on, where its own worktree branch
+    is cut instead of at the checkout's HEAD: that worktree is made new or the spawn is
+    refused, since with a start point no tree and no branch that already exists is reused
+    (:func:`_ensure_worktree`).
+
     ``size`` is the ``(columns, rows)`` the window is born with. The UI passes
     the pane it is about to attach, so the agent never runs wider than it will
     be shown; a headless spawn (a manager starting coders, `fleet spawn` with
@@ -1369,6 +1606,11 @@ def spawn(
     """
     config = settings()
     _require_role(role)
+    if role == CAPTAIN_ROLE and not _is_home_project(project):
+        raise FleetError(
+            "the captain lives on the home board, one per home — `aisquare captain` starts "
+            f"it; it cannot be spawned into {_name(project)}"
+        )
     replayed_args = spec is not None and not agent_args
     if spec is not None:
         # The recorded launch stands in for the role's config, argument by argument
@@ -1382,6 +1624,13 @@ def spawn(
         worktree = worktree if worktree is not None else spec.worktree
         if replayed_args:
             agent_args = list(spec.extra_args)
+    if role == CAPTAIN_ROLE and not _is_the_captains_launch(cwd, agent_args):
+        # `fleet spawn captain` on the home was a captain with every tool, in the
+        # home itself — and `aisquare captain` then attached to it and typed into it.
+        raise FleetError(
+            "the captain is started by `aisquare captain`, which gives it its brain folder "
+            "and no tool but its own server"
+        )
     # A transcript to resume is one only Claude Code writes.
     claude_code = claude_code or resume is not None
     srv = server(config)
@@ -1391,6 +1640,7 @@ def spawn(
         role, binary=binary, spec=spec, claude_code=claude_code, notes=notes, bin_flag=bin_flag
     )
     role_config = role_settings(role, config)
+    chosen_persona = _chosen_persona(project, role, persona, role_config, notes)
     # Nothing up to the codename below writes the project's registration: every
     # refusal that needs no window is given first (#139). A spawn refused for its
     # account, its worktree, its task, the cap or a second manager had already
@@ -1412,6 +1662,7 @@ def spawn(
     for ended in _end_dead_rows(live, views):
         live = [agent for agent in live if agent.id != ended.id]
         rows = [ended if agent.id == ended.id else agent for agent in rows]
+    use_worktree = role_config.worktree if worktree is None else worktree
     with store_session() as store:
         if role == "manager":
             existing = next((agent for agent in live if agent.role == "manager"), None)
@@ -1419,6 +1670,13 @@ def spawn(
                 raise FleetError(
                     f"{_name(project)} already has a manager ({existing.id}) — one per "
                     "project; `aisquare fleet stop manager` first"
+                )
+        if role == CAPTAIN_ROLE:
+            existing = next((agent for agent in live if agent.role == CAPTAIN_ROLE), None)
+            if existing is not None:
+                raise FleetError(
+                    f"the home already has a captain ({existing.id}) — one per home; "
+                    "`aisquare captain` attaches to it"
                 )
         if len(live) >= config.max_agents_per_project:
             raise FleetError(
@@ -1428,14 +1686,24 @@ def spawn(
             )
         task = _task_for(store, project, task_id)
         resolved_task_id = task.id if task is not None else None
-        picked = next_label(project, role, wanted=label, task_id=resolved_task_id, store=store)
+        if fork:
+            # Held by nothing, where a spawn's label is kept apart from the live agents
+            # only: a fork is not the next agent under a label (review of #240, finding 3).
+            picked = _fork_label(
+                project,
+                role,
+                label,
+                store=store,
+                trees=project.root / config.worktree_dir if use_worktree else None,
+                codename=observed,
+            )
+        else:
+            picked = next_label(project, role, wanted=label, task_id=resolved_task_id, store=store)
     if label is not None and picked != label:
         if role == "manager":
             notes.append(f"the manager is always labelled {MANAGER_LABEL!r} (asked: {label!r})")
         else:
             notes.append(f"label {label!r} is held by a live agent — using {picked!r}")
-
-    use_worktree = role_config.worktree if worktree is None else worktree
 
     def refuse_if_taken() -> None:
         _refuse_occupied_worktree(project, config.worktree_dir, picked)
@@ -1474,7 +1742,11 @@ def spawn(
         # A forgotten project's ended rows keep their windows under the codename its
         # tombstone kept, which the caller's registration did not carry.
         views = _observe_sockets(rows, session_name(codename), config)
-    cwd = project.root
+    # ``cwd`` is a non-worktree agent's working directory when it is not the
+    # project's root: the captain runs from its brain folder under the home, so no
+    # project's CLAUDE.md or hooks brief it as a worker (T2, 13121). The row
+    # records it and a restart replays it.
+    cwd = cwd if cwd is not None else project.root
     if use_worktree:
         branch = branch_name(
             codename,
@@ -1489,6 +1761,7 @@ def spawn(
             notes,
             refuse_if_taken=refuse_if_taken,
             own=own_worktree,
+            start_point=start_point,
         )
     notes.extend(f"accounts: {note}" for note in choice.notes)
     # A replayed spec already holds the role's arguments as they were at spawn;
@@ -1507,7 +1780,20 @@ def spawn(
     # The same goes for a session the CALLER chose (`--session-id`, `--resume`,
     # `--continue`): see `_without_session_choice`.
     recorded_args = _without_session_choice(resolution.binary, [*role_args, *extra])
-    if resume is not None:
+    if resume is not None and resume.fork:
+        # A FORK (card tsk_01m3ns5a736s): `--resume <transcript> --fork-session` opens the
+        # source's conversation under a NEW id, minted here and passed as `--session-id`
+        # (Claude Code takes the two together only when it forks), so the row joins the
+        # fork's own session. The identity planner is not asked: it reads `--resume <path>`
+        # as the RESUMED id and knows nothing of `--fork-session`. The recorded spec drops
+        # all three flags (`_without_session_choice`), so a restart of the fork resumes the
+        # fork, never its source.
+        forked = str(uuid.uuid4())
+        extra = ["--resume", str(resume.transcript_path), "--fork-session", *extra]
+        identity = explainability_service.SessionIdentity(
+            forked, inject_args=("--session-id", forked)
+        )
+    elif resume is not None:
         # `--resume <transcript path>` keeps the ORIGINAL session id (#146), so
         # the row is joined to it here rather than minted or learned later; the
         # identity planner would otherwise read the path as the id.
@@ -1545,20 +1831,48 @@ def spawn(
         # through the resolver lands on the same account whatever its
         # environment says, and sets the account's variables there.
         flags += ["--account", str(choice.account.slot)]
+    if chosen_persona is not None:
+        # A flag, not an env var: the window's environment is the tmux SERVER's.
+        flags += ["--persona", chosen_persona]
     flags += ["--name", picked]
     command = selfcli.argv_for(["launch", role, *flags, *role_args, *extra])
-    env = {orchestrator.FLEET_AGENT_ENV_VAR: agent_id}
+    # Every window names its own fleet's board. A window inherits the tmux SERVER's
+    # environment, and a server started from a shell that exported a hub carries it
+    # globally, so without this pin every seat of every fleet on that server joined
+    # the one board the server's hub named (card tsk_01m3k89b2f96tt7xc6crzvxzjk).
+    # The fleet's root, not the spawner's hub (main's rule for #170, D1b round 2,
+    # B1): a spawner under a hub, the captain among them, put another project's
+    # seat on the hub's board, which `team_project`'s fleet-row rule then overrode
+    # with a warning at every launch.
+    env = {
+        orchestrator.FLEET_AGENT_ENV_VAR: agent_id,
+        orchestrator.TEAM_HUB_ENV_VAR: str(project.root),
+    }
+    if role == CAPTAIN_ROLE:
+        # The launcher activates a board BEFORE it hands the agent its `-e` pairs,
+        # from its cwd — the brain folder, where `.aisquare` above it is a project
+        # marker. With the hub only in `-e`, it onboarded the brain folder (or
+        # `$HOME`, under `~/.aisquare`) as a project; the hub above lands the
+        # launcher on the home board, which the store keeps captured (T2).
+        env["AISQUARE_HOME"] = str(paths.aisquare_home().resolve())
+        # Claude Code's session-rating survey drew in the captain's pane mid-conversation, and
+        # send (rightly) never types into a dialog: every voice line was refused, and from the
+        # phone the owner cannot answer it (T1e). screen.py's refusal stays the backstop.
+        env["CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY"] = "1"
+        # The experimental switch as THIS process has it, when it has it. The window's
+        # launcher looks the bundled `captain` persona up again, and with the switch set
+        # only in the starting shell — the server started without it — the window said
+        # "no persona named 'captain'" and exited under "started the captain" (review of
+        # #240, finding 13). A window pair, never a `launch -e` one: those reach the
+        # agent after that lookup, and the row would record the value for every restart
+        # to replay. Read at each start instead, a restart's included.
+        env.update(experimental.captain_environment())
     if config.disable_native_agent_teams:
         env["CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"] = "0"
-    # The hub as THIS process resolves it, blank for none: the window's
-    # `launch` joins the project the spawner — and the UI's Explainability tab
-    # beside it — resolves, and takes that project's key, not the one the tmux
-    # server's frozen environment would name (review of #170, D1b round 2, B1).
-    env[orchestrator.TEAM_HUB_ENV_VAR] = orchestrator.window_team_hub()
-    # The deployment override too, for the same reason: the tab resolves the
-    # key's deployment, and shows the target, with THIS process's variable,
-    # and the window's `launch` has to trace where the tab says. Blank for
-    # none, which `resolve_target` reads as unset (review of #170's Setup-form
+    # The deployment override as THIS process sees it: the UI's Explainability tab
+    # resolves the key's deployment, and shows the target, with this process's
+    # variable, and the window's `launch` has to trace where the tab says. Blank
+    # for none, which `resolve_target` reads as unset (review of #170's Setup-form
     # merge, G2).
     env[explainability_ops.TARGET_ENV_VAR] = os.environ.get(
         explainability_ops.TARGET_ENV_VAR, ""
@@ -1638,6 +1952,7 @@ def spawn(
             command=list(command),
         ),
         created_at=_now(),
+        persona=chosen_persona,
     )
     stored = _record(
         agent,
@@ -1673,6 +1988,44 @@ def spawn(
         prompt_typed=typed,
         failures=[*moved, *(typing if typed is False else [])],
     )
+
+
+def _chosen_persona(
+    project: ProjectInfo,
+    role: str,
+    flag: str | None,
+    role_config: FleetRoleSettings,
+    notes: list[str],
+) -> str | None:
+    """The spawn's persona — flag > ``[fleet.roles.<role>].persona`` > none — checked
+    against the project's personas before any window or worktree exists.
+
+    A name nothing resolves refuses with the known names; one that came from the
+    config names the key, so a stale default is found at the first spawn rather
+    than after a day of work (§3.7). ``persona-roles`` is advisory: a persona
+    written for other roles is a receipt note, never a refusal. A seat
+    (``coder2``) counts as its role.
+    """
+    # ``""`` is a flag too: a replay's "the row had none" (``_persona_for_replay``),
+    # which must not fall through to a role default adopted since the spawn.
+    name = flag if flag is not None else role_config.persona
+    if not name:
+        return None
+    try:
+        found = personas.resolve(name, project.root)
+    except personas.PersonaError as exc:
+        if flag is not None:
+            raise FleetError(exc.rule) from exc
+        raise FleetError(
+            f"[fleet.roles.{role}].persona = {name!r}: {exc.rule} — fix the key or pass --persona"
+        ) from exc
+    seat_of = re.sub(r"\d+$", "", role)
+    if found.roles and role not in found.roles and seat_of not in found.roles:
+        notes.append(
+            f"persona {name} is written for {', '.join(found.roles)}, not {role} — spawned "
+            "with it anyway"
+        )
+    return name
 
 
 def _launch_binary(
@@ -2019,6 +2372,8 @@ def _relabel(
     """
     if agent.role == "manager":
         raise FleetError(f"{_name(project)} already has a manager — one per project")
+    if agent.role == CAPTAIN_ROLE:
+        raise FleetError("the home already has a captain — one per home")
     if agent.worktree:
         raise FleetError(
             f"label {agent.label!r} was taken while this agent was starting, and "
@@ -2419,27 +2774,40 @@ def tell(project: ProjectInfo, label: str, text: str, *, sender: str | None = No
     the one :func:`nudge_manager` already applies — and a pane that is not the
     agent's gets the board note instead.
     """
+    typed = _type_if_waiting(project, label, text)
+    if typed.delivered:
+        return typed
+    how = _file_note(project, label, text, sender)
+    return TellResult(False, f"{typed.how} — {how}")
+
+
+def _type_if_waiting(project: ProjectInfo, label: str, text: str) -> TellResult:
+    """Type ``text`` into ``label``'s pane if the agent is WAITING there; else say why not.
+
+    The typing half of :func:`tell`, whose docstring gives the readiness rules, with no
+    fallback of its own: what becomes of a message that was not typed is the caller's to
+    decide. ``tell`` files it as a board note; :func:`attach_persona` must not, because
+    its message is a persona's body (review of #240, finding 7). Not delivered, ``how``
+    is the reason alone.
+    """
     with store_session() as store:
         agent = _live_agent(store, project, label)
     status = status_of(agent)
     if status.state == "waiting":
         srv = server_for(agent.tmux_socket)
         if not _pane_is_the_agent(srv, agent.pane_id):
-            how = _file_note(project, label, text, sender)
             return TellResult(
                 False,
                 "it reads as waiting, but its pane is not running the agent yet (the "
-                f"launcher or a shell is in the foreground) — {how}",
+                "launcher or a shell is in the foreground)",
             )
         try:
             srv.paste(agent.pane_id, text)
             srv.send_keys(agent.pane_id, "Enter")
         except TmuxError as exc:
-            how = _file_note(project, label, text, sender)
-            return TellResult(False, f"tmux could not type it ({exc}) — {how}")
+            return TellResult(False, f"tmux could not type it ({exc})")
         return TellResult(True, "typed into its pane (it was waiting)")
-    how = _file_note(project, label, text, sender)
-    return TellResult(False, f"it is {status.state} — {how}")
+    return TellResult(False, f"it is {status.state}")
 
 
 def _pane_is_the_agent(srv: TmuxServer, pane_id: str) -> bool:
@@ -2455,15 +2823,106 @@ def _pane_is_the_agent(srv: TmuxServer, pane_id: str) -> bool:
     return facts is not None and not facts.dead and _agent_running(facts.current_command)
 
 
+def pane_is_the_agent(srv: TmuxServer, pane_id: str) -> bool:
+    """Whether the pane's foreground process is the agent — :func:`tell`'s readiness test.
+
+    Public because it is a seam by use: the captain's ``press`` and ``paste``
+    (``services.captain.actions``) type only where ``tell`` would.
+    """
+    return _pane_is_the_agent(srv, pane_id)
+
+
 def _file_note(project: ProjectInfo, label: str, text: str, sender: str | None) -> str:
+    """File ``text`` on ``project``'s board as a note to ``label``; the receipt's words.
+
+    The board is named by project id and never resolved from a ``cwd``: an exported
+    ``AISQUARE_TEAM_HUB`` and the caller's own ``AISQUARE_FLEET_AGENT`` row both win over
+    a ``cwd``, and a sender's session delivers to the sender's board. Each put the note
+    for a busy agent on a board that agent never reads, while this receipt said "filed"
+    (review of #240, finding 8).
+    """
     team = _team()
     try:
-        event = team.add_note(text, session_ref=sender, to_role=label, cwd=project.root)
+        event = team.add_note(text, session_ref=sender, to_role=label, project_id=project.id)
     except team.TeamDisabledError as exc:
         raise FleetError(f"cannot file the message as a board note: {exc}") from exc
     except KeyError as exc:
         raise FleetError(f"unknown sender session {sender!r}") from exc
     return f"filed as board note #{event.seq} to {label}"
+
+
+def attach_persona(
+    project: ProjectInfo, label: str, name: str, *, sender: str | None = None
+) -> AttachReceipt:
+    """Give a RUNNING agent a persona (docs/plans/spawn-personas.md §4.7).
+
+    The persona is resolved first — an unknown name lists the known ones before
+    the store or tmux is touched — then the live agent. One ``persona_attached``
+    board event is written (which also refuses an unknown ``sender`` before
+    anything changes); the ``fleet_agent`` row and, when the agent has joined,
+    its ``team_session`` row record the name. The rows are what make it last: the
+    session-start hook reads the fleet row, so a ``/clear`` or a restart briefs
+    the agent with it again.
+
+    The briefing itself is only ever TYPED, into an agent that is waiting, by
+    ``tell``'s own readiness test (:func:`_type_if_waiting`). For any other agent
+    nothing is filed in its place. ``tell``'s board note would be the whole fenced
+    body and its guard sentence as an ordinary ``note``: every OTHER session read
+    it in its next delta as if it were addressed to it, ``aisquare board`` and a
+    teammate's session-start briefing showed it, and the distiller wrote it into
+    the project brain (review of #240, finding 7). The board names the persona
+    and never carries its body (§3.1). So such an agent is OWED the briefing
+    (``team.owe_persona_briefing``, a marker under its row): its own next prompt's
+    hook hands it the same preface and block, once and to it alone, unless a
+    session start briefs it first. The receipt says that instead of a delivery.
+    """
+    try:
+        persona = personas.resolve(name, project.root)
+    except personas.PersonaError as exc:
+        raise FleetError(exc.rule) from exc
+    with store_session() as store:
+        agent = _live_agent(store, project, label)
+    replaced = agent.persona if agent.persona and agent.persona != persona.name else None
+    team = _team()
+    note = f"persona {persona.name} attached to {label}"
+    try:
+        team.add_note(
+            f"{note} (replaces {replaced})" if replaced else note,
+            session_ref=sender,
+            to_role=label,
+            kind="persona_attached",
+            project_id=project.id,  # the agent's board, never a cwd's (:func:`_file_note`)
+        )
+    except team.TeamDisabledError as exc:
+        raise FleetError(f"cannot record the attachment on the board: {exc}") from exc
+    except KeyError as exc:
+        raise FleetError(f"unknown sender session {sender!r}") from exc
+    with store_session() as store:
+        agent = store.set_fleet_agent_persona(agent.id, persona.name)
+        if agent.session_id is not None and store.get_session(agent.session_id) is not None:
+            store.set_session_persona(agent.session_id, persona.name)
+        # What an earlier attach still owes is superseded, and BEFORE anything is typed:
+        # the prompt that types this briefing runs the very hook that hands that one over.
+        # The agent never read what was owed, so the preface names the persona IT ran as.
+        told = team.settle_persona_briefing(store, agent.id, replaced=replaced)
+    told = told if told != persona.name else None
+    preface = team.persona_attached_preface(persona.name, told)
+    typed = _type_if_waiting(project, label, "\n".join([preface, *personas.briefing(persona)]))
+    how = typed.how
+    if not typed.delivered:
+        with store_session() as store:
+            team.owe_persona_briefing(store, agent.id, replaced=told)
+        how = (
+            f"{how}, so the briefing was not typed: {persona.name} is recorded and reaches it "
+            "with its next prompt, for it alone; the board carries the name only"
+        )
+    return AttachReceipt(
+        agent=agent,
+        persona=persona.name,
+        replaced=replaced,
+        delivered="typed" if typed.delivered else "noted",
+        how=how,
+    )
 
 
 def stop(
@@ -3819,6 +4278,7 @@ def switch(
             else []
         )
     _require_role(agent.role)  # `spawn`'s first refusal, before the stop as the task's
+    _refuse_the_captain_while_off(agent)
     current = _account_slot_of(agent, session)
     notes: list[str] = []
     failures: list[str] = []  # the notes that say what did not happen (`SwitchReceipt`)
@@ -3966,6 +4426,8 @@ def _respawn(
     takes_over: bool = False,
     permission_mode: str | None = None,
     onboard: bool = True,
+    role: str | None = None,
+    persona: str | None = None,
 ) -> tuple[SpawnReceipt, bool, list[str]]:
     """Start ``agent`` again — same label, role, task and worktree — resuming when it can.
 
@@ -4008,9 +4470,13 @@ def _respawn(
             "no transcript on disk to resume — the replacement starts fresh with a hand-off prompt"
         )
     prompt = resume_prompt if resume is not None else _handoff_prompt(agent, task, recent, reason)
+    # A take-over from the Spawn dialog may run the label as another role (card
+    # tsk_01m3ns5a736s): the recorded launch was the old role's, so it is replayed only
+    # for the same role, and the new one launches as today's config says for it.
+    replay = role is None or role == agent.role
     receipt = spawn(
         project,
-        agent.role,
+        agent.role if replay or role is None else role,
         label=agent.label,
         task_id=agent.task_id,
         worktree=agent.worktree,
@@ -4020,19 +4486,21 @@ def _respawn(
         resume=resume,
         size=size,
         permission_mode=permission_mode,
-        spec=agent.launch_spec,
+        spec=agent.launch_spec if replay else None,
+        persona=_persona_for_replay(project, agent, notes) if persona is None else persona,
         # Only Claude Code's hooks write a board session (`agents connect`
         # installs them for Claude Code alone): a row joined to one is Claude
         # Code whatever its binary is called, resumed or `--fresh`.
         claude_code=session is not None,
         takes_over=session.id if takes_over and resume is None and session is not None else None,
+        cwd=None if agent.worktree else agent.cwd,
         onboard=onboard,
         # Asked again here, after a stop that can outlast the binary (a relink in the
         # grace): the refusal names no `--bin`, which no command that gets here takes.
         bin_flag=False,
         own_worktree=agent.cwd if agent.worktree else None,
     )
-    if agent.launch_spec is not None:
+    if agent.launch_spec is not None and replay:
         # Said once the replacement is up, for what it really took from the row: a
         # recorded binary that has left the PATH was replaced by today's resolution,
         # which the spawn's own note names, and "the binary comes from the row" beside
@@ -4047,6 +4515,59 @@ def _respawn(
         )
     notes.extend(receipt.notes)
     return receipt, resume is not None, notes
+
+
+def _persona_for_replay(project: ProjectInfo, agent: FleetAgent, notes: list[str]) -> str:
+    """The persona a replay runs as: the ROW's, then the role's default, then none; never a refusal.
+
+    A restart is the same agent (#144), and the row is the record of how it ran
+    (docs/plans/spawn-personas.md §3.8): the persona it was spawned with, or was
+    given since (``attach_persona``), comes back with it. A row with no persona
+    replays with none — the empty string, which :func:`_chosen_persona` reads as
+    "none was asked" rather than "ask the role" — so a role default adopted since
+    does not quietly change an agent that ran without one. Only when the row's
+    persona no longer resolves (deleted or renamed since) does the ladder step
+    down: to the role's current default when that resolves, else to none, and
+    each step is said on the receipt. A replay never refuses over a persona —
+    the agent can run without one, and refusing would leave it stopped, the
+    failure :func:`_refuse_a_replay_that_cannot_start` exists to prevent
+    (owner decision, 2026-09-24).
+    """
+    if not agent.persona:
+        return ""
+    try:
+        personas.resolve(agent.persona, project.root)
+    except personas.PersonaError as exc:
+        gone = f"persona {agent.persona} no longer resolves ({exc.rule})"
+    else:
+        return agent.persona
+    fallback = role_settings(agent.role, settings()).persona
+    if not fallback or fallback == agent.persona:
+        notes.append(f"{gone} — started without a persona")
+        return ""
+    try:
+        personas.resolve(fallback, project.root)
+    except personas.PersonaError as exc:
+        notes.append(
+            f"{gone}, and the role's default {fallback} does not either ({exc.rule}) — "
+            "started without a persona"
+        )
+        return ""
+    notes.append(f"{gone} — started with the role's default, {fallback}")
+    return fallback
+
+
+def _refuse_the_captain_while_off(agent: FleetAgent) -> None:
+    """Refuse to start the captain's row again while the experimental captain is off.
+
+    :func:`restart` and :func:`switch` replay the row, and off, the bundled ``captain``
+    persona does not resolve: a replay drops a persona that no longer resolves rather
+    than refuse (:func:`_persona_for_replay`), so the captain came back with its tools
+    and without its rules. Asked before anything is stopped, and said in the one line
+    every captain refusal says (review of #240, finding 13).
+    """
+    if agent.role == CAPTAIN_ROLE and not experimental.captain_enabled():
+        raise FleetError(experimental.CAPTAIN_OFF)
 
 
 def _refuse_a_replay_that_cannot_start(agent: FleetAgent, session: TeamSession | None) -> None:
@@ -4075,6 +4596,58 @@ def _refuse_a_replay_that_cannot_start(agent: FleetAgent, session: TeamSession |
         notes=[],
         bin_flag=False,
     )
+
+
+def _refuse_a_take_over_that_would_move(project: ProjectInfo, agent: FleetAgent, role: str) -> None:
+    """Raise now what running ``agent`` on as another ``role`` would meet in :func:`spawn`.
+
+    BEFORE its source is stopped, as :func:`_refuse_a_replay_that_cannot_start` asks about
+    the binary. For a role change ``restart`` asked the new role's binary, the persona and
+    the account first and left the rest of ``spawn``'s rules for that role to ``spawn``,
+    which runs after the stop (review of #240, finding 6). *Take over* as ``manager`` from
+    a worktree coder holding a task sent the coder ``/exit``; ``spawn`` then forced the
+    label to ``manager`` and its ``git worktree add`` failed, the task's branch being
+    checked out in the tree the coder had just left; the abandoned hand-over returned the
+    task to the pool, and the project had no live agent. A coder with no task came back as
+    a manager in a brand-new tree cut from the root's HEAD, away from what it had not
+    committed.
+
+    Asked in ``spawn``'s order: one manager per project, then the label, then the tree. A
+    take-over is the same agent carrying on (:func:`_respawn`), under its source's label
+    and in its source's tree, so a role that would move either is refused here: one whose
+    label is fixed (the manager's, the captain's), one that cannot keep the label its
+    source has (the manager's own, for any other role), and one whose worktree today's
+    ``[fleet] worktree_dir`` puts somewhere else. That simple rule is the acting manager's
+    ruling: the owner can stop the agent and spawn the other role by hand. A role that
+    keeps both starts as it always did, and a restart with no role change never comes
+    here.
+    """
+    existing = manager_of(project) if role == "manager" else None
+    if existing is not None:
+        raise FleetError(
+            f"{_name(project)} already has a manager ({existing.id}) — one per project; "
+            "nothing was stopped"
+        )
+    keeps = (
+        "a take-over keeps its source's label and tree, so nothing was stopped: stop "
+        f"{agent.label!r} and spawn the {role} by hand"
+    )
+    try:
+        fixed = _fixed_label(role, agent.label)
+    except FleetError as exc:
+        raise FleetError(f"{exc}, which a {role} cannot keep — {keeps}") from exc
+    if fixed is not None and fixed != agent.label:
+        where = f", in that label's worktree rather than {agent.cwd}" if agent.worktree else ""
+        raise FleetError(
+            f"as {role} it would be labelled {fixed!r}, not {agent.label!r}{where} — {keeps}"
+        )
+    if agent.worktree:
+        path = project.root / settings().worktree_dir / agent.label
+        if path.resolve() != agent.cwd.resolve():
+            raise FleetError(
+                f"as {role} it would start in {path}, not in {agent.cwd} where it works now "
+                f"— {keeps}"
+            )
 
 
 @dataclass
@@ -4106,6 +4679,9 @@ def restart(
     spawned_by: str = "user",
     agent_id: str | None = None,
     permission_mode: str | None = None,
+    role: str | None = None,
+    account: str | None = None,
+    persona: str | None = None,
 ) -> RestartReceipt:
     """Start an agent again under its own label — the **Restart** of #138.
 
@@ -4145,6 +4721,17 @@ def restart(
     that hand-over ends it and starts the replacement itself.
     ``agent_id`` pins the row, as for :func:`stop`: the agent view's Restart
     means the row it shows, never a replacement that took the label since.
+
+    ``role``, ``account`` and ``persona`` are a take-over's changes (the Spawn dialog's
+    *Take over*, :func:`hand_off`); ``None`` keeps the row's, and an account of
+    :data:`THIS_SHELL_ACCOUNT` runs where a plain spawn with no ``--account`` runs.
+    Another role launches as today's config says for it, since the recorded launch was
+    the old role's; a persona of ``""`` is none. Each is checked with the rest, before
+    anything is stopped, and so is what ``spawn`` asks of another role: a second manager
+    is refused here, and so is a role under which the agent could not keep its label and
+    its tree, the manager's fixed label above all
+    (:func:`_refuse_a_take_over_that_would_move`).
+
     ``permission_mode`` is refused first when Claude Code does not take it
     (:data:`~aisquare.core.config.CLAUDE_PERMISSION_MODES`, or ``""`` for no
     flag). The replacement records it, so a typo was replayed by every later
@@ -4187,16 +4774,35 @@ def restart(
             if agent.session_id is not None
             else []
         )
+    _refuse_the_captain_while_off(agent)
     # `spawn`'s refusals for the binary and the account, asked here for the same
     # reason. The account is resolved as `switch` resolves its target — the row's
     # slot, else the one its session ran under, whose number outlives a removed
     # slot — and the replacement is started on what was resolved here.
     slot = _account_slot_of(agent, session)
+    runs_as = role or agent.role
     try:
-        _require_role(agent.role)
-        _refuse_a_replay_that_cannot_start(agent, session)
+        _require_role(runs_as)
+        if runs_as == agent.role:
+            _refuse_a_replay_that_cannot_start(agent, session)
+        else:
+            # What else `spawn` asks of another role, and the take-over's own rule: it
+            # keeps its source's label and tree (review of #240, finding 6).
+            _refuse_a_take_over_that_would_move(project, agent, runs_as)
+            # Another role launches as today's config says for it, not as the row
+            # recorded the old one: that binary is the one to ask about.
+            _launch_binary(
+                runs_as,
+                binary=None,
+                spec=None,
+                claude_code=session is not None,
+                notes=[],
+                bin_flag=False,
+            )
+        if persona:
+            _chosen_persona(project, runs_as, persona, role_settings(runs_as, settings()), [])
         choice = claude_accounts_service.choose(
-            str(slot) if slot is not None else None, role=agent.role, project=project
+            _account_wanted(account, slot), role=runs_as, project=project
         )
     except (FleetError, claude_accounts_service.NoSuchAccount) as exc:
         raise FleetError(f"cannot restart {label!r}: {exc}") from exc
@@ -4279,6 +4885,8 @@ def restart(
             resume_prompt=_restart_prompt(agent),
             takes_over=handed_over is not None,
             permission_mode=permission_mode,
+            role=role,
+            persona=persona,
         )
     except Exception:
         if handed_over is not None and handed_over.withheld:
@@ -4310,6 +4918,290 @@ def restart(
         notes=notes,
         prompt_typed=bool(receipt.prompt_typed),
     )
+
+
+HandoffMode = Literal["fork", "take_over"]
+
+THIS_SHELL_ACCOUNT = "(this shell's)"
+"""An ``account`` for :func:`hand_off` and :func:`restart`: run where a plain spawn with
+no ``--account`` runs, the resolver's ladder (``claude_accounts.choose(None)``), and never
+on the row's own slot, which ``None`` keeps. The Spawn dialog's *(this shell's)* sends it
+(runner2-1's reopen of #234: sent as ``None``, it ran the new agent on the teammate's
+slot). It is no slot, alias or email, so it can never name an account itself."""
+
+
+@dataclass(frozen=True)
+class HandoffReceipt:
+    """What a hand-off from a teammate did (the Spawn dialog's, card tsk_01m3ns5a736s)."""
+
+    mode: HandoffMode
+    source: FleetAgent
+    """The teammate handed off from, as read before anything started."""
+    started: SpawnReceipt
+    """The agent started. The dialog dismisses with it, so the shell attaches it as it
+    attaches any spawn."""
+    resumed: bool
+    """Whether it resumed the source's transcript: a fork under its own new id, a
+    take-over under the same id, with the claims."""
+    stopped: FleetAgent | None = None
+    """The source as a take-over stopped it; ``None`` for a fork, which touches nothing."""
+    notes: list[str] = field(default_factory=list)
+    failures: list[str] = field(default_factory=list)
+
+
+def handoff_sources(project: ProjectInfo) -> list[FleetAgentStatus]:
+    """The teammates a spawn can hand off from: the project's listed rows, less the lost.
+
+    The owner's words: "any current running or stopped but still open/attached
+    teammate". That is the fleet's own listing (the sidebar's rows): the running,
+    waiting and asking agents, and the exited ones whose dead window tmux still keeps.
+    A ``lost`` row's window is gone, so it is nobody to hand off from. The captain
+    lives on the home board, so no project lists it.
+    """
+    return [status for status in list_agents(project) if status.state != "lost"]
+
+
+def hand_off(
+    project: ProjectInfo,
+    source: str,
+    *,
+    mode: HandoffMode = "fork",
+    fresh: bool = False,
+    role: str | None = None,
+    account: str | None = None,
+    persona: str | None = None,
+    label: str | None = None,
+    prompt: str | None = None,
+    size: tuple[int, int] | None = None,
+    spawned_by: str = "user",
+    agent_id: str | None = None,
+) -> HandoffReceipt:
+    """Start an agent from teammate ``source``: the Spawn dialog's *Hand off from*.
+
+    **Fork**, the default, touches nothing of the source: no mark, no stop, no claim, and
+    neither its row, its window, its tree nor its branch. The new agent takes a label that
+    nothing holds (:func:`_fork_label`: ``label``, refused when a row, a worktree or a
+    branch already has it, else the next free one), its own worktree made new at the
+    commit the source's tree is on, and no task. With the source's transcript on
+    disk and ``fresh`` not asked, it resumes that conversation as a FORK
+    (``ResumeSpec(fork=True)``: ``--resume <transcript> --fork-session`` under a new id),
+    and is told in one line what it is. Otherwise it starts fresh, with a first message
+    built from the board that names the source and its task as the source's work.
+
+    **Take over** is the source's own hand-over, which :func:`restart` already is: a
+    running source is stopped with its claims parked for the replacement (an exited one
+    is simply started again), under the same label, task and tree, resumed or fresh as
+    asked. The row read here is the row restarted (``agent_id``). A role that would move
+    it out of that label or that tree is refused before the stop
+    (:func:`_refuse_a_take_over_that_would_move`).
+
+    ``role``, ``account`` and ``persona`` are the dialog's changes, ``None`` keeping the
+    source's; a persona of ``""`` is none, and an account of :data:`THIS_SHELL_ACCOUNT`
+    runs where a plain spawn with no ``--account`` runs. ``label`` and ``prompt`` are a
+    fork's own: a take-over keeps the source's label, and continues its work.
+
+    ``agent_id`` names the source's ROW, for a caller that means one teammate rather than
+    whoever carries the label now, as it does for :func:`stop` and :func:`restart`. The
+    label alone names the newest row under it, and two rows of a project can carry one
+    label over time: by label, choosing an exited coder-1 forked, or stopped and
+    restarted, the coder-1 started since (:func:`_handoff_row`). Given, the hand-off acts
+    on exactly that row, which must be this project's and carry ``source``. A fork forks
+    its conversation and its commit, live or ended, whatever newer row shares the label. A
+    take-over acts on it only while it is still the row its label names: replaced by a
+    newer one, it is refused as ``restart`` refuses it, with neither row touched. ``None``
+    resolves the label as before.
+    """
+    with store_session() as store:
+        agent = (
+            store.fleet_agent_by_label(project.id, source, live_only=False)
+            if agent_id is None
+            else _handoff_row(store, project, source, agent_id)
+        )
+        if agent is None:
+            raise NoSuchAgent(f"no teammate {source!r} in {_name(project)} to hand off from")
+        session = store.get_session(agent.session_id) if agent.session_id else None
+        try:
+            task = _task_for(store, project, agent.task_id)
+        except FleetError:
+            task = None  # finished work: nothing to name in a fork's first message
+        recent = (
+            store.filtered_events(project.id, session_id=agent.session_id, limit=_HANDOFF_NOTES)
+            if agent.session_id is not None
+            else []
+        )
+    if mode == "take_over":
+        restarted = restart(
+            project,
+            source,
+            fresh=fresh,
+            role=role,
+            account=account,
+            persona=persona,
+            size=size,
+            spawned_by=spawned_by,
+            agent_id=agent.id,
+        )
+        started = SpawnReceipt(
+            agent=restarted.started,
+            asked_label=source,
+            tmux_session=restarted.tmux_session,
+            notes=list(restarted.notes),
+            prompt_typed=restarted.prompt_typed,
+        )
+        return HandoffReceipt(
+            mode="take_over",
+            source=agent,
+            started=started,
+            resumed=restarted.resumed,
+            stopped=restarted.replaced,
+            notes=list(restarted.notes),
+        )
+    notes: list[str] = []
+    transcript = (
+        Path(session.transcript_path) if session is not None and session.transcript_path else None
+    )
+    resume: ResumeSpec | None = None
+    if not fresh and session is not None and transcript is not None and transcript.is_file():
+        resume = ResumeSpec(session.id, transcript, fork=True)
+    elif not fresh:
+        notes.append("no transcript on disk to fork — the new agent starts fresh from the board")
+    runs_as = role or agent.role
+    replay = runs_as == agent.role
+    own = is_git_project(project.root)
+    if not own:
+        notes.append(f"not a git repository — the fork works in {project.root}, beside {source}")
+    first = _fork_prompt(agent, task, recent, resumed=resume is not None)
+    if prompt and prompt.strip():
+        # A resumed fork's first message stays one line (see :func:`_fork_prompt`).
+        extra = " ".join(prompt.split()) if resume is not None else prompt.strip()
+        first = f"{first} {extra}" if resume is not None else f"{first}\n\n{extra}"
+    slot = _account_slot_of(agent, session)
+    receipt = spawn(
+        project,
+        runs_as,
+        label=label,
+        task_id=None,
+        worktree=own,
+        prompt=first,
+        spawned_by=spawned_by,
+        account=_account_wanted(account, slot),
+        resume=resume,
+        size=size,
+        spec=agent.launch_spec if replay else None,
+        persona=(
+            (_persona_for_replay(project, agent, notes) if replay else None)
+            if persona is None
+            else persona
+        ),
+        claude_code=session is not None,
+        start_point=_head_of(Path(agent.cwd)) if own else None,
+        fork=True,
+    )
+    resumed = resume is not None
+    how = "resumed its session as a fork" if resumed else "started fresh"
+    with contextlib.suppress(Exception), store_session() as store:  # the courtesy, not the record
+        _team()._emit(
+            store,
+            project.id,
+            "forked",
+            f"{receipt.agent.label} forked from {source} — {how}",
+            session_id=receipt.agent.session_id,
+        )
+    return HandoffReceipt(
+        mode="fork",
+        source=agent,
+        started=receipt,
+        resumed=resumed,
+        notes=[*notes, *receipt.notes],
+        failures=list(receipt.failures),
+    )
+
+
+def _handoff_row(
+    store: ContextStore, project: ProjectInfo, label: str, agent_id: str
+) -> FleetAgent:
+    """The row a hand-off was GIVEN (``agent_id``): this project's, under ``label``, or refused.
+
+    The label alone names the newest row that carries it, and two rows of a project can
+    carry one label over time: an exited coder-1 and the coder-1 started since. The Spawn
+    dialog's *Hand off from* can show the older one, so by label its fork forked, and its
+    take-over stopped and restarted, the NEWER agent (review of #240, "also confirmed":
+    hand-off by label). A caller that means one teammate names its row, as the agent view
+    does for :func:`stop` and :func:`restart`: by its whole id, as theirs is. A row of
+    another project, or one under another label, is a refusal that says which, before
+    anything is stopped or made, and never a quiet fall back to the row the label names.
+    """
+    try:
+        agent = store.get_fleet_agent(agent_id)
+    except AmbiguousIdError:
+        agent = None  # the start of several ids is no row's id
+    if agent is None or agent.id != agent_id:
+        raise NoSuchAgent(
+            f"no agent {agent_id} to hand off from — `aisquare fleet ls --all` shows every "
+            "row; nothing was done"
+        )
+    if agent.project_id != project.id:
+        raise FleetError(
+            f"{agent_id} ({agent.label}) is another project's agent, not one of "
+            f"{_name(project)}'s — nothing was done"
+        )
+    if agent.label != label:
+        raise FleetError(
+            f"{agent_id} is labelled {agent.label!r}, not {label!r} — nothing was done"
+        )
+    return agent
+
+
+def _account_wanted(account: str | None, slot: int | None) -> str | None:
+    """What the resolver is asked for a replacement or a fork: the dialog's account, the
+    row's own slot for ``None``, or no flag at all for :data:`THIS_SHELL_ACCOUNT`."""
+    if account == THIS_SHELL_ACCOUNT:
+        return None
+    if account is not None:
+        return account
+    return str(slot) if slot is not None else None
+
+
+def _head_of(tree: Path) -> str | None:
+    """The commit ``tree``'s checkout is on, or ``None`` when git cannot say."""
+    done = _git(tree, "rev-parse", "--verify", "--quiet", "HEAD")
+    return (done.stdout.strip() or None) if done.returncode == 0 else None
+
+
+def _fork_prompt(
+    source: FleetAgent, task: TeamTask | None, recent: list[TeamEvent], *, resumed: bool
+) -> str:
+    """The first message of a fork: what it is, what it is not, where to look.
+
+    Resumed, ONE line, as :func:`_resume_prompt` is and for its reason: ``claude
+    --resume`` opens at an idle prompt, and :func:`_type_prompt` types a single line past
+    its timeout and refuses a multi-line one. It carries the source's conversation, so it
+    is told only what changed. Fresh, it is built from the board as
+    :func:`_handoff_prompt` is, with the source's task named as the source's.
+    """
+    if resumed:
+        return (
+            f"You are a fork of {source.label}: you have its conversation up to now, but you run "
+            "in your own worktree on your own branch with no claims, and "
+            f"{source.label} keeps working in its own tree, so never touch that tree or its "
+            "task. Re-read `aisquare board` and `git status` here, then say what you will "
+            "take on."
+        )
+    lines = [
+        f"You are a fork of {source.label}, which keeps running: you start fresh, in your own "
+        "worktree on your own branch, with no claims.",
+    ]
+    if task is not None:
+        lines.append(f"{source.label} is working on {task.title} ({task.id}): its task, not yours.")
+    tail = recent[-_HANDOFF_NOTES:]
+    if tail:
+        lines.append(f"{source.label}'s last board entries:")
+        lines.extend(f"- {event.kind}: {event.text}" for event in tail)
+    lines.append(
+        "Start by reading `aisquare board`, then `git status` and `git log --oneline -5` in "
+        "your own worktree, and say what you will take on."
+    )
+    return "\n".join(lines)
 
 
 def _pane_alive(agent: FleetAgent) -> bool:
@@ -4444,6 +5336,12 @@ def _restart_prompt(agent: FleetAgent) -> str:
     ``working`` from its start hook, with no turn to end — refused the board's
     nudges for as long as that row stayed fresh (review of #163, round 2).
     """
+    if agent.role == CAPTAIN_ROLE:
+        # The captain has no shell (T2): it picks up through its own tools.
+        return (
+            "You are the captain, restarted and resumed mid-session: call attention() to see "
+            "what needs the owner now, then carry on from where you left off."
+        )
     return (
         f"You are {agent.label}, restarted and resumed mid-session: re-read `aisquare board` "
         "and `git status`, then continue exactly where you left off without redoing work "
@@ -4481,6 +5379,12 @@ def _handoff_prompt(
     short on purpose: the board and the working tree are the source of truth,
     and the prompt points at them instead of retelling them.
     """
+    if agent.role == CAPTAIN_ROLE:
+        return (
+            f"You are the captain, taking over from a previous session ({reason or 'it stopped'})."
+            " Call attention() to see what needs the owner, and since(project) for what "
+            "happened on a board while you were away; then wait for the owner."
+        )
     lines = [
         f"You are {agent.label}, taking over from a previous session of this agent "
         f"({reason or 'it stopped'}).",

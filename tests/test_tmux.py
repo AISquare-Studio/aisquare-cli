@@ -1209,6 +1209,36 @@ def test_live_new_session_env_does_not_reach_a_window_opened_by_hand(live: TmuxS
 
 
 @requires_tmux
+def test_live_a_windows_own_hub_beats_the_servers_global_hub(live: TmuxServer) -> None:
+    """Card tsk_01m3k89b2f96tt7xc6crzvxzjk: the owner's ``asqui`` server holds a GLOBAL
+    ``AISQUARE_TEAM_HUB``, which every window inherits. Two fleets' windows on ONE such
+    server, each spawned with its own hub (``fleet spawn`` sets it per window), must each
+    see their own. The window opened by hand, with no ``-e``, sees the server's, which
+    proves the global pin is live on this server (the negative control)."""
+    say = 'echo "hub=${AISQUARE_TEAM_HUB:-unset}"; exec sleep 30'
+    first = live.spawn_window(
+        "asq-test-fox", name="w0", cwd=Path("/tmp"), command=["sh", "-c", say],
+        env={"AISQUARE_TEAM_HUB": "/work/captain"}, width=80, height=24,
+    )  # fmt: skip
+    live.run("set-environment", "-g", "AISQUARE_TEAM_HUB", "/work/workspace-rc")
+    second = live.spawn_window(
+        "asq-test-owl", name="w0", cwd=Path("/tmp"), command=["sh", "-c", say],
+        env={"AISQUARE_TEAM_HUB": "/work/release"}, width=80, height=24,
+    )  # fmt: skip
+    by_hand = live.run(
+        "new-window", "-d", "-P", "-F", "#{pane_id}", "-t", "=asq-test-owl:", "--",
+        "sh", "-c", say,
+    ).strip()  # fmt: skip
+    panes = (first.pane_id, second.pane_id, by_hand)
+    assert _wait(lambda: all("hub=" in _screen(live, pane) for pane in panes)), [
+        _screen(live, pane) for pane in panes
+    ]
+    assert "hub=/work/captain" in _screen(live, first.pane_id)
+    assert "hub=/work/release" in _screen(live, second.pane_id)
+    assert "hub=/work/workspace-rc" in _screen(live, by_hand)
+
+
+@requires_tmux
 def test_live_has_session_is_exact_because_of_the_equals(live: TmuxServer) -> None:
     _spawn(live, "asq-test-fox", "w0", CAT)
     assert live.has_session("asq-test-fox") is True
@@ -1418,7 +1448,9 @@ def test_live_a_finished_command_is_a_dead_pane_with_its_status(live: TmuxServer
             (w for w in live.list_windows("asq-test-fox") if w.pane_id == exiting.pane_id), None
         )
 
-    assert _wait(lambda: (found := dead()) is not None and found.dead)
+    # tmux can report a pane dead a beat before it records the exit status: wait for the
+    # status itself, whatever it is, so a wrong one still fails the assertion below.
+    assert _wait(lambda: (found := dead()) is not None and found.dead_status is not None)
     found = dead()
     assert found is not None and (found.dead, found.dead_status) == (True, 3)
     facts = live.pane_facts(exiting.pane_id)
@@ -1764,3 +1796,52 @@ def test_the_default_geometry_stays_under_claude_codes_diff_panel_line(
     assert new_session[x + 1] == str(DEFAULT_WINDOW_WIDTH) == "120"
     assert new_session[y + 1] == str(DEFAULT_WINDOW_HEIGHT) == "40"
     assert len(fake.commands()) == 2  # a new session's first window needs no second step
+
+
+# --- a server we start holds no team variable (fleet-board fix 3, tsk_01m3k89bkhpj) -------------
+
+
+def test_the_seam_strips_the_team_variables_a_server_must_never_hold(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fix 3 of the fleet-board card. A tmux server copies the environment of the client
+    that starts it into its global environment, and every window inherits that. The
+    owner's asqui launcher exported the launch folder's git root as AISQUARE_TEAM_HUB,
+    so the server it started pinned every window opened there by hand to that board.
+    No tmux client carries a team variable now: a server we start holds none, and each
+    fleet window gets its own through ``-e``. AISQUARE_HOME stays, since the windows
+    need the home."""
+    assert set(spawn.TEAM_ENV_VARS) == {
+        "AISQUARE_TEAM_HUB",
+        "AISQUARE_FLEET_AGENT",
+        "AISQUARE_ROLE",
+        "AISQUARE_PERSONA",
+    }
+    for name in spawn.TEAM_ENV_VARS:
+        monkeypatch.setenv(name, f"parent-{name}")
+    monkeypatch.setenv("AISQUARE_HOME", "/tmp/asq-home-kept")
+    probe = "import os,sys; print(' '.join(os.environ.get(n, '<unset>') for n in sys.argv[1:]))"
+    names = [*spawn.TEAM_ENV_VARS, "AISQUARE_HOME"]
+    completed = _tmux([sys.executable, "-c", probe, *names], None)
+    assert completed.returncode == 0
+    assert completed.stdout.split() == ["<unset>"] * len(spawn.TEAM_ENV_VARS) + [
+        "/tmp/asq-home-kept"
+    ]
+
+
+@requires_tmux
+def test_a_server_the_fleet_starts_holds_no_team_variable(
+    live: TmuxServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same on a real server: started through our seam from a process that exports
+    every team variable, its global environment holds none of them, and keeps the home."""
+    for name in spawn.TEAM_ENV_VARS:
+        monkeypatch.setenv(name, f"/parent/{name}")
+    monkeypatch.setenv("AISQUARE_HOME", "/tmp/asq-home-kept")
+
+    live.run("new-session", "-d", "-s", "probe", "sleep 30")
+
+    held = live.run("show-environment", "-g").splitlines()
+    names = {line.partition("=")[0] for line in held if "=" in line and not line.startswith("-")}
+    assert not names & set(spawn.TEAM_ENV_VARS), held
+    assert "AISQUARE_HOME=/tmp/asq-home-kept" in held

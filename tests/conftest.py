@@ -8,17 +8,24 @@ the narrow one nobody selects it with.
 
 from __future__ import annotations
 
+import contextlib
 import os
+import shlex
+import shutil
+import subprocess
 import sys
-from collections.abc import Iterator
+import tempfile
+from collections.abc import Iterator, Sequence
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as metadata_version
 from pathlib import Path
+from typing import NoReturn
 
 import pytest
 from typer.testing import CliRunner
 
 import aisquare
+from aisquare.core import experimental
 from aisquare.core.paths import HOME_ENV_VAR
 from aisquare.core.state import reset_state
 from aisquare.services import ci_client
@@ -176,6 +183,8 @@ AMBIENT_ENV_VARS = (
     "AISQUARE_PLAIN_CLAUDE_CODE_TMPDIR",
     "AISQUARE_TEAM",
     "AISQUARE_ROLE",
+    # Exported by `launch --persona`; a fleet agent running the suite has one.
+    "AISQUARE_PERSONA",
     # Read off the ambient env by `services/mcp_server.py` to attribute remote
     # calls — same family as the two above, and missed for the same reason.
     "AISQUARE_SERVE_CLIENT",
@@ -367,12 +376,251 @@ def isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return home
 
 
+def _uid() -> int:
+    """This user's id — the ``tmux-<uid>`` folder. Windows has neither, nor tmux; a test
+    that removes ``os.getuid`` (to stand for Windows) reads as uid 0 here, never a crash."""
+    if sys.platform == "win32":
+        return 0
+    getuid = getattr(os, "getuid", None)
+    return getuid() if callable(getuid) else 0
+
+
+#: Where tmux keeps the OWNER's sockets — read once, at import, before any fixture
+#: clears ``TMUX_TMPDIR`` (``isolated_home`` does, for every test). ``tmux -L asq``
+#: resolves to ``<dir>/tmux-<uid>/asq``: the owner's live fleet, when the dir is
+#: theirs. The default ``/tmp`` is always theirs too.
+_OWNER_TMUX_DIRS: frozenset[Path] = frozenset(
+    Path(base).resolve() / f"tmux-{_uid()}"
+    for base in {os.environ.get("TMUX_TMPDIR") or "/tmp", "/tmp"}
+) if sys.platform != "win32" else frozenset()  # fmt: skip
+
+
+def _tmux_target(argv: Sequence[str], uid: int) -> Path | None:
+    """The socket a tmux argv reaches, resolved the way tmux resolves it; ``None`` for
+    ``tmux -V``, which asks the binary and reaches no server."""
+    args = list(argv)
+    if args[1:] == ["-V"]:
+        return None
+    if "-S" in args:
+        return Path(args[args.index("-S") + 1])
+    name = args[args.index("-L") + 1] if "-L" in args else "default"
+    base = os.environ.get("TMUX_TMPDIR") or "/tmp"
+    return Path(base) / f"tmux-{uid}" / name
+
+
+class RealFleetGuard:
+    """What :func:`no_real_fleet` refused — read by the tests of the guard itself.
+
+    A plain class, not a dataclass: ``tests/test_gate_import_guard.py`` loads this file
+    by path without registering it in ``sys.modules``, where ``@dataclass`` looks."""
+
+    def __init__(self, private: Path, uid: int, tmux: str | None = None) -> None:
+        self.private = private
+        self.uid = uid
+        self.tmux = tmux
+        """The tmux binary, found at setup: a test may patch ``sys.platform`` to ``win32``
+        for its body (test_windows_contention.py), and ``shutil.which`` follows it."""
+        self.reached: list[tuple[str, ...]] = []
+        self.launched = private / "claude-launched.log"
+
+    def launches(self) -> list[str]:
+        return self.launched.read_text().splitlines() if self.launched.exists() else []
+
+    def forgive(self) -> None:
+        """A test that escaped ON PURPOSE, to prove the guard, clears the record."""
+        self.reached.clear()
+        self.launched.unlink(missing_ok=True)
+
+    def verdict(self) -> str | None:
+        """Why the test fails, or ``None``: what reached the owner's server, what launched."""
+        if self.reached:
+            return f"a test addressed the owner's tmux server: {self.reached[:3]}"
+        launched = self.launches()
+        if launched:
+            return f"a test launched claude (the suite's stand-in refused it): {launched[:3]}"
+        return None
+
+
+_PRIVATE_FLEETS: list[Path] = []
+"""Every private TMUX_TMPDIR a test made — swept again when the session ends."""
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _sweep_private_fleets() -> Iterator[None]:
+    """End every private tmux server and remove every private folder the tests left.
+
+    ``no_real_fleet`` cleans up after each test, but its teardown runs while that
+    test's monkeypatches still stand: a test that patches ``os.unlink`` (test_atomic)
+    or ``subprocess.run`` quietly breaks the per-test cleanup, and 14 folders were
+    left in ``/tmp`` after one full run. Here, at the session's end, nothing is patched.
+    """
+    yield
+    tmux = shutil.which("tmux")
+    for folder in _PRIVATE_FLEETS:
+        if folder.exists():
+            _kill_private_servers(folder, _uid(), tmux)
+            shutil.rmtree(folder, ignore_errors=True)
+
+
+@pytest.fixture(autouse=True)
+def no_real_fleet(isolated_home: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[RealFleetGuard]:
+    """No test may reach the owner's tmux server or launch the real ``claude`` (board 13220).
+
+    A T3 test once spawned a REAL captain onto the owner's main fleet socket: the
+    fleet's default socket is ``asq``, ``isolated_home`` clears ``TMUX_TMPDIR``, so a
+    spawn that went all the way to tmux resolved ``/tmp/tmux-<uid>/asq`` — the owner's
+    live server — and its window exec'd the real ``claude`` (pid 85381, parked at the
+    trust dialog). ``AISQUARE_HOME`` alone isolated nothing of that. So, for every test:
+
+    - **a private ``TMUX_TMPDIR``** (short, under ``/tmp``: a unix socket's path is
+      capped near 100 bytes). Every ``-L <name>`` a test reaches — the fleet's ``asq``
+      included — resolves to a server of the test's own, and teardown kills whatever
+      server was left there, with every process in it.
+    - **the tmux seam refuses the owner's servers**: an argv that still resolves under
+      the owner's socket folder (a test that deletes ``TMUX_TMPDIR``, an ``-S`` path)
+      is answered as a failure without running, and the test FAILS at teardown with
+      the argv — refused and said, never passed through. Tests that swap the seam for
+      a fake (``no_real_tmux``, the fleet suite's ``FakeTmux``) replace this with
+      something that reaches no server at all.
+    - **a stand-in ``claude`` first on PATH**: a window this test's server opens
+      inherits the PATH, so an agent launched there runs the stand-in, which records
+      its argv and exits 97; the test FAILS at teardown with that argv. A test that
+      wants an agent brings its own stand-in ahead of this one (the captain's live
+      round trip does).
+    """
+    if sys.platform == "win32":  # no tmux, no /bin/sh: nothing to reach or to launch
+        yield RealFleetGuard(Path(tempfile.gettempdir()), 0)
+        return
+    from aisquare.core import tmux as tmux_core
+    from aisquare.core.tmux import Completed
+
+    private = Path(tempfile.mkdtemp(prefix="asqtx", dir="/tmp"))
+    _PRIVATE_FLEETS.append(private)
+    # Read once, now: a test may remove os.getuid, or patch sys.platform, to stand for
+    # Windows (test_tmux.py, test_windows_contention.py) — and teardown runs under it.
+    guard = RealFleetGuard(private, _uid(), shutil.which("tmux"))
+    monkeypatch.setenv("TMUX_TMPDIR", str(private))
+    standin = private / "bin"
+    standin.mkdir()
+    claude = standin / "claude"
+    claude.write_text(
+        "#!/bin/sh\n"
+        f"printf '%s\\n' \"$*\" >> {shlex.quote(str(guard.launched))}\n"
+        "echo 'a test launched claude: refused (tests/conftest.py no_real_fleet)' >&2\n"
+        "exit 97\n",
+        encoding="utf-8",
+    )
+    claude.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{standin}{os.pathsep}{os.environ.get('PATH', '')}")
+    real_runner = tmux_core._tmux
+
+    def guarded(argv: Sequence[str], stdin: bytes | None) -> Completed:
+        target = _tmux_target(argv, guard.uid)
+        if target is not None and target.parent.resolve() in _OWNER_TMUX_DIRS:
+            guard.reached.append(tuple(argv))
+            return Completed(1, "", "refused: a test addressed the owner's tmux server\n")
+        return real_runner(argv, stdin)
+
+    monkeypatch.setattr(tmux_core, "_tmux", guarded)
+    try:
+        yield guard
+        verdict = guard.verdict()
+    finally:
+        # A first pass, under the test's own monkeypatches, which are still standing: a
+        # spy on os.open that refuses rmtree's dir_fd (test_state_file, on CI's 3.12)
+        # raised TypeError here and ERRORED the test. Whatever this pass cannot do, the
+        # session's sweep does, with nothing patched.
+        with contextlib.suppress(Exception):
+            _kill_private_servers(private, guard.uid, guard.tmux)
+            shutil.rmtree(private, ignore_errors=True)
+    if verdict is not None:
+        pytest.fail(verdict)
+
+
+def _kill_private_servers(private: Path, uid: int, tmux: str | None) -> None:
+    """End every tmux server a test left under its private ``TMUX_TMPDIR``, with its panes."""
+    folder = private / f"tmux-{uid}"
+    if tmux is None or not folder.is_dir():
+        return
+    for socket in folder.iterdir():
+        with contextlib.suppress(OSError, subprocess.TimeoutExpired):
+            subprocess.run(
+                [tmux, "-S", str(socket), "kill-server"],
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+
+
 @pytest.fixture(autouse=True)
 def fresh_state() -> Iterator[None]:
     """Reset the global runtime state around every test."""
     reset_state()
     yield
     reset_state()
+
+
+_PRIVATE_UI_ROOTS: list[Path] = []
+"""Every private ui socket root a test made — removed again when the session ends."""
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _sweep_private_ui_roots() -> Iterator[None]:
+    """Remove every private ui socket root at the session's end, where nothing is patched
+    (``private_ui_socket_root``'s own removal runs under the test's patches)."""
+    yield
+    for folder in _PRIVATE_UI_ROOTS:
+        shutil.rmtree(folder, ignore_errors=True)
+
+
+@pytest.fixture(autouse=True)
+def private_ui_socket_root(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """A long home's ui socket folder is made in a folder of this test's own.
+
+    ``asq`` binds its ui receiver on mount (``cli/ui/receiver.py``), so every test
+    that drives the shell binds one at ``captain_state.ui_socket_path``. The
+    isolated home fits a unix socket's path on this suite's usual machines, but
+    not everywhere — a macOS ``$TMPDIR``, a long user name — and a home that does
+    not fit puts the socket in ``/tmp/aisquare-<uid>``, the machine's shared
+    folder, which no test may touch. So the short root is moved under a private
+    ``mkdtemp`` for the test's life: made on first use only, removed after.
+
+    The real root is still asked and mapped beneath the private one, not replaced,
+    so the test of where the short path lives (it must not follow the environment,
+    tests/test_captain_state.py) still sees the product's own answer move: measured,
+    a ``_short_root`` that followed ``XDG_RUNTIME_DIR`` still fails it under this fixture.
+
+    Off on Windows: there are no unix sockets there, so nothing binds or dials, and the
+    temp dir it would map beneath is already long — #223's Windows leg failed T1's
+    short-path test at 133 bytes against the 100 cap under this mapping.
+    """
+    if sys.platform == "win32":
+        yield
+        return
+    from aisquare.services.captain import state as captain_state
+
+    real = captain_state._short_root
+    made: list[Path] = []
+
+    def private() -> Path:
+        if not made:
+            made.append(
+                Path(
+                    tempfile.mkdtemp(prefix="asq", dir=None if sys.platform == "win32" else "/tmp")
+                )
+            )
+            _PRIVATE_UI_ROOTS.append(made[0])
+        root = real()
+        return made[0] / root.relative_to(root.anchor)
+
+    monkeypatch.setattr(captain_state, "_short_root", private)
+    yield
+    for folder in made:
+        # Under the test's own patches (see no_real_fleet): a spied ``os.open`` that refuses
+        # rmtree's ``dir_fd`` raises TypeError, and a patched ``os`` call an OSError. Neither
+        # may error the test; ``_sweep_private_ui_roots`` removes what is left.
+        with contextlib.suppress(OSError, TypeError):
+            shutil.rmtree(folder, ignore_errors=True)
 
 
 @pytest.fixture(autouse=True)
@@ -453,6 +701,26 @@ def no_detached_distill(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(distill, "spawn_drain", lambda cwd=None, *, root=None: None)
 
 
+@pytest.fixture(autouse=True)
+def no_real_llm_import(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No test may run a model.
+
+    ``persona import`` of anything that is not already a skill reaches
+    ``services.persona_import``'s engines: a real ``claude -p`` under the manager's
+    binding, or a paid API call. Both are replaced with an engine that is
+    unavailable, so such an import in any test ends in ``no_import_engine``.
+    ``tests/test_persona_import.py`` tests the engines themselves by capturing the
+    real functions at import time, as ``test_spawn_seams.py`` does for the distiller.
+    """
+    from aisquare.services import persona_import
+
+    def unavailable(*_args: object, **_kwargs: object) -> NoReturn:
+        raise persona_import.EngineUnavailable("tests never run a model")
+
+    monkeypatch.setattr(persona_import, "draft_with_manager", unavailable)
+    monkeypatch.setattr(persona_import, "draft_with_api", unavailable)
+
+
 @pytest.fixture
 def runner() -> CliRunner:
     """A Click test runner for invoking the Typer app."""
@@ -467,3 +735,14 @@ def no_model_probe(monkeypatch: pytest.MonkeyPatch) -> None:
     Tests that exercise probing override ``harness.probe_model`` with a fake.
     """
     monkeypatch.setenv("AISQUARE_HARNESS_PROBE", "0")
+
+
+@pytest.fixture(autouse=True)
+def captain_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The suite runs with the experimental captain ON (``AISQUARE_EXPERIMENTAL_CAPTAIN=1``).
+
+    It ships off (``core.experimental``), and on must be the captain exactly as it was
+    before the switch: every Phase 1 pin runs with it on, unchanged. The switch's own
+    pins (``tests/test_captain_flag.py``) unset it or set it themselves.
+    """
+    monkeypatch.setenv(experimental.CAPTAIN_ENV, "1")

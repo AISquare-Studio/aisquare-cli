@@ -3,7 +3,9 @@
 Three preferences share it: the project ``project switch`` pinned
 (``active_project_id``, :mod:`aisquare.core.workspace`), the board's theme
 (``board_theme``, ``cli.watch``) and the fleet UI's navigator width
-(``sidebar_width``, ``cli.ui``). Each surface used to carry its own
+(``sidebar_width``, ``cli.ui``). The captain keeps its runtime state here too —
+``captain_watermarks``, ``captain_busy``, ``captain_brake_at``, ``captain_undo``
+(:mod:`aisquare.services.captain.state`). Each surface used to carry its own
 read-modify-write of the file, and the copies had drifted: one caught only
 ``JSONDecodeError``, two raised ``AttributeError`` on a file whose top level
 was not an object (``.get`` on a list), one wrote in place with no rename, and
@@ -34,16 +36,20 @@ here.
   which names what refused — the file, its lock, the read, the write — so a
   toast or an error line points at the right thing. An EMPTY file (blank, or
   the NULs a crash leaves) is not refused: there is nothing in it to protect.
+- :func:`modify_state` is the same write for a value computed FROM the old one
+  (a map with one entry changed, a log with one entry pushed): the change runs
+  under the same hold of the lock as the read and the write.
 """
 
 from __future__ import annotations
 
 import contextlib
+import copy
 import errno
 import json
 import os
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 from aisquare.core import paths
@@ -119,6 +125,24 @@ def update_state(key: str, value: object) -> None:
     contents are the truth. Temp files an earlier process left behind (a quit
     that ran out of time mid-write) are swept while the lock is held.
     """
+    _rewrite(key, lambda current: value)
+
+
+def modify_state(key: str, change: Callable[[object | None], object | None]) -> object | None:
+    """Replace ``key``'s value with ``change(current)`` under the lock; ``None`` drops it.
+
+    For a key whose NEW value depends on its old one — the captain's watermark
+    map, its undo log. :func:`update_state` with a value computed from an earlier
+    :func:`read_state` would lose another process's write made in between; here
+    the read, the change and the write share one hold of the lock. ``change``
+    gets ``None`` for a missing key, runs under the lock and so must be quick.
+    Returns what was stored (``None`` when the key is now absent); refuses as
+    :func:`update_state` does.
+    """
+    return _rewrite(key, change)
+
+
+def _rewrite(key: str, change: Callable[[object | None], object | None]) -> object | None:
     path = paths.state_path()
     try:
         paths.ensure_home()
@@ -136,11 +160,14 @@ def update_state(key: str, value: object) -> None:
         if not isinstance(data, dict):
             raise StateUnwritableError(f"{path} is not a JSON object")
         _sweep_stale_temps(target)
+        # A copy: a change that edits the current value in place and returns it would
+        # otherwise compare equal to the file and never be written.
+        value = change(copy.deepcopy(data.get(key)))
         # The same JSON type too: ``60.0 == 60`` and ``True == 1`` in Python, and a width
         # stored as a float is one the divider ignores — left alone, it could never be fixed.
         same = key in data and type(data[key]) is type(value) and data[key] == value
         if (key not in data) if value is None else same:
-            return  # the file already says so
+            return value  # the file already says so
         if value is None:
             data.pop(key, None)
         else:
@@ -155,6 +182,7 @@ def update_state(key: str, value: object) -> None:
             write_replacing(target, body)
         except OSError as exc:
             raise StateUnwritableError(f"{path} could not be written: {exc}") from exc
+    return value
 
 
 def _parse(raw: bytes) -> object:

@@ -423,8 +423,11 @@ def _run_tui(interval: float) -> None:
 
 def board_frame(height: int, width: int) -> Text:
     """One fallback frame: header, sessions, open tasks, then as many recent
-    events as the remaining terminal rows can hold."""
-    project, sessions, tasks, events = team_service.board_data(events=200)
+    events as the remaining terminal rows can hold — the captain's audit left out,
+    as ``aisquare board`` leaves it out (``team.CAPTAIN_AUDIT_KINDS``)."""
+    project, sessions, tasks, events = team_service.board_data(
+        events=200, exclude_kinds=team_service.CAPTAIN_AUDIT_KINDS
+    )
     text = Text(no_wrap=True, overflow="ellipsis")
     text.append(
         f"aisquare board — {project.root.name or project.id} — {datetime.now():%H:%M:%S}\n",

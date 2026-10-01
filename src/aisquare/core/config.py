@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import tomli_w
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from aisquare.core import paths
 from aisquare.core.atomic import write_replacing
@@ -153,6 +153,19 @@ class ExperimentSettings(BaseModel):
     run: str = ""
 
 
+class ExperimentalSettings(BaseModel):
+    """``[experimental]`` — features that ship OFF until the owner turns them on.
+
+    ``captain``: the home-level agent (``docs/captain.md``). Off, ``aisquare captain``
+    refuses, the fleet UI shows no insignia or captain view, the bundled ``captain``
+    persona is absent and the voice page does not serve. ``AISQUARE_EXPERIMENTAL_CAPTAIN``
+    wins over this field either way; ``core.experimental.captain_enabled`` is the one
+    reader of both.
+    """
+
+    captain: bool = False
+
+
 class RoleLaunchProfile(BaseModel):
     """One role's launch spec, carried verbatim and never interpreted.
 
@@ -242,6 +255,10 @@ class FleetRoleSettings(BaseModel):
     permission_mode: str = "auto"
     worktree: bool = False
     extra_args: list[str] = Field(default_factory=list)
+    persona: str | None = None
+    """The persona every spawn of this role gets unless ``--persona`` names another
+    (docs/plans/spawn-personas.md §3.8). Checked at spawn, not at load: a name the
+    project does not have refuses the spawn with this key in the message."""
 
 
 def _default_fleet_roles() -> dict[str, FleetRoleSettings]:
@@ -314,6 +331,41 @@ class SnapshotSettings(BaseModel):
     ignore: list[str] = Field(default_factory=list)
 
 
+class PersonaImportSettings(BaseModel):
+    """``[persona.import]`` — how ``aisquare persona import`` converts a source that is
+    not already a skill (docs/plans/spawn-personas.md §3.9).
+
+    ``engine``: ``auto`` tries the manager engine (headless Claude Code under the
+    manager role's binding), then the api engine (the ``anthropic`` SDK,
+    ``aisquare-cli[llm]``); ``manager`` or ``api`` forces one; ``off`` refuses every
+    conversion, for a machine that must never spend a token by accident.
+    ``api_model`` is the api engine's model — the manager engine rides the manager's
+    model ladder. No key lives here: the SDK resolves credentials its own way.
+    """
+
+    engine: Literal["auto", "manager", "api", "off"] = "auto"
+    api_model: str = "claude-opus-5"
+
+
+class PersonaSettings(BaseModel):
+    """``[persona]``. ``import`` is a Python keyword, so the field is ``import_`` and
+    the file's key is ``import`` — read and written under that name."""
+
+    model_config = ConfigDict(
+        validate_by_name=True, validate_by_alias=True, serialize_by_alias=True
+    )
+
+    import_: PersonaImportSettings = Field(default_factory=PersonaImportSettings, alias="import")
+    #: The persona block is appended to the agent's system prompt at launch too (Claude
+    #: Code: ``--append-system-prompt-file``), beside the session-start briefing that
+    #: survives ``/clear``, so it holds over a long session as hook context alone may
+    #: not (docs/plans/spawn-personas.md §9, gh #210). ``false`` keeps the briefing
+    #: alone and appends nothing — for a session whose system prompt must stay exactly
+    #: the binary's own. A binary without a seam this launcher knows (codex, aider) gets
+    #: the briefing alone either way, and the launch says so. Owner decision, 2026-09-24.
+    system_prompt: bool = True
+
+
 class AccountsSettings(BaseModel):
     """How the fleet spends several Claude accounts (#146); every field is a changeable default.
 
@@ -361,6 +413,8 @@ class AppConfig(BaseModel):
     accounts: AccountsSettings = Field(default_factory=AccountsSettings)
     snapshot: SnapshotSettings = Field(default_factory=SnapshotSettings)
     experiment: ExperimentSettings = Field(default_factory=ExperimentSettings)
+    experimental: ExperimentalSettings = Field(default_factory=ExperimentalSettings)
+    persona: PersonaSettings = Field(default_factory=PersonaSettings)
 
 
 def _keep_unknown(existing: Any, dumped: Any, model: Any) -> Any:
@@ -405,12 +459,15 @@ def _keep_unknown(existing: Any, dumped: Any, model: Any) -> Any:
     fields = getattr(type(model), "model_fields", None)
     if not fields:
         return dumped
+    # A field is known by its file key: the alias when it has one (``[persona.import]``
+    # is the field ``import_``), else its name.
+    by_key = {info.alias or name: name for name, info in fields.items()}
     merged = dict(dumped)
     for key, value in existing.items():
-        if key not in fields:
+        if key not in by_key:
             merged.setdefault(key, value)
         elif key in dumped:
-            merged[key] = _keep_unknown(value, dumped[key], getattr(model, key, None))
+            merged[key] = _keep_unknown(value, dumped[key], getattr(model, by_key[key], None))
     return merged
 
 

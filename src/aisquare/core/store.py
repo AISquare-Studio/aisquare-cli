@@ -28,7 +28,7 @@ import sqlite3
 import sys
 import time
 import uuid
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -650,6 +650,13 @@ ALTER TABLE project ADD COLUMN forgotten_at TEXT;
 # (v8) carries the config DIRECTORY once the session's first hook reports a
 # transcript path; this is the slot, known before the agent has said a word,
 # which is what a restart (#144) or a hand-over (#146) needs.
+#
+# ``team_session.persona`` and ``fleet_agent.persona`` (#201, in :data:`_PRODUCTS`
+# beside it) name the persona a session or a fleet agent runs as, NULL for none.
+# #201 stamped 15 for them alone; this line takes them as v15's products rather
+# than a number of their own, so a store #201 stamped holds them already, the
+# presence pass gives them to a store that never met #201 (main's 0.7.0 among
+# them), and a later step of main's cannot collide with one of this line's.
 _SCHEMA_V15 = """
 CREATE TABLE IF NOT EXISTS claude_account (
     slot        INTEGER PRIMARY KEY,
@@ -866,7 +873,11 @@ class _Products(NamedTuple):
 _PRODUCTS: dict[int, _Products] = {
     14: _Products(
         ("claude_account", "claude_account_alias", "claude_account_default", "project_setting"),
-        (("fleet_agent", "account_slot", "INTEGER"),),
+        (
+            ("fleet_agent", "account_slot", "INTEGER"),
+            ("team_session", "persona", "TEXT"),
+            ("fleet_agent", "persona", "TEXT"),
+        ),
     ),
     15: _Products(
         ("claude_usage", "claude_usage_slot_time"),
@@ -948,7 +959,7 @@ in the wall-clock median. Older than this it stays open and is excluded
 instead, which is what an unfinished turn is."""
 _SESSION_COLUMNS = (
     "id, project_id, role, label, focus, started_at, last_seen_at, ended_at, cursor, state, "
-    "transcript_path, account, model, effort, limit_resets_at"
+    "transcript_path, account, model, effort, limit_resets_at, persona"
 )
 _USAGE_COLUMNS = (
     "slot, fetched_at, session_percent, session_resets_at, week_percent, week_resets_at"
@@ -962,7 +973,7 @@ _TASK_COLUMNS = (
 _EVENT_COLUMNS = "seq, id, project_id, session_id, kind, text, task_id, to_role, created_at"
 _FLEET_AGENT_COLUMNS = (
     "id, project_id, label, role, binary, tmux_socket, pane_id, session_id, cwd, worktree, "
-    "task_id, spawned_by, created_at, ended_at, exit_status, account_slot, launch_spec"
+    "task_id, spawned_by, created_at, ended_at, exit_status, account_slot, launch_spec, persona"
 )
 _CLAUDE_ACCOUNT_COLUMNS = "slot, config_dir, alias, position, is_default, disabled, created_at"
 
@@ -973,6 +984,14 @@ class AmbiguousIdError(LookupError):
     def __init__(self, ref: str) -> None:
         super().__init__(f"entry id {ref!r} is ambiguous")
         self.ref = ref
+
+
+def _is_the_home(root: Path) -> bool:
+    """Whether ``root`` is the aisquare home itself (resolved, so a symlink is the same home)."""
+    try:
+        return root.resolve() == paths.aisquare_home().resolve()
+    except OSError:
+        return False
 
 
 class ContextStore(Protocol):
@@ -1021,6 +1040,7 @@ class ContextStore(Protocol):
         label: str | None = None,
         focus: str | None = None,
     ) -> TeamSession: ...
+    def set_session_persona(self, session_id: str, persona: str | None) -> TeamSession: ...
     def touch_session(
         self, session_id: str, *, cursor: int | None = None, state: str | None = None
     ) -> None: ...
@@ -1070,9 +1090,17 @@ class ContextStore(Protocol):
     def get_event_by_seq(self, seq: int) -> TeamEvent | None: ...
     def find_event_by_id(self, ref: str) -> TeamEvent | None: ...
     def events_since(
-        self, project_id: str, seq: int, *, exclude_session: str | None = None, limit: int = 50
+        self,
+        project_id: str,
+        seq: int,
+        *,
+        exclude_session: str | None = None,
+        exclude_kinds: Collection[str] = (),
+        limit: int = 50,
     ) -> list[TeamEvent]: ...
-    def recent_events(self, project_id: str, *, limit: int = 10) -> list[TeamEvent]: ...
+    def recent_events(
+        self, project_id: str, *, exclude_kinds: Collection[str] = (), limit: int = 10
+    ) -> list[TeamEvent]: ...
     def filtered_events(
         self,
         project_id: str,
@@ -1082,6 +1110,7 @@ class ContextStore(Protocol):
         since_seq: int | None = None,
         kind: str | None = None,
         task_id: str | None = None,
+        exclude_kinds: Collection[str] = (),
         limit: int = 30,
     ) -> list[TeamEvent]: ...
     def latest_seq(self, project_id: str) -> int: ...
@@ -1145,6 +1174,7 @@ class ContextStore(Protocol):
         self, project_id: str, label: str, *, live_only: bool = True
     ) -> FleetAgent | None: ...
     def end_fleet_agent(self, agent_id: str, *, exit_status: int | None = None) -> FleetAgent: ...
+    def set_fleet_agent_persona(self, agent_id: str, persona: str | None) -> FleetAgent: ...
     def end_fleet_agent_if_live(
         self, agent_id: str, *, exit_status: int | None = None
     ) -> FleetAgent | None: ...
@@ -1234,6 +1264,7 @@ def _row_to_fleet_agent(row: sqlite3.Row) -> FleetAgent:
         exit_status=row["exit_status"],
         account_slot=row["account_slot"],
         launch_spec=_launch_spec(row["launch_spec"]),
+        persona=row["persona"],
     )
 
 
@@ -1364,6 +1395,7 @@ def _row_to_session(row: sqlite3.Row) -> TeamSession:
         model=row["model"],
         effort=row["effort"],
         limit_resets_at=_maybe_dt(row["limit_resets_at"]),
+        persona=row["persona"],
     )
 
 
@@ -1630,6 +1662,14 @@ class SqliteStore:
         says, and marked now: a tombstone holds no mark to keep (v23). A live
         one keeps its place.
         """
+        if _is_the_home(project.root):
+            # The aisquare home's row is the captain's HOME BOARD (services.captain):
+            # captured so it can hold the captain's row and events, never one of the
+            # owner's projects — a spawn, a codename, a rename or a launch's
+            # activation onboarding it would put `.aisquare` in the sidebar, in
+            # `project list` and in the captain's own projects() tool (T2, 13121).
+            self.ensure_project(project)
+            return self._written_project(project.id)
         now = _now_iso()
         self._conn.execute(
             "INSERT INTO project (id, root, name, linked_repos, created_at, onboarded_at) "
@@ -1646,8 +1686,16 @@ class SqliteStore:
             ),
         )
         self._conn.commit()
-        stored = self.get_project(project.id)
-        assert stored is not None  # just written
+        return self._written_project(project.id)
+
+    def _written_project(self, project_id: str) -> ProjectInfo:
+        """The row just written — a ``KeyError`` if it is gone already (another process's
+        purge between the write and this read), as every lookup here says a missing
+        project. Checked, not asserted: under ``python -O`` an ``assert`` is stripped and
+        ``None`` went back against the return type (pre-gate review of #219)."""
+        stored = self.get_project(project_id)
+        if stored is None:
+            raise KeyError(project_id)
         return stored
 
     def list_projects(
@@ -1950,17 +1998,29 @@ class SqliteStore:
         return row is not None
 
     def upsert_session(self, session: TeamSession) -> TeamSession:
-        """Insert the session, or revive/refresh it if the id is already known."""
+        """Insert the session, or revive/refresh it if the id is already known.
+
+        A known session that registers on ANOTHER board moves there (card
+        tsk_01m3k89b2f96tt7xc6crzvxzjk, fix 2b): a fleet restart resumes the same
+        session id, so a seat that once registered on the wrong board stayed there.
+        A move starts from the new board's cursor, as a fresh registration does, so
+        its first delta does not replay that board's history; a refresh on the same
+        board keeps its cursor. (Every SET expression reads the OLD row.)
+        """
         self._conn.execute(
             f"INSERT INTO team_session ({_SESSION_COLUMNS}) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT (id) DO UPDATE SET "
+            "cursor = CASE WHEN excluded.project_id = team_session.project_id "
+            "THEN team_session.cursor ELSE excluded.cursor END, "
+            "project_id = excluded.project_id, "
             "last_seen_at = excluded.last_seen_at, ended_at = NULL, "
             "state = 'working', "
             "transcript_path = COALESCE(excluded.transcript_path, transcript_path), "
             "account = COALESCE(excluded.account, account), "
             "model = COALESCE(excluded.model, model), "
-            "effort = COALESCE(excluded.effort, effort)",
+            "effort = COALESCE(excluded.effort, effort), "
+            "persona = COALESCE(excluded.persona, persona)",
             (
                 session.id,
                 session.project_id,
@@ -1977,6 +2037,7 @@ class SqliteStore:
                 session.model,
                 session.effort,
                 session.limit_resets_at.isoformat() if session.limit_resets_at else None,
+                session.persona,
             ),
         )
         self._conn.commit()
@@ -2691,6 +2752,7 @@ class SqliteStore:
         since_seq: int | None = None,
         kind: str | None = None,
         task_id: str | None = None,
+        exclude_kinds: Collection[str] = (),
         limit: int = 30,
     ) -> list[TeamEvent]:
         """Matching events for ``team log``'s filters, oldest-first.
@@ -2701,7 +2763,9 @@ class SqliteStore:
         events (the MCP ``team_log`` contract). Rides the ``(project_id,
         seq)`` index; ``since_iso`` compares stored ISO-8601 UTC strings
         lexicographically (uniform format by construction). ``session_id`` is
-        exact — prefix resolution is the service layer's job.
+        exact — prefix resolution is the service layer's job. ``exclude_kinds``
+        leaves those kinds out INSIDE the query, so a window stays ``limit``
+        long however many of them the board holds (the captain's audit lines).
         """
         clauses = ["project_id = ?"]
         params: list[str | int] = [project_id]
@@ -2720,6 +2784,11 @@ class SqliteStore:
         if task_id is not None:
             clauses.append("task_id = ?")
             params.append(task_id)
+        if exclude_kinds:
+            # In the query, not after it: a window of N filtered AFTER the LIMIT
+            # comes back short on a board where the excluded kind is common.
+            clauses.append(f"kind NOT IN ({', '.join('?' * len(exclude_kinds))})")
+            params.extend(exclude_kinds)
         paging = since_seq is not None
         rows = self._conn.execute(
             f"SELECT {_EVENT_COLUMNS} FROM team_event "
@@ -2729,22 +2798,40 @@ class SqliteStore:
         return [_row_to_event(row) for row in (rows if paging else reversed(rows))]
 
     def events_since(
-        self, project_id: str, seq: int, *, exclude_session: str | None = None, limit: int = 50
+        self,
+        project_id: str,
+        seq: int,
+        *,
+        exclude_session: str | None = None,
+        exclude_kinds: Collection[str] = (),
+        limit: int = 50,
     ) -> list[TeamEvent]:
+        """A cursor page: the OLDEST ``limit`` events past ``seq``, oldest first.
+
+        ``exclude_kinds`` leaves those kinds out INSIDE the query, as
+        :meth:`filtered_events` does, so ``limit`` counts rows the caller can use.
+        Dropped after the LIMIT, a run of the captain's audit lines filled the whole
+        page, and the event behind it was not read at all (review of #240, finding 11).
+        """
         rows = self._conn.execute(
             f"SELECT {_EVENT_COLUMNS} FROM team_event "
             "WHERE project_id = ? AND seq > ? "
             "AND (session_id IS NULL OR session_id != ?) "
-            "ORDER BY seq LIMIT ?",
-            (project_id, seq, exclude_session or "", limit),
+            f"{_and_not_kinds(exclude_kinds)}ORDER BY seq LIMIT ?",
+            (project_id, seq, exclude_session or "", *exclude_kinds, limit),
         ).fetchall()
         return [_row_to_event(row) for row in rows]
 
-    def recent_events(self, project_id: str, *, limit: int = 10) -> list[TeamEvent]:
+    def recent_events(
+        self, project_id: str, *, exclude_kinds: Collection[str] = (), limit: int = 10
+    ) -> list[TeamEvent]:
+        """A window: the NEWEST ``limit`` events, oldest first. ``exclude_kinds`` is left
+        out inside the query, as in :meth:`events_since`: the window stays ``limit`` long
+        however many of those kinds are newer than the events it shows."""
         rows = self._conn.execute(
             f"SELECT {_EVENT_COLUMNS} FROM team_event "
-            "WHERE project_id = ? ORDER BY seq DESC LIMIT ?",
-            (project_id, limit),
+            f"WHERE project_id = ? {_and_not_kinds(exclude_kinds)}ORDER BY seq DESC LIMIT ?",
+            (project_id, *exclude_kinds, limit),
         ).fetchall()
         return [_row_to_event(row) for row in reversed(rows)]
 
@@ -2781,7 +2868,7 @@ class SqliteStore:
         """
         self._conn.execute(
             f"INSERT INTO fleet_agent ({_FLEET_AGENT_COLUMNS}) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT (id) DO UPDATE SET "
             "pane_id = excluded.pane_id, session_id = excluded.session_id, "
             "cwd = excluded.cwd, worktree = excluded.worktree, task_id = excluded.task_id, "
@@ -2805,6 +2892,7 @@ class SqliteStore:
                 agent.exit_status,
                 agent.account_slot,
                 agent.launch_spec.model_dump_json() if agent.launch_spec is not None else None,
+                agent.persona,
             ),
         )
         self._conn.commit()
@@ -3649,6 +3737,28 @@ class SqliteStore:
         ).fetchall()
         return {str(row["project_id"]): str(row["value"]) for row in rows}
 
+    def set_fleet_agent_persona(self, agent_id: str, persona: str | None) -> FleetAgent:
+        """The persona a running agent was given (``fleet.attach_persona``, plan §4.7)."""
+        self._conn.execute("UPDATE fleet_agent SET persona = ? WHERE id = ?", (persona, agent_id))
+        self._conn.commit()
+        agent = self.get_fleet_agent(agent_id)
+        if agent is None:
+            raise KeyError(agent_id)
+        return agent
+
+    def set_session_persona(self, session_id: str, persona: str | None) -> TeamSession:
+        """The persona a joined session now runs as — beside ``set_fleet_agent_persona``."""
+        session = self.get_session(session_id)
+        if session is None:
+            raise KeyError(session_id)
+        self._conn.execute(
+            "UPDATE team_session SET persona = ? WHERE id = ?", (persona, session.id)
+        )
+        self._conn.commit()
+        updated = self.get_session(session.id)
+        assert updated is not None  # just updated
+        return updated
+
     def terminal_events(self, project_id: str) -> dict[str, TeamEvent]:
         """The latest done/dropped event per task — archive attribution.
 
@@ -3687,6 +3797,12 @@ def _glob_prefix(ref: str) -> str:
     """Escape GLOB metacharacters in ``ref`` and append a wildcard."""
     escaped = ref.translate({ord("*"): None, ord("?"): None, ord("["): None})
     return f"{escaped}*"
+
+
+def _and_not_kinds(kinds: Collection[str]) -> str:
+    """``AND kind NOT IN (?, …) `` for a query that leaves ``kinds`` out, or nothing; the
+    caller hands ``*kinds`` to the query at that place."""
+    return f"AND kind NOT IN ({', '.join('?' * len(kinds))}) " if kinds else ""
 
 
 _DEFAULT_BUSY_MS = 5000

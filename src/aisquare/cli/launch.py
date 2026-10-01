@@ -28,12 +28,14 @@ answers for ``launch`` and ``fleet spawn`` alike.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import os
 import re
 import shutil
 import sqlite3
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
+from pathlib import Path
 from typing import Annotated
 
 import typer
@@ -41,10 +43,12 @@ from rich.text import Text
 
 from aisquare.cli.common import fail
 from aisquare.core import claude_accounts as claude_accounts_core
-from aisquare.core import harness, orchestrator
+from aisquare.core import harness, orchestrator, paths, personas
 from aisquare.core.config import load_config
 from aisquare.core.console import stderr_console
 from aisquare.core.store import ContextStore, is_locked_error, store_session
+from aisquare.core.workspace import git_common_root
+from aisquare.models import ProjectInfo
 from aisquare.services import claude_accounts as claude_accounts_service
 from aisquare.services import explainability as explainability_service
 from aisquare.services import explainability_ops
@@ -105,6 +109,12 @@ def _declared_roles() -> set[str]:
         return set()
 
 
+UNSEATED = ("captain",)
+"""Roles with a standing cycle that never take a numbered seat: the captain is one per HOME
+(services.captain, T2), so ``captain1`` is not a seat of anything — and ``ROLES`` stays
+the list whose every member has a harness profile (``_SEAT`` is built from it)."""
+
+
 def _role_ok(role: str) -> bool:
     """First-class role, a numbered seat of one, or declared in config.
 
@@ -114,7 +124,75 @@ def _role_ok(role: str) -> bool:
     shapes real crews use: numbered seats, and roles the operator has already
     written down.
     """
-    return role in ROLES or bool(_SEAT.match(role)) or role in _declared_roles()
+    return role in ROLES or role in UNSEATED or bool(_SEAT.match(role)) or role in _declared_roles()
+
+
+def _check_persona(name: str, project: ProjectInfo | None) -> None:
+    """Refuse a persona this project cannot resolve, before anything starts (§3.7).
+
+    The project's root is the board's; with no board row (an unreadable store) it
+    is the git repository around the working directory, as ``aisquare persona``
+    reads it.
+    """
+    root = project.root if project is not None else git_common_root(Path.cwd())
+    try:
+        personas.resolve(name, root)
+    except personas.PersonaError as exc:
+        fail(str(exc), error="unknown_persona", ref=name)
+
+
+SYSTEM_PROMPT_FLAG = "--append-system-prompt-file"
+"""Claude Code's seam for appending to its default system prompt — a FILE, so the body
+never sits in argv, which ``ps`` shows (the name travels as ``AISQUARE_PERSONA``)."""
+_SYSTEM_PROMPT_FLAGS = (SYSTEM_PROMPT_FLAG, "--append-system-prompt")
+
+
+def _persona_system_prompt(
+    name: str, project: ProjectInfo | None, binary: str, args: Sequence[str]
+) -> list[str]:
+    """The persona in the agent's system prompt too, where the binary has a seam for it.
+
+    Claude Code takes ``--append-system-prompt-file``: the same block the
+    session-start hook briefs (``personas.briefing``), written under the home
+    and appended to the default system prompt, so the persona holds over a
+    long session as hook context alone may not (docs/plans/spawn-personas.md
+    §9; gh #210). The hook keeps briefing it: that channel survives ``/clear``,
+    this one does not. ``[persona] system_prompt = false`` keeps the hook
+    alone. Any other binary — codex, aider, a wrapper not named claude — has no
+    seam this launcher knows (codex reads AGENTS.md, aider its own prompts), so
+    it gets the hook alone and one dim line says so. An ``--append-system-prompt``
+    of either spelling already in the arguments is the operator's and wins.
+
+    The file is named by the block's own hash: two launches of one persona
+    share it, and a project-layer persona that differs from a bundled one of
+    the same name gets a file of its own — no launch can read another's.
+    Owner decision, 2026-09-24.
+    """
+    try:
+        wanted = load_config().persona.system_prompt
+    except Exception:  # an unreadable config was already said above; the default stands
+        wanted = True
+    if not wanted:
+        return []
+    if any(
+        arg == flag or arg.startswith(f"{flag}=") for arg in args for flag in _SYSTEM_PROMPT_FLAGS
+    ):
+        return []
+    if not harness.is_default_agent(binary):
+        stderr_console().print(
+            f"persona {name}: {os.path.basename(binary)!r} takes no system-prompt flag this "
+            "launcher knows — briefed by the session-start hook alone",
+            style="dim",
+        )
+        return []
+    root = project.root if project is not None else git_common_root(Path.cwd())
+    block = "\n".join(personas.briefing(personas.resolve(name, root))) + "\n"
+    digest = hashlib.sha256(block.encode("utf-8")).hexdigest()[:12]
+    path = paths.aisquare_home() / "cache" / "persona-prompts" / f"{name}-{digest}.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not path.exists() or path.read_text(encoding="utf-8") != block:
+        path.write_text(block, encoding="utf-8")
+    return [SYSTEM_PROMPT_FLAG, str(path)]
 
 
 def _exec(binary: str, argv: list[str], env: dict[str, str]) -> None:
@@ -225,6 +303,15 @@ def launch(
             metavar="ACCOUNT",
         ),
     ] = None,
+    persona: Annotated[
+        str | None,
+        typer.Option(
+            "--persona",
+            help="Persona this session runs as (see `aisquare persona list`): exported as "
+            "AISQUARE_PERSONA and briefed once, at session start.",
+            metavar="NAME",
+        ),
+    ] = None,
 ) -> None:
     """Launch an agent session already attached to this project's team board.
 
@@ -244,6 +331,14 @@ def launch(
             f"unknown role {role!r} — expected one of: {', '.join(ROLES)}, "
             "a numbered seat of one (coder1, coder2), or a role you have "
             "bound with `aisquare team bind`",
+            error="unknown_role",
+        )
+    if role in UNSEATED and orchestrator.env_fleet_agent() is None:
+        # Only the window `aisquare captain` starts is the captain: its brain folder,
+        # its one server, no other tool. By hand in a project this was plain claude
+        # with every tool, briefed as the one captain that has no shell.
+        fail(
+            f"the {role} lives on the home board, one per home — `aisquare captain` starts it",
             error="unknown_role",
         )
     # Resolve WHICH executable on the same ladder `team spawn` uses, so a role
@@ -280,7 +375,15 @@ def launch(
             style="dim",
         )
 
+    if persona is not None:
+        _check_persona(persona, project)
+
     env = {**os.environ, "AISQUARE_ROLE": role}
+    if persona is not None:
+        # The name travels, never the body: argv is visible in `ps` and a body
+        # can be thousands of characters. The session-start hook resolves it and
+        # renders the briefing (docs/plans/spawn-personas.md §3.2).
+        env["AISQUARE_PERSONA"] = persona
     # The role's bound spec plus this launch's overrides, carried verbatim.
     # Resolved even with no flag, so a bound role launches correctly without
     # the operator remembering to say anything.
@@ -440,7 +543,18 @@ def launch(
             # the join for EVERY binary, wrapper or not — which is why nothing
             # here needs to write one, and why an unpinnable launch still joins.
             env.update(explainability_service.trace_marker(wiring))
-    argv = [resolution.binary, *profile.args, *role_args, *ctx.args, *pinned_id]
+    # The persona's system-prompt seam, after the role's own flags and before the
+    # operator's line: `_persona_system_prompt` stands down when that line already
+    # carries the flag. `_check_persona` refused an unknown name above, so the
+    # resolve inside cannot fail here.
+    persona_args = (
+        _persona_system_prompt(
+            persona, project, resolution.binary, [*profile.args, *role_args, *ctx.args]
+        )
+        if persona is not None
+        else []
+    )
+    argv = [resolution.binary, *profile.args, *role_args, *persona_args, *ctx.args, *pinned_id]
     # Text.assemble rather than "[bold]{role}[/bold]": this is the one line that
     # styles a single token instead of the whole line, and it interpolates a
     # role name, a binary path and a project name. A Text carries its styling

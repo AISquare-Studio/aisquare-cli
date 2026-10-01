@@ -337,7 +337,12 @@ when it is set, else this checkout (a worktree resolves to its principal) —
 never the `project switch` pin, which launches ignore. Every surface without a
 `--project` asks the same question, so the key `status` and `key show` report
 is the key `launch`, `team spawn` and `explainability env` authenticate with.
-Name another project with `--project P`.
+Name another project with `--project P`. Under a hub that default is the hub's
+project, while a fleet seat spawned from the same shell traces as its own
+fleet's project (`fleet spawn -P repoA` gives a seat of `repoA`): so under a
+hub each of these commands says in one line on stderr whose project it speaks
+for, naming the project a `fleet spawn` here joins when that is not the hub's,
+and `--project <name>` addresses a seat's.
 
 The key lands in the project's data directory, mode 600
 (`~/.aisquare/projects/<id>/explainability-key`); the store records only the
@@ -351,8 +356,9 @@ knows this machine's agent identities — every span is refused 409
 `agent_not_registered` — so run `explainability register` there once;
 `register [--project P]` registers under the same project's key. `status`
 shows the origin for that project, and each project page's Explainability tab
-shows the key its launches use — the project they join from the page's root,
-so the hub's under `$AISQUARE_TEAM_HUB` — and a *Register roster* button that
+shows the key its launches use: the page's own project, hub or no hub, since a
+fleet window joins its fleet's board whatever `$AISQUARE_TEAM_HUB` is exported
+and whichever repository its root sits in — and a *Register roster* button that
 registers under it. The **Setup** form's workspace key field attaches a key to
 that project when **this project only** is ticked (the key is pasted, never
 echoed), bound to the deployment the form names, or — when the field is blank —

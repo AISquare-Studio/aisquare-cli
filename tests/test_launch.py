@@ -16,6 +16,8 @@ from typer.testing import CliRunner
 
 from aisquare.cli import launch as launch_cli
 from aisquare.cli.app import app
+from aisquare.core import personas
+from aisquare.core.config import AppConfig, save_config
 from aisquare.core.orchestrator import team_project
 from aisquare.core.store import ContextStore, store_session
 from aisquare.models import FleetAgent
@@ -287,6 +289,19 @@ def test_launch_rejects_an_unknown_role(
     assert result.exit_code == 1
     assert "unknown role" in result.output
     assert not spy, "nothing should be exec'd for an invalid role"
+
+
+def test_launch_captain_outside_the_fleet_is_refused(
+    runner: CliRunner, work_dir: Path, spy: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``captain`` is a launch role only for the window ``aisquare captain`` starts: by hand in
+    a project it was plain claude with every tool, briefed as the one captain with no shell."""
+    monkeypatch.delenv("AISQUARE_FLEET_AGENT", raising=False)
+    result = runner.invoke(app, ["launch", "captain"])
+
+    assert result.exit_code == 1
+    assert "`aisquare captain` starts it" in result.output
+    assert not spy, "nothing should be exec'd"
 
 
 def test_launch_reports_a_missing_agent_binary(
@@ -953,3 +968,90 @@ def test_a_numbered_seat_exports_the_seat_and_resolves_to_its_base_role() -> Non
     assert launch_cli._SEAT.match("codr1") is None
     assert team_service.base_role("codr1") == "codr1"
     assert launch_cli._SEAT.match("1") is None
+
+
+# --- --persona (docs/plans/spawn-personas.md §7 "P2") -----------------------------------
+
+
+def test_launch_persona_exports_the_name_for_the_session_start_hook(
+    runner: CliRunner, work_dir: Path, spy: dict[str, Any]
+) -> None:
+    result = runner.invoke(app, ["launch", "coder", "--persona", "skeptic"])
+
+    assert result.exit_code == 0, result.output
+    assert spy["env"]["AISQUARE_PERSONA"] == "skeptic"
+    # The NAME travels as a variable; the BODY reaches Claude Code's system prompt by
+    # file, never as an argument (`ps` shows argv) — the same block the session-start
+    # hook briefs, so the two channels cannot disagree (owner decision, gh #210).
+    assert spy["argv"][:2] == ["claude", launch_cli.SYSTEM_PROMPT_FLAG]
+    assert len(spy["argv"]) == 3
+    prompt = Path(spy["argv"][2])
+    briefed = "\n".join(personas.briefing(personas.resolve("skeptic"))) + "\n"
+    assert prompt.read_text(encoding="utf-8") == briefed
+    assert "skeptic" in prompt.name and prompt.parent.name == "persona-prompts"
+
+
+def test_launch_persona_system_prompt_is_a_switch_the_hook_channel_ignores(
+    runner: CliRunner, work_dir: Path, spy: dict[str, Any]
+) -> None:
+    """``[persona] system_prompt = false``: nothing appended, the hook alone."""
+    config = AppConfig()
+    config.persona.system_prompt = False
+    save_config(config)
+
+    result = runner.invoke(app, ["launch", "coder", "--persona", "skeptic"])
+
+    assert result.exit_code == 0, result.output
+    assert spy["env"]["AISQUARE_PERSONA"] == "skeptic", "the hook channel is not the switch's"
+    assert spy["argv"] == ["claude"]
+
+
+def test_launch_persona_on_a_binary_without_a_seam_keeps_the_hook_alone_and_says_so(
+    runner: CliRunner, work_dir: Path, spy: dict[str, Any]
+) -> None:
+    """codex, aider, a wrapper not named claude: no system-prompt flag this launcher
+    knows, so the briefing is the channel, and one line says so."""
+    result = runner.invoke(app, ["launch", "coder", "--persona", "skeptic", "--command", "aider"])
+
+    assert result.exit_code == 0, result.output
+    assert spy["env"]["AISQUARE_PERSONA"] == "skeptic"
+    assert spy["argv"] == ["aider"]
+    said = result.output + (result.stderr if hasattr(result, "stderr") else "")
+    assert "takes no system-prompt flag" in said
+
+
+def test_launch_persona_leaves_the_operators_own_system_prompt_flag_alone(
+    runner: CliRunner, work_dir: Path, spy: dict[str, Any]
+) -> None:
+    """A ``--append-system-prompt`` of either spelling on the operator's line wins."""
+    result = runner.invoke(
+        app, ["launch", "coder", "--persona", "skeptic", "--append-system-prompt", "mine"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert spy["argv"] == ["claude", "--append-system-prompt", "mine"]
+
+
+def test_launch_refuses_an_unknown_persona_listing_the_known_ones(
+    runner: CliRunner, work_dir: Path, spy: dict[str, Any]
+) -> None:
+    import json
+
+    as_json = runner.invoke(app, ["--json", "launch", "coder", "--persona", "nope"])
+    human = runner.invoke(app, ["launch", "coder", "--persona", "nope"])
+
+    assert as_json.exit_code == 1
+    assert json.loads(as_json.stdout) == {"error": "unknown_persona", "ref": "nope"}
+    assert human.exit_code == 1
+    assert "known: captain, careful, mentor, minimalist, skeptic" in human.output
+    assert spy == {}, "nothing may launch with a persona that does not exist"
+
+
+def test_launch_without_persona_exports_no_persona_variable(
+    runner: CliRunner, work_dir: Path, spy: dict[str, Any]
+) -> None:
+    result = runner.invoke(app, ["launch", "coder"])
+
+    assert result.exit_code == 0, result.output
+    assert spy["env"]["AISQUARE_ROLE"] == "coder"
+    assert "AISQUARE_PERSONA" not in spy["env"]

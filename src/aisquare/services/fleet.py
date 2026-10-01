@@ -265,9 +265,12 @@ class AttachReceipt:
     replaced: str | None
     """The persona the agent ran as before, when it was a different one."""
     delivered: Literal["typed", "noted"]
-    """``typed`` into a waiting agent's pane, or ``noted`` on the board for a busy one."""
+    """``typed`` into a waiting agent's pane, or ``noted``: an agent that could not be
+    typed into is sent nothing, not even a note. The board's ``persona_attached`` line
+    and its rows are the record, and its next session start briefs it."""
     how: str
-    """``tell``'s own words for what happened."""
+    """What happened, in words to show the caller: ``tell``'s own for a briefing that was
+    typed; otherwise why it was not, and when the persona applies."""
 
 
 @dataclass(frozen=True)
@@ -2630,27 +2633,40 @@ def tell(project: ProjectInfo, label: str, text: str, *, sender: str | None = No
     the one :func:`nudge_manager` already applies — and a pane that is not the
     agent's gets the board note instead.
     """
+    typed = _type_if_waiting(project, label, text)
+    if typed.delivered:
+        return typed
+    how = _file_note(project, label, text, sender)
+    return TellResult(False, f"{typed.how} — {how}")
+
+
+def _type_if_waiting(project: ProjectInfo, label: str, text: str) -> TellResult:
+    """Type ``text`` into ``label``'s pane if the agent is WAITING there; else say why not.
+
+    The typing half of :func:`tell`, whose docstring gives the readiness rules, with no
+    fallback of its own: what becomes of a message that was not typed is the caller's to
+    decide. ``tell`` files it as a board note; :func:`attach_persona` must not, because
+    its message is a persona's body (review of #240, finding 7). Not delivered, ``how``
+    is the reason alone.
+    """
     with store_session() as store:
         agent = _live_agent(store, project, label)
     status = status_of(agent)
     if status.state == "waiting":
         srv = server_for(agent.tmux_socket)
         if not _pane_is_the_agent(srv, agent.pane_id):
-            how = _file_note(project, label, text, sender)
             return TellResult(
                 False,
                 "it reads as waiting, but its pane is not running the agent yet (the "
-                f"launcher or a shell is in the foreground) — {how}",
+                "launcher or a shell is in the foreground)",
             )
         try:
             srv.paste(agent.pane_id, text)
             srv.send_keys(agent.pane_id, "Enter")
         except TmuxError as exc:
-            how = _file_note(project, label, text, sender)
-            return TellResult(False, f"tmux could not type it ({exc}) — {how}")
+            return TellResult(False, f"tmux could not type it ({exc})")
         return TellResult(True, "typed into its pane (it was waiting)")
-    how = _file_note(project, label, text, sender)
-    return TellResult(False, f"it is {status.state} — {how}")
+    return TellResult(False, f"it is {status.state}")
 
 
 def _pane_is_the_agent(srv: TmuxServer, pane_id: str) -> bool:
@@ -2697,16 +2713,25 @@ def _file_note(project: ProjectInfo, label: str, text: str, sender: str | None) 
 def attach_persona(
     project: ProjectInfo, label: str, name: str, *, sender: str | None = None
 ) -> AttachReceipt:
-    """Give a RUNNING agent a persona, now (docs/plans/spawn-personas.md §4.7).
+    """Give a RUNNING agent a persona (docs/plans/spawn-personas.md §4.7).
 
     The persona is resolved first — an unknown name lists the known ones before
     the store or tmux is touched — then the live agent. One ``persona_attached``
     board event is written (which also refuses an unknown ``sender`` before
     anything changes); the ``fleet_agent`` row and, when the agent has joined,
-    its ``team_session`` row record the name; and the briefing goes through
-    :func:`tell` — typed into a waiting agent, a board note for a busy one, no
-    second channel. The rows are what make it last: the session-start hook reads
-    the fleet row, so a ``/clear`` or a restart briefs the agent with it again.
+    its ``team_session`` row record the name. The rows are what make it last: the
+    session-start hook reads the fleet row, so a ``/clear`` or a restart briefs
+    the agent with it again.
+
+    The briefing itself is only ever TYPED, into an agent that is waiting, by
+    ``tell``'s own readiness test (:func:`_type_if_waiting`). For any other agent
+    nothing is filed in its place. ``tell``'s board note would be the whole fenced
+    body and its guard sentence as an ordinary ``note``: every OTHER session read
+    it in its next delta as if it were addressed to it, ``aisquare board`` and a
+    teammate's session-start briefing showed it, and the distiller wrote it into
+    the project brain (review of #240, finding 7). The board names the persona
+    and never carries its body (§3.1). So such an agent is briefed by the rows,
+    at its next session start, and the receipt says that instead of a delivery.
     """
     try:
         persona = personas.resolve(name, project.root)
@@ -2738,13 +2763,19 @@ def attach_persona(
         f"aisquare: the operator attached persona {persona.name} to you — it applies from "
         f"now on{tail}"
     )
-    result = tell(project, label, "\n".join([preface, *personas.briefing(persona)]), sender=sender)
+    typed = _type_if_waiting(project, label, "\n".join([preface, *personas.briefing(persona)]))
+    how = typed.how
+    if not typed.delivered:
+        how = (
+            f"{how}, so the briefing was not typed: {persona.name} is recorded on its fleet "
+            "row and applies at its next session start (a /clear or a restart)"
+        )
     return AttachReceipt(
         agent=agent,
         persona=persona.name,
         replaced=replaced,
-        delivered="typed" if result.delivered else "noted",
-        how=result.how,
+        delivered="typed" if typed.delivered else "noted",
+        how=how,
     )
 
 

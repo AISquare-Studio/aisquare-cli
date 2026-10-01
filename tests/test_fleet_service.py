@@ -2317,18 +2317,22 @@ def test_attaching_to_a_waiting_agent_records_it_and_types_the_briefing(
     assert _events(project, "note") == []
 
 
-def test_attaching_to_a_busy_agent_files_the_briefing_as_a_board_note(
+def test_attaching_to_a_busy_agent_records_it_and_files_no_briefing_on_the_board(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
 ) -> None:
+    """The briefing is typed or it is not delivered. Filed as a board note, which is what
+    this pinned before, it carried the persona's body to every other session on the board
+    (review of #240, finding 7). The whole rule is pinned in
+    ``tests/test_attaching_to_a_busy_agent_keeps_the_persona_off_the_board.py``."""
     agent = _coder(project)
     _board_session(agent, "working")
 
     receipt = fleet_service.attach_persona(project, "coder-1", "skeptic")
 
-    assert receipt.delivered == "noted" and "board note" in receipt.how
+    assert receipt.delivered == "noted" and "next session start" in receipt.how
     assert tmux.typed == [], "never typed into a busy agent"
-    [note] = _events(project, "note")
-    assert note.startswith(_preface("skeptic") + '\n<aisquare-persona name="skeptic"')
+    assert _events(project, "note") == [], "and nothing filed on the board in its place"
+    assert _events(project, "persona_attached") == ["persona skeptic attached to coder-1"]
     with store_session() as store:
         row = store.get_fleet_agent(agent.id)
     assert row is not None and row.persona == "skeptic"

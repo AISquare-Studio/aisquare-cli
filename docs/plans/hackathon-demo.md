@@ -186,7 +186,7 @@ aisquare: the operator attached persona mentor to you — it applies from now on
 You are a mentor. The work matters, and so does the person who reads it after you.
 ```
 
-`(typed)` — the agent was waiting, so the briefing was typed into its pane: the preface names what it replaces, then the mentor block. A busy agent gets it as a board note instead (`noted`). Either way the fleet row records the persona, and the session-start hook reads that row first, so a `/clear` or a restart briefs the agent with mentor again, even though it was spawned with `--persona calm-reviewer`.
+`(typed)` — the agent was waiting, so the briefing was typed into its pane: the preface names what it replaces, then the mentor block. A busy agent is typed nothing and gets no note in its place (`noted`): the board carries only the persona's name, and the agent's next session start briefs it. Either way the fleet row records the persona, and the session-start hook reads that row first, so a `/clear` or a restart briefs the agent with mentor again, even though it was spawned with `--persona calm-reviewer`.
 
 ### 10. The board and the fleet agree
 

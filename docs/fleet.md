@@ -320,10 +320,12 @@ agent's own project's board, the one its next prompt reads, whatever hub or flee
 window the command runs in. Never interrupts an agent that is working or sitting
 on a permission prompt. Takes `--as SESSION`.
 
-`aisquare persona attach <name> --to <label>` uses the same delivery to give a
-running agent a persona, and keeps it on the agent's row so a `/clear` or a restart
-briefs it again ([docs/personas.md](personas.md)); its receipt reads `typed` or
-`noted`.
+`aisquare persona attach <name> --to <label>` types a persona's briefing into a
+waiting agent the same way, and keeps the persona on the agent's row so a `/clear`
+or a restart briefs it again ([docs/personas.md](personas.md)). A busy agent gets
+no note in the briefing's place: the board names the persona and never carries its
+body, and the agent is briefed at its next session start. The receipt reads `typed`
+or `noted`.
 
 ### `fleet stop`
 

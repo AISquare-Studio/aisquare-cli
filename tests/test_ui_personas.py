@@ -1262,7 +1262,11 @@ def test_choosing_an_agent_confirms_then_attaches_and_says_how_it_was_delivered(
         calls.append((target.id, label, name))
         agent = targets[0].agent.model_copy(update={"persona": name})
         return fleet_service.AttachReceipt(
-            agent=agent, persona=name, replaced="mentor", delivered="noted", how="a board note"
+            agent=agent,
+            persona=name,
+            replaced="mentor",
+            delivered="noted",
+            how="it applies at its next session start",
         )
 
     monkeypatch.setattr(fleet_service, "attach_persona", attach)
@@ -1282,7 +1286,10 @@ def test_choosing_an_agent_confirms_then_attaches_and_says_how_it_was_delivered(
     question, notices, screen = drive(scenario, project=project)
     assert question.startswith("Attach pair to coder-auth?") and "It replaces mentor." in question
     assert calls == [(project.id, "coder-auth", "pair")]
-    assert ("✓ attached pair to coder-auth (noted)", "information") in notices
+    # A `noted` toast carries the receipt's sentence: nothing reached the agent yet, and
+    # the bare "(noted)" read as a briefing waiting on the board (review of #240, finding 7).
+    said = "✓ attached pair to coder-auth (noted) — it applies at its next session start"
+    assert (said, "information") in notices
     assert screen == "Screen"
 
 

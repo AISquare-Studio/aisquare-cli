@@ -315,8 +315,10 @@ aisquare fleet tell coder-auth "use the existing JWT helper, do not add a depend
 
 Types the text into the agent — **only** when it is *waiting* and its pane is
 alive. Otherwise the message is filed as a board note addressed to that agent,
-and the output says which happened (`✓` typed, `→` noted). Never interrupts an
-agent that is working or sitting on a permission prompt. Takes `--as SESSION`.
+and the output says which happened (`✓` typed, `→` noted). The note goes on the
+agent's own project's board, the one its next prompt reads, whatever hub or fleet
+window the command runs in. Never interrupts an agent that is working or sitting
+on a permission prompt. Takes `--as SESSION`.
 
 `aisquare persona attach <name> --to <label>` uses the same delivery to give a
 running agent a persona, and keeps it on the agent's row so a `/clear` or a restart

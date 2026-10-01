@@ -2676,9 +2676,17 @@ def pane_is_the_agent(srv: TmuxServer, pane_id: str) -> bool:
 
 
 def _file_note(project: ProjectInfo, label: str, text: str, sender: str | None) -> str:
+    """File ``text`` on ``project``'s board as a note to ``label``; the receipt's words.
+
+    The board is named by project id and never resolved from a ``cwd``: an exported
+    ``AISQUARE_TEAM_HUB`` and the caller's own ``AISQUARE_FLEET_AGENT`` row both win over
+    a ``cwd``, and a sender's session delivers to the sender's board. Each put the note
+    for a busy agent on a board that agent never reads, while this receipt said "filed"
+    (review of #240, finding 8).
+    """
     team = _team()
     try:
-        event = team.add_note(text, session_ref=sender, to_role=label, cwd=project.root)
+        event = team.add_note(text, session_ref=sender, to_role=label, project_id=project.id)
     except team.TeamDisabledError as exc:
         raise FleetError(f"cannot file the message as a board note: {exc}") from exc
     except KeyError as exc:
@@ -2715,7 +2723,7 @@ def attach_persona(
             session_ref=sender,
             to_role=label,
             kind="persona_attached",
-            cwd=project.root,
+            project_id=project.id,  # the agent's board, never a cwd's (:func:`_file_note`)
         )
     except team.TeamDisabledError as exc:
         raise FleetError(f"cannot record the attachment on the board: {exc}") from exc

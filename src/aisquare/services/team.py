@@ -946,13 +946,25 @@ def add_note(
     to_role: str | None = None,
     kind: str = "note",
     cwd: Path | None = None,
+    project_id: str | None = None,
 ) -> TeamEvent:
-    """Put a note/decision/question/result on the team pipe."""
+    """Put a note/decision/question/result on the team pipe.
+
+    ``project_id`` names the board outright, for a caller whose note is FOR a project
+    rather than from wherever the caller stands: ``fleet tell``'s fallback for a busy
+    agent, which that agent reads on its own fleet's board. Everything else that can
+    pick a board can pick another one: an exported ``AISQUARE_TEAM_HUB`` and the
+    caller's own fleet row both win over ``cwd``, and a session delivers to the board it
+    is registered on. So with an id the session still says who filed the note, and no
+    longer where (review of #240, finding 8); ``_board_of`` as in :func:`set_signal`.
+    """
     _require_enabled()
     _DELIVERY.set(None)
     with store_session() as store:
         session = _resolve_session(store, session_ref)
-        board = _board(store, session, cwd)
+        board = (
+            _board_of(store, project_id) if project_id is not None else _board(store, session, cwd)
+        )
         task_id: str | None = None
         if task_ref is not None:
             task = store.get_task(task_ref)

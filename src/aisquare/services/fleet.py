@@ -471,13 +471,14 @@ class AttachReceipt:
     """The persona the agent ran as before, when it was a different one."""
     delivered: Literal["typed", "noted", "unsent", "maybe"]
     """``typed`` into a waiting agent's pane, or ``noted``: an agent that could not be
-    typed into is sent nothing, not even a note. The board's ``persona_attached`` line
-    and its rows are the record, and its next session start briefs it. ``unsent`` and
-    ``maybe`` as :class:`TellResult` says them — at its prompt with its Enter refused,
-    or tmux did not answer in time — neither to be told again."""
+    typed into gets no note on the board in its place. The board's ``persona_attached``
+    line and its rows are the record, and the agent's own next prompt hands it the
+    briefing, for it alone. ``unsent`` and ``maybe`` as :class:`TellResult` says them —
+    at its prompt with its Enter refused, or tmux did not answer in time — neither to be
+    told again."""
     how: str
     """What happened, in words to show the caller: ``tell``'s own for a briefing that was
-    typed; otherwise why it was not, and when the persona applies."""
+    typed; otherwise why it was not, and how the persona reaches the agent."""
 
 
 @dataclass(frozen=True)
@@ -4703,8 +4704,10 @@ def attach_persona(
     it in its next delta as if it were addressed to it, ``aisquare board`` and a
     teammate's session-start briefing showed it, and the distiller wrote it into
     the project brain (review of #240, finding 7). The board names the persona
-    and never carries its body (§3.1). So such an agent is briefed by the rows,
-    at its next session start, and the receipt says that instead of a delivery.
+    and never carries its body (§3.1). So such an agent is OWED the briefing
+    (``team.owe_persona_briefing``, a marker under its row): its own next prompt's
+    hook hands it the same preface and block, once and to it alone, unless a
+    session start briefs it first. The receipt says that instead of a delivery.
     """
     try:
         persona = personas.resolve(name, project.root)
@@ -4731,11 +4734,12 @@ def attach_persona(
         agent = store.set_fleet_agent_persona(agent.id, persona.name)
         if agent.session_id is not None and store.get_session(agent.session_id) is not None:
             store.set_session_persona(agent.session_id, persona.name)
-    tail = f"; it replaces {replaced}" if replaced else ""
-    preface = (
-        f"aisquare: the operator attached persona {persona.name} to you — it applies from "
-        f"now on{tail}"
-    )
+        # What an earlier attach still owes is superseded, and BEFORE anything is typed:
+        # the prompt that types this briefing runs the very hook that hands that one over.
+        # The agent never read what was owed, so the preface names the persona IT ran as.
+        told = team.settle_persona_briefing(store, agent.id, replaced=replaced)
+    told = told if told != persona.name else None
+    preface = team.persona_attached_preface(persona.name, told)
     # Pinned to the row the attachment was recorded on: a replacement that took the
     # label meanwhile is refused, not briefed with a persona its row does not carry.
     typed = tell(
@@ -4748,9 +4752,11 @@ def attach_persona(
     )
     how = typed.how
     if typed.typed == "no":
+        with store_session() as store:
+            team.owe_persona_briefing(store, agent.id, replaced=told)
         how = (
-            f"{how}, so the briefing was not typed: {persona.name} is recorded on its fleet "
-            "row and applies at its next session start (a /clear or a restart)"
+            f"{how}, so the briefing was not typed: {persona.name} is recorded and reaches it "
+            "with its next prompt, for it alone; the board carries the name only"
         )
     delivered: Literal["typed", "noted", "unsent", "maybe"] = (
         "typed" if typed.typed == "yes" else "noted" if typed.typed == "no" else typed.typed

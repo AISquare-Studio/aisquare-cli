@@ -270,6 +270,15 @@ the name of a skill from `import --list`. The directory is copied byte for byte
 it records the source and its sha256. A bare file becomes `<name>/SKILL.md`,
 named by `--name`, else its frontmatter `name`, else its file name.
 
+A symbolic link inside a skill directory, at any depth, is never followed. The
+import copies everything else and leaves the link out — link and target both —
+so what it points at (a key file, a whole directory outside the skill) never
+reaches a layer, least of all the project's, which is committed. One warning
+line names the links it skipped (`skipped_links` under `--json`; the dialogs in
+`asq` show the same sentence). One link cannot be skipped: a `SKILL.md` that is
+itself a link is refused (`symlink_refused`), since there is no persona without
+it — replace it with a real file.
+
 `import --list` marks a skill `imported` when a user or project persona's
 `.persona.json` names that skill as its source, whatever the persona was called.
 A persona of the same name that did not come from it (a bundled one, say) is
@@ -347,7 +356,9 @@ directory as `DIR/<name>/`. `--skill --user` writes it into Claude Code's
 personal skills (`$CLAUDE_CONFIG_DIR/skills`, else `~/.claude/skills`), and
 `--skill --project` into the repository's `.claude/skills` — after either, the
 persona is `/<name>` in Claude Code. An existing target is refused unless you
-pass `--force`.
+pass `--force`. `--to` and `--skill` leave symbolic links out of the copy as
+import does and name the ones they skipped; a persona whose `SKILL.md` is itself
+a link is refused.
 
 To change a bundled persona, copy it out and back in:
 

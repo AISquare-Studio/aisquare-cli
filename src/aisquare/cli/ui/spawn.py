@@ -720,7 +720,8 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         mode.set_options(permission_options(keep))
         mode.value = keep
         if not self._persona_touched:
-            # Every role default is already an option (_persona_options), so this
+            # Every role default is already an option (_persona_options, and
+            # _offer_role_personas for a role that joined the list since), so this
             # never needs set_options — which would post a Changed for "(none)".
             self._persona_shown = self._persona_default(role)
             self.query_one("#spawn-persona", Select).value = self._persona_shown
@@ -970,6 +971,7 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
             if role not in self._roles:
                 self._roles.append(role)
                 roles.set_options([(self._role_prompt(r), r) for r in self._roles])
+                self._offer_role_personas()
                 if self._manager_live:
                     self.call_after_refresh(self._grey_out_manager)
             roles.value = role
@@ -980,6 +982,25 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
             slots = self.query_one("#spawn-account", Select)
             slots.set_options(self._account_options(self._account_statuses))
             slots.value = account
+
+    def _offer_role_personas(self) -> None:
+        """Rebuild what the Persona field offers once the role list has grown, its value kept.
+
+        ``_role_changed`` sets the field to the role's default and counts on that being
+        an option, and the options were built from the roles the list held at compose. A
+        role that joined later (a seat bound since, a picked agent's) with a default this
+        project lacks was no option: ``InvalidSelectValueError`` in a message handler, the
+        end of the TUI. Now it is offered as every missing default is (``_persona_options``).
+        No ``Select.Changed`` leaves the rebuild: it passes through *(none)*, which
+        ``_persona_changed`` would read as the owner's pick (review of #240, the role picker).
+        """
+        field = self.query_one("#spawn-persona", Select)
+        current = field.value
+        options = self._persona_options()
+        with self.prevent(Select.Changed):
+            field.set_options(options)
+            if current in {value for _, value in options}:
+                field.value = current
 
     # --- import a persona from here ------------------------------------------------------
 

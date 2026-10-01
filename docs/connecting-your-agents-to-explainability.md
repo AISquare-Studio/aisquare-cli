@@ -351,9 +351,9 @@ knows this machine's agent identities — every span is refused 409
 `agent_not_registered` — so run `explainability register` there once;
 `register [--project P]` registers under the same project's key. `status`
 shows the origin for that project, and each project page's Explainability tab
-shows the key its launches use: the page's own project, since a fleet window
-joins its fleet's board whatever `$AISQUARE_TEAM_HUB` is exported (with no hub,
-the project the page's root joins) — and a *Register roster* button that
+shows the key its launches use: the page's own project, hub or no hub, since a
+fleet window joins its fleet's board whatever `$AISQUARE_TEAM_HUB` is exported
+and whichever repository its root sits in — and a *Register roster* button that
 registers under it. The **Setup** form's workspace key field attaches a key to
 that project when **this project only** is ticked (the key is pasted, never
 echoed), bound to the deployment the form names, or — when the field is blank —

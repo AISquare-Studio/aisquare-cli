@@ -345,8 +345,8 @@ class ProjectView(TabbedContent):
             TabPane(
                 "Explainability",
                 # ``project``: the key this tab shows and attaches is the one
-                # THIS page's launches use (#141) — the project they join from
-                # its root — not the ``project switch`` pin's.
+                # THIS page's launches use (#141) — the page's own project, which
+                # its fleet seats join — not the ``project switch`` pin's.
                 ExplainabilityView(project, id="project-explainability"),
                 id="tab-explainability",
             ),

@@ -15,7 +15,13 @@ worker and reaches back through the two callbacks the CLI passes too:
 ``app.call_from_thread(app.push_screen_wait, …)`` and returns its answer — the
 CLI's ``y/N`` (verified on Textual 8.2.8 before this was written). Cancelling a
 running import cancels the worker: a later ``confirm`` answers ``False`` and its
-progress is dropped; the service's own timeout bounds the process (§9).
+progress is dropped; the service's own timeout bounds the process (§9). The
+worker's THREAD runs on, though, so the import is handed a third callback,
+``cancelled``, its last question before it publishes a recognised skill: once the
+user has backed out it answers yes and nothing is written. From the moment that
+question (or ``confirm``) lets the publish go ahead, cancelling is too late: the
+dialog waits for the answer, as the Spawn dialog waits for a started spawn, and a
+toast says what was written (review of #240).
 
 The Import dialog's engine defaults are the plan's documented ones (§3.9) until
 ``[persona.import]`` exists (P5): an untouched engine is sent as ``None`` and an
@@ -24,6 +30,7 @@ empty model as ``None``, so ``import_source`` — which owns the ladder — deci
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, ClassVar, Literal
@@ -61,6 +68,9 @@ DEFAULT_API_MODEL = "claude-opus-5"
 
 IMPORT_WORKER = "persona-import"
 SKILLS_WORKER = "persona-importable-skills"
+
+TOO_LATE = "too late to cancel — the persona is already being written"
+"""The Import dialog's status line when Esc or Cancel comes after the publish began."""
 
 PARSE_DEBOUNCE = 0.25
 """Seconds of quiet typing before the editor re-parses the SKILL.md."""
@@ -167,6 +177,13 @@ class ImportPersonaScreen(_Dialog):
         self._worker: Worker[Any] | None = None
         self._importing = False
         self._progress_lines: list[str] = []
+        self._publish_lock = threading.Lock()
+        """Held by ``action_cancel`` and by the import's last question, so the two cannot
+        cross: either the cancel came first, or the publish did."""
+        self._publishing = False
+        """The running import was let past its last question: it cannot be stopped."""
+        self._cancel_late = False
+        """Esc or Cancel came while ``_publishing``: the result is announced when it lands."""
 
     def compose(self) -> ComposeResult:
         with Vertical():
@@ -280,11 +297,15 @@ class ImportPersonaScreen(_Dialog):
             return
         kwargs = self.import_kwargs()
         self._progress_lines = []
+        self._publishing = self._cancel_late = False
         self.note("#import-draft", None)
         self._set_importing(True)
         self._worker = self.run_worker(
             lambda: personas_service.import_source(
-                **kwargs, confirm=self._confirm, progress=self._progress
+                **kwargs,
+                confirm=self._confirm,
+                progress=self._progress,
+                cancelled=self._cancelled,
             ),
             name=IMPORT_WORKER,
             group=IMPORT_WORKER,
@@ -298,7 +319,7 @@ class ImportPersonaScreen(_Dialog):
             self.note("#import-status", "importing …", style="dim")
         self._validate()
 
-    # Both callbacks run on the WORKER's thread.
+    # The three callbacks run on the WORKER's thread.
 
     def _progress(self, text: str) -> None:
         if get_current_worker().is_cancelled:
@@ -319,7 +340,21 @@ class ImportPersonaScreen(_Dialog):
             self.app.call_from_thread(
                 self.note, "#import-draft", f"discarded — the draft stays at {view.draft_path}"
             )
-        return answer
+        # Save is the LLM path's go-ahead to publish: the same last question as below.
+        return answer and not self._cancelled()
+
+    def _cancelled(self) -> bool:
+        """The import's last question before it publishes: has the user backed out?
+
+        Esc cancels the worker, but a thread cannot be cancelled: this one ran on and
+        published a recognised skill after the dialog had closed, replacing a persona
+        under Force (review of #240). So the import asks here first. Under the lock
+        ``action_cancel`` takes, either the cancel came first and nothing is written, or
+        this did, and from then on the dialog waits for a persona it can no longer stop.
+        """
+        with self._publish_lock:
+            self._publishing = not get_current_worker().is_cancelled
+            return not self._publishing
 
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
         worker = event.worker
@@ -331,6 +366,8 @@ class ImportPersonaScreen(_Dialog):
         if event.state is WorkerState.SUCCESS:
             if isinstance(worker.result, personas_service.ImportResult):
                 self.warn_links(worker.result.skipped_links)
+                if self._cancel_late:
+                    self._say_too_late(worker.result)
                 self.dismiss(worker.result)
                 return
             self._refused(f"the import answered without a result ({type(worker.result).__name__})")
@@ -344,6 +381,21 @@ class ImportPersonaScreen(_Dialog):
     def _refused(self, reason: str) -> None:
         self._set_importing(False)
         self.note("#import-status", reason, style="bold red")
+
+    def _say_too_late(self, result: personas_service.ImportResult) -> None:
+        """The user asked to cancel and a persona was written all the same: never silently."""
+        persona = result.persona
+        outcome = (
+            f"it replaced the {persona.layer} persona of that name"
+            if result.replaced
+            else f"it is now a {persona.layer} persona"
+        )
+        self.notify(
+            f"too late to cancel: {persona.name} was already being written — {outcome}",
+            severity="warning",
+            timeout=8,
+            markup=False,
+        )
 
     def _skills_read(self, worker: Worker[Any], state: WorkerState) -> None:
         select = self.query_one("#import-browse", Select)
@@ -365,7 +417,17 @@ class ImportPersonaScreen(_Dialog):
 
     def action_cancel(self) -> None:
         if self._worker is not None and self._importing:
-            self._worker.cancel()  # its confirm answers False from here on
+            with self._publish_lock:
+                too_late = self._publishing
+                if not too_late:
+                    # Its confirm answers False from here on, and its last question yes.
+                    self._worker.cancel()
+            if too_late:
+                # The persona is being written and cannot be taken back. Dismissing now
+                # would tell the user nothing happened, and lose the result (Spawn's rule).
+                self._cancel_late = True
+                self.note("#import-status", TOO_LATE, style="yellow")
+                return
         self.dismiss(None)
 
     @on(Button.Pressed, "#import-cancel")

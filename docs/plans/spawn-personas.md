@@ -559,6 +559,18 @@ is the CLI's `y/N`. Cancel while running cancels the worker; the service's
 dialog stays open. Success dismisses with the result; the tab selects the new
 row and toasts `✓ imported <name> (<engine>)`.
 
+**Cancel, as amended by the review of #240.** Cancelling the worker does not stop
+its thread, and a recognised skill needs no confirmation, so Esc on a running
+import closed the dialog and the copy was published anyway — replacing a persona
+under Force. `import_source` therefore takes a third, optional callback,
+`cancelled()`: the recognised path's last question, asked once, after every
+refusal and right before it publishes. After Esc or Cancel the dialog answers yes
+and nothing is written (`PersonaError`, code `cancelled`); the CLI passes none.
+Once that question — or `confirm`'s *Save*, the LLM path's last question — has let
+the publish go ahead, cancelling is too late: the dialog waits for the result, as
+the Spawn dialog waits for a started spawn, and toasts `too late to cancel: <name>
+was already being written — …` before it dismisses with the result as usual.
+
 `ConfirmDraftScreen(ModalScreen[bool])`: header "engine · model · N
 characters"; the frontmatter as it will be written; the body in a scrollable
 `Static`; the engine's `notes` ("dropped: …"); `warnings()`; **Save** /

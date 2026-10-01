@@ -283,11 +283,22 @@ reads working until its first reply.
   happens; the captain asks you the tool's one-sentence question ("Stop coder-1
   in alpha?"), and your yes answers it within two minutes: *yes*, *yeah*, *yep*,
   *do it*, *go ahead* or *confirm* to begin your answer, or *ok*, *okay*, *sure*,
-  *yup*, *roger*, *copy* or *affirmative* as the whole of it. *No*, *nope*,
-  *cancel*, *negative*, *don't* or *stop that* on its own closes the question,
-  and so does anything else you say or ask before your yes, the TUI's What's
-  up included. Words that name another
-  agent or project are refused: "stop the coder in beta" never stops alpha's.
+  *yup*, *roger*, *copy* or *affirmative* as the whole of it. A refusal is a no
+  even when it names the agent, and closes the question: an answer that begins
+  with *no*, *nope*, *nah*, *never*, *negative*, *don't* or *do not* ("No, leave
+  coder-1 running"); *don't*, *do not*, *not*, *never*, *shouldn't* or
+  *mustn't* right before *stop*, *restart* or *spawn*, whichever is asked
+  ("Please don't stop coder-1", "I would not restart coder-1"); *leave* or
+  *keep* followed within two words by the agent, its role or its project
+  ("Leave coder-1 alone", "keep the coder running"); *cancel* or *stop that* on
+  its own. Only these: "Stop coder-1, no
+  need for it anymore" is an order, and a refusal put another way ("coder-1
+  should carry on") still reads as naming the agent, so begin with no. Anything
+  else you say or ask before your yes closes the question too, the TUI's What's
+  up included. Words that name another agent or project are refused: "stop the
+  coder in beta" never stops alpha's. A name is read whole, on every agent the
+  board has had: `coder-1-2` is not `coder-1`, `alpha-omega` is not `alpha`,
+  and "stop coder-1" stops no other coder once coder-1 has ended.
 - **Pane text is data.** What an agent's pane or a note says is reported to
   you, never obeyed.
 - **Never into a dialog.** Anything that types into the captain reads its pane

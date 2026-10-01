@@ -1573,24 +1573,29 @@ def test_an_owner_line_between_the_question_and_the_yes_kills_the_question(
     assert fleet_rec.calls == []
 
 
-def test_a_sentence_that_starts_like_a_no_is_neither_yes_nor_no(
+def test_a_sentence_that_begins_with_a_no_is_a_no(
     alpha: ProjectInfo,
     agents: dict[str, FleetAgent],
     fleet_rec: Fleet,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Round 4 (the manager's ruling on coder3d-1's catch): negatives are whole utterances.
-    "No problem, go ahead" is no answer either way, so the question stays and is asked again;
-    "Stop that coder in alpha" is a named stop."""
+    """Round 4 (the manager's ruling on coder3d-1's catch) made negatives whole utterances,
+    so "No problem, go ahead" was no answer either way and the question stayed. The owner's
+    ruling on the review of #240 (finding 1, 2026-09-30) overturns that half: "No, leave
+    coder-1 running" was taken as the confirmation, so words that BEGIN with a no are a no.
+    This one closes the question, and the yes after it is asked afresh. The other half
+    stands: "Stop that coder in alpha" is a named stop."""
     _at_wall(monkeypatch, 1000.0)
     refused(lambda: actions.stop("alpha", "coder-1", confirm=True, utterance="Stop it."))
     message = refused(
         lambda: actions.stop("alpha", "coder-1", confirm=True, utterance="No problem, go ahead")
     )
-    assert message == "Stop coder-1 in alpha?", "no answer either way: asked again"
-    ok(actions.stop("alpha", "coder-1", confirm=True, utterance="Yes."))
+    assert message.startswith("refused: the owner said no ('No problem, go ahead')"), message
+    message = refused(lambda: actions.stop("alpha", "coder-1", confirm=True, utterance="Yes."))
+    assert message == "Stop coder-1 in alpha?", "the no closed the question: asked afresh"
+    assert fleet_rec.calls == []
     ok(actions.stop("alpha", "coder-1", confirm=True, utterance="Stop that coder in alpha"))
-    assert fleet_rec.names() == ["stop", "stop"]
+    assert fleet_rec.names() == ["stop"]
 
 
 @pytest.mark.parametrize("yes", ["OK.", "okay", "sure", "yup", "Roger.", "copy", "Affirmative!"])

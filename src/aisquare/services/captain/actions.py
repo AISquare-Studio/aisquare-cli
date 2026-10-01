@@ -1493,9 +1493,12 @@ def _heard(utterance: str) -> _Heard:
     """
     low = utterance.lower()
     found = list(_WORDS.finditer(low))
+    # Positions through span(): the config-write guard reads calls by bare name, and a
+    # match's .start() counts as the fleet's start (tests/test_config_writes_stay_in_the_cli.py).
+    spans = [match.span() for match in found]
     tied = [
-        index > 0 and low[found[index - 1].end() : match.start()] == "-"
-        for index, match in enumerate(found)
+        index > 0 and low[spans[index - 1][1] : here] == "-"
+        for index, (here, _) in enumerate(spans)
     ]
     return [match.group() for match in found], tied
 

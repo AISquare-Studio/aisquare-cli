@@ -86,7 +86,9 @@ _CLOSE = "</aisquare-persona>"
 #: (``reviewed: 2026-09-31``), ``AttributeError`` for ``!!timestamp soon``,
 #: ``TypeError`` for ``!!timestamp {=: 2026-01-01}``, ``LookupError`` for ``!!bool
 #: maybe`` (a ``KeyError``) and ``!!int ""`` (an ``IndexError``), and
-#: ``RecursionError`` for a few hundred nested ``[``.
+#: ``RecursionError`` for a few hundred nested ``[``. ``ValueError`` is also what
+#: Python raises for printing an integer past its digit limit, which
+#: :func:`_print_integers` asks of whatever loaded.
 _LOADER_ERRORS = (ValueError, TypeError, AttributeError, LookupError, RecursionError)
 
 
@@ -172,7 +174,8 @@ def parse_skill(text: str, *, name: str, path: Path, layer: Layer) -> Persona:
 
     Whatever the frontmatter makes PyYAML raise is a :class:`PersonaError` here, the
     bare exceptions of :data:`_LOADER_ERRORS` included: one class is what ``catalogue``,
-    ``resolve`` and every surface that shows a refusal catch.
+    ``resolve`` and every surface that shows a refusal catch. So is a frontmatter that
+    loads and holds an integer Python will not print (:func:`_print_integers`).
     """
     where = path / SKILL_FILE
     try:
@@ -190,6 +193,7 @@ def parse_skill(text: str, *, name: str, path: Path, layer: Layer) -> Persona:
 
     try:
         data = yaml.safe_load(raw)
+        _print_integers(data)
     except yaml.YAMLError as exc:
         line = None
         problem = str(exc).split("\n", 1)[0]
@@ -248,6 +252,36 @@ def parse_skill(text: str, *, name: str, path: Path, layer: Layer) -> Persona:
         roles=_hints(metadata, "persona-roles"),
         tags=_hints(metadata, "persona-tags"),
     )
+
+
+def _print_integers(data: object) -> None:
+    """Ask Python for the text of every integer in what PyYAML loaded. One it will not
+    print raises ``ValueError`` here, inside ``parse_skill``'s guard, and so is refused
+    as any frontmatter that is not valid YAML is (review of #240, finding 4).
+
+    PyYAML reads a hex literal of any length, and Python will not turn an integer past
+    ``sys.get_int_max_str_digits()`` into text. Such a key, role or tag hint or ``name``
+    label loaded, and then raised ``ValueError`` from the first ``str()`` of it: in
+    ``parse_skill``, in ``_hints`` or in ``warnings``, and under ``--json`` for any value
+    at all. A frontmatter that cannot be turned into text is not one a persona can use.
+
+    Each value is visited once, by identity. Printing the whole of ``data`` instead
+    would cost what its aliases multiply out to, which a few hundred bytes of YAML can
+    make astronomical.
+    """
+    seen: set[int] = set()
+    pending: list[object] = [data]
+    while pending:
+        item = pending.pop()
+        if id(item) in seen:
+            continue
+        seen.add(id(item))
+        if isinstance(item, int):
+            str(item)
+        elif isinstance(item, (dict, list, set, tuple)):
+            pending.extend(item)
+            if isinstance(item, dict):
+                pending.extend(item.values())
 
 
 def _check_name(name: str, where: Path) -> None:

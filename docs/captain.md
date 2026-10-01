@@ -144,6 +144,10 @@ Two modes, on the page and on the command line:
   - **The stop word "stop listening"** turns the mic off, spoken bare, after
     "Captain", or typed. A mute or a mode switch closes an open window.
   - **Typed text needs no wake word.** The gate is on what the mic hears.
+  - **A page opened straight in listen mode may wait for you.** A browser such
+    as Chrome starts no audio before a click or a key press on the page. Until
+    then the chip says **click or press a key to start the mic**, and the first
+    one starts it.
 
 The wake word is `captain` unless `[captain] wake_word` in `config.toml` says
 otherwise: one word or a few, a to z and spaces (`wake_word = "hey captain"`).
@@ -170,7 +174,9 @@ already speak during that turn, so nothing is heard twice.
 
 The mode has one home, `captain_voice_mode` in `state.json`: `--mode` sets it,
 the page's toggle sets it, and every open page follows within a second. A typed
-message in the page's box goes the same way as a spoken one.
+message in the page's box goes the same way as a spoken one. If the page is not
+connected when you send it (it reconnects by itself), it says so and keeps your
+text in the box.
 
 ### Dictation apps
 

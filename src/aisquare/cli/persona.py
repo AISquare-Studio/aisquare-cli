@@ -78,6 +78,13 @@ def _warn(messages: list[str]) -> None:
         typer.echo(f"⚠ {message}", err=True)
 
 
+def _warn_links(skipped: list[str]) -> None:
+    """One line for the symbolic links a copy left out: the sentence the dialogs show."""
+    warning = persona_service.link_warning(skipped)
+    if warning is not None:
+        _warn([warning])
+
+
 def _editor_available() -> bool:
     """An editor was named, or there is a terminal for the ``vi`` fallback.
 
@@ -389,12 +396,14 @@ def import_(
                 "source": result.source,
                 "replaced": result.replaced,
                 "warnings": result.warnings,
+                "skipped_links": result.skipped_links,
             }
         )
         return
     replaced = " (replaced)" if result.replaced else ""
     how = f"{result.engine}, {result.model}" if result.model else result.engine
     typer.echo(f"✓ imported {persona.name} ({how}) into {persona.layer}: {persona.path}{replaced}")
+    _warn_links(result.skipped_links)
     _warn(result.warnings)
 
 
@@ -449,10 +458,18 @@ def export(
             typer.echo(result, nl=False)
         return
     if _json():
-        _emit({"name": name, "path": str(result), "skill": scope if skill else None})
+        _emit(
+            {
+                "name": name,
+                "path": str(result.path),
+                "skill": scope if skill else None,
+                "skipped_links": result.skipped_links,
+            }
+        )
         return
     slash = f" — it is /{name} in Claude Code now" if skill else ""
-    typer.echo(f"✓ exported {name} to {result}{slash}")
+    typer.echo(f"✓ exported {name} to {result.path}{slash}")
+    _warn_links(result.skipped_links)
 
 
 @app.command("attach")

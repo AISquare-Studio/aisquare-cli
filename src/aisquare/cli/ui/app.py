@@ -28,7 +28,7 @@ all of them must reach it.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
@@ -36,11 +36,11 @@ from typing import Any, ClassVar
 
 from rich.text import Text
 from textual import events
-from textual.app import ComposeResult
+from textual.app import ComposeResult, SystemCommand
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.css.query import NoMatches
-from textual.screen import ModalScreen
+from textual.screen import ModalScreen, Screen
 from textual.widget import Widget
 from textual.widgets import ContentSwitcher, Footer, Static
 from textual.worker import Worker, WorkerState
@@ -57,6 +57,7 @@ from aisquare.cli.ui.groups import (
     TogglePin,
     UndoLayout,
 )
+from aisquare.cli.ui.remote_control import RemoteController
 from aisquare.cli.ui.sidebar import (
     AccountsSelected,
     AddProject,
@@ -75,6 +76,7 @@ from aisquare.cli.ui.views.agent import AgentRestarted, AgentView
 from aisquare.cli.ui.views.doctor import DoctorRefreshed, DoctorView
 from aisquare.cli.ui.views.onboard import OnboardFailed, OnboardView, ProjectOnboarded
 from aisquare.cli.ui.views.project import ProjectView
+from aisquare.cli.ui.views.remote import RemotePanel
 from aisquare.cli.ui.views.welcome import WelcomeView
 from aisquare.core.console import stderr_console
 from aisquare.core.store import ContextStore, store_session
@@ -207,6 +209,7 @@ class HelpScreen(ModalScreen[None]):
             ("divider", "drag the line beside the sidebar to resize it; double-click puts it back"),
             ("> < =", "from the sidebar: widen, narrow, reset the divider"),
             ("t", "themes (applied live, autosaved)"),
+            ("R", "remote control — the fleet on your phone: link, QR, password, devices"),
             ("r", "refresh now"),
             ("a", "show or hide the captured directories (never added)"),
             ("F1", "command palette"),
@@ -326,6 +329,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         Binding("q", "quit", "quit"),
         Binding("ctrl+q", "quit", "quit", show=False),
         Binding("t", "pick_theme", "theme"),
+        Binding("R", "remote_panel", "remote"),
         Binding("r", "refresh_now", "refresh"),
         Binding("a", "toggle_captured", "captured", show=False),
         Binding("question_mark", "help", "help", key_display="?"),
@@ -334,6 +338,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         {
             "quit",
             "pick_theme",
+            "remote_panel",
             "refresh_now",
             "help",
             "command_palette",
@@ -350,8 +355,11 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         doctor: DoctorRunner | None = diagnostics.doctor,
         escape_key: str | None = None,
         accounts: AccountsReader | None = accounts_service.overview,
+        remote: RemoteController | None = None,
     ) -> None:
         super().__init__()
+        self.remote = remote if remote is not None else RemoteController()
+        """The Remote (``m``) model — one per app, so the tunnel outlives the dialog."""
         self.refresh_seconds = refresh_seconds
         self._doctor = doctor
         self._accounts = accounts
@@ -405,6 +413,8 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         self.set_interval(self.refresh_seconds, self.refresh_data)
         self.run_doctor()
         self._restore_selection()
+        self.remote.restore()
+        self.set_interval(30.0, self.remote.enforce_auto_off)
 
     # --- what was open (#144) ---------------------------------------------------------
 
@@ -489,6 +499,19 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         # stays-open picker instead of textual's pick-and-close one.
         self.action_pick_theme()
 
+    # --- remote (R) ------------------------------------------------------------------
+
+    def action_remote_panel(self) -> None:
+        self.push_screen(RemotePanel(self.remote))
+
+    def get_system_commands(self, screen: Screen[Any]) -> Iterable[SystemCommand]:
+        yield from super().get_system_commands(screen)
+        yield SystemCommand(
+            "Remote control",
+            "Remote on/off, link + QR, password, devices (R)",
+            self.action_remote_panel,
+        )
+
     def watch_theme(self, theme_name: str) -> None:
         # Fires on ANY theme change (our picker or the palette): every change is
         # the save. Not while the saved theme is being restored at mount.
@@ -502,6 +525,9 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         # Every saver — the theme's here, the divider's — started first and joined
         # against ONE deadline, so quit waits once, not once per preference.
         self.unsaved = Autosave.flush_all(self)
+        # The TUI is leaving: no ngrok may outlive it. The saved switches stay,
+        # so a Remote that was on comes back on at the next start (restore()).
+        self.remote.shutdown()
 
     # --- help / refresh ---------------------------------------------------------------
 

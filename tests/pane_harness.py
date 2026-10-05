@@ -170,6 +170,23 @@ class FakeTmux:
         """Every ``send-keys`` after ``-t <pane>``."""
         return [call[2:] for call in self.input if call[0] == "send-keys"]
 
+    def sent_text(self) -> list[str]:
+        """Every ``send-keys -H`` decoded back to the text it delivers.
+
+        ``send_literal`` sends hex pairs rather than a string, so that no tmux
+        argument parser stands between typed text and the pane (a trailing space
+        and a lone ``;`` were both being eaten). Asserting on the decoded text
+        keeps these tests about WHICH sequence a program receives, which is what
+        they are for, rather than about a wall of hex.
+        """
+        out: list[str] = []
+        for call in self.input:
+            if call[0] != "send-keys" or "-H" not in call:
+                continue
+            hexes = call[call.index("-H") + 1 :]
+            out.append(bytes(int(pair, 16) for pair in hexes).decode("utf-8", "replace"))
+        return out
+
     def __call__(self, argv: Sequence[str], stdin: bytes | None) -> Completed:
         args = list(argv)
         if self.record is not None:

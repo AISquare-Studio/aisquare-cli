@@ -944,13 +944,20 @@ def test_capture_raises_when_the_pane_is_gone(fake_bin: Path, conf: Path) -> Non
 # --- input --------------------------------------------------------------------------------------
 
 
-def test_send_keys_and_send_literal_build_their_argv(fake_bin: Path, conf: Path) -> None:
-    """…including the escape send_literal's docstring records.
+def _hex(text: str) -> list[str]:
+    return [f"{byte:02x}" for byte in text.encode("utf-8")]
 
-    A TRAILING ``;`` is tmux's command separator even after ``-l --``: measured
-    on 3.7c, ``send-keys -l -- 'a;'`` puts ``a`` in the pane and drops the
-    semicolon (proved live in ``test_live_send_literal_delivers_a_trailing_semicolon``).
-    A ``;`` anywhere else is already data — the negative control on the escape.
+
+def test_send_keys_and_send_literal_build_their_argv(fake_bin: Path, conf: Path) -> None:
+    """Named keys go as NAMES; literal text goes as BYTES.
+
+    Literal text used to go as ``-l -- <string>``, which put tmux's argument
+    parser between the text and the pane: measured on 3.7c, ``-l -- 'a;'`` puts
+    ``a`` in the pane and drops the semicolon, so :func:`_data_arg` escaped the
+    separator. ``-H`` removes the string entirely, so nothing needs escaping and
+    the whole class of quirk is gone — including the trailing space that was
+    eating the remote page's space bar. (``_data_arg`` still guards
+    :meth:`spawn_window`, where an argv really is a command.)
     """
     fake = FakeTmux()
     server = _server(fake, fake_bin, conf)
@@ -961,8 +968,8 @@ def test_send_keys_and_send_literal_build_their_argv(fake_bin: Path, conf: Path)
     server.send_literal("%3", "")
     assert fake.commands() == [
         ["send-keys", "-t", "%3", "C-c", "Enter"],
-        ["send-keys", "-t", "%3", "-l", "--", "-dash text; not a command"],
-        ["send-keys", "-t", "%3", "-l", "--", "a\\;"],
+        ["send-keys", "-t", "%3", "-H", *_hex("-dash text; not a command")],
+        ["send-keys", "-t", "%3", "-H", *_hex("a;")],
     ], "nothing to send is not a tmux call"
 
 

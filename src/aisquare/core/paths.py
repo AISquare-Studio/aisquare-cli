@@ -443,6 +443,21 @@ def state_path() -> Path:
     return aisquare_home() / "state.json"
 
 
+def remote_state_path() -> Path:
+    """``remote.json`` — the Remote Control server's token, password, switches and devices."""
+    return aisquare_home() / "remote.json"
+
+
+def remote_audit_path() -> Path:
+    """One line per write the Remote Control server let through (``ts sid endpoint summary``)."""
+    return aisquare_home() / "remote-audit.log"
+
+
+def remote_dist_dir() -> Path:
+    """Default location of the built Remote Control page the server serves."""
+    return aisquare_home() / "remote-dist"
+
+
 def project_data_dir(project_id: str) -> Path:
     """Per-project data directory (codebase snapshots, future sync artifacts)."""
     return aisquare_home() / "projects" / project_id

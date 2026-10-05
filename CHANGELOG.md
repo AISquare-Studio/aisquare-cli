@@ -6,6 +6,58 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Remote Control in the fleet UI, on `R`.** A modal that turns Remote on and
+  off (the local server plus an ngrok tunnel), shows the link, a QR (`segno`,
+  a new core dependency imported only by the QR renderer) and the 4-word
+  password, lists unlocked devices with revoke, and holds the write switch
+  (off by default) and an auto-off timer (30/60/120 minutes or Never). The
+  switches live in `state.json` beside the theme, written through
+  `core.state_file`; Never is stored as `"never"`. No ngrok outlives the UI,
+  and a Remote that was on comes back on at the next start. `asq remote
+  install-page <dist>` installs the built `aisquare-remote` page it serves.
+- **Remote Control server: `asq remote serve`.** One local port (`127.0.0.1:8748`,
+  never anything else) that serves the built `aisquare-remote` page with SPA
+  fallback, a read-only JSON API and a WebSocket stream, so ngrok can show the
+  fleet to a phone. Every path sits under `/r/<32-char token>/`; a wrong token is
+  a 404 everywhere, so the URL leaks nothing. `POST api/unlock {password}` sets
+  an HttpOnly SameSite=Lax cookie; `/api` and `/ws` without it are 401; more than
+  five unlock attempts a minute per client is 429. `GET api/{projects,fleet,board,
+  tasks,memory}` return exactly what `asq --json project list|fleet ls|board|task
+  list|context list` print (the same builders, now `projects_json`, `agents_json`
+  and `board_json`); `api/panes/<agent>` is one `capture-pane -e` frame; `api/remote`
+  carries `{allow_write, auto_off_at, version}`; `api/devices` lists unlocked
+  browsers and `DELETE api/devices/<sid>` revokes one, closing its sockets with
+  code 4401. The stream sends `{type: board|fleet|remote, payload, ts}` every
+  second when something changed and `pane` frames for agents the client
+  subscribed to. Write endpoints (`task/claim`, `task/done`, `note`,
+  `project/switch|add|remove`, `send-keys`) exist and answer 403 until
+  `asq remote allow-write on` (default off; each allowed write is one line in
+  `~/.aisquare/remote-audit.log`). State lives in `~/.aisquare/remote.json` (0600).
+  `services.remote_server` also exposes `start/stop/status/revoke/set_allow_write/
+  regenerate_password` for the fleet UI's Remote modal. New optional extra
+  `remote`: starlette + uvicorn (already resolved by `serve`) and `websockets`,
+  the one new package.
+- **`GET api/explainability/<agent>`** on the Remote Control server, for Saturday's
+  card: `{available, reason?, model?, tokens_in?, tokens_out?, cost_estimate_usd?,
+  policy?, updated_at?}`. `available` is true only when the explainability SDK is
+  present and no doctor check is RED; otherwise `reason` says which, while model
+  (board session), tokens (recorded turns) and the config's policy still come
+  through. The doctor verdict is cached for 30 s; the endpoint never raises — a
+  failing lookup is `available:false` with the error as the reason, and an
+  unknown agent is a 404 like `panes/<agent>`.
+- Remote Control tester nits: the serve banner's `ngrok http <port>` follows `--port`;
+  the unlock cookie carries `Secure` when the tunnel says `X-Forwarded-Proto: https`
+  (never on plain 127.0.0.1); `GET api/devices` marks the caller's own row
+  `current: true` so the page can label "this device".
+- A running Remote Control server re-reads `~/.aisquare/remote.json` when its
+  content changes (a blake2b fingerprint, not mtime — same-size rewrites within
+  one mtime tick were being missed), so `aisquare remote allow-write on|off`, `regenerate-password`
+  and `revoke <sid>` from another shell reach it: the next `GET api/remote`
+  and the next write request see the switch, the stream pushes a `remote`
+  frame within a second, and a session the file no longer lists is dropped
+  (cookie 401, websocket closed 4401). An unchanged file is never parsed again.
+
 ## [0.7.0] - 2026-09-25
 
 **Accounts, project groups and destinations, and a fleet that survives

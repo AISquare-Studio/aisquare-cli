@@ -3581,7 +3581,8 @@ def test_selecting_an_agent_focuses_its_pane_so_typing_reaches_the_agent_not_the
     focused_pane, alive, still_in_pane = drive(go)
     assert focused_pane, "the pane, not the sidebar, has the keyboard after a selection"
     assert alive is None, "q went to the agent, not to the app"
-    typed = [argv for argv in no_real_tmux if "send-keys" in argv and argv[-1] == "q"]
+    # Typed text goes as hex (``send-keys -H``): ``q`` is ``71``.
+    typed = [argv for argv in no_real_tmux if "send-keys" in argv and argv[-2:] == ("-H", "71")]
     assert typed, f"q was forwarded to tmux: {no_real_tmux[-3:]}"
     assert not still_in_pane, "F12 is the deliberate way back to the sidebar"
 

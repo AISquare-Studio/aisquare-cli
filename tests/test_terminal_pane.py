@@ -558,6 +558,11 @@ def test_alt_p_reaches_the_agent_as_meta_p_not_as_the_letter(
     assert fake.sent() == [("M-p",)], fake.sent()
 
 
+def _literal_argv(text: str) -> tuple[str, ...]:
+    """A literal write as it goes on the wire now: hex pairs, no string to parse."""
+    return ("-H", *(f"{byte:02x}" for byte in text.encode("utf-8")))
+
+
 def test_keys_are_forwarded_in_tmux_vocabulary(fake: FakeTmux, tmp_path: Path) -> None:
     async def drive() -> None:
         host = Host(fake.server(tmp_path), "%1")
@@ -569,14 +574,16 @@ def test_keys_are_forwarded_in_tmux_vocabulary(fake: FakeTmux, tmp_path: Path) -
 
     run(drive())
     assert fake.sent() == [
-        ("-l", "--", "a"),
-        ("-l", "--", "A"),
-        ("-l", "--", " "),
+        _literal_argv("a"),
+        _literal_argv("A"),
+        _literal_argv(" "),  # the space bar: it used to be eaten before the pane saw it
         ("C-c",),
         ("BTab",),
         ("Up",),
         ("Escape",),
-        ("-l", "--", "-"),  # literal text may start with '-'; the '--' protects it
+        # A literal may start with '-'. As hex there is no string for any tmux
+        # argument parser to read as a flag, so it needs no '--' to protect it.
+        _literal_argv("-"),
     ]
 
 
@@ -665,7 +672,7 @@ def test_a_literal_ending_in_the_separator_takes_the_paste_path(
 
     run(drive())
     assert ("load-buffer", ";") in fake.input and ("paste-buffer", "%1") in fake.input
-    assert fake.sent() == [("-l", "--", "a")]
+    assert fake.sent_text() == ["a"]
 
 
 def test_wheel_scrolls_history_clamped_and_any_key_returns_to_live(
@@ -793,7 +800,9 @@ def test_the_wheel_reaches_a_program_that_tracks_the_mouse_as_its_own_event(
 
     scrollback, sent = run(drive())
     assert scrollback == 0, "the history offset is not what a mouse-tracking program wants"
-    assert sent == [("send-keys", "%1", "-l", "--", "\x1b[<64;5;3M\x1b[<65;5;3M")], sent
+    assert len(sent) == 1, "both notches in ONE tmux call"
+    delivered = bytes(int(pair, 16) for pair in sent[0][sent[0].index("-H") + 1 :]).decode()
+    assert delivered == "\x1b[<64;5;3M\x1b[<65;5;3M", sent
 
 
 def test_the_x10_encoding_goes_as_raw_bytes_because_a_string_cannot_carry_it(
@@ -970,7 +979,9 @@ def test_scroll_keys_go_to_a_program_that_owns_its_own_transcript(
     scrollback, calls, text = run(drive())
     assert scrollback == 0, "tmux history is not this program's transcript"
     sent = [c for c in calls if c[0] == "send-keys"]
-    assert sent == [("send-keys", "%1", "-l", "--", "\x1b[<64;21;4M")], sent
+    assert len(sent) == 1, sent
+    delivered = bytes(int(pair, 16) for pair in sent[0][sent[0].index("-H") + 1 :]).decode()
+    assert delivered == "\x1b[<64;21;4M", sent
     assert not any("pre-launch" in row for row in text)
 
 
@@ -4105,7 +4116,7 @@ def test_agent_view_shows_and_types_into_no_pane_for_a_lost_row(
     assert "✗ lost" in header  # the header says what the row is
     lost_at_build, working, lost_later = typed
     assert lost_at_build == []  # nothing typed anywhere
-    assert working == [("-l", "--", "y")]  # the control: a row that is there gets the key
+    assert working == [_literal_argv("y")]  # the control: a row that is there gets the key
     assert turned_lost is None and lost_later == working  # detached, and deaf, once lost
 
 
@@ -4114,7 +4125,7 @@ def test_agent_view_shows_and_types_into_no_pane_for_a_lost_row(
 
 def _literals(fake: FakeTmux) -> str:
     """Everything sent to the pane as literal text, in order — the SGR reports concatenated."""
-    return "".join(call[-1] for call in fake.sent() if call[:1] == ("-l",))
+    return "".join(fake.sent_text())
 
 
 def _hex(fake: FakeTmux) -> list[str]:
@@ -4229,7 +4240,9 @@ def test_buttons_are_x10_bytes_for_a_program_that_did_not_ask_for_sgr(
         "1b", "5b", "4d", "40", "24", "22",
         "1b", "5b", "4d", "23", "24", "22",
     ], _hex(fake)  # fmt: skip
-    assert _literals(fake) == "", "nothing went as text: a string cannot carry these bytes"
+    # Typed text rides ``-H`` too now (send_literal), so the check is that no
+    # ``-l`` string carried any of it: a string cannot carry these bytes.
+    assert not any("-l" in call for call in fake.sent()), fake.sent()
 
 
 def test_nothing_is_forwarded_in_copy_mode_into_history_or_to_a_program_without_the_mouse(
@@ -5987,7 +6000,7 @@ def test_a_numpad_operator_without_its_text_is_typed_not_swallowed(
             return host.notices, host.severities, fake.sent()
 
     notices, severities, sent = run(drive())
-    assert sent == [("-l", "--", "+"), ("-l", "--", "/"), ("-l", "--", "*")]
+    assert sent == [_literal_argv("+"), _literal_argv("/"), _literal_argv("*")]
     # The decimal key's text is the layout's to know — ``,`` on a German numpad
     # arrives under the same physical key code — so without it nothing is
     # guessed: one quiet line, the keystroke lost rather than mistyped (review

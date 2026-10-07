@@ -251,13 +251,23 @@ class NoRemotePage(RemoteError):
 
 
 class RequestError(Exception):
-    """A handler's refusal, carried to the client as ``{error, message}``."""
+    """A handler's refusal, carried to the client as ``{error, message}``.
 
-    def __init__(self, status: int, error: str, message: str) -> None:
+    ``extra`` adds keys to that body: a 409 ``stale`` carries ``current``, what the
+    agent shows now (SPEC §3.2). A handler the write dispatcher runs has no
+    response of its own to put it in, so the refusal carries it.
+    """
+
+    def __init__(self, status: int, error: str, message: str, **extra: object) -> None:
         super().__init__(message)
         self.status = status
         self.error = error
         self.message = message
+        self.extra = extra
+
+    def request_error_body(self) -> dict[str, object]:
+        """The body the client gets: ``{error, message}``, then the extra keys."""
+        return {**_error_body(self.error, self.message), **self.extra}
 
 
 class NoSuchAgent(LookupError):
@@ -1890,7 +1900,7 @@ class RemoteKit:
             try:
                 return await endpoint(request, device, body)
             except RequestError as exc:
-                return self.kit_refuse(exc.status, exc.error, exc.message)
+                return JSONResponse(exc.request_error_body(), status_code=exc.status)
             except LookupError as exc:
                 return self.kit_refuse(404, "not_found", str(exc))
 
@@ -1904,7 +1914,7 @@ class RemoteKit:
                 body = {} if reading else await self.kit_json_object(request)
                 request_id = _ledger_request_id(body) if gated else None
             except RequestError as exc:
-                return self.kit_refuse(exc.status, exc.error, exc.message)
+                return JSONResponse(exc.request_error_body(), status_code=exc.status)
             if request_id is None:
                 return await kit_respond(request, device, body)
             replayed = self.ledger.ledger_replay(device.id, request_id)
@@ -2163,7 +2173,7 @@ def build_remote_app(
             result, summary = await asyncio.to_thread(handler, body)
             status, payload = 200, result
         except RequestError as exc:
-            status, payload = exc.status, _error_body(exc.error, exc.message)
+            status, payload = exc.status, exc.request_error_body()
         except LookupError as exc:
             status, payload = 404, _error_body("not_found", str(exc))
         except Exception as exc:

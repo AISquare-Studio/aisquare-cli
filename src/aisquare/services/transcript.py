@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import json
 import re
+import stat
 import textwrap
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
@@ -448,6 +449,12 @@ class TranscriptTail:
     """The ``uuid`` of the record that decided ``newest``, else its byte offset."""
 
 
+_TAIL_NOTHING = TranscriptTail(
+    pending=(), newest="none", newest_at=None, last_text=None, last_text_at=None, marker_key=None
+)
+"""The tail of a transcript with no record in it yet."""
+
+
 def read_transcript_tail(
     path: Path | str | None, *, budget: int = TAIL_BUDGET
 ) -> TranscriptTail | None:
@@ -462,12 +469,26 @@ def read_transcript_tail(
     blocks of the newest message, because tools run while it streams. Records
     without a ``message.id`` (an older Claude Code) are read back to the human's
     prompt instead. Never raises: an unreadable file is ``None``.
+
+    Only a regular file is opened. The path is whatever the agent's own hook
+    payload said, and opening a named pipe waits for a writer: the watcher's
+    scan would wait with it, every later scan behind it, and so would an action
+    re-reading that agent's project. An empty file is no conversation yet,
+    answered without opening it, as :func:`read_page` answers it.
     """
     if path is None:
         return None
     file = Path(path)
     try:
-        return _tail_walk(file, file.stat().st_size, budget)
+        facts = file.stat()
+    except OSError:
+        return None
+    if not stat.S_ISREG(facts.st_mode):
+        return None
+    if facts.st_size == 0:
+        return _TAIL_NOTHING
+    try:
+        return _tail_walk(file, facts.st_size, budget)
     except OSError:
         return None
 

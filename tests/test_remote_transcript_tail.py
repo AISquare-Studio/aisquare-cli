@@ -11,7 +11,10 @@ error result that says ``doesn't want to proceed``. No real transcript is read.
 from __future__ import annotations
 
 import json
+import os
 import re
+import sys
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -452,6 +455,23 @@ def test_no_transcript_is_none_and_an_empty_one_is_nothing(tmp_path: Path) -> No
     tail = read_transcript_tail(empty)
     assert tail is not None
     assert (tail.pending, tail.newest, tail.newest_at, tail.last_text) == ((), "none", None, None)
+
+
+def test_a_named_pipe_is_never_opened(tmp_path: Path) -> None:
+    """The path is whatever the agent's own hook payload said, and opening a FIFO waits for a
+    writer: the watcher's scan would wait with it, and every later scan behind it."""
+    if sys.platform == "win32":  # an `if`, not a skipif: mypy's platform check reads only this
+        pytest.skip("named pipes in the file system are POSIX")
+    fifo = tmp_path / "fifo.jsonl"
+    os.mkfifo(fifo)
+    read: list[object] = []
+    reader = threading.Thread(target=lambda: read.append(read_transcript_tail(fifo)), daemon=True)
+    reader.start()
+    reader.join(timeout=5)
+    if reader.is_alive():  # a writer lets it go, so a regression fails here instead of hanging
+        os.close(os.open(fifo, os.O_WRONLY | os.O_NONBLOCK))
+        reader.join(timeout=5)
+    assert read == [None], "it opened the pipe and waited on it"
 
 
 def test_a_line_nested_past_the_parsers_depth_is_skipped_not_raised(tmp_path: Path) -> None:

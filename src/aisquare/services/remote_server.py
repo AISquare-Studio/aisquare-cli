@@ -319,6 +319,53 @@ def build_local_url(token: str, port: int = DEFAULT_PORT) -> str:
     return f"http://{BIND}:{port}/r/{token}/"
 
 
+_DNS_LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
+_NUMERIC_LABEL = re.compile(r"[0-9]+|0x[0-9a-f]*")
+"""A last label a browser reads as part of an IPv4 address (``https://0x7f.1`` is 127.0.0.1)."""
+
+
+def check_public_origin(url: str) -> str:
+    """``https://<host>`` for a public URL of this server; ``ValueError`` for anything else.
+
+    https only, on a DNS name (never an IP literal, nor a name a browser reads
+    as one), with no userinfo and no port but 443. A push link opens this
+    origin, and the page there is where the human types the passphrase, so it
+    is the most trusted string the server emits: it is taken only from the
+    TUI's ngrok announcement, ``serve --public-url`` or ngrok's own agent API,
+    and NEVER from a request header, which anyone who reaches the server
+    writes (SPEC §5.8). The path is dropped: ``/r/<token>/`` is the server's.
+    """
+    import ipaddress
+    from urllib.parse import urlsplit
+
+    try:
+        parts = urlsplit(url.strip())
+        port = parts.port
+    except ValueError as exc:
+        raise ValueError(f"{url!r} is not a URL") from exc
+    if parts.scheme != "https":
+        raise ValueError(f"{url!r} is not https")
+    if "@" in parts.netloc:
+        raise ValueError(f"{url!r} carries a user name")
+    if port not in (None, 443):
+        raise ValueError(f"{url!r} is on port {port}, not 443")
+    host = parts.hostname or ""
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        pass
+    else:
+        raise ValueError(f"{url!r} names an IP address, not a host")
+    labels = host.split(".")
+    if (
+        len(labels) < 2
+        or not all(_DNS_LABEL.fullmatch(label) for label in labels)
+        or _NUMERIC_LABEL.fullmatch(labels[-1])
+    ):
+        raise ValueError(f"{url!r} does not name a DNS host")
+    return f"https://{host}"
+
+
 # --- state --------------------------------------------------------------------------
 
 
@@ -430,6 +477,8 @@ class Runtime:
         self.reads = 0
         """How many times the file was parsed after startup — tests pin the short-circuit."""
         self._said_unrestricted = False
+        self._public_origin: str | None = None
+        """Where phones reach this server, as :func:`check_public_origin` passed it; memory only."""
         self._state = self._load_state()
 
     # -- persistence --
@@ -544,6 +593,20 @@ class Runtime:
 
     def token_matches(self, supplied: str) -> bool:
         return _same(supplied, self.token)
+
+    def note_public_origin(self, origin: str | None) -> None:
+        """Remember the public origin an authoritative source announced; ``None`` forgets it.
+
+        Checked again here, so no caller can store an origin that would not pass.
+        """
+        checked = None if origin is None else check_public_origin(origin)
+        with self._lock:
+            self._public_origin = checked
+
+    def remote_public_origin(self) -> str | None:
+        """``https://<host>`` phones reach this server at, when an authoritative source said."""
+        with self._lock:
+            return self._public_origin
 
     def remote_json(self) -> dict[str, object]:
         """``GET /api/remote`` — the ONE place remote-specific state is exposed (§4-B)."""
@@ -1739,6 +1802,15 @@ class RemoteKit:
         """Whether writes are on right now (``remote.json``, re-read when it changes)."""
         return self.runtime.allow_write
 
+    def kit_public_url(self) -> str | None:
+        """``https://<host>/r/<token>/`` for a push link, or ``None`` when no origin is known.
+
+        Never learned from a request: ``Host``, ``X-Forwarded-Host`` and
+        ``X-Forwarded-Proto`` are whatever the sender wrote (SPEC §5.8).
+        """
+        origin = self.runtime.remote_public_origin()
+        return None if origin is None else f"{origin}/r/{self.runtime.token}/"
+
     def kit_pane_pool(self) -> ThreadPoolExecutor:
         """The pool every pane capture of the stream runs on, made on first use.
 
@@ -2493,6 +2565,16 @@ def regenerate_password() -> str:
     return runtime().regenerate_password()
 
 
+def note_public_url(url: str | None) -> None:
+    """Tell this process's server where phones reach it; ``None``: nowhere any more.
+
+    The TUI calls it once ngrok announces its URL, and with ``None`` when Remote
+    goes off; ``asq remote serve --public-url`` calls it at start. A URL that is
+    not https on a DNS name raises ``ValueError`` (:func:`check_public_origin`).
+    """
+    runtime().note_public_origin(None if url is None else check_public_origin(url))
+
+
 def set_auto_off(at: datetime | None) -> None:
     """Record when the modal will switch Remote off (shown as ``auto_off_at``)."""
     runtime().set_auto_off(at)
@@ -2557,10 +2639,12 @@ __all__ = [
     "Writes",
     "build_app",
     "build_local_url",
+    "check_public_origin",
     "explainability_payload",
     "install_page",
     "live_sources",
     "live_writes",
+    "note_public_url",
     "regenerate_password",
     "remote_board_payload",
     "remote_gate_token",

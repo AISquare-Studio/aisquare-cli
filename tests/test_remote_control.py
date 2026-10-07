@@ -11,6 +11,7 @@ branches — on/off, restore after a restart, auto-off, write actions default OF
 
 from __future__ import annotations
 
+import inspect
 import json
 import sys
 import types
@@ -154,8 +155,26 @@ def test_a_tunnel_that_exits_without_a_url_says_so_instead_of_hanging(tmp_path: 
 # --- the controller -------------------------------------------------------------------------
 
 
+#: Every ``remote_server`` module function the controller calls, now or once a later
+#: lane lands (turning Remote off revokes every device; the TUI notes ngrok's URL and
+#: adopts a deadline the phone extended). The fake answers all of them from day one.
+SERVER_CALLS = (
+    "start_remote_server",
+    "stop_remote_server",
+    "remote_server_status",
+    "revoke_remote_device",
+    "set_allow_write",
+    "set_auto_off",
+    "regenerate_password",
+    "note_public_url",
+    "revoke_every_remote_device",
+    "remote_auto_off_at",
+)
+
+
 class FakeServer(types.ModuleType):
-    """PLAN §4-F's six names, recording every call; sessions are a plain list."""
+    """The server module as the controller sees it (:data:`SERVER_CALLS`), recording every
+    call; sessions are a plain list."""
 
     def __init__(self) -> None:
         super().__init__("fake_remote_server")
@@ -167,6 +186,13 @@ class FakeServer(types.ModuleType):
         self.revoked: list[str] = []
         self.fail_start: Exception | None = None
         self.sessions: list[dict[str, Any]] = []
+        self.revoked_every: list[str] = []
+        """``revoke_every_remote_device`` reasons, in order."""
+        self.public_urls: list[str | None] = []
+        """``note_public_url`` calls, in order; ``None`` is the origin forgotten."""
+        self.server_auto_off_at: datetime | None = None
+        """What ``remote_auto_off_at()`` answers: the last ``set_auto_off``, or a later
+        deadline a test sets to stand for one the phone extended."""
         self.DEFAULT_PORT = 8750
         self.RemoteInfo = remote_server.RemoteInfo
 
@@ -195,10 +221,43 @@ class FakeServer(types.ModuleType):
 
     def set_auto_off(self, at: datetime | None) -> None:
         self.auto_off_calls.append(at)
+        self.server_auto_off_at = at
 
     def regenerate_password(self) -> str:
         self.password = "ember-fjord-glade-harbor"
         return self.password
+
+    def revoke_every_remote_device(self, reason: str) -> None:
+        self.revoked_every.append(reason)
+        self.sessions = []
+
+    def note_public_url(self, url: str | None) -> None:
+        self.public_urls.append(url)
+
+    def remote_auto_off_at(self) -> datetime | None:
+        return self.server_auto_off_at
+
+
+def _positional(function: Any) -> int:
+    return sum(
+        param.kind in (param.POSITIONAL_ONLY, param.POSITIONAL_OR_KEYWORD)
+        for param in inspect.signature(function).parameters.values()
+    )
+
+
+def test_the_fake_server_answers_every_call_the_real_module_does() -> None:
+    """A fake that drifts from the module tests a controller nobody runs. Where the module
+    already has a name, the fake takes the same arguments; where it does not yet (a lane
+    still to land), the fake leads and the controller can be written against it."""
+    fake = FakeServer()
+    for name in SERVER_CALLS:
+        real = getattr(remote_server, name, None)
+        assert callable(getattr(fake, name)), name
+        if real is not None:
+            assert _positional(getattr(fake, name)) == _positional(real), name
+    assert {"start_remote_server", "note_public_url"} <= {
+        name for name in SERVER_CALLS if hasattr(remote_server, name)
+    }, "the comparison above compares something"
 
 
 def fake_server() -> FakeServer:

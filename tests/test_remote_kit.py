@@ -36,6 +36,8 @@ from aisquare.services.remote_server import (
     Sources,
     Writes,
     build_app,
+    check_public_origin,
+    note_public_url,
     remote_agent_lock,
     write_endpoint_names,
 )
@@ -661,3 +663,87 @@ def test_pane_captures_run_on_the_pane_pool_and_the_lifespan_shuts_it(
     assert app.kit.pane_pool is None
     with pytest.raises(RuntimeError):
         pool.submit(print)  # shut down with the server
+
+
+# --- the public URL: authoritative sources only (SPEC §5.8) -------------------------------
+
+
+@pytest.mark.parametrize(
+    ("url", "origin"),
+    [
+        ("https://abcd-12.ngrok-free.app", "https://abcd-12.ngrok-free.app"),
+        ("https://abcd-12.ngrok-free.app/r/tok_123/", "https://abcd-12.ngrok-free.app"),
+        ("https://Remote.Example.COM:443/x?y#z", "https://remote.example.com"),
+        ("https://xn--bcher-kva.example/", "https://xn--bcher-kva.example"),
+    ],
+)
+def test_a_public_url_on_https_and_a_dns_name_gives_its_origin(url: str, origin: str) -> None:
+    assert check_public_origin(url) == origin
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://abcd-12.ngrok-free.app/",  # not https
+        "https://127.0.0.1/",  # an IP literal
+        "https://[::1]/",
+        "https://0x7f.1/",  # a name a browser reads as 127.0.0.1
+        "https://2130706433/",
+        "https://user@abcd-12.ngrok-free.app/",  # userinfo
+        "https://user:pw@abcd-12.ngrok-free.app/",
+        "https://abcd-12.ngrok-free.app:8443/",  # another port
+        "https://abcd-12.ngrok-free.app:99999/",
+        "https://localhost/",  # not a DNS name anyone else resolves
+        "https://example.com./",  # another origin than example.com
+        "https://-bad.example/",
+        "https://bücher.example/",
+        "ftp://example.com/",
+        "not a url",
+    ],
+)
+def test_anything_else_is_refused(url: str) -> None:
+    with pytest.raises(ValueError):
+        check_public_origin(url)
+
+
+def test_note_public_url_sets_and_clears_the_servers_origin(
+    isolated_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(remote_server, "_runtime", None)
+    server = remote_server.runtime()
+    note_public_url("https://abcd-12.ngrok-free.app/r/whatever/")
+    assert server.remote_public_origin() == "https://abcd-12.ngrok-free.app"
+    with pytest.raises(ValueError):
+        note_public_url("http://evil.example/")
+    assert server.remote_public_origin() == "https://abcd-12.ngrok-free.app", "a refusal keeps it"
+    with pytest.raises(ValueError):
+        server.note_public_origin("https://127.0.0.1")  # the runtime checks again
+    note_public_url(None)
+    assert server.remote_public_origin() is None
+
+
+def test_no_request_header_teaches_the_server_its_public_origin(
+    runtime: Runtime, tmp_path: Path
+) -> None:
+    """What a forged ``Host`` plus ``X-Forwarded-Proto: https`` would buy, if it were read:
+    a push link to a page the attacker serves, where the human types the passphrase."""
+    app = build_app(runtime, sources=_sources(), dist_dir=tmp_path, tick=0.02)
+    forged = {
+        "host": "evil.ngrok-free.app",
+        "x-forwarded-proto": "https",
+        "x-forwarded-host": "evil.ngrok-free.app",
+        "forwarded": "host=evil.ngrok-free.app;proto=https",
+    }
+    # https: the forged X-Forwarded-Proto makes unlock's cookie Secure.
+    client = make_client(app, base_url="https://testserver", headers=forged)
+    assert unlock(client, runtime).status_code == 200
+    assert client.get(f"{base(runtime)}/api/remote").status_code == 200
+    # The test client opens sockets on ws:// only, where a Secure cookie is not sent.
+    plain = make_client(app)
+    assert unlock(plain, runtime).status_code == 200
+    with plain.websocket_connect(f"{base(runtime)}/ws", headers=forged) as ws:
+        _until(ws, "remote")
+    assert app.kit.kit_public_url() is None
+    runtime.note_public_origin("https://abcd-12.ngrok-free.app")
+    assert client.get(f"{base(runtime)}/api/remote").status_code == 200
+    assert app.kit.kit_public_url() == f"https://abcd-12.ngrok-free.app/r/{runtime.token}/"

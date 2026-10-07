@@ -55,7 +55,6 @@ load in a base install; :func:`start` and the CLI say what to install.
 
 from __future__ import annotations
 
-import asyncio
 import contextlib
 import hashlib
 import json
@@ -1276,6 +1275,11 @@ def build_app(
     clock: Callable[[], float] = time.monotonic,
 ) -> _TokenGate:
     """The ASGI app. Everything real is behind ``sources``/``writes``; tests pass fakes."""
+    # Here, not at module scope: `asq remote status`, `allow-write`, `revoke` and
+    # `regenerate-password` import this module and serve nothing, and on Windows
+    # importing asyncio opens a socket (``cli/remote.py`` says what that cost).
+    import asyncio
+
     try:
         from starlette.applications import Starlette
         from starlette.responses import FileResponse, JSONResponse

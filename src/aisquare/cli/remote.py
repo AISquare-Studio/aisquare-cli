@@ -1,17 +1,32 @@
-"""``aisquare remote`` — the Remote Control server on one local port."""
+"""``aisquare remote`` — the Remote Control server on one local port.
+
+Each command imports ``services.remote_server`` in its own body. ``cli/app.py``
+imports this module to register it, so an import here at module scope put the
+server on every command's import path, every hook's included: about thirty more
+modules, asyncio among them, and on Windows asyncio loads ``_overlapped``, which
+opens a socket at import. A child started without ``SYSTEMROOT`` cannot (WinError
+10106), so ``asq --json`` and every hook died before typer ran (PR #243's
+windows leg). ``tests/test_remote_stays_off_the_hook_path.py`` keeps it off.
+"""
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated
 
 import typer
 
 from aisquare.cli.common import fail
 from aisquare.core.console import stderr_console, stdout_console
 from aisquare.core.state import get_state
-from aisquare.services import remote_server
+
+if TYPE_CHECKING:
+    from aisquare.services.remote_server import RemoteInfo
+
+#: ``remote_server.DEFAULT_PORT``, spelled out so ``--port`` needs no import (the
+#: ``cli/serve.py`` shape); the hook-path test pins the two equal.
+DEFAULT_PORT = 8748
 
 app = typer.Typer(
     help="Remote Control: show the fleet to a phone over one local port (ngrok exposes it).",
@@ -20,18 +35,24 @@ app = typer.Typer(
 
 
 def _fail_if_missing() -> None:
+    from aisquare.services import remote_server
+
     problem = remote_server._dependency_error()
     if problem is not None:
         fail(problem, error="remote_not_installed")
 
 
 def _fail_if_no_page(dist: Path | None) -> None:
+    from aisquare.services import remote_server
+
     problem = remote_server._page_missing(dist)
     if problem is not None:
         fail(problem, error="no_remote_page")
 
 
-def _describe(info: remote_server.RemoteInfo, *, allow_write: bool) -> dict[str, object]:
+def _describe(info: RemoteInfo, *, allow_write: bool) -> dict[str, object]:
+    from aisquare.services import remote_server
+
     return {
         "url_local": info.url_local,
         "token": info.token,
@@ -45,7 +66,7 @@ def _describe(info: remote_server.RemoteInfo, *, allow_write: bool) -> dict[str,
 def serve_remote(
     port: Annotated[
         int, typer.Option("--port", help="Local port.", envvar="AISQUARE_REMOTE_PORT")
-    ] = remote_server.DEFAULT_PORT,
+    ] = DEFAULT_PORT,
     dist: Annotated[
         Path | None,
         typer.Option(
@@ -55,6 +76,8 @@ def serve_remote(
     ] = None,
 ) -> None:
     """Serve the page, the read-only JSON API and the live stream on 127.0.0.1 (Ctrl-C stops)."""
+    from aisquare.services import remote_server
+
     _fail_if_missing()
     _fail_if_no_page(dist)
     state = remote_server.runtime()
@@ -88,6 +111,8 @@ def install_page(
     it is not something a fresh clone can do for itself (the built page lives
     in the FE repo's dist/, not in this package).
     """
+    from aisquare.services import remote_server
+
     source = dist.resolve()
     if not (source / "index.html").is_file():
         fail(
@@ -105,6 +130,8 @@ def install_page(
 @app.command("status")
 def status() -> None:
     """The link, the password and the unlocked devices, from ~/.aisquare/remote.json."""
+    from aisquare.services import remote_server
+
     state = remote_server.runtime()
     payload = _describe(state.info(), allow_write=state.allow_write)
     payload["sessions"] = state.device_rows()
@@ -128,6 +155,8 @@ def allow_write(
     """Turn the write endpoints on or off for the running/next server."""
     if switch not in ("on", "off"):
         fail(f"say 'on' or 'off', not {switch!r}", error="invalid_switch", ref=switch)
+    from aisquare.services import remote_server
+
     remote_server.set_allow_write(switch == "on")
     if get_state().json_output:
         typer.echo(json.dumps({"allow_write": switch == "on"}))
@@ -138,6 +167,8 @@ def allow_write(
 @app.command("regenerate-password")
 def regenerate_password() -> None:
     """Mint a new password; every unlocked device has to unlock again."""
+    from aisquare.services import remote_server
+
     password = remote_server.regenerate_password()
     if get_state().json_output:
         typer.echo(json.dumps({"password": password}))
@@ -148,6 +179,8 @@ def regenerate_password() -> None:
 @app.command("revoke")
 def revoke(sid: Annotated[str, typer.Argument(help="Device session id (see status).")]) -> None:
     """Drop one unlocked device."""
+    from aisquare.services import remote_server
+
     if not remote_server.revoke(sid):
         fail(f"no device {sid}", error="not_found", ref=sid)
     if get_state().json_output:

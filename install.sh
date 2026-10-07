@@ -1522,7 +1522,7 @@ _install_node_via_fnm() {
         INSTALLED_LIST="$INSTALLED_LIST node(fnm)"
         warn "fnm's Node is only on PATH in shells that have run its hook. Add to your profile:
          eval \"\$(fnm env --use-on-cd)\"
-         Until then \`aisquare doctor\` will report no node on PATH."
+         Until then those shells have no node, and \`aisquare doctor\` reads codebase snapshots as off."
     else
         warn "fnm could not install Node $MIN_NODE_MAJOR — snapshots need it; everything else works."
     fi
@@ -1814,6 +1814,22 @@ summary() {
             UNEXPECTED=$((UNEXPECTED + 1))
         fi
     done
+    # A Node this run was asked for and could not put on PATH. `aisquare doctor`
+    # reads no Node at all as codebase snapshots OFF -- optional, since the memory
+    # route never needs it -- so no row above can tell "chose the memory route"
+    # from "the Node install failed". That knowledge is this script's: with system
+    # deps on, a missing node is unexpected and exits 2, as it did while the
+    # repomix row went amber for it. A Node that is too old, or a packer without a
+    # Node, still turns the repomix row amber, which the loop above has counted.
+    if [ "$WANT_SYSTEM_DEPS" = 1 ] && ! have node; then
+        case " $_unexpected " in
+            *" repomix "*) ;;
+            *)
+                _unexpected="$_unexpected node"
+                UNEXPECTED=$((UNEXPECTED + 1))
+                ;;
+        esac
+    fi
 
     if [ -n "$_expected" ]; then
         say ""
@@ -1859,7 +1875,12 @@ summary() {
         say ""
         say "${C_YELLOW}Not expected, and worth a look:${C_RESET}"
         for _check in $_unexpected; do
-            printf '  %s\n' "$_check"
+            case "$_check" in
+                # Its own line: doctor only says snapshots are off, which is
+                # true and names no failure.
+                node) printf '  node — Node %s+ did not install, so codebase snapshots are off (nodejs.org, or fnm)\n' "$MIN_NODE_MAJOR" ;;
+                *) printf '  %s\n' "$_check" ;;
+            esac
         done
         note "the full detail and a fix for each: aisquare doctor"
     fi

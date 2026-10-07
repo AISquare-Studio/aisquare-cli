@@ -133,6 +133,125 @@ def test_repomix_base_still_reports_when_nothing_is_installed(
         snapshot._repomix_base()
 
 
+def _on_path(monkeypatch: pytest.MonkeyPatch, *present: str) -> None:
+    monkeypatch.setattr(
+        "aisquare.core.snapshot.shutil.which",
+        lambda name: f"/usr/bin/{name}" if name in present else None,
+    )
+
+
+@pytest.mark.parametrize(
+    ("present", "expected"),
+    [
+        # A packer and a Node to run it on: the two ways a pack can run.
+        (("node", "repomix"), True),
+        (("node", "npx"), True),
+        (("node", "npx", "repomix"), True),
+        # Either packer alone is a `#!/usr/bin/env node` script with no Node.
+        (("repomix",), False),
+        (("npx",), False),
+        (("npx", "repomix"), False),
+        # A Node with nothing to run on it.
+        (("node",), False),
+        # The memory-only machine.
+        ((), False),
+    ],
+)
+def test_can_pack_needs_a_packer_and_a_node(
+    monkeypatch: pytest.MonkeyPatch, present: tuple[str, ...], expected: bool
+) -> None:
+    _on_path(monkeypatch, *present)
+    assert snapshot.can_pack() is expected
+
+
+def test_can_pack_starts_no_process(monkeypatch: pytest.MonkeyPatch) -> None:
+    """PATH lookups only: the doctor asks it once per row, so it must stay cheap."""
+
+    def no_process(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("can_pack started a process")
+
+    monkeypatch.setattr("aisquare.core.snapshot.subprocess.run", no_process)
+    _on_path(monkeypatch, "node", "npx")
+    assert snapshot.can_pack() is True
+
+
+def _node_reads(monkeypatch: pytest.MonkeyPatch, version: tuple[int, ...] | None) -> None:
+    """What `node --version` answers, without running a node (the PATH above is fake)."""
+    monkeypatch.setattr(snapshot, "node_version", lambda: version)
+
+
+def test_a_missing_snapshot_is_off_without_node_and_failed_with_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The sentences `init` and `project onboard` print when no snapshot came back."""
+    _node_reads(monkeypatch, (26, 7, 0))
+    monkeypatch.setattr(snapshot, "installed_repomix_floor", lambda: None)
+    _on_path(monkeypatch)
+    off = snapshot.skipped_detail()
+    _on_path(monkeypatch, "node")
+    no_packer = snapshot.skipped_detail()
+    _on_path(monkeypatch, "node", "repomix")
+    failed = snapshot.skipped_detail()
+    assert off == snapshot.OFF_DETAIL
+    assert failed == snapshot.FAILED_DETAIL
+    # Telling someone who has Node to install Node is the confusion this split removes:
+    # a pack that failed blames no cause, and a Node with no packer names the packer.
+    assert "Node" not in failed
+    assert no_packer == snapshot.NO_PACKER_DETAIL
+    assert "Node.js" not in no_packer and "repomix" in no_packer
+
+
+@pytest.mark.parametrize(
+    ("present", "node", "installed_floor", "named"),
+    [
+        # npx fetches the latest repomix, whose floor is MIN_NODE: Ubuntu 22.04's 12.
+        (("node", "npx"), (12, 22, 9), (16,), "Node 12.22.9 is older than repomix needs (22+)"),
+        # An installed repomix is judged by the floor it declares, higher or lower.
+        (("node", "repomix"), (22, 1, 0), (24,), "Node 22.1.0 is older than repomix needs (24+)"),
+    ],
+    ids=["npx-path", "installed-repomix"],
+)
+def test_a_node_too_old_for_the_repomix_that_ran_is_named(
+    monkeypatch: pytest.MonkeyPatch,
+    present: tuple[str, ...],
+    node: tuple[int, ...],
+    installed_floor: tuple[int, ...],
+    named: str,
+) -> None:
+    """Debian 12 and Ubuntu 22.04's packaged Node: the pack fails, and the line says why."""
+    _on_path(monkeypatch, *present)
+    _node_reads(monkeypatch, node)
+    monkeypatch.setattr(snapshot, "installed_repomix_floor", lambda: installed_floor)
+
+    detail = snapshot.skipped_detail()
+
+    assert detail.startswith(f"skipped — {named}"), detail
+    assert detail.endswith("run: aisquare doctor")
+
+
+@pytest.mark.parametrize(
+    ("present", "node", "installed_floor"),
+    [
+        # A pinned repomix that declares a LOWER floor packs on Node 18: no accusation.
+        (("node", "repomix"), (18, 19, 1), (16,)),
+        # Unreadable is not presumed old, as in the doctor's repomix row.
+        (("node", "npx"), None, None),
+    ],
+    ids=["installed-floor-met", "unreadable"],
+)
+def test_a_node_that_is_not_known_to_be_too_old_is_not_blamed(
+    monkeypatch: pytest.MonkeyPatch,
+    present: tuple[str, ...],
+    node: tuple[int, ...] | None,
+    installed_floor: tuple[int, ...] | None,
+) -> None:
+    _on_path(monkeypatch, *present)
+    _node_reads(monkeypatch, node)
+    monkeypatch.setattr(snapshot, "installed_repomix_floor", lambda: installed_floor)
+
+    assert snapshot.skipped_detail() == snapshot.FAILED_DETAIL
+
+
 def test_child_output_is_decoded_as_utf8_not_the_locale_codec(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

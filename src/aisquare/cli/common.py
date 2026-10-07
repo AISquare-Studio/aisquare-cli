@@ -527,10 +527,10 @@ def emit_connected(connection: AgentConnection) -> None:
     if get_state().json_output:
         typer.echo(connection.model_dump_json())
         return
-    hooks = "hooks installed" if connection.hooks_installed else "no hooks for this agent"
+    # Always installed: `connect` refuses rather than return a connection without hooks.
     noun = "entry" if connection.imported == 1 else "entries"
     stdout_console().print(
-        f"✓ connected {connection.name} — {hooks}; imported {connection.imported} {noun}"
+        f"✓ connected {connection.name} — hooks installed; imported {connection.imported} {noun}"
     )
 
 
@@ -555,7 +555,7 @@ def emit_onboard(report: OnboardReport) -> None:
             f"snapshot: {snapshot_core.too_large_detail(snapshot)} {snapshot_core.REPACK_HINT}"
         )
     else:
-        console.print("snapshot: skipped (repomix/Node not available)")
+        console.print(f"snapshot: {snapshot_core.skipped_detail()}")
     if report.seeded:
         console.print(f"seeded {len(report.seeded)} project fact(s):")
         for entry in report.seeded:

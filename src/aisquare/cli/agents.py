@@ -57,7 +57,13 @@ def connect(name: AgentName, config_dir: ConfigDir = None) -> None:
         connection = agents_service.connect(name, config_dir)
     except KeyError:
         fail(f"unknown agent: {name}", error="unknown_agent", ref=name)
-    except ValueError as exc:
+    except agents_service.UnsupportedAgentError as exc:
+        fail(str(exc), error="unsupported_agent", ref=name)
+    except agents_service.AgentFileUnreadableError as exc:
+        # `detail` too: under --json `fail` drops the message, and asq's Connect
+        # button shows the error with its detail, so the file is named there as well.
+        fail(str(exc), error="agent_file_unreadable", ref=name, detail=str(exc))
+    except agents_service.AgentNotInstalledError as exc:
         fail(str(exc), error="not_installed", ref=name)
     emit_connected(connection)
 

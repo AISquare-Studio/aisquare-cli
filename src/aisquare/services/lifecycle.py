@@ -6,6 +6,7 @@ from pathlib import Path
 
 from aisquare.core import credentials as credentials_store
 from aisquare.core import paths
+from aisquare.core import snapshot as snapshot_core
 from aisquare.core.config import (
     AppConfig,
     ExplainabilitySettings,
@@ -160,7 +161,9 @@ def initialize(
                 f"{report.snapshot.token_count} tokens packed for fast agent context."
             )
         elif report.snapshot is None:
-            notes.append("Codebase snapshot skipped (repomix/Node not available).")
+            # Off (no Node, or no packer: optional, not a fault) or a pack that
+            # failed -- the same sentence `project onboard` prints, from one place.
+            notes.append(f"Snapshot: {snapshot_core.skipped_detail()}.")
 
     for agent in agents:
         try:
@@ -168,8 +171,8 @@ def initialize(
         except (KeyError, ValueError) as exc:
             notes.append(f"Could not connect {agent}: {exc}")
             continue
-        hook_note = "hooks installed" if connection.hooks_installed else "no hooks for this agent"
-        notes.append(f"Connected {agent}: {hook_note}, imported {connection.imported} entries.")
+        # Always installed: `connect` refuses rather than return a connection without hooks.
+        notes.append(f"Connected {agent}: hooks installed, imported {connection.imported} entries.")
 
     return SetupReport(
         home=home,

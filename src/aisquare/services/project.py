@@ -388,7 +388,11 @@ def snapshot_settings() -> SnapshotSettings:
 
 
 def _ensure_snapshot(project: ProjectInfo, *, refresh: bool) -> Snapshot | None:
-    """Generate (or reuse) the codebase snapshot; ``None`` if repomix is unavailable."""
+    """Generate (or reuse) the codebase snapshot; ``None`` if repomix is unavailable or failed.
+
+    Which of the two is :func:`snapshot_core.skipped_detail`'s business: no Node is
+    the optional feature being off, a repomix that ran and failed is not.
+    """
     if snapshot_core.exists(project.id) and not refresh:
         return snapshot_core.load(project.id)
     settings = snapshot_settings()

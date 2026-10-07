@@ -21,6 +21,11 @@ rather than leniency:
 - **The floor is read from ``snapshot_core.MIN_NODE``**, not written here. A
   test that hardcoded 22 would keep passing while the code moved, and the
   version this project supports is the code's fact, not the test's.
+- **No Node at all is OFF, not a warning** (it was a warning before 0.9).
+  Snapshots are optional and memory never needed them, so a machine with none of
+  ``repomix``, ``npx`` or ``node`` chose the memory-only route: an ``ok`` line
+  saying so, with no fix. Any one of the three present still warns about the
+  rest, because someone started on the toolchain (:class:`TestNoNodeAtAllIsOffNotBroken`).
 """
 
 from __future__ import annotations
@@ -115,6 +120,7 @@ def test_an_unreadable_node_is_reported_as_untested_not_as_too_old(tools: Tools)
 
 
 def test_no_repomix_and_no_npx_still_warns_and_now_names_the_floor(tools: Tools) -> None:
+    """A Node IS on PATH (unreadable here), so this is a half-installed toolchain."""
     tools(repomix=False, npx=False, node=None)
     check = diagnostics._check_repomix()
     assert check.status is CheckStatus.warn
@@ -245,6 +251,49 @@ class TestNodeAbsentIsNotMerelyUnknown:
         tools(repomix=True, npx=True, node=None, node_on_path=False)
         fix = diagnostics._check_repomix().fix or ""
         assert "on PATH" in fix
+
+
+class TestNoNodeAtAllIsOffNotBroken:
+    """The memory-only route: no ``node``, no ``npx``, no ``repomix`` -- a choice, not a fault.
+
+    This line used to warn here, with a fix to install Node, and the snapshot row
+    beside it offered ``project onboard`` as a one-click button that could never
+    turn green. Snapshots are optional; ``init``, the hooks and memory never run
+    Node. So the line is ``ok`` and says the feature is off, in the one sentence
+    every surface uses (``snapshot_core.OFF_DETAIL``).
+
+    Narrow on purpose: ANY one of the three on PATH still warns, because then
+    someone started installing the toolchain and the line names what is missing.
+    """
+
+    def test_none_of_the_three_reads_off_with_no_fix(self, tools: Tools) -> None:
+        tools(repomix=False, npx=False, node=None, node_on_path=False)
+        check = diagnostics._check_repomix()
+        assert check.status is CheckStatus.ok
+        assert check.detail == snapshot_core.OFF_DETAIL
+        assert check.fix is None
+
+    def test_the_off_line_names_the_floor_and_says_it_is_optional(self, tools: Tools) -> None:
+        tools(repomix=False, npx=False, node=None, node_on_path=False)
+        detail = diagnostics._check_repomix().detail
+        floor = ".".join(str(part) for part in snapshot_core.MIN_NODE)
+        assert f"Node.js {floor}+" in detail
+        assert "optional" in detail
+
+    def test_a_node_without_repomix_or_npx_still_warns(self, tools: Tools) -> None:
+        """The control: a readable, new-enough Node is not the memory-only route."""
+        tools(repomix=False, npx=False, node=_NEWER, node_on_path=True)
+        check = diagnostics._check_repomix()
+        assert check.status is CheckStatus.warn
+        assert check.fix and "npm install -g repomix" in check.fix
+
+    @pytest.mark.parametrize("present", ["repomix", "npx"])
+    def test_a_packer_without_node_still_warns(self, tools: Tools, present: str) -> None:
+        """The other control: a packer with no Node to run it is a broken install."""
+        tools(repomix=present == "repomix", npx=present == "npx", node=None, node_on_path=False)
+        check = diagnostics._check_repomix()
+        assert check.status is CheckStatus.warn
+        assert "Node is not on PATH" in check.detail
 
 
 class TestTheFloorIsPerPath:

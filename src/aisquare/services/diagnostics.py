@@ -663,10 +663,19 @@ def _check_repomix() -> DoctorCheck:
     run -- a warning, not "untested". An unreadable Node stays ``ok``: failing
     open costs this line its verdict, while guessing "too old" would send
     someone to reinstall a working toolchain.
+
+    NO NODE AT ALL IS OFF, NOT BROKEN. Snapshots are optional and memory and
+    the hooks never touch Node, so a machine with none of ``repomix``,
+    ``npx`` or ``node`` made a choice rather than a mistake: ``ok``, with
+    :data:`snapshot_core.OFF_DETAIL` and no fix. Any ONE of the three present
+    means someone started on the toolchain, and the warnings below still say
+    what is missing.
     """
     name = "repomix"
     direct = shutil.which("repomix")
     if direct is None and shutil.which("npx") is None:
+        if shutil.which("node") is None:
+            return _ok(name, snapshot_core.OFF_DETAIL)
         return _warn(
             name,
             "repomix not found — codebase snapshots are disabled",
@@ -708,6 +717,11 @@ def _check_repomix() -> DoctorCheck:
 def _check_tiktoken() -> DoctorCheck:
     if _has_module("tiktoken"):
         return _ok("tiktoken", "exact snapshot token counts enabled")
+    if not snapshot_core.can_pack():
+        # Only the snapshot counts tokens, so with snapshots off there is nothing
+        # for it to sharpen -- an amber line here was a fix for a feature that is
+        # not running, on exactly the machines that chose not to run it.
+        return _ok("tiktoken", "off — only snapshot token counts use it, and snapshots are off")
     # `pipx inject` takes the name of an INSTALLED PIPX ENVIRONMENT, which is
     # this distribution -- so `pipx inject aisquare tiktoken` failed on every
     # machine that had followed the documented install, naming an environment
@@ -2012,6 +2026,12 @@ def _check_snapshot(cwd: Path | None = None) -> DoctorCheck:
         # The fix is `--refresh` because a plain `onboard` only reloads this
         # verdict — which is how the line stayed a warning forever.
         return _warn("snapshot", snapshot_core.too_large_detail(snap), snapshot_core.REPACK_HINT)
+    if not snapshot_core.can_pack():
+        # No fix, deliberately: `Pack one: aisquare project onboard` is a one-click
+        # button in the UI (services/onboarding.KNOWN_FIXES), and without a Node to
+        # run repomix on it can never turn green. When something of the toolchain IS
+        # here, the repomix row warns and names what is missing.
+        return _ok("snapshot", snapshot_core.OFF_DETAIL)
     return _warn(
         "snapshot",
         "no codebase snapshot for the active project",

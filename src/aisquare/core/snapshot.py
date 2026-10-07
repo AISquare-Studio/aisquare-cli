@@ -16,7 +16,9 @@ does that (the session-start directive hands the agent paths), so it gates only
 the full pack. A ``too_large`` verdict, nothing stored, is only ever loaded from
 a snapshot.json written before ``skeleton_only`` existed. Repomix
 is a Node CLI — we shell out to ``repomix`` (or ``npx repomix``); if neither is
-available the snapshot is skipped, not fatal.
+available the snapshot is skipped, not fatal. The whole feature is optional: with
+no Node at all :func:`can_pack` is False and every surface reports it as off
+(:data:`OFF_DETAIL`), because memory and the hooks never needed it.
 """
 
 from __future__ import annotations
@@ -87,6 +89,21 @@ class RepomixUnavailableError(RuntimeError):
 #: rather than on whether ``npx`` exists -- Debian 12 ships Node 18 and Ubuntu
 #: 22.04 ships 12, so "npx is here" was true on machines that cannot pack at all.
 MIN_NODE = (22,)
+
+#: What every surface says on a machine where :func:`can_pack` is False: the
+#: doctor's repomix and snapshot rows, ``init`` and ``project onboard``. One
+#: sentence, so the places that describe the feature cannot drift apart. Snapshots
+#: are optional (the memory route needs nothing from Node), so this is a state,
+#: not a fault, and nothing that prints it offers a fix.
+OFF_DETAIL = (
+    f"off — codebase snapshots need Node.js {'.'.join(map(str, MIN_NODE))}+ "
+    "(optional; memory works without them)"
+)
+
+#: What ``init`` and ``project onboard`` say when :func:`can_pack` was True and
+#: still no snapshot came back: repomix ran and failed. Not :data:`OFF_DETAIL`,
+#: which sends someone to install a Node they already have.
+FAILED_DETAIL = "skipped — repomix ran but could not pack this repo"
 
 _NODE_VERSION = re.compile(r"v?(\d+(?:\.\d+)*)")
 
@@ -224,6 +241,33 @@ def head_sha(root: Path) -> str | None:
     except (subprocess.SubprocessError, OSError):
         return None
     return result.stdout.strip() or None
+
+
+def can_pack() -> bool:
+    """Whether this machine has what a pack runs on: a repomix (or ``npx`` to fetch
+    one) and a Node on PATH to run it.
+
+    The one answer to "are codebase snapshots possible here". The doctor's snapshot
+    and tiktoken rows and the line ``init`` and ``project onboard`` print when no
+    snapshot came back all read it, so they cannot disagree about whether the
+    feature is off. ``repomix`` and ``npx`` are both ``#!/usr/bin/env node``
+    scripts, so either without a Node cannot pack -- the ruling the doctor's
+    repomix row already makes (tests/test_repomix_check_gates_on_node.py).
+
+    PATH lookups only. No process is started, so a doctor run can ask it once per
+    row; whether the Node is NEW enough is the repomix row's question, answered
+    there with :func:`node_version`. It does not gate :func:`generate`, which
+    still tries whatever :func:`_repomix_base` finds -- this decides what is SAID
+    about a missing snapshot, never whether one is attempted.
+    """
+    if shutil.which("node") is None:
+        return False
+    return shutil.which("repomix") is not None or shutil.which("npx") is not None
+
+
+def skipped_detail() -> str:
+    """Why a pack that returned nothing returned nothing, as ``init`` and ``onboard`` say it."""
+    return FAILED_DETAIL if can_pack() else OFF_DETAIL
 
 
 def _repomix_base() -> list[str]:

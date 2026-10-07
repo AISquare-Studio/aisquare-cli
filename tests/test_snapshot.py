@@ -133,6 +133,62 @@ def test_repomix_base_still_reports_when_nothing_is_installed(
         snapshot._repomix_base()
 
 
+def _on_path(monkeypatch: pytest.MonkeyPatch, *present: str) -> None:
+    monkeypatch.setattr(
+        "aisquare.core.snapshot.shutil.which",
+        lambda name: f"/usr/bin/{name}" if name in present else None,
+    )
+
+
+@pytest.mark.parametrize(
+    ("present", "expected"),
+    [
+        # A packer and a Node to run it on: the two ways a pack can run.
+        (("node", "repomix"), True),
+        (("node", "npx"), True),
+        (("node", "npx", "repomix"), True),
+        # Either packer alone is a `#!/usr/bin/env node` script with no Node.
+        (("repomix",), False),
+        (("npx",), False),
+        (("npx", "repomix"), False),
+        # A Node with nothing to run on it.
+        (("node",), False),
+        # The memory-only machine.
+        ((), False),
+    ],
+)
+def test_can_pack_needs_a_packer_and_a_node(
+    monkeypatch: pytest.MonkeyPatch, present: tuple[str, ...], expected: bool
+) -> None:
+    _on_path(monkeypatch, *present)
+    assert snapshot.can_pack() is expected
+
+
+def test_can_pack_starts_no_process(monkeypatch: pytest.MonkeyPatch) -> None:
+    """PATH lookups only: the doctor asks it once per row, so it must stay cheap."""
+
+    def no_process(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("can_pack started a process")
+
+    monkeypatch.setattr("aisquare.core.snapshot.subprocess.run", no_process)
+    _on_path(monkeypatch, "node", "npx")
+    assert snapshot.can_pack() is True
+
+
+def test_a_missing_snapshot_is_off_without_node_and_failed_with_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The two sentences `init` and `project onboard` print when no snapshot came back."""
+    _on_path(monkeypatch)
+    off = snapshot.skipped_detail()
+    _on_path(monkeypatch, "node", "repomix")
+    failed = snapshot.skipped_detail()
+    assert off == snapshot.OFF_DETAIL
+    assert failed == snapshot.FAILED_DETAIL
+    # Telling someone who has Node to install Node is the confusion this split removes.
+    assert "Node" not in failed
+
+
 def test_child_output_is_decoded_as_utf8_not_the_locale_codec(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

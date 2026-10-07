@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -426,6 +427,37 @@ def test_unsubscribing_one_project_leaves_the_same_label_in_another(
         _until(ws, _pane("coder-3"))
     assert ("coder-1", "prj_a") not in panes.asked, "unsubscribed: no longer captured"
     assert ("coder-1", "prj_b") in panes.asked
+
+
+def test_a_pane_unsubscribed_while_it_is_captured_gets_no_frame(
+    runtime: Runtime, reads: Reads, tmp_path: Path
+) -> None:
+    """The capture runs on the pool while the socket reads on, so an unsubscribe can land
+    mid-capture. It wins: no frame is sent for the pane, and nothing is kept for it (a
+    frame kept for a label nobody watches is memory a client could pile up)."""
+    started, release = threading.Event(), threading.Event()
+
+    class SlowPanes(Panes):
+        def __call__(self, agent: str, project: str | None, history: int) -> dict[str, object]:
+            if agent == "slow":
+                started.set()
+                release.wait(10)
+            return super().__call__(agent, project, history)
+
+    client = _socket_client(runtime, tmp_path, reads, SlowPanes())
+    cap = remote_server.WS_PANE_SUBSCRIPTIONS_MAX
+    with client.websocket_connect(f"{base(runtime)}/ws") as ws:
+        ws.send_text(json.dumps({"subscribe": "slow"}))
+        assert started.wait(10), "the capture of slow never began"
+        ws.send_text(json.dumps({"unsubscribe": "slow"}))
+        # The reader answers a subscription past the cap at once, so when the error frame
+        # is here the unsubscribe sent before it has been read as well.
+        for n in range(cap + 1):
+            ws.send_text(json.dumps({"subscribe": f"coder-{n}"}))
+        _until(ws, lambda f: f["type"] == "error")
+        release.set()
+        after = [_until(ws, lambda f: f["type"] == "pane") for _ in range(cap)]
+    assert [frame["agent"] for frame in after] == [f"coder-{n}" for n in range(cap)]
 
 
 def test_subscribe_board_picks_which_projects_board_frames_arrive(

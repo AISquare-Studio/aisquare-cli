@@ -11,6 +11,7 @@ import contextlib
 import dataclasses
 import json
 import threading
+import tracemalloc
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -534,7 +535,8 @@ def _until(ws: Any, kind: str, *, limit: int = 60) -> dict[str, Any]:
 
 
 def _stream_app(runtime: Runtime, tmp_path: Path, **kw: Any) -> tuple[Any, Any]:
-    app = build_app(runtime, sources=_sources(), dist_dir=tmp_path, tick=kw.pop("tick", 0.02), **kw)
+    sources = kw.pop("sources", None) or _sources()
+    app = build_app(runtime, sources=sources, dist_dir=tmp_path, tick=kw.pop("tick", 0.02), **kw)
     return app, _unlocked(app, runtime)
 
 
@@ -598,7 +600,7 @@ def test_the_action_frame_shows_this_devices_ledger_only_when_it_has_entries(
     assert [action["request_id"] for action in actions] == ["next", "c0ffee"]
 
 
-# --- sockets per device, and the pane pool ------------------------------------------------
+# --- sockets per device, the pane pool, and what a socket keeps ---------------------------
 
 
 def test_a_fifth_socket_from_one_device_closes_its_oldest_with_4409(
@@ -665,6 +667,48 @@ def test_pane_captures_run_on_the_pane_pool_and_the_lifespan_shuts_it(
     assert app.kit.pane_pool is None
     with pytest.raises(RuntimeError):
         pool.submit(print)  # shut down with the server
+
+
+def test_a_socket_cycling_through_pane_labels_keeps_none_of_the_old_ones(
+    runtime: Runtime, tmp_path: Path
+) -> None:
+    """Unsubscribing forgets a pane's last frame along with its subscription.
+
+    The frame once stayed behind, so any unlocked device, a read-only one too, could
+    grow the server without bound: subscribe a fresh 4 000-character label, take its
+    frame (for an unknown agent, an error that repeats the label), unsubscribe, again.
+    That memory is the stream's own and out of a test's reach, so it is measured: what
+    ``tracemalloc`` sees allocated under this module and still held after 100 labels,
+    which is about 800 KB when every label's frame is kept.
+    """
+
+    def panes(agent: str, project: str | None, history: int) -> dict[str, object]:
+        return {"rows": [], "width": 0, "height": 0, "error": f"no live agent {agent!r}"}
+
+    sources = dataclasses.replace(_sources(), panes=panes)
+    _app, client = _stream_app(runtime, tmp_path, sources=sources, tick=0.005)
+    here = [tracemalloc.Filter(True, remote_server.__file__, all_frames=True)]
+
+    def cycle(ws: Any, n: int) -> None:
+        label = f"{n:03d}" + "x" * 4_000
+        ws.send_text(json.dumps({"subscribe": label}))
+        while _until(ws, "pane")["agent"] != label:
+            pass
+        ws.send_text(json.dumps({"unsubscribe": label}))
+
+    tracemalloc.start(32)
+    try:
+        with client.websocket_connect(f"{base(runtime)}/ws") as ws:
+            for n in range(5):  # the pool's thread and the caches exist before the count
+                cycle(ws, n)
+            before = tracemalloc.take_snapshot().filter_traces(here)
+            for n in range(5, 105):
+                cycle(ws, n)
+            after = tracemalloc.take_snapshot().filter_traces(here)
+    finally:
+        tracemalloc.stop()
+    held = sum(stat.size_diff for stat in after.compare_to(before, "filename"))
+    assert held < 200_000, f"{held} bytes more held after 100 labels than before them"
 
 
 # --- the public URL: authoritative sources only (SPEC §5.8) -------------------------------

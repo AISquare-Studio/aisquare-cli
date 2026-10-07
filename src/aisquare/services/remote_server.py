@@ -2206,16 +2206,22 @@ def build_remote_app(
         await websocket.accept()
         sid = device.sid
         loop = asyncio.get_running_loop()
-        panes_wanted: dict[tuple[str, str], None] = {}
-        """``(project ref, label)`` per pane subscription, oldest first; ``""`` is the CURRENT
-        project. A dict for its order: frames follow the order subscriptions came in."""
+        panes_wanted: dict[tuple[str, str], str | None] = {}
+        """``(project ref, label)`` per pane subscription, oldest first (``""`` is the CURRENT
+        project), to the JSON of the last ``pane`` frame it was sent (``None`` before the
+        first). A dict for its order: frames follow the order subscriptions came in. The
+        last frame lives WITH its subscription, so unsubscribing forgets both: a socket
+        that cycles through labels holds what its 8 subscriptions hold, and no more."""
         fleet_project: str | None = None
         """``None`` = the CURRENT project; a ``{subscribe_fleet: "<project>"}`` text frame
         picks another one's ``fleet`` frames (``""``/``null`` returns). The frame shape
         does not change, only WHICH project's ``fleet ls`` payload fills it."""
         board_project: str | None = None
         """The same, for ``board`` frames and ``{subscribe_board: "<project>"}``."""
-        last: dict[tuple[str, ...], str] = {}
+        last: dict[str, str] = {}
+        """The JSON of the last frame of every other kind, keyed by the kind alone and never by
+        a string the client sent, so it cannot grow with what a client sends. Switching
+        projects forgets that kind's frame, so the new project's goes out even if equal."""
         next_heartbeat = time.monotonic() + heartbeat
         first_tick = True
 
@@ -2239,39 +2245,32 @@ def build_remote_app(
                 frame["project"] = project
             await websocket.send_text(json.dumps(frame))
 
-        async def push_if_changed(
-            key: tuple[str, ...],
-            kind: str,
-            payload: object,
-            *,
-            agent: str | None = None,
-            project: str | None = None,
-        ) -> None:
+        async def push_if_changed(kind: str, payload: object) -> None:
             encoded = json.dumps(payload, sort_keys=True)
-            if last.get(key) != encoded:
-                last[key] = encoded
-                await send_frame(kind, payload, agent=agent, project=project)
+            if last.get(kind) != encoded:
+                last[kind] = encoded
+                await send_frame(kind, payload)
 
         async def tick_once() -> None:
             nonlocal next_heartbeat, first_tick
             board_ref = board_project
             try:
                 payload = await snapshot(f"board:{board_ref or ''}", lambda: reads.board(board_ref))
-                await push_if_changed(("board", board_ref or ""), "board", payload)
+                await push_if_changed("board", payload)
             except Exception as exc:
                 log.debug("remote: board frame skipped: %s", exc)
             fleet_ref = fleet_project
             try:
                 payload = await snapshot(f"fleet:{fleet_ref or ''}", lambda: reads.fleet(fleet_ref))
-                await push_if_changed(("fleet", fleet_ref or ""), "fleet", payload)
+                await push_if_changed("fleet", payload)
             except Exception as exc:
                 log.debug("remote: fleet frame skipped: %s", exc)
-            await push_if_changed(("remote",), "remote", runtime.remote_json())
+            await push_if_changed("remote", runtime.remote_json())
             for kind, payload in remote_needs.needs_ws_frames(kit):
-                await push_if_changed((kind,), kind, payload)
+                await push_if_changed(kind, payload)
             actions = kit.ledger.ledger_recent(device.id)
             if actions:
-                await push_if_changed(("action",), "action", {"actions": actions})
+                await push_if_changed("action", {"actions": actions})
             now = time.monotonic()
             if first_tick:
                 first_tick = False
@@ -2279,7 +2278,8 @@ def build_remote_app(
                 next_heartbeat = now + heartbeat
                 scanned = remote_needs.needs_scanned_iso(kit)
                 await send_frame("heartbeat", {"needs_scanned_at": scanned})
-            for project, label in list(panes_wanted):
+            for wanted in list(panes_wanted):
+                project, label = wanted
                 try:
                     # §4-L: history is a FETCH, live stays a stream — 0 keeps
                     # this frame exactly the §4-D shape it has always had.
@@ -2288,9 +2288,12 @@ def build_remote_app(
                     )
                 except Exception as exc:
                     payload = {"rows": [], "width": 0, "height": 0, "error": str(exc)}
-                await push_if_changed(
-                    ("pane", project, label), "pane", payload, agent=label, project=project or None
-                )
+                encoded = json.dumps(payload, sort_keys=True)
+                # Not wanted any more: unsubscribed while the capture ran, so no frame,
+                # and nothing kept for it either.
+                if wanted in panes_wanted and panes_wanted[wanted] != encoded:
+                    panes_wanted[wanted] = encoded
+                    await send_frame("pane", payload, agent=label, project=project or None)
 
         async def reader() -> None:
             nonlocal fleet_project, board_project
@@ -2314,8 +2317,7 @@ def build_remote_app(
                     if (project, label) in panes_wanted or len(
                         panes_wanted
                     ) < WS_PANE_SUBSCRIPTIONS_MAX:
-                        panes_wanted[(project, label)] = None
-                        last.pop(("pane", project, label), None)
+                        panes_wanted[(project, label)] = None  # its frame goes out next tick
                     else:
                         refusal = _error_body(
                             "too_many_subscriptions",
@@ -2329,11 +2331,11 @@ def build_remote_app(
                 target = message.get("subscribe_fleet", False)
                 if target is None or isinstance(target, str):
                     fleet_project = target or None
-                    last.pop(("fleet", fleet_project or ""), None)
+                    last.pop("fleet", None)
                 target = message.get("subscribe_board", False)
                 if target is None or isinstance(target, str):
                     board_project = target or None
-                    last.pop(("board", board_project or ""), None)
+                    last.pop("board", None)
 
         runtime.register_socket(sid, revoked)
         kit.kit_socket_opened(device.id, closer)

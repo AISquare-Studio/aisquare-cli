@@ -416,6 +416,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         self._restore_selection()
         self.remote.restore()
         self.set_interval(30.0, self.remote.enforce_auto_off)
+        self.set_interval(30.0, self.remote.revive_tunnel_if_dead)
 
     # --- what was open (#144) ---------------------------------------------------------
 

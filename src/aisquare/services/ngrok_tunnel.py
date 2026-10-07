@@ -11,17 +11,26 @@ Pure functions (:func:`build_public_url`, :func:`parse_log_line`,
 :func:`missing_binary_message`) carry the logic, so PLAN §4-H's proxies for the
 "ngrok present" check — the URL builder and the missing-binary message — are unit
 tests; the real tunnel is Rabia's QA.
+
+A free ngrok URL changes every time ngrok starts, and with it the link, the
+cookie's origin and a home-screen app. ``AISQUARE_REMOTE_NGROK_URL`` names a
+static domain instead (``--url``), which survives restarts (SPEC §5.8). A server
+that was never told its URL, ``asq remote serve`` beside a hand-started ngrok,
+can ask ngrok's local agent API (:func:`discover_ngrok_public_url`).
 """
 
 from __future__ import annotations
 
 import json
+import os
+import re
 import shutil
 import subprocess
 import threading
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlsplit
 
 INSTALL_HINT = (
     "ngrok is not installed. Install it: https://ngrok.com/download "
@@ -33,6 +42,19 @@ AUTHTOKEN_HINT = (
     "ngrok needs an authtoken: run  ngrok config add-authtoken <token>  "
     "(from https://dashboard.ngrok.com/get-started/your-authtoken) and turn Remote on again."
 )
+TOO_OLD_HINT = (
+    "this ngrok is too old for --url (the static domain in AISQUARE_REMOTE_NGROK_URL) — "
+    "run  ngrok update  and turn Remote on again."
+)
+NGROK_URL_ENV = "AISQUARE_REMOTE_NGROK_URL"
+"""A static ngrok domain (``name.ngrok-free.app``, with or without ``https://``) to serve on."""
+NGROK_AGENT_API = "http://127.0.0.1:4040/api/tunnels"
+"""The running ngrok agent's own API, on loopback: its tunnels and their public URLs."""
+NGROK_AGENT_API_MAX = 1 << 20
+
+_TOO_OLD_FOR_URL = re.compile(r"(?:unknown flag|flag provided but not defined):\s*-{1,2}url\b")
+"""What ngrok v3 (``unknown flag: --url``) and v2 (``flag provided but not defined: -url``)
+print as plain text on stderr, before any JSON log, when they do not know ``--url``."""
 
 
 def build_public_url(host: str, token: str) -> str:
@@ -69,11 +91,15 @@ class LogEvent:
 
 
 def parse_log_line(line: str) -> LogEvent:
-    """What one JSON log line means for us; a non-JSON or irrelevant line means nothing."""
+    """What one log line means for us; an irrelevant line means nothing.
+
+    The lines are JSON, but for one: an ngrok too old for ``--url`` says so in
+    plain text before it logs anything, and that becomes :data:`TOO_OLD_HINT`.
+    """
     try:
         record: Any = json.loads(line)
     except ValueError:
-        return LogEvent()
+        return LogEvent(error=TOO_OLD_HINT) if _TOO_OLD_FOR_URL.search(line) else LogEvent()
     if not isinstance(record, dict):
         return LogEvent()
     if record.get("msg") == "started tunnel" and isinstance(record.get("url"), str):
@@ -83,12 +109,84 @@ def parse_log_line(line: str) -> LogEvent:
         text = str(err)
         if "authtoken" in text.lower() or "ERR_NGROK_4018" in text:
             text = AUTHTOKEN_HINT
+        elif _TOO_OLD_FOR_URL.search(text):
+            text = TOO_OLD_HINT
         return LogEvent(error=text)
     return LogEvent()
 
 
-def ngrok_command(port: int, binary: str = "ngrok") -> list[str]:
-    return [binary, "http", str(port), "--log=stdout", "--log-format=json"]
+def ngrok_static_host(raw: str | None) -> str | None:
+    """The host ``--url`` takes, from a static domain however it was written; ``None`` if blank.
+
+    ``name.ngrok-free.app``, ``https://name.ngrok-free.app`` and either with a
+    trailing slash or a path all give ``name.ngrok-free.app``.
+    """
+    text = (raw or "").strip()
+    if not text:
+        return None
+    try:
+        return urlsplit(text if "://" in text else f"https://{text}").hostname or None
+    except ValueError:  # an unparseable value is no domain; ngrok picks a random one
+        return None
+
+
+def ngrok_command(port: int, binary: str = "ngrok", *, url: str | None = None) -> list[str]:
+    """``ngrok http <port>`` with its log as JSON lines, on the static domain ``url`` if one."""
+    command = [binary, "http", str(port), "--log=stdout", "--log-format=json"]
+    return [*command, f"--url={url}"] if url else command
+
+
+def _ngrok_agent_api_get(url: str, timeout: float) -> bytes:
+    """``GET url`` on loopback: no proxy, no redirect followed, at most 1 MiB of answer."""
+    import http.client
+
+    parts = urlsplit(url)
+    connection = http.client.HTTPConnection(
+        parts.hostname or "127.0.0.1", parts.port or 80, timeout=timeout
+    )
+    try:
+        connection.request("GET", parts.path or "/")
+        response = connection.getresponse()
+        if response.status != 200:
+            raise OSError(f"ngrok's agent API answered {response.status}")
+        return response.read(NGROK_AGENT_API_MAX)
+    finally:
+        connection.close()
+
+
+def discover_ngrok_public_url(
+    port: int,
+    timeout: float = 1.0,
+    *,
+    fetch: Callable[[str, float], bytes] | None = None,
+) -> str | None:
+    """The ``https`` public URL ngrok tunnels to ``port``, from its local agent API.
+
+    For a server that was never told where phones reach it: ``asq remote serve``
+    beside a hand-started ``ngrok http 8750``. Only ngrok's own loopback API is
+    asked, never anything a request carried, and only an ``https`` tunnel whose
+    ``config.addr`` ends in ``:<port>`` counts: another tunnel of the same agent
+    serves something else. ``None`` for anything else, no ngrok running
+    included; this never raises. ``fetch`` (URL, timeout → body) is the tests'.
+    """
+    try:
+        listing: Any = json.loads((fetch or _ngrok_agent_api_get)(NGROK_AGENT_API, timeout))
+    except Exception:  # refused, timed out, not ngrok, not JSON: all "no tunnel known"
+        return None
+    tunnels = listing.get("tunnels") if isinstance(listing, dict) else None
+    for tunnel in tunnels if isinstance(tunnels, list) else []:
+        if not isinstance(tunnel, dict):
+            continue
+        public_url, config = tunnel.get("public_url"), tunnel.get("config")
+        addr = config.get("addr") if isinstance(config, dict) else None
+        if (
+            isinstance(public_url, str)
+            and public_url.startswith("https://")
+            and isinstance(addr, str)
+            and addr.rstrip("/").endswith(f":{port}")
+        ):
+            return public_url
+    return None
 
 
 class NgrokTunnel:
@@ -120,6 +218,9 @@ class NgrokTunnel:
         self._url_ready = threading.Event()
         self.public_url: str | None = None
         self.error: str | None = None
+        self.static_host = ngrok_static_host(os.environ.get(NGROK_URL_ENV))
+        """The static domain ngrok serves on (``--url``), from ``AISQUARE_REMOTE_NGROK_URL``;
+        ``None``: ngrok picks a new URL every time it starts."""
 
     # --- lifecycle ------------------------------------------------------------------
 
@@ -130,7 +231,7 @@ class NgrokTunnel:
             if self._which(self.binary) is None:
                 self.error = missing_binary_message(self.binary)
                 return self.error
-            command = ngrok_command(self.port, self.binary)
+            command = ngrok_command(self.port, self.binary, url=self.static_host)
         try:
             self._process = self._popen(
                 command,

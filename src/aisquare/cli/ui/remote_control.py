@@ -20,6 +20,7 @@ path to ``allow_write=True`` is the user's switch.
 
 from __future__ import annotations
 
+import contextlib
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass, replace
@@ -181,6 +182,7 @@ class RemoteController:
         if url is not None and self.info is not None:
             self.public_url = build_public_url(url, self.info.token)
             self.message = None
+            self._note_public_url(self.public_url)
         else:
             self.message = tunnel.error or "ngrok did not announce a tunnel in time"
 
@@ -359,3 +361,83 @@ class RemoteController:
     def _set_state(self, **changes: Any) -> None:
         self.state = replace(self.state, **changes)
         save_remote_state(self.state)
+
+    # --- the tunnel watchdog ---------------------------------------------------------------------
+
+    REVIVE_SECONDS = 60.0
+    """A dead tunnel is started again at most this often."""
+    _revived_at: datetime | None = None
+    """When :meth:`revive_tunnel_if_dead` last started ngrok."""
+    _revived_tunnel: NgrokTunnel | None = None
+    """The tunnel the last revive started. Should it die before it announces a URL, it is
+    revived all the same: a tunnel of this Remote did come up before it."""
+    _link_before_revive: str | None = None
+    """The public link the Remote had when its tunnel died, so the message can say whether
+    the new one differs, however many restarts it took to get one."""
+
+    def revive_tunnel_if_dead(self) -> bool:
+        """Start ngrok again when it died under a Remote that is still on; ``True`` when it did.
+
+        The app runs this every 30 s. Without it, a tunnel that died in the night
+        left the server up and unreachable, and the phone's link dead until
+        someone at the desk noticed. The FIRST tunnel of a Remote, when it never
+        announced a URL, is left alone: it failed for a reason the status line
+        already shows (no authtoken, an ngrok too old for ``--url``), and would
+        fail the same way again. Once one came up, every dead tunnel is revived,
+        a restarted one that died before announcing included: a static domain
+        still held by the session that just died (``ERR_NGROK_334``), or a network
+        that is down for a while, clears within minutes, and the watchdog must
+        still be trying then. The new link is shown, and noted for push links, as
+        soon as ngrok announces it.
+        """
+        dead = self.tunnel
+        if not self.running or dead is None or dead.running:
+            return False
+        if dead.public_url is None and dead is not self._revived_tunnel:
+            return False
+        now = self._now()
+        if self._revived_at is not None and now - self._revived_at < timedelta(
+            seconds=self.REVIVE_SECONDS
+        ):
+            return False
+        self._revived_at = now
+        tunnel = self._tunnel_factory(self._port)
+        failure = tunnel.start_tunnel()
+        if failure is not None:  # the dead one stays, so the next minute tries again
+            self.message = failure
+            return False
+        dead.stop_tunnel()
+        if self.public_url is not None:  # else the last restart never came up: keep the link
+            self._link_before_revive = self.public_url
+        self.tunnel = self._revived_tunnel = tunnel
+        self.public_url = None  # the modal shows the local link until ngrok announces one
+        self.message = "ngrok stopped — restarting it…"
+        self._waiter = threading.Thread(
+            target=self._await_revived_url,
+            args=(tunnel, self._link_before_revive),
+            name="ngrok-url",
+            daemon=True,
+        )
+        self._waiter.start()
+        return True
+
+    def _await_revived_url(self, tunnel: NgrokTunnel, dead_link: str | None) -> None:
+        """:meth:`_await_url`, then say ngrok was restarted, and whether the link changed.
+
+        A restart that dies before it announces leaves :meth:`_await_url`'s
+        message, ngrok's own error, on the status line until the next one.
+        """
+        self._await_url(tunnel)
+        if tunnel is self.tunnel and self.public_url is not None:
+            changed = "" if self.public_url == dead_link else "; the link changed"
+            self.message = f"ngrok stopped — restarted it{changed}"
+
+    def _note_public_url(self, url: str) -> None:
+        """Tell the server where phones reach it, so push links lead there (SPEC §5.8).
+
+        Only an https URL on a DNS name is an origin: a tunnel that announces
+        anything else leaves push links without one, rather than raising in the
+        thread that waited for it.
+        """
+        with contextlib.suppress(ValueError):
+            self._server.note_public_url(url)

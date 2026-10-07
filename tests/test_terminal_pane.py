@@ -657,10 +657,10 @@ def test_paste_goes_through_the_paste_buffer_not_send_keys(fake: FakeTmux, tmp_p
     assert fake.sent() == []  # the negative: no Enter per line
 
 
-def test_a_literal_ending_in_the_separator_takes_the_paste_path(
-    fake: FakeTmux, tmp_path: Path
-) -> None:
-    """tmux reads an argument ending in ';' as a command separator (measured: sends nothing)."""
+def test_a_typed_separator_is_a_keystroke_not_a_paste(fake: FakeTmux, tmp_path: Path) -> None:
+    """``;`` once went through the paste buffer, because ``send-keys -l -- ';'`` sent
+    nothing. Literal text now goes as hex bytes, which tmux never parses, so ``;`` is
+    typed like any other character: no bracketed paste, no two extra tmux processes."""
 
     async def drive() -> None:
         host = Host(fake.server(tmp_path), "%1")
@@ -671,8 +671,8 @@ def test_a_literal_ending_in_the_separator_takes_the_paste_path(
             await pilot.pause()
 
     run(drive())
-    assert ("load-buffer", ";") in fake.input and ("paste-buffer", "%1") in fake.input
-    assert fake.sent_text() == ["a"]
+    assert fake.sent_text() == [";", "a"]
+    assert not [call for call in fake.input if call[0] in ("load-buffer", "paste-buffer")]
 
 
 def test_wheel_scrolls_history_clamped_and_any_key_returns_to_live(

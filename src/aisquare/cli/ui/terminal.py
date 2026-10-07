@@ -137,7 +137,6 @@ from textual.timer import Timer
 from textual.widget import Widget
 
 from aisquare.core.keys import (
-    ARGV_SEPARATOR,
     EXTENDED_MINIMUM,
     Drop,
     Translation,
@@ -1972,12 +1971,10 @@ class TerminalPane(Widget, can_focus=True):
         try:
             if translation.kind == "key":
                 self.server.send_keys(self.pane_id, translation.value)
-            elif translation.value.endswith(ARGV_SEPARATOR):
-                # tmux reads an argument ending in ';' as a command separator, so
-                # ``send-keys -l -- ';'`` sends nothing: such text goes through the
-                # paste buffer (stdin, never argv) until core.tmux escapes it.
-                self.server.paste(self.pane_id, translation.value)
             else:
+                # Hex bytes (``send-keys -H``), which no tmux parser reads: a typed
+                # ``;`` arrives as itself, never as tmux's command separator, and is
+                # a keystroke, not a bracketed paste the agent would see as one.
                 self.server.send_literal(self.pane_id, translation.value)
         except TmuxUnavailable:
             self._fail(TMUX_UNAVAILABLE)

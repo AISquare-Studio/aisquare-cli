@@ -20,17 +20,30 @@ still guards"):
 - ``_unresolved_repo_links`` — every URL into this repository's ``main`` must
   name a file in this checkout, and a ``#fragment`` on a Markdown page one of
   that page's headings. Absolute links are what PyPI needs and what nothing
-  else checks: a renamed docs page would leave the front page pointing at a
-  404, on every release page from then on. Fenced code is read here, because
-  the one-liner's URL lives in a fence and is the most-copied line on the page.
+  else checks: without this, renaming a docs page leaves the README on ``main``
+  pointing at a 404. Fenced code is read here, because the one-liner's URL
+  lives in a fence and is the most-copied line on the page.
+
+WHAT THIS CANNOT PROTECT. It reads this checkout. A release's PyPI page keeps
+the README it shipped with, and its ``blob/main`` links follow ``main``, so
+renaming a page the README links still breaks every older release page. Leave a
+stub at the old path when you rename one.
 
 PENDING FILES, AND WHY THE EXCUSE EXPIRES. Two links on the README name files
 that other lanes of the same release commit: the demo GIF and the Claude Code
 plugin page. They are excused only while pyproject's version is still the one
-this branch was cut at. The release commit bumps the version, and from then on
-a missing file fails here — so a slipped GIF or plugin page fails the release
-commit's CI instead of shipping a broken image or a dead link to PyPI. Each
-entry must still be cited, so the list cannot outlive the link it excuses.
+this branch was cut at, ``_PENDING_WHILE_VERSION``. The release commit bumps
+the version, so a slipped GIF or plugin page fails that commit's CI instead of
+shipping a broken image or a dead link to PyPI. Each entry must still be
+linked, so the list cannot outlive the link it excuses.
+
+ANY bump ends the excuse, on purpose. A release merged in from ``main`` before
+both files land (a 0.8.0, say) also turns this test red; that merge commit then
+moves ``_PENDING_WHILE_VERSION`` to the merged version. A bound such as "below
+0.9.0" would not need that edit, and was rejected: the release's number is the
+owner's call, and if it is 0.8.0 that bound would excuse a missing file on the
+release commit itself. Ending early is the safe direction: this branch goes
+red, never a PyPI page.
 """
 
 from __future__ import annotations
@@ -57,13 +70,16 @@ _PENDING: dict[str, str] = {
 }
 _PENDING_WHILE_VERSION = "0.7.0"
 
-_FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
+#: A fence opener. A backtick fence's info string holds no backtick (CommonMark).
+_FENCE = re.compile(r"^ {0,3}(`{3,}(?=[^`]*$)|~{3,})")
 _INLINE_CODE = re.compile(r"(`+)(?:(?!\1).)+?\1")
 #: Inline links and images, badges included: `[![alt](image)](link)` yields both.
 _INLINE_TARGET = re.compile(r"\]\(\s*<?([^)\s>]*)")
 #: Reference-style definitions: `[label]: target`.
 _DEFINITION_TARGET = re.compile(r"^ {0,3}\[[^\]]+\]:\s*<?([^\s>]+)", re.MULTILINE)
-_HTML_TARGET = re.compile(r"""\b(?:src|href)\s*=\s*["']([^"']*)["']""", re.IGNORECASE)
+#: Quoted or not: `<img src=docs/demo.gif>` is valid HTML and PyPI keeps `img[src]`.
+#: After whitespace only, as an attribute is, so `?src=` inside a URL is not read.
+_HTML_TARGET = re.compile(r"""(?<=\s)(?:src|href)\s*=\s*["']?\s*([^"'\s>]*)""", re.IGNORECASE)
 _ABSOLUTE = re.compile(r"^(?:https?://|mailto:)", re.IGNORECASE)
 #: The two spellings of a link into this repository's `main` the README uses.
 _BLOB = "https://github.com/AISquare-Studio/aisquare-cli/blob/main"
@@ -81,21 +97,32 @@ def _too_long(text: str) -> bool:
     return len(text.splitlines()) > MAX_LINES
 
 
+def _outside_fences(markdown: str) -> list[str]:
+    """The lines a renderer reads as Markdown: everything outside fenced code.
+
+    A fence closes only on a run of its opener's character at least as long as
+    the opener, with nothing after it but spaces (CommonMark, fenced code
+    blocks). So a ```` fence can hold a ``` line, and a ```sh line inside a
+    block does not close it. One walker for both readers below: two copies of
+    a fence rule are how one of them goes stale.
+    """
+    kept: list[str] = []
+    fence: tuple[str, int] | None = None
+    for line in markdown.splitlines():
+        if fence is None:
+            opener = _FENCE.match(line)
+            if opener:
+                fence = (opener.group(1)[0], len(opener.group(1)))
+                continue
+            kept.append(line)
+        elif re.fullmatch(rf" {{0,3}}{re.escape(fence[0])}{{{fence[1]},}}\s*", line):
+            fence = None
+    return kept
+
+
 def _prose(text: str) -> str:
     """The text with fenced blocks and inline code spans removed."""
-    kept: list[str] = []
-    fence: str | None = None
-    for line in text.splitlines():
-        opener = _FENCE.match(line)
-        if fence is None and opener:
-            fence = opener.group(1)[0] * 3
-            continue
-        if fence is not None:
-            if line.strip().startswith(fence):
-                fence = None
-            continue
-        kept.append(_INLINE_CODE.sub("", line))
-    return "\n".join(kept)
+    return "\n".join(_INLINE_CODE.sub("", line) for line in _outside_fences(text))
 
 
 def _targets(text: str) -> list[str]:
@@ -133,16 +160,7 @@ def _anchors(markdown: str) -> set[str]:
     """The anchors GitHub gives a page's headings, numbered when they repeat."""
     seen: dict[str, int] = {}
     found: set[str] = set()
-    fence: str | None = None
-    for line in markdown.splitlines():
-        opener = _FENCE.match(line)
-        if fence is None and opener:
-            fence = opener.group(1)[0] * 3
-            continue
-        if fence is not None:
-            if line.strip().startswith(fence):
-                fence = None
-            continue
+    for line in _outside_fences(markdown):
         heading = re.match(r"^ {0,3}#{1,6}\s+(.*?)\s*#*\s*$", line)
         if heading is None:
             continue
@@ -226,8 +244,9 @@ def test_every_repo_link_in_the_readme_resolves() -> None:
         + "\n  ".join(unresolved)
         + "\nOn PyPI and GitHub these are a dead link or a broken image. Either land "
         "the file, or drop the line from the README. A file another lane is still "
-        "committing is excused in _PENDING only until the release commit bumps the "
-        "version."
+        f"committing is excused in _PENDING only while the version is "
+        f"{_PENDING_WHILE_VERSION}; if a merge from main moved the version before the "
+        "file landed, move _PENDING_WHILE_VERSION in that merge."
     )
 
 
@@ -257,7 +276,13 @@ _RELATIVE_SHAPES = {
     "bare anchor": "Read [part one](#part-1--memory-start-here) first.",
     "reference-style definition": "[guide]: docs/fleet.md",
     "html image": '<img src="docs/demo.gif" alt="demo">',
+    "html image, unquoted": "<img src=docs/demo.gif alt=demo>",
     "html link": '<a href="CONTRIBUTING.md">contributing</a>',
+    # The fence walker must not lose its place, or everything after a block is
+    # read as code and passes unread.
+    "after a fence that holds a shorter fence": "````\n```\n````\nSee [x](docs/fleet.md).",
+    "after a fence holding a line with an info string": "```\n```sh\n```\nSee [x](docs/fleet.md).",
+    "after a line that only looks like a fence": "``` not`a fence\nSee [x](docs/fleet.md).",
 }
 
 
@@ -275,7 +300,11 @@ _ABSOLUTE_SHAPES = {
     "badge": "[![PyPI](https://img.shields.io/pypi/v/aisquare-cli.svg)](https://pypi.org/project/aisquare-cli/)",
     "mail link": "[mail us](mailto:security@example.com)",
     "a relative link inside a fence": "```markdown\nSee [the guide](docs/fleet.md).\n```",
+    "a relative link inside a fence that holds a shorter fence": (
+        "````markdown\n```\nSee [the guide](docs/fleet.md).\n```\n````"
+    ),
     "a relative link inside inline code": "Write `[the guide](docs/fleet.md)` in a doc page.",
+    "an absolute link whose query says src=": "[x](https://example.com/page?src=readme)",
 }
 
 
@@ -292,9 +321,12 @@ def tree(tmp_path: Path) -> Path:
     """A checkout with one page, one script and nothing else."""
     (tmp_path / "docs").mkdir()
     (tmp_path / "docs" / "install.md").write_text(
-        "# Install\n\n## Start the GUI\n\n```sh\n# not a heading\n```\n", encoding="utf-8"
+        "# Install\n\n## Start the GUI\n\n```sh\n# not a heading\n```\n\n"
+        "````markdown\n```\n# nested comment\n```\n````\n",
+        encoding="utf-8",
+        newline="\n",
     )
-    (tmp_path / "install.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+    (tmp_path / "install.sh").write_text("#!/bin/sh\n", encoding="utf-8", newline="\n")
     return tmp_path
 
 
@@ -303,6 +335,9 @@ _UNRESOLVED_SHAPES = {
     "a raw file that does not exist, in a fence": f"```sh\ncurl -fsSL {_RAW}/gone.sh | sh\n```",
     "a heading the page does not have": f"[x]({_BLOB}/docs/install.md#no-such-heading)",
     "a heading that is only a comment in a fence": f"[x]({_BLOB}/docs/install.md#not-a-heading)",
+    "a heading that is only a comment in a nested fence": (
+        f"[x]({_BLOB}/docs/install.md#nested-comment)"
+    ),
 }
 
 
@@ -332,14 +367,19 @@ def test_resolving_repo_links_are_not_accused(shape: str, tree: Path) -> None:
 
 
 def test_a_pending_file_is_excused_only_until_the_release(tree: Path) -> None:
-    """The expiry is the point: a slipped file must fail the release commit."""
+    """The expiry is the point: a slipped file must fail the release commit.
+
+    Whatever the release is numbered. 0.8.0 is pinned as NOT excused: it is
+    both "a release merged in from main" and a possible number for this
+    branch's own release, and only failing closed is safe for the second.
+    """
     gif = f"![demo]({_RAW}/docs/demo.gif)"
     pending = {"docs/demo.gif": "another lane commits it"}
 
-    before = _unresolved_repo_links(gif, tree, version=_PENDING_WHILE_VERSION, pending=pending)
-    after = _unresolved_repo_links(gif, tree, version="9.9.9", pending=pending)
-    unlisted = _unresolved_repo_links(gif, tree, version=_PENDING_WHILE_VERSION, pending={})
+    def missing(version: str, excuses: dict[str, str]) -> list[str]:
+        return _unresolved_repo_links(gif, tree, version=version, pending=excuses)
 
-    assert before == [], f"a pending file was accused before the release: {before}"
-    assert after, "a pending file was still excused after the version moved on"
-    assert unlisted, "a missing file that nothing excuses went unreported"
+    assert missing(_PENDING_WHILE_VERSION, pending) == [], "accused on the base version"
+    for released in ("0.8.0", "0.9.0rc1", "0.9.0"):
+        assert missing(released, pending), f"still excused at {released}"
+    assert missing(_PENDING_WHILE_VERSION, {}), "a missing file nothing excuses went unreported"

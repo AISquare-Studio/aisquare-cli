@@ -40,7 +40,6 @@ from aisquare.core.version import __version__
 
 app = typer.Typer(
     cls=GlobalFlagsGroup,
-    help="One terminal over your projects and your coding agents.",
     no_args_is_help=False,
     context_settings={"help_option_names": ["-h", "--help"]},
     pretty_exceptions_show_locals=False,
@@ -86,11 +85,11 @@ def main_callback(
     ] = "default",
     no_color: Annotated[bool, typer.Option("--no-color", help="Disable coloured output.")] = False,
 ) -> None:
-    """One terminal over your projects and your coding agents.
+    """One terminal over your projects and your coding agents: task a manager in
+    plain words, and it runs the coders, testers and reviewers for you.
 
-    Task a manager in plain words, and it runs the coders, testers and
-    reviewers for you. Underneath, a memory keeps your preferences and each
-    project's conventions across sessions.
+    Underneath, a memory keeps your preferences and each project's conventions
+    across sessions.
     """
     state = RuntimeState(
         verbose=verbose,

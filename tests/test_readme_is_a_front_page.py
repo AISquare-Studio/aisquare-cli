@@ -38,12 +38,11 @@ renaming a page the README links still breaks every older release page. Leave a
 stub at the old path when you rename one.
 
 PENDING FILES, AND WHY THE EXCUSE EXPIRES. A link on the README may name a file
-another lane of the same release commits (the demo GIF was one until it
-landed; the Claude Code plugin page is one now). Such a file is excused only
-while pyproject's version is still the one
+that another lane of the same release has yet to commit; ``_PENDING`` lists
+them. Such a file is excused only while pyproject's version is still the one
 this branch was cut at, ``_PENDING_WHILE_VERSION``. The release commit bumps
-the version, so a slipped GIF or plugin page fails that commit's CI instead of
-shipping a broken image or a dead link to PyPI. Each entry must still be
+the version, so a file that slipped fails that commit's CI instead of shipping
+a broken image or a dead link to PyPI. Each entry must still be
 linked, so the list cannot outlive the link it excuses.
 
 ANY bump ends the excuse, on purpose. A release merged in from ``main`` before

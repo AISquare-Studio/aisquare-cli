@@ -24,5 +24,9 @@ $ aisquare doctor
 
 **Environment**
 - aisquare-cli version: `aisquare --version`
-- OS:
-- Install method: pipx / pip / from source
+- Claude Code version: `claude --version`
+- OS (on Windows, say whether this is inside WSL2):
+- Install method: one-line installer / `uv tool install` / pipx / pip / from source
+
+<!-- A security problem? Please don't file it here: SECURITY.md says how to
+report it privately. -->

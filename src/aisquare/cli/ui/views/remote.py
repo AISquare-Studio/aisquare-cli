@@ -257,9 +257,10 @@ class RemotePanel(ModalScreen[None]):
         if not self._device_ids or row < 0 or row >= len(self._device_ids):
             return
         device_id = self._device_ids[row]
-        self.controller.revoke_device(device_id)
+        revoked = self.controller.revoke_device(device_id)
         self._device_ids = []  # force the table to be rebuilt on the next paint
-        self.notify(f"Revoked {device_id}")
+        if revoked:  # else the status line says why not
+            self.notify(f"Revoked {device_id}")
 
     def action_close_panel(self) -> None:
         self.dismiss(None)

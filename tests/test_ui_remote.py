@@ -562,6 +562,85 @@ def test_the_write_switch_is_remote_jsons_whatever_an_older_state_json_says() ->
     drive(go, tunnel=missing_ngrok)
 
 
+def refuse_remote_json(monkeypatch: pytest.MonkeyPatch) -> None:
+    """From now on ``remote.json`` cannot be replaced, as in a read-only or full home."""
+
+    def refuse(path: Path, **kwargs: object) -> object:
+        raise PermissionError(13, "Permission denied", str(path))
+
+    monkeypatch.setattr(remote_server, "replacement", refuse)
+
+
+def test_a_remote_json_that_will_not_write_leaves_the_ui_up_at_start_and_remote_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Remote that was on comes back in ``on_mount``, and the deadline it could not write
+    raised out of it: ``asq ui`` ended at start, uvicorn still serving (r2 review of #243)."""
+    update_state("remote_enabled", True)
+    Runtime(paths.remote_state_path(), paths.remote_audit_path())  # an earlier Remote's file
+    refuse_remote_json(monkeypatch)
+
+    async def go(pilot: Pilot[None]) -> None:
+        app = pilot.app
+        assert isinstance(app, FleetApp)
+        assert not app.remote.running
+        assert remote_server.remote_server_status()["running"] is False
+        modal = await open_panel(pilot)
+        assert modal.query_one("#remote-on", Switch).value is False
+        status = shown(modal.query_one("#remote-status", Static))
+        assert status.startswith("Remote could not start — remote.json could not be written")
+
+    drive(go, tunnel=missing_ngrok)
+
+
+def test_a_remote_json_that_will_not_write_is_a_sentence_for_each_control_of_the_panel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The switch, the Auto-off picker, Regenerate and Revoke raised into Textual's handlers,
+    and the exception ended the fleet UI while Remote kept serving (r2 review of #243)."""
+
+    async def go(pilot: Pilot[None]) -> None:
+        app = pilot.app
+        assert isinstance(app, FleetApp)
+        modal = await open_panel(pilot)
+        modal.query_one("#remote-on", Switch).toggle()
+        await pilot.pause()
+        runtime = remote_server.runtime()
+        assert runtime.unlock_device(runtime.password, "iPhone Safari") is not None
+        modal.repaint()
+        await pilot.pause()
+        refuse_remote_json(monkeypatch)
+
+        def status() -> str:
+            return shown(modal.query_one("#remote-status", Static))
+
+        modal.query_one("#remote-auto-off", Select).value = 30
+        await pilot.pause()
+        assert status().startswith("auto-off could not be saved to remote.json — [Errno 13]")
+        modal.query_one("#remote-revoke", Button).press()
+        await pilot.pause()
+        assert "could not be revoked in remote.json" in status()
+        modal.query_one("#remote-regen", Button).press()
+        await pilot.pause()
+        assert status().startswith("the new password could not be saved to remote.json")
+        assert app.screen is modal and app.remote.running
+
+        modal.query_one("#remote-on", Switch).toggle()  # off still goes off
+        await pilot.pause()
+        assert not app.remote.running
+        assert remote_server.remote_server_status()["running"] is False
+        assert "devices could not be revoked" in status()
+
+        modal.query_one("#remote-on", Switch).toggle()  # and on does not stay on without it
+        await pilot.pause()
+        assert app.screen is modal and not app.remote.running
+        assert modal.query_one("#remote-on", Switch).value is False
+        assert status().startswith("Remote could not start — remote.json could not be written")
+        assert remote_server.remote_server_status()["running"] is False
+
+    drive(go, tunnel=missing_ngrok)
+
+
 def test_the_modal_shows_failed_unlocks_and_a_deadline_a_phone_extended() -> None:
     async def go(pilot: Pilot[None]) -> None:
         app = pilot.app

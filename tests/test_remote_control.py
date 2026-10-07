@@ -204,9 +204,16 @@ class FakeServer(types.ModuleType):
         self.server_auto_off_at: datetime | None = None
         """What ``remote_auto_off_at()`` answers: the last ``set_auto_off``, or a later
         deadline a test sets to stand for one the phone extended."""
+        self.unwritable: OSError | None = None
+        """Raised by every call that writes ``remote.json``, as the real module raises a
+        full disk's or a read-only home's error."""
         self.calls: list[str] = []
         self.DEFAULT_PORT = 8750
         self.RemoteInfo = remote_server.RemoteInfo
+
+    def _write_remote_json(self) -> None:
+        if self.unwritable is not None:
+            raise self.unwritable
 
     def start_remote_server(
         self, dist_dir: Path | None, port: int = 8750
@@ -231,23 +238,28 @@ class FakeServer(types.ModuleType):
         }
 
     def revoke_remote_device(self, device_id: str) -> None:
+        self._write_remote_json()
         self.revoked.append(device_id)
         self.devices = [d for d in self.devices if d.get("id") != device_id]
 
     def set_allow_write(self, enabled: bool) -> None:
+        self._write_remote_json()
         self.allow_write_calls.append(enabled)
         self.allow_write = enabled
 
     def set_auto_off(self, at: datetime | None) -> None:
+        self._write_remote_json()
         self.auto_off_calls.append(at)
         self.server_auto_off_at = at
 
     def regenerate_password(self, new_link: bool = False) -> str:
+        self._write_remote_json()
         self.password = "ember-glade-heron-indigo"
         return self.password
 
     def revoke_every_remote_device(self, reason: str) -> None:
         self.calls.append("revoke_every_remote_device")
+        self._write_remote_json()
         self.revoked_every.append(reason)
         self.devices = []
 
@@ -433,7 +445,7 @@ def test_regenerate_devices_and_revoke_go_through_the_server() -> None:
     assert controller.regenerate_password() == "ember-glade-heron-indigo"
     assert controller.password() == "ember-glade-heron-indigo"
     assert [d["id"] for d in controller.devices()] == ["dev_0000000a", "dev_0000000b"]
-    controller.revoke_device("dev_0000000a")
+    assert controller.revoke_device("dev_0000000a") is True
     assert server.revoked == ["dev_0000000a"]
     assert [d["id"] for d in controller.devices()] == ["dev_0000000b"]
 
@@ -531,6 +543,113 @@ def test_a_revoke_that_cannot_be_written_still_turns_remote_off_and_says_so() ->
     assert controller.message is not None and "could not be revoked" in controller.message
 
 
+DENIED = PermissionError(13, "Permission denied", "remote.json")
+"""What a read-only home, or a full disk's twin, raises from every write of ``remote.json``."""
+
+
+def test_a_remote_json_that_will_not_write_keeps_remote_off_at_start_and_says_why() -> None:
+    """``restore()`` runs in ``FleetApp.on_mount``, and the deadline ``turn_on`` could not
+    record raised out of it: ``asq ui`` ended at start while the server kept serving in its
+    thread (r2 review of #243). A Remote that cannot write ``remote.json`` cannot sign a
+    phone in either, so it does not stay on; the saved switch stays on for the next start."""
+    server = fake_server()
+    server.unwritable = DENIED
+    tunnels: list[FakeTunnel] = []
+
+    def tunnel_factory(port: int) -> FakeTunnel:
+        tunnels.append(FakeTunnel(port, url="x.app", failure=None))
+        return tunnels[-1]
+
+    controller = RemoteController(
+        server=server, tunnel_factory=tunnel_factory, state=RemoteState(remote_enabled=True)
+    )
+    controller.restore()
+    assert not controller.running and not server.running
+    assert controller.link_url() is None and controller.auto_off_at is None
+    assert tunnels == [], "ngrok is never started for a Remote that did not come on"
+    assert controller.message == (
+        "Remote could not start — remote.json could not be written: "
+        "[Errno 13] Permission denied: 'remote.json'"
+    )
+    assert controller.state.remote_enabled is True, "the next start tries again"
+
+
+def test_each_control_says_when_remote_json_will_not_write_instead_of_raising() -> None:
+    """The Auto-off picker, Regenerate and Revoke raised into Textual's handlers, which
+    ended the fleet UI with Remote still serving; the write switch already said it."""
+    clock = [datetime(2026, 9, 11, 18, 0, tzinfo=UTC)]
+    server = fake_server()
+    server.devices = [{"id": "dev_0000000a", "ua": "iPhone", "first_seen": "t0", "last_seen": "t1"}]
+    controller = RemoteController(
+        server=server, tunnel_factory=fake_tunnel_factory(url="x"), now=lambda: clock[0]
+    )
+    controller.turn_on()
+    server.unwritable = DENIED
+
+    controller.set_auto_off(30)
+    assert controller.message == (
+        "auto-off could not be saved to remote.json — [Errno 13] Permission denied: 'remote.json'"
+    )
+    assert controller.state.auto_off_minutes == 30
+    # The server still reports the hour it was given at turn_on: not a phone's extension
+    # to adopt, but the deadline the shorter one failed to replace.
+    assert server.server_auto_off_at == clock[0] + timedelta(minutes=60)
+    assert controller.adopt_server_deadline() == clock[0] + timedelta(minutes=30)
+    assert controller.auto_off_at == clock[0] + timedelta(minutes=30), "this UI still keeps it"
+
+    assert controller.regenerate_password() is None
+    assert (controller.message or "").startswith(
+        "the new password could not be saved to remote.json — [Errno 13]"
+    )
+    assert controller.password() == "amber-birch-cedar-delta"
+
+    assert controller.revoke_device("dev_0000000a") is False
+    assert (controller.message or "").startswith(
+        "dev_0000000a could not be revoked in remote.json — [Errno 13]"
+    )
+    assert server.revoked == [] and controller.running and server.running
+
+    clock[0] += timedelta(minutes=30)
+    assert controller.enforce_auto_off() is True, "the deadline it could not save still ends it"
+    assert not controller.running and not server.running
+
+
+def test_a_timer_remote_json_will_not_take_ends_remote_at_the_earlier_of_the_two() -> None:
+    """The server's gate ends Remote at the deadline ``remote.json`` holds (SPEC §2.5), and a
+    timer the file would not take holds here: Remote goes off at whichever comes first. A
+    longer timer, or Never, kept in hand showed a time the server would not wait for, and
+    the panel read on while every phone was answered as if Remote were off."""
+    clock = [datetime(2026, 9, 11, 18, 0, tzinfo=UTC)]
+    server = fake_server()
+    controller = RemoteController(
+        server=server, tunnel_factory=fake_tunnel_factory(url="x"), now=lambda: clock[0]
+    )
+    controller.turn_on()
+    in_the_file = clock[0] + timedelta(minutes=60)
+    server.unwritable = DENIED
+    for minutes in (120, None):
+        controller.set_auto_off(minutes)
+        assert (controller.message or "").startswith("auto-off could not be saved"), minutes
+        assert controller.adopt_server_deadline() == in_the_file, minutes
+    clock[0] = in_the_file - timedelta(seconds=1)
+    assert controller.enforce_auto_off() is False and controller.running
+    clock[0] = in_the_file
+    assert controller.enforce_auto_off() is True, "off when the server stops waiting"
+    assert not controller.running and not server.running
+
+    # With the file's deadline in hand, a later one there is a phone's extension again (the
+    # file took a write once more), not the one a timer failed to replace.
+    server.unwritable = None
+    controller.set_auto_off(60)
+    controller.turn_on()
+    server.unwritable = DENIED
+    controller.set_auto_off(120)
+    assert controller.adopt_server_deadline() == clock[0] + timedelta(minutes=60)
+    server.unwritable = None
+    server.server_auto_off_at = extended = clock[0] + timedelta(minutes=90)
+    assert controller.adopt_server_deadline() == extended
+
+
 def _free_port() -> int:
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
@@ -586,3 +705,53 @@ def test_auto_off_with_a_remote_json_that_will_not_write_still_stops_everything(
     assert "flushing remote.json as the server stopped failed" in caplog.text
     assert read_state()["remote_enabled"] is False
     controller.shutdown_for_exit()  # the TUI's exit after it: nothing left to stop or raise
+
+
+def test_a_real_remote_json_that_will_not_write_is_a_sentence_for_each_control(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The real module, a ``remote.json`` from an earlier Remote, and a home that refuses
+    the file's replacement: ``restore()`` raised ``PermissionError`` with the server up,
+    and so did the Auto-off picker, Regenerate and Revoke (r2 review of #243)."""
+    monkeypatch.setattr(remote_server, "_runtime", None)
+    monkeypatch.setattr(remote_server, "_server", None)
+    page = tmp_path / "page"
+    page.mkdir()
+    (page / "index.html").write_text("<!doctype html>", encoding="utf-8")
+    earlier = remote_server.runtime()
+    assert earlier.unlock_device(earlier.password, "Pixel") is not None
+    (device_id,) = earlier.device_ids()
+    monkeypatch.setattr(remote_server, "_runtime", None)  # this TUI reads the file afresh
+
+    def unwritable(path: Path, **kwargs: object) -> object:
+        raise PermissionError(13, "Permission denied", str(path))
+
+    controller = RemoteController(
+        tunnel_factory=fake_tunnel_factory(url=STARTED["url"]),
+        dist_dir=page,
+        port=_free_port(),
+        state=RemoteState(remote_enabled=True),
+    )
+    with pytest.MonkeyPatch.context() as home:
+        home.setattr(remote_server, "replacement", unwritable)
+        controller.restore()
+    assert not controller.running and remote_server._server is None
+    assert (controller.message or "").startswith(
+        "Remote could not start — remote.json could not be written: [Errno 13] Permission denied"
+    )
+
+    controller.turn_on()
+    assert controller._waiter is not None
+    controller._waiter.join(5)  # the URL lands, and its thread's word on the status line first
+    assert controller.running and controller.message is None
+    with pytest.MonkeyPatch.context() as home:
+        home.setattr(remote_server, "replacement", unwritable)
+        controller.set_auto_off(30)
+        assert (controller.message or "").startswith("auto-off could not be saved to remote.json")
+        assert controller.revoke_device(device_id) is False
+        assert (controller.message or "").startswith(f"{device_id} could not be revoked")
+        assert controller.regenerate_password() is None
+        assert (controller.message or "").startswith("the new password could not be saved")
+        assert controller.running
+        controller.shutdown_for_exit()
+    assert remote_server._server is None

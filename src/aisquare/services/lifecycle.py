@@ -168,8 +168,8 @@ def initialize(
         except (KeyError, ValueError) as exc:
             notes.append(f"Could not connect {agent}: {exc}")
             continue
-        hook_note = "hooks installed" if connection.hooks_installed else "no hooks for this agent"
-        notes.append(f"Connected {agent}: {hook_note}, imported {connection.imported} entries.")
+        # Always installed: `connect` refuses rather than return a connection without hooks.
+        notes.append(f"Connected {agent}: hooks installed, imported {connection.imported} entries.")
 
     return SetupReport(
         home=home,

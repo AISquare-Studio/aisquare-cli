@@ -135,9 +135,10 @@ aisquare remote allow-write on
 aisquare remote allow-write off
 ```
 
-The R panel's **Allow write actions** switch does the same. Opening the TUI
-pushes its switch to the server, so turning writes on from a shell can be undone
-by a later TUI start; the page's READ-ONLY sentence names both.
+The R panel's **Allow write actions** switch sets the same value. There is one
+write switch, the server's own, in `~/.aisquare/remote.json`: the shell and the
+panel both set it there, whether Remote is on or off, so they always agree and
+starting the TUI never changes it. The page's READ-ONLY sentence names both.
 
 The writes, and the routes they use:
 

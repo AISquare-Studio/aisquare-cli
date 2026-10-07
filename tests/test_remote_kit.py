@@ -736,14 +736,20 @@ def test_no_request_header_teaches_the_server_its_public_origin(
         "x-forwarded-host": "evil.ngrok-free.app",
         "forwarded": "host=evil.ngrok-free.app;proto=https",
     }
+    # Each Origin matches the forged Host, as a sender who writes both would make it.
     # https: the forged X-Forwarded-Proto makes unlock's cookie Secure.
-    client = make_client(app, base_url="https://testserver", headers=forged)
+    client = make_client(
+        app,
+        base_url="https://testserver",
+        headers={**forged, "origin": "https://evil.ngrok-free.app"},
+    )
     assert unlock(client, runtime).status_code == 200
     assert client.get(f"{base(runtime)}/api/remote").status_code == 200
     # The test client opens sockets on ws:// only, where a Secure cookie is not sent.
     plain = make_client(app)
     assert unlock(plain, runtime).status_code == 200
-    with plain.websocket_connect(f"{base(runtime)}/ws", headers=forged) as ws:
+    handshake = {**forged, "origin": "http://evil.ngrok-free.app"}
+    with plain.websocket_connect(f"{base(runtime)}/ws", headers=handshake) as ws:
         _until(ws, "remote")
     assert app.kit.kit_public_url() is None
     runtime.note_public_origin("https://abcd-12.ngrok-free.app")

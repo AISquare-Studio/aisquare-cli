@@ -31,6 +31,7 @@ from aisquare.services.remote_server import (
     build_app,
 )
 from aisquare.services.transcript import EMPTY, SCAN_BUDGET, Page, read_page
+from tests.remote_kit_helpers import make_client
 
 PASSWORD = "Test1234"
 
@@ -349,7 +350,7 @@ def _echo(
 
 
 def _client(runtime: Runtime, transcript: Any, tmp_path: Path) -> TestClient:
-    client = TestClient(build_app(runtime, sources=_sources(transcript), dist_dir=tmp_path))
+    client = make_client(build_app(runtime, sources=_sources(transcript), dist_dir=tmp_path))
     assert (
         client.post(f"/r/{runtime.token}/api/unlock", json={"password": PASSWORD}).status_code
         == 200
@@ -397,7 +398,7 @@ def test_an_unknown_agent_is_404(runtime: Runtime, tmp_path: Path) -> None:
 def test_the_transcript_is_behind_the_same_gates(runtime: Runtime, tmp_path: Path) -> None:
     """A conversation is the most private thing this server serves."""
     app = build_app(runtime, sources=_sources(_echo), dist_dir=tmp_path)
-    anonymous = TestClient(app)
+    anonymous = make_client(app)
     assert anonymous.get(f"/r/{runtime.token}/api/transcript/coder-1").status_code == 401
     assert anonymous.get("/r/wrong/api/transcript/coder-1").status_code == 404
     anonymous.cookies.set("asq_remote", "forged")

@@ -19,13 +19,13 @@ import socket
 from pathlib import Path
 
 import pytest
-from starlette.testclient import TestClient
 from typer.testing import CliRunner
 
 from aisquare.cli.app import app as cli
 from aisquare.core.paths import remote_audit_path, remote_dist_dir, remote_state_path
 from aisquare.services import remote_server
 from aisquare.services.remote_server import NO_PAGE_HINT, NoRemotePage, Runtime, build_app
+from tests.remote_kit_helpers import make_client
 
 
 @pytest.fixture
@@ -182,7 +182,7 @@ def test_an_explicit_dist_is_still_the_callers_business(
     """
     assert remote_server._page_missing(tmp_path / "still-building") == NO_PAGE_HINT
     runtime = Runtime(remote_state_path(), remote_audit_path())
-    response = TestClient(build_app(runtime, dist_dir=tmp_path / "still-building")).get(
+    response = make_client(build_app(runtime, dist_dir=tmp_path / "still-building")).get(
         f"/r/{runtime.token}/"
     )
     assert response.status_code == 404 and response.json()["error"] == "no_dist"
@@ -193,7 +193,7 @@ def test_after_install_page_the_server_serves_the_spa_with_no_dist_flag(
 ) -> None:
     remote_server.install_page(built)
     runtime = Runtime(remote_state_path(), remote_audit_path())
-    client = TestClient(build_app(runtime))  # dist_dir=None: the installed page
+    client = make_client(build_app(runtime))  # dist_dir=None: the installed page
 
     index = client.get(f"/r/{runtime.token}/")
     deep = client.get(f"/r/{runtime.token}/fleet/coder-1")  # SPA fallback

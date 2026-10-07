@@ -37,6 +37,7 @@ from aisquare.services.remote_server import (
     _history_param,
     build_app,
 )
+from tests.remote_kit_helpers import make_client
 
 PASSWORD = "Test1234"
 requires_tmux = pytest.mark.skipif(
@@ -179,7 +180,7 @@ def _sources(panes: Any) -> Sources:
 
 
 def _client(runtime: Runtime, panes: Any, tmp_path: Path) -> TestClient:
-    client = TestClient(build_app(runtime, sources=_sources(panes), dist_dir=tmp_path))
+    client = make_client(build_app(runtime, sources=_sources(panes), dist_dir=tmp_path))
     assert (
         client.post(f"/r/{runtime.token}/api/unlock", json={"password": PASSWORD}).status_code
         == 200
@@ -313,7 +314,7 @@ def test_a_bad_history_value_is_a_400_not_a_silent_zero(runtime: Runtime, tmp_pa
 
 def test_history_does_not_loosen_the_gates(runtime: Runtime, tmp_path: Path) -> None:
     app = build_app(runtime, sources=_sources(_echo_panes), dist_dir=tmp_path)
-    anonymous = TestClient(app)
+    anonymous = make_client(app)
     with_history = {"history": 50}
     assert (
         anonymous.get(f"/r/{runtime.token}/api/panes/coder-1", params=with_history).status_code
@@ -335,7 +336,7 @@ def test_the_ws_pane_frame_still_asks_for_no_history(runtime: Runtime, tmp_path:
         return {"rows": ["x"], "width": 1, "height": 1}
 
     app = build_app(runtime, sources=_sources(panes), dist_dir=tmp_path, tick=0.02)
-    streaming = TestClient(app)
+    streaming = make_client(app)
     assert (
         streaming.post(f"/r/{runtime.token}/api/unlock", json={"password": PASSWORD}).status_code
         == 200

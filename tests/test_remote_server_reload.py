@@ -20,6 +20,7 @@ from aisquare.services.remote_server import (
     Sources,
     build_app,
 )
+from tests.remote_kit_helpers import make_client
 
 PASSWORD = "Test1234"
 
@@ -43,7 +44,7 @@ def client(runtime: Runtime, tmp_path: Path) -> TestClient:
         panes=lambda agent, project, history: {"rows": [], "width": 0, "height": 0},
         explainability=lambda agent, project: {"available": False},
     )
-    client = TestClient(build_app(runtime, sources=sources, dist_dir=tmp_path, tick=0.02))
+    client = make_client(build_app(runtime, sources=sources, dist_dir=tmp_path, tick=0.02))
     assert (
         client.post(f"/r/{runtime.token}/api/unlock", json={"password": PASSWORD}).status_code
         == 200

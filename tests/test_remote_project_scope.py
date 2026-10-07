@@ -37,6 +37,7 @@ from aisquare.services.remote_server import (
     live_sources,
     live_writes,
 )
+from tests.remote_kit_helpers import make_client
 
 PASSWORD = "Test1234"
 T0 = datetime(2026, 9, 12, 10, 0, tzinfo=UTC)
@@ -414,7 +415,7 @@ def test_the_audit_line_written_to_disk_carries_the_key_name(
     """End to end: through the HTTP write gate and into remote-audit.log."""
     current, _other = two_projects
     _seed_agent(current, "coder-1", "%1")
-    client = TestClient(
+    client = make_client(
         build_app(runtime, sources=_sources(FLEETS), writes=live_writes(), dist_dir=tmp_path)
     )
     assert (
@@ -513,7 +514,7 @@ def _sources(fleets: dict[str | None, dict[str, object]]) -> Sources:
 
 
 def _client(runtime: Runtime, sources: Sources, tmp_path: Path, tick: float = 1.0) -> TestClient:
-    client = TestClient(build_app(runtime, sources=sources, dist_dir=tmp_path, tick=tick))
+    client = make_client(build_app(runtime, sources=sources, dist_dir=tmp_path, tick=tick))
     unlocked = client.post(f"/r/{runtime.token}/api/unlock", json={"password": PASSWORD})
     assert unlocked.status_code == 200
     return client
@@ -563,7 +564,7 @@ def test_get_panes_with_an_unknown_project_is_404(runtime: Runtime, tmp_path: Pa
 
 def test_the_project_query_param_still_needs_the_cookie(runtime: Runtime, tmp_path: Path) -> None:
     app = build_app(runtime, sources=_sources(FLEETS), dist_dir=tmp_path)
-    anonymous = TestClient(app)
+    anonymous = make_client(app)
     for path in ("api/fleet", "api/panes/coder-1"):
         response = anonymous.get(f"/r/{runtime.token}/{path}", params={"project": "prj_other"})
         assert response.status_code == 401, path
@@ -612,7 +613,7 @@ def test_ws_still_needs_the_cookie(runtime: Runtime, tmp_path: Path) -> None:
     from starlette.testclient import WebSocketDenialResponse
 
     app = build_app(runtime, sources=_sources(FLEETS), dist_dir=tmp_path, tick=0.02)
-    anonymous = TestClient(app)
+    anonymous = make_client(app)
     with (
         pytest.raises(WebSocketDenialResponse) as denied,
         anonymous.websocket_connect(f"/r/{runtime.token}/ws"),

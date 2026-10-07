@@ -25,6 +25,7 @@ from aisquare.services.remote_server import (
     build_app,
     explainability_payload,
 )
+from tests.remote_kit_helpers import make_client
 
 PASSWORD = "Test1234"
 T0 = datetime(2026, 9, 12, 10, 0, tzinfo=UTC)
@@ -174,7 +175,7 @@ def _sources(explainability: Any) -> Sources:
 
 
 def _client(runtime: Runtime, explainability: Any, tmp_path: Path) -> TestClient:
-    client = TestClient(build_app(runtime, sources=_sources(explainability), dist_dir=tmp_path))
+    client = make_client(build_app(runtime, sources=_sources(explainability), dist_dir=tmp_path))
     assert (
         client.post(f"/r/{runtime.token}/api/unlock", json={"password": PASSWORD}).status_code
         == 200
@@ -218,7 +219,7 @@ def test_endpoint_obeys_the_token_and_cookie_gates(runtime: Runtime, tmp_path: P
     app = build_app(
         runtime, sources=_sources(lambda label, project: {"available": True}), dist_dir=tmp_path
     )
-    anonymous = TestClient(app)
+    anonymous = make_client(app)
     assert anonymous.get("/r/wrong/api/explainability/coder-1").status_code == 404
     assert anonymous.get(f"/r/{runtime.token}/api/explainability/coder-1").status_code == 401
     anonymous.cookies.set(COOKIE, "forged")

@@ -30,6 +30,7 @@ from aisquare.services.remote_server import (
     Writes,
     build_app,
 )
+from tests.remote_kit_helpers import make_client
 
 PASSWORD = "Test1234"
 
@@ -111,7 +112,7 @@ def dist(tmp_path: Path) -> Path:
 @pytest.fixture
 def client(runtime: Runtime, fake: Fake, dist: Path) -> TestClient:
     app = build_app(runtime, sources=fake.sources(), writes=fake.writes(), dist_dir=dist, tick=0.02)
-    return TestClient(app)
+    return make_client(app)
 
 
 def base(runtime: Runtime) -> str:
@@ -313,7 +314,7 @@ def test_sixth_unlock_attempt_within_a_minute_is_429(
 ) -> None:
     now = [1000.0]
     app = build_app(runtime, sources=fake.sources(), dist_dir=dist, clock=lambda: now[0])
-    client = TestClient(app)
+    client = make_client(app)
     for _ in range(5):
         assert unlock(client, runtime, "wrong").status_code == 401
     assert unlock(client, runtime, PASSWORD).status_code == 429
@@ -323,7 +324,7 @@ def test_sixth_unlock_attempt_within_a_minute_is_429(
 
 def test_rate_limit_is_per_client(runtime: Runtime, fake: Fake, dist: Path) -> None:
     app = build_app(runtime, sources=fake.sources(), dist_dir=dist)
-    client = TestClient(app)
+    client = make_client(app)
     for _ in range(5):
         unlock(client, runtime, "wrong")
     assert unlock(client, runtime, PASSWORD).status_code == 429
@@ -402,7 +403,7 @@ def test_write_body_must_be_an_object(client: TestClient, runtime: Runtime) -> N
 
 def test_devices_lists_sessions_and_delete_revokes(client: TestClient, runtime: Runtime) -> None:
     first = unlock(client, runtime).cookies[COOKIE]
-    other = TestClient(client.app)
+    other = make_client(client.app)
     second = unlock(other, runtime).cookies[COOKIE]
     rows = client.get(f"{base(runtime)}/api/devices").json()
     assert [row["sid"] for row in rows] == [first, second]
@@ -459,7 +460,7 @@ def test_missing_dist_is_a_404_that_says_where_to_put_it(
     runtime: Runtime, fake: Fake, tmp_path: Path
 ) -> None:
     app = build_app(runtime, sources=fake.sources(), dist_dir=tmp_path / "nope")
-    response = TestClient(app).get(f"{base(runtime)}/")
+    response = make_client(app).get(f"{base(runtime)}/")
     assert response.status_code == 404
     assert response.json()["error"] == "no_dist"
     assert "nope" in response.json()["message"]
@@ -616,7 +617,9 @@ def test_start_status_revoke_stop_over_a_real_port(
         assert info.url_local == f"http://127.0.0.1:{port}/r/{info.token}/"
         assert remote_server.remote_server_status()["running"] is True
         assert remote_server.start_remote_server(dist, port=port) == info  # idempotent
-        with httpx.Client(base_url=f"http://127.0.0.1:{port}") as http:
+        with httpx.Client(
+            base_url=f"http://127.0.0.1:{port}", headers={"origin": f"http://127.0.0.1:{port}"}
+        ) as http:
             assert http.get("/r/wrong/api/board").status_code == 404
             assert http.get(f"/r/{info.token}/api/board").status_code == 401
             ok = http.post(f"/r/{info.token}/api/unlock", json={"password": info.password})
@@ -773,7 +776,7 @@ def built(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def site(runtime: Runtime, fake: Fake, built: Path) -> TestClient:
-    client = TestClient(build_app(runtime, sources=fake.sources(), dist_dir=built))
+    client = make_client(build_app(runtime, sources=fake.sources(), dist_dir=built))
     return client
 
 

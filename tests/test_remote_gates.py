@@ -180,7 +180,13 @@ def test_without_the_denial_extension_the_socket_is_closed_4401(runtime: Runtime
     async def send(message: dict[str, Any]) -> None:
         sent.append(message)
 
-    scope = {"type": "websocket", "path": f"{base(runtime)}/ws", "headers": [], "extensions": {}}
+    scope = {
+        "type": "websocket",
+        "scheme": "ws",
+        "path": f"{base(runtime)}/ws",
+        "headers": [(b"host", b"testserver"), (b"origin", b"http://testserver")],
+        "extensions": {},
+    }
     asyncio.run(app(scope, receive, send))
     assert sent == [{"type": "websocket.close", "code": remote_server.WS_CLOSE_UNAUTHORIZED}]
 

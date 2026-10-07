@@ -4,21 +4,30 @@
 button, the Welcome view and the Claude Code plugin route all ask, so the hooks are
 never offered, or installed, twice. ``agents connect`` refuses an agent aisquare has
 no hooks for (Codex, Cursor) instead of recording a connection that installs
-nothing. Each claim has its negative control in the same test.
+nothing, and the doctor has a row for every agent in the registry: Claude Code's
+with its Connect fix, the others ok, saying whether they are on this machine and
+when they are planned, with no button. Each claim has its negative control in the
+same test.
 """
 
 from __future__ import annotations
 
 import json
 import shutil
+import socket
+import subprocess
 from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
 
 from aisquare.cli.app import app
+from aisquare.core import agents as agent_core
 from aisquare.core import paths
+from aisquare.models import CheckStatus, DoctorCheck
 from aisquare.services import agents as agents_service
+from aisquare.services import diagnostics
+from aisquare.services.onboarding import fix_commands
 from tests.test_no_traceback_on_a_damaged_store import damaged_store  # noqa: F401
 
 
@@ -222,3 +231,160 @@ def test_the_refusal_never_reaches_a_damaged_store(
         assert reached.get("error") == "store_unopenable", reached
     else:
         assert reached.get("name") == "claude-code" and "error" not in reached, reached
+
+
+# --------------------------------------------------------------------------- the doctor's rows
+
+
+def _row(name: str) -> DoctorCheck:
+    return next(check for check in diagnostics.doctor() if check.name == name)
+
+
+def _tree(root: Path) -> list[str]:
+    return sorted(str(path.relative_to(root)) for path in root.rglob("*"))
+
+
+def test_the_doctor_has_a_row_for_every_agent_in_the_registry(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    payload = json.loads(runner.invoke(app, ["--json", "doctor"]).stdout)
+    rows = {row["name"]: row for row in payload}
+
+    registry = {spec.name for spec in agent_core.specs()}
+    assert {"claude-code", "codex", "cursor"} <= registry
+    assert registry <= set(rows), f"agents with no doctor row: {sorted(registry - set(rows))}"
+    for name in ("codex", "cursor"):
+        assert (rows[name]["status"], rows[name]["fix"]) == ("ok", None), rows[name]
+
+
+@pytest.mark.parametrize(("name", "label"), [("codex", "Codex"), ("cursor", "Cursor")])
+def test_a_planned_agent_row_says_whether_it_is_on_this_machine(
+    isolated_agent_home: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    label: str,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    absent = _row(name)
+    (isolated_agent_home / f".{name}").mkdir(parents=True)
+    present = _row(name)
+
+    assert absent.detail == (
+        f"{label} not detected on this machine (aisquare support is planned for 0.10)"
+    )
+    assert present.detail == (
+        f"{label} detected at {isolated_agent_home / f'.{name}'}, but aisquare can't "
+        "connect it yet (planned for 0.10)"
+    )
+    for row in (absent, present):
+        assert (row.status, row.fix) == (CheckStatus.ok, None), row
+
+
+def test_only_the_claude_code_row_offers_connect(
+    claude_home: Path, isolated_agent_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The buttons are ``fix_commands`` over the report: Claude Code's Connect, nothing else."""
+    for name in (".codex", ".cursor"):
+        (isolated_agent_home / name).mkdir()
+    monkeypatch.chdir(tmp_path)
+
+    checks = diagnostics.doctor()
+
+    connects = [fix.argv for fix in fix_commands(checks) if fix.argv[:2] == ("agents", "connect")]
+    assert connects == [("agents", "connect", "claude-code", "--config-dir", str(claude_home))]
+    named = {check.name: check for check in checks}
+    assert named["claude-code"].status is CheckStatus.warn, "control: Connect is on offer here"
+    assert all(
+        (named[name].status, named[name].fix) == (CheckStatus.ok, None)
+        for name in ("codex", "cursor")
+    ), [named["codex"], named["cursor"]]
+
+
+def test_the_connect_fix_follows_the_shared_check(
+    claude_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The plugin route extends ``claude_code_connected``; the row must follow it, so a
+    directory it calls connected is never offered a second install of the hooks."""
+    offered = diagnostics._check_claude_code()
+    monkeypatch.setattr(agents_service, "claude_code_connected", lambda config_dir=None: True)
+    answered = diagnostics._check_claude_code()
+
+    assert offered.status is CheckStatus.warn
+    assert offered.fix == f"aisquare agents connect claude-code --config-dir {claude_home}"
+    assert answered.status is CheckStatus.ok, answered.detail
+    assert fix_commands([answered]) == []
+
+
+def test_the_agent_rows_read_paths_only(
+    isolated_agent_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No socket, no process, no state: every doctor run in asq computes these rows."""
+    for name in (".codex", ".cursor"):
+        (isolated_agent_home / name).mkdir(parents=True)
+    before = _tree(isolated_agent_home)
+    started: list[str] = []
+
+    class Tripwire(socket.socket):
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            started.append("socket")
+            raise ConnectionRefusedError("a doctor agent row opened a socket")
+
+    def no_process(*args: object, **kwargs: object) -> None:
+        started.append("process")
+        raise OSError("a doctor agent row started a process")
+
+    monkeypatch.setattr(socket, "socket", Tripwire)
+    monkeypatch.setattr(subprocess, "Popen", no_process)
+
+    rows = diagnostics._planned_agent_checks()
+
+    assert {row.name for row in rows} == {"codex", "cursor"}
+    assert started == []
+    assert not paths.aisquare_home().exists()
+    assert _tree(isolated_agent_home) == before
+    with pytest.raises(OSError):  # control: both tripwires are live
+        socket.create_connection(("127.0.0.1", 9))
+    with pytest.raises(OSError):
+        subprocess.run(["true"], check=False)
+    assert started == ["socket", "process"]
+
+
+def test_doctor_with_every_agent_on_disk_writes_nothing(
+    runner: CliRunner,
+    claude_home: Path,
+    isolated_agent_home: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for name in (".codex", ".cursor"):
+        (isolated_agent_home / name).mkdir()
+    monkeypatch.chdir(tmp_path)
+    before = _tree(isolated_agent_home)
+
+    runner.invoke(app, ["doctor"])
+
+    assert _tree(isolated_agent_home) == before
+    assert not paths.aisquare_home().exists()
+    _connect(runner)  # control: a real connect writes, and the listing sees it
+    assert _tree(isolated_agent_home) != before
+
+
+def test_the_agent_rows_survive_a_damaged_store(
+    runner: CliRunner,
+    isolated_agent_home: Path,
+    damaged_store: str,  # noqa: F811 — pytest resolves fixtures by NAME, so the import must keep it
+) -> None:
+    (isolated_agent_home / ".codex").mkdir(parents=True)
+
+    result = runner.invoke(app, ["--json", "doctor"])
+
+    assert result.exception is None or isinstance(result.exception, SystemExit), repr(
+        result.exception
+    )
+    rows = {row["name"]: row for row in json.loads(result.stdout)}
+    assert rows["codex"]["status"] == "ok" and "Codex detected at" in rows["codex"]["detail"]
+    assert rows["cursor"]["status"] == "ok" and rows["claude-code"]["status"] == "ok"
+    if damaged_store == "at-open":  # control: doctor does see this damage (a zeroed page it
+        assert rows["database"]["status"] == "fail", rows["database"]  # never reads, it cannot)

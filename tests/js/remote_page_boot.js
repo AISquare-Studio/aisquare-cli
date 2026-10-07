@@ -21,6 +21,7 @@ const APP = path.join(__dirname, "..", "..", "src", "aisquare", "web", "remote",
 const SOURCE = fs.readFileSync(APP, "utf8");
 const BASE = "http://127.0.0.1:8750/r/" + "t".repeat(32) + "/";
 const PROJECT = "prj_x";
+const NEEDS_ID = "ny_0123456789abcdef";
 const PASSPHRASE = "amber birch cedar delta";
 
 // --- a browser just big enough for the page -------------------------------------------------
@@ -202,6 +203,13 @@ function storage() {
   };
 }
 
+/* An answer the scenario holds back until it says so. */
+function deferred() {
+  let settle;
+  const promise = new Promise((resolve) => { settle = resolve; });
+  return { promise, settle };
+}
+
 /* Boot app.js at `hash`, the machine answering every request through `answer`:
  * (method, path, body) -> {status, json}, or "network" for a request that never
  * arrives, or a promise of either. */
@@ -322,6 +330,19 @@ const FLEET = {
   name: "x",
   agents: [{ agent: { id: "agt_1", label: "coder-1", role: "coder" }, state: "waiting", detail: null }],
 };
+const ITEM = {
+  id: NEEDS_ID,
+  kind: "question",
+  project: { id: PROJECT, name: "x" },
+  agent: "coder-1",
+  agent_id: "agt_1",
+  reason: "coder-1 asks which approach to take",
+  since: "2026-10-07T10:12:03+00:00",
+  detail: { questions: [{ question: "Which?", options: [{ label: "A" }, { label: "B" }] }] },
+  answers: [{ label: "1. A", keys: ["1"] }, { label: "2. B", keys: ["2"] }],
+  actions: ["answer", "open", "dismiss"],
+};
+
 /* A machine that knows this phone, allows writes, and has `extra` routes besides. */
 function signedIn(extra) {
   return (method, where, body) => {
@@ -462,6 +483,69 @@ async function lostRead() {
   return { lost, offline: page.run("S.offline"), bannerHidden: page.run("UI.banner.hidden") };
 }
 
+/* Two quick taps on a card's answers while the first is in flight. */
+async function quickAnswerTwice() {
+  const held = deferred();
+  const page = bootPage("#/", signedIn({
+    "GET api/needs": () => ({ status: 200, json: { items: [ITEM] } }),
+    "POST api/needs/answer": () => held.promise,
+  }));
+  await settle();
+  page.acceptSockets();
+  await settle();
+  const answers = () => page.main().querySelectorAll("button.qa");
+  click(answers()[0]);
+  await settle();
+  const inFlight = answers().map((control) => control.disabled);
+  click(answers()[0]);
+  click(answers()[1]);
+  await settle();
+  const sentWhileHeld = page.sent("api/needs/answer").length;
+  held.settle({ status: 200, json: { id: NEEDS_ID, sent: ["1"] } });
+  await settle();
+  return { inFlight, sentWhileHeld, after: answers().map((control) => control.disabled), toast: page.toast() };
+}
+
+/* Nothing heard for longer than the stale limit, on the devices screen. */
+async function staleDevices() {
+  const page = bootPage("#/devices", signedIn({
+    "GET api/devices": () => ({
+      status: 200,
+      json: [
+        { id: "dev_0a1b2c3d", current: true, signed_in: true, ua: "this phone", last_seen: null },
+        { id: "dev_4e5f6a7b", current: false, signed_in: true, ua: "another", last_seen: null },
+      ],
+    }),
+  }));
+  await settle();
+  page.acceptSockets();
+  await settle();
+  page.run("S.lastFrameAt = Date.now() - 60000; checkStale();");
+  return {
+    stale: page.run("S.stale"),
+    signOut: buttonNamed(page.main(), "Sign out").disabled,
+    revoke: buttonNamed(page.main(), "Revoke").disabled,
+  };
+}
+
+/* Interrupt & tell: the text was pasted at the prompt, but tmux could not press Enter. */
+async function tellNotSent() {
+  const how = "interrupted it with Escape, then pasted it at its prompt, but tmux could not press Enter (no pane) — press Enter on the pad to send it";
+  const page = await agentView({
+    "POST api/agent/tell": (body) => ({ status: 200, json: { label: "coder-1", delivered: false, how, mode: body.mode, project: PROJECT } }),
+  });
+  page.live().frame("fleet", FLEET);
+  await settle();
+  click(buttonNamed(page.main(), "Actions…"));
+  click(buttonNamed(page.run("UI.sheet"), "Interrupt & tell…"));
+  const text = find(page.run("UI.sheet"), (node) => node.tagName === "TEXTAREA");
+  text.value = "commit it";
+  click(buttonNamed(page.run("UI.sheet"), "Interrupt & tell"));
+  await settle();
+  const told = page.sent("api/agent/tell").map((body) => body.mode);
+  return { told, toast: page.toast(), how };
+}
+
 async function main() {
   const report = {
     bareLink: await openedSignedOut(""),
@@ -471,6 +555,9 @@ async function main() {
     lostWrite: await lostWrite(),
     lostTwice: await lostTwice(),
     lostRead: await lostRead(),
+    quickAnswerTwice: await quickAnswerTwice(),
+    staleDevices: await staleDevices(),
+    tellNotSent: await tellNotSent(),
   };
   process.stdout.write(JSON.stringify(report) + "\n");
 }

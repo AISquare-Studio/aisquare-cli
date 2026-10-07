@@ -8,8 +8,10 @@
  * - every string the server sends reaches the DOM as text: textContent or a
  *   text node, after plainText() drops escape sequences and controls;
  * - no server string is ever written to an attribute, a URL or a style, with
- *   one exception: an ANSI colour, parsed as integers, clamped to 0-255 and
- *   written as rgb() through el.style.color / backgroundColor;
+ *   two exceptions, both numbers the page parses and clamps itself: an ANSI
+ *   colour, clamped to 0-255 and written as rgb() through el.style.color /
+ *   backgroundColor; and a pane's width, an integer clamped to 20-400, written
+ *   as the --cols property that Fit width scales the pane's font by;
  * - setAttribute takes only literal names from a short list, handlers are
  *   added with addEventListener, and navigation goes through pageGo(), the
  *   one place location.hash is set, from ids it validated.
@@ -468,7 +470,7 @@ function renderNeedsCard(item, doc, opts) {
     if (!answer || typeof answer !== "object" || !isText(answer.label)) continue;
     const quick = mk(doc, "button", "w qa", clip(plainText(answer.label), 60));
     quick.disabled = shut;
-    quick.addEventListener("click", () => { if (o.onAnswer) o.onAnswer(it, answer); });
+    quick.addEventListener("click", () => { if (o.onAnswer) o.onAnswer(it, answer, row); });
     row.appendChild(quick);
   }
   const wanted = Array.isArray(it.actions) ? it.actions : [];
@@ -1036,7 +1038,9 @@ function checkStale() {
   drawStatus();
 }
 
-/* Writes off, or nothing heard for 25 s: every action button waits. */
+/* Writes off, or nothing heard for 25 s: every action button waits. "w" marks a
+ * write, "a" an action that is not one. Sign out is neither: it is always there
+ * (SPEC §6.3), and a plain DELETE that needs no live socket. */
 function gateButtons() {
   const shut = !writable() || S.stale;
   document.body.classList.toggle("ro", !writable());
@@ -1127,10 +1131,12 @@ function drawNav() {
 
 function toast(text) {
   if (!UI.toast || !text) return;
-  UI.toast.textContent = plainText(text);
+  const shown = plainText(text);
+  UI.toast.textContent = shown;
   UI.toast.classList.add("show");
   clearTimeout(UI.toastTimer);
-  UI.toastTimer = setTimeout(() => UI.toast.classList.remove("show"), 4000);
+  // Four seconds reads a short line; a sentence from the machine gets time to be read.
+  UI.toastTimer = setTimeout(() => UI.toast.classList.remove("show"), Math.min(10000, 4000 + Math.max(0, shown.length - 60) * 60));
 }
 
 function openSheet(title, build) {
@@ -1535,11 +1541,19 @@ VIEWS.card = (route, main) => {
   return { needs: draw, cleanup: () => { if (entry) entry.drop(); } };
 };
 
-async function answerCard(item, answer) {
+/* A quick answer. Its row waits while it is in flight: a second tap would go out
+ * under a second request_id, and the server's re-check would answer it "no longer
+ * needs you" because the first one worked. */
+async function answerCard(item, answer, row) {
   const keys = Array.isArray(answer.keys) ? answer.keys.filter((key) => typeof key === "string") : [];
   if (!keys.length) return;
   const label = plainText(answer.label);
+  const quick = row ? Array.from(row.querySelectorAll("button.qa")) : [];
+  for (const control of quick) control.classList.add("busy");
+  gateButtons();
   const res = await apiWrite(API.needsAnswer, { id: item.id, keys }, "Answer " + label);
+  for (const control of quick) control.classList.remove("busy");
+  gateButtons();
   if (res.ok) return toast("Sent " + label + " to " + plainText(item.agent || "the agent"));
   if (res.status === 409 && res.error === "stale") return noLonger(item, res.data && res.data.current);
   toast(failText(res, TEXT_MAX.keys));
@@ -1616,8 +1630,15 @@ function tellSheet(ctx, mode) {
       sheet.busy(false);
       if (res.ok) {
         closeSheet();
-        const delivered = res.data && res.data.delivered === true;
-        toast(delivered ? "Typed into " + label : "Left a note for " + label + " — it reads it at its next prompt");
+        const told = res.data && typeof res.data === "object" ? res.data : {};
+        const delivered = told.delivered === true;
+        // Not typed in, the machine says what happened instead: in "auto" a board note
+        // the agent reads at its next prompt; in the other two, text pasted at the
+        // prompt that tmux could not send with Enter, which holds the agent's next
+        // question back until Enter is pressed on the pad.
+        if (delivered) toast("Typed into " + label);
+        else if (isText(told.how)) toast(label + ": " + plainText(told.how));
+        else toast(current === "auto" ? "Left a note for " + label + " — it reads it at its next prompt" : "Not typed into " + label + " — look at its pane");
         if (delivered && ctx.needsId) dismissItem({ id: ctx.needsId });
         return;
       }
@@ -2099,6 +2120,7 @@ VIEWS.agent = (route, main) => {
     let width = 80;
     const fitNow = () => {
       pane.classList.toggle("fit", fit.box.checked);
+      // The second style write from server data (see the top of this file): an integer, clamped below.
       pane.style.setProperty("--cols", String(width));
     };
     fit.box.addEventListener("change", fitNow);
@@ -2287,7 +2309,7 @@ VIEWS.devices = (route, main) => {
       if (isText(device.expires_at)) when.push("sign-in ends " + ago(device.expires_at, Date.now()));
       line.appendChild(el("p", "muted", when.join(" · ")));
       const id = device.id;
-      if (own) line.appendChild(button("a", "Sign out", () => signOut(id)));
+      if (own) line.appendChild(button(null, "Sign out", () => signOut(id)));
       else {
         line.appendChild(button("w", "Revoke", async () => {
           const out = await apiCall("DELETE", apiPath(API.device, { id }));
@@ -2475,7 +2497,7 @@ VIEWS.settings = (route, main) => {
   const about = el("section", "panel");
   about.appendChild(el("h3", null, "This page"));
   about.appendChild(el("p", "muted", "aisquare " + plainText(S.remote && S.remote.version ? S.remote.version : "") + " · writes " + (writable() ? "on" : "off")));
-  about.appendChild(button("a", "Sign out", async () => {
+  about.appendChild(button(null, "Sign out", async () => {
     if (!S.me) {
       const res = await apiCall("GET", API.devices);
       const own = res.ok && Array.isArray(res.data) ? res.data.find((device) => device && device.current === true) : null;

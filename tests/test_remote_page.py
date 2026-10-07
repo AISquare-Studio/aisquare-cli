@@ -820,6 +820,33 @@ def test_a_frame_clears_the_offline_banner_a_lost_read_raised(
     assert lost["offline"] is False and lost["bannerHidden"] is True
 
 
+def test_a_quick_answer_holds_its_row_until_the_machine_answers(
+    boot_report: dict[str, Any],
+) -> None:
+    """A second tap went out under a second request_id, and the server's re-check
+    answered it "no longer needs you" because the first one had worked."""
+    taps = boot_report["quickAnswerTwice"]
+    assert taps["inFlight"] == [True, True]
+    assert taps["sentWhileHeld"] == 1
+    assert taps["after"] == [False, False]
+    assert taps["toast"] == "Sent 1. A to coder-1"
+
+
+def test_sign_out_stays_available_while_the_page_is_stale(boot_report: dict[str, Any]) -> None:
+    """SPEC §6.3: sign out is a plain DELETE that needs no socket. Revoke is the control."""
+    assert boot_report["staleDevices"] == {"stale": True, "signOut": False, "revoke": True}
+
+
+def test_a_tell_that_was_not_typed_in_says_what_happened_instead(
+    boot_report: dict[str, Any],
+) -> None:
+    """Text pasted at the prompt that Enter never sent holds the agent's next question back;
+    the page said "left a note" instead of the machine's own sentence."""
+    told = boot_report["tellNotSent"]
+    assert told["told"] == ["interrupt"]
+    assert told["toast"] == f"coder-1: {told['how']}"
+
+
 # --- 11. the wheel --------------------------------------------------------------------------
 
 

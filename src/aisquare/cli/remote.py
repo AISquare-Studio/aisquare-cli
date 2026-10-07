@@ -90,7 +90,7 @@ def serve_remote(
         Path | None,
         typer.Option(
             "--dist",
-            help="Built aisquare-remote page to serve (default ~/.aisquare/remote-dist).",
+            help="Serve this built page instead of the installed or bundled one.",
         ),
     ] = None,
     auto_off: Annotated[

@@ -30,6 +30,36 @@ def status(name: str | None = None) -> list[AgentInfo]:
     return [info]
 
 
+def claude_code_connected(config_dir: Path | None = None) -> bool:
+    """Whether Claude Code in ``config_dir`` runs aisquare: the one "connected?" answer.
+
+    Every surface that decides whether to offer Connect asks here: the doctor's
+    ``claude-code`` row (whose ``agents connect`` fix is a button in asq), the
+    Welcome view, and the Claude Code plugin route, which extends THIS function
+    rather than adding a check of its own. Two answers to one question is how
+    the hooks get installed twice and every prompt captured twice.
+
+    ``config_dir`` is a Claude Code config directory; ``None`` is the one a
+    session started from this shell reads (``CLAUDE_CONFIG_DIR``, else
+    ``~/.claude``), as ``agents connect`` means it.
+
+    Today that means every lifecycle hook ``agents connect`` installs is in the
+    directory's ``settings.json``. A partial install from an older version
+    answers False, because Connect is what completes it. Which aisquare the
+    hooks run is the doctor's question, not this one: answering it can start a
+    process.
+
+    Read-only and offline: one file is read and nothing is written, so no
+    ``~/.aisquare`` appears. ``agents.json`` is not consulted, because hooks on
+    disk run whether or not this home recorded them (#84). A ``settings.json``
+    that cannot be read answers False: nothing shows our hooks are there.
+    """
+    try:
+        return agent_core.hooks_installed("claude-code", config_dir)
+    except (OSError, ValueError):
+        return False
+
+
 def connect(name: str, config_dir: Path | None = None) -> AgentConnection:
     """Install aisquare's hooks into the agent and ingest its existing context.
 

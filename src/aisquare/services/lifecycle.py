@@ -440,6 +440,10 @@ def refresh_sites(found: install_route.Facts) -> tuple[tuple[HookSite, ...], tup
         if key in seen:
             continue
         seen.add(key)
+        unreadable = settings_unreadable(directory)
+        if unreadable is not None:
+            left.append(HookSite(directory, reason=unreadable))
+            continue
         try:
             commands = agent_core.hook_commands(HOOK_AGENT, directory)
         except (OSError, ValueError, TypeError) as exc:
@@ -471,6 +475,25 @@ def refresh_sites(found: install_route.Facts) -> tuple[tuple[HookSite, ...], tup
         else:
             refresh.append(HookSite(directory, programs))
     return tuple(refresh), tuple(left)
+
+
+def settings_unreadable(directory: Path) -> str | None:
+    """Why ``directory``'s settings.json cannot be read as UTF-8, or ``None``.
+
+    ``hook_commands`` reads a file it cannot read as one with no hooks (#247),
+    which is right for doctor and wrong for a step that has to act on the hooks.
+    Claude Code decodes the file leniently, so a Latin-1 byte does not stop it
+    running the hooks inside, and a file this user cannot read may hold some. So
+    such a site is named with its reason, never taken for an empty one.
+    """
+    settings = directory / "settings.json"
+    if not settings.exists():
+        return None
+    try:
+        settings.read_bytes().decode("utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        return f"its settings.json could not be read ({exc})"
+    return None
 
 
 def upgrade(plan: UpgradePlan, *, to_stderr: bool = False) -> UpgradeReport:

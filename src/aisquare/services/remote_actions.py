@@ -655,7 +655,7 @@ def action_type_now(
             f"{label} is showing a prompt; typing now would answer it — "
             "answer it or dismiss it first",
         )
-    action_pane_agent(snap, label)
+    action_pane_agent(snap, label)  # refused here, before the interrupt's Escape
     if interrupt:
         action_press_escape(snap, label)
         reached = action_settle(

@@ -65,7 +65,7 @@ from aisquare.services.remote_server import (
     write_endpoint_names,
 )
 from aisquare.services.team import TeamDisabledError
-from tests.remote_kit_helpers import base, make_client, make_runtime, unlock
+from tests.remote_kit_helpers import base, make_client, make_runtime, receive_within, unlock
 
 
 def _sources() -> Sources:
@@ -356,8 +356,11 @@ def test_get_actions_recent_answers_while_writes_are_off(runtime: Runtime, tmp_p
 
 
 def _until(ws: Any, kind: str, *, limit: int = 60) -> dict[str, Any]:
+    """The next frame of ``kind``: a failed test, not a hang, when the socket goes quiet."""
     for _ in range(limit):
-        frame: dict[str, Any] = json.loads(ws.receive_text())
+        message = receive_within(ws)
+        assert message["type"] == "websocket.send", f"the socket ended: {message}"
+        frame: dict[str, Any] = json.loads(message["text"])
         if frame["type"] == kind:
             return frame
     raise AssertionError(f"no {kind} frame in {limit}")
@@ -1145,10 +1148,10 @@ def test_fleet_refusal_maps_the_servers_own_lookups_too() -> None:
     """needs-you may say an agent or project is unknown in the server's own words."""
     agent = fleet_refusal(remote_server.NoSuchAgent("no agent 'coder-1'"))
     project = fleet_refusal(remote_server.NoSuchProject("no project 'web'"))
-    interrupted = fleet_refusal(fleet_service.FleetError("anything else the fleet refused"))
+    other = fleet_refusal(fleet_service.FleetError("anything else the fleet refused"))
     assert (agent.status, agent.error) == (404, "no_such_agent")
     assert (project.status, project.error) == (404, "not_found")
-    assert (interrupted.status, interrupted.error) == (409, "fleet_error")
+    assert (other.status, other.error) == (409, "fleet_error")
 
 
 # --- one action per agent; the ledger in front -------------------------------------------------

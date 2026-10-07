@@ -457,18 +457,30 @@ def test_the_password_is_read_from_the_server_every_time() -> None:
     assert controller.password() == "anchor-badger-cactus-dolphin"
 
 
+def tunnel_announced(controller: RemoteController, server: FakeServer) -> None:
+    """Wait for the tunnel's URL and forget the calls announcing it made: noted for push
+    links (SPEC §5.8), it lands between turning on and off, from the ``ngrok-url`` thread,
+    and what turning off calls, in order, is what is asserted."""
+    assert controller._waiter is not None
+    controller._waiter.join(5)
+    server.calls.clear()
+    server.public_urls.clear()
+
+
 def test_turning_remote_off_revokes_every_device_before_the_server_stops() -> None:
     """The farewell push goes from inside the revoke, so the order is the contract: revoke
     (farewell first), forget the public origin, then stop. Leaving the TUI revokes nothing."""
     server = fake_server()
     controller = RemoteController(server=server, tunnel_factory=fake_tunnel_factory(url="x"))
     controller.turn_on()
+    tunnel_announced(controller, server)
     controller.turn_off()
     assert server.calls == ["revoke_every_remote_device", "note_public_url", "stop_remote_server"]
     assert server.revoked_every == ["remote off"] and server.public_urls == [None]
     exiting = fake_server()
     leaving = RemoteController(server=exiting, tunnel_factory=fake_tunnel_factory(url="x"))
     leaving.turn_on()
+    tunnel_announced(leaving, exiting)
     leaving.shutdown_for_exit()
     assert exiting.revoked_every == [] and exiting.calls == [
         "note_public_url",

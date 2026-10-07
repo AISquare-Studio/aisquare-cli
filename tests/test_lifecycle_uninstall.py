@@ -165,6 +165,15 @@ def user_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return home
 
 
+@pytest.fixture
+def default_home(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The home as ``~/.aisquare`` would be: aisquare's by name, so --purge may delete it.
+
+    The suite always runs with AISQUARE_HOME set, which --purge refuses outright.
+    """
+    monkeypatch.setattr(lifecycle, "custom_home", lambda _home: False)
+
+
 def _initialised(runner: CliRunner, tmp_path: Path) -> None:
     """A home the CLI made itself: config.toml, context.db, a registered project."""
     project = tmp_path / "proj"
@@ -282,6 +291,7 @@ def test_mcp_servers_that_run_aisquare_are_listed_and_never_edited(
 def test_the_plan_alone_leaves_every_file_byte_identical(
     tool: Tool,
     world: World,
+    default_home: None,
     runner: CliRunner,
     isolated_agent_home: Path,
     tmp_path: Path,
@@ -494,6 +504,7 @@ def test_windows_never_removes_its_own_package(
 def test_a_site_that_cannot_be_cleaned_keeps_the_package_and_the_home(
     tool: Tool,
     world: World,
+    default_home: None,
     runner: CliRunner,
     isolated_agent_home: Path,
     tmp_path: Path,
@@ -602,25 +613,69 @@ def test_it_refuses_while_fleet_agents_are_live_and_names_the_shutdown(
     assert _snapshot(tmp_path) == before and world.events == []
 
 
-def test_rows_left_live_with_no_tmux_on_the_machine_do_not_block(
+@pytest.mark.parametrize("listening", [True, False], ids=["server-listening", "no-server"])
+def test_without_tmux_a_live_row_blocks_only_while_its_server_listens(
     tool: Tool,
     world: World,
     runner: CliRunner,
     isolated_agent_home: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    listening: bool,
 ) -> None:
-    """Negative control: without tmux no fleet agent can be running, and a stale row
-    must not trap someone who cannot run `fleet shutdown` either."""
+    """A tmux that left PATH is no evidence the agents stopped (review of #253): the
+    row's socket is asked. Nobody listening — a stale row — must not trap someone who
+    cannot run `fleet shutdown` either."""
     monkeypatch.setattr(lifecycle, "_tmux_on_path", lambda: False)
+    asked: list[str] = []
+
+    def server_listening(name: str) -> bool:
+        asked.append(name)
+        return listening
+
+    monkeypatch.setattr(lifecycle, "_server_listening", server_listening)
     _initialised(runner, tmp_path)
     _live_agent(tmp_path / "repo")
     _hooked(isolated_agent_home / ".claude", tool.script)
 
     result = runner.invoke(app, ["uninstall", "--yes"])
 
-    assert result.exit_code == 0, result.output
-    assert world.events[-1][0] == "package"
+    assert asked == ["asq"], "the row's own socket is the one asked"
+    if listening:
+        assert result.exit_code == 1 and world.events == []
+        assert "aisquare fleet shutdown --all --yes" in result.stderr
+    else:
+        assert result.exit_code == 0, result.output
+        assert world.events[-1][0] == "package"
+
+
+def test_the_probe_asks_the_socket_file_itself(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The probe needs no tmux: a listener on tmux's own path is a server; a stale
+    file nobody listens on, or no file at all, is none."""
+    import socket as socket_module
+    import tempfile
+
+    if not hasattr(socket_module, "AF_UNIX") or not hasattr(os, "getuid"):
+        pytest.skip("AF_UNIX sockets and a POSIX uid are what tmux needs")
+    base = Path(tempfile.mkdtemp(prefix="asq-", dir="/tmp"))  # short: AF_UNIX paths are small
+    monkeypatch.setenv("TMUX_TMPDIR", str(base))
+    path = base / f"tmux-{os.getuid()}" / "probe"
+    path.parent.mkdir()
+    server = socket_module.socket(socket_module.AF_UNIX, socket_module.SOCK_STREAM)
+    try:
+        assert lifecycle._server_listening("probe") is False, "no file: no server"
+        server.bind(str(path))
+        server.listen(1)
+        assert lifecycle._server_listening("probe") is True
+        server.close()
+        assert lifecycle._server_listening("probe") is False, "a stale file: no server"
+    finally:
+        server.close()
+        path.unlink(missing_ok=True)
+        path.parent.rmdir()
+        base.rmdir()
 
 
 def test_ended_rows_do_not_count_as_live(
@@ -680,17 +735,37 @@ def test_the_guard_refuses_a_directory_with_no_aisquare_markers(
     assert reason is not None and "is not an aisquare home" in reason
 
 
-def test_a_custom_home_holding_anything_aisquare_did_not_create_is_refused(
+def test_a_home_aisquare_home_moved_is_never_purged_whatever_its_names(
     user_home: Path, tmp_path: Path
 ) -> None:
-    shared = _home_with_markers(tmp_path / "Dropbox")
-    (shared / "taxes-2025.pdf").write_text("", encoding="utf-8")
+    """Review of #253: the guard told foreign entries apart by NAME, so a user's
+    ``projects/my-startup`` and ``screenshots/passport.png`` in AISQUARE_HOME=~/work
+    passed as aisquare's. No name proves anything; a moved home is never purged."""
+    work = _home_with_markers(tmp_path / "work")
+    (work / "projects" / "my-startup").mkdir(parents=True)
+    (work / "projects" / "my-startup" / "main.py").write_text("", encoding="utf-8")
+    (work / "screenshots").mkdir()
+    (work / "screenshots" / "passport.png").write_bytes(b"png")
 
-    custom = lifecycle.purge_refusal(shared, custom=True)
-    default = lifecycle.purge_refusal(shared, custom=False)
+    custom = lifecycle.purge_refusal(work, custom=True)
+    default = lifecycle.purge_refusal(work, custom=False)
 
-    assert custom is not None and "taxes-2025.pdf" in custom
+    assert custom is not None and "AISQUARE_HOME moved the home" in custom
     assert default is None, "the default ~/.aisquare is aisquare's by name"
+
+
+def test_only_a_moved_home_counts_as_custom(
+    user_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    default = user_home / ".aisquare"
+    monkeypatch.setenv(paths.HOME_ENV_VAR, str(tmp_path / "elsewhere"))
+    moved = lifecycle.custom_home(tmp_path / "elsewhere")
+    monkeypatch.setenv(paths.HOME_ENV_VAR, str(default))
+    spelled_out = lifecycle.custom_home(default)
+    monkeypatch.delenv(paths.HOME_ENV_VAR)
+    unset = lifecycle.custom_home(default)
+
+    assert (moved, spelled_out, unset) == (True, False, False)
 
 
 def test_the_guard_refuses_a_home_that_is_a_link(user_home: Path, tmp_path: Path) -> None:
@@ -708,20 +783,21 @@ def test_the_guard_refuses_a_home_that_is_a_link(user_home: Path, tmp_path: Path
 def test_the_guard_accepts_a_real_aisquare_home(
     user_home: Path, runner: CliRunner, tmp_path: Path
 ) -> None:
-    """Negative control for every refusal above: the home the CLI makes is accepted,
-    as a custom AISQUARE_HOME and as the default."""
+    """Negative control for every refusal above: the home the CLI makes is accepted as
+    the default ~/.aisquare — and refused once AISQUARE_HOME has moved it."""
     _initialised(runner, tmp_path)
     home = paths.aisquare_home()
 
-    assert lifecycle.purge_refusal(home, custom=True) is None, sorted(
+    assert lifecycle.purge_refusal(home, custom=False) is None, sorted(
         p.name for p in home.iterdir()
     )
-    assert lifecycle.purge_refusal(home, custom=False) is None
+    assert lifecycle.purge_refusal(home, custom=True) is not None, "moved: never purged"
 
 
 def test_purge_deletes_the_home_and_never_follows_a_link_inside_it(
     tool: Tool,
     world: World,
+    default_home: None,
     runner: CliRunner,
     user_home: Path,
     isolated_agent_home: Path,
@@ -813,3 +889,368 @@ def test_an_unreadable_settings_file_is_reported_not_raised(
 
     assert [site.config_dir for site in plan.unreadable] == [unreadable_site]
     assert plan.hooks == ()
+
+
+# --- review of #253, round 1 -------------------------------------------------------------
+
+
+def test_a_users_hook_sharing_a_group_with_ours_is_kept_with_its_matcher(
+    tool: Tool, world: World, runner: CliRunner, isolated_agent_home: Path
+) -> None:
+    """Finding 1: the user's command shared a group with aisquare's, and the whole
+    group went. Only aisquare's ENTRY goes now; the group keeps its other keys."""
+    site = _hooked(isolated_agent_home / ".claude", tool.script, foreign=False)
+    settings = _settings(site)
+    settings["hooks"]["Stop"][0]["matcher"] = "*"
+    settings["hooks"]["Stop"][0]["hooks"].append({"type": "command", "command": "notify-send done"})
+    (site / "settings.json").write_text(json.dumps(settings), encoding="utf-8")
+
+    result = runner.invoke(app, ["uninstall", "--yes"])
+
+    assert result.exit_code == 0, result.output
+    assert _settings(site)["hooks"] == {
+        "Stop": [{"matcher": "*", "hooks": [{"type": "command", "command": "notify-send done"}]}]
+    }
+
+
+def test_reinstalling_hooks_keeps_a_users_hook_in_a_shared_group(isolated_agent_home: Path) -> None:
+    """The same rule on the way in: `agents connect` and the upgrade's refresh rewrite
+    our entry and must not take the user's with the group."""
+    site = _hooked(isolated_agent_home / ".claude", "/x/aisquare", foreign=False)
+    settings = _settings(site)
+    settings["hooks"]["Stop"][0]["hooks"].append({"type": "command", "command": "notify-send done"})
+    (site / "settings.json").write_text(json.dumps(settings), encoding="utf-8")
+
+    agent_core.install_hooks("claude-code", site)
+
+    stop = _settings(site)["hooks"]["Stop"]
+    assert {"type": "command", "command": "notify-send done"} in stop[0]["hooks"]
+    assert len(agent_core.hook_commands("claude-code", site)) == len(_EVENTS)
+
+
+def test_the_fail_open_warnings_reach_a_yes_run(
+    tool: Tool, world: World, runner: CliRunner, isolated_agent_home: Path, tmp_path: Path
+) -> None:
+    """Finding 3: under --yes no plan is printed, so the report must carry them."""
+    _initialised(runner, tmp_path)
+    paths.db_path().write_bytes(b"this is not a sqlite database")
+    _hooked(isolated_agent_home / ".claude", tool.script)
+
+    machine = runner.invoke(app, ["--json", "uninstall", "--yes"])
+    human = runner.invoke(app, ["uninstall", "--yes"])
+
+    assert machine.exit_code == 0, machine.output
+    assert _one_object(machine.stdout)["fleet_error"]
+    assert "⚠ the fleet's agents could not be counted" in human.stdout
+
+
+def test_a_settings_file_that_is_not_utf8_is_reported_not_raised(
+    tool: Tool, world: World, runner: CliRunner, isolated_agent_home: Path, tmp_path: Path
+) -> None:
+    """Finding 4: UTF-16 (PowerShell 5.1's default) in a recorded directory, and
+    Latin-1 in a ~/.claude* sibling, crashed the plan — --dry-run included."""
+    recorded = tmp_path / "recorded"
+    recorded.mkdir()
+    (recorded / "settings.json").write_bytes('{"hooks": {}}'.encode("utf-16"))
+    sibling = isolated_agent_home / ".claude-old"
+    sibling.mkdir(parents=True)
+    (sibling / "settings.json").write_bytes(b'{"note": "caf\xe9"}')
+    _record(recorded)
+
+    result = runner.invoke(app, ["--json", "uninstall", "--dry-run"])
+
+    assert result.exit_code == 0, result.output
+    plan = _one_object(result.stdout)
+    assert [entry["config_dir"] for entry in plan["unreadable"]] == [str(recorded)]
+
+
+@pytest.mark.parametrize(
+    ("spec", "runs"),
+    [
+        ({"command": "aisquare", "args": ["serve", "--stdio"]}, True),
+        ({"command": "C:\\Tools\\asq.exe", "args": ["serve"]}, True),
+        ({"command": "uvx", "args": ["--from", "aisquare-cli", "aisquare", "serve"]}, True),
+        ({"command": "/usr/bin/python3", "args": ["-m", "aisquare", "serve"]}, True),
+        (
+            {
+                "command": "npx",
+                "args": ["-y", "@modelcontextprotocol/server-filesystem", "/home/u/Code/AISquare"],
+            },
+            False,
+        ),
+        ({"command": "node", "args": ["server.js", "--config", "/etc/aisquare.json"]}, False),
+    ],
+    ids=["program", "windows-program", "uvx", "python-m", "a-path-named-aisquare", "a-file"],
+)
+def test_an_mcp_server_runs_aisquare_only_by_program_name(spec: dict[str, Any], runs: bool) -> None:
+    """Finding 5: a path or file merely named aisquare is not aisquare."""
+    assert lifecycle._runs_aisquare(spec) is runs
+
+
+def test_a_refused_purge_says_why_under_json(
+    tool: Tool,
+    world: World,
+    runner: CliRunner,
+    user_home: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Finding 6: the reason reaches a JSON consumer, not only stderr."""
+    shared = _home_with_markers(tmp_path / "shared")
+    (shared / "taxes-2025.pdf").write_text("", encoding="utf-8")
+    monkeypatch.setenv(paths.HOME_ENV_VAR, str(shared))
+
+    result = runner.invoke(app, ["--json", "uninstall", "--yes", "--purge"])
+
+    error = _one_object(result.stdout)
+    assert error["error"] == "purge_refused"
+    assert "AISQUARE_HOME moved the home" in error["detail"]
+
+
+def test_off_a_terminal_a_refused_plan_exits_1_without_sending_them_to_yes(
+    tool: Tool,
+    world: World,
+    runner: CliRunner,
+    user_home: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Finding 7: "re-run with --yes" pointed straight at the refusal."""
+    shared = _home_with_markers(tmp_path / "shared")
+    (shared / "notes.txt").write_text("mine", encoding="utf-8")
+    monkeypatch.setenv(paths.HOME_ENV_VAR, str(shared))
+
+    result = runner.invoke(app, ["uninstall", "--purge"])
+
+    assert result.exit_code == 1
+    assert "✗ it will not start" in result.stdout
+    assert "re-run with --yes" not in result.stdout
+
+
+def test_the_kept_home_connects_nothing_even_where_hooks_were_already_gone(
+    tool: Tool, world: World, runner: CliRunner, isolated_agent_home: Path, tmp_path: Path
+) -> None:
+    """Finding 8: a recorded directory whose hooks were removed by hand, or that no
+    longer exists, and a codex record (which never had hooks), are unrecorded too."""
+    hooked = _hooked(isolated_agent_home / ".claude", tool.script)
+    gone = tmp_path / "deleted-claude"
+    _record(hooked, gone)
+    registry = json.loads(paths.agents_registry_path().read_text("utf-8"))
+    registry["connected"].append("codex")
+    registry["connections"]["codex"] = [str(isolated_agent_home / ".codex")]
+    paths.agents_registry_path().write_text(json.dumps(registry), encoding="utf-8")
+
+    result = runner.invoke(app, ["uninstall", "--yes"])
+
+    assert result.exit_code == 0, result.output
+    assert agent_core.connected_dirs("claude-code") == []
+    assert agent_core.connected_dirs("codex") == []
+
+
+def test_mcp_servers_in_the_default_claude_json_are_found_without_hooks_there(
+    tool: Tool,
+    world: World,
+    isolated_agent_home: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Finding 9: a plain `claude mcp add` writes ~/.claude.json, read even when
+    ~/.claude carries no hooks and the shell points somewhere else."""
+    (isolated_agent_home / ".claude").mkdir(parents=True)
+    (isolated_agent_home / ".claude.json").write_text(
+        json.dumps({"mcpServers": {"aisquare": {"command": "aisquare", "args": ["serve"]}}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(_hooked(tmp_path / "claude-work", tool.script)))
+
+    plan = lifecycle.uninstall_plan()
+
+    assert [(entry.name, entry.file) for entry in plan.mcp] == [
+        ("aisquare", isolated_agent_home / ".claude.json")
+    ]
+
+
+def test_an_agents_json_that_cannot_be_updated_is_said(
+    tool: Tool,
+    world: World,
+    runner: CliRunner,
+    isolated_agent_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Finding 10: the failure used to be swallowed into a field nothing read."""
+    site = _hooked(isolated_agent_home / ".claude", tool.script)
+    _record(site)
+
+    def refuse(*_args: object, **_kwargs: object) -> None:
+        raise PermissionError(13, "Permission denied", str(paths.agents_registry_path()))
+
+    monkeypatch.setattr(agent_core, "set_connected", refuse)
+
+    result = runner.invoke(app, ["uninstall", "--yes"])
+
+    assert result.exit_code == 0, result.output
+    assert "⚠ agents.json still lists connections" in result.stdout
+    assert "Permission denied" in result.stdout
+
+
+def test_an_unreadable_site_is_a_failure_so_the_package_stays(
+    tool: Tool,
+    world: World,
+    runner: CliRunner,
+    unreadable_site: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Max review, finding 1: an unreadable site may still hold our hooks, which would
+    then name a program that is gone, with no uninstall left to retry with."""
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(unreadable_site))
+
+    result = runner.invoke(app, ["--json", "uninstall", "--yes"])
+
+    assert result.exit_code == 1
+    report = _one_object(result.stdout)
+    assert {"config_dir": str(unreadable_site), "removed": False} == {
+        key: report["hooks"][0][key] for key in ("config_dir", "removed")
+    }
+    assert report["package"]["runs"] is False and world.execs == []
+
+
+def test_a_partial_purge_leaves_the_markers_so_the_retry_is_recognised(
+    tool: Tool,
+    world: World,
+    default_home: None,
+    runner: CliRunner,
+    isolated_agent_home: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Max review, finding 5: the markers are deleted LAST."""
+    _initialised(runner, tmp_path)
+    home = paths.aisquare_home()
+    (home / "projects" / "p1").mkdir(parents=True)
+    import shutil
+
+    real_rmtree = shutil.rmtree
+
+    def rmtree(path: Any, *args: Any, **kwargs: Any) -> None:
+        if Path(path).name == "projects":
+            raise PermissionError(13, "Permission denied", str(path))
+        real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr("aisquare.services.lifecycle.shutil.rmtree", rmtree)
+    _hooked(isolated_agent_home / ".claude", tool.script)
+
+    result = runner.invoke(app, ["uninstall", "--yes", "--purge"])
+
+    assert result.exit_code == 1
+    assert (home / "config.toml").is_file(), "a marker went before the failure"
+    assert lifecycle.purge_refusal(home, custom=False) is None, "the retry must be accepted"
+    assert world.execs == []
+
+
+@pytest.mark.parametrize("keychain", [True, False], ids=["macos", "elsewhere"])
+def test_purge_says_the_keychain_keeps_the_slots_tokens_on_macos(
+    tool: Tool,
+    world: World,
+    default_home: None,
+    runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    keychain: bool,
+) -> None:
+    """Max review, finding 6: on macOS the slots' tokens live in the Keychain, which a
+    purge does not touch — said, rather than promised away."""
+    monkeypatch.setattr(accounts_core, "keychain_platform", lambda: keychain)
+    _initialised(runner, tmp_path)
+    slot = paths.claude_accounts_dir() / "2"
+    slot.mkdir(parents=True)
+    (slot / accounts_core.MARKER).write_text('{"slot": 2}', encoding="utf-8")
+
+    human = runner.invoke(app, ["uninstall", "--purge", "--dry-run"])
+    machine = runner.invoke(app, ["--json", "uninstall", "--purge"])
+
+    said = "their sign-in tokens stay in the macOS Keychain" in human.stdout
+    assert said is keychain
+    assert _one_object(machine.stdout)["home"]["keychain_tokens_kept"] is keychain
+
+
+def test_a_purge_that_does_not_happen_still_updates_agents_json(
+    tool: Tool,
+    world: World,
+    default_home: None,
+    runner: CliRunner,
+    isolated_agent_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Max review, finding 8: a requested purge skipped after a failure kept the home
+    AND every record of the sites this run had cleaned."""
+    clean = _hooked(isolated_agent_home / ".claude", tool.script)
+    stuck = _hooked(isolated_agent_home / ".claude-c2", tool.script)
+    _record(clean, stuck)
+    recording = agent_core.remove_hooks
+
+    def remove_hooks(name: str, config_dir: Path | None = None) -> bool:
+        if config_dir == stuck:
+            raise PermissionError(13, "Permission denied")
+        return recording(name, config_dir)
+
+    monkeypatch.setattr(agent_core, "remove_hooks", remove_hooks)
+
+    result = runner.invoke(app, ["uninstall", "--yes", "--purge"])
+
+    assert result.exit_code == 1
+    assert paths.aisquare_home().is_dir()
+    assert agent_core.connected_dirs("claude-code") == [stuck], "the cleaned site is unrecorded"
+
+
+def test_the_plan_neither_migrates_the_store_nor_recreates_the_home(
+    tool: Tool, world: World, runner: CliRunner, tmp_path: Path
+) -> None:
+    """Max review, finding 9: the plan counted live agents through store_session,
+    which runs ensure_home and the migrations."""
+    import sqlite3
+
+    _initialised(runner, tmp_path)
+    home = paths.aisquare_home()
+    for directory in (home / "cache", home / "log"):
+        for child in sorted(directory.rglob("*"), reverse=True):
+            child.unlink() if child.is_file() else child.rmdir()
+        directory.rmdir()
+    with sqlite3.connect(paths.db_path()) as connection:
+        version = connection.execute("PRAGMA user_version").fetchone()[0]
+        connection.execute(f"PRAGMA user_version = {version - 1}")
+    connection.close()
+
+    result = runner.invoke(app, ["--json", "uninstall", "--dry-run"])
+
+    assert result.exit_code == 0, result.output
+    with sqlite3.connect(paths.db_path()) as connection:
+        after = connection.execute("PRAGMA user_version").fetchone()[0]
+    connection.close()
+    assert after == version - 1, "the plan migrated the store"
+    assert not (home / "cache").exists() and not (home / "log").exists()
+
+
+def test_upgrade_and_uninstall_agree_on_which_uv_tools_they_touch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Max review, finding 12: one check, so the two cannot drift."""
+    monkeypatch.setattr(install_route, "find_uv", lambda: "/usr/bin/uv")
+    prefix = tmp_path / "tools" / "aisquare-cli-old"
+    (prefix / "bin").mkdir(parents=True)
+    (prefix / install_route.RECEIPT_NAME).write_text(
+        '[tool]\nrequirements = [{ name = "aisquare-cli" }]\n', encoding="utf-8"
+    )
+    route = install_route.classify(
+        Facts(
+            prefix=prefix,
+            base_prefix=tmp_path / "base",
+            executable=prefix / "bin" / "python",
+            platform="linux",
+            python_version="3.13",
+        )
+    )
+
+    upgrade, uninstall = install_route.not_automated(route), install_route.not_removable(route)
+
+    assert upgrade is not None and upgrade == uninstall
+    assert "aisquare-cli-old" in upgrade

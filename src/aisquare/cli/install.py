@@ -292,10 +292,12 @@ def _uninstall_plan_json(plan: lifecycle_service.UninstallPlan) -> dict[str, Any
             "exists": plan.home_exists,
             "entries": len(plan.home_entries),
             "accounts": list(plan.accounts),
+            "keychain_tokens_kept": plan.keychain and bool(plan.accounts),
             "action": "delete" if plan.purge else "keep",
         },
         "purge_refusal": plan.purge_refusal,
         "live_agents": list(plan.live_agents),
+        "unlistened": plan.unlistened,
         "fleet_error": plan.fleet_error,
         "refusal": None if refusal is None else {"error": refusal.error, "message": str(refusal)},
     }
@@ -325,6 +327,11 @@ def _emit_uninstall_plan(plan: lifecycle_service.UninstallPlan) -> None:
         _say(f"  ⚠ could not check {site.config_dir}: {site.reason}")
     if plan.purge and plan.home_exists:
         _say(f"  DELETE {_home_line(plan)}")
+        if plan.keychain and plan.accounts:
+            # A purge deletes the slots' directories; on macOS Claude Code keeps their
+            # sign-in tokens in the Keychain, which nothing here touches (review of #253).
+            _say("    their sign-in tokens stay in the macOS Keychain: sign out in each slot")
+            _say("    (/logout in Claude Code) first to remove them")
     if plan.package_reason is None:
         _say(f"  then remove the package: {plan.package_command}")
     else:
@@ -342,9 +349,10 @@ def _emit_uninstall_plan(plan: lifecycle_service.UninstallPlan) -> None:
     _say("  uv, tmux, Node, gh and Claude Code")
     if plan.fleet_error is not None:
         _say(f"⚠ the fleet's agents could not be counted ({plan.fleet_error}); make sure none run")
-    elif plan.live_agents and not plan.tmux_found:
+    elif plan.unlistened:
         _say(
-            "· the board lists live fleet agents, but tmux is not installed, so none can be running"
+            f"· the board lists {plan.unlistened} live fleet agent(s), but tmux is not on PATH and "
+            "no server listens on their sockets, so none can be running"
         )
     refusal = plan.refusal
     if refusal is not None:
@@ -371,10 +379,17 @@ def _emit_uninstall_report(report: lifecycle_service.UninstallReport) -> None:
                     "runs": report.package_runs,
                     "reason": plan.package_reason,
                 },
+                "fleet_error": plan.fleet_error,
+                "record_error": report.record_error,
                 "notes": list(report.notes),
             }
         )
         return
+    # The fail-open warning, here as well as in the plan: under --yes the plan is never
+    # printed, and this is exactly what nobody was asked about (review of #253). An
+    # unreadable site needs no line of its own: it is a failed site in the report.
+    if plan.fleet_error is not None:
+        _say(f"⚠ the fleet's agents could not be counted ({plan.fleet_error}); make sure none run")
     for hook in report.hooks:
         if hook.ok:
             _say(f"✓ hooks removed from {hook.config_dir}")
@@ -386,6 +401,11 @@ def _emit_uninstall_report(report: lifecycle_service.UninstallReport) -> None:
         _say(f"✗ {plan.home} was not deleted: {report.purge_error}")
     elif plan.home_exists:
         _say(f"· kept {plan.home} — delete it by hand if you do not want it")
+    if report.record_error is not None:
+        _say(
+            f"⚠ agents.json still lists connections: it could not be updated "
+            f"({report.record_error})"
+        )
     for note in report.notes:
         _say(f"· {note}")
     if report.failed:
@@ -421,7 +441,7 @@ def uninstall(
         typer.Option(
             "--purge",
             help="Also delete the aisquare home (~/.aisquare): memory, boards, settings and "
-            "the Claude Code logins in its account slots.",
+            "its Claude Code account slots (on macOS their sign-in tokens stay in the Keychain).",
         ),
     ] = False,
     yes: Annotated[
@@ -448,11 +468,13 @@ def uninstall(
         _emit_uninstall_plan(plan)
         if dry_run or json_output:
             return
+        if refusal is not None:
+            # The plan just said why. At a terminal, asking would offer a yes that is
+            # refused; off one, "re-run with --yes" would send them into the refusal.
+            raise typer.Exit(1)
         if not _stdin_is_a_terminal():
             _say("dry run: nothing removed — re-run with --yes to uninstall")
             return
-        if refusal is not None:
-            raise typer.Exit(1)  # the plan just said why; asking would offer a refused yes
         question = _uninstall_question(plan)
         if question is None:
             _say(
@@ -463,7 +485,7 @@ def uninstall(
             _say("nothing removed")
             return
     if refusal is not None:
-        fail(str(refusal), error=refusal.error)
+        fail(str(refusal), error=refusal.error, detail=str(refusal))
     report = lifecycle_service.uninstall(plan)
     _emit_uninstall_report(report)
     if report.failed:

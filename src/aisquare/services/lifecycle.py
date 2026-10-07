@@ -12,9 +12,11 @@ subprocess.
 
 from __future__ import annotations
 
+import contextlib
 import os
-import re
 import shutil
+import socket
+import sqlite3
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
@@ -30,7 +32,7 @@ from aisquare.core.config import (
     save_config,
 )
 from aisquare.core.store import store_session
-from aisquare.core.tmux import CONF_NAME as FLEET_TMUX_CONF
+from aisquare.core.tmux import TmuxServer, TmuxUnavailable
 from aisquare.core.version import __version__
 from aisquare.core.workspace import current_project
 from aisquare.models import SetupReport
@@ -442,19 +444,10 @@ def refresh_sites(found: install_route.Facts) -> tuple[tuple[HookSite, ...], tup
         if key in seen:
             continue
         seen.add(key)
-        try:
-            commands = agent_core.hook_commands(HOOK_AGENT, directory)
-        except (OSError, ValueError, TypeError) as exc:
-            # Unreadable, not UTF-8 (a ValueError), or a hooks table that is not
-            # the shape Claude Code writes (`{"Stop": 1}` is a TypeError): left and
-            # named, so one bad file cannot stop the upgrade of everything else.
-            left.append(HookSite(directory, reason=f"its settings.json could not be read ({exc})"))
+        binaries, error = hook_binaries(directory)
+        if error is not None:
+            left.append(HookSite(directory, reason=error))
             continue
-        binaries: list[agent_core.HookBinary] = []
-        for command in commands:
-            binary = agent_core.hook_binary(command)
-            if binary is not None and binary not in binaries:
-                binaries.append(binary)
         if not binaries:
             continue
         programs = tuple(str(binary.program) for binary in binaries)
@@ -473,6 +466,26 @@ def refresh_sites(found: install_route.Facts) -> tuple[tuple[HookSite, ...], tup
         else:
             refresh.append(HookSite(directory, programs))
     return tuple(refresh), tuple(left)
+
+
+def hook_binaries(directory: Path) -> tuple[list[agent_core.HookBinary], str | None]:
+    """The distinct programs ``directory``'s aisquare hooks run — or why it could not be read.
+
+    The one reader for upgrade's refresh and uninstall's plan. A settings.json
+    that is unreadable, not UTF-8 (a ValueError), or holds hooks of a shape
+    Claude Code does not write (``{"Stop": 1}`` is a TypeError) is a reason, not
+    a traceback: one bad file must not stop the work on every other directory.
+    """
+    try:
+        commands = agent_core.hook_commands(HOOK_AGENT, directory)
+    except (OSError, ValueError, TypeError) as exc:
+        return [], f"its settings.json could not be read ({exc})"
+    binaries: list[agent_core.HookBinary] = []
+    for command in commands:
+        binary = agent_core.hook_binary(command)
+        if binary is not None and binary not in binaries:
+            binaries.append(binary)
+    return binaries, None
 
 
 def upgrade(plan: UpgradePlan, *, to_stderr: bool = False) -> UpgradeReport:
@@ -604,37 +617,6 @@ def _refresh(site: HookSite, found: install_route.Facts) -> HookRefresh:
 #: before --purge deletes anything.
 HOME_MARKERS = ("config.toml", "context.db", "agents.json")
 
-#: What aisquare itself writes at the top of its home, by name. A home that
-#: AISQUARE_HOME moved somewhere custom is deleted by --purge only when it holds
-#: nothing else: pointed at a directory people keep other things in, a
-#: recursive delete would take those too. Names come from the helpers that
-#: create them wherever one exists, so a rename there cannot strand this list.
-_HOME_NAMES = frozenset(
-    {
-        paths.config_path().name,
-        paths.credentials_path().name,
-        f"{paths.credentials_path().name}.lock",
-        paths.db_path().name,
-        f"{paths.db_path().name}-wal",
-        f"{paths.db_path().name}-shm",
-        f"{paths.db_path().name}-journal",
-        paths.agents_registry_path().name,
-        paths.state_path().name,
-        f"{paths.state_path().name}.lock",
-        paths.claude_accounts_dir().name,
-        paths.cache_dir().name,
-        paths.log_dir().name,
-        paths.project_data_dir("x").parent.name,
-        paths.explainability_dir().name,
-        paths.truncation_marker_path().name,
-        explainability_service.key_path().name,
-        FLEET_TMUX_CONF,
-        "screenshots",
-    }
-)
-#: ``core.atomic``'s sibling temp files: ``.<name>.<pid>.<8 hex>.tmp``.
-_ATOMIC_TEMP = re.compile(r"^\..+\.\d+\.[0-9a-f]{8}\.tmp$")
-
 FLEET_SHUTDOWN = "aisquare fleet shutdown --all --yes"
 
 
@@ -680,13 +662,18 @@ class UninstallPlan:
     home_entries: tuple[str, ...]
     accounts: tuple[str, ...]
     """The Claude Code logins kept in the home's account slots, described."""
+    keychain: bool
+    """Whether those logins' tokens live in the macOS Keychain, which a purge leaves."""
     purge: bool
     purge_refusal: str | None
     """Why the home may not be deleted — consulted only when ``purge`` is set."""
     live_agents: tuple[str, ...]
+    """Live fleet rows that may still be running: with tmux on PATH every live row,
+    without it those whose socket still has a server listening."""
+    unlistened: int
+    """Live rows that do not block: no tmux here and no server on their socket."""
     fleet_error: str | None
     """Why the fleet's live agents could not be counted, when they could not."""
-    tmux_found: bool
 
     @property
     def package_command(self) -> str:
@@ -695,7 +682,7 @@ class UninstallPlan:
     @property
     def refusal(self) -> UninstallRefused | None:
         """The reason nothing may start, or ``None``."""
-        if self.live_agents and self.tmux_found:
+        if self.live_agents:
             count = len(self.live_agents)
             return UninstallRefused(
                 f"{count} fleet agent{'s are' if count != 1 else ' is'} running "
@@ -726,7 +713,8 @@ class UninstallReport:
 
     plan: UninstallPlan
     hooks: tuple[HookRemoval, ...] = ()
-    unrecorded: bool = False
+    record_error: str | None = None
+    """Why agents.json could not be updated, when it could not."""
     purged: bool = False
     purge_error: str | None = None
     notes: tuple[str, ...] = ()
@@ -758,15 +746,26 @@ def _is_link(path: Path) -> bool:
     return bool(is_junction(path)) if is_junction is not None else False
 
 
+def custom_home(home: Path) -> bool:
+    """Whether AISQUARE_HOME moved the home away from ``~/.aisquare``."""
+    if not os.environ.get(paths.HOME_ENV_VAR):
+        return False
+    return agent_core.dir_identity(home) != agent_core.dir_identity(_user_home() / ".aisquare")
+
+
 def purge_refusal(home: Path, *, custom: bool) -> str | None:
     """Why ``home`` must not be deleted, or ``None`` when ``--purge`` may delete it.
 
-    Every check is about the one mistake that cannot be undone — a recursive
-    delete of the wrong directory: a link (#198 plans links between account slots
-    and ~/.claude, and a delete led through one would take the target), the
-    user's home or anything above it, a directory with none of aisquare's
-    markers, and — when AISQUARE_HOME moved the home somewhere custom — any
-    entry aisquare did not create.
+    Every check is about the one mistake that cannot be undone, a recursive
+    delete of the wrong directory:
+    - a link (#198 plans links between account slots and ~/.claude, and a
+      delete led through one would take the target);
+    - the user's home, or anything above it, or a filesystem root;
+    - a directory with none of aisquare's markers;
+    - ANY home AISQUARE_HOME moved elsewhere. A directory someone chose can hold
+      their own things under names aisquare also uses (``projects/``,
+      ``screenshots/``), and no name tells the two apart (review of #253), so
+      only ``~/.aisquare`` — aisquare's by name — is ever deleted.
     """
     if _is_link(home):
         return f"{home} is a link — delete what it points at by hand if that is what you mean"
@@ -785,19 +784,11 @@ def purge_refusal(home: Path, *, custom: bool) -> str | None:
     if not any((home / marker).is_file() for marker in HOME_MARKERS):
         return f"{home} holds none of {', '.join(HOME_MARKERS)}, so it is not an aisquare home"
     if custom:
-        try:
-            names = sorted(child.name for child in home.iterdir())
-        except OSError as exc:
-            return f"{home} could not be listed ({exc})"
-        foreign = [n for n in names if n not in _HOME_NAMES and not _ATOMIC_TEMP.match(n)]
-        if foreign:
-            shown = ", ".join(foreign[:5]) + (
-                f" and {len(foreign) - 5} more" if len(foreign) > 5 else ""
-            )
-            return (
-                f"AISQUARE_HOME points at a directory that also holds {shown}, which aisquare "
-                "did not create — move them out, or delete the directory by hand"
-            )
+        return (
+            f"AISQUARE_HOME moved the home to {home}, and --purge deletes only ~/.aisquare: a "
+            "directory you chose may hold your own files under names aisquare also uses — "
+            "delete it by hand"
+        )
     return None
 
 
@@ -823,22 +814,30 @@ def _accounts_kept() -> tuple[str, ...]:
     return tuple(described)
 
 
-def _runs_aisquare(spec: object) -> bool:
-    """Whether an ``mcpServers`` entry starts aisquare: by name, or ``python -m aisquare``.
+#: The executable names that ARE aisquare, as either platform writes them.
+_PROGRAM_NAMES = frozenset({"aisquare", "asq", "aisquare.exe", "asq.exe"})
 
-    Any token counts, not only ``command``: ``uvx --from aisquare-cli aisquare
-    serve`` names the program in its arguments. Windows names (``asq.exe``) are
-    read as Windows paths whatever this machine is, because the file may have
-    been written on either.
+
+def _runs_aisquare(spec: object) -> bool:
+    """Whether an ``mcpServers`` entry starts aisquare — by program, never by mention.
+
+    ``command`` counts when its file name IS the program (read as a Windows path
+    whatever this machine is, since the file may come from either; ``/`` splits
+    there too). An argument counts only as a BARE program name — ``uvx --from
+    aisquare-cli aisquare serve`` — or as the ``-m aisquare`` pair. A path or a
+    file that merely ends in ``aisquare`` (``~/Code/AISquare``, ``aisquare.json``)
+    is another server's argument, and naming that server for removal would be
+    wrong (review of #253).
     """
     if not isinstance(spec, dict):
         return False
-    tokens = [str(spec.get("command") or "")]
+    command = spec.get("command")
+    if isinstance(command, str) and PureWindowsPath(command).name.lower() in _PROGRAM_NAMES:
+        return True
     args = spec.get("args")
-    if isinstance(args, list):
-        tokens.extend(str(arg) for arg in args)
+    tokens = [str(arg) for arg in args] if isinstance(args, list) else []
     for index, token in enumerate(tokens):
-        if PureWindowsPath(token).stem.lower() in ("aisquare", "asq"):
+        if token.lower() in _PROGRAM_NAMES:
             return True
         if token == "-m" and tokens[index + 1 : index + 2] == ["aisquare"]:
             return True
@@ -881,14 +880,40 @@ def _mcp_registrations(directories: Iterable[Path]) -> tuple[McpRegistration, ..
     return tuple(found)
 
 
-def _live_fleet_agents() -> tuple[tuple[str, ...], str | None]:
-    """The fleet's live rows as ``label (project)``, or why they could not be read.
+def _claude_dirs_for_mcp() -> list[Path]:
+    """``~/.claude`` and every ``~/.claude*`` directory, hooked or not, for the MCP scan.
 
-    The store is opened only when ``context.db`` exists and is not empty: opening
-    creates a missing home, and an empty file is rebuilt by ``open_store`` (its
-    truncation path writes a marker). A store that cannot answer is reported,
-    never raised — the plan reads, and a damaged board is no reason to keep a
-    user from removing the tool.
+    ``claude mcp add`` on a plain install writes ``~/.claude.json``, beside
+    ``~/.claude``, whether or not that directory carries hooks; reading a few
+    small files is cheap next to telling nobody about a server that will fail to
+    start once the package is gone.
+    """
+    default = accounts_core.home_config_dir()
+    found = [default]
+    with contextlib.suppress(OSError):
+        found.extend(
+            sorted(p for p in default.parent.glob(".claude*") if p.is_dir() and p != default)
+        )
+    return found
+
+
+_LIVE_ROWS = (
+    "SELECT f.label, f.tmux_socket, p.root FROM fleet_agent AS f "
+    "LEFT JOIN project AS p ON p.id = f.project_id WHERE f.ended_at IS NULL"
+)
+
+
+def _live_fleet_agents() -> tuple[tuple[tuple[str, str], ...], str | None]:
+    """The fleet's live rows as ``(label (project), socket)``, or why they could not be read.
+
+    Read with a plain ``query_only`` connection, never through ``store_session``:
+    that runs ``ensure_home`` (recreating ``cache/`` and ``log/``) and migrates
+    the schema, and the plan writes nothing (review of #253). As the last
+    connection, its close leaves no ``-wal``/``-shm`` behind; a ``mode=ro`` one
+    would (measured). Opened only when ``context.db`` exists and is not empty. A
+    store from before the fleet has no rows to count; any other store that
+    cannot answer is reported, never raised — a damaged board is no reason to
+    keep a user from removing the tool.
     """
     database = paths.db_path()
     try:
@@ -897,15 +922,57 @@ def _live_fleet_agents() -> tuple[tuple[str, ...], str | None]:
     except OSError as exc:
         return (), str(exc)
     try:
-        with store_session() as store:
-            live = [
-                f"{agent.label} ({project.codename or project.root.name})"
-                for project in store.list_projects(all=True, include_forgotten=True)
-                for agent in store.fleet_agents(project.id, live_only=True)
-            ]
-    except Exception as exc:  # StoreUnopenable, a corrupt page, a lock: report it
+        connection = sqlite3.connect(str(database), timeout=2.0)
+    except sqlite3.Error as exc:
         return (), str(exc) or type(exc).__name__
-    return tuple(live), None
+    try:
+        connection.execute("PRAGMA query_only = ON")
+        rows = connection.execute(_LIVE_ROWS).fetchall()
+    except sqlite3.OperationalError as exc:
+        if "no such table" in str(exc):
+            return (), None  # a store from before the fleet: nothing can be live
+        return (), str(exc) or type(exc).__name__
+    except sqlite3.Error as exc:
+        return (), str(exc) or type(exc).__name__
+    finally:
+        connection.close()
+    return (
+        tuple(
+            (f"{label} ({Path(root).name if root else 'unknown project'})", socket_name or "asq")
+            for label, socket_name, root in rows
+        ),
+        None,
+    )
+
+
+def _server_listening(socket_name: str) -> bool:
+    """Whether a tmux server answers on fleet socket ``socket_name``, asked WITHOUT tmux.
+
+    "tmux is not on PATH" is no evidence that no agent runs — the agents may have
+    been started from a shell whose PATH had it (``core.tmux``: "a missing
+    binary is not evidence either way"). The socket file is: a plain AF_UNIX
+    connect at tmux's own path (``TmuxServer.socket_path``). Only "no file" and
+    "nobody listening" count as no server; any other answer is treated as a live
+    one, because the cost of being wrong is removing hooks under running agents.
+    """
+    try:
+        path = TmuxServer(socket_name).socket_path()
+    except TmuxUnavailable:
+        return False  # no POSIX uid, so no tmux server can exist here at all
+    family = getattr(socket, "AF_UNIX", None)
+    if family is None:
+        return False
+    probe = socket.socket(family, socket.SOCK_STREAM)
+    probe.settimeout(2.0)
+    try:
+        probe.connect(str(path))
+    except (FileNotFoundError, ConnectionRefusedError):
+        return False
+    except OSError:
+        return True
+    finally:
+        probe.close()
+    return True
 
 
 def uninstall_plan(*, purge: bool = False) -> UninstallPlan:
@@ -920,32 +987,27 @@ def uninstall_plan(*, purge: bool = False) -> UninstallPlan:
         if key in seen:
             continue
         seen.add(key)
-        try:
-            commands = agent_core.hook_commands(HOOK_AGENT, directory)
-        except OSError as exc:
-            unreadable.append(
-                HookSite(directory, reason=f"its settings.json could not be read ({exc})")
-            )
-            continue
-        if commands:
-            programs: list[str] = []
-            for command in commands:
-                binary = agent_core.hook_binary(command)
-                if binary is not None and str(binary.program) not in programs:
-                    programs.append(str(binary.program))
-            hooks.append(HookSite(directory, tuple(programs)))
+        binaries, error = hook_binaries(directory)
+        if error is not None:
+            unreadable.append(HookSite(directory, reason=error))
+        elif binaries:
+            hooks.append(HookSite(directory, tuple(str(b.program) for b in binaries)))
     home = paths.aisquare_home()
     try:
         entries = tuple(sorted(c.name for c in home.iterdir())) if home.is_dir() else ()
     except OSError:
         entries = ()
-    live, fleet_error = _live_fleet_agents()
-    custom = bool(os.environ.get(paths.HOME_ENV_VAR))
+    rows, fleet_error = _live_fleet_agents()
+    tmux_found = _tmux_on_path()
+    live = tuple(
+        label for label, socket_name in rows if tmux_found or _server_listening(socket_name)
+    )
+    custom = custom_home(home)
     return UninstallPlan(
         route=route,
         hooks=tuple(hooks),
         unreadable=tuple(unreadable),
-        mcp=_mcp_registrations(candidates),
+        mcp=_mcp_registrations([*candidates, *_claude_dirs_for_mcp()]),
         package_argv=tuple(install_route.remove_argv(route)),
         package_env=install_route.installer_env(route),
         package_reason=install_route.not_removable(route),
@@ -953,11 +1015,12 @@ def uninstall_plan(*, purge: bool = False) -> UninstallPlan:
         home_exists=home.exists() or home.is_symlink(),
         home_entries=entries,
         accounts=_accounts_kept(),
+        keychain=accounts_core.keychain_platform(),
         purge=purge,
         purge_refusal=purge_refusal(home, custom=custom),
         live_agents=live,
+        unlistened=len(rows) - len(live),
         fleet_error=fleet_error,
-        tmux_found=_tmux_on_path(),
     )
 
 
@@ -987,31 +1050,50 @@ def uninstall(plan: UninstallPlan) -> UninstallReport:
             )
         else:
             removals.append(HookRemoval(site.config_dir, True))
-    unrecorded = False
-    if not plan.purge and paths.agents_registry_path().is_file():
-        # The home stays, so it should not claim a connection that is gone. Only
-        # because agents.json already exists: set_connected creates the home.
-        try:
-            for removal in removals:
-                if removal.ok:
-                    agent_core.set_connected(HOOK_AGENT, False, removal.config_dir)
-            unrecorded = True
-        except Exception:  # agents.json is a record, not the hooks: never a reason to stop
-            unrecorded = False
+    # A site that could not be read may still hold our hooks, and nothing here can
+    # take them out: a failure like any other, so the package stays and the
+    # command is still there to run again (review of #253).
+    removals.extend(HookRemoval(site.config_dir, False, site.reason) for site in plan.unreadable)
     purged, purge_error = False, None
     hooks_failed = any(not removal.ok for removal in removals)
     if plan.purge and plan.home_exists and not hooks_failed:
         purged, purge_error = _purge(plan.home)
     elif plan.purge and hooks_failed:
         purge_error = "not attempted: hooks were left in a directory above"
+    record_error: str | None = None
+    if not purged and paths.agents_registry_path().is_file():
+        # The home survives — no purge, or one not attempted or not finished — so
+        # it must not claim a connection that is gone: any recorded site with no
+        # aisquare hook left, whether this run removed them or they were already
+        # gone. Only when agents.json exists: set_connected creates the home.
+        try:
+            _unrecord_hookless()
+        except Exception as exc:  # a record, not the hooks: reported, never a stop
+            record_error = str(exc) or type(exc).__name__
     return UninstallReport(
         plan,
         hooks=tuple(removals),
-        unrecorded=unrecorded,
+        record_error=record_error,
         purged=purged,
         purge_error=purge_error,
         notes=tuple(_uninstall_notes(plan, removals)),
     )
+
+
+def _unrecord_hookless() -> None:
+    """Drop every recorded agent site that carries no aisquare hook from agents.json.
+
+    Every agent, not only Claude Code: ``agents connect codex`` records a site
+    that never had hooks, and an uninstalled aisquare connects nothing. A site
+    whose settings.json cannot be read keeps its record — it may still hold ours.
+    """
+    registry = agent_core.read_json(paths.agents_registry_path())
+    names = set(registry.get("connected") or []) | set(registry.get("connections") or {})
+    for name in sorted(str(n) for n in names):
+        for directory in agent_core.connected_dirs(name, registry):
+            binaries, error = hook_binaries(directory) if name == HOOK_AGENT else ([], None)
+            if error is None and not binaries:
+                agent_core.set_connected(name, False, directory)
 
 
 def _purge(home: Path) -> tuple[bool, str | None]:
@@ -1020,11 +1102,19 @@ def _purge(home: Path) -> tuple[bool, str | None]:
     ``shutil.rmtree`` never follows a link inside the tree — it removes the link —
     and refuses a link at the top; the guard has already refused that one.
     """
-    refusal = purge_refusal(home, custom=bool(os.environ.get(paths.HOME_ENV_VAR)))
+    refusal = purge_refusal(home, custom=custom_home(home))
     if refusal is not None:
         return False, refusal
     try:
-        shutil.rmtree(home)
+        # The markers LAST: a delete that stops partway leaves them, so the retry
+        # the report promises is still recognised as an aisquare home (review of
+        # #253). A link is unlinked, never followed; rmtree inside does the same.
+        for child in sorted(home.iterdir(), key=lambda entry: entry.name in HOME_MARKERS):
+            if _is_link(child) or not child.is_dir():
+                child.unlink()
+            else:
+                shutil.rmtree(child)
+        home.rmdir()
     except OSError as exc:
         return False, f"{home} was only partly deleted ({exc})"
     return True, None

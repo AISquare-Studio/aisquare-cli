@@ -762,11 +762,9 @@ def not_automated(route: InstallRoute) -> str | None:
     receipt says exactly how to reinstall it, and the result is checked in a new
     process afterwards. Everything else is told the exact command instead.
     """
-    if route.facts.platform == "win32":
-        return (
-            "Windows locks the files of a running program, so aisquare cannot replace "
-            "itself — quit it first"
-        )
+    windows = _windows_blocker(route, "replace")
+    if windows is not None:
+        return windows
     if route.kind == EDITABLE:
         return (
             "an editable install follows its checkout — pull it first "
@@ -780,6 +778,26 @@ def not_automated(route: InstallRoute) -> str | None:
             f"its uv receipt records {'; '.join(receipt.unrestatable)}, which a reinstall "
             "could not carry over"
         )
+    return _uv_tool_blocker(route)
+
+
+def _windows_blocker(route: InstallRoute, verb: str) -> str | None:
+    """Why Windows rules out a self-``verb`` (``replace``, ``remove``), or ``None``."""
+    if route.facts.platform != "win32":
+        return None
+    return (
+        f"Windows locks the files of a running program, so aisquare cannot {verb} itself "
+        "— run it after aisquare exits"
+    )
+
+
+def _uv_tool_blocker(route: InstallRoute) -> str | None:
+    """Why uv cannot be pointed at THIS tool environment, or ``None``.
+
+    Shared by upgrade and uninstall, so the two agree on which uv tools they touch:
+    ``uv tool … aisquare-cli`` acts on ``tools/aisquare-cli``, and from an
+    environment with any other name it would act on a different one.
+    """
     if route.facts.prefix.name != DISTRIBUTION:
         return f"the tool environment is named {route.facts.prefix.name!r}, not {DISTRIBUTION!r}"
     if find_uv() is None:
@@ -832,21 +850,15 @@ def not_removable(route: InstallRoute) -> str | None:
     may hold other things they installed, and pipx and Homebrew keep records of
     their own that only they should edit.
     """
-    if route.facts.platform == "win32":
-        return (
-            "Windows locks the files of a running program, so aisquare cannot remove "
-            "itself — run it after aisquare exits"
-        )
+    windows = _windows_blocker(route, "remove")
+    if windows is not None:
+        return windows
     if route.receipt is None:
         return {
             PIPX: "pipx installs are removed with pipx",
             HOMEBREW: "Homebrew installs are removed with brew",
         }.get(route.kind, f"it was installed with {route.manager}, which this CLI does not run")
-    if route.facts.prefix.name != DISTRIBUTION:
-        return f"the tool environment is named {route.facts.prefix.name!r}, not {DISTRIBUTION!r}"
-    if find_uv() is None:
-        return "uv is not on PATH"
-    return None
+    return _uv_tool_blocker(route)
 
 
 def installer_env(route: InstallRoute) -> dict[str, str]:

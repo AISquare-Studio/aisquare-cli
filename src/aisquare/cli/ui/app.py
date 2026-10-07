@@ -1107,7 +1107,10 @@ def run_ui(**options: Any) -> None:
     app.run()
     for line in app.unsaved:
         stderr_console().print(f"⚠ {line}", markup=False, highlight=False)
-    if app.hand_off is not None:  # the terminal is ours again: give it to the command
+    # The terminal is ours again: give it to the command. Read with getattr so an
+    # app still needs only `run()` and `unsaved` to be run here.
+    hand_off = getattr(app, "hand_off", None)
+    if hand_off is not None:
         from aisquare.core import selfcli
 
-        selfcli.exec_self(app.hand_off)
+        selfcli.exec_self(hand_off)

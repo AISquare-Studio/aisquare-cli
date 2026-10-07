@@ -1,4 +1,4 @@
-"""Agent actions from the phone: stop, restart, switch (SPEC §3), and the request ledger.
+"""Agent actions from the phone: tell, stop, restart, switch (SPEC §3), and the request ledger.
 
 The actions are ordinary write handlers (:data:`ACTION_ENDPOINTS`,
 :func:`action_handlers`). The write dispatcher runs each one in a worker thread
@@ -6,23 +6,32 @@ behind ``allow_write``, the request ledger and the audit log, as it runs ``note`
 or ``send-keys``. Acting on a live agent from a phone needs more than that, and
 the rest is here:
 
-* **A pin.** ``agent_id`` must still be the newest row holding the label, and a
-  card's ``needs_id`` must still be one of the agent's items. Both are checked
-  before anything reaches the fleet. A screen that went stale therefore never
-  stops, restarts or moves the replacement a manager started meanwhile (409
-  ``stale``, with what is ``current``).
-* **A confirmation.** Each action carries ``confirm=<label>``.
+* **A pin.** ``agent_id`` (required by stop, restart and switch, optional for a
+  tell) must still be the newest row holding the label, and a card's
+  ``needs_id`` must still be one of the agent's items. Both are checked before
+  anything reaches the fleet. A screen that went stale therefore never stops,
+  restarts or moves the replacement a manager started meanwhile, and never
+  types into it either (409 ``stale``, with what is ``current``).
+* **A confirmation.** Stop, restart and switch carry ``confirm=<label>``.
 * **The dialog guard.** A stop types ``/exit`` and Enter, and restart and switch
   stop the agent the same way. With a dialog up, that Enter answers it: it can
   approve a Bash command or take a question's first option. So an open dialog
   refuses the action (409 ``dialog_open``), unless ``dismiss_dialog`` asks for one
-  Escape (No) first.
+  Escape (No) first. A tell that types does not type into a dialog either.
 * **One action per agent at a time.** ``remote_server.remote_agent_lock`` is
   taken without waiting, and the needs card's quick answers take it too (409
   ``busy``).
 * **The fleet's own refusals**, mapped as ``asq fleet`` maps them
   (:func:`fleet_refusal`). A 200 body is the CLI's ``--json`` payload plus
-  ``project``.
+  ``project``; a tell's also says its ``mode``.
+
+``agent/tell`` has three modes. ``auto`` is ``fleet tell``: it types into an agent
+that reads as waiting, and files a board note for any other, which the agent reads
+at its next prompt. ``prompt`` types now, into an agent idle at its input prompt.
+After an Escape no Stop hook fires, so the row reads ``working`` for up to 30
+minutes while the agent sits at its prompt, and ``auto`` would only file a note
+the agent never wakes for. ``interrupt`` sends one Escape, then types once the
+prompt is back.
 
 :class:`ActionLedger` keeps, per device, how its recent write-gated requests
 ended. A retried ``request_id`` gets the first answer instead of a second run: a
@@ -59,8 +68,17 @@ if TYPE_CHECKING:
     from aisquare.services.remote_needs import AgentNow
     from aisquare.services.remote_server import Device, RemoteKit, WriteHandler
 
-ACTION_ENDPOINTS: tuple[str, ...] = ("agent/stop", "agent/restart", "agent/switch")
+ACTION_ENDPOINTS: tuple[str, ...] = ("agent/tell", "agent/stop", "agent/restart", "agent/switch")
 """The action names ``POST api/{name}`` accepts beside ``remote_server.WRITE_ENDPOINTS``."""
+
+TELL_TEXT_MAX = 8_000
+"""The longest ``agent/tell``. It arrives as one bracketed paste, however many lines it has."""
+
+TELL_MODES = ("auto", "prompt", "interrupt")
+"""``agent/tell``'s ``mode``: ``fleet tell``, type at the idle prompt, or Escape and then type."""
+
+ACTION_AUDIT_EXCERPT = 120
+"""How many characters of a tell its audit line keeps (SPEC §2.7)."""
 
 ACTION_NEEDS_ID_MAX = 64
 """The longest ``needs_id`` a body may carry (an id is ``ny_`` and 16 hex digits)."""
@@ -246,6 +264,41 @@ def action_pinned(body: dict[str, Any]) -> tuple[str, str]:
     if body.get("confirm") != label:
         raise RequestError(400, "confirm_required", f"confirm by sending confirm={label}")
     return label, action_required(body, "agent_id")
+
+
+def action_tell_text(body: dict[str, Any]) -> str:
+    """The tell's ``text``, kept literally: whitespace is content. Empty is a 400, and
+    longer than :data:`TELL_TEXT_MAX` a 413."""
+    text = body.get("text")
+    if not isinstance(text, str) or not text:
+        raise RequestError(400, "invalid", "'text' is required: what to tell the agent")
+    if len(text) > TELL_TEXT_MAX:
+        raise RequestError(413, "too_large", f"'text' is over {TELL_TEXT_MAX} characters")
+    return text
+
+
+def action_tell_mode(body: dict[str, Any]) -> str:
+    """The tell's ``mode``, ``auto`` when there is none (:data:`TELL_MODES`)."""
+    mode = body.get("mode")
+    if mode is None:
+        return "auto"
+    if not isinstance(mode, str) or mode not in TELL_MODES:
+        raise RequestError(400, "invalid", "'mode' is auto, prompt or interrupt")
+    return mode
+
+
+def action_audit_excerpt(text: str) -> str:
+    """How a tell began, for its audit line (SPEC §2.7).
+
+    A tell is the one write that delivers free-form instructions, and one typed
+    into a pane leaves no board event, so the trail keeps its start. A longer
+    text is cut to :data:`ACTION_AUDIT_EXCERPT` characters, the last of them
+    ``…``. Anything that would not print becomes ``?``: a newline would begin a
+    forged line of its own.
+    """
+    if len(text) > ACTION_AUDIT_EXCERPT:
+        text = text[: ACTION_AUDIT_EXCERPT - 1] + "…"
+    return "".join(ch if ch.isprintable() else "?" for ch in text)
 
 
 def action_yes_no(flag: bool) -> str:
@@ -513,7 +566,155 @@ def action_dialog_guard(
     return True
 
 
+# --- typing into the agent's prompt ------------------------------------------------------------
+
+
+def action_interrupt_wait() -> float:
+    """How long ``interrupt`` waits, after its Escape, for the input prompt to come back.
+
+    ``needs_at_input_prompt`` holds only for a QUIET pane, one with no output for
+    ``fleet.ACTIVITY_WINDOW``. The interrupt's own redraw is output: the spinner
+    stops, and Claude Code prints that it was interrupted. So the prompt cannot
+    read as reached until that long after the Escape, and the settle time
+    (``DIALOG_SETTLE_SECONDS``) counts from then. A wait of the settle time
+    alone would always have ended in ``still_busy``.
+    """
+    from aisquare.services import fleet as fleet_service
+
+    return fleet_service.ACTIVITY_WINDOW.total_seconds() + remote_needs.DIALOG_SETTLE_SECONDS
+
+
+def action_busy_sentence(snap: AgentNow, label: str) -> str:
+    """Why ``prompt`` will not type: what the agent is doing, and what to do instead."""
+    state = action_state(snap)
+    if state == "waiting":
+        return (
+            f"{label} is not idle at its prompt yet — try again in a few seconds, "
+            "or use Interrupt & tell"
+        )
+    return f"{label} is {state} — use Interrupt & tell"
+
+
+def action_paste(snap: AgentNow, label: str, text: str, *, interrupted: bool) -> tuple[bool, str]:
+    """Type ``text`` into the agent's pane the way ``fleet tell`` does: one bracketed paste,
+    then Enter. Returns ``(delivered, how)``.
+
+    A paste, not keystrokes: Claude Code takes every line of it as one message,
+    where each typed newline would submit one. The paste is a single tmux call,
+    so a paste that fails typed nothing, and is a 409. An Enter that fails leaves
+    the text unsent at the prompt. That is a 200 with ``delivered: false`` that
+    says so, because text reached a live agent: the audit line records it, and the
+    page keeps the card.
+    """
+    from aisquare.core.tmux import TmuxError
+    from aisquare.services import fleet as fleet_service
+
+    agent = action_pane_agent(snap, label)
+    server = fleet_service.server_for(agent.tmux_socket)
+    first = "interrupted it with Escape, then " if interrupted else ""
+    try:
+        server.paste(agent.pane_id, text)
+    except TmuxError as exc:
+        sent = "Escape was sent, but " if interrupted else ""
+        raise RequestError(
+            409,
+            "fleet_error",
+            f"{sent}tmux could not type into {label}'s pane ({exc}) — nothing was typed",
+        ) from exc
+    try:
+        server.send_keys(agent.pane_id, "Enter")
+    except TmuxError as exc:
+        return False, (
+            f"{first}pasted it at its prompt, but tmux could not press Enter ({exc}) — "
+            "press Enter on the pad to send it"
+        )
+    return True, f"{first}typed into its pane at its prompt"
+
+
+def action_type_now(
+    target: ProjectInfo,
+    label: str,
+    text: str,
+    snap: AgentNow | None,
+    *,
+    agent_id: str | None,
+    interrupt: bool,
+) -> tuple[bool, str]:
+    """``prompt`` and ``interrupt``: type ``text`` at the agent's input prompt, now.
+
+    Both refuse an open dialog, which the Enter would answer, and a pane that is
+    not running the agent. ``prompt`` types only at an idle prompt, and otherwise
+    says what the agent is doing. ``interrupt`` sends one Escape and waits for the
+    prompt to come back. If it does not, nothing is typed.
+    """
+    snap = snap if snap is not None else action_snapshot(target, label, agent_id)
+    if remote_needs.needs_dialog_open(snap):
+        raise RequestError(
+            409,
+            "dialog_open",
+            f"{label} is showing a prompt; typing now would answer it — "
+            "answer it or dismiss it first",
+        )
+    action_pane_agent(snap, label)
+    if interrupt:
+        action_press_escape(snap, label)
+        reached = action_settle(
+            target, label, agent_id, remote_needs.needs_at_input_prompt, action_interrupt_wait()
+        )
+        if reached is None:
+            raise RequestError(
+                409,
+                "still_busy",
+                f"Escape was sent; {label} has not stopped yet — nothing was typed",
+            )
+        snap = reached
+    elif not remote_needs.needs_at_input_prompt(snap):
+        raise RequestError(409, "agent_busy", action_busy_sentence(snap, label))
+    return action_paste(snap, label, text, interrupted=interrupt)
+
+
 # --- the actions ---------------------------------------------------------------------------
+
+
+def action_tell(body: dict[str, Any]) -> tuple[dict[str, object], str]:
+    """``POST api/agent/tell``: say ``text`` to one agent, in ``auto``, ``prompt`` or
+    ``interrupt`` mode.
+
+    ``auto`` is ``fleet tell``, unchanged. The other two modes type now
+    (:func:`action_type_now`). ``agent_id`` and a card's ``needs_id`` are
+    optional here: with either one, the tell reaches only the agent it names.
+    The audit line keeps how the text began, since a tell typed into a pane
+    leaves no trace on the board.
+    """
+    from aisquare.services import fleet as fleet_service
+
+    label = action_required(body, "agent")
+    text = action_tell_text(body)
+    mode = action_tell_mode(body)
+    agent_id = action_ref(body, "agent_id")
+    needs_id = action_ref(body, "needs_id", limit=ACTION_NEEDS_ID_MAX)
+    target = action_project(body)
+    with action_locked(target, label, agent_id):
+        snap = action_check_needs(target, label, agent_id, needs_id)
+        if mode == "auto":
+            told = action_fleet_call(lambda: fleet_service.tell(target, label, text, sender=None))
+            delivered, how = told.delivered, told.how
+        else:
+            delivered, how = action_type_now(
+                target, label, text, snap, agent_id=agent_id, interrupt=mode == "interrupt"
+            )
+    result: dict[str, object] = {
+        "label": label,
+        "delivered": delivered,
+        "how": how,
+        "mode": mode,
+        "project": target.id,
+    }
+    summary = (
+        f"tell {label}@{target.id} mode={mode} delivered={action_yes_no(delivered)} "
+        f'text={len(text)}ch "{action_audit_excerpt(text)}"'
+    )
+    return result, summary
 
 
 def action_stop(body: dict[str, Any]) -> tuple[dict[str, object], str]:
@@ -652,6 +853,7 @@ def action_switch(body: dict[str, Any]) -> tuple[dict[str, object], str]:
 def action_handlers() -> dict[str, WriteHandler]:
     """The write handlers behind :data:`ACTION_ENDPOINTS`, in its order."""
     return {
+        "agent/tell": action_tell,
         "agent/stop": action_stop,
         "agent/restart": action_restart,
         "agent/switch": action_switch,
@@ -680,12 +882,15 @@ def action_routes(kit: RemoteKit) -> list[BaseRoute]:
 
 
 __all__ = [
+    "ACTION_AUDIT_EXCERPT",
     "ACTION_ENDPOINTS",
     "ACTION_FIELD_MAX",
     "ACTION_LEDGER_SIZE",
     "ACTION_LEDGER_TTL",
     "ACTION_NEEDS_ID_MAX",
     "ACTION_POLL_SECONDS",
+    "TELL_MODES",
+    "TELL_TEXT_MAX",
     "ActionLedger",
     "LedgerEntry",
     "action_handlers",
@@ -693,6 +898,7 @@ __all__ = [
     "action_routes",
     "action_stop",
     "action_switch",
+    "action_tell",
     "fleet_refusal",
     "new_action_ledger",
 ]

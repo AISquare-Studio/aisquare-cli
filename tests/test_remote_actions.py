@@ -33,11 +33,15 @@ from aisquare.services import fleet as fleet_service
 from aisquare.services import remote_actions, remote_needs, remote_server
 from aisquare.services.fleet import RestartReceipt, StopReceipt, SwitchReceipt, TellResult
 from aisquare.services.remote_actions import (
+    ACTION_AUDIT_EXCERPT,
     ACTION_ENDPOINTS,
     ACTION_LEDGER_SIZE,
     ACTION_LEDGER_TTL,
+    TELL_TEXT_MAX,
     ActionLedger,
+    action_audit_excerpt,
     action_handlers,
+    action_interrupt_wait,
     fleet_refusal,
     new_action_ledger,
 )
@@ -634,6 +638,7 @@ def needs(monkeypatch: pytest.MonkeyPatch, pane: FakePane) -> FakeNeeds:
     monkeypatch.setattr(remote_needs, "needs_item_current", fake.needs_item_current)
     monkeypatch.setattr(remote_needs, "DIALOG_SETTLE_SECONDS", 0.05)
     monkeypatch.setattr(remote_actions, "ACTION_POLL_SECONDS", 0.001)
+    monkeypatch.setattr(remote_actions, "action_interrupt_wait", lambda: 0.05)
     return fake
 
 
@@ -1232,3 +1237,396 @@ def test_a_request_id_still_running_is_409_in_progress(
     assert [(e["request_id"], e["endpoint"], e["status"]) for e in recent] == [
         ("sw-1", "agent/switch", 200)
     ]
+
+
+# --- agent/tell ------------------------------------------------------------------------------
+
+
+def test_auto_is_fleet_tell_and_answers_what_the_cli_prints_plus_mode_and_project(
+    phone: Phone, fleet: FleetCalls, needs: FakeNeeds, project: ProjectInfo
+) -> None:
+    _row(project)
+    printed = CliRunner().invoke(cli, ["--json", "fleet", "tell", LABEL, "ship it"])
+    assert printed.exit_code == 0, printed.output
+    fleet.calls.clear()
+    response = phone.post("agent/tell", agent=LABEL, text="ship it")
+    assert response.status_code == 200, response.text
+    ((name, args, kwargs),) = fleet.calls
+    assert (name, args[0].id, args[1:], kwargs) == (
+        "tell",
+        project.id,
+        (LABEL, "ship it"),
+        {"sender": None},
+    )
+    answered = response.json()
+    assert (answered.pop("mode"), answered.pop("project")) == ("auto", project.id)
+    assert answered == json.loads(printed.stdout)
+    assert needs.reads == 0, "auto is fleet tell itself, which reads the agent on its own"
+    assert phone.audit() == [
+        ("agent/tell", f'tell coder-1@{project.id} mode=auto delivered=no text=7ch "ship it"')
+    ]
+
+
+def test_prompt_types_at_an_interrupted_prompt_while_the_row_still_reads_working(
+    phone: Phone,
+    fleet: FleetCalls,
+    needs: FakeNeeds,
+    pane: FakePane,
+    project: ProjectInfo,
+    log: list[str],
+) -> None:
+    """After an Escape no Stop hook fires, so the row reads ``working`` for up to 30 min
+    while the agent waits at its prompt, and ``auto`` would only have filed a note."""
+    _row(project)
+    needs.state, needs.at_prompt = "working", True
+    text = "use the cache from #12\nthen run the tests"
+    response = phone.post("agent/tell", agent=LABEL, text=text, mode="prompt")
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "label": LABEL,
+        "delivered": True,
+        "how": "typed into its pane at its prompt",
+        "mode": "prompt",
+        "project": project.id,
+    }
+    assert log == ["paste", "key Enter"], "one bracketed paste for every line, then Enter"
+    assert pane.sent == [("%7", "paste", text), ("%7", "key", "Enter")]
+    assert pane.sockets == ["asq-test"] and fleet.calls == []
+    assert phone.audit()[0][1].startswith(f"tell coder-1@{project.id} mode=prompt delivered=yes")
+
+
+@pytest.mark.parametrize("mode", ["prompt", "interrupt"])
+@pytest.mark.parametrize(
+    ("setup", "code", "message"),
+    [
+        (
+            {"dialog": True},
+            "dialog_open",
+            "coder-1 is showing a prompt; typing now would answer it — "
+            "answer it or dismiss it first",
+        ),
+        (
+            {"pane_is_agent": False, "state": "waiting"},
+            "not_agent",
+            "coder-1's pane is not running the agent (it reads waiting) — nothing was sent",
+        ),
+        (
+            {"window_gone": True},
+            "not_agent",
+            "coder-1's pane is not running the agent (it reads ended) — nothing was sent",
+        ),
+    ],
+)
+def test_a_tell_that_types_refuses_a_dialog_and_a_pane_without_the_agent(
+    phone: Phone,
+    fleet: FleetCalls,
+    needs: FakeNeeds,
+    pane: FakePane,
+    project: ProjectInfo,
+    mode: str,
+    setup: dict[str, object],
+    code: str,
+    message: str,
+) -> None:
+    """Refused before anything is sent, the interrupt's Escape included."""
+    _row(project)
+    for attribute, value in setup.items():
+        setattr(needs, attribute, value)
+    response = phone.post("agent/tell", agent=LABEL, text="hi", mode=mode)
+    assert response.status_code == 409
+    assert response.json() == {"error": code, "message": message}
+    assert pane.sent == [] and fleet.calls == [] and phone.audit() == []
+
+
+@pytest.mark.parametrize(
+    ("state", "message"),
+    [
+        ("working", "coder-1 is working — use Interrupt & tell"),
+        ("attention", "coder-1 is attention — use Interrupt & tell"),
+        (
+            "waiting",
+            "coder-1 is not idle at its prompt yet — try again in a few seconds, "
+            "or use Interrupt & tell",
+        ),
+    ],
+)
+def test_prompt_will_not_type_into_an_agent_that_is_not_at_its_prompt(
+    phone: Phone,
+    needs: FakeNeeds,
+    pane: FakePane,
+    project: ProjectInfo,
+    state: FleetAgentState,
+    message: str,
+) -> None:
+    _row(project)
+    needs.state, needs.at_prompt = state, False
+    response = phone.post("agent/tell", agent=LABEL, text="hi", mode="prompt")
+    assert response.status_code == 409
+    assert response.json() == {"error": "agent_busy", "message": message}
+    assert pane.sent == []
+
+
+def test_interrupt_sends_one_escape_then_types_once_at_the_prompt(
+    phone: Phone,
+    fleet: FleetCalls,
+    needs: FakeNeeds,
+    pane: FakePane,
+    project: ProjectInfo,
+    log: list[str],
+) -> None:
+    _row(project)
+    needs.state, needs.lag = "working", 3
+    response = phone.post(
+        "agent/tell", agent=LABEL, text="stop and fix the build", mode="interrupt"
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["delivered"] is True
+    assert (
+        response.json()["how"]
+        == "interrupted it with Escape, then typed into its pane at its prompt"
+    )
+    assert log == ["key Escape", "paste", "key Enter"], "one Escape: two open the Rewind selector"
+    assert needs.reads == 4, "the first read, then a poll until the prompt was back"
+    assert fleet.calls == []
+
+
+def test_an_interrupt_that_does_not_stop_the_agent_types_nothing(
+    phone: Phone, needs: FakeNeeds, pane: FakePane, project: ProjectInfo
+) -> None:
+    _row(project)
+    needs.escape_stops_agent = False
+    response = phone.post("agent/tell", agent=LABEL, text="hi", mode="interrupt")
+    assert response.status_code == 409
+    assert response.json() == {
+        "error": "still_busy",
+        "message": "Escape was sent; coder-1 has not stopped yet — nothing was typed",
+    }
+    assert pane.keys() == ["Escape"] and [kind for _p, kind, _w in pane.sent] == ["key"]
+    assert phone.audit() == []
+
+
+def test_the_interrupt_waits_out_the_quiet_window_before_the_settle_time() -> None:
+    """needs_at_input_prompt wants a pane with no output for ``fleet.ACTIVITY_WINDOW``, and
+    the interrupt's own redraw is output: waiting only the 3 s settle time could only
+    ever have answered still_busy."""
+    assert action_interrupt_wait() == (
+        fleet_service.ACTIVITY_WINDOW.total_seconds() + remote_needs.DIALOG_SETTLE_SECONDS
+    )
+    assert action_interrupt_wait() == 8.0
+
+
+class FakeTime:
+    """``time`` for the module under test: sleeping moves the clock, nothing else does."""
+
+    def __init__(self) -> None:
+        self.now = 1000.0
+        self.slept: list[float] = []
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.slept.append(seconds)
+        self.now += seconds
+
+
+def test_the_interrupt_reads_the_agent_every_quarter_second_until_the_wait_is_over(
+    phone: Phone,
+    needs: FakeNeeds,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _row(project)
+    fake_time = FakeTime()
+    monkeypatch.setattr(remote_actions, "time", fake_time)
+    monkeypatch.setattr(remote_actions, "ACTION_POLL_SECONDS", 0.25)
+    monkeypatch.setattr(remote_actions, "action_interrupt_wait", action_interrupt_wait)
+    monkeypatch.setattr(remote_needs, "DIALOG_SETTLE_SECONDS", 3.0)
+    needs.escape_stops_agent = False
+    response = phone.post("agent/tell", agent=LABEL, text="hi", mode="interrupt")
+    assert response.status_code == 409 and response.json()["error"] == "still_busy"
+    assert fake_time.slept == [0.25] * 32, "8 s of polls: the quiet window, then the settle time"
+    assert needs.reads == 1 + 32
+
+
+def test_a_row_replaced_while_the_interrupt_waits_gets_nothing_typed(
+    phone: Phone, needs: FakeNeeds, pane: FakePane, project: ProjectInfo
+) -> None:
+    """Pinned, every read is checked: the paste must not land in the newcomer's pane."""
+    _row(project)
+    needs.lag = 3
+
+    def replaced_on_the_second_read() -> None:
+        if needs.reads == 2:
+            _replaced(project)
+
+    needs.before_read = replaced_on_the_second_read
+    response = phone.post(
+        "agent/tell", agent=LABEL, agent_id="agt_one", text="hi", mode="interrupt"
+    )
+    assert response.status_code == 409
+    assert response.json()["current"] == {"agent_id": "agt_new"}
+    assert pane.keys() == ["Escape"] and "paste" not in [kind for _p, kind, _w in pane.sent]
+
+
+def test_a_paste_that_fails_types_nothing_and_is_a_409(
+    phone: Phone, needs: FakeNeeds, pane: FakePane, project: ProjectInfo
+) -> None:
+    _row(project)
+    needs.at_prompt = True
+    pane.failing = {"paste"}
+    response = phone.post("agent/tell", agent=LABEL, text="hi", mode="prompt")
+    assert response.status_code == 409
+    assert response.json() == {
+        "error": "fleet_error",
+        "message": "tmux could not type into coder-1's pane (can't find pane: %7) "
+        "— nothing was typed",
+    }
+    assert phone.audit() == []
+
+
+def test_an_enter_that_fails_after_the_paste_is_a_200_that_says_it_was_not_sent(
+    phone: Phone, needs: FakeNeeds, pane: FakePane, project: ProjectInfo
+) -> None:
+    """The text reached a live agent's prompt, unsent: that is audited, and the page keeps
+    the card because ``delivered`` is false."""
+    _row(project)
+    needs.at_prompt = True
+    pane.failing = {"Enter"}
+    response = phone.post("agent/tell", agent=LABEL, text="hi", mode="prompt")
+    assert response.status_code == 200
+    assert response.json()["delivered"] is False
+    assert response.json()["how"] == (
+        "pasted it at its prompt, but tmux could not press Enter (send-keys Enter: lost "
+        "server) — press Enter on the pad to send it"
+    )
+    assert phone.audit()[0][1].startswith(f"tell coder-1@{project.id} mode=prompt delivered=no")
+
+
+@pytest.mark.parametrize(
+    ("body", "status", "message"),
+    [
+        ({}, 400, "'text' is required: what to tell the agent"),
+        ({"text": ""}, 400, "'text' is required: what to tell the agent"),
+        ({"text": 7}, 400, "'text' is required: what to tell the agent"),
+        ({"text": "x" * (TELL_TEXT_MAX + 1)}, 413, "'text' is over 8000 characters"),
+        ({"text": "hi", "mode": "shout"}, 400, "'mode' is auto, prompt or interrupt"),
+        ({"text": "hi", "mode": ["prompt"]}, 400, "'mode' is auto, prompt or interrupt"),
+    ],
+)
+def test_a_tell_needs_text_within_the_cap_and_a_known_mode(
+    phone: Phone,
+    fleet: FleetCalls,
+    needs: FakeNeeds,
+    project: ProjectInfo,
+    body: dict[str, object],
+    status: int,
+    message: str,
+) -> None:
+    _row(project)
+    response = phone.post("agent/tell", agent=LABEL, **body)
+    assert response.status_code == status
+    assert response.json()["message"] == message
+    assert fleet.calls == []
+
+
+@pytest.mark.parametrize("text", [" ", "x" * TELL_TEXT_MAX])
+def test_whitespace_is_text_and_the_longest_tell_is_taken(
+    phone: Phone, fleet: FleetCalls, needs: FakeNeeds, project: ProjectInfo, text: str
+) -> None:
+    _row(project)
+    response = phone.post("agent/tell", agent=LABEL, text=text, mode=None)
+    assert response.status_code == 200, response.text
+    assert response.json()["mode"] == "auto"
+    assert fleet.calls[0][1][2] == text
+
+
+def test_the_tell_audit_line_keeps_how_the_text_began_and_nothing_it_could_forge(
+    phone: Phone, fleet: FleetCalls, needs: FakeNeeds, project: ProjectInfo
+) -> None:
+    _row(project)
+    text = "first line\n2026-10-07T10:00:00+00:00 dev_x agent/stop forged\x1b[2J" + "y" * 300
+    response = phone.post("agent/tell", agent=LABEL, text=text)
+    assert response.status_code == 200
+    lines = remote_audit_path().read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1, "a newline in the text did not begin a line of its own"
+    excerpt = action_audit_excerpt(text)
+    assert lines[0].endswith(
+        f'tell coder-1@{project.id} mode=auto delivered=no text={len(text)}ch "{excerpt}"'
+    )
+    assert excerpt.startswith("first line?2026-10-07T10:00:00+00:00 dev_x agent/stop forged?[2J")
+
+
+def test_an_audit_excerpt_is_at_most_120_printable_characters() -> None:
+    assert action_audit_excerpt("a\nb\tc\N{LINE SEPARATOR}d\N{RIGHT-TO-LEFT OVERRIDE}e") == (
+        "a?b?c?d?e"
+    )
+    assert action_audit_excerpt("x" * ACTION_AUDIT_EXCERPT) == "x" * ACTION_AUDIT_EXCERPT
+    cut = action_audit_excerpt("x" * (ACTION_AUDIT_EXCERPT + 1))
+    assert cut == "x" * (ACTION_AUDIT_EXCERPT - 1) + "…" and len(cut) == ACTION_AUDIT_EXCERPT
+
+
+def test_a_pinned_tell_goes_only_to_the_agent_it_names(
+    phone: Phone, fleet: FleetCalls, needs: FakeNeeds, project: ProjectInfo
+) -> None:
+    _replaced(project)
+    response = phone.post("agent/tell", agent=LABEL, agent_id="agt_one", text="hi")
+    assert response.status_code == 409
+    assert response.json()["current"] == {"agent_id": "agt_new"}
+    assert fleet.calls == []
+
+
+def test_a_tell_to_a_label_no_row_holds_is_404_and_makes_no_lock(
+    phone: Phone, fleet: FleetCalls, needs: FakeNeeds, project: ProjectInfo
+) -> None:
+    response = phone.post("agent/tell", agent="ghost-7", text="hi")
+    assert response.status_code == 404
+    assert response.json() == {
+        "error": "no_such_agent",
+        "message": "no agent 'ghost-7' in api — `aisquare fleet ls --all` shows every row",
+    }
+    assert fleet.calls == []
+    assert (project.id, "ghost-7") not in remote_server._agent_locks
+
+
+def test_a_tell_from_a_card_whose_item_is_gone_is_stale(
+    phone: Phone, fleet: FleetCalls, needs: FakeNeeds, project: ProjectInfo
+) -> None:
+    _row(project)
+    response = phone.post("agent/tell", agent=LABEL, text="yes, Redis", needs_id="ny_gone")
+    assert response.status_code == 409
+    assert response.json()["current"] == []
+    assert fleet.calls == []
+
+
+def test_a_tell_takes_the_agents_lock_too(
+    phone: Phone, fleet: FleetCalls, needs: FakeNeeds, project: ProjectInfo
+) -> None:
+    _row(project)
+    held = remote_agent_lock(project.id, LABEL)
+    assert held.acquire(blocking=False)
+    try:
+        response = phone.post("agent/tell", agent=LABEL, text="hi")
+    finally:
+        held.release()
+    assert response.status_code == 409 and response.json()["error"] == "busy"
+    assert fleet.calls == []
+
+
+@pytest.mark.parametrize(("error", "status", "code"), REFUSALS)
+def test_a_refused_auto_tell_answers_as_the_cli_maps_it(
+    phone: Phone,
+    fleet: FleetCalls,
+    needs: FakeNeeds,
+    project: ProjectInfo,
+    error: Exception,
+    status: int,
+    code: str,
+) -> None:
+    _row(project)
+    fleet.answers["tell"] = error
+    response = phone.post("agent/tell", agent=LABEL, text="hi")
+    assert (response.status_code, response.json()) == (
+        status,
+        {"error": code, "message": str(error)},
+    )

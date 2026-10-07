@@ -33,6 +33,7 @@ from aisquare.cli.ui.views.doctor import DoctorView
 from aisquare.core import selfcli
 from aisquare.services.install_route import LatestRelease
 from tests.installer_seams import no_real_installer  # noqa: F401 — autouse, applied by import
+from tests.rendered import plain
 from tests.test_lifecycle_upgrade import Machine, Tool, machine, tool  # noqa: F401
 from tests.test_ui_shell import drive, script, seed  # noqa: F401 — `script` is a fixture
 from tests.ui_workers import settle_page
@@ -301,6 +302,7 @@ def test_reopen_stays_out_of_the_way_of_a_failure_json_ctrl_c_and_no_terminal(
 def test_reopen_is_hidden_from_help(runner: CliRunner) -> None:
     """asq passes it; a person typing `aisquare upgrade` has no use for it."""
     shown = runner.invoke(cli_app, ["upgrade", "--help"])
+    text = plain(shown.stdout)  # styled on CI, where typer forces a terminal
 
-    assert shown.exit_code == 0 and "--dry-run" in shown.stdout, "control: help lists flags"
-    assert "--reopen" not in shown.stdout
+    assert shown.exit_code == 0 and "--dry-run" in text, "control: help lists flags"
+    assert "--reopen" not in text

@@ -556,7 +556,7 @@ def hook_binaries(directory: Path) -> tuple[list[agent_core.HookBinary], str | N
     if unreadable is not None:
         return [], unreadable
     try:
-        commands = agent_core.hook_commands(HOOK_AGENT, directory, strict=True)
+        commands = agent_core.hook_commands(HOOK_AGENT, directory)
     except (OSError, ValueError, TypeError) as exc:
         return [], f"its settings.json could not be read ({exc})"
     binaries: list[agent_core.HookBinary] = []

@@ -3,6 +3,23 @@
 Thanks for your interest in aisquare! This is an early-stage, open-source
 project and contributions are welcome.
 
+## Where to start
+
+- **Pick up a
+  [good first issue](https://github.com/AISquare-Studio/aisquare-cli/issues?q=is%3Aissue%20state%3Aopen%20label%3A%22good%20first%20issue%22).**
+  Each one names the files and lines involved and says what done looks like.
+  Say on the issue that you are taking it, so two people do not build the
+  same thing.
+- **Ask when unsure.**
+  [Discussions, Q&A](https://github.com/AISquare-Studio/aisquare-cli/discussions/categories/q-a)
+  is the place for "where does this live?" and "would you take a PR that…?".
+- **Find your way around.** `src/aisquare/cli/` parses the command line,
+  `src/aisquare/services/` does the work, and `src/aisquare/core/` is shared
+  plumbing. `tests/` is hermetic: it never touches your real `~/.aisquare`.
+  User docs live under `docs/`; the README is the front page.
+- **Keep a PR to one change**, with a test that fails without it. The rest of
+  this page says how this suite likes its tests.
+
 ## Development setup
 
 Requires Python 3.11+.

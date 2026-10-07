@@ -51,20 +51,23 @@ STAND_IN = REPO / "docs" / "demo" / "bin" / "claude"
 SEED = REPO / "docs" / "demo" / "seed.sh"
 UI = REPO / "src" / "aisquare" / "cli" / "ui"
 
-#: Where the walkthrough ends today: the manager's window, running the stand-in.
-END = "stand-in agent"
+WELCOME = UI / "views" / "welcome.py"
+
+#: Where the walkthrough ends: the Welcome page's last step, a manager and two
+#: coders live (welcome.py's FLEET_UP, "the stable string a recording can wait for").
+END = "Your fleet is up"
 
 #: The one file that prints each text the tape waits for, on the screen it waits
 #: on. Checked against that file alone, docstrings and comments left out: against
-#: the pooled UI, three of these six stayed found after their screen stopped
-#: showing them (review of #250).
+#: the pooled UI, three of the first tape's six stayed found after their screen
+#: stopped showing them (review of #250).
 PRINTED_BY: dict[str, Path] = {
     "seeded:": SEED,
-    "aisquare fleet": UI / "views" / "welcome.py",
-    "Onboard a project": UI / "views" / "onboard.py",
-    "will register": REPO / "src" / "aisquare" / "services" / "onboarding.py",
-    "has no manager yet": UI / "views" / "project.py",
-    END: STAND_IN,
+    "Pick the folder your agents will work in": WELCOME,
+    "Choose another": WELCOME,
+    "the manager gets its instructions through": WELCOME,
+    "answer Claude Code's question": WELCOME,
+    END: WELCOME,
 }
 
 
@@ -174,7 +177,7 @@ def test_the_parser_separates_timing_and_target_from_the_name() -> None:
 #: A tape every rule accepts, for the negative controls: each rule is handed the
 #: same synthetic sources, bindings and end, so a rule that accuses everything
 #: fails here rather than passing its positive control for free.
-_GOOD = """\
+_GOOD = f"""\
 Output out/demo.gif
 Output out/demo.txt
 Env COLORTERM "truecolor"
@@ -184,7 +187,7 @@ Wait+Screen /aisquare fleet/
 Down
 Type "q"
 Type "~/acme-api"
-Wait+Line /stand-in agent/
+Wait+Line /{END}/
 Sleep 1s
 Screenshot out/welcome.png
 Sleep 500ms
@@ -275,14 +278,11 @@ _SCREENSHOT_SHAPES = {
 }
 _ENDING_SHAPES = {
     "the last Wait is elsewhere": (
-        "Wait+Screen /stand-in agent/\nWait+Screen /aisquare fleet/\n"
-        "Screenshot out/a.png\nSleep 1s\n"
+        f"Wait+Screen /{END}/\nWait+Screen /aisquare fleet/\nScreenshot out/a.png\nSleep 1s\n"
     ),
-    "a key after the last Wait": (
-        "Wait+Screen /stand-in agent/\nEnter\nScreenshot out/a.png\nSleep 1s\n"
-    ),
+    "a key after the last Wait": f"Wait+Screen /{END}/\nEnter\nScreenshot out/a.png\nSleep 1s\n",
     "no Screenshot after the last Wait": (
-        "Screenshot out/a.png\nSleep 1s\nWait+Screen /stand-in agent/\nSleep 1s\n"
+        f"Screenshot out/a.png\nSleep 1s\nWait+Screen /{END}/\nSleep 1s\n"
     ),
     "no Wait at all": 'Type "asq"\nScreenshot out/a.png\nSleep 1s\n',
 }
@@ -345,7 +345,7 @@ def test_the_wait_rule_counts_text_that_is_drawn(shape: str, tmp_path: Path) -> 
 def test_the_wait_rule_accepts_a_sound_tape(tmp_path: Path) -> None:
     printed_by = {
         "aisquare fleet": _source(tmp_path, "ui.py", 'TITLE = "aisquare fleet"\n'),
-        "stand-in agent": _source(tmp_path, "claude", 'line "stand-in agent: $name"\n'),
+        END: _source(tmp_path, "fleet.py", 'FLEET_UP = "Your fleet is up."\n'),
     }
 
     assert demo_tape.wait_problems(parse(_GOOD), printed_by) == []
@@ -439,12 +439,36 @@ _SOUND_RENDERS = {
 
 @pytest.mark.parametrize("shape", sorted(_SNAPSHOT_SHAPES))
 def test_the_snapshot_check_fires_on_each_shape(shape: str) -> None:
-    assert demo_tape.snapshot_problems(_SNAPSHOT_SHAPES[shape], END), f"missed: {shape}"
+    assert demo_tape.snapshot_problems(_SNAPSHOT_SHAPES[shape], [END]), f"missed: {shape}"
 
 
 @pytest.mark.parametrize("shape", sorted(_SOUND_RENDERS))
 def test_the_snapshot_check_accepts_a_sound_render(shape: str) -> None:
-    assert demo_tape.snapshot_problems(_SOUND_RENDERS[shape], END) == []
+    assert demo_tape.snapshot_problems(_SOUND_RENDERS[shape], [END]) == []
+
+
+#: The coders the end screen must show besides the last Wait's text: render.sh
+#: passes the labels the fleet gives them, which no Wait can take from the source.
+_CODERS = ["coder-1", "coder-2"]
+
+
+@pytest.mark.parametrize(
+    "last",
+    [f"{END}. manager", f"{END}. manager coder-1", f"{END}. manager coder-2"],
+)
+def test_the_snapshot_check_fires_on_an_end_screen_missing_a_coder(last: str) -> None:
+    assert demo_tape.snapshot_problems(_render("aisquare fleet", last), [END, *_CODERS])
+
+
+def test_the_snapshot_check_accepts_an_end_screen_with_both_coders() -> None:
+    last = f"{END}. ✓ manager ✓ coder-1 ✓ coder-2"
+
+    assert demo_tape.snapshot_problems(_render("aisquare fleet", last), [END, *_CODERS]) == []
+
+
+def test_the_snapshot_check_refuses_an_empty_end_text() -> None:
+    """``"" in snapshot`` is always true: an empty text to look for must not pass."""
+    assert demo_tape.snapshot_problems(_render(END), [END, ""]) != []
 
 
 def test_snapshots_split_on_the_rule_line_and_only_on_it() -> None:
@@ -474,6 +498,18 @@ def test_the_render_check_exits_zero_on_a_sound_render(tmp_path: Path) -> None:
     )
 
     assert demo_tape.main([str(rendered), str(TAPE)]) == 0
+
+
+def test_the_render_check_reads_the_end_screen_texts_render_sh_passes(tmp_path: Path) -> None:
+    """render.sh passes the coders' labels after the tape; without them on the last
+    snapshot the check fails, with them it passes."""
+    rendered = tmp_path / "demo.txt"
+    rendered.write_text(_render(f"{END}. manager coder-1"), encoding="utf-8", newline="\n")
+    complete = tmp_path / "complete.txt"
+    complete.write_text(_render(f"{END}. manager coder-1 coder-2"), encoding="utf-8", newline="\n")
+
+    assert demo_tape.main([str(rendered), str(TAPE), *_CODERS]) == 1
+    assert demo_tape.main([str(complete), str(TAPE), *_CODERS]) == 0
 
 
 # ------------------------------------------------------------------- the seed

@@ -12,8 +12,7 @@
 # never read as the agent and a prompt typed at spawn would wait out the 20 s
 # PROMPT_TIMEOUT first. cat is not a shell.
 
-# The banner below is the only line that says "stand-in agent": the tape waits
-# for those words, and tests/test_demo_tape.py checks them against this file.
+# The banner below is the only line that says "stand-in agent".
 case "${1:-}" in
 --version | -v)
     echo "0.0.0 (the aisquare demo's stand-in, not Claude Code)"

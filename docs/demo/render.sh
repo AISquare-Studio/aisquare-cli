@@ -46,7 +46,10 @@ in_image() {
 }
 
 in_image "$image" docs/demo.tape
-in_image --entrypoint python3 "$image" -B -m tests.demo_tape out/demo.txt docs/demo.tape
+# The end screen shows the coders the fleet labels coder-1 and coder-2, names no
+# Wait can take from the source (they are made at spawn), so they are passed here.
+in_image --entrypoint python3 "$image" -B -m tests.demo_tape out/demo.txt docs/demo.tape \
+    coder-1 coder-2
 # The Onboard view's log of init and doctor is on screen only while the tape
 # waits for the project view, so no snapshot holds it, and a doctor that crashed
 # there rendered green (review of #250). Ask doctor again, with the command

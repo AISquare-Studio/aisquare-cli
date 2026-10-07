@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Annotated
 
 import typer
 
 from aisquare.cli.common import emit_agents, emit_connected, emit_disconnected, fail
-from aisquare.core.console import stderr_console
+from aisquare.core.console import stderr_console, stdout_console
+from aisquare.core.state import get_state
 from aisquare.services import agents as agents_service
 
 app = typer.Typer(help="Detect and connect coding agents.", no_args_is_help=True)
@@ -66,6 +68,12 @@ def connect(name: AgentName, config_dir: ConfigDir = None) -> None:
     except agents_service.AgentNotInstalledError as exc:
         fail(str(exc), error="not_installed", ref=name)
     emit_connected(connection)
+    plugin = agents_service.claude_plugin(config_dir) if name == "claude-code" else None
+    if plugin is not None:
+        stderr_console().print(
+            f"note: the aisquare plugin is enabled in {plugin.config_dir} too — its hooks "
+            "stand down while these run; keep one route (aisquare doctor says how)"
+        )
 
 
 @app.command("disconnect")
@@ -75,9 +83,41 @@ def disconnect(name: AgentName, config_dir: ConfigDir = None) -> None:
         removed = agents_service.disconnect(name, config_dir)
     except KeyError:
         fail(f"unknown agent: {name}", error="unknown_agent", ref=name)
-    if not removed:
+    plugin = agents_service.claude_plugin(config_dir) if name == "claude-code" else None
+    if not removed and plugin is None:
         stderr_console().print(
             "note: no aisquare hooks found in that config dir — if you connected "
             "with --config-dir, disconnect with the same one"
         )
+    if plugin is not None:
+        # The plugin's hooks stand down only while settings.json runs them, so
+        # removing these hands every event to the plugin rather than stopping it.
+        stderr_console().print(
+            f"note: the aisquare plugin is still enabled in {plugin.config_dir}, so aisquare "
+            f"keeps running there — to stop it: "
+            f"{agents_service.claude_plugin_command('disable', plugin.config_dir)}"
+        )
     emit_disconnected(name)
+
+
+@app.command("refresh-hooks", hidden=True)
+def refresh_hooks(name: AgentName, config_dir: ConfigDir = None) -> None:
+    """Rewrite aisquare's hooks for this version and import nothing.
+
+    Plumbing for ``aisquare upgrade``, which runs it in the NEW install for each
+    directory it re-connects. Kept hidden: ``agents connect`` is the command a
+    person types. Later releases must keep it, or an upgrade from this one
+    cannot refresh hooks.
+    """
+    try:
+        written = agents_service.refresh_hooks(name, config_dir)
+    except KeyError:
+        fail(f"unknown agent: {name}", error="unknown_agent", ref=name)
+    except ValueError as exc:
+        fail(str(exc), error="not_installed", ref=name)
+    if not written:
+        fail(f"{name} has no hooks for aisquare to write", error="no_hooks", ref=name)
+    if get_state().json_output:
+        typer.echo(json.dumps({"name": name, "hooks_installed": True}))
+    else:
+        stdout_console().print(f"✓ hooks rewritten for {name}")

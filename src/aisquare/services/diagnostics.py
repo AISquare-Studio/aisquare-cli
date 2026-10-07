@@ -809,12 +809,48 @@ def _hook_binary_problems(sites: list[agent_core.HookSiteHealth]) -> list[str]:
     return clauses
 
 
+def _plugin_label(plugin: agent_core.ClaudePlugin) -> str:
+    return f"the aisquare plugin {plugin.version}" if plugin.version else "the aisquare plugin"
+
+
+def _plugin_runner(pin: str | None) -> tuple[str, str | None, str | None]:
+    """What the plugin's hooks run here: ``(what, problem, fix)``, graded like a hook's binary.
+
+    The plugin's version is its manifest's, not the CLI's, and the launcher runs the
+    first aisquare it finds (``agent_core.plugin_runner``), else the pinned release
+    through uvx. An old CLI first on PATH is the #84 blind spot again, so it is
+    graded with the same probe the settings.json hooks get. ``pin`` is the version
+    the plugin was installed at, which the launcher pins uvx to.
+    """
+    program = agent_core.plugin_runner()
+    if program is None:
+        if shutil.which("uvx") is not None:
+            release = f"{DISTRIBUTION}=={pin}" if pin else f"the pinned {DISTRIBUTION}"
+            return f"{release} through uvx", None, None
+        return (
+            "",
+            "finds neither aisquare nor uvx on PATH, so its hooks run nothing",
+            f"Install uv (https://docs.astral.sh/uv/), or the CLI: uv tool install {DISTRIBUTION}",
+        )
+    state, version = agent_core.classify_hook_binary(agent_core.HookBinary(program))
+    if state == agent_core.HOOK_BINARY_CURRENT:
+        return "this install", None, None
+    found = f"{program} ({version})" if version else f"{program}, whose version could not be read"
+    this = f"{agent_core.current_install()} ({__version__})"
+    return (
+        "",
+        f"runs {found} — this install is {this}",
+        f"put this install's aisquare first on PATH, or upgrade {program}",
+    )
+
+
 def _check_claude_code() -> DoctorCheck:
     """Claude Code: are our hooks in every config dir, and do they run THIS install?
 
     Graded per directory over recorded sites UNION the ambient dir UNION every
-    ``~/.claude*`` on disk that carries our hooks (``agent_core.hook_sites``).
-    Two ways a directory goes red, both with the same one-line fix:
+    ``~/.claude*`` on disk that carries our hooks or enables our plugin
+    (``agent_core.hook_sites``). Two ways a directory goes red, both with the
+    same one-line fix:
 
     * not connected (hooks missing or partial) — the check this always made,
       asked of ``agents_service.claude_code_connected`` per directory, the one
@@ -823,6 +859,14 @@ def _check_claude_code() -> DoctorCheck:
     * hooks present but naming an aisquare that is not this install — the #84
       gap. The text of a hook is ours whichever binary it names; for weeks every
       board update on one box ran a 0.3-era checkout while this line was green.
+
+    The aisquare Claude Code plugin is the other route in: a directory that
+    enables it is connected with no settings.json hooks at all, and saying
+    "missing" there offered a one-click ``agents connect`` that would make every
+    hook fire twice. A directory with BOTH warns: the plugin's hooks stand down
+    for the events settings.json runs, so nothing doubles, but two routes drift
+    apart (the plugin pins its own release), and keeping one is a choice the
+    operator makes -- so that fix is not a button.
 
     Read-only, like every check here: doctor never rewrites ``settings.json``.
     """
@@ -853,11 +897,32 @@ def _check_claude_code() -> DoctorCheck:
     if not sites:
         return _warn("claude-code", f"{product} {_STALE_HOOKS}", _RECONNECT)
 
+    # The shared answer, which counts the plugin route as connected.
     unhooked = [site for site in sites if not agents_service.claude_code_connected(site.config_dir)]
-    wrong_binary = [
-        site for site in sites if site.binary_state not in (None, agent_core.HOOK_BINARY_CURRENT)
+    doubled = [
+        site
+        for site in sites
+        if site.plugin is not None and agent_core.hook_commands("claude-code", site.config_dir)
     ]
-    if not unhooked and not wrong_binary:
+    # Doubled directories are graded too. The plugin's copies stand down only beside
+    # hooks whose program exists, so beside dead ones the plugin runs instead: that
+    # is not "two ways", and those hooks fail on every event (review of #249).
+    dead = [site for site in doubled if site.binary_state == agent_core.HOOK_BINARY_MISSING]
+    wrong_binary = [
+        site
+        for site in sites
+        if site.binary_state not in (None, agent_core.HOOK_BINARY_CURRENT) and site not in dead
+    ]
+    # Where the plugin is the route that runs, what it runs is graded like a hook.
+    plugin_runs = [site for site in sites if site.plugin is not None and site not in doubled]
+    plugin_runs += dead
+    pins = [site.plugin.version for site in plugin_runs if site.plugin is not None]
+    runs, runner_problem, runner_fix = (
+        _plugin_runner(next((pin for pin in pins if pin), None))
+        if plugin_runs
+        else ("", None, None)
+    )
+    if not unhooked and not wrong_binary and not doubled and runner_problem is None:
         # Installed, firing, and running THIS install — but a context hook may
         # still carry a shorter timeout than the CI hook can wait for (a
         # settings.json from 0.6.0, or one hand-edited). Its own sentence: the
@@ -878,15 +943,24 @@ def _check_claude_code() -> DoctorCheck:
                 "; ".join(f"aisquare agents connect claude-code --config-dir {p}" for p in short),
             )
         where = f" in {len(sites)} config dirs" if len(sites) > 1 else ""
-        unrecorded = [str(site.config_dir) for site in sites if not site.recorded]
+        hooked = [site for site in sites if site.plugin is None]
+        plugins = [(site.config_dir, site.plugin) for site in sites if site.plugin is not None]
+        # A plugin user never runs `agents connect`, so "not connected in this
+        # home" would be true of every plugin directory and mean nothing.
+        unrecorded = [str(site.config_dir) for site in hooked if not site.recorded]
         note = (
             f"; {', '.join(unrecorded)} found on disk, not connected in this home"
             if unrecorded
             else ""
         )
-        return _ok(
-            "claude-code", f"{product} connected{where} (all lifecycle hooks installed{note})"
-        )
+        routes = [f"all lifecycle hooks installed{note}"] if hooked else []
+        if len(plugins) == 1 and not hooked:
+            routes.append(f"through {_plugin_label(plugins[0][1])}, which runs {runs}")
+        else:
+            routes.extend(f"through {_plugin_label(p)} in {d}" for d, p in plugins)
+            if plugins:
+                routes.append(f"the plugin runs {runs}")
+        return _ok("claude-code", f"{product} connected{where} ({'; '.join(routes)})")
 
     problems: list[str] = []
     if unhooked:
@@ -896,15 +970,43 @@ def _check_claude_code() -> DoctorCheck:
         clauses = "; ".join(_hook_binary_problems(wrong_binary))
         this = f"{agent_core.current_install()} ({__version__})"
         problems.append(f"{clauses} — this install is {this}")
+    live = [site for site in doubled if site not in dead]
+    if dead:
+        listed = ", ".join(str(site.config_dir) for site in dead)
+        problems.append(
+            f"settings.json hooks in: {listed} name an aisquare that does not exist, so they "
+            "fail on every event and the aisquare plugin runs in their place"
+        )
+    if live:
+        listed = ", ".join(str(site.config_dir) for site in live)
+        problems.append(
+            f"runs aisquare two ways in: {listed} — settings.json hooks and the aisquare "
+            "plugin, whose hooks stand down while those are installed; keep one"
+        )
+    if runner_problem is not None:
+        listed = ", ".join(str(site.config_dir) for site in plugin_runs)
+        problems.append(f"the aisquare plugin in: {listed} {runner_problem}")
+    # A doubled directory gets no Connect button: connecting keeps both routes.
     broken: list[Path] = []
     for site in sites:
-        if (site in unhooked or site in wrong_binary) and site.config_dir not in broken:
+        if site in doubled or site.config_dir in broken:
+            continue
+        if site in unhooked or site in wrong_binary:
             broken.append(site.config_dir)
-    return _warn(
-        "claude-code",
-        f"{product} {'; '.join(problems)}",
-        "; ".join(f"aisquare agents connect claude-code --config-dir {p}" for p in broken),
+    fixes = [f"aisquare agents connect claude-code --config-dir {p}" for p in broken]
+    fixes.extend(
+        "remove them, and the plugin runs alone: "
+        f"aisquare agents disconnect claude-code --config-dir {site.config_dir}"
+        for site in dead
     )
+    fixes.extend(
+        f"keep the plugin: aisquare agents disconnect claude-code --config-dir {site.config_dir}"
+        f" (or keep the hooks: {agent_core.claude_plugin_command('uninstall', site.config_dir)})"
+        for site in live
+    )
+    if runner_fix is not None:
+        fixes.append(runner_fix)
+    return _warn("claude-code", f"{product} {'; '.join(problems)}", "; ".join(fixes))
 
 
 def _planned_agent_checks() -> list[DoctorCheck]:
@@ -1880,17 +1982,14 @@ def _browser_tools_in(config_dir: Path, parsed: Mapping[Path, dict[str, object]]
     ``doctor`` run was the row's whole cost (review of #203).
     """
     found: list[str] = []
-    settings = agent_core.read_json(config_dir / "settings.json")
-    plugins = settings.get("enabledPlugins")
-    if isinstance(plugins, dict):
-        for key, enabled in plugins.items():
-            # The plugin, not the marketplace it came from: `<plugin>@<market>`,
-            # and matching the whole key credited `my-linter@chrome-plugins-market`
-            # to the market's name while labelling only `my-linter`. Match and
-            # label the same string.
-            plugin = str(key).rsplit("@", 1)[0]
-            if enabled and _names_browser_tool(plugin):
-                found.append(f"plugin {plugin}")
+    for key in agent_core.enabled_plugins(config_dir):
+        # The plugin, not the marketplace it came from: `<plugin>@<market>`,
+        # and matching the whole key credited `my-linter@chrome-plugins-market`
+        # to the market's name while labelling only `my-linter`. Match and
+        # label the same string.
+        plugin = key.rsplit("@", 1)[0]
+        if _names_browser_tool(plugin):
+            found.append(f"plugin {plugin}")
     for path in agent_core.claude_json_paths(config_dir):
         claude_json = parsed.get(path, {})
         found.extend(_browser_servers(_mcp_servers(claude_json)))

@@ -75,9 +75,7 @@ MAX_LINES = 250
 
 #: Files the README links before they exist, with who commits them. Excused only
 #: while the version is ``_PENDING_WHILE_VERSION`` (see the module docstring).
-_PENDING: dict[str, str] = {
-    "docs/claude-code-plugin.md": "the plugin route's page; roadmap 9.3 writes it",
-}
+_PENDING: dict[str, str] = {}
 _PENDING_WHILE_VERSION = "0.7.0"
 
 #: CommonMark with tables, as GitHub and PyPI render a README (see the docstring).

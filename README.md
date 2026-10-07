@@ -104,7 +104,7 @@ short alias.
 
 | Page | What is in it |
 | --- | --- |
-| [Install](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/install.md) | The one-liner's flags and exit codes, reading it before you run it, installing by hand, Windows, starting the UI |
+| [Install](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/install.md) | The one-liner's flags and exit codes, reading it before you run it, installing by hand, Windows, starting the UI, updating and removing it |
 | [Memory](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/memory.md) | Your agent remembers preferences and project conventions, and starts every session oriented. For everyone; nothing to run after setup |
 | [The fleet](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/fleet.md) | The UI, the roles, `aisquare fleet …`, Claude accounts, and every default you can change |
 | [Orchestration](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/orchestration.md) | Several agent sessions work one problem as a team, with a shared task board. Opt-in, per repo |

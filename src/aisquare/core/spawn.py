@@ -86,6 +86,14 @@ narrowing their environment would be change without a reason:
     spoofed by a stray ``USER`` in the environment. Same argument as its
     caller.
   * ``services/explainability_ops.py::install_sdk`` — ``pip install``.
+  * ``services/install_route.py::run_installer`` — ``uv tool install --force``,
+    ``aisquare upgrade`` replacing its own install. A package manager, not a
+    model process.
+  * ``services/install_route.py::run_captured`` — the NEW install after an
+    upgrade, asked ``--version`` and ``agents connect``. Our own CLI, like
+    ``core/selfcli.py::run`` below.
+  * ``services/install_route.py::exec_replace`` — ``uv tool uninstall``, the
+    last step of ``aisquare uninstall``, which this process becomes.
   * ``services/explainability_ops.py::sdk_doctor`` — the SDK's own doctor
     script. Not stripped: it needs the ``EXPLAINABILITY_*`` environment to
     diagnose the machine it is running on.
@@ -256,6 +264,21 @@ SEAMS: dict[str, Seam] = {
     ),
     "aisquare/services/explainability_ops.py::install_sdk": Seam(
         EXCLUDED, "`pip install` — reaches PyPI, never the model API"
+    ),
+    "aisquare/services/install_route.py::run_installer": Seam(
+        EXCLUDED,
+        "`uv tool install --force` for `aisquare upgrade` — a package manager reaching an "
+        "index, never the model API; not stripped, like `install_sdk`",
+    ),
+    "aisquare/services/install_route.py::run_captured": Seam(
+        EXCLUDED,
+        "the upgraded install asked `--version` and `agents connect`: our own CLI as a "
+        "subprocess, no model process; not stripped, like `core/selfcli.py::run`",
+    ),
+    "aisquare/services/install_route.py::exec_replace": Seam(
+        EXCLUDED,
+        "`uv tool uninstall` replacing this process as the last step of `aisquare "
+        "uninstall` — a package manager, never the model API; not stripped",
     ),
     "aisquare/services/explainability_ops.py::sdk_doctor": Seam(
         EXCLUDED,

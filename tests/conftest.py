@@ -186,6 +186,15 @@ AMBIENT_ENV_VARS = (
     # show-token tests, which print the port a client should dial.
     "AISQUARE_SERVE_PORT",
     "AISQUARE_SERVE_CLOSE_AFTER",
+    # `aisquare remote serve`'s --port, --auto-off and --public-url, the same
+    # typer `envvar=` kind; the last is also the static domain the TUI's ngrok
+    # serves on (`services.ngrok_tunnel.NGROK_URL_ENV`), which an operator with
+    # a reserved domain keeps exported. Measured: AISQUARE_REMOTE_AUTO_OFF=1 and
+    # AISQUARE_REMOTE_NGROK_URL set in the shell fail test_remote_server.py's
+    # serve test, which asserts the hour of auto-off and no public URL.
+    "AISQUARE_REMOTE_PORT",
+    "AISQUARE_REMOTE_AUTO_OFF",
+    "AISQUARE_REMOTE_NGROK_URL",
     "AISQUARE_TEAM_HUB",
     "AISQUARE_TEAM_DELTA",
     "AISQUARE_TEAM_LEASE_MIN",

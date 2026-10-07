@@ -93,6 +93,13 @@ remote = [
   "starlette>=0.40",
   "uvicorn>=0.30",
   "websockets>=12",
+  # Web Push (services/remote_push.py): the RFC 8291 encryption and the RFC 8292
+  # VAPID signature are P-256 ECDH, AES-GCM and ES256, none of which the stdlib
+  # has. Until now it arrived only through mcp -> pyjwt[crypto], declared by
+  # nothing here. Optional inside the extra: without it the page says how to get
+  # it, and Remote serves everything else. A floor, not a pin: every call used
+  # (ECDH, AESGCM, from_encoded_point, decode_dss_signature) is far older.
+  "cryptography>=42",
 ]
 tui = [
   # Kept as a no-op alias for one release: `pipx install 'aisquare-cli[tui]'`
@@ -143,6 +150,9 @@ dev = [
   # starlette's TestClient, which the remote server tests drive; mcp 2.x no
   # longer brings it.
   "httpx>=0.27",
+  # The remote extra's Web Push crypto, so tests/test_remote_push.py runs on the
+  # CI's dev-only install rather than on whatever mcp happens to pull in.
+  "cryptography>=42",
 ]
 
 [project.scripts]

@@ -26,6 +26,14 @@ the rest is here:
 * **The fleet's own refusals**, mapped as ``asq fleet`` maps them
   (:func:`fleet_refusal`). A 200 body is the CLI's ``--json`` payload plus
   ``project``; a tell's also says its ``mode``.
+* **The trail.** The dispatcher audits what went through. A refusal that comes
+  after something reached the agent, or may have, is audited too: one after an
+  Escape went to its pane, and every fleet call that fails, which may have done
+  part of its work first (a restart stops the agent before it starts the
+  replacement). The line says what was sent and how it ended: ``refused=`` when
+  the action stopped short of its own step, ``failed=`` when that step was
+  tried. A refusal before any of that changed nothing, and only the ledger
+  keeps it.
 
 ``agent/tell`` has three modes. ``auto`` is ``fleet tell``: it types into an agent
 that reads as waiting, and files a board note for any other, which the agent reads
@@ -52,6 +60,8 @@ where it is used.
 from __future__ import annotations
 
 import contextlib
+import functools
+import logging
 import threading
 import time
 from collections.abc import Callable, Iterator
@@ -69,6 +79,8 @@ if TYPE_CHECKING:
     from aisquare.models import FleetAgent, ProjectInfo
     from aisquare.services.remote_needs import AgentNow
     from aisquare.services.remote_server import Device, RemoteKit, WriteHandler
+
+log = logging.getLogger(__name__)
 
 ACTION_ENDPOINTS: tuple[str, ...] = ("agent/tell", "agent/stop", "agent/restart", "agent/switch")
 """The action names ``POST api/{name}`` accepts beside ``remote_server.WRITE_ENDPOINTS``."""
@@ -317,6 +329,35 @@ def action_yes_no(flag: bool) -> str:
     return "yes" if flag else "no"
 
 
+def action_tell_summary(label: str, target: ProjectInfo, mode: str, text: str, how: str) -> str:
+    """A tell's audit line: ``how`` it ended (``delivered=…`` and what stopped it), then the
+    text's length and how it began, last, since an excerpt may hold anything printable."""
+    excerpt = action_audit_excerpt(text)
+    return f'tell {label}@{target.id} mode={mode} {how} text={len(text)}ch "{excerpt}"'
+
+
+@contextlib.contextmanager
+def action_audited(summary: Callable[[str], str]) -> Iterator[None]:
+    """Audit a refusal raised inside as ``summary(<its error code>)``.
+
+    For the steps after something reached the agent, or may have: an Escape
+    went to its pane, or the fleet was asked to act and may have done part of it
+    before it failed (``fleet stop`` types ``/exit`` before it can fail to kill
+    the window). The dispatcher audits only what went through, and the trail is
+    there for what a device did to a live agent, finished or not (review of
+    #243, round 1, F10). Any other exception here is a 400 ``write_failed``,
+    logged as the dispatcher logs one, and audited the same way.
+    """
+    try:
+        yield
+    except RequestError as exc:
+        exc.audit = summary(exc.error)
+        raise
+    except Exception as exc:
+        log.warning("remote: an action failed after it reached the agent: %s", exc)
+        raise RequestError(400, "write_failed", str(exc), audit=summary("write_failed")) from exc
+
+
 # --- the fleet's refusals ------------------------------------------------------------------
 
 _Result = TypeVar("_Result")
@@ -385,16 +426,23 @@ def action_newest_row(target: ProjectInfo, label: str) -> FleetAgent | None:
         return store.fleet_agent_by_label(target.id, label, live_only=False)
 
 
-def action_stale(target: ProjectInfo, label: str, current: FleetAgent | None) -> RequestError:
-    """409 ``stale``: the label is not the agent the phone saw, and ``current`` says who is."""
+def action_stale(
+    target: ProjectInfo, label: str, current: FleetAgent | None, *, escaped: bool = False
+) -> RequestError:
+    """409 ``stale``: the label is not the agent the phone saw, and ``current`` says who is.
+
+    ``escaped``: an Escape already went to the pinned agent's pane, and the
+    sentence must not say that nothing was done.
+    """
     if current is None:
         said = f"there is no agent {label!r} in {target.root.name or target.id} now"
     else:
         said = f"{label!r} is another agent now ({current.id})"
+    done = "Escape was sent, nothing else was done" if escaped else "nothing was done"
     return RequestError(
         409,
         "stale",
-        f"{said} — nothing was done",
+        f"{said} — {done}",
         current={"agent_id": None if current is None else current.id},
     )
 
@@ -442,7 +490,9 @@ def action_locked(target: ProjectInfo, label: str, agent_id: str | None) -> Iter
 # --- what the agent shows now ------------------------------------------------------------------
 
 
-def action_snapshot(target: ProjectInfo, label: str, pin: str) -> AgentNow:
+def action_snapshot(
+    target: ProjectInfo, label: str, pin: str, *, escaped: bool = False
+) -> AgentNow:
     """The agent as needs-you reads it now, which must still be the row ``pin`` names.
 
     The pin is the row read under the lock: the body's ``agent_id`` when it had
@@ -452,7 +502,7 @@ def action_snapshot(target: ProjectInfo, label: str, pin: str) -> AgentNow:
     """
     snap = action_fleet_call(lambda: remote_needs.needs_agent_now(target, label))
     if snap.status is not None and snap.status.agent.id != pin:
-        raise action_stale(target, label, snap.status.agent)
+        raise action_stale(target, label, snap.status.agent, escaped=escaped)
     return snap
 
 
@@ -530,7 +580,7 @@ def action_settle(
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
         time.sleep(ACTION_POLL_SECONDS)
-        snap = action_snapshot(target, label, pin)
+        snap = action_snapshot(target, label, pin, escaped=True)
         if reached(snap):
             return snap
     return None
@@ -544,6 +594,7 @@ def action_dialog_guard(
     *,
     dismiss: bool,
     doing: str,
+    audit_start: str,
 ) -> bool:
     """Refuse to stop an agent that shows a dialog, or with ``dismiss``, press Escape first.
 
@@ -551,6 +602,9 @@ def action_dialog_guard(
     dialog was dismissed, which the audit line records. A false alarm costs a
     refusal with a sentence, or with ``dismiss`` an Escape to an agent about to be
     stopped anyway. It never costs an Enter into a dialog.
+
+    The Escape answers a permission prompt "No", so a refusal after it is audited,
+    as ``audit_start`` and then ``dismissed=yes refused=<error>``.
     """
     snap = snap if snap is not None else action_snapshot(target, label, pin)
     if not remote_needs.needs_dialog_open(snap):
@@ -563,19 +617,20 @@ def action_dialog_guard(
             "send dismiss_dialog: true to press Esc (No) first",
         )
     action_press_escape(snap, label)
-    closed = action_settle(
-        target,
-        label,
-        pin,
-        lambda again: not remote_needs.needs_dialog_open(again),
-        remote_needs.DIALOG_SETTLE_SECONDS,
-    )
-    if closed is None:
-        raise RequestError(
-            409,
-            "dialog_open",
-            f"Escape was sent, but {label} still shows a prompt — nothing else was done",
+    with action_audited(lambda error: f"{audit_start} dismissed=yes refused={error}"):
+        closed = action_settle(
+            target,
+            label,
+            pin,
+            lambda again: not remote_needs.needs_dialog_open(again),
+            remote_needs.DIALOG_SETTLE_SECONDS,
         )
+        if closed is None:
+            raise RequestError(
+                409,
+                "dialog_open",
+                f"Escape was sent, but {label} still shows a prompt — nothing else was done",
+            )
     return True
 
 
@@ -663,13 +718,16 @@ def action_type_now(
     *,
     pin: str,
     interrupt: bool,
+    trail: Callable[[str], str],
 ) -> tuple[bool, str]:
     """``prompt`` and ``interrupt``: type ``text`` at the agent's input prompt, now.
 
     Both refuse an open dialog, which the Enter would answer, and a pane that is
     not running the agent. ``prompt`` types only at an idle prompt, and otherwise
     says what the agent is doing. ``interrupt`` sends one Escape and waits for the
-    prompt to come back. If it does not, nothing is typed.
+    prompt to come back. If it does not, nothing is typed. By then the Escape has
+    cut the agent's turn short, so a refusal after it is audited: ``trail`` words
+    the tell's line from how it ended.
     """
     snap = snap if snap is not None else action_snapshot(target, label, pin)
     if remote_needs.needs_dialog_open(snap):
@@ -680,8 +738,12 @@ def action_type_now(
             "answer it or dismiss it first",
         )
     action_pane_agent(snap, label)  # refused here, before the interrupt's Escape
-    if interrupt:
-        action_press_escape(snap, label)
+    if not interrupt:
+        if not remote_needs.needs_at_input_prompt(snap):
+            raise RequestError(409, "agent_busy", action_busy_sentence(snap, label))
+        return action_paste(snap, label, text, interrupted=False)
+    action_press_escape(snap, label)
+    with action_audited(lambda error: trail(f"delivered=no escape=sent refused={error}")):
         reached = action_settle(
             target, label, pin, remote_needs.needs_at_input_prompt, action_interrupt_wait()
         )
@@ -692,9 +754,8 @@ def action_type_now(
                 f"Escape was sent; {label} has not stopped yet — nothing was typed",
             )
         snap = reached
-    elif not remote_needs.needs_at_input_prompt(snap):
-        raise RequestError(409, "agent_busy", action_busy_sentence(snap, label))
-    return action_paste(snap, label, text, interrupted=interrupt)
+    with action_audited(lambda error: trail(f"delivered=no escape=sent failed={error}")):
+        return action_paste(snap, label, text, interrupted=True)
 
 
 # --- the actions ---------------------------------------------------------------------------
@@ -720,14 +781,26 @@ def action_tell(body: dict[str, Any]) -> tuple[dict[str, object], str]:
     agent_id = action_ref(body, "agent_id", guard=True)
     needs_id = action_ref(body, "needs_id", limit=ACTION_NEEDS_ID_MAX, guard=True)
     target = action_project(body)
+    trail = functools.partial(action_tell_summary, label, target, mode, text)
     with action_locked(target, label, agent_id) as row:
         snap = action_check_needs(target, label, row.id, needs_id)
         if mode == "auto":
-            told = action_fleet_call(lambda: fleet_service.tell(target, label, text, sender=None))
+            # fleet tell pastes before it presses Enter, and files a note when that
+            # fails, so it can fail with the text already in the pane.
+            with action_audited(lambda error: trail(f"delivered=no failed={error}")):
+                told = action_fleet_call(
+                    lambda: fleet_service.tell(target, label, text, sender=None)
+                )
             delivered, how = told.delivered, told.how
         else:
             delivered, how = action_type_now(
-                target, label, text, snap, pin=row.id, interrupt=mode == "interrupt"
+                target,
+                label,
+                text,
+                snap,
+                pin=row.id,
+                interrupt=mode == "interrupt",
+                trail=trail,
             )
     result: dict[str, object] = {
         "label": label,
@@ -736,11 +809,7 @@ def action_tell(body: dict[str, Any]) -> tuple[dict[str, object], str]:
         "mode": mode,
         "project": target.id,
     }
-    summary = (
-        f"tell {label}@{target.id} mode={mode} delivered={action_yes_no(delivered)} "
-        f'text={len(text)}ch "{action_audit_excerpt(text)}"'
-    )
-    return result, summary
+    return result, trail(f"delivered={action_yes_no(delivered)}")
 
 
 def action_stop(body: dict[str, Any]) -> tuple[dict[str, object], str]:
@@ -759,15 +828,26 @@ def action_stop(body: dict[str, Any]) -> tuple[dict[str, object], str]:
     dismiss = action_flag(body, "dismiss_dialog")
     needs_id = action_ref(body, "needs_id", limit=ACTION_NEEDS_ID_MAX, guard=True)
     target = action_project(body)
+    audit_start = f"stop {label}@{target.id} agent={agent_id} force={action_yes_no(force)}"
     with action_locked(target, label, agent_id) as row:
         snap = action_check_needs(target, label, row.id, needs_id)
         guarded = not force and row.ended_at is None
         dismissed = guarded and action_dialog_guard(
-            target, label, row.id, snap, dismiss=dismiss, doing="stopping"
+            target,
+            label,
+            row.id,
+            snap,
+            dismiss=dismiss,
+            doing="stopping",
+            audit_start=audit_start,
         )
-        receipt = action_fleet_call(
-            lambda: fleet_service.stop(target, label, force=force, agent_id=agent_id)
-        )
+        # The /exit may already be typed when the stop fails (a kill tmux refused).
+        with action_audited(
+            lambda error: f"{audit_start} dismissed={action_yes_no(dismissed)} failed={error}"
+        ):
+            receipt = action_fleet_call(
+                lambda: fleet_service.stop(target, label, force=force, agent_id=agent_id)
+            )
     released = [task.id for task in receipt.released]
     result: dict[str, object] = {
         "agent": receipt.agent.model_dump(mode="json"),
@@ -775,10 +855,7 @@ def action_stop(body: dict[str, Any]) -> tuple[dict[str, object], str]:
         "release_failed": receipt.release_failed,
         "project": target.id,
     }
-    summary = (
-        f"stop {label}@{target.id} agent={agent_id} force={action_yes_no(force)} "
-        f"dismissed={action_yes_no(dismissed)} released={len(released)}"
-    )
+    summary = f"{audit_start} dismissed={action_yes_no(dismissed)} released={len(released)}"
     return result, summary
 
 
@@ -798,16 +875,29 @@ def action_restart(body: dict[str, Any]) -> tuple[dict[str, object], str]:
     dismiss = action_flag(body, "dismiss_dialog")
     needs_id = action_ref(body, "needs_id", limit=ACTION_NEEDS_ID_MAX, guard=True)
     target = action_project(body)
+    # A refused restart's line names the row it acted on: it has no started= to go by.
+    audit_start = f"restart {label}@{target.id} agent={agent_id} fresh={action_yes_no(fresh)}"
     with action_locked(target, label, agent_id) as row:
         snap = action_check_needs(target, label, row.id, needs_id)
         dismissed = row.ended_at is None and action_dialog_guard(
-            target, label, row.id, snap, dismiss=dismiss, doing="restarting"
+            target,
+            label,
+            row.id,
+            snap,
+            dismiss=dismiss,
+            doing="restarting",
+            audit_start=audit_start,
         )
-        receipt = action_fleet_call(
-            lambda: fleet_service.restart(
-                target, label, fresh=fresh, spawned_by="user", agent_id=agent_id
+        # A running agent is stopped before its replacement starts, and a start that
+        # fails then leaves it stopped.
+        with action_audited(
+            lambda error: f"{audit_start} dismissed={action_yes_no(dismissed)} failed={error}"
+        ):
+            receipt = action_fleet_call(
+                lambda: fleet_service.restart(
+                    target, label, fresh=fresh, spawned_by="user", agent_id=agent_id
+                )
             )
-        )
     result: dict[str, object] = {
         "replaced": receipt.replaced.model_dump(mode="json"),
         "started": receipt.started.model_dump(mode="json"),
@@ -846,16 +936,28 @@ def action_switch(body: dict[str, Any]) -> tuple[dict[str, object], str]:
     dismiss = action_flag(body, "dismiss_dialog")
     needs_id = action_ref(body, "needs_id", limit=ACTION_NEEDS_ID_MAX, guard=True)
     target = action_project(body)
+    # As a restart's: the row it acted on, and nothing a body typed (``to``, ``reason``).
+    audit_start = f"switch {label}@{target.id} agent={agent_id}"
     with action_locked(target, label, agent_id) as row:
         snap = action_check_needs(target, label, row.id, needs_id)
         dismissed = row.ended_at is None and action_dialog_guard(
-            target, label, row.id, snap, dismiss=dismiss, doing="switching"
+            target,
+            label,
+            row.id,
+            snap,
+            dismiss=dismiss,
+            doing="switching",
+            audit_start=audit_start,
         )
-        receipt = action_fleet_call(
-            lambda: fleet_service.switch(
-                target, label, to=to, fresh=fresh, reason=reason, spawned_by="user"
+        # The hand-over stops the agent before it starts it on the other account.
+        with action_audited(
+            lambda error: f"{audit_start} dismissed={action_yes_no(dismissed)} failed={error}"
+        ):
+            receipt = action_fleet_call(
+                lambda: fleet_service.switch(
+                    target, label, to=to, fresh=fresh, reason=reason, spawned_by="user"
+                )
             )
-        )
     result: dict[str, object] = {
         "stopped": receipt.stopped.model_dump(mode="json"),
         "started": receipt.started.model_dump(mode="json"),

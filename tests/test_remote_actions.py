@@ -434,6 +434,14 @@ PINNED_ACTIONS = ("agent/stop", "agent/restart", "agent/switch")
 DOING = {"agent/stop": "stopping", "agent/restart": "restarting", "agent/switch": "switching"}
 
 
+def _acted_on(name: str, project: ProjectInfo) -> str:
+    """How the audit line of a pinned action refused after it acted begins: the row it
+    acted on, and the flags :data:`PINNED` leaves at their defaults."""
+    verb = name.removeprefix("agent/")
+    flags = {"stop": " force=no", "restart": " fresh=no", "switch": ""}[verb]
+    return f"{verb} coder-1@{project.id} agent=agt_one{flags}"
+
+
 @pytest.fixture
 def project(isolated_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> ProjectInfo:
     """The current project, ``init``-ed in a directory of its own (``api``)."""
@@ -1111,6 +1119,7 @@ def test_an_open_dialog_refuses_the_action_and_nothing_reaches_the_agent(
         "send dismiss_dialog: true to press Esc (No) first",
     }
     assert fleet.calls == [] and pane.sent == []
+    assert phone.audit() == [], "nothing reached the agent, so only the ledger keeps it"
 
 
 @pytest.mark.parametrize("name", PINNED_ACTIONS)
@@ -1143,6 +1152,7 @@ def test_a_dialog_still_open_after_the_escape_is_409_and_nothing_else_is_done(
     project: ProjectInfo,
     name: str,
 ) -> None:
+    """Refused, but not before its Escape answered a prompt "No": that is on the trail."""
     _row(project)
     needs.dialog = True
     needs.escape_closes_dialog = False
@@ -1154,6 +1164,41 @@ def test_a_dialog_still_open_after_the_escape_is_409_and_nothing_else_is_done(
     }
     assert pane.keys() == ["Escape"], "one Escape: a second one opens the Rewind selector"
     assert fleet.calls == []
+    assert phone.audit() == [
+        (name, f"{_acted_on(name, project)} dismissed=yes refused=dialog_open")
+    ]
+
+
+@pytest.mark.parametrize("name", PINNED_ACTIONS)
+def test_a_row_replaced_while_the_dialog_closes_is_stale_and_says_the_escape_went(
+    phone: Phone,
+    fleet: FleetCalls,
+    needs: FakeNeeds,
+    pane: FakePane,
+    project: ProjectInfo,
+    name: str,
+) -> None:
+    """The Escape reached the pinned agent, then the manager's restart took the label: the
+    sentence must not say nothing was done, and the trail keeps the Escape."""
+    _row(project)
+    needs.dialog = True
+    needs.lag = 3
+
+    def replaced_on_the_second_read() -> None:
+        if needs.reads == 2:
+            _replaced(project)
+
+    needs.before_read = replaced_on_the_second_read
+    response = phone.post(name, **PINNED, dismiss_dialog=True)
+    assert response.status_code == 409
+    assert response.json() == {
+        "error": "stale",
+        "message": "'coder-1' is another agent now (agt_new) — Escape was sent, "
+        "nothing else was done",
+        "current": {"agent_id": "agt_new"},
+    }
+    assert pane.keys() == ["Escape"] and fleet.calls == []
+    assert phone.audit() == [(name, f"{_acted_on(name, project)} dismissed=yes refused=stale")]
 
 
 def test_a_force_stop_types_nothing_so_it_skips_the_guard(
@@ -1222,7 +1267,7 @@ REFUSALS = [
 
 @pytest.mark.parametrize("name", PINNED_ACTIONS)
 @pytest.mark.parametrize(("error", "status", "code"), REFUSALS)
-def test_a_fleet_refusal_answers_as_the_cli_maps_it(
+def test_a_fleet_refusal_answers_as_the_cli_maps_it_and_is_on_the_trail(
     phone: Phone,
     fleet: FleetCalls,
     needs: FakeNeeds,
@@ -1232,12 +1277,48 @@ def test_a_fleet_refusal_answers_as_the_cli_maps_it(
     status: int,
     code: str,
 ) -> None:
+    """The fleet may have acted before it refused: a restart or a switch stops the agent
+    before it starts the next one, and a stop types ``/exit`` before it kills the window."""
     _row(project)
     fleet.answers[name.removeprefix("agent/")] = error
     response = phone.post(name, **PINNED)
     assert response.status_code == status
     assert response.json() == {"error": code, "message": str(error)}
-    assert phone.audit() == [], "a refusal is not a write that went through"
+    assert phone.audit() == [(name, f"{_acted_on(name, project)} dismissed=no failed={code}")]
+
+
+@pytest.mark.parametrize("name", PINNED_ACTIONS)
+def test_a_fleet_call_that_fails_after_a_dismissal_records_both(
+    phone: Phone,
+    fleet: FleetCalls,
+    needs: FakeNeeds,
+    pane: FakePane,
+    project: ProjectInfo,
+    name: str,
+) -> None:
+    _row(project)
+    needs.dialog = True
+    fleet.answers[name.removeprefix("agent/")] = fleet_service.FleetError("tmux went away")
+    response = phone.post(name, **PINNED, dismiss_dialog=True)
+    assert response.status_code == 409 and response.json()["error"] == "fleet_error"
+    assert pane.keys() == ["Escape"]
+    assert phone.audit() == [(name, f"{_acted_on(name, project)} dismissed=yes failed=fleet_error")]
+
+
+def test_an_unexpected_failure_of_the_fleet_call_is_a_400_on_the_trail(
+    phone: Phone, fleet: FleetCalls, needs: FakeNeeds, project: ProjectInfo
+) -> None:
+    """Not a refusal the fleet words, but the agent may be stopped all the same."""
+    _row(project)
+    fleet.answers["restart"] = RuntimeError("the store went away")
+    response = phone.post("agent/restart", **PINNED)
+    assert (response.status_code, response.json()) == (
+        400,
+        {"error": "write_failed", "message": "the store went away"},
+    )
+    assert phone.audit() == [
+        ("agent/restart", f"{_acted_on('agent/restart', project)} dismissed=no failed=write_failed")
+    ]
 
 
 def test_fleet_refusal_maps_the_servers_own_lookups_too() -> None:
@@ -1508,6 +1589,7 @@ def test_interrupt_sends_one_escape_then_types_once_at_the_prompt(
 def test_an_interrupt_that_does_not_stop_the_agent_types_nothing(
     phone: Phone, needs: FakeNeeds, pane: FakePane, project: ProjectInfo
 ) -> None:
+    """Nothing typed, but the Escape cut the agent's turn short: that is on the trail."""
     _row(project)
     needs.escape_stops_agent = False
     response = phone.post("agent/tell", agent=LABEL, text="hi", mode="interrupt")
@@ -1517,7 +1599,13 @@ def test_an_interrupt_that_does_not_stop_the_agent_types_nothing(
         "message": "Escape was sent; coder-1 has not stopped yet — nothing was typed",
     }
     assert pane.keys() == ["Escape"] and [kind for _p, kind, _w in pane.sent] == ["key"]
-    assert phone.audit() == []
+    assert phone.audit() == [
+        (
+            "agent/tell",
+            f"tell coder-1@{project.id} mode=interrupt delivered=no escape=sent "
+            'refused=still_busy text=2ch "hi"',
+        )
+    ]
 
 
 def test_the_interrupt_waits_out_the_quiet_window_before_the_settle_time() -> None:
@@ -1581,13 +1669,47 @@ def test_a_row_replaced_while_the_interrupt_waits_gets_nothing_typed(
     needs.before_read = replaced_on_the_second_read
     response = phone.post("agent/tell", agent=LABEL, **pin, text="hi", mode="interrupt")
     assert response.status_code == 409
-    assert response.json()["current"] == {"agent_id": "agt_new"}
+    assert response.json() == {
+        "error": "stale",
+        "message": "'coder-1' is another agent now (agt_new) — Escape was sent, "
+        "nothing else was done",
+        "current": {"agent_id": "agt_new"},
+    }
     assert pane.sent == [("%7", "key", "Escape")], "nothing typed, into either pane"
+    assert phone.audit() == [
+        (
+            "agent/tell",
+            f"tell coder-1@{project.id} mode=interrupt delivered=no escape=sent "
+            'refused=stale text=2ch "hi"',
+        )
+    ]
+
+
+def test_a_paste_that_fails_after_the_interrupts_escape_is_on_the_trail(
+    phone: Phone, needs: FakeNeeds, pane: FakePane, project: ProjectInfo
+) -> None:
+    _row(project)
+    pane.failing = {"paste"}
+    response = phone.post("agent/tell", agent=LABEL, text="hi", mode="interrupt")
+    assert response.status_code == 409
+    assert response.json() == {
+        "error": "fleet_error",
+        "message": "Escape was sent, but tmux could not type into coder-1's pane "
+        "(can't find pane: %7) — nothing was typed",
+    }
+    assert phone.audit() == [
+        (
+            "agent/tell",
+            f"tell coder-1@{project.id} mode=interrupt delivered=no escape=sent "
+            'failed=fleet_error text=2ch "hi"',
+        )
+    ]
 
 
 def test_a_paste_that_fails_types_nothing_and_is_a_409(
     phone: Phone, needs: FakeNeeds, pane: FakePane, project: ProjectInfo
 ) -> None:
+    """tmux's paste is one call, so nothing reached the agent, and only the ledger keeps it."""
     _row(project)
     needs.at_prompt = True
     pane.failing = {"paste"}
@@ -1731,7 +1853,7 @@ def test_a_tell_takes_the_agents_lock_too(
 
 
 @pytest.mark.parametrize(("error", "status", "code"), REFUSALS)
-def test_a_refused_auto_tell_answers_as_the_cli_maps_it(
+def test_a_refused_auto_tell_answers_as_the_cli_maps_it_and_is_on_the_trail(
     phone: Phone,
     fleet: FleetCalls,
     needs: FakeNeeds,
@@ -1740,6 +1862,8 @@ def test_a_refused_auto_tell_answers_as_the_cli_maps_it(
     status: int,
     code: str,
 ) -> None:
+    """``fleet tell`` pastes before it presses Enter, and files a note when that fails: it
+    can refuse with the text already in the pane."""
     _row(project)
     fleet.answers["tell"] = error
     response = phone.post("agent/tell", agent=LABEL, text="hi")
@@ -1747,6 +1871,12 @@ def test_a_refused_auto_tell_answers_as_the_cli_maps_it(
         status,
         {"error": code, "message": str(error)},
     )
+    assert phone.audit() == [
+        (
+            "agent/tell",
+            f'tell coder-1@{project.id} mode=auto delivered=no failed={code} text=2ch "hi"',
+        )
+    ]
 
 
 # --- with needs-you's own predicates (lane C) ------------------------------------------------

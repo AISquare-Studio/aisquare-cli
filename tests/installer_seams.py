@@ -1,9 +1,10 @@
 """The installer's outside world, closed for the tests that import this fixture.
 
-``aisquare upgrade`` reaches PyPI and runs uv, and ``services.install_route``
-is the one module that does either. A test that forgot to replace one of its
-seams would reinstall the CLI running the suite, or wait on the network — so
-every module that drives the upgrade imports :func:`no_real_installer`, which
+``aisquare upgrade`` reaches PyPI and runs uv, ``aisquare uninstall`` hands
+the process to ``uv tool uninstall``, and ``services.install_route`` is the one
+module that does any of it. A test that forgot to replace one of its seams would
+reinstall or remove the CLI running the suite, or wait on the network — so every
+module that drives either command imports :func:`no_real_installer`, which
 pytest then applies to each of its tests (an autouse fixture imported into a
 test module is that module's fixture).
 
@@ -27,7 +28,7 @@ from aisquare.services import install_route
 #: Everything in ``install_route`` that leaves this process or reads ambient
 #: machine state. ``open_url`` is listed beside ``fetch_latest`` so a test of the
 #: real lookup still cannot reach the network unless it supplies a stand-in.
-SEAMS = ("fetch_latest", "open_url", "run_installer", "run_captured", "find_uv")
+SEAMS = ("fetch_latest", "open_url", "run_installer", "run_captured", "exec_replace", "find_uv")
 
 
 @pytest.fixture(autouse=True)

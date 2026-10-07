@@ -45,6 +45,7 @@ aisquare
 │                   promote · import · export · —  your persistent memory
 ├── inject · why · log · status · doctor
 ├── upgrade [--check] [--version V] [--dry-run] [-y]   update this install in place
+├── uninstall [--purge] [--dry-run] [-y]   hooks out of Claude Code, then the package
 ├── project (workspace)  info · list · switch · link · onboard [--refresh] · forget <id|path> [--purge]
 │                   prune [--missing] [--worktrees] [--purge] [--yes]
 ├── agents          scan · list · status [name] · connect <name> · disconnect <name>
@@ -100,8 +101,8 @@ registered but hidden until they do something real.
 
 ### Roadmap commands
 
-`sync`, `connectors`, `capture`, `policy` / `enforce`, `open` and
-`uninstall` are the cloud roadmap (sync across machines, managed connectors). They are **hidden from `--help`**
+`sync`, `connectors`, `capture`, `policy` / `enforce` and `open` are the cloud
+roadmap (sync across machines, managed connectors). They are **hidden from `--help`**
 so the listed surface is only what actually works, but they still run and
 still say plainly that they are not implemented (exit code 70) rather than
 half-working. Follow along in

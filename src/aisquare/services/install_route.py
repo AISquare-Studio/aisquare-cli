@@ -1,4 +1,4 @@
-"""How THIS aisquare was installed, and the command that upgrades it.
+"""How THIS aisquare was installed, and the commands that upgrade and remove it.
 
 Read from the RUNNING interpreter (``sys.prefix``), never from ``PATH``. The two
 disagree on ordinary machines: a developer whose shell runs a checkout's
@@ -30,11 +30,12 @@ the index options. It is never ``uv tool upgrade``, which leaves a pinned
 install where it is ("Nothing to upgrade", exit 0 — docs/plans/one-line-install.md
 §3.9.1); ``tests/test_lifecycle_upgrade.py`` holds both modules to that.
 
-The outside world is reached through three functions here and nowhere else —
-:func:`open_url` (the network, for :func:`fetch_latest`), :func:`run_installer`
-and :func:`run_captured` (processes) — so a test replaces them and never starts
-uv or touches PyPI; :func:`find_uv` is the one PATH lookup, for the same reason.
-The process ones are registered spawn seams (``core.spawn.SEAMS``).
+The outside world is reached through four functions here and nowhere else —
+:func:`open_url` (the network, for :func:`fetch_latest`), :func:`run_installer`,
+:func:`run_captured` and :func:`exec_replace` (processes) — so a test replaces
+them and never starts uv or touches PyPI; :func:`find_uv` is the one PATH
+lookup, for the same reason. The process ones are registered spawn seams
+(``core.spawn.SEAMS``).
 
 What the run touches AFTER the installer is imported at module top, on purpose.
 ``uv tool install --force`` deletes the environment this process was loaded from
@@ -49,6 +50,7 @@ interpreter rather than in the tool environment uv replaces.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -62,7 +64,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from importlib import metadata
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 from urllib.parse import parse_qsl, unquote, urlparse, urlsplit, urlunsplit
 
 from aisquare.core.version import DISTRIBUTION, __version__
@@ -760,7 +762,7 @@ def not_automated(route: InstallRoute) -> str | None:
     receipt says exactly how to reinstall it, and the result is checked in a new
     process afterwards. Everything else is told the exact command instead.
     """
-    windows = route.facts.platform == "win32"
+    windows = _windows_blocker(route, "replace")
     if route.kind == EDITABLE:
         # First on every platform: the pull is the step the printed reinstall
         # cannot carry, and Windows only changes WHEN the reinstall can run.
@@ -768,14 +770,11 @@ def not_automated(route: InstallRoute) -> str | None:
         reason = (
             f"an editable install follows its checkout — pull it first ({pull}), then reinstall it"
         )
-        if windows:
+        if windows is not None:
             reason += " after aisquare exits (Windows locks the files of a running program)"
         return reason
-    if windows:
-        return (
-            "Windows locks the files of a running program, so aisquare cannot replace "
-            "itself — quit it first"
-        )
+    if windows is not None:
+        return windows
     if route.kind != UV_TOOL:
         return _NOT_AUTOMATED.get(route.kind, "this install is not one aisquare manages")
     receipt = route.receipt or UvReceipt()
@@ -784,6 +783,26 @@ def not_automated(route: InstallRoute) -> str | None:
             f"its uv receipt records {'; '.join(receipt.unrestatable)}, which a reinstall "
             "could not carry over"
         )
+    return _uv_tool_blocker(route)
+
+
+def _windows_blocker(route: InstallRoute, verb: str) -> str | None:
+    """Why Windows rules out a self-``verb`` (``replace``, ``remove``), or ``None``."""
+    if route.facts.platform != "win32":
+        return None
+    return (
+        f"Windows locks the files of a running program, so aisquare cannot {verb} itself "
+        "— run it after aisquare exits"
+    )
+
+
+def _uv_tool_blocker(route: InstallRoute) -> str | None:
+    """Why uv cannot be pointed at THIS tool environment, or ``None``.
+
+    Shared by upgrade and uninstall, so the two agree on which uv tools they touch:
+    ``uv tool … aisquare-cli`` acts on ``tools/aisquare-cli``, and from an
+    environment with any other name it would act on a different one.
+    """
     if route.facts.prefix.name != DISTRIBUTION:
         return f"the tool environment is named {route.facts.prefix.name!r}, not {DISTRIBUTION!r}"
     if find_uv() is None:
@@ -811,6 +830,40 @@ def own_index(route: InstallRoute) -> str | None:
 def find_uv() -> str | None:
     """Where ``uv`` is on PATH (an indirection so a test decides the answer)."""
     return shutil.which("uv")
+
+
+# --- what removes it --------------------------------------------------------------------
+
+
+def remove_argv(route: InstallRoute) -> list[str]:
+    """The command that removes this install's package — and nothing else of ours."""
+    if route.receipt is not None:
+        return ["uv", "tool", "uninstall", DISTRIBUTION]
+    if route.kind == PIPX:
+        return ["pipx", "uninstall", DISTRIBUTION]
+    if route.kind == HOMEBREW:
+        return ["brew", "uninstall", route.formula or DISTRIBUTION]
+    return _pip_argv(route, "uninstall", DISTRIBUTION)
+
+
+def not_removable(route: InstallRoute) -> str | None:
+    """Why ``aisquare uninstall`` will not run the removal itself, or ``None``.
+
+    Any uv tool is removed by uv — whatever it was installed from, ``uv tool
+    uninstall`` deletes the environment and both shims (measured) and nothing
+    else. Every other manager is told the command: a pip in a venv the user made
+    may hold other things they installed, and pipx and Homebrew keep records of
+    their own that only they should edit.
+    """
+    windows = _windows_blocker(route, "remove")
+    if windows is not None:
+        return windows
+    if route.receipt is None:
+        return {
+            PIPX: "pipx installs are removed with pipx",
+            HOMEBREW: "Homebrew installs are removed with brew",
+        }.get(route.kind, f"it was installed with {route.manager}, which this CLI does not run")
+    return _uv_tool_blocker(route)
 
 
 def installer_env(route: InstallRoute) -> dict[str, str]:
@@ -905,3 +958,26 @@ def run_captured(argv: Sequence[str], *, timeout: float) -> Captured:
     except (OSError, subprocess.SubprocessError) as exc:
         return Captured(None, error=str(exc))
     return Captured(completed.returncode, completed.stdout or "", completed.stderr or "")
+
+
+def exec_replace(
+    argv: Sequence[str], *, env: Mapping[str, str], stdout_to_stderr: bool
+) -> NoReturn:
+    """Replace this process with ``argv`` — the package removal, the LAST thing uninstall does.
+
+    A registered spawn seam (``core.spawn.SEAMS``). ``os.execvp`` rather than a
+    child: what is being removed is the environment this process runs from, so
+    nothing of ours should still be running when it goes, and the exit status
+    the caller sees is the package manager's own. Under ``--json`` stdout
+    already holds the one report object, so the manager's stdout is pointed at
+    stderr first. Returns only when the program could not be started, by
+    raising ``OSError``.
+    """
+    sys.stdout.flush()
+    sys.stderr.flush()
+    if stdout_to_stderr:
+        # A stream with no descriptor cannot be redirected; the manager's few
+        # stdout lines then follow the report rather than replacing the exec.
+        with contextlib.suppress(AttributeError, OSError, ValueError):
+            os.dup2(sys.stderr.fileno(), sys.stdout.fileno())
+    os.execvpe(argv[0], list(argv), {**os.environ, **env})

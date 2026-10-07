@@ -76,7 +76,11 @@ UNINVOKED = {
     ),
     "logout": "clears credentials on the developer's own machine",
     "open": "launches a browser",
-    "uninstall": "removes the installation running the test",
+    "uninstall": (
+        "removes the hooks, the package running the test and, with --purge, the home; "
+        "its read-only plan (`--json` without `--yes`) is invoked by "
+        "test_the_uninstall_plan_is_held_to_it"
+    ),
     "upgrade": (
         "on a uv tool install it asks PyPI and, with --yes, reinstalls the CLI running the "
         "test; its read-only `--check` is invoked by test_the_upgrade_check_is_held_to_it"
@@ -441,3 +445,24 @@ def test_the_upgrade_check_is_held_to_it(
     lines = [line for line in result.stdout.splitlines() if line.strip()]
     assert len(lines) == 1, f"--json must print exactly one object, got {result.stdout!r}"
     assert json.loads(lines[0])["latest"] is None
+
+
+def test_the_uninstall_plan_is_held_to_it(damaged_store: str) -> None:
+    """``uninstall`` is UNINVOKED because a real run removes the CLI under test, but
+    ``--json`` without ``--yes`` is its documented read-only plan, and the plan is the
+    one place it reads the store: to count the fleet's live agents. A store that
+    cannot answer is reported in the plan, never raised."""
+    result = CliRunner().invoke(app, ["--json", "uninstall"], catch_exceptions=True)
+
+    assert _escaped(result.exception) is None, (
+        f"`aisquare --json uninstall` raised under {damaged_store} damage: {result.exception!r}"
+    )
+    lines = [line for line in result.stdout.splitlines() if line.strip()]
+    assert len(lines) == 1, f"--json must print exactly one object, got {result.stdout!r}"
+    plan = json.loads(lines[0])
+    assert plan["dry_run"] is True
+    if damaged_store == "at-open":
+        # A store that cannot be opened cannot say whether agents are live, and the
+        # plan has to say so. The at-query shape zeroes a page the plan's two small
+        # queries never reach, so there they answer — honestly — and nothing is owed.
+        assert plan["fleet_error"], "an unopenable store must be reported in the plan"

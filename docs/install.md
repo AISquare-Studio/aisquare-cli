@@ -88,6 +88,11 @@ Claude Code's hooks. It runs for the uv tool install the one-liner makes; any
 other install is shown the exact command that updates it. Releases before 0.9.0
 have no `upgrade` yet: re-run the one-liner instead.
 
+Remove it with `aisquare uninstall`. It takes aisquare's hooks out of Claude
+Code, then removes the package of the uv tool install the one-liner makes (any
+other install is shown its command), and keeps `~/.aisquare` (your memory and
+boards) unless you add `--purge`. It shows what it will do and asks first.
+
 ## Start the GUI
 
 The installer offers this at the end; if you skipped it:

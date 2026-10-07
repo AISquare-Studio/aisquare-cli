@@ -3705,8 +3705,17 @@ def _remote_serve_off(state: Runtime, server: Any) -> None:
         server.should_exit = True
 
 
+class RemoteBindError(RemoteError):
+    """``serve``'s port could not be bound: another process holds it, or it is not ours.
+
+    Its own class, so the CLI calls only THIS a bind failure: it caught every
+    ``OSError`` out of :func:`run_foreground`, and a ``remote.json`` that would not
+    write was reported as "cannot bind 127.0.0.1:8750"."""
+
+
 def _bind_remote_socket(port: int) -> socket.socket:
-    """A socket bound to ``127.0.0.1:port`` for uvicorn to serve on; ``OSError`` when taken.
+    """A socket bound to ``127.0.0.1:port`` for uvicorn to serve on; :class:`RemoteBindError`
+    when that port cannot be had.
 
     Bound here, before anything is printed: uvicorn binding for itself turned a
     taken port into ``sys.exit(3)`` AFTER ``serve`` had printed its banner and the
@@ -3720,9 +3729,9 @@ def _bind_remote_socket(port: int) -> socket.socket:
         if os.name == "posix":
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         sock.bind((BIND, port))
-    except OSError:
+    except OSError as exc:
         sock.close()
-        raise
+        raise RemoteBindError(f"cannot bind {BIND}:{port} — {exc}") from exc
     return sock
 
 
@@ -3736,8 +3745,8 @@ def run_foreground(
 ) -> bool:
     """``asq remote serve``: serve in this thread until Ctrl-C or auto-off.
 
-    ``True`` when auto-off ended it. In order: the port is bound (``OSError`` when
-    another process holds it, before ``ready`` prints anything); the deadline is set
+    ``True`` when auto-off ended it. In order: the port is bound (:class:`RemoteBindError`
+    when another process holds it, before ``ready`` prints anything); the deadline is set
     ``auto_off_minutes`` from now (0 is never) and ``public_url`` noted as the origin
     of push links; ``ready`` runs (the CLI's banner); uvicorn serves on the bound
     socket. A timer turns Remote off at the deadline, re-armed while a phone keeps
@@ -3811,6 +3820,7 @@ __all__ = [
     "NoRemotePage",
     "NoSuchAgent",
     "NoSuchProject",
+    "RemoteBindError",
     "RemoteError",
     "RemoteInfo",
     "RemoteUnavailable",

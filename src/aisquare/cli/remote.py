@@ -55,13 +55,18 @@ def _fail_if_no_page(dist: Path | None) -> None:
 
 
 def _remote_runtime() -> Runtime:
-    """The server's state from ``remote.json``, or a clean failure when it cannot be read."""
+    """The server's state from ``remote.json``, or a clean failure when it cannot be used.
+
+    Every command that reads or writes the file starts here, so an unreadable or
+    corrupt one is the same answer everywhere, its reason in ``--json``'s
+    ``detail`` too (``fail`` keeps the message for the human surface alone).
+    """
     from aisquare.services import remote_server
 
     try:
         return remote_server.runtime()
     except remote_server.RemoteError as exc:
-        fail(str(exc), error="remote_state_unreadable")
+        fail(str(exc), error="remote_state_unreadable", detail=str(exc))
 
 
 def _describe_remote(info: RemoteInfo, *, allow_write: bool) -> dict[str, object]:
@@ -152,10 +157,12 @@ def serve_remote(
 
     try:
         timed_out = remote_server.run_foreground(dist, port, auto_off, public_url, ready=banner)
-    except OSError as exc:
-        fail(f"cannot bind {remote_server.BIND}:{port} — {exc}", error="remote_bind_failed")
+    except remote_server.RemoteBindError as exc:
+        fail(str(exc), error="remote_bind_failed", detail=str(exc))
     except remote_server.RemoteError as exc:
-        fail(str(exc), error="remote_failed")
+        fail(str(exc), error="remote_failed", detail=str(exc))
+    except OSError as exc:  # remote.json would not write, say: anything but the port
+        fail(f"the remote server could not run — {exc}", error="remote_failed", detail=str(exc))
     if timed_out:
         stderr_console().print("Remote turned off — the auto-off timer ran out", markup=False)
 
@@ -241,9 +248,7 @@ def allow_write(
     """Turn the write endpoints on or off for the running/next server."""
     if switch not in ("on", "off"):
         fail(f"say 'on' or 'off', not {switch!r}", error="invalid_switch", ref=switch)
-    from aisquare.services import remote_server
-
-    remote_server.set_allow_write(switch == "on")
+    _remote_runtime().set_allow_write(switch == "on")
     if get_state().json_output:
         typer.echo(json.dumps({"allow_write": switch == "on"}))
     else:

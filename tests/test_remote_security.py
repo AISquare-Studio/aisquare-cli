@@ -888,13 +888,31 @@ def test_serve_on_a_taken_port_fails_before_it_prints_anything(page: Path) -> No
         taken.listen(1)
         port = int(taken.getsockname()[1])
         ready: list[str] = []
-        with pytest.raises(OSError):
+        with pytest.raises(remote_server.RemoteBindError, match=f"cannot bind 127.0.0.1:{port}"):
             remote_server.run_foreground(port=port, ready=lambda: ready.append("banner"))
         assert ready == []
         result = CliRunner().invoke(cli, ["--json", "remote", "serve", "--port", str(port)])
     assert result.exit_code == 1
     assert json.loads(result.stdout)["error"] == "remote_bind_failed"
     assert "url_local" not in result.stdout and "password" not in result.stdout
+
+
+def test_a_remote_json_that_will_not_write_is_not_called_a_taken_port(
+    page: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``serve`` answered every ``OSError`` out of the server as ``cannot bind
+    127.0.0.1:<port>``, the deadline it could not write into ``remote.json`` included."""
+    remote_server.runtime()  # the file is there: only serve's own write fails
+
+    def unwritable(path: Path, data: object, **kwargs: object) -> bool:
+        raise PermissionError(errno.EACCES, "Permission denied", str(path))
+
+    monkeypatch.setattr(remote_server, "write_replacing", unwritable)
+    port = _free_port()
+    result = CliRunner().invoke(cli, ["--json", "remote", "serve", "--port", str(port)])
+    assert result.exit_code == 1
+    answer = json.loads(result.stdout)
+    assert answer["error"] == "remote_failed" and "Permission denied" in answer["detail"]
 
 
 def test_serve_sets_the_deadline_notes_the_public_url_and_reports_auto_off(
@@ -1358,6 +1376,33 @@ def test_a_hand_edit_that_breaks_the_json_costs_no_phone_its_link(
     assert path.read_bytes() == broken
     assert runtime.reload_if_changed() is False, "the server keeps what it has"
     assert (runtime.password, runtime.allow_write) == (PASSWORD, True)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        ["status"],
+        ["allow-write", "on"],
+        ["regenerate-password"],
+        ["revoke", "--all"],
+        ["revoke", "dev_00000000"],
+    ],
+    ids=" ".join,
+)
+def test_every_command_says_why_remote_json_cannot_be_used(
+    runtime: Runtime, monkeypatch: pytest.MonkeyPatch, command: list[str]
+) -> None:
+    """``allow-write`` went to the file unchecked, and answered a file it could not use with a
+    traceback and no JSON at all; the others answered without saying why."""
+    monkeypatch.setattr(remote_server, "_runtime", None)  # the CLI is another process
+    path = remote_state_path()
+    path.write_bytes(b'{"version": 2,')
+    result = CliRunner().invoke(cli, ["--json", "remote", *command])
+    assert result.exit_code == 1
+    answer = json.loads(result.stdout)
+    assert answer["error"] == "remote_state_unreadable"
+    assert f"{path} is not a JSON object" in answer["detail"]
+    assert path.read_bytes() == b'{"version": 2,'
 
 
 def test_a_write_waits_for_another_process_holding_the_lock(runtime: Runtime) -> None:

@@ -1564,10 +1564,13 @@ def test_the_interrupt_reads_the_agent_every_quarter_second_until_the_wait_is_ov
     assert needs.reads == 1 + 32
 
 
+@pytest.mark.parametrize("pin", [{"agent_id": "agt_one"}, {}])
 def test_a_row_replaced_while_the_interrupt_waits_gets_nothing_typed(
-    phone: Phone, needs: FakeNeeds, pane: FakePane, project: ProjectInfo
+    phone: Phone, needs: FakeNeeds, pane: FakePane, project: ProjectInfo, pin: dict[str, str]
 ) -> None:
-    """Pinned, every read is checked: the paste must not land in the newcomer's pane."""
+    """Every read is checked against the row that held the label when the lock was taken,
+    pinned or not: the Escape went to agt_one, and the text must not land in the
+    newcomer's pane."""
     _row(project)
     needs.lag = 3
 
@@ -1576,12 +1579,10 @@ def test_a_row_replaced_while_the_interrupt_waits_gets_nothing_typed(
             _replaced(project)
 
     needs.before_read = replaced_on_the_second_read
-    response = phone.post(
-        "agent/tell", agent=LABEL, agent_id="agt_one", text="hi", mode="interrupt"
-    )
+    response = phone.post("agent/tell", agent=LABEL, **pin, text="hi", mode="interrupt")
     assert response.status_code == 409
     assert response.json()["current"] == {"agent_id": "agt_new"}
-    assert pane.keys() == ["Escape"] and "paste" not in [kind for _p, kind, _w in pane.sent]
+    assert pane.sent == [("%7", "key", "Escape")], "nothing typed, into either pane"
 
 
 def test_a_paste_that_fails_types_nothing_and_is_a_409(

@@ -442,21 +442,22 @@ def action_locked(target: ProjectInfo, label: str, agent_id: str | None) -> Iter
 # --- what the agent shows now ------------------------------------------------------------------
 
 
-def action_snapshot(target: ProjectInfo, label: str, agent_id: str | None) -> AgentNow:
-    """The agent as needs-you reads it now. With a pin, it must still be the pinned row.
+def action_snapshot(target: ProjectInfo, label: str, pin: str) -> AgentNow:
+    """The agent as needs-you reads it now, which must still be the row ``pin`` names.
 
-    Every snapshot is checked, not only the first. The reads after an Escape go
-    on for seconds, and the pane they send to must still belong to the agent the
-    phone pinned.
+    The pin is the row read under the lock: the body's ``agent_id`` when it had
+    one, else whoever held the label then. Every snapshot is checked, not only
+    the first. The reads after an Escape go on for seconds, and the pane the
+    paste goes to must belong to the agent the Escape went to.
     """
     snap = action_fleet_call(lambda: remote_needs.needs_agent_now(target, label))
-    if agent_id is not None and snap.status is not None and snap.status.agent.id != agent_id:
+    if snap.status is not None and snap.status.agent.id != pin:
         raise action_stale(target, label, snap.status.agent)
     return snap
 
 
 def action_check_needs(
-    target: ProjectInfo, label: str, agent_id: str | None, needs_id: str | None
+    target: ProjectInfo, label: str, pin: str, needs_id: str | None
 ) -> AgentNow | None:
     """With a card's ``needs_id``: the agent now, but only while that item is still its own.
 
@@ -468,7 +469,7 @@ def action_check_needs(
     """
     if needs_id is None:
         return None
-    snap = action_snapshot(target, label, agent_id)
+    snap = action_snapshot(target, label, pin)
     if not remote_needs.needs_item_current(snap, needs_id):
         raise RequestError(
             409,
@@ -516,7 +517,7 @@ def action_press_escape(snap: AgentNow, label: str) -> None:
 def action_settle(
     target: ProjectInfo,
     label: str,
-    agent_id: str | None,
+    pin: str,
     reached: Callable[[AgentNow], bool],
     seconds: float,
 ) -> AgentNow | None:
@@ -529,7 +530,7 @@ def action_settle(
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
         time.sleep(ACTION_POLL_SECONDS)
-        snap = action_snapshot(target, label, agent_id)
+        snap = action_snapshot(target, label, pin)
         if reached(snap):
             return snap
     return None
@@ -538,7 +539,7 @@ def action_settle(
 def action_dialog_guard(
     target: ProjectInfo,
     label: str,
-    agent_id: str,
+    pin: str,
     snap: AgentNow | None,
     *,
     dismiss: bool,
@@ -551,7 +552,7 @@ def action_dialog_guard(
     refusal with a sentence, or with ``dismiss`` an Escape to an agent about to be
     stopped anyway. It never costs an Enter into a dialog.
     """
-    snap = snap if snap is not None else action_snapshot(target, label, agent_id)
+    snap = snap if snap is not None else action_snapshot(target, label, pin)
     if not remote_needs.needs_dialog_open(snap):
         return False
     if not dismiss:
@@ -565,7 +566,7 @@ def action_dialog_guard(
     closed = action_settle(
         target,
         label,
-        agent_id,
+        pin,
         lambda again: not remote_needs.needs_dialog_open(again),
         remote_needs.DIALOG_SETTLE_SECONDS,
     )
@@ -660,7 +661,7 @@ def action_type_now(
     text: str,
     snap: AgentNow | None,
     *,
-    agent_id: str | None,
+    pin: str,
     interrupt: bool,
 ) -> tuple[bool, str]:
     """``prompt`` and ``interrupt``: type ``text`` at the agent's input prompt, now.
@@ -670,7 +671,7 @@ def action_type_now(
     says what the agent is doing. ``interrupt`` sends one Escape and waits for the
     prompt to come back. If it does not, nothing is typed.
     """
-    snap = snap if snap is not None else action_snapshot(target, label, agent_id)
+    snap = snap if snap is not None else action_snapshot(target, label, pin)
     if remote_needs.needs_dialog_open(snap):
         raise RequestError(
             409,
@@ -682,7 +683,7 @@ def action_type_now(
     if interrupt:
         action_press_escape(snap, label)
         reached = action_settle(
-            target, label, agent_id, remote_needs.needs_at_input_prompt, action_interrupt_wait()
+            target, label, pin, remote_needs.needs_at_input_prompt, action_interrupt_wait()
         )
         if reached is None:
             raise RequestError(
@@ -706,8 +707,10 @@ def action_tell(body: dict[str, Any]) -> tuple[dict[str, object], str]:
     ``auto`` is ``fleet tell``, unchanged. The other two modes type now
     (:func:`action_type_now`). ``agent_id`` and a card's ``needs_id`` are
     optional here: with either one, the tell reaches only the agent it names.
-    The audit line keeps how the text began, since a tell typed into a pane
-    leaves no trace on the board.
+    Without one it still reaches only the row that held the label when the lock
+    was taken, so an interrupt cannot send its Escape to one agent and its text
+    to the replacement. The audit line keeps how the text began, since a tell
+    typed into a pane leaves no trace on the board.
     """
     from aisquare.services import fleet as fleet_service
 
@@ -717,14 +720,14 @@ def action_tell(body: dict[str, Any]) -> tuple[dict[str, object], str]:
     agent_id = action_ref(body, "agent_id", guard=True)
     needs_id = action_ref(body, "needs_id", limit=ACTION_NEEDS_ID_MAX, guard=True)
     target = action_project(body)
-    with action_locked(target, label, agent_id):
-        snap = action_check_needs(target, label, agent_id, needs_id)
+    with action_locked(target, label, agent_id) as row:
+        snap = action_check_needs(target, label, row.id, needs_id)
         if mode == "auto":
             told = action_fleet_call(lambda: fleet_service.tell(target, label, text, sender=None))
             delivered, how = told.delivered, told.how
         else:
             delivered, how = action_type_now(
-                target, label, text, snap, agent_id=agent_id, interrupt=mode == "interrupt"
+                target, label, text, snap, pin=row.id, interrupt=mode == "interrupt"
             )
     result: dict[str, object] = {
         "label": label,
@@ -757,10 +760,10 @@ def action_stop(body: dict[str, Any]) -> tuple[dict[str, object], str]:
     needs_id = action_ref(body, "needs_id", limit=ACTION_NEEDS_ID_MAX, guard=True)
     target = action_project(body)
     with action_locked(target, label, agent_id) as row:
-        snap = action_check_needs(target, label, agent_id, needs_id)
+        snap = action_check_needs(target, label, row.id, needs_id)
         guarded = not force and row.ended_at is None
         dismissed = guarded and action_dialog_guard(
-            target, label, agent_id, snap, dismiss=dismiss, doing="stopping"
+            target, label, row.id, snap, dismiss=dismiss, doing="stopping"
         )
         receipt = action_fleet_call(
             lambda: fleet_service.stop(target, label, force=force, agent_id=agent_id)
@@ -796,9 +799,9 @@ def action_restart(body: dict[str, Any]) -> tuple[dict[str, object], str]:
     needs_id = action_ref(body, "needs_id", limit=ACTION_NEEDS_ID_MAX, guard=True)
     target = action_project(body)
     with action_locked(target, label, agent_id) as row:
-        snap = action_check_needs(target, label, agent_id, needs_id)
+        snap = action_check_needs(target, label, row.id, needs_id)
         dismissed = row.ended_at is None and action_dialog_guard(
-            target, label, agent_id, snap, dismiss=dismiss, doing="restarting"
+            target, label, row.id, snap, dismiss=dismiss, doing="restarting"
         )
         receipt = action_fleet_call(
             lambda: fleet_service.restart(
@@ -844,9 +847,9 @@ def action_switch(body: dict[str, Any]) -> tuple[dict[str, object], str]:
     needs_id = action_ref(body, "needs_id", limit=ACTION_NEEDS_ID_MAX, guard=True)
     target = action_project(body)
     with action_locked(target, label, agent_id) as row:
-        snap = action_check_needs(target, label, agent_id, needs_id)
+        snap = action_check_needs(target, label, row.id, needs_id)
         dismissed = row.ended_at is None and action_dialog_guard(
-            target, label, agent_id, snap, dismiss=dismiss, doing="switching"
+            target, label, row.id, snap, dismiss=dismiss, doing="switching"
         )
         receipt = action_fleet_call(
             lambda: fleet_service.switch(

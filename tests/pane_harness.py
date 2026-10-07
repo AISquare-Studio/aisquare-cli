@@ -270,7 +270,11 @@ class FakeTmux:
             return Completed(0, pane.facts(pane_id, group[-1]) + "\n", "")
         if name == "send-keys":
             assert group[1] == "-t", group
-            self.input.append((name, pane_id, *group[3:]))
+            # ``send_keys`` ends tmux's flags with ``--`` before the key names; what a
+            # program receives is the names, so the recording is the names alone.
+            rest = group[3:]
+            rest = rest[1:] if rest[:1] == ["--"] else rest
+            self.input.append((name, pane_id, *rest))
             return Completed(0, "", "")
         if name == "paste-buffer":
             self.input.append((name, pane_id))

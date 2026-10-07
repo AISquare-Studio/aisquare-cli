@@ -453,6 +453,10 @@ The app — what bare `asq` runs. Explicit so a script or alias can reach it, an
 so `aisquare ui --help` exists. Without an interactive terminal it refuses with
 the reason (`not_a_tty`) rather than starting a full-screen app into a pipe.
 
+Press `R` for Remote control: the fleet on your phone through your own ngrok
+tunnel, with the link, a QR code and the passphrase in one panel — see
+[Phone control](remote.md).
+
 ---
 
 ## Accounts

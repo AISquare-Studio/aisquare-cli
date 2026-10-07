@@ -38,7 +38,10 @@ subscription, each only when it changed.
 **The lanes** live in their own modules and plug in through :class:`RemoteKit`:
 ``remote_needs`` (what needs the human), ``remote_push`` (Web Push),
 ``remote_actions`` (tell, stop, restart, switch, and the ledger). This module
-imports them inside functions only, and none of them is on the hook path.
+imports them inside functions only, and none of them is on the hook path. A
+lane that raises costs its own feature, never the server or a socket: a start
+that fails is logged and the server runs without it, and a stream seam that
+fails skips its frame for that tick.
 
 State (token, password, ``allow_write``, ``auto_off_at``, devices) lives in
 ``~/.aisquare/remote.json``, owner-only (0600; on Windows, a DACL for this
@@ -1978,6 +1981,7 @@ def build_remote_app(
         from starlette.applications import Starlette
         from starlette.responses import FileResponse, JSONResponse
         from starlette.routing import Mount, Route, WebSocketRoute
+        from starlette.status import WS_1011_INTERNAL_ERROR
         from starlette.websockets import WebSocketDisconnect
     except ImportError as exc:  # pragma: no cover - exercised only in a base install
         raise RemoteUnavailable(f"the remote extra is not installed — {INSTALL_HINT}") from exc
@@ -2203,7 +2207,8 @@ def build_remote_app(
         or not, never on the first tick), then one ``pane`` frame per
         subscription. Pane subscriptions are ``(project, label)``: the same
         label in two projects is two agents, and a frame names the project its
-        subscription named.
+        subscription named. A lane seam that raises skips its own frame for the
+        tick; anything else that fails ends the socket with 1011.
         """
         device = kit.kit_device(websocket)  # the gate refused a socket without one
         await websocket.accept()
@@ -2227,6 +2232,10 @@ def build_remote_app(
         projects forgets that kind's frame, so the new project's goes out even if equal."""
         next_heartbeat = time.monotonic() + heartbeat
         first_tick = True
+        lanes_failing: set[str] = set()
+        """The lane seams that raised on this socket. The first failure of each is a warning
+        with its traceback, any later one only a debug line: a lane broken for good would
+        otherwise log a traceback on every tick of every socket."""
 
         async def close_with(code: int) -> None:
             with contextlib.suppress(Exception):
@@ -2254,6 +2263,12 @@ def build_remote_app(
                 last[kind] = encoded
                 await send_frame(kind, payload)
 
+        def lane_frame_skipped(seam: str) -> None:
+            """Called from an ``except``: a lane's bug costs its own frame, never the socket."""
+            level = logging.DEBUG if seam in lanes_failing else logging.WARNING
+            lanes_failing.add(seam)
+            log.log(level, "remote: %s failed; the stream goes on without it", seam, exc_info=True)
+
         async def tick_once() -> None:
             nonlocal next_heartbeat, first_tick
             board_ref = board_project
@@ -2269,17 +2284,29 @@ def build_remote_app(
             except Exception as exc:
                 log.debug("remote: fleet frame skipped: %s", exc)
             await push_if_changed("remote", runtime.remote_json())
-            for kind, payload in remote_needs.needs_ws_frames(kit):
-                await push_if_changed(kind, payload)
-            actions = kit.ledger.ledger_recent(device.id)
-            if actions:
-                await push_if_changed("action", {"actions": actions})
+            # The lanes' frames, each guarded as board and fleet are: one lane's bug,
+            # raised here on every tick, would otherwise end every phone's live view.
+            try:
+                for kind, payload in remote_needs.needs_ws_frames(kit):
+                    await push_if_changed(kind, payload)
+            except Exception:
+                lane_frame_skipped("needs_ws_frames")
+            try:
+                actions = kit.ledger.ledger_recent(device.id)
+                if actions:
+                    await push_if_changed("action", {"actions": actions})
+            except Exception:
+                lane_frame_skipped("ledger_recent")
             now = time.monotonic()
             if first_tick:
                 first_tick = False
             elif now >= next_heartbeat:
                 next_heartbeat = now + heartbeat
-                scanned = remote_needs.needs_scanned_iso(kit)
+                try:
+                    scanned = remote_needs.needs_scanned_iso(kit)
+                except Exception:
+                    lane_frame_skipped("needs_scanned_iso")
+                    scanned = None  # the beat says the LINK is alive: it goes out regardless
                 await send_frame("heartbeat", {"needs_scanned_at": scanned})
             for wanted in list(panes_wanted):
                 project, label = wanted
@@ -2354,6 +2381,9 @@ def build_remote_app(
             pass
         except Exception as exc:
             log.debug("remote: stream for %s ended: %s", device.id, exc)
+            # A failure, said as one (the page reconnects with backoff): returning
+            # without a close leaves the phone an abnormal 1006 and no reason.
+            await close_with(WS_1011_INTERNAL_ERROR)
         finally:
             kit.kit_socket_closed(device.id, closer)
             runtime.unregister_socket(sid, revoked)

@@ -10,6 +10,7 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import json
+import logging
 import threading
 import tracemalloc
 from collections.abc import Callable
@@ -44,7 +45,7 @@ from aisquare.services.remote_server import (
     remote_agent_lock,
     write_endpoint_names,
 )
-from tests.remote_kit_helpers import base, make_client, make_runtime, unlock
+from tests.remote_kit_helpers import base, make_client, make_runtime, receive_within, unlock
 
 
 def _sources() -> Sources:
@@ -540,6 +541,18 @@ def _stream_app(runtime: Runtime, tmp_path: Path, **kw: Any) -> tuple[Any, Any]:
     return app, _unlocked(app, runtime)
 
 
+def _frame_within(ws: Any) -> dict[str, Any]:
+    """The next frame; a failed test if the socket closed or went silent instead."""
+    message = receive_within(ws)
+    assert message["type"] == "websocket.send", f"the socket ended: {message}"
+    frame: dict[str, Any] = json.loads(message["text"])
+    return frame
+
+
+def _lane_bug(*args: object) -> Any:
+    raise RuntimeError("a bug in a lane")
+
+
 def test_the_heartbeat_is_never_on_the_first_tick(runtime: Runtime, tmp_path: Path) -> None:
     """``heartbeat=0`` would send one every tick: the first still carries none."""
     _app, client = _stream_app(runtime, tmp_path, heartbeat=0)
@@ -598,6 +611,62 @@ def test_the_action_frame_shows_this_devices_ledger_only_when_it_has_entries(
         ledger.recent[device_id] = [{**entry, "request_id": "next"}, entry]
         actions = _until(ws, "action")["payload"]["actions"]
     assert [action["request_id"] for action in actions] == ["next", "c0ffee"]
+
+
+@pytest.mark.parametrize("seam", ["needs_ws_frames", "ledger_recent", "needs_scanned_iso"])
+def test_a_lane_seam_that_raises_costs_its_own_frame_and_never_the_socket(
+    runtime: Runtime,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    seam: str,
+) -> None:
+    """Every tick calls these three, and the lanes behind them land after this region is
+    frozen. A bug in one used to end the socket at once, on every phone, every tick it
+    recurred: now the heartbeat still beats (with no scan time when that is what failed),
+    panes still stream, and the bug is logged once per socket, not once per tick."""
+    scanned = "2026-10-07T10:12:05+00:00"
+    monkeypatch.setattr(remote_needs, "needs_scanned_iso", lambda kit: scanned)
+    app, client = _stream_app(runtime, tmp_path, heartbeat=0)
+    if seam == "ledger_recent":
+        monkeypatch.setattr(app.kit.ledger, "ledger_recent", _lane_bug)
+    else:
+        monkeypatch.setattr(remote_needs, seam, _lane_bug)
+    seen: list[str] = []
+    beats: list[object] = []
+    with client.websocket_connect(f"{base(runtime)}/ws") as ws:
+        ws.send_text(json.dumps({"subscribe": "coder-1"}))
+        while seen.count("heartbeat") < 3 or "pane" not in seen:  # 4 ticks, 3 or 4 failures
+            assert len(seen) < 50, seen
+            frame = _frame_within(ws)
+            seen.append(frame["type"])
+            if frame["type"] == "heartbeat":
+                beats.append(frame["payload"])
+    expected = None if seam == "needs_scanned_iso" else scanned
+    assert beats[:3] == [{"needs_scanned_at": expected}] * 3
+    logged = [
+        r
+        for r in caplog.records
+        if r.name == remote_server.log.name and r.levelno >= logging.WARNING
+    ]
+    assert [r.getMessage() for r in logged] == [
+        f"remote: {seam} failed; the stream goes on without it"
+    ]
+    assert logged[0].exc_info is not None, "the warning carries the lane's traceback"
+
+
+def test_a_stream_that_fails_otherwise_closes_1011_not_a_dropped_link(
+    runtime: Runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """What is not a lane's to lose still ends the socket, but with a close frame the
+    page reads (1011, reconnect with backoff), where returning without one left the
+    phone an abnormal 1006 with no reason."""
+    _app, client = _stream_app(runtime, tmp_path)
+    monkeypatch.setattr(runtime, "remote_json", _lane_bug)
+    with client.websocket_connect(f"{base(runtime)}/ws") as ws:
+        assert [_frame_within(ws)["type"] for _ in range(2)] == ["board", "fleet"]
+        closed = receive_within(ws)
+    assert closed["type"] == "websocket.close" and closed["code"] == 1011, closed
 
 
 # --- sockets per device, the pane pool, and what a socket keeps ---------------------------

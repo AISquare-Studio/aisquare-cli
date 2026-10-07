@@ -1,58 +1,58 @@
-"""The Remote Control server: one local port that shows the fleet to a phone.
+"""The Remote Control server: one local port that shows the fleet to a phone, and acts on it.
 
-``asq remote serve`` runs it in the foreground; the fleet UI's Remote modal runs
-it in a background thread through :func:`start_remote_server` /
-:func:`stop_remote_server`. Either way it
-binds ``127.0.0.1`` only — ngrok (or the same machine's browser) is the only way
-in — and every path lives under ``/r/<token>/``:
+``asq remote serve`` runs it in the foreground; the fleet UI's Remote modal (``R``)
+runs it in a background thread through :func:`start_remote_server` /
+:func:`stop_remote_server`. Either way it binds ``127.0.0.1:8750`` only (ngrok, or
+the same machine's browser, is the only way in) and every path lives under
+``/r/<token>/``: the page at ``/``, the JSON API under ``api/``, the live stream
+at ``ws``. ``docs/remote.md`` is the full guide; this is the contract in brief.
 
-* ``/r/<token>/``                 the built ``aisquare-remote`` page (SPA fallback)
-* ``POST /r/<token>/api/unlock``  ``{password}`` → ``Set-Cookie: asq_remote=<sid>``
-* ``GET  /r/<token>/api/...``     ``projects fleet board tasks memory panes/<agent>
-                                  explainability/<agent> devices remote`` — the read-only JSON.
-                                  ``fleet`` and ``panes/<agent>`` take an optional
-                                  ``?project=<id|name|codename>`` (default: the
-                                  CURRENT project, unchanged); an unknown project
-                                  is a 404 shaped exactly like an unknown agent.
-                                  ``transcript/<agent>`` pages the agent's own
-                                  conversation (``?limit=``, ``?before=``, §4-M) —
-                                  the pane cannot, being alternate-screen.
-                                  ``panes/<agent>`` also takes ``?history=<n>``
-                                  for n lines of scrollback above the live screen,
-                                  oldest first in one block (§4-L); omitted or 0
-                                  is today's live-only frame, byte for byte.
-* ``WS   /r/<token>/ws``          frames ``{type, agent?, payload, ts}`` every second;
-                                  a ``{subscribe_fleet:"<project>"}`` text frame
-                                  switches which project's ``fleet`` frames arrive
-                                  (empty string/``null`` returns to the current one)
-* ``POST /r/<token>/api/...``     the write endpoints: 403 unless ``allow_write``
+**One choke point.** :class:`_TokenGate` runs five gates, in order, for every
+HTTP request and every WebSocket handshake before any route sees it: the token
+(a wrong one is a 404 on everything, so the URL alone leaks nothing), auto-off
+(the same 404 once Remote has timed out), the ``Origin`` of a write or a socket
+(403), the unlocked device behind the ``asq_remote`` cookie for every ``api/``
+path but unlock and for the socket (401), and a 64 KiB cap on any body (413).
+Routes read the device the gate found (:meth:`RemoteKit.kit_device`) and parse
+bodies in one place (:meth:`RemoteKit.kit_json_object`).
 
-Three gates, in this order. A wrong or missing token is a **404** on everything,
-so the URL alone leaks nothing — not even that a server is here. A missing or
-revoked cookie is a **401** on ``/api`` and ``/ws`` (the page itself needs none,
-or the unlock screen could not load). Unlock takes five attempts a minute per
-client, then **429**. Write endpoints exist from day one and answer **403** until
-``allow_write`` is switched on (default OFF, never on by itself); each write that
-does go through appends one line to ``remote-audit.log``.
+**Reads** are exactly what ``asq --json`` prints: the handlers call the builders
+the typer commands use (``projects_json``, ``agents_json``, ``board_json``, the
+task and entry dumps), so nobody invents a field here. Each takes ``?project=``
+(default: the CURRENT project; an unknown one is a 404 shaped like an unknown
+agent), and each cached snapshot is keyed by it. Remote's own state is
+``GET api/remote``.
 
-The read-only payloads are exactly what ``asq --json`` prints: the handlers call
-the same builders the typer commands use (``projects_json``, ``agents_json``,
-``board_json``, the task and entry model dumps), so nobody invents a field here.
-Remote-specific state has its own endpoint, ``GET /api/remote``.
+**Writes** answer 403 until ``allow_write`` is switched on (default OFF, never on
+by itself): ``POST api/{name}`` for the plan's writes and the agent actions, and
+every lane route built with ``write_gated`` (:meth:`RemoteKit.kit_route`). A
+write may carry a ``request_id``: a retry is answered from the request ledger
+instead of running twice. Each write that goes through appends one line to
+``remote-audit.log``. :data:`NOT_WRITE_GATED` lists the few routes that change
+something without the gate, frozen.
+
+**The stream** sends ``board``, ``fleet``, ``remote``, then ``needs_you``,
+``action`` and a ``heartbeat``, then one ``pane`` frame per ``(project, label)``
+subscription, each only when it changed.
+
+**The lanes** live in their own modules and plug in through :class:`RemoteKit`:
+``remote_needs`` (what needs the human), ``remote_push`` (Web Push),
+``remote_actions`` (tell, stop, restart, switch, and the ledger). This module
+imports them inside functions only, and none of them is on the hook path.
 
 State (token, password, ``allow_write``, ``auto_off_at``, devices) lives in
 ``~/.aisquare/remote.json``, owner-only (0600; on Windows, a DACL for this
-account alone), and a serving process re-reads it when its bytes change —
-``aisquare remote allow-write on`` from another shell reaches the
-running server within a second (:meth:`Runtime.reload_if_changed`). Everything
-that touches real systems goes through :class:`Sources` and :class:`Writes`, two
-bags of callables the tests replace — the server itself never opens the store or
+account alone), and a serving process re-reads it when its bytes change, so
+``aisquare remote allow-write on`` from another shell reaches the running
+server within a second (:meth:`Runtime.reload_if_changed`). Everything that
+touches real systems goes through :class:`Sources` and :class:`Writes`, two bags
+of callables the tests replace: the server itself never opens the store or
 spawns tmux.
 
 Dependencies: starlette and uvicorn (already here through the ``serve`` extra) and
-``websockets`` (uvicorn's WebSocket backend) — the ``remote`` extra in pyproject.
-All three are imported lazily so this module, and the modal that imports it,
-load in a base install; :func:`start_remote_server` and the CLI say what to install.
+``websockets`` (uvicorn's WebSocket backend), the ``remote`` extra in pyproject.
+All are imported lazily so this module, and the modal that imports it, load in a
+base install; :func:`start_remote_server` and the CLI say what to install.
 """
 
 from __future__ import annotations

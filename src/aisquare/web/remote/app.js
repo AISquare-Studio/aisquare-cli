@@ -1832,12 +1832,15 @@ function actionSheet(kind, ctx) {
         else toast(label + " changed since this screen loaded — look again, then retry.");
         return;
       }
-      sheet.status.textContent = failText(res);
       if (res.status === 409 && res.error === "dialog_open" && !dismiss) {
+        // The machine's sentence is for curl ("send dismiss_dialog: true"); here that
+        // is the button. "May": a tool still waiting on its result counts as a prompt.
+        sheet.status.textContent = label + " may be showing a prompt that " + meta.busy.toLowerCase() +
+          " it now would answer. Press Esc (No) first to dismiss it.";
         dismiss = true;
         say();
         go.textContent = "Press Esc (No) first";
-      }
+      } else sheet.status.textContent = failText(res);
       afterFailure(res, ctx);
     };
     const go = button("w primary", meta.title, run);

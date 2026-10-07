@@ -721,6 +721,28 @@ async function paneCursor() {
   return { shown: await cells(true), hidden: await cells(false), unsaid: await cells(undefined) };
 }
 
+/* Stop, on an agent that shows a prompt: the machine refuses in its API's words, the
+ * sheet says why in its own, and the next tap sends dismiss_dialog. */
+async function stopAtAPrompt() {
+  const refused = "coder-1 is showing a prompt; stopping would answer it — send dismiss_dialog: true to press Esc (No) first";
+  const stopped = { agent: { id: "agt_1", label: "coder-1" }, claims_released: [], release_failed: null, project: PROJECT };
+  const page = await agentView({
+    "POST api/agent/stop": (body) => (body.dismiss_dialog === true
+      ? { status: 200, json: stopped }
+      : { status: 409, json: { error: "dialog_open", message: refused } }),
+  });
+  page.live().frame("fleet", FLEET);
+  await settle();
+  click(buttonNamed(page.main(), "Actions…"));
+  click(buttonNamed(page.run("UI.sheet"), "Stop…"));
+  click(buttonNamed(page.run("UI.sheet"), "Stop"));
+  await settle();
+  const said = find(page.run("UI.sheet"), (node) => node.className === "status").textContent;
+  click(buttonNamed(page.run("UI.sheet"), "Press Esc (No) first"));
+  await settle();
+  return { said, dismissed: page.sent("api/agent/stop").map((body) => body.dismiss_dialog === true), toast: page.toast() };
+}
+
 async function main() {
   const report = {
     bareLink: await openedSignedOut(""),
@@ -743,6 +765,7 @@ async function main() {
     staleDevices: await staleDevices(),
     tellNotSent: await tellNotSent(),
     paneCursor: await paneCursor(),
+    stopAtAPrompt: await stopAtAPrompt(),
   };
   process.stdout.write(JSON.stringify(report) + "\n");
 }

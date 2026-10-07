@@ -934,6 +934,21 @@ def test_the_live_pane_draws_no_cursor_where_the_program_hid_it(
     assert boot_report["paneCursor"] == {"shown": 1, "hidden": 0, "unsaid": 1}
 
 
+def test_a_stop_refused_at_a_prompt_is_explained_in_the_pages_own_words(
+    boot_report: dict[str, Any],
+) -> None:
+    """The sheet showed the machine's sentence, which is written for curl: "send
+    dismiss_dialog: true to press Esc (No) first" means nothing on a phone, where the way
+    to say that is the button the sheet offers next."""
+    stop = boot_report["stopAtAPrompt"]
+    assert stop["said"] == (
+        "coder-1 may be showing a prompt that stopping it now would answer. "
+        "Press Esc (No) first to dismiss it."
+    )
+    assert stop["dismissed"] == [False, True]
+    assert stop["toast"] == "Stopped coder-1"
+
+
 # --- 11. the wheel --------------------------------------------------------------------------
 
 

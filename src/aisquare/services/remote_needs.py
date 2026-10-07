@@ -1772,8 +1772,17 @@ def _needs_id_field(body: Mapping[str, object]) -> str:
 
 
 def _needs_answer_body(body: Mapping[str, object]) -> tuple[str, list[str], str, bool]:
-    """``(id, keys, text, enter)`` of a quick answer: exactly one of ``keys`` and ``text``."""
-    from aisquare.services.remote_server import RequestError, check_remote_key_names
+    """``(id, keys, text, enter)`` of a quick answer: exactly one of ``keys`` and ``text``.
+
+    The text reaches the pane byte for byte, as ``send-keys``' does, so it passes the
+    same :func:`~aisquare.services.remote_server.check_remote_text`: a ``"\\x03"`` in it
+    would be a Ctrl-C that no key allowlist saw and the audit line could not show.
+    """
+    from aisquare.services.remote_server import (
+        RequestError,
+        check_remote_key_names,
+        check_remote_text,
+    )
 
     item_id = _needs_id_field(body)
     raw_keys, raw_text = body.get("keys"), body.get("text")
@@ -1798,6 +1807,7 @@ def _needs_answer_body(body: Mapping[str, object]) -> tuple[str, list[str], str,
         raise RequestError(
             413, "too_large", f"'text' is at most {NEEDS_ANSWER_TEXT_MAX} characters"
         )
+    check_remote_text(text)
     return item_id, keys, text, bool(body.get("enter", False))
 
 

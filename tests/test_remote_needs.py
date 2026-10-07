@@ -1787,6 +1787,19 @@ def test_an_answer_is_keys_or_words_never_both(
     assert live.tmux.typed == []
 
 
+@pytest.mark.parametrize("text", ["\x03", "yes\x1b[201~", "no\x7f", "ok\x04"])
+def test_an_answer_in_words_carries_no_control_character(live: Live, text: str) -> None:
+    """Words reach the pane byte for byte, so a control in them would be a keystroke
+    that no allowlist saw: a Ctrl-C past send-keys' double-press guard, written to the
+    trail as ``text=1ch``. The same boundary as send-keys' text refuses it."""
+    live.runtime.set_allow_write(True)
+    card = live.card("permission")
+    response = live.client.post(live.url("needs/answer"), json={"id": card["id"], "text": text})
+    assert (response.status_code, response.json()["error"]) == (400, "invalid")
+    assert "control character" in response.json()["message"]
+    assert live.tmux.typed == []
+
+
 def test_an_answer_waits_for_no_other_action_on_the_agent(live: Live) -> None:
     live.runtime.set_allow_write(True)
     card = live.card("permission")

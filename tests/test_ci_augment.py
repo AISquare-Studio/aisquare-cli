@@ -393,19 +393,46 @@ def test_a_dead_endpoint_records_transport_error_and_still_opens_the_row(
 
 
 def test_a_slow_endpoint_returns_within_the_ceiling_and_records_the_breach(
-    wired: StubCI, isolated_home: Path, tmp_path: Path
+    wired: StubCI, isolated_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """The exchange ends at the descriptor's 300 ms ceiling, before the server answers,
+    and the turn records the breach.
+
+    The exchange alone is timed, with the test's own clock, and bounded by the stub's
+    delay: it returned before the server could have answered, so the ceiling ended
+    it. The hook as a whole is not timed. Around the exchange it spools, records and
+    reads the store, and on windows-latest that took the whole hook 1.4 to 25 s
+    against the 1.3 s this used to allow (jobs 108294515313, 108259170919). That time
+    is not the ceiling's, and the outcome asserts below hold whatever it is.
+    """
     import time
 
+    delay_s = 1.5
     wired.descriptor_json(live_descriptor(client_safety_ms=300))
-    wired.respond(status=200, body=json.dumps(_response()), delay_s=1.5)
-    started = time.monotonic()
+    wired.respond(status=200, body=json.dumps(_response()), delay_s=delay_s)
+    took: list[float] = []
+    real_call = ci_client.call
+
+    def timed_call(*args: Any, **kwargs: Any) -> Any:
+        started = time.monotonic()
+        try:
+            return real_call(*args, **kwargs)
+        finally:
+            took.append(time.monotonic() - started)
+
+    monkeypatch.setattr(ci_client, "call", timed_call)
+
     out = hooks_service.prompt_submitted("q", tmp_path, session_id=SESSION)
-    assert time.monotonic() - started < 1.3
+
     assert out == ""
     turn = _turn()
     assert turn.client_reason is ClientReason.deadline_exceeded
     assert turn.deadline_breached is True
+    assert len(took) == 1, "precondition: the exchange happened, once"
+    assert took[0] < delay_s, (
+        f"the exchange took {took[0]:.2f} s: it waited for the server's {delay_s} s answer "
+        "instead of ending at the 300 ms ceiling"
+    )
 
 
 # --- the frame cannot be defeated by what it frames -------------------------------------

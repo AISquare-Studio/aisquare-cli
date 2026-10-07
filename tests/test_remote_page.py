@@ -925,6 +925,15 @@ def test_a_tell_that_was_not_typed_in_says_what_happened_instead(
     assert told["toast"] == f"coder-1: {told['how']}"
 
 
+def test_the_live_pane_draws_no_cursor_where_the_program_hid_it(
+    boot_report: dict[str, Any],
+) -> None:
+    """Claude Code hides the terminal's cursor, and the pane drew it anyway: a stray
+    inverted cell after its dialog, where the hidden cursor rests. A frame that does not
+    say (an older machine) still draws it."""
+    assert boot_report["paneCursor"] == {"shown": 1, "hidden": 0, "unsaid": 1}
+
+
 # --- 11. the wheel --------------------------------------------------------------------------
 
 

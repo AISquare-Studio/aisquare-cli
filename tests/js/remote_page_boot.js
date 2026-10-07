@@ -74,6 +74,16 @@ class FakeNode {
     return child;
   }
 
+  replaceChild(child, old) {
+    if (child.parentNode) child.parentNode.removeChild(child);
+    const at = this.childNodes.indexOf(old);
+    if (at < 0) throw new Error("replaceChild: not a child");
+    this.childNodes.splice(at, 1, child);
+    old.parentNode = null;
+    child.parentNode = this;
+    return old;
+  }
+
   append(...nodes) {
     for (const node of nodes) this.appendChild(typeof node === "string" ? new FakeText(this.ownerDocument, node) : node);
   }
@@ -697,6 +707,20 @@ async function tellNotSent() {
   return { told, toast: page.toast(), how };
 }
 
+/* The live pane's inverted cells, as the program shows its cursor, hides it (Claude Code
+ * does), and as a machine that does not say whether it shows (an older one) draws it. */
+async function paneCursor() {
+  const page = await agentView();
+  const cells = async (visible) => {
+    const frame = { rows: ["> hello", "  Esc to cancel"], cursor: [7, 0], width: 80, height: 2 };
+    if (visible !== undefined) frame.cursor_visible = visible;
+    page.live().frame("pane", frame, { agent: "coder-1", project: PROJECT });
+    await settle();
+    return page.main().querySelectorAll("span.cur").length;
+  };
+  return { shown: await cells(true), hidden: await cells(false), unsaid: await cells(undefined) };
+}
+
 async function main() {
   const report = {
     bareLink: await openedSignedOut(""),
@@ -718,6 +742,7 @@ async function main() {
     quickAnswerTwice: await quickAnswerTwice(),
     staleDevices: await staleDevices(),
     tellNotSent: await tellNotSent(),
+    paneCursor: await paneCursor(),
   };
   process.stdout.write(JSON.stringify(report) + "\n");
 }

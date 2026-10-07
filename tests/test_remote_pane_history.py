@@ -35,6 +35,7 @@ from aisquare.services.remote_server import (
     Runtime,
     Sources,
     _history_param,
+    _pane_payload,
     build_app,
 )
 from tests.remote_kit_helpers import frame_within, make_client
@@ -238,19 +239,47 @@ def _project_stub(ref: str | None) -> Any:
     return _P()
 
 
+LIVE_KEYS = {"rows", "cursor", "width", "height", "cursor_visible"}
+"""What the live stream's frame holds: §4-D's four keys, and whether the cursor shows."""
+
+
 @requires_tmux
 def test_omitted_history_is_byte_identical_to_today(live_panes: Any) -> None:
-    """§4-L: nothing existing changes — same four keys, no history keys at all."""
+    """§4-L: nothing existing changes — the live frame's keys, no history keys at all."""
     today = live_panes("coder-1", None, 0)
-    assert set(today) == {"rows", "cursor", "width", "height"}
+    assert set(today) == LIVE_KEYS
     assert "history" not in today and "history_size" not in today
     assert len(today["rows"]) == today["height"]
 
 
 @requires_tmux
+def test_a_frame_says_whether_the_program_shows_its_cursor(live: TmuxServer) -> None:
+    """Claude Code hides the terminal's cursor (``ESC[?25l``), and the page drew it
+    anyway: a stray inverted cell after a dialog's last line, where the hidden cursor
+    rested. The frame carries tmux's own word on it now, which the page follows."""
+    shown = live.spawn_window(
+        "asq-cursor", name="shown", cwd=Path("/tmp"), command=["sleep", "300"], width=80, height=24
+    )
+    hidden = live.spawn_window(
+        "asq-cursor",
+        name="hidden",
+        cwd=Path("/tmp"),
+        command=["sh", "-c", r"printf '\033[?25l'; sleep 300"],
+        width=80,
+        height=24,
+    )
+    deadline = time.monotonic() + 10
+    while live.capture(hidden.pane_id).facts.cursor_visible and time.monotonic() < deadline:
+        time.sleep(0.05)
+
+    assert _pane_payload(live.capture(shown.pane_id))["cursor_visible"] is True
+    assert _pane_payload(live.capture(hidden.pane_id))["cursor_visible"] is False
+
+
+@requires_tmux
 def test_history_adds_the_scrollback_and_reports_both_counts(live_panes: Any) -> None:
     frame = live_panes("coder-1", None, 50)
-    assert set(frame) == {"rows", "cursor", "width", "height", "history_size", "history"}
+    assert set(frame) == LIVE_KEYS | {"history_size", "history"}
     assert frame["history"] == 50
     assert frame["history_size"] >= 150, "what the pane actually holds"
     assert len(frame["rows"]) == 50 + frame["height"]

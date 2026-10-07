@@ -2080,7 +2080,8 @@ function noteComposer(pid) {
 // --- one agent: live pane, transcript, card, input bar and key pad (SPEC §6.3) ---
 
 /* Draws pane frames into a pre, replacing only the rows that changed, so the
- * scroll position holds; the cursor's cell is inverted. */
+ * scroll position holds; the cursor's cell is inverted, unless the program hid
+ * its cursor (Claude Code does): drawn anyway, it was a stray block. */
 function paneRenderer(pre) {
   const rows = [];
   return (payload) => {
@@ -2093,7 +2094,7 @@ function paneRenderer(pre) {
     if (rows.length === 0) clear(pre);
     const lines = Array.isArray(payload.rows) ? payload.rows : [];
     const cursor = Array.isArray(payload.cursor) ? payload.cursor : [];
-    const cy = toInt(cursor[1]);
+    const cy = payload.cursor_visible === false ? -1 : toInt(cursor[1]);
     for (let y = 0; y < lines.length; y++) {
       const source = String(lines[y]) + (y === cy ? "\u0000" + toInt(cursor[0]) : "");
       if (rows[y] && rows[y].source === source) continue;

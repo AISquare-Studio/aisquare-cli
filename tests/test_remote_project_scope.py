@@ -158,6 +158,7 @@ class _FakeFacts:
     cursor_y = 0
     width = 80
     height = 24
+    cursor_visible = True
 
 
 class _FakeCapture:

@@ -1640,21 +1640,24 @@ class Writes:
 
 
 def _pane_payload(capture: Capture) -> dict[str, object]:
-    """The four keys every pane response has carried since day one (§4-D)."""
+    """The four keys every pane response has carried since day one (§4-D), and
+    ``cursor_visible``: Claude Code hides the terminal's cursor (``ESC[?25l``), and a
+    page that drew it anyway showed a stray block wherever the hidden cursor rested."""
     return {
         "rows": capture.lines,
         "cursor": [capture.facts.cursor_x, capture.facts.cursor_y],
         "width": capture.facts.width,
         "height": capture.facts.height,
+        "cursor_visible": capture.facts.cursor_visible,
     }
 
 
 def _live_panes(label: str, project: str | None = None, history: int = 0) -> dict[str, object]:
     """One pane frame: the live screen, or scrollback and the screen together (§4-L).
 
-    ``history`` of 0 takes the SAME call today took and returns the SAME four
-    keys, so the live stream and every existing client are untouched — the
-    history keys appear only when history was asked for.
+    ``history`` of 0 takes the SAME call today took and returns the live keys
+    alone (:func:`_pane_payload`), so the live stream and every existing client
+    are untouched — the history keys appear only when history was asked for.
     """
     from aisquare.core.store import store_session
     from aisquare.services import fleet as fleet_service
@@ -3418,7 +3421,7 @@ def build_remote_app(
                 project, label = wanted
                 try:
                     # §4-L: history is a FETCH, live stays a stream — 0 keeps
-                    # this frame exactly the §4-D shape it has always had.
+                    # this frame the live shape, with no history keys.
                     payload = await loop.run_in_executor(
                         kit.kit_pane_pool(), reads.panes, label, project or None, 0
                     )

@@ -555,7 +555,7 @@ def emit_onboard(report: OnboardReport) -> None:
             f"snapshot: {snapshot_core.too_large_detail(snapshot)} {snapshot_core.REPACK_HINT}"
         )
     else:
-        console.print("snapshot: skipped (repomix/Node not available)")
+        console.print(f"snapshot: {snapshot_core.skipped_detail()}")
     if report.seeded:
         console.print(f"seeded {len(report.seeded)} project fact(s):")
         for entry in report.seeded:

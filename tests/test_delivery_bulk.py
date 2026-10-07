@@ -34,6 +34,7 @@ from typing import Any
 import pytest
 
 from aisquare.core.paths import HOME_ENV_VAR
+from tests.budgets import budget
 
 WRITERS = 8
 WRITES_PER_WRITER = 25
@@ -46,7 +47,10 @@ READERS = 2
 #: runners (a4975fd on #108, c0946fb on main) against the 60 s this was set to
 #: when the CLI imported less — 200 CLI invocations at ~0.3 s of import each,
 #: eight abreast on two cores, is a minute. Three times that keeps the box a
-#: guard against the catastrophic and stops it grading the runner.
+#: guard against the catastrophic and stops it grading the runner. The Windows
+#: leg is held to ``budget(TIME_BOX_SECONDS)`` (tests/budgets.py): a process
+#: starts slower there, and the storm took 86-143 s on eight windows-latest
+#: runs and 191.7 s on a ninth (job 108259151826).
 TIME_BOX_SECONDS = 180.0
 _CLI_TIMEOUT = 30.0  # any single call outliving this is already a failure
 
@@ -326,7 +330,7 @@ def test_bulk_concurrent_writes_never_lose_a_confirmed_write(tmp_path: Path) -> 
         assert _stdio_daemon_pids(home) == daemons_before
 
     # (d) bounded runtime — the whole point is that this stays in CI.
-    assert elapsed < TIME_BOX_SECONDS, f"bulk run took {elapsed:.1f}s"
+    assert elapsed < budget(TIME_BOX_SECONDS), f"bulk run took {elapsed:.1f}s"
 
 
 # ── the probe itself ─────────────────────────────────────────────────────────

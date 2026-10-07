@@ -628,7 +628,7 @@ def _read_line(path: Path) -> str:
         return ""
 
 
-_NODE_FLOOR = ".".join(str(part) for part in snapshot_core.MIN_NODE)
+_NODE_FLOOR = snapshot_core.MIN_NODE_TEXT
 
 #: Deliberately NOT ``install_hint("nodejs")``. On the distributions that ship a
 #: Node too old for repomix, the package manager's ``nodejs`` IS the old one --
@@ -665,14 +665,26 @@ def _check_repomix() -> DoctorCheck:
     run -- a warning, not "untested". An unreadable Node stays ``ok``: failing
     open costs this line its verdict, while guessing "too old" would send
     someone to reinstall a working toolchain.
+
+    NO NODE AT ALL IS OFF, NOT BROKEN. Snapshots are optional and memory and
+    the hooks never touch Node, so a machine with none of ``repomix``,
+    ``npx`` or ``node`` made a choice rather than a mistake: ``ok``, with
+    :data:`snapshot_core.OFF_DETAIL` and no fix. Any ONE of the three present
+    means someone started on the toolchain, and the warnings below still say
+    what is missing.
     """
     name = "repomix"
     direct = shutil.which("repomix")
     if direct is None and shutil.which("npx") is None:
+        if shutil.which("node") is None:
+            return _ok(name, snapshot_core.OFF_DETAIL)
+        # A Node IS here, so the missing piece is npm: no npx almost always means
+        # no npm, which Arch, Alpine and Debian's own nodejs package separately.
         return _warn(
             name,
             "repomix not found — codebase snapshots are disabled",
-            f"Install Node.js {_NODE_FLOOR}+, then: npm install -g repomix",
+            f"Install npm (some distributions package it apart from Node; repomix needs "
+            f"Node.js {_NODE_FLOOR}+), then: npm install -g repomix",
         )
     how = "repomix found" if direct else "repomix available on demand via npx"
     if shutil.which("node") is None:
@@ -692,12 +704,11 @@ def _check_repomix() -> DoctorCheck:
             f"{how} — Node version not readable, so untested against the "
             f"{_NODE_FLOOR} minimum; snapshots enabled",
         )
-    floor = snapshot_core.installed_repomix_floor() if direct else None
-    required = floor or snapshot_core.MIN_NODE
+    required, own_floor = snapshot_core.pack_node_floor()
     found = ".".join(str(part) for part in node)
     if node < required:
         wanted = ".".join(str(part) for part in required)
-        whose = "the installed repomix needs" if floor else "repomix needs"
+        whose = "the installed repomix needs" if own_floor else "repomix needs"
         return _warn(
             name,
             f"{how}, but Node {found} is older than {whose} "
@@ -710,6 +721,11 @@ def _check_repomix() -> DoctorCheck:
 def _check_tiktoken() -> DoctorCheck:
     if _has_module("tiktoken"):
         return _ok("tiktoken", "exact snapshot token counts enabled")
+    if not snapshot_core.can_pack():
+        # Only the snapshot counts tokens, so with snapshots off there is nothing
+        # for it to sharpen -- an amber line here was a fix for a feature that is
+        # not running, on exactly the machines that chose not to run it.
+        return _ok("tiktoken", "off — only snapshot token counts use it, and snapshots are off")
     # `pipx inject` takes the name of an INSTALLED PIPX ENVIRONMENT, which is
     # this distribution -- so `pipx inject aisquare tiktoken` failed on every
     # machine that had followed the documented install, naming an environment
@@ -2166,6 +2182,14 @@ def _check_snapshot(cwd: Path | None = None) -> DoctorCheck:
         # The fix is `--refresh` because a plain `onboard` only reloads this
         # verdict — which is how the line stayed a warning forever.
         return _warn("snapshot", snapshot_core.too_large_detail(snap), snapshot_core.REPACK_HINT)
+    if not snapshot_core.can_pack():
+        # No fix, deliberately: `Pack one: aisquare project onboard` is a one-click
+        # button in the UI (services/onboarding.KNOWN_FIXES), and with nothing to
+        # run repomix it can never turn green. When something of the toolchain IS
+        # here, the repomix row warns and names what is missing. A Node that is
+        # there but too old still packs-and-fails, so it keeps this row's warning:
+        # can_pack() reads PATH only (snapshot_core.can_pack).
+        return _ok("snapshot", snapshot_core.off_detail())
     return _warn(
         "snapshot",
         "no codebase snapshot for the active project",

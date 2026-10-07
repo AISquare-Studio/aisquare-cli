@@ -1409,6 +1409,62 @@ def test_no_system_deps_expects_the_checks_it_skipped(tmp_path: Path) -> None:
         assert member.stdout.strip() == "yes", name
 
 
+def _summary_then_handoff(
+    tmp_path: Path, assignments: str, *, node: bool
+) -> subprocess.CompletedProcess[str]:
+    """`summary` then `handoff` after a run with a project, `node` on PATH or not."""
+    path = base_path(tmp_path)
+    if node:
+        path = f"{stub_dir(tmp_path, 'nodebin', 'node')}:{path}"
+    return sh(
+        f"DRY_RUN=0; WANT_PROJECT=1; PROJECT_DIR=/p; UNEXPECTED=0; {assignments}; "
+        'summary; echo "UNEXPECTED=$UNEXPECTED"; handoff',
+        path=path,
+        no_terminal=True,
+    )
+
+
+def test_a_node_this_run_could_not_install_is_unexpected(tmp_path: Path) -> None:
+    """System deps on, and no `node` on PATH after the run: exit 2, and the summary names it.
+
+    `aisquare doctor` reads no Node at all as codebase snapshots OFF, which is
+    optional, so every row is ok, and it cannot tell that from a Node install that
+    failed. Until it learned the difference, the amber `repomix` row was what
+    turned a failed Node install into exit 2 (review of #244, finding 1). The
+    installer knows it asked for Node, so it says so itself.
+    """
+    result = _summary_then_handoff(tmp_path, "WANT_SYSTEM_DEPS=1; DOCTOR_AMBER=brain", node=False)
+
+    assert result.returncode == 2, result.stdout
+    assert "UNEXPECTED=1" in result.stdout
+    assert "node — Node 22+ did not install" in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("assignments", "node", "unexpected"),
+    [
+        ("WANT_SYSTEM_DEPS=1; DOCTOR_AMBER=brain", True, 0),
+        # --no-system-deps asked for no Node.
+        ("WANT_SYSTEM_DEPS=0; DOCTOR_AMBER=brain", False, 0),
+        # --dry-run installs nothing, so nothing failed to install.
+        ("WANT_SYSTEM_DEPS=1; DOCTOR_AMBER=brain; DRY_RUN=1", False, 0),
+        # A Node that is too old, and a packer with no Node, turn the repomix row
+        # amber: counted once, as repomix, never twice.
+        ("WANT_SYSTEM_DEPS=1; DOCTOR_AMBER='brain repomix'", True, 1),
+        ("WANT_SYSTEM_DEPS=1; DOCTOR_AMBER='brain repomix'", False, 1),
+    ],
+    ids=["node-installed", "no-system-deps", "dry-run", "node-too-old", "packer-without-node"],
+)
+def test_only_a_missing_node_that_was_asked_for_is_named(
+    tmp_path: Path, assignments: str, node: bool, unexpected: int
+) -> None:
+    result = _summary_then_handoff(tmp_path, assignments, node=node)
+
+    assert f"UNEXPECTED={unexpected}" in result.stdout, result.stdout
+    assert result.returncode == (2 if unexpected else 0)
+    assert "did not install" not in result.stdout
+
+
 def test_a_version_pin_moves_a_machine_that_is_ahead_of_it(tmp_path: Path) -> None:
     """`--version V` is documented as a PIN, so anything that is not V must move.
 

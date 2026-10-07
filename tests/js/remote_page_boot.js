@@ -472,6 +472,44 @@ async function lostTwice() {
   return { bodies, said, orphaned, later: page.toast(), send: sendState(page) };
 }
 
+/* A pad key whose request never arrived, and a phone that is back an hour later. */
+async function lostKeyLongAgo() {
+  const page = await agentView({ "POST api/send-keys": () => "network" });
+  click(buttonNamed(page.main(), "1"));
+  await settle();
+  page.run("Date.now = ((then) => () => then + 3600000)(Date.now());"); // the phone slept
+  page.acceptSockets();
+  await settle();
+  const bodies = page.sent("api/send-keys");
+  return {
+    bodies,
+    said: page.toast(),
+    orphaned: page.run("S.orphans.has(" + JSON.stringify(bodies[0].request_id) + ")"),
+    pending: page.run("S.pending.size"),
+  };
+}
+
+/* A pad key whose request never arrived, then the device is revoked: the phone unlocks again. */
+async function lostThenSignedOut() {
+  const page = await agentView({
+    "POST api/send-keys": () => "network",
+    "POST api/unlock": () => ({ status: 200, json: { ok: true, device: { id: "dev_4e5f6a7b" } } }),
+  });
+  click(buttonNamed(page.main(), "1"));
+  await settle();
+  page.live().fire("close", { code: 4401 }); // the reconnect is refused: signed out
+  await settle();
+  const said = page.toast();
+  const hash = page.location.hash;
+  const { input, form } = unlockForm(page);
+  input.value = PASSPHRASE;
+  form.dispatch("submit");
+  await settle();
+  page.acceptSockets();
+  await settle();
+  return { said, hash, bodies: page.sent("api/send-keys"), pending: page.run("S.pending.size") };
+}
+
 /* A read lost while the socket is fine: the next frame says the machine is there. */
 async function lostRead() {
   const page = await agentView({ "GET api/projects": () => "network" });
@@ -554,6 +592,8 @@ async function main() {
     unlockKept: await unlockKept(),
     lostWrite: await lostWrite(),
     lostTwice: await lostTwice(),
+    lostKeyLongAgo: await lostKeyLongAgo(),
+    lostThenSignedOut: await lostThenSignedOut(),
     lostRead: await lostRead(),
     quickAnswerTwice: await quickAnswerTwice(),
     staleDevices: await staleDevices(),

@@ -795,6 +795,28 @@ def test_a_retry_lost_too_is_not_confirmed_and_its_result_still_arrives(
     assert lost["send"] == {"busy": False, "disabled": False}
 
 
+def test_a_write_lost_long_ago_is_not_sent_again_when_the_phone_is_back(
+    boot_report: dict[str, Any],
+) -> None:
+    """The retry had no age limit: a pad "1" whose request never arrived went out at the
+    next reconnect, an hour later, and approved whatever prompt the agent showed by then."""
+    late = boot_report["lostKeyLongAgo"]
+    assert [body["keys"] for body in late["bodies"]] == [["1"]], "never sent a second time"
+    assert late["said"].startswith("Not sent again — the phone was away too long")
+    assert late["orphaned"] and late["pending"] == 0, "its result still shows if it arrived"
+
+
+def test_a_write_lost_before_the_phone_had_to_unlock_is_not_sent_again(
+    boot_report: dict[str, Any],
+) -> None:
+    """After a 4401 the next unlock may be a new device, whose ledger knows none of the old
+    ids: the retry would run a request the machine may already have run."""
+    gone = boot_report["lostThenSignedOut"]
+    assert gone["hash"] == "#/unlock"
+    assert gone["said"].startswith("Not sent again — the phone was signed out")
+    assert len(gone["bodies"]) == 1 and gone["pending"] == 0
+
+
 def test_a_frame_clears_the_offline_banner_a_lost_read_raised(
     boot_report: dict[str, Any],
 ) -> None:

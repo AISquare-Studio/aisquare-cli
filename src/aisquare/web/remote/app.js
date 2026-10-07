@@ -47,6 +47,8 @@ const DEVICE_ID = /^[A-Za-z0-9_-]{1,64}$/;
 const PROJECT_TABS = ["fleet", "board", "tasks", "memory"];
 const AGENT_TABS = ["live", "transcript", "card"];
 const STALE_AFTER_MS = 25000;
+/* How long after its tap a write whose request was lost is still sent again. */
+const RETRY_WITHIN_MS = 15000;
 const BACKOFF_SECONDS = [1, 2, 4, 8, 16, 30];
 const ESC_REPEAT_MS = 1500;
 const STRIP_ROWS = 10;
@@ -705,12 +707,15 @@ async function apiCall(method, path, options) {
 }
 
 /* A write: a fresh request_id, and one retry with the SAME id after the next
- * reconnect when the phone lost the request. The server's ledger answers a
- * retried id from what it recorded, so a restart never runs twice. onWait
- * hears when the answer has to wait for the phone to be back. */
+ * reconnect when the phone lost the request, if that comes soon enough
+ * (flushRetries). The server's ledger answers a retried id from what it
+ * recorded, so a restart never runs twice. onWait hears when the answer has
+ * to wait for the phone to be back. */
 async function apiWrite(path, body, verb, onWait) {
   const id = newRequestId();
-  const pending = { id, path, body: Object.assign({}, body, { request_id: id }), verb, resolve: null, retried: false };
+  const pending = {
+    id, path, body: Object.assign({}, body, { request_id: id }), verb, at: Date.now(), resolve: null, retried: false, dropped: false,
+  };
   S.pending.set(id, pending);
   savePending();
   let res = await apiCall("POST", path, { body: pending.body });
@@ -735,12 +740,40 @@ async function apiWrite(path, body, verb, onWait) {
   return res;
 }
 
+/* A new socket is open: each write whose request was lost goes out again, with
+ * its request_id, but only within RETRY_WITHIN_MS of its tap. An id the machine
+ * did receive is answered from its ledger; one it never received runs now, and
+ * a key tapped minutes ago would land on whatever the agent shows by then: a
+ * "1" or an Enter answering a prompt that came up since. So an older write is
+ * not sent again, and neither is one from before the phone had to unlock (the
+ * unlock may be a new device, whose ledger knows none of its ids). The page
+ * says so, and still shows the result if the machine had it after all. */
 function flushRetries() {
+  const now = Date.now();
   for (const pending of S.pending.values()) {
     if (!pending.resolve || pending.retried) continue;
     pending.retried = true;
-    apiCall("POST", pending.path, { body: pending.body }).then((res) => finishPending(pending, res));
+    if (pending.dropped || now - pending.at > RETRY_WITHIN_MS) {
+      finishPending(pending, notSentAgain(pending.dropped ? "gone" : "late"));
+    } else {
+      apiCall("POST", pending.path, { body: pending.body }).then((res) => finishPending(pending, res));
+    }
   }
+}
+
+/* Signed out, or Remote off: no write still in hand goes out again after it. */
+function dropRetries() {
+  for (const pending of S.pending.values()) {
+    pending.dropped = true;
+    if (!pending.resolve || pending.retried) continue;
+    pending.retried = true;
+    finishPending(pending, notSentAgain("gone"));
+  }
+}
+
+/* The answer to a lost write that flushRetries or dropRetries kept from going out again. */
+function notSentAgain(why) {
+  return { ok: false, status: 0, data: null, error: "offline", message: "", retryAfter: 0, network: true, notJson: false, notSent: why };
 }
 
 function finishPending(pending, res) {
@@ -803,6 +836,10 @@ function settleFromLedger(entries) {
  * once nothing will retry it: a write's one retry was lost as well, or a call
  * that is never retried. */
 function failText(res, max) {
+  if (res.notSent) {
+    const why = res.notSent === "late" ? "the phone was away too long to be sure the agent still shows what you saw" : "the phone was signed out, or Remote went off, before the machine answered";
+    return "Not sent again — " + why + ". If the machine got it, its result shows here; if not, look, then send it again.";
+  }
   if (res.unconfirmed) return "Not confirmed — the connection dropped again. If the machine got it, its result shows here.";
   if (res.network) return "Could not reach the machine — try again once the phone is back online.";
   if (res.notJson) return OFF_OR_MOVED + ".";
@@ -1230,6 +1267,7 @@ function toUnlock() {
     // the page still unlocks; it just lands on the feed
   }
   S.locked = true;
+  dropRetries();
   clearTimeout(S.retryTimer);
   const sock = S.sock;
   S.sock = null;
@@ -1245,6 +1283,7 @@ function toUnlock() {
 function offScreen(kind) {
   if (S.off === kind) return;
   S.off = kind;
+  dropRetries();
   clearTimeout(S.retryTimer);
   const sock = S.sock;
   S.sock = null;
@@ -1625,7 +1664,7 @@ function tellSheet(ctx, mode) {
       sheet.busy(true);
       sheet.status.textContent = current === "interrupt" ? "Interrupting " + label + "…" : "Sending…";
       const res = await apiWrite("api/agent/tell", body, "Tell " + label, () => {
-        sheet.status.textContent = "The phone lost the connection; this goes out again once it is back.";
+        sheet.status.textContent = "The phone lost the connection; this goes out again if it is back within 15 seconds.";
       });
       sheet.busy(false);
       if (res.ok) {
@@ -1760,7 +1799,7 @@ function actionSheet(kind, ctx) {
       sheet.busy(true);
       sheet.status.textContent = meta.busy + " " + label + "…";
       const res = await apiWrite("api/agent/" + kind, body, meta.title + " " + label, () => {
-        sheet.status.textContent = "The phone lost the connection. The machine carries on; the result shows here once the phone is back.";
+        sheet.status.textContent = "The phone lost the connection. If the machine got this it carries on, and the result shows here once the phone is back.";
       });
       sheet.busy(false);
       if (res.ok) {

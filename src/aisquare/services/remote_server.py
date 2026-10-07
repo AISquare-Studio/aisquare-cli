@@ -724,6 +724,12 @@ class Runtime:
         self._state_path = state_path
         self._audit_path = audit_path
         self._lock = threading.RLock()
+        """Every read and change of the state in memory; the event loop takes it on every
+        request, so it is never held while waiting on another process."""
+        self._writing = threading.RLock()
+        """One read-modify-write of ``remote.json`` at a time in this process, held while
+        ``remote.json.lock`` is waited for (:meth:`_state_file_lock`). Taken before
+        :attr:`_lock`, never while holding it."""
         self._closers: dict[str, set[Callable[[int], None]]] = {}
         """Each device's live sockets, by device id, as closers that take the close code."""
         self._file_lock_depth = 0
@@ -758,26 +764,33 @@ class Runtime:
 
     @contextlib.contextmanager
     def _state_file_lock(self) -> Iterator[None]:
-        """This runtime's lock and ``remote.json.lock``, around one read-modify-write.
+        """``remote.json.lock``, then this runtime's lock, around one read-modify-write.
 
         The per-process lock alone never covered the CLI: a ``revoke`` or a
         ``regenerate-password`` that landed inside a server's flush was undone by
         it, and a ``status`` rewrote the file from its own snapshot over a device
         that had just unlocked. Re-entrant within this runtime, since a file lock
         taken twice by one process would wait on itself.
+
+        The wait for the file lock holds :attr:`_writing` alone. Holding
+        :attr:`_lock` through it, a write that waited on another process (up to
+        :data:`STATE_LOCK_WAIT_SECONDS`) held up every request the event loop
+        served meanwhile, since the gate reads the state under ``_lock``.
         """
-        with self._lock:
+        with self._writing:
             if self._file_lock_depth:
                 self._file_lock_depth += 1
                 try:
-                    yield
+                    with self._lock:
+                        yield
                 finally:
                     self._file_lock_depth -= 1
                 return
             fd = _lock_state_file(self._state_path)
             self._file_lock_depth = 1
             try:
-                yield
+                with self._lock:
+                    yield
             finally:
                 self._file_lock_depth = 0
                 if fd is not None:
@@ -1071,9 +1084,16 @@ class Runtime:
         return found
 
     def unlock_device(self, password: str, ua: str) -> tuple[str, Device] | None:
-        """A new device and its cookie's secret when ``password`` is right, else ``None``."""
+        """A new device and its cookie's secret when ``password`` is right, else ``None``.
+
+        Compared before ``remote.json.lock`` is taken, so a wrong guess, the common
+        case while someone is guessing, waits on no other process here; and compared
+        again under the lock, since a ``regenerate-password`` may land in between.
+        """
         import secrets
 
+        if not self.password_matches(password):
+            return None
         with self._state_file_lock():
             if not self.password_matches(password):
                 return None
@@ -2901,6 +2921,55 @@ def build_remote_app(
 
         return guarded_read
 
+    unlock_turn = threading.Lock()
+    """Unlocks are decided one at a time: the budget's check and its record are then one
+    step, so guesses that arrive together cannot all get past a budget with one left."""
+
+    def unlock_decision(
+        password: str, ua: str, cookie: str | None, direct: bool
+    ) -> tuple[str, Device, bool] | datetime | None:
+        """What an unlock comes to, decided in a worker thread: ``(secret, device,
+        reactivated)`` for a right passphrase, ``None`` for a wrong one, and, while the
+        budget is spent, when it opens again (the guess is not evaluated).
+
+        Off the event loop because each step may write ``remote.json`` and so wait on
+        another process's ``remote.json.lock``: run on the loop, one wrong guess while
+        a CLI command held it stalled every socket and every read for seconds. A known
+        device's last allowed wrong guess revokes it, and says so in the log and on
+        the audit trail: that is most likely a stolen cookie, and its owner would
+        otherwise find only a device gone.
+        """
+        with unlock_turn:
+            known = runtime.known_device_for_cookie(cookie)
+            if known is None and not budget.unlock_budget_allows(direct):
+                return budget.budget_exhausted_until() or _remote_now()
+            if known is None:
+                unlocked = runtime.unlock_device(password, ua)
+            elif runtime.password_matches(password):
+                # Its own device again; one revoked or expired since the lookup is a new one.
+                unlocked = runtime.reactivate_device(known.id, ua) or runtime.unlock_device(
+                    password, ua
+                )
+            else:
+                unlocked = None
+            if unlocked is None:
+                if known is None:
+                    if not direct and budget.record_failed_unlock():
+                        _unlock_lockout_alert(runtime)
+                elif runtime.known_device_failed(known.id):
+                    revoked = (
+                        f"device {known.id} revoked after "
+                        f"{KNOWN_DEVICE_FAILURES_MAX} wrong passwords sent with its cookie"
+                    )
+                    log.warning("remote: %s", revoked)
+                    runtime.audit(known.id, "unlock", revoked)
+                return None
+            secret, device = unlocked
+            reactivated = known is not None and device.id == known.id
+            summary = f"device {device.id} " + ("reactivated" if reactivated else f"ua={ua[:60]}")
+            runtime.audit(device.id, "unlock", summary)
+            return secret, device, reactivated
+
     async def unlock_endpoint(request: Request) -> Response:
         """``POST api/unlock``: the passphrase for a cookie (SPEC §2.2).
 
@@ -2910,7 +2979,7 @@ def build_remote_app(
         budget WITHOUT evaluating the guess; then the passphrase. A wrong one counts
         against the known device's own cap, or against the budget (the machine's
         never does). A right one reactivates the known device under its old id, or
-        makes a new one.
+        makes a new one. Everything after the body is :func:`unlock_decision`'s.
         """
         retry = limiter.limiter_retry_after(_client_of(request.scope))
         if retry is not None:
@@ -2927,32 +2996,19 @@ def build_remote_app(
         password = body.get("password")
         if not isinstance(password, str):
             return _json_error(400, "invalid", 'send {"password": "..."}')
-        ua = request.headers.get("user-agent", "")
-        known = runtime.known_device_for_cookie(request.cookies.get(COOKIE))
-        direct = is_direct_loopback(request.scope)
-        if known is None and not budget.unlock_budget_allows(direct):
-            until = budget.budget_exhausted_until() or _remote_now()
-            wait = max(1, math.ceil((until - _remote_now()).total_seconds()))
+        decided = await asyncio.to_thread(
+            unlock_decision,
+            password,
+            request.headers.get("user-agent", ""),
+            request.cookies.get(COOKIE),
+            is_direct_loopback(request.scope),
+        )
+        if isinstance(decided, datetime):
+            wait = max(1, math.ceil((decided - _remote_now()).total_seconds()))
             return kit.kit_refuse(429, "locked_out", LOCKED_OUT, headers={"Retry-After": str(wait)})
-        if known is None:
-            unlocked = runtime.unlock_device(password, ua)
-        elif runtime.password_matches(password):
-            # Its own device again; one revoked or expired since the lookup is a new device.
-            unlocked = runtime.reactivate_device(known.id, ua) or runtime.unlock_device(
-                password, ua
-            )
-        else:
-            unlocked = None
-        if unlocked is None:
-            if known is not None:
-                runtime.known_device_failed(known.id)
-            elif not direct and budget.record_failed_unlock():
-                _unlock_lockout_alert(runtime)
+        if decided is None:
             return _json_error(401, "wrong_password")
-        secret, device = unlocked
-        reactivated = known is not None and device.id == known.id
-        summary = f"device {device.id} " + ("reactivated" if reactivated else f"ua={ua[:60]}")
-        runtime.audit(device.id, "unlock", summary)
+        secret, device, reactivated = decided
         # A reactivated device keeps its expiry, so its cookie gets what is left of it: a
         # cookie never outlives its device.
         expires = _remote_instant(device.expires_at) or _remote_now()
@@ -3005,6 +3061,7 @@ def build_remote_app(
         the write switch says. Another id is a change to who can reach the fleet,
         so a read-only phone cannot sign every other phone out, the owner's
         included. An id that is not a device's shape, or no device's, is a 404.
+        The revoke writes ``remote.json`` in a worker thread, as an unlock does.
         """
         device = kit.kit_device(request)
         device_id = request.path_params["device_id"]
@@ -3013,7 +3070,7 @@ def build_remote_app(
             return kit.kit_refuse(404, "not_found", "no such device")
         if not own and not kit.kit_write_allowed():
             return kit.kit_refuse(403, "read_only", READ_ONLY_REASON)
-        if not runtime.revoke_device(device_id):
+        if not await asyncio.to_thread(runtime.revoke_device, device_id):
             return kit.kit_refuse(404, "not_found", "no such device")
         kit.kit_audit(device, "devices/revoke", "self" if own else device_id)
         response = JSONResponse({"ok": True, "id": device_id, "signed_out": own})

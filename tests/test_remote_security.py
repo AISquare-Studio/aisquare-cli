@@ -480,18 +480,25 @@ def test_a_known_phone_unlocks_through_a_spent_budget_into_its_own_device(
 
 
 def test_a_known_cookie_buys_ten_guesses_then_its_device_is_revoked(
-    app: Any, runtime: Runtime
+    app: Any, runtime: Runtime, caplog: pytest.LogCaptureFixture
 ) -> None:
+    """The revoke is said in the log and on the audit trail: it is most likely a stolen
+    cookie, and its owner found only a device gone (review of #243, round 2)."""
     phone = _from(app, "198.51.100.51")
-    unlock(phone, runtime)
+    device_id = unlock(phone, runtime).json()["device"]["id"]
     _spend_the_budget(app, runtime)
-    for n in range(KNOWN_DEVICE_FAILURES_MAX):
-        guesser = _from(app, f"198.51.100.{60 + n}")  # its own limiter row each time
-        guesser.cookies.set(COOKIE, phone.cookies[COOKIE])
-        assert unlock(guesser, runtime, "wrong").status_code == 401
+    with caplog.at_level("WARNING", logger=remote_server.__name__):
+        for n in range(KNOWN_DEVICE_FAILURES_MAX):
+            guesser = _from(app, f"198.51.100.{60 + n}")  # its own limiter row each time
+            guesser.cookies.set(COOKIE, phone.cookies[COOKIE])
+            assert unlock(guesser, runtime, "wrong").status_code == 401
     assert runtime.device_rows() == [], "the tenth wrong guess revoked it"
     assert UnlockBudget(runtime).budget_failures() == UNLOCK_GLOBAL_FAILURES, "none counted"
     assert unlock(phone, runtime).status_code == 429, "a stranger again"
+    said = f"device {device_id} revoked after {KNOWN_DEVICE_FAILURES_MAX} wrong passwords"
+    assert [r for r in caplog.records if said in r.getMessage()], "logged"
+    _ts, who, endpoint, summary = _audit_lines()[-1]
+    assert (who, endpoint) == (device_id, "unlock") and summary.startswith(said)
 
 
 def test_a_right_guess_resets_the_known_devices_count(app: Any, runtime: Runtime) -> None:
@@ -503,6 +510,83 @@ def test_a_right_guess_resets_the_known_devices_count(app: Any, runtime: Runtime
         unlock(guesser, runtime, "wrong")
     assert unlock(phone, runtime).status_code == 200
     assert runtime._state.devices[0].failed_unlocks == 0
+
+
+def test_a_wrong_guess_takes_no_lock_on_remote_json(
+    runtime: Runtime, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``unlock_device`` took the file lock merely to compare the passphrase, so a wrong guess
+    waited on another process holding it, and then waited again to be counted."""
+    taken: list[Path] = []
+
+    def lock_and_record(path: Path) -> None:
+        taken.append(path)  # and goes on without the lock, as a stalled holder would let it
+
+    monkeypatch.setattr(remote_server, "_lock_state_file", lock_and_record)
+    assert runtime.unlock_device("wrong", "Pixel") is None and taken == []
+    assert runtime.unlock_device(PASSWORD, "Pixel") is not None
+    assert taken == [remote_state_path()]
+
+
+def test_a_guess_waiting_on_another_processs_lock_holds_up_no_other_request(
+    app: Any, runtime: Runtime, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The unlock's writes ran on the event loop: one wrong guess while a CLI command held
+    ``remote.json.lock`` stalled every socket and every read for seconds."""
+    from aisquare.core.locking import lock_exclusive
+    from aisquare.core.locking import unlock as release
+
+    monkeypatch.setattr(remote_server, "STATE_LOCK_WAIT_SECONDS", 3.0)
+    waiting = threading.Event()
+    lock_state_file = remote_server._lock_state_file
+
+    def lock_and_say(path: Path) -> int | None:
+        waiting.set()
+        return lock_state_file(path)
+
+    monkeypatch.setattr(remote_server, "_lock_state_file", lock_and_say)
+    fd = os.open(remote_state_path().with_name("remote.json.lock"), os.O_RDWR | os.O_CREAT, 0o600)
+    lock_exclusive(fd)  # what the CLI command holds
+    answers: list[int] = []
+    with _from(app, "203.0.113.70") as stranger:  # one event loop serves both requests
+        guess = threading.Thread(
+            target=lambda: answers.append(unlock(stranger, runtime, "wrong").status_code)
+        )
+        guess.start()
+        try:
+            assert waiting.wait(5), "the wrong guess is counted under the lock"
+            started = time.monotonic()
+            read = stranger.get(f"{base(runtime)}/api/remote")
+            took = time.monotonic() - started
+            assert read.status_code == 401 and took < 1.5, f"the read waited {took:.1f} s"
+            assert answers == [], "answered while the guess still waited"
+        finally:
+            release(fd)
+            os.close(fd)
+        guess.join(10)
+    assert answers == [401]
+
+
+def test_guesses_decided_at_once_get_no_further_past_the_budget(app: Any, runtime: Runtime) -> None:
+    """Off the event loop, unlocks are still decided one at a time: with one guess left in
+    the budget, five guesses together get one evaluation and four ``locked_out``."""
+    for n in range(UNLOCK_GLOBAL_FAILURES - 1):
+        unlock(_from(app, f"203.0.113.{n}"), runtime, "wrong")
+    together = threading.Barrier(5)
+    answers: list[int] = []
+
+    def guess(n: int) -> None:
+        client = _from(app, f"198.51.100.{140 + n}")
+        together.wait()
+        answers.append(unlock(client, runtime, "wrong").status_code)
+
+    guesses = [threading.Thread(target=guess, args=(n,)) for n in range(5)]
+    for thread in guesses:
+        thread.start()
+    for thread in guesses:
+        thread.join(30)
+    assert sorted(answers) == [401, 429, 429, 429, 429]
+    assert UnlockBudget(runtime).budget_failures() == UNLOCK_GLOBAL_FAILURES
 
 
 def test_the_trip_is_said_once_logged_and_pushed(

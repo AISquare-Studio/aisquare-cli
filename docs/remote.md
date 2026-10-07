@@ -169,7 +169,11 @@ line each:
 
 That is the time, the device, the route and what it did. Typed text is recorded
 as a length; a tell keeps its first 120 characters, because it is the one write
-that hands an agent free-form instructions.
+that hands an agent free-form instructions. A write refused after part of it
+already reached the agent is on the trail too, with how it ended: keys typed
+before tmux failed (`failed`), an Esc sent before the action stopped short
+(`refused=<error>`), a restart that stopped the agent and could not start its
+replacement (`failed=<error>`).
 
 ---
 

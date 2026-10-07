@@ -655,3 +655,24 @@ def test_the_agent_rows_survive_a_damaged_store(
     assert rows["cursor"]["status"] == "ok" and rows["claude-code"]["status"] == "ok"
     if damaged_store == "at-open":  # control: doctor does see this damage (a zeroed page it
         assert rows["database"]["status"] == "fail", rows["database"]  # never reads, it cannot)
+
+
+@pytest.mark.parametrize("shape", _shapes(_UNREADABLE_SHAPES | {"non-list event"}))
+def test_strict_hook_reading_refuses_what_the_lenient_reading_calls_empty(
+    runner: CliRunner, claude_home: Path, shape: str
+) -> None:
+    """The doctor reads a damaged settings.json as "no hooks"; uninstall must not, or it
+    removes the package under hooks it could not see. ``strict`` raises for it instead."""
+    settings_path = claude_home / "settings.json"
+    _DAMAGED_SETTINGS[shape](settings_path)
+    try:
+        lenient = agent_core.hook_commands("claude-code")
+        with pytest.raises((OSError, ValueError, TypeError)):
+            agent_core.hook_commands("claude-code", strict=True)
+    finally:
+        _cleared(settings_path)
+    _connect(runner)  # control: a readable file reads the same both ways
+
+    assert lenient == []
+    hooked = agent_core.hook_commands("claude-code")
+    assert hooked and agent_core.hook_commands("claude-code", strict=True) == hooked

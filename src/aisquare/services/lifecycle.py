@@ -480,7 +480,7 @@ def hook_binaries(directory: Path) -> tuple[list[agent_core.HookBinary], str | N
     a traceback: one bad file must not stop the work on every other directory.
     """
     try:
-        commands = agent_core.hook_commands(HOOK_AGENT, directory)
+        commands = agent_core.hook_commands(HOOK_AGENT, directory, strict=True)
     except (OSError, ValueError, TypeError) as exc:
         return [], f"its settings.json could not be read ({exc})"
     binaries: list[agent_core.HookBinary] = []

@@ -743,22 +743,32 @@ class HookSiteHealth:
     binary_state: str | None = None
 
 
-def hook_commands(name: str, config_dir: Path | None = None) -> list[str]:
+def hook_commands(name: str, config_dir: Path | None = None, *, strict: bool = False) -> list[str]:
     """Every aisquare hook command in the agent's settings, across all events.
 
     Any event counts, not only the full set ``hooks_installed`` demands: a
     partial install from an older version still RUNS on the events it has, so
     what it runs is still worth grading. Read-only, so through :func:`read_json`
     (see ``_missing_events``): a file that cannot be read names no command.
+
+    ``strict`` raises instead, for a file that cannot be read as hooks: not
+    readable, not UTF-8, or an event holding something other than a list. It is
+    for the callers that must not take such a file for one without our hooks:
+    ``uninstall`` would remove the package under hooks it could not see, so it
+    names the directory and keeps the package. The doctor reads leniently.
     """
     spec = _spec(name, config_dir)
     if spec is None or spec.settings_path is None:
         return []
-    hooks = read_json(spec.settings_path).get("hooks")
+    read = _read_settings if strict else read_json
+    hooks = read(spec.settings_path).get("hooks")
     if not isinstance(hooks, dict):
         return []
     found: list[str] = []
     for event, _ in _HOOKS:
+        groups = hooks.get(event)
+        if strict and groups is not None and not isinstance(groups, list):
+            raise TypeError(f"its {event} hooks are not a list")
         for group in _event_groups(hooks, event):
             if not _is_aisquare_group(group):
                 continue

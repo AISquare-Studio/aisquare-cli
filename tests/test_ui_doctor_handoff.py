@@ -10,9 +10,12 @@ leave the process is replaced here; each claim has its negative control beside i
 from __future__ import annotations
 
 import asyncio
+import builtins
 import os
 import subprocess
 import sys
+from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -25,13 +28,17 @@ from typer.testing import CliRunner
 from aisquare.cli import install as install_cli
 from aisquare.cli.app import app as cli_app
 from aisquare.cli.ui import app as ui_app
+from aisquare.cli.ui.sidebar import AddProject, ProjectSelected
 from aisquare.cli.ui.views.doctor import DoctorView
 from aisquare.core import selfcli
 from aisquare.services.install_route import LatestRelease
 from tests.installer_seams import no_real_installer  # noqa: F401 — autouse, applied by import
 from tests.test_lifecycle_upgrade import Machine, Tool, machine, tool  # noqa: F401
-from tests.test_ui_shell import drive
+from tests.test_ui_shell import drive, script, seed  # noqa: F401 — `script` is a fixture
 from tests.ui_workers import settle_page
+
+#: The real function, taken before ``no_real_installer`` closes it for every test here.
+_REAL_EXEC_SELF = selfcli.exec_self
 
 # --------------------------------------------------------------------------- the view
 
@@ -49,64 +56,95 @@ class Host(App[None]):
         self.received.append(message)
 
 
-def _pressed(view: DoctorView, *button_ids: str, busy: bool = False) -> tuple[list[str], Host, str]:
-    """Mount ``view``, press each button; the machine buttons it showed, and its status line."""
+def _pressed(view: DoctorView, *button_ids: str) -> tuple[dict[str, bool], Host, str]:
+    """Mount ``view`` and press each button: its machine buttons (id → enabled) and note."""
 
-    async def drive_view() -> tuple[list[str], Host, str]:
+    async def drive_view() -> tuple[dict[str, bool], Host, str]:
         host = Host(view)
         async with host.run_test(size=(120, 40)):
             await settle_page(host)
-            shown = [str(b.id) for b in view.query("#doctor-machine Button").results(Button)]
-            view.busy = busy
+            shown = {
+                str(b.id): not b.disabled
+                for b in view.query("#doctor-machine Button").results(Button)
+            }
             for button_id in button_ids:
                 view.query_one(f"#{button_id}", Button).press()
                 await settle_page(host)
-            return shown, host, str(view.query_one("#doctor-status", Static).render())
+            notes = view.query("#doctor-update-note").results(Static)
+            return shown, host, " ".join(str(note.render()) for note in notes)
 
     return asyncio.run(drive_view())
 
 
-def test_the_machine_doctor_hands_off_update_and_uninstall() -> None:
-    shown, host, _status = _pressed(DoctorView(machine=True), "doctor-update", "doctor-uninstall")
+def _never_refused() -> str | None:
+    return None
 
-    assert shown == ["doctor-update", "doctor-uninstall"]
+
+def test_the_machine_doctor_hands_off_update_and_uninstall() -> None:
+    view = DoctorView(machine=True, update_refusal=_never_refused)
+    shown, host, note = _pressed(view, "doctor-update", "doctor-uninstall")
+
+    assert shown == {"doctor-update": True, "doctor-uninstall": True} and note == ""
     handed = [m.args for m in host.received if isinstance(m, DoctorView.HandOff)]
-    assert handed == [("upgrade", "--reopen"), ("uninstall",)]
+    assert handed == [("upgrade", "--reopen"), ("uninstall", "--reopen")]
 
 
 def test_a_project_or_onboard_doctor_has_neither_button() -> None:
     """Control: the same view without ``machine`` — the Onboard and Project copies."""
-    shown, host, _status = _pressed(DoctorView())
+    shown, host, _note = _pressed(DoctorView())
 
-    assert shown == [] and host.received == []
+    assert shown == {} and host.received == []
 
 
-def test_no_hand_off_while_a_fix_is_still_running() -> None:
-    shown, host, status = _pressed(DoctorView(machine=True), "doctor-update", busy=True)
+def test_update_is_disabled_with_the_reason_where_upgrade_would_only_refuse() -> None:
+    """An editable checkout, pipx, Homebrew, a venv, system pip, Windows: the button
+    would only quit asq into a refusal, so it says what to run instead."""
+    refusal = "aisquare does not upgrade this install itself (pipx). Upgrade it with: pipx upgrade"
+    view = DoctorView(machine=True, update_refusal=lambda: refusal)
+    shown, host, note = _pressed(view, "doctor-update", "doctor-uninstall")
 
-    assert shown == ["doctor-update", "doctor-uninstall"]
-    assert host.received == [], "quitting under a fix that is writing would cut it off"
-    assert "a fix is still running" in status
+    assert shown == {"doctor-update": False, "doctor-uninstall": True}
+    assert note == f"Update: {refusal}"
+    handed = [m.args for m in host.received if isinstance(m, DoctorView.HandOff)]
+    assert handed == [("uninstall", "--reopen")], "Uninstall still runs"
 
 
 # --------------------------------------------------------------------------- the app
 
 
-def test_asqs_own_doctor_is_the_only_machine_one_and_update_quits_with_the_hand_off() -> None:
-    async def fn(pilot: Pilot[None]) -> tuple[list[str], tuple[str, ...] | None, bool]:
+def test_only_asqs_own_doctor_is_machine_wide_and_no_doctor_may_be_busy(
+    isolated_home: Path,
+    tmp_path: Path,
+    script: Any,  # noqa: F811 — pytest resolves fixtures by NAME, so the import must keep it
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With a project's tab and Onboard really open, so the negative half has copies to see.
+    Update quits only when no Doctor view anywhere still has a fix writing."""
+    monkeypatch.setattr("aisquare.cli.ui.views.doctor._update_refusal", _never_refused)
+    seed(tmp_path, ("prj_a", "alpha", None))
+
+    async def fn(pilot: Pilot[None]) -> tuple[dict[str, bool], tuple[str, ...] | None, Any]:
         app = pilot.app
         assert isinstance(app, ui_app.FleetApp)
-        machines = [str(view.id) for view in app.query(DoctorView) if view.machine]
-        before = app.hand_off
+        await app.on_project_selected(ProjectSelected("prj_a"))
+        await app.on_add_project(AddProject())
+        await settle_page(app)
+        doctors = {str(view.id): view.machine for view in app.query(DoctorView)}
+        project = next(v for v in app.query(DoctorView) if v.id == "project-doctor")
+        project.busy = True
         app.query_one("#doctor-update", Button).press()
         await settle_page(app)
-        return machines, app.hand_off, before is None
+        refused = app.hand_off
+        project.busy = False
+        app.query_one("#doctor-update", Button).press()
+        await settle_page(app)
+        return doctors, refused, app.hand_off
 
-    machines, hand_off, unset_before = drive(fn)
+    doctors, while_busy, after = drive(fn)
 
-    assert machines == ["doctor"]
-    assert unset_before, "control: nothing is handed off until the button is pressed"
-    assert hand_off == ("upgrade", "--reopen")
+    assert doctors == {"doctor": True, "project-doctor": False, "onboard-doctor": False}
+    assert while_busy is None, "a project tab's fix is still writing"
+    assert after == ("upgrade", "--reopen"), "control: with no fix running it quits"
 
 
 class _FakeApp:
@@ -142,7 +180,7 @@ def test_exec_self_replaces_this_process_with_this_installs_cli(
     monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setattr(os, "execv", lambda path, argv: calls.append((path, list(argv))))
 
-    selfcli.exec_self(["upgrade", "--reopen"])
+    _REAL_EXEC_SELF(["upgrade", "--reopen"])
 
     argv = [sys.executable, "-P", "-m", "aisquare", "upgrade", "--reopen"]
     assert calls == [(sys.executable, argv)]
@@ -163,7 +201,7 @@ def test_exec_self_on_windows_waits_for_the_child_and_exits_with_its_status(
     monkeypatch.setattr(subprocess, "call", call)
 
     with pytest.raises(SystemExit) as exited:
-        selfcli.exec_self(["uninstall"])
+        _REAL_EXEC_SELF(["uninstall"])
 
     assert exited.value.code == 3
     assert children == [[sys.executable, "-P", "-m", "aisquare", "uninstall"]]
@@ -172,63 +210,92 @@ def test_exec_self_on_windows_waits_for_the_child_and_exits_with_its_status(
 # --------------------------------------------------------------------------- upgrade --reopen
 
 
+@dataclass
+class Terminal:
+    """A terminal for ``--reopen``: the Enter prompts it showed and what exec'd after."""
+
+    prompts: list[str] = field(default_factory=list)
+    reopened: list[list[str]] = field(default_factory=list)
+    answer: BaseException | None = None
+    """Raised at the prompt instead of returning (Ctrl-C, a closed stdin)."""
+
+
 @pytest.fixture
-def reopened(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
-    seen: list[list[str]] = []
-    monkeypatch.setattr(selfcli, "exec_self", lambda args: seen.append(list(args)))
-    return seen
+def terminal(monkeypatch: pytest.MonkeyPatch) -> Terminal:
+    at = Terminal()
+
+    def enter(prompt: str = "") -> str:
+        at.prompts.append(prompt)
+        if at.answer is not None:
+            raise at.answer
+        return ""
+
+    monkeypatch.setattr(install_cli, "_stdin_is_a_terminal", lambda: True)
+    monkeypatch.setattr(builtins, "input", enter)
+    monkeypatch.setattr(selfcli, "exec_self", lambda args: at.reopened.append(list(args)))
+    return at
 
 
-def test_reopen_opens_asq_after_an_upgrade_that_did_not_fail(
+_ENTER = "Press Enter to go back to asq "
+
+
+def test_reopen_waits_for_enter_then_opens_asq_after_an_upgrade_that_did_not_fail(
     runner: CliRunner,
     tool: Tool,  # noqa: F811
     machine: Machine,  # noqa: F811
-    reopened: list[list[str]],
+    terminal: Terminal,
 ) -> None:
+    """asq opens on the alternate screen: the report must be read before it goes."""
     upgraded = runner.invoke(cli_app, ["upgrade", "--yes", "--reopen"])
-    after_upgrade = list(reopened)
+    after_upgrade = (list(terminal.prompts), list(terminal.reopened))
     plain = runner.invoke(cli_app, ["upgrade", "--yes"])
 
     assert upgraded.exit_code == 0, upgraded.output
     assert len(machine.installs) == 2
-    assert after_upgrade == [["ui"]]
-    assert plain.exit_code == 0 and reopened == [["ui"]], "control: no --reopen, no asq"
+    assert after_upgrade == ([_ENTER], [["ui"]])
+    assert plain.exit_code == 0 and terminal.reopened == [["ui"]], "control: no --reopen, no asq"
 
 
 def test_reopen_opens_asq_when_there_was_nothing_to_do_or_the_answer_was_no(
     runner: CliRunner,
     tool: Tool,  # noqa: F811
     machine: Machine,  # noqa: F811
-    reopened: list[list[str]],
+    terminal: Terminal,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The user pressed Update in asq; declining, or being current, returns them there."""
     machine.latest = LatestRelease("0.9.0")
     current = runner.invoke(cli_app, ["upgrade", "--reopen"])
     machine.latest = LatestRelease("0.9.1")
-    monkeypatch.setattr(install_cli, "_stdin_is_a_terminal", lambda: True)
     monkeypatch.setattr("aisquare.cli.install.typer.confirm", lambda *_a, **_k: False)
     declined = runner.invoke(cli_app, ["upgrade", "--reopen"])
 
     assert current.exit_code == 0 and "nothing to do" in current.stdout, current.output
     assert declined.exit_code == 0 and "nothing changed" in declined.stdout, declined.output
-    assert reopened == [["ui"], ["ui"]] and machine.installs == []
+    assert terminal.reopened == [["ui"], ["ui"]] and machine.installs == []
 
 
-def test_reopen_stays_out_of_the_way_of_a_failure_and_of_json(
+def test_reopen_stays_out_of_the_way_of_a_failure_json_ctrl_c_and_no_terminal(
     runner: CliRunner,
     tool: Tool,  # noqa: F811
     machine: Machine,  # noqa: F811
-    reopened: list[list[str]],
+    terminal: Terminal,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A failure stays on screen to be read; ``--json`` output is for a program."""
+    """A failure stays on screen to be read; ``--json`` output is for a program; Ctrl-C at
+    the prompt and a run with nobody at the terminal stay in this shell."""
     as_json = runner.invoke(cli_app, ["--json", "upgrade", "--yes", "--reopen"])
+    terminal.answer = KeyboardInterrupt()
+    interrupted = runner.invoke(cli_app, ["upgrade", "--yes", "--reopen"])
+    monkeypatch.setattr(install_cli, "_stdin_is_a_terminal", lambda: False)
+    unattended = runner.invoke(cli_app, ["upgrade", "--yes", "--reopen"])
     machine.installer_exit = 1
     failed = runner.invoke(cli_app, ["upgrade", "--yes", "--reopen"])
 
-    assert as_json.exit_code == 0, as_json.output
+    assert as_json.exit_code == 0 and interrupted.exit_code == 0 and unattended.exit_code == 0
     assert failed.exit_code == 1 and "the upgrade failed" in failed.stderr, failed.output
-    assert reopened == []
+    assert terminal.prompts == [_ENTER], "asked once: the interrupted run"
+    assert terminal.reopened == []
 
 
 def test_reopen_is_hidden_from_help(runner: CliRunner) -> None:

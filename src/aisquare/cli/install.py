@@ -158,14 +158,22 @@ def _emit_report(report: lifecycle_service.UpgradeReport) -> None:
 
 
 def _reopen(reopen: bool) -> None:
-    """Hand the terminal back to asq (``--reopen``, what asq's Update button runs).
+    """Hand the terminal back to asq (``--reopen``: what asq's Update and Uninstall run).
 
-    Only where nothing failed, and never under ``--json``: a failure stays on
-    screen to be read. The asq that opens is a new process of THIS install, so
-    after an upgrade it is the version just installed.
+    Only at a terminal, never under ``--json``, and only where the caller says
+    nothing failed or was removed. It waits for Enter first: asq opens on the
+    alternate screen, and the lines above (the answer, a site left as it was,
+    the notes) would vanish unread. Ctrl-C or a closed stdin stays here. The asq
+    that opens is a new process of THIS install, so after an upgrade it is the
+    version just installed.
     """
-    if reopen and not get_state().json_output:
-        selfcli.exec_self(["ui"])
+    if not reopen or get_state().json_output or not _stdin_is_a_terminal():
+        return
+    try:
+        input("Press Enter to go back to asq ")
+    except (EOFError, KeyboardInterrupt):
+        return
+    selfcli.exec_self(["ui"])
 
 
 def _fallback(plan: lifecycle_service.UpgradePlan) -> str:
@@ -473,6 +481,14 @@ def uninstall(
     dry_run: Annotated[
         bool, typer.Option("--dry-run", help="Show what would be removed, and remove nothing.")
     ] = False,
+    reopen: Annotated[
+        bool,
+        typer.Option(
+            "--reopen",
+            hidden=True,
+            help="Open asq again if nothing was removed (asq's Uninstall button).",
+        ),
+    ] = False,
 ) -> None:
     """Remove aisquare: its Claude Code hooks, then the package. Keeps ~/.aisquare.
 
@@ -494,6 +510,7 @@ def uninstall(
         if refusal is not None:
             # The plan just said why. At a terminal, asking would offer a yes that is
             # refused; off one, "re-run with --yes" would send them into the refusal.
+            _reopen(reopen)
             raise typer.Exit(1)
         if not _stdin_is_a_terminal():
             _say("dry run: nothing removed — re-run with --yes to uninstall")
@@ -503,9 +520,11 @@ def uninstall(
             _say(
                 f"nothing for aisquare to remove here — remove the package: {plan.package_command}"
             )
+            _reopen(reopen)
             return
         if not typer.confirm(question, default=False):
             _say("nothing removed")
+            _reopen(reopen)
             return
     if refusal is not None:
         fail(str(refusal), error=refusal.error, detail=str(refusal))

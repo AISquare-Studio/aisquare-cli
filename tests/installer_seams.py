@@ -23,6 +23,7 @@ from typing import Any
 
 import pytest
 
+from aisquare.core import selfcli
 from aisquare.services import install_route
 
 #: Everything in ``install_route`` that leaves this process or reads ambient
@@ -45,6 +46,14 @@ def no_real_installer(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[str]]:
 
     for name in SEAMS:
         monkeypatch.setattr(install_route, name, closed(name))
+
+    # `upgrade --reopen` and `uninstall --reopen` exec asq: a test that reached the
+    # real one would replace the pytest process with the UI.
+    def no_exec_self(*_args: object, **_kwargs: object) -> Any:
+        reached.append("selfcli.exec_self")
+        raise AssertionError("a test reached the real selfcli.exec_self")
+
+    monkeypatch.setattr(selfcli, "exec_self", no_exec_self)
     yield reached
     assert not reached, (
         f"the real installer seam(s) {reached} were reached — replace them in the test "

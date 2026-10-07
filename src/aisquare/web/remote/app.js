@@ -49,6 +49,8 @@ const AGENT_TABS = ["live", "transcript", "card"];
 const STALE_AFTER_MS = 25000;
 /* How long after its tap a write whose request was lost is still sent again. */
 const RETRY_WITHIN_MS = 15000;
+/* A needs scan older than this, by the machine's own clock, means the scans stopped. */
+const SCAN_BEHIND_MS = 30000;
 const BACKOFF_SECONDS = [1, 2, 4, 8, 16, 30];
 const ESC_REPEAT_MS = 1500;
 const STRIP_ROWS = 10;
@@ -562,7 +564,7 @@ const S = {
   wantFleet: null, wantBoard: null, panes: new Map(), sock: null, sockState: "idle",
   opened: false, backoff: 0, retryTimer: 0, lastFrameAt: 0, stale: false, offline: false,
   off: null, locked: false, booting: false, view: null, route: null, pending: new Map(), orphans: new Map(),
-  gone: new Map(), since: new Set(), push: null, padOnOpen: false, lastWake: 0, me: null, names: new Map(),
+  gone: new Map(), since: new Set(), push: null, padOnOpen: false, lastWake: 0, me: null, names: new Map(), scannedBehind: "",
 };
 const UI = {};
 const paneWatchers = new Map();
@@ -970,6 +972,7 @@ function onFrame(text) {
   if (frame.type === "remote") setRemote(payload);
   else if (frame.type === "needs_you") setNeeds(payload && payload.items);
   else if (frame.type === "action") settleFromLedger(payload && payload.actions);
+  else if (frame.type === "heartbeat") noteScan(frame.ts, payload);
   else if (frame.type === "fleet") {
     S.fleet = payload;
     noteName(payload);
@@ -985,6 +988,17 @@ function onFrame(text) {
       for (const fn of watcher.fns) fn(payload);
     }
   } else if (frame.type === "error" && payload && typeof payload === "object") toast(plainText(payload.message));
+}
+
+/* The heartbeat says when the machine last looked for what needs you, by its own clock as
+ * the frame's ts is. A watcher that stopped (a tmux call hung in a scan) froze the feed
+ * while the link stayed green: the feed now says how old it is instead. */
+function noteScan(ts, payload) {
+  const scanned = payload && typeof payload.needs_scanned_at === "string" ? payload.needs_scanned_at : "";
+  const behind = Date.parse(ts) - Date.parse(scanned) > SCAN_BEHIND_MS ? scanned : "";
+  if (behind === S.scannedBehind) return;
+  S.scannedBehind = behind;
+  viewCall("needs");
 }
 
 /* Watch one agent's pane; the returned function stops watching. */
@@ -1485,12 +1499,16 @@ function noLongerText(item, current) {
 
 VIEWS.home = (route, main) => {
   const notice = el("div", "notice");
+  const behind = el("p", "notice-line");
   const list = el("div", "cards data");
   const empty = el("p", "empty", "Loading…");
-  main.append(notice, list, empty);
+  main.append(notice, behind, list, empty);
   const cards = new Map();
   const draw = () => {
     const items = S.needs || [];
+    behind.hidden = !S.scannedBehind;
+    behind.textContent = S.scannedBehind ? "Last looked at " + clock(S.scannedBehind) + ": the machine has stopped checking, so this may be out of date." : "";
+    list.classList.toggle("behind", !!S.scannedBehind);
     empty.textContent = S.needs === null ? "Loading…" : "Nothing needs you.";
     empty.hidden = items.length > 0;
     const seen = new Set();

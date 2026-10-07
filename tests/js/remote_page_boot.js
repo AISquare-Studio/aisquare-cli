@@ -193,8 +193,8 @@ class FakeSocket {
     this.fire("open");
   }
 
-  frame(type, payload) {
-    this.fire("message", { data: JSON.stringify({ type, payload }) });
+  frame(type, payload, extra) {
+    this.fire("message", { data: JSON.stringify(Object.assign({ type, payload }, extra)) });
   }
 }
 
@@ -642,6 +642,21 @@ async function pushAfterUnlock(held) {
   return { log: push.log, subscribed };
 }
 
+/* Heartbeats whose last needs scan is a minute old, then two seconds old, on the feed. */
+async function scansStopped() {
+  const page = bootPage("#/", signedIn());
+  await settle();
+  page.acceptSockets();
+  await settle();
+  const beat = (scanned, ts) => page.live().frame("heartbeat", { needs_scanned_at: scanned }, { ts });
+  beat("2026-10-07T10:00:00+00:00", "2026-10-07T10:01:00+00:00");
+  await settle();
+  const stopped = { said: page.main().textContent, greyed: page.main().querySelectorAll("div.data.behind").length };
+  beat("2026-10-07T10:01:08+00:00", "2026-10-07T10:01:10+00:00");
+  await settle();
+  return { stopped, again: { said: page.main().textContent, greyed: page.main().querySelectorAll("div.data.behind").length } };
+}
+
 /* Nothing heard for longer than the stale limit, on the devices screen. */
 async function staleDevices() {
   const page = bootPage("#/devices", signedIn({
@@ -694,6 +709,7 @@ async function main() {
     lostThenSignedOut: await lostThenSignedOut(),
     lostRead: await lostRead(),
     emptySend: await emptySend(),
+    scansStopped: await scansStopped(),
     pushKeyChanged: await pushTurnedOn(KEY_BEFORE),
     pushKeyKept: await pushTurnedOn(KEY_NOW),
     pushKeyChangedAtUnlock: await pushAfterUnlock(KEY_BEFORE),

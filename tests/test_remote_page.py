@@ -877,6 +877,19 @@ def test_an_unlock_sends_a_subscription_made_anew_when_the_key_changed(
     assert kept == {"log": [], "subscribed": ["https://fcm.googleapis.com/fcm/send/old"]}
 
 
+def test_a_feed_whose_scans_stopped_says_so_instead_of_passing_for_live(
+    boot_report: dict[str, Any],
+) -> None:
+    """The heartbeat carries when the machine last looked for what needs you. A watcher that
+    stopped (a tmux call hung inside a scan) left the feed frozen while the dot stayed green;
+    the page read the heartbeat only as proof that the link was alive."""
+    report = boot_report["scansStopped"]
+    assert "the machine has stopped checking" in report["stopped"]["said"]
+    assert report["stopped"]["greyed"] == 1
+    assert "stopped checking" not in report["again"]["said"]
+    assert report["again"]["greyed"] == 0
+
+
 def test_a_frame_clears_the_offline_banner_a_lost_read_raised(
     boot_report: dict[str, Any],
 ) -> None:

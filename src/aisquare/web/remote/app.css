@@ -212,7 +212,7 @@ pre.pane.fit { overflow-x: hidden; font-size: calc((100vw - 48px) / (var(--cols,
 .pass { width: 100%; font-size: 18px; }
 
 /* stale: nothing heard for 25 s, so what is shown may be old */
-body.stale .data { opacity: .5; filter: grayscale(1); }
+body.stale .data, .data.behind { opacity: .5; filter: grayscale(1); }
 
 /* ANSI: the 16 colours follow the theme; 256 and true colour arrive as rgb() */
 .b { font-weight: 700; } .d { opacity: .6; } .i { font-style: italic; } .u { text-decoration: underline; }

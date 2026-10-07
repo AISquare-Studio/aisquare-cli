@@ -935,35 +935,6 @@ def test_asq_remote_needs_prints_one_line_per_item(monkeypatch: pytest.MonkeyPat
     ]
 
 
-def test_serve_hands_its_port_to_the_kit(
-    isolated_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Push discovery asks ngrok's local API for the tunnel to THIS port (SPEC §5.8)."""
-    import socket
-
-    import uvicorn
-
-    served: list[Any] = []
-
-    class Served:
-        def __init__(self, config: Any) -> None:
-            self.config = config
-            self.should_exit = False
-
-        def run(self, sockets: Any = None) -> None:
-            served.append((self.config.app, self.config.port))
-
-    monkeypatch.setattr(remote_server, "_runtime", None)
-    monkeypatch.setattr(uvicorn, "Server", Served)
-    (tmp_path / "index.html").write_text("<!doctype html>")
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        port = int(probe.getsockname()[1])
-    remote_server.run_foreground(tmp_path, port)
-    ((app, served_port),) = served
-    assert app.kit.port == served_port == port
-
-
 def test_a_socket_that_cannot_be_closed_does_not_cost_the_new_one_its_place(
     runtime: Runtime,
 ) -> None:

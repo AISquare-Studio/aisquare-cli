@@ -677,10 +677,7 @@ def test_start_status_revoke_stop_over_a_real_port(
     info = remote_server.start_remote_server(dist, port=port)
     server = remote_server._server
     assert server is not None
-    served = server._server.config.app
-    assert isinstance(served, remote_server._TokenGate) and served.kit.port == port, (
-        "the app knows the port it serves"
-    )
+    assert isinstance(server._server.config.app, remote_server._TokenGate)
     try:
         assert info.url_local == f"http://127.0.0.1:{port}/r/{info.token}/"
         assert remote_server.remote_server_status()["running"] is True

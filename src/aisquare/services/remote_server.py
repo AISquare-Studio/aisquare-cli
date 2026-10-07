@@ -376,7 +376,8 @@ class NoSuchProject(LookupError):
     ``LookupError``) for both "no match" and "ambiguous" — folded into this one
     ``LookupError`` shape by :func:`_resolve_project` so every existing
     ``except LookupError`` (the GET routes, the write dispatcher, the WS tick)
-    turns it into the SAME 404 shape an unknown agent gets — no new branch.
+    turns it into a 404 ``not_found`` — no new branch. (An agent that is gone is
+    :class:`NoSuchAgent`, ``no_such_agent``.)
     """
 
 
@@ -2725,8 +2726,6 @@ class RemoteKit:
 
     runtime: Runtime
     tick: float = TICK_SECONDS
-    port: int | None = None
-    """The port the app serves on, when its caller said (``build_app(port=)``)."""
     needs_listeners: list[Callable[[list[NeedsItem], datetime], None]] = field(default_factory=list)
     """Called after every needs scan with ``(all items, scanned_at)``."""
     ledger: ActionLedger = field(default_factory=_new_action_ledger)
@@ -2957,7 +2956,6 @@ def build_remote_app(
     dist_dir: Path | None = None,
     tick: float = TICK_SECONDS,
     clock: Callable[[], float] = time.monotonic,
-    port: int | None = None,
     heartbeat: float = HEARTBEAT_SECONDS,
 ) -> _TokenGate:
     """The ASGI app. Everything real is behind ``sources``/``writes``; tests pass fakes."""
@@ -2983,7 +2981,7 @@ def build_remote_app(
     limiter = _RateLimiter(clock)
     budget = UnlockBudget(runtime)
     cache = _Cache(ttl=tick * 0.9)
-    kit = RemoteKit(runtime, tick=tick, port=port)
+    kit = RemoteKit(runtime, tick=tick)
 
     def cookie_path(request: Request) -> str:
         return f"/r/{request.path_params['token']}"
@@ -2996,7 +2994,7 @@ def build_remote_app(
     ) -> Callable[[Request], Any]:
         """A cached read. ``?project=`` picks the project (``scoped``) and is part of the
         cache key, so a read of one project is never answered from another's snapshot
-        (SPEC §7.5); an unknown project is a 404 shaped like an unknown agent."""
+        (SPEC §7.5); an unknown project is a 404 ``not_found``."""
 
         async def guarded_read(request: Request) -> Response:
             project = (request.query_params.get("project") or None) if scoped else None
@@ -3715,7 +3713,7 @@ def start_remote_server(dist_dir: Path | None = None, port: int = DEFAULT_PORT) 
     with _lock:
         if _server is not None and _server.running:
             return state.connection_info(_server.port)
-        app = build_remote_app(state, dist_dir=dist_dir, port=port)
+        app = build_remote_app(state, dist_dir=dist_dir)
         server = _Server(app, port)
         server.start_serving()
         _server = server
@@ -3997,7 +3995,7 @@ def run_foreground(
     state = runtime()
     sock = _bind_remote_socket(port)
     try:
-        app = build_remote_app(state, dist_dir=dist_dir, port=port)
+        app = build_remote_app(state, dist_dir=dist_dir)
         server = uvicorn.Server(_remote_uvicorn_config(app, port))
 
         timer = _AutoOffTimer(state, lambda: _remote_serve_off(state, server))

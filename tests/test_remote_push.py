@@ -1014,7 +1014,6 @@ def test_with_no_origin_announced_a_link_is_null_and_ngroks_api_is_never_asked(
     ``https://<theirs>/r/<the real token>/``, the service worker opened them, and one tap
     handed over the token. Nothing is asked now, and the link is null: the notification
     opens the page the phone subscribed from."""
-    world.kit.port = 8750
     for n in (1, 2):
         assert push_item(world, n) is None
         world.later(60)
@@ -1023,7 +1022,6 @@ def test_with_no_origin_announced_a_link_is_null_and_ngroks_api_is_never_asked(
 
 
 def test_an_origin_the_tui_or_serve_announced_leads_every_link(world: World) -> None:
-    world.kit.port = 8750
     world.kit.runtime.note_public_origin(PUBLIC_ORIGIN)
     for n in (1, 2, 3):
         assert push_item(world, n).startswith(f"{PUBLIC_ORIGIN}/r/{world.kit.runtime.token}/")

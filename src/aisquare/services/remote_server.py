@@ -1760,6 +1760,9 @@ class RemoteKit:
 
         No other code in a remote module reads a body (``tests/test_remote_gates.py``
         pins it), so every route refuses a malformed one the same way: 400 ``invalid``.
+        That includes a body nested deeper than ``json`` recurses into: it raises
+        ``RecursionError``, not ``ValueError`` (from about 1 000 levels on 3.11), and
+        anyone holding only the URL can post one to ``unlock``.
         """
         from starlette.requests import ClientDisconnect
 
@@ -1771,7 +1774,7 @@ class RemoteKit:
             return {}
         try:
             body = json.loads(raw)
-        except ValueError:
+        except (ValueError, RecursionError):
             raise RequestError(400, "invalid", "the body must be a JSON object") from None
         if not isinstance(body, dict):
             raise RequestError(400, "invalid", "the body must be a JSON object")
@@ -2306,8 +2309,8 @@ def build_remote_app(
                     continue  # bytes, or longer than any message a client sends: ignored
                 try:
                     message = json.loads(text)
-                except ValueError:
-                    continue
+                except (ValueError, RecursionError):
+                    continue  # RecursionError: nested past the parser's depth, 1 000 on 3.11
                 if not isinstance(message, dict):
                     continue
                 ref = message.get("project")

@@ -407,3 +407,34 @@ def test_a_body_that_is_not_an_object_is_400_through_the_one_parser(
     assert client.post(f"{base(runtime)}/api/note", content=b"").status_code == 200, (
         "an empty body is an empty object"
     )
+
+
+TOO_DEEP = b"[" * MAX_BODY_BYTES
+"""A body at the cap, nested deeper than ``json`` recurses into on every Python we run:
+3.11 stops near 1 000 levels, 3.12 and 3.13 before 50 000, 3.14 before 60 000."""
+
+
+def test_a_body_nested_too_deep_to_parse_is_400_even_from_a_stranger(
+    app: Any, runtime: Runtime
+) -> None:
+    """``json`` refuses this with RecursionError, not ValueError, and the parser once let it
+    out as a 500 and a logged traceback, from unlock, which needs only the URL."""
+    with pytest.raises(RecursionError):
+        json.loads(TOO_DEEP)  # the control: this body does reach the parser's limit
+    response = make_client(app).post(f"{base(runtime)}/api/unlock", content=TOO_DEEP)
+    assert response.status_code == 400, response.text
+    assert response.json()["error"] == "invalid"
+
+
+@pytest.mark.parametrize("call", GATED, ids=_ids)
+def test_a_body_nested_too_deep_to_parse_is_400_on_every_write(
+    app: Any, runtime: Runtime, ran: list[str], call: tuple[str, str, str]
+) -> None:
+    method, _template, path = call
+    client = make_client(app)
+    unlock(client, runtime)
+    runtime.set_allow_write(True)
+    response = client.request(method, f"{base(runtime)}{path}", content=TOO_DEEP)
+    assert response.status_code == 400, response.text
+    assert response.json()["error"] == "invalid"
+    assert ran == []

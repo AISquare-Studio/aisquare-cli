@@ -1,5 +1,6 @@
 """What every remote test builds on (SPEC §0.3): a runtime with a known password, a
-client that sends the page's ``Origin``, unlock, and the routes of a built app.
+client that sends the page's ``Origin``, unlock, the routes of a built app, and a
+socket read that fails instead of hanging.
 
 The ``Origin`` header goes on every request and every handshake from day one:
 the Origin gate refuses a write or a socket without it (SPEC §2.8), and a
@@ -10,6 +11,8 @@ client's default headers too.
 
 from __future__ import annotations
 
+import contextlib
+import threading
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -55,3 +58,24 @@ def mounted_routes(app: Any) -> list[BaseRoute]:
     """Every route under ``/r/{token}`` of a built app, in the order they are matched."""
     mount = next(route for route in app._app.routes if isinstance(route, Mount))
     return list(mount.routes)
+
+
+def receive_within(ws: Any, seconds: float = 10.0) -> dict[str, Any]:
+    """The socket's next ASGI message (a frame or the close); a failed test after ``seconds``.
+
+    The test session's own ``receive`` waits forever, and a stream that ends
+    without a close frame sends nothing more: a test about how a stream ends
+    would hang instead of failing. The wait runs on a daemon thread, which the
+    session's exit releases.
+    """
+    got: list[dict[str, Any]] = []
+
+    def wait() -> None:
+        with contextlib.suppress(Exception):
+            got.append(ws.receive())
+
+    waiter = threading.Thread(target=wait, daemon=True)
+    waiter.start()
+    waiter.join(seconds)
+    assert got, f"nothing from the socket in {seconds} s: did the stream end without a close?"
+    return got[0]

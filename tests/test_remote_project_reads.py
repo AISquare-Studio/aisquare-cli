@@ -38,7 +38,7 @@ from aisquare.services.remote_server import (
     live_writes,
     remote_board_payload,
 )
-from tests.remote_kit_helpers import base, make_client, make_runtime, unlock
+from tests.remote_kit_helpers import base, make_client, make_runtime, receive_within, unlock
 
 T0 = datetime(2026, 10, 7, 9, 0, tzinfo=UTC)
 
@@ -513,3 +513,24 @@ def test_a_client_message_over_4096_characters_is_ignored(
         first = _until(ws, lambda f: f["type"] == "pane")
     assert first["agent"] == "edge", "the long message and the binary one were never read"
     assert all(agent == "edge" for agent, _project in panes.asked)
+
+
+def test_a_client_message_nested_too_deep_to_parse_is_ignored_and_the_socket_reads_on(
+    runtime: Runtime, reads: Reads, tmp_path: Path
+) -> None:
+    """4 096 ``[`` fit the size cap and are past what ``json`` recurses into on 3.11, the
+    CI floor, where they raise RecursionError rather than ValueError. That once ended
+    the socket's reader; now they are ignored like any other message that is not JSON.
+    Every read is bounded: a reader that died would leave the socket silent, not closed."""
+    client = _socket_client(runtime, tmp_path, reads, Panes())
+    with client.websocket_connect(f"{base(runtime)}/ws") as ws:
+        ws.send_text("[" * remote_server.WS_CLIENT_MESSAGE_MAX)
+        ws.send_text(json.dumps({"subscribe": "after"}))
+        kinds: list[str] = []
+        while "pane" not in kinds:
+            assert len(kinds) < 20, kinds
+            message = receive_within(ws)
+            assert message["type"] == "websocket.send", f"the socket ended: {message}"
+            frame = json.loads(message["text"])
+            kinds.append(frame["type"])
+    assert frame["agent"] == "after"

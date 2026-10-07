@@ -1084,6 +1084,18 @@ def test_every_key_of_the_pad_has_a_name_a_screen_reader_can_say(
     assert names["enterToggle"] == "Press Enter after the text"
 
 
+def test_the_live_tab_opens_at_the_foot_of_the_pane_where_a_prompt_waits(
+    boot_report: dict[str, Any],
+) -> None:
+    """The Live tab opened at the top of a 40-row pane, and the prompt that needed the human
+    sat at its foot, below the fold and half under the input bar. Only the first screen
+    moves the scroll: a later frame leaves it where the human put it to read. The key pad,
+    opened at the foot, grew the bar back over the options it is there to answer: the view
+    stays at the foot, and one scrolled up to read stays where it is."""
+    assert boot_report["liveScroll"] == {"unread": 0, "first": 2400, "later": 300}
+    assert boot_report["padScroll"] == {"atFoot": 2400, "reading": 300, "open": True}
+
+
 # --- 11. the wheel --------------------------------------------------------------------------
 
 

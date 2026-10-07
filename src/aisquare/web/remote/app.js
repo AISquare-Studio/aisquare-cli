@@ -2247,10 +2247,19 @@ VIEWS.agent = (route, main) => {
     };
     fit.box.addEventListener("change", fitNow);
     body.append(tools, pane);
+    let landed = false;
     cleanups.push(paneWatch(pid, label, (payload) => {
       width = clampInt(payload.width, 20, 400);
       fitNow();
       draw(payload);
+      // The first screen opens at its foot, where a prompt waits: it sat below the fold,
+      // half under the input bar, about 110 px of scrolling away. Later frames leave the
+      // scroll where the human put it. Scrolled once this view is built, since a cached
+      // frame is drawn before the input bar is added.
+      if (!landed && Array.isArray(payload.rows) && payload.rows.length) {
+        landed = true;
+        Promise.resolve().then(() => { UI.main.scrollTop = UI.main.scrollHeight; });
+      }
     }));
   } else if (route.tab === "transcript") {
     const older = button("ghost", "Load older", () => load(cursor));
@@ -2346,8 +2355,13 @@ function inputBar(pid, label, cleanups) {
   pad.appendChild(more);
   bar.append(line, pad);
   const setPad = (open) => {
+    // The pad grows the bar over the foot of the pane, where the prompt it answers waits:
+    // a view at its foot stays there. One scrolled up to read is left where it is.
+    const main = UI.main;
+    const atFoot = main.scrollHeight - main.scrollTop - main.clientHeight < 2;
     pad.classList.toggle("open", open);
     if (open) text.blur();
+    if (open && atFoot) main.scrollTop = main.scrollHeight;
   };
   text.addEventListener("focus", () => setPad(false));
   text.addEventListener("input", () => {

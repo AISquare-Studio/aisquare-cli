@@ -155,6 +155,10 @@ class FakeElement extends FakeNode {
     this.dispatch("focus");
   }
 
+  blur() {
+    this.dispatch("blur");
+  }
+
   /* "tag" or "tag.class.class": all the page ever asks for. */
   querySelectorAll(selector) {
     const [tag, ...classes] = selector.split(".");
@@ -788,6 +792,41 @@ async function refusedReadOnly() {
   };
 }
 
+/* The live tab's scroll: after a pane that could not be read, after the first screen,
+ * and after another screen once the human scrolled up to read. */
+async function liveScroll() {
+  const page = await agentView();
+  page.run("UI.main.scrollHeight = 2400; UI.main.scrollTop = 0;");
+  const pane = (rows, error) => page.live().frame("pane", { rows, cursor: [0, 39], width: 80, height: 40, error }, { agent: "coder-1", project: PROJECT });
+  pane([], "can't find pane");
+  await settle();
+  const unread = page.run("UI.main.scrollTop");
+  const rows = Array.from({ length: 40 }, (unused, n) => (n === 36 ? "❯ 1. Yes" : "line " + n));
+  pane(rows);
+  await settle();
+  const first = page.run("UI.main.scrollTop");
+  page.run("UI.main.scrollTop = 300;");
+  pane(rows.map((row, n) => (n === 39 ? "a spinner moved" : row)));
+  await settle();
+  return { unread, first, later: page.run("UI.main.scrollTop") };
+}
+
+/* The key pad opened at the foot of the pane, and again once the human scrolled up to read.
+ * Opening it grows the input bar; this fake has no layout, so the height stays put. */
+async function padScroll() {
+  const page = await agentView();
+  const keys = () => click(buttonNamed(page.main(), "Keys"));
+  page.run("UI.main.scrollHeight = 2400; UI.main.clientHeight = 600; UI.main.scrollTop = 1800;");
+  keys();
+  await settle();
+  const atFoot = page.run("UI.main.scrollTop");
+  keys();
+  page.run("UI.main.scrollTop = 300;");
+  keys();
+  await settle();
+  return { atFoot, reading: page.run("UI.main.scrollTop"), open: page.main().querySelectorAll("div.pad.open").length === 1 };
+}
+
 /* What a screen reader is given for each key of the pad, and for the ⏎ toggle beside Send. */
 async function keyNames() {
   const page = await agentView();
@@ -823,6 +862,8 @@ async function main() {
     stopAtAPrompt: await stopAtAPrompt(),
     refusedReadOnly: await refusedReadOnly(),
     keyNames: await keyNames(),
+    liveScroll: await liveScroll(),
+    padScroll: await padScroll(),
   };
   process.stdout.write(JSON.stringify(report) + "\n");
 }

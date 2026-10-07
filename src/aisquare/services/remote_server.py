@@ -253,16 +253,24 @@ class NoRemotePage(RemoteError):
 class RequestError(Exception):
     """A handler's refusal, carried to the client as ``{error, message}``.
 
+    ``audit`` is for a refusal that still did something: one that came after keys
+    had reached an agent's pane, or after a fleet call that may have stopped the
+    agent before it failed. The write dispatcher writes it to the audit log as it
+    writes a success's summary.
+
     ``extra`` adds keys to that body: a 409 ``stale`` carries ``current``, what the
     agent shows now (SPEC §3.2). A handler the write dispatcher runs has no
     response of its own to put it in, so the refusal carries it.
     """
 
-    def __init__(self, status: int, error: str, message: str, **extra: object) -> None:
+    def __init__(
+        self, status: int, error: str, message: str, *, audit: str | None = None, **extra: object
+    ) -> None:
         super().__init__(message)
         self.status = status
         self.error = error
         self.message = message
+        self.audit = audit
         self.extra = extra
 
     def request_error_body(self) -> dict[str, object]:
@@ -2174,6 +2182,7 @@ def build_remote_app(
             status, payload = 200, result
         except RequestError as exc:
             status, payload = exc.status, exc.request_error_body()
+            summary = exc.audit  # a refusal that still did something is on the trail too
         except LookupError as exc:
             status, payload = 404, _error_body("not_found", str(exc))
         except Exception as exc:

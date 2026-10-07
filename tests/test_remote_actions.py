@@ -166,6 +166,33 @@ def test_a_refusal_without_extras_keeps_the_one_shape() -> None:
         "current": [],
         "headers": "kept as a key",
     }, "an extra key is body, never mistaken for a parameter of the response"
+    audited = RequestError(409, "still_busy", "Escape was sent", audit="tell coder-1 escape=sent")
+    assert audited.request_error_body() == {"error": "still_busy", "message": "Escape was sent"}
+
+
+def test_a_dispatched_refusal_that_still_did_something_is_audited(
+    runtime: Runtime, tmp_path: Path
+) -> None:
+    """The audit line is the refusal's own, and the body says nothing of it."""
+
+    def half_done(body: dict[str, Any]) -> tuple[dict[str, object], str]:
+        raise RequestError(
+            409, "still_busy", "Escape was sent", audit="tell coder-1 escape=sent refused"
+        )
+
+    writes = Writes({"note": half_done, "task/done": _stale})
+    app = build_app(runtime, sources=_sources(), writes=writes, dist_dir=tmp_path)
+    runtime.set_allow_write(True)
+    client = _unlocked(app, runtime)
+    response = client.post(f"{base(runtime)}/api/note", json={})
+    assert (response.status_code, response.json()) == (
+        409,
+        {"error": "still_busy", "message": "Escape was sent"},
+    )
+    assert client.post(f"{base(runtime)}/api/task/done", json={}).status_code == 409
+    assert _writes_audited() == [("note", "tell coder-1 escape=sent refused")], (
+        "a refusal that did nothing is not on the trail"
+    )
 
 
 # --- the ledger ----------------------------------------------------------------------------

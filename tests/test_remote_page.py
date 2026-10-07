@@ -942,8 +942,22 @@ def test_a_frame_clears_the_offline_banner_a_lost_read_raised(
     boot_report: dict[str, Any],
 ) -> None:
     lost = boot_report["lostRead"]
-    assert lost["lost"]["offline"] is True and "Offline" in lost["lost"]["banner"]
+    assert lost["lost"]["offline"] is True and lost["lost"]["banner"]
     assert lost["offline"] is False and lost["bannerHidden"] is True
+
+
+def test_only_a_phone_the_browser_calls_offline_is_told_to_get_back_online(
+    boot_report: dict[str, Any],
+) -> None:
+    """With serve stopped, or ngrok down, the phone is online and the machine is the one
+    away; the banner said "Offline — the page reconnects once the phone is back online"
+    all the same, and a lost read said to try again then."""
+    lost = boot_report["lostRead"]
+    assert lost["lost"]["banner"] == (
+        "The machine is not answering — the page reconnects as soon as it does."
+    )
+    assert "Could not reach the machine — try again in a moment." in lost["lost"]["said"]
+    assert lost["phone"] == "Offline — the page reconnects once the phone is back online."
 
 
 def test_a_quick_answer_holds_its_row_until_the_machine_answers(

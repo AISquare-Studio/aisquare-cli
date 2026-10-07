@@ -562,7 +562,7 @@ function routeHash(route) {
 const S = {
   remote: null, needs: null, actions: [], fleet: null, board: null,
   wantFleet: null, wantBoard: null, panes: new Map(), sock: null, sockState: "idle",
-  opened: false, backoff: 0, retryTimer: 0, lastFrameAt: 0, stale: false, offline: false,
+  opened: false, backoff: 0, retryTimer: 0, lastFrameAt: 0, stale: false, offline: false, away: null,
   off: null, locked: false, booting: false, view: null, route: null, pending: new Map(), orphans: new Map(),
   gone: new Map(), since: new Set(), push: null, padOnOpen: false, lastWake: 0, me: null, names: new Map(), scannedBehind: "",
 };
@@ -843,7 +843,7 @@ function failText(res, max) {
     return "Not sent again — " + why + ". If the machine got it, its result shows here; if not, look, then send it again.";
   }
   if (res.unconfirmed) return "Not confirmed — the connection dropped again. If the machine got it, its result shows here.";
-  if (res.network) return "Could not reach the machine — try again once the phone is back online.";
+  if (res.network) return "Could not reach the machine — try again " + (phoneOffline() ? "once the phone is back online." : "in a moment.");
   if (res.notJson) return OFF_OR_MOVED + ".";
   const message = plainText(res.message);
   if (res.status === 401) return "Unlock again to do that.";
@@ -1073,9 +1073,19 @@ async function refreshRemote() {
   if (res.ok) setRemote(res.data);
 }
 
+/* Whether the browser says this phone has no network. Only then is the phone the one
+ * away: with serve stopped or the tunnel down the phone is online, and the banner that
+ * told it to get back online blamed the wrong end. */
+function phoneOffline() {
+  return navigator.onLine === false;
+}
+
 function setOffline(offline) {
-  if (S.offline === offline) return;
+  // Who is away words the banner, so a change of that redraws it as well.
+  const away = offline ? (phoneOffline() ? "phone" : "machine") : null;
+  if (S.away === away) return;
   S.offline = offline;
+  S.away = away;
   drawStatus();
   drawBanner();
 }
@@ -1160,7 +1170,10 @@ function drawStatus() {
 function drawBanner() {
   if (!UI.banner) return;
   clear(UI.banner);
-  if (S.offline) UI.banner.appendChild(el("p", null, "Offline — the page reconnects once the phone is back online."));
+  if (S.offline) {
+    UI.banner.appendChild(el("p", null, S.away === "phone" ? "Offline — the page reconnects once the phone is back online."
+      : "The machine is not answering — the page reconnects as soon as it does."));
+  }
   if (S.sockState === "replaced") {
     UI.banner.appendChild(el("p", null, "Another tab of this phone took over the live view."));
     UI.banner.appendChild(button("ghost", "Reconnect here", () => wake(true)));

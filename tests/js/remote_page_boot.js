@@ -536,15 +536,20 @@ async function lostThenSignedOut() {
   return { said, hash, bodies: page.sent("api/send-keys"), pending: page.run("S.pending.size") };
 }
 
-/* A read lost while the socket is fine: the next frame says the machine is there. */
+/* A read lost while the socket is fine: the next frame says the machine is there. In
+ * between, the browser says the phone itself went offline. */
 async function lostRead() {
   const page = await agentView({ "GET api/projects": () => "network" });
+  const banner = () => (page.run("UI.banner.hidden") ? "" : page.run("UI.banner").textContent);
   click(buttonNamed(page.run("UI.nav"), "Projects"));
   await settle();
-  const lost = { offline: page.run("S.offline"), banner: page.run("UI.banner.hidden") ? "" : page.run("UI.banner").textContent };
+  const lost = { offline: page.run("S.offline"), banner: banner(), said: page.main().textContent };
+  page.run("navigator.onLine = false; for (const fn of window.listeners.offline) fn({ type: 'offline' });");
+  const phone = banner();
+  page.run("navigator.onLine = true;");
   page.live().frame("heartbeat", { needs_scanned_at: null });
   await settle();
-  return { lost, offline: page.run("S.offline"), bannerHidden: page.run("UI.banner.hidden") };
+  return { lost, phone, offline: page.run("S.offline"), bannerHidden: page.run("UI.banner.hidden") };
 }
 
 /* Two quick taps on a card's answers while the first is in flight. */

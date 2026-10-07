@@ -3,17 +3,25 @@
 The tape is the README's GIF and a test of the walkthrough it shows: vhs exits
 1 when a ``Wait`` does not see its text in time. That half runs only where vhs
 does, in docs/demo/render.sh's image, which .github/workflows/demo.yml runs on
-the pull requests that touch the demo or the UI. This module is the half that
-runs everywhere:
+the pull requests that touch the demo or the package. This module is the half
+that runs everywhere:
 
 - **The tape, statically.** :func:`parse` reads a tape into commands, and each
   ``*_problems`` rule says what in them cannot work. tests/test_demo_tape.py
   runs every rule over docs/demo.tape on every leg of the suite, with a
   positive control per shape and a negative control per rule.
-- **The render.** :func:`frame_problems` reads the ``.txt`` Output, the text of
-  every frame vhs recorded, and says whether a frame shows a traceback and
-  whether the last frame is still the screen the walkthrough ends on.
-  render.sh runs it as ``python -m tests.demo_tape out/demo.txt docs/demo.tape``.
+- **The render.** :func:`snapshot_problems` reads the ``.txt`` Output and says
+  whether a snapshot shows a traceback and whether the last one is still the
+  screen the walkthrough ends on. render.sh runs it as
+  ``python -m tests.demo_tape out/demo.txt docs/demo.tape``.
+
+  The ``.txt`` is not every frame of the GIF. vhs writes one snapshot of the
+  screen after each command of the tape (45 here; the GIF has ~530 frames),
+  and a Wait's snapshot is taken once its text is already on screen. What is on
+  screen only while a Wait polls, such as the Onboard view's log of ``init`` and
+  ``doctor``, is in no snapshot, so render.sh asks doctor again itself. When a
+  Wait times out, the file stops at the command before it, and vhs's error
+  prints the screen it gave up on.
 
 Standard library only: render.sh runs it on the render image's Python, which
 has neither pytest nor this checkout's environment.
@@ -24,7 +32,7 @@ from __future__ import annotations
 import ast
 import re
 import sys
-from collections.abc import Callable, Collection, Iterable, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -90,7 +98,7 @@ def output_problems(commands: Sequence[Command]) -> list[str]:
     A leading ``/`` is not a path to vhs: it lexes ``/…/`` as a regex and the
     tape fails to parse (measured with ``vhs validate``: "Invalid command").
     ``out/`` is where render.sh clears and the workflow uploads from, and the
-    ``.txt`` is what :func:`frame_problems` reads.
+    ``.txt`` is what :func:`snapshot_problems` reads.
     """
     problems: list[str] = []
     outputs: list[str] = []
@@ -147,27 +155,39 @@ _REGEX_SYNTAX = re.compile(r"[\\^$.|?*+()\[\]{}]")
 
 
 def strings_in(path: Path) -> list[str]:
-    """What ``path`` can put on screen: a Python file's string constants, another file's text.
+    """What ``path`` can put on screen: a Python file's strings, a script's lines.
 
-    The constants include the literal parts of f-strings, so ``f"{name} has no
-    manager yet."`` yields ``" has no manager yet."``.
+    Text that is never drawn is left out, so prose cannot satisfy the guard. In
+    Python that is a docstring, or any string that is a statement of its own; in
+    a script, a whole-line ``#`` comment. Measured in the review of #250: a
+    docstring in cli/ui/app.py kept "has no manager yet" found after the Manager
+    tab stopped saying it. The literal parts of f-strings are drawn, so
+    ``f"{name} has no manager yet."`` yields ``" has no manager yet."``.
     """
     text = path.read_text(encoding="utf-8")
     if path.suffix != ".py":
-        return [text]
+        return [line for line in text.splitlines() if not line.strip().startswith("#")]
+    tree = ast.parse(text)
+    statements = {id(node.value) for node in ast.walk(tree) if isinstance(node, ast.Expr)}
     return [
         node.value
-        for node in ast.walk(ast.parse(text))
-        if isinstance(node, ast.Constant) and isinstance(node.value, str)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and id(node) not in statements
     ]
 
 
-def wait_problems(commands: Sequence[Command], corpus: Sequence[str]) -> list[str]:
-    """Each Wait pattern is plain text that something the walkthrough runs prints.
+def wait_problems(commands: Sequence[Command], printed_by: Mapping[str, Path]) -> list[str]:
+    """Each Wait pattern is plain text that the one file named for it prints.
 
     So copy that changes under the tape fails here, on every leg, and not only
-    in the render, a minute in, as a timeout. A bare ``Wait`` waits for the
-    shell's prompt and is left alone.
+    in the render, a minute in, as a timeout. One file per text, the one that
+    draws it on the screen the tape is waiting for, not the whole UI: pooled,
+    "aisquare fleet" stayed found through the help screen and a toast after
+    Welcome's title changed (review of #250). A Wait with no file named for it
+    is a problem too, so a new Wait has to say what prints it. A bare ``Wait``
+    waits for the shell's prompt and is left alone.
     """
     problems: list[str] = []
     for command in commands:
@@ -179,8 +199,10 @@ def wait_problems(commands: Sequence[Command], corpus: Sequence[str]) -> list[st
             problems.append(f"{where} matches any screen")
         elif _REGEX_SYNTAX.search(text):
             problems.append(f"{where} is a regex; wait for plain text this guard can find")
-        elif not any(text in string for string in corpus):
-            problems.append(f"{where}: nothing the walkthrough runs prints that text")
+        elif (source := printed_by.get(text)) is None:
+            problems.append(f"{where}: no file is named as the one that prints it")
+        elif not any(text in string for string in strings_in(source)):
+            problems.append(f"{where}: {source.name} does not print that text")
     return problems
 
 
@@ -382,6 +404,11 @@ def stand_in_problems(script: str, is_agent: Callable[[str], bool]) -> list[str]
     agent. A stand-in that loops in sh leaves sh in the foreground, so its row
     never reads as the agent and a prompt typed at spawn waits out the 20 s
     PROMPT_TIMEOUT first.
+
+    The word after ``exec`` must be the program itself. The stand-in is
+    ``#!/bin/sh``, which is dash in the render image, and dash's ``exec`` takes
+    no options: ``exec -a claude cat`` runs a command named ``-a`` and exits 127
+    after the banner has printed (measured; ``--`` fails the same way).
     """
     lines = [
         stripped
@@ -394,68 +421,69 @@ def stand_in_problems(script: str, is_agent: Callable[[str], bool]) -> list[str]
     words = last.split()
     if words[0] != "exec":
         return [f"its last line, {last!r}, execs nothing: the shell stays in the foreground"]
-    rest = iter(words[1:])
-    program = None
-    for word in rest:
-        if word == "-a":  # exec -a NAME: the next word is a name, not the program
-            next(rest, None)
-        elif not word.startswith("-"):
-            program = word
-            break
-    if program is None:
+    if len(words) < 2:
         return [f"its last line, {last!r}, names no program"]
+    program = words[1]
+    if program.startswith("-"):
+        return [f"its last line, {last!r}, gives exec {program}, which dash runs as the command"]
     name = program.rsplit("/", 1)[-1]
     if not is_agent(name):
         return [f"its last line, {last!r}, leaves {name} in the foreground, which is not an agent"]
     return []
 
 
-# ---------------------------------------------------------------------- frames
+# ------------------------------------------------------------------- snapshots
 
-#: The line vhs writes between two frames of a ``.txt`` Output (measured: 80 of
-#: U+2500, alone on its line; no frame of the walkthrough has one of its own).
-FRAME_RULE = "─" * 80
+#: The line vhs writes after each snapshot of a ``.txt`` Output (measured: 80 of
+#: U+2500, alone on its line; no screen of the walkthrough draws one of its own).
+SNAPSHOT_RULE = "─" * 80
 
-TRACEBACK = "Traceback (most recent call last)"
+#: What a traceback leaves on screen, whichever slice of it a snapshot holds. The
+#: header alone is not enough: a long traceback scrolls it away, and a narrow box
+#: such as the Onboard log (~46 columns) word-wraps it in two (review of #250).
+#: So each frame line counts too: Python's ``File "…", line N, in …``, and the
+#: ``❱`` (U+2771) Rich puts on the line that raised in every frame, a character
+#: nothing in src/ draws.
+TRACEBACK = re.compile(r'Traceback \(most recent call last\)|File "[^"]*", line \d+, in |❱')
 
 
-def frames(text: str) -> list[str]:
-    """The frames of a ``.txt`` Output that show anything, in order."""
+def snapshots(text: str) -> list[str]:
+    """The snapshots of a ``.txt`` Output that show anything, in order."""
     found: list[list[str]] = [[]]
     for line in text.splitlines():
-        if line == FRAME_RULE:
+        if line == SNAPSHOT_RULE:
             found.append([])
         else:
             found[-1].append(line)
     return [joined for lines in found if (joined := "\n".join(lines)).strip()]
 
 
-def frame_problems(text: str, end: str) -> list[str]:
-    """No frame shows a traceback, and the last frame still shows ``end``.
+def snapshot_problems(text: str, end: str) -> list[str]:
+    """No snapshot shows a traceback, and the last one still shows ``end``.
 
-    Python's and Rich's tracebacks both start with :data:`TRACEBACK`. The last
-    frame is checked because a Wait passes the moment its text appears: an app
-    that fell over just after would still have passed every Wait.
+    The last snapshot is checked because a Wait passes the moment its text
+    appears: an app that fell over just after would still have passed every
+    Wait.
     """
     if not end.strip():
-        return ["no end text to look for: an empty one is found in every frame"]
-    shown = frames(text)
+        return ["no end text to look for: an empty one is found in every snapshot"]
+    shown = snapshots(text)
     if not shown:
-        return ["no frames: the render recorded nothing"]
+        return ["no snapshots: the render recorded nothing"]
     problems = [
-        f"frame {number} of {len(shown)} shows a traceback"
-        for number, frame in enumerate(shown, start=1)
-        if TRACEBACK in frame
+        f"snapshot {number} of {len(shown)} shows a traceback"
+        for number, snapshot in enumerate(shown, start=1)
+        if TRACEBACK.search(snapshot)
     ]
     if end not in shown[-1]:
-        problems.append(f"the last frame does not show {end!r}, where the walkthrough ends")
+        problems.append(f"the last snapshot does not show {end!r}, where the walkthrough ends")
     return problems
 
 
 def main(argv: Sequence[str]) -> int:
-    """``python -m tests.demo_tape <frames.txt> <tape>``: 0 when the render is sound."""
+    """``python -m tests.demo_tape <demo.txt> <tape>``: 0 when the render is sound."""
     if len(argv) != 2:
-        print("usage: python -m tests.demo_tape <frames.txt> <tape>", file=sys.stderr)
+        print("usage: python -m tests.demo_tape <demo.txt> <tape>", file=sys.stderr)
         return 2
     rendered, tape = Path(argv[0]), Path(argv[1])
     end = end_text(parse(tape.read_text(encoding="utf-8")))
@@ -463,12 +491,12 @@ def main(argv: Sequence[str]) -> int:
         print(f"{tape}: waits for no text, so nothing says where it ends", file=sys.stderr)
         return 1
     text = rendered.read_text(encoding="utf-8")
-    problems = frame_problems(text, end)
+    problems = snapshot_problems(text, end)
     for problem in problems:
         print(f"{rendered}: {problem}", file=sys.stderr)
     if problems:
         return 1
-    print(f"{rendered}: {len(frames(text))} frames, no traceback, the last shows {end!r}")
+    print(f"{rendered}: {len(snapshots(text))} snapshots, no traceback, the last shows {end!r}")
     return 0
 
 

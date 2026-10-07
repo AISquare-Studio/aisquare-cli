@@ -4,10 +4,13 @@ name: demo
 #
 # docs/demo.tape is the README's GIF and a test of the walkthrough it records:
 # vhs exits 1 when a Wait does not see its text in time, so a step of the
-# walkthrough that stops working stops the GIF. Rendering needs docker,
-# Chromium and a few minutes, unlike ci.yml's Python matrix, and only a handful
-# of paths can change what it shows. So it runs on the pull requests that touch
-# those paths, on every published release (the artifact holds the GIF and the
+# walkthrough that stops working stops the GIF. Rendering needs docker and
+# Chromium, unlike ci.yml's Python matrix, and takes about a minute and a half.
+# The walkthrough runs most of the package (asq's entry point, init and doctor
+# through core/selfcli.py, the store, the workspace resolver, the manager's
+# spawn and launch), so it renders on any change to the package, the demo or
+# the dependencies: on pull requests, on pushes to main and rc/** (merges
+# included), on every published release (the artifact holds the GIF and the
 # still for the release notes), and by hand. The static half of the test,
 # tests/test_demo_tape.py, is part of the suite and runs on every leg of ci.yml.
 
@@ -19,15 +22,19 @@ on:
       - docs/demo/**
       - tests/demo_tape.py
       - .github/workflows/demo.yml
-      # What the walkthrough drives: the UI; onboarding, which runs init and
-      # doctor; the manager's spawn, and the tmux window it runs in.
-      - src/aisquare/cli/ui/**
-      - src/aisquare/cli/launch.py
-      - src/aisquare/services/onboarding.py
-      - src/aisquare/services/diagnostics.py
-      - src/aisquare/services/fleet.py
-      - src/aisquare/core/tmux.py
-      # A dependency bump, textual's above all, changes what is drawn.
+      - src/aisquare/**
+      # A dependency bump, textual's above all, changes what is drawn. (So can a
+      # release inside pyproject.toml's ranges, with no change here: the next
+      # render picks it up.)
+      - pyproject.toml
+  push:
+    branches: [main, "rc/**"]
+    paths:
+      - docs/demo.tape
+      - docs/demo/**
+      - tests/demo_tape.py
+      - .github/workflows/demo.yml
+      - src/aisquare/**
       - pyproject.toml
   release:
     types: [published]
@@ -48,13 +55,15 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # The same script `make demo` runs, so CI renders exactly what a laptop
-      # does: the pinned image from docs/demo/Dockerfile with aisquare built
-      # from this tree, the tape run as the runner's uid with a scratch HOME,
-      # then gifsicle, the frame check and the size check. It exits non-zero
-      # when a Wait times out (vhs prints the last screen), when a frame shows
-      # a traceback, when the last frame is not where the walkthrough ends, or
-      # when the GIF is over 4 MiB.
+      # The same script `make demo` runs, so CI renders the way a laptop does:
+      # the image from docs/demo/Dockerfile (vhs pinned by digest; apt and PyPI
+      # resolved fresh here, since CI has no layer cache) with aisquare built
+      # from this tree, the tape run with a scratch HOME, then the snapshot
+      # check, doctor asked again, gifsicle and the size check. It exits non-zero
+      # when a Wait times out (vhs prints the screen it gave up on), when a
+      # snapshot shows a traceback, when the last one is not where the
+      # walkthrough ends, when doctor crashes or fails a check, or when the GIF
+      # is over 4 MiB.
       - name: Render
         run: sh docs/demo/render.sh
 
@@ -66,8 +75,10 @@ jobs:
             echo "To refresh the committed copies, replace docs/demo.gif and docs/demo/welcome.png with them."
           } >> "$GITHUB_STEP_SUMMARY"
 
-      # Always, so a failed render still leaves its frames: out/demo.txt holds
-      # the text of every frame up to the Wait that timed out (measured).
+      # Always, so a failed render still leaves what it saw: out/demo.txt holds a
+      # snapshot of the screen after each command, up to the one before a Wait
+      # that timed out (vhs's own error, in the Render step's log, prints the
+      # screen that Wait gave up on).
       - name: Upload the render
         if: always()
         uses: actions/upload-artifact@v7

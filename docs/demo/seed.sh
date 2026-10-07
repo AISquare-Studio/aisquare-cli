@@ -17,8 +17,13 @@ aisquare_demo_seed() {
         echo "seed.sh: runs only inside the demo image (docs/demo/Dockerfile)" >&2
         return 1
     fi
-    if [ ! -x docs/demo/bin/claude ]; then
+    if [ ! -e docs/demo/bin/claude ]; then
         echo "seed.sh: source it from the repository root, where docs/demo.tape runs" >&2
+        return 1
+    fi
+    if [ ! -x docs/demo/bin/claude ]; then
+        echo "seed.sh: docs/demo/bin/claude is not executable (chmod +x it; git stages" \
+            "it as 100755; a noexec mount does this too)" >&2
         return 1
     fi
     for state in .aisquare .claude .codex acme-api; do

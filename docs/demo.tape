@@ -1,12 +1,12 @@
 # The README's GIF, and a test of the walkthrough it shows.
 #
 # Every Wait below must find its text on screen within WaitTimeout, or vhs
-# exits 1 and the render fails: a step that stops working stops the GIF. The
-# same texts are checked against the UI's source on every test run
-# (tests/test_demo_tape.py), so changed copy fails there first.
+# exits 1 and the render fails: a step that stops working stops the GIF. Each
+# text is also checked against the one file that prints it on every test run
+# (tests/test_demo_tape.py, PRINTED_BY), so changed copy fails there first.
 #
 # Render it with `make demo`, which runs docs/demo/render.sh: this tape in the
-# pinned image docs/demo/Dockerfile, writing out/demo.gif, out/demo.txt and
+# image docs/demo/Dockerfile builds, writing out/demo.gif, out/demo.txt and
 # out/welcome.png. Not with a vhs on your own machine: the hidden opening
 # sources docs/demo/seed.sh, which writes a sample project into HOME and puts a
 # stand-in `claude` first on PATH, and which refuses to run outside the image.

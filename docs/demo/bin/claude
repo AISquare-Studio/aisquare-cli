@@ -12,9 +12,11 @@
 # never read as the agent and a prompt typed at spawn would wait out the 20 s
 # PROMPT_TIMEOUT first. cat is not a shell.
 
+# The banner below is the only line that says "stand-in agent": the tape waits
+# for those words, and tests/test_demo_tape.py checks them against this file.
 case "${1:-}" in
 --version | -v)
-    echo "0.0.0 (stand-in agent for the aisquare demo, not Claude Code)"
+    echo "0.0.0 (the aisquare demo's stand-in, not Claude Code)"
     exit 0
     ;;
 esac
@@ -22,7 +24,7 @@ esac
 # Nothing to talk to without a terminal (a probe, a pipe): say so and stop,
 # rather than leave `cat` waiting on a stdin nobody will close.
 if [ ! -t 0 ]; then
-    echo "stand-in agent: nothing is signed in in this demo, so there is no answer"
+    echo "stand-in: nothing is signed in in this demo, so there is no answer"
     exit 0
 fi
 

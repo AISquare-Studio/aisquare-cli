@@ -13,6 +13,10 @@ source .venv/bin/activate
 make install          # editable install + dev tools (ruff, mypy, pytest)
 ```
 
+`make install` pins ruff and mypy to the versions CI runs, through
+`ci/constraints.txt`, so lint and the type check agree with CI. A venv built
+another way takes the same file: `uv pip install -c ci/constraints.txt -e ".[dev]"`.
+
 > **Do not install the explainability extra into this checkout.**
 > `pip install 'aisquare-cli[explainability]'` puts a second `aisquare` package
 > ahead of your editable one, and from then on every command — including the

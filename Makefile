@@ -7,9 +7,10 @@
 # which installs into its runner env and never had two candidates).
 PYTHON ?= $(if $(wildcard .venv/bin/python),.venv/bin/python,python)
 
-## install: editable install with dev tools (into .venv when present)
+## install: editable install with dev tools (into .venv when present), ruff and
+## mypy at the versions CI pins (ci/constraints.txt)
 install:
-	$(PYTHON) -m pip install -e ".[dev]"
+	$(PYTHON) -m pip install -c ci/constraints.txt -e ".[dev]"
 
 ## test: run the test suite
 test:

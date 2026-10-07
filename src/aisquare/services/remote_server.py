@@ -533,6 +533,9 @@ class Device:
     secret_sha256: str
     """Hex SHA-256 of the cookie's secret, which a presented cookie is compared against."""
     ua: str
+    """The browser's ``User-Agent``, every character that does not print a ``?``
+    (:func:`_audit_clean`): ``status`` and the R panel print it on the machine's own
+    terminal, and a header's bytes past 0x7f arrive as latin-1, C1 controls included."""
     first_seen: str
     last_seen: str
     """ISO UTC. Touched in memory on every request; the flush writes it every 30 s."""
@@ -1119,7 +1122,7 @@ class Runtime:
             device = Device(
                 id=device_id,
                 secret_sha256=_secret_digest(secret),
-                ua=ua[:DEVICE_UA_MAX],
+                ua=_audit_clean(ua, DEVICE_UA_MAX),
                 first_seen=_iso_seconds(now),
                 last_seen=_iso_seconds(now),
                 expires_at=_iso_seconds(now + DEVICE_LIFETIME),
@@ -1178,7 +1181,7 @@ class Runtime:
             device.last_seen = _iso_seconds(now)
             device.failed_unlocks = 0
             if ua:
-                device.ua = ua[:DEVICE_UA_MAX]
+                device.ua = _audit_clean(ua, DEVICE_UA_MAX)
             self._write_state(self._state)
             return secret, device
 

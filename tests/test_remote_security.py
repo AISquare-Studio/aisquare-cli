@@ -803,6 +803,26 @@ def test_a_user_agent_that_is_rich_markup_is_printed_as_text(
     assert "x [/b] [bold red]phone" in shown.stdout
 
 
+def test_a_user_agent_reaches_the_machines_terminal_without_a_control_character(
+    runtime: Runtime, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``status`` prints the user agent as text, which keeps markup out but not an escape
+    sequence: ``ESC c`` resets the terminal it is printed in. A header's bytes past 0x7f
+    arrive as latin-1, so ``\\x9b``, the C1 control that starts one too, gets in as well
+    (the runtime is called directly: the test client re-encodes such a byte as UTF-8)."""
+    monkeypatch.setattr(remote_server, "_runtime", runtime)
+    unlocked = runtime.unlock_device(PASSWORD, "Phone \x1bc\x9b2J end")
+    assert unlocked is not None
+    _secret, device = unlocked
+    assert device.ua == "Phone ?c?2J end"
+    again = runtime.reactivate_device(device.id, "Tablet \x1b]0;x\x07")
+    assert again is not None and again[1].ua == "Tablet ?]0;x?"
+    shown = CliRunner().invoke(cli, ["remote", "status"])
+    assert shown.exit_code == 0, shown.output
+    assert "Tablet ?]0;x?" in shown.stdout
+    assert not any(char in shown.stdout for char in "\x1b\x9b\x07")
+
+
 # --- (4) idle sign-out and absolute expiry ----------------------------------------------
 
 

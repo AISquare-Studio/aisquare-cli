@@ -603,35 +603,59 @@ def action_dialog_guard(
     refusal with a sentence, or with ``dismiss`` an Escape to an agent about to be
     stopped anyway. It never costs an Enter into a dialog.
 
+    A pending tool counts as a dialog here (:func:`action_may_answer`): in a
+    permission prompt's first seconds nothing else tells it from a tool at work,
+    and the ``/exit`` and Enter of a stop would answer it "1. Yes". For a tool
+    that is running, the Escape stops it, which a stop was about to do anyway.
+
     The Escape answers a permission prompt "No", so a refusal after it is audited,
     as ``audit_start`` and then ``dismissed=yes refused=<error>``.
     """
     snap = snap if snap is not None else action_snapshot(target, label, pin)
-    if not remote_needs.needs_dialog_open(snap):
+    if not action_may_answer(snap):
         return False
+    dialog = remote_needs.needs_dialog_open(snap)
     if not dismiss:
-        raise RequestError(
-            409,
-            "dialog_open",
-            f"{label} is showing a prompt; {doing} would answer it — "
-            "send dismiss_dialog: true to press Esc (No) first",
-        )
+        if dialog:
+            message = (
+                f"{label} is showing a prompt; {doing} would answer it — "
+                "send dismiss_dialog: true to press Esc (No) first"
+            )
+        else:
+            message = (
+                f"{label} has a tool pending, and a prompt for it may have just opened; "
+                f"{doing} could answer it — send dismiss_dialog: true to press Esc (No) "
+                "first, which also stops a running tool"
+            )
+        raise RequestError(409, "dialog_open", message)
     action_press_escape(snap, label)
     with action_audited(lambda error: f"{audit_start} dismissed=yes refused={error}"):
         closed = action_settle(
             target,
             label,
             pin,
-            lambda again: not remote_needs.needs_dialog_open(again),
+            lambda again: not action_may_answer(again),
             remote_needs.DIALOG_SETTLE_SECONDS,
         )
         if closed is None:
+            still = "still shows a prompt" if dialog else "still has its tool pending"
             raise RequestError(
                 409,
                 "dialog_open",
-                f"Escape was sent, but {label} still shows a prompt — nothing else was done",
+                f"Escape was sent, but {label} {still} — nothing else was done",
             )
     return True
+
+
+def action_may_answer(snap: AgentNow) -> bool:
+    """Whether an Enter typed into the agent's pane now may answer a dialog.
+
+    One needs-you sees (:func:`remote_needs.needs_dialog_open`), or any tool use
+    still waiting for its result (:func:`remote_needs.needs_tool_pending`), which
+    is what a permission prompt is until its pane has been quiet for 5 s and its
+    notification has come at 6 s.
+    """
+    return remote_needs.needs_dialog_open(snap) or remote_needs.needs_tool_pending(snap)
 
 
 # --- typing into the agent's prompt ------------------------------------------------------------

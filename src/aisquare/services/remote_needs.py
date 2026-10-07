@@ -1426,11 +1426,15 @@ def needs_dialog_open(snap: AgentNow) -> bool:
     Never for a pane that is not the agent's: an exited, lost or not-yet-started
     agent shows no dialog, even when its transcript ends on a pending tool (a
     crash mid-tool). Otherwise any of: a pending tool in a quiet pane (the
-    spinner stops while a dialog waits, in the 6 s before the notification
-    too); attention with no interruption since; a current prompt, question or
-    plan item, or the usage-limit dialog. A false positive costs a refusal with
-    a sentence, or an Escape to an agent about to be stopped anyway — never an
-    Enter into a dialog.
+    spinner stops while a dialog waits); attention with no interruption since; a
+    current prompt, question or plan item, or the usage-limit dialog. A false
+    positive costs a refusal with a sentence, or an Escape to an agent about to
+    be stopped anyway — never an Enter into a dialog.
+
+    A dialog's first seconds are not seen here: quiet means no output for
+    ``fleet.ACTIVITY_WINDOW`` (5 s), and the notification that makes the row
+    ``attention`` comes at 6 s, so until then a prompt reads like a tool at work.
+    An action that would type an Enter asks :func:`needs_tool_pending` as well.
     """
     status = snap.status
     if status is None or not snap.pane_is_agent:
@@ -1447,6 +1451,23 @@ def needs_dialog_open(snap: AgentNow) -> bool:
         or (item.kind == "limited" and status.state != "limited")
         for item in snap.items
     )
+
+
+def needs_tool_pending(snap: AgentNow) -> bool:
+    """Whether the agent's newest message holds a tool use that has no result yet.
+
+    A tool at work, or a permission prompt for it that opened too recently for
+    :func:`needs_dialog_open` to tell: in a dialog's first seconds the pane is
+    not quiet yet and no notification has come. Nothing on screen tells the two
+    apart, so a stop, a restart or a switch, whose ``/exit`` and Enter would
+    answer "1. Yes", takes it for a prompt. Tools older than the row do not count
+    (a resumed session's leftovers), and neither does a pane that is not the
+    agent's.
+    """
+    status = snap.status
+    if status is None or not snap.pane_is_agent:
+        return False
+    return bool(_needs_pending(snap.tail, status.agent))
 
 
 def needs_at_input_prompt(snap: AgentNow) -> bool:
@@ -1997,6 +2018,7 @@ __all__ = [
     "needs_push_safe",
     "needs_routes",
     "needs_scanned_iso",
+    "needs_tool_pending",
     "needs_ws_frames",
     "record_needs_dismissal",
     "scan_needs_you",

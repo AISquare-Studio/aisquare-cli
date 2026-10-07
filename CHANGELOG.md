@@ -60,10 +60,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Esc, then the text once the agent is back at its prompt), `agent/stop`,
   `agent/restart` and `agent/switch`. Each is pinned to the agent the phone
   looked at (`agent_id`, and a card's `needs_id`), refused while the agent shows
-  a dialog that an Enter would answer (`dialog_open`, with `dismiss_dialog` to
-  press Esc first), and run at most once per `request_id`: a retry after the
-  phone slept is answered from the server's ledger (`GET api/actions/recent`,
-  and an `action` frame).
+  a dialog that an Enter would answer, or has a tool pending that may be a
+  prompt just opened (`dialog_open`, with `dismiss_dialog` to press Esc first),
+  and run at most once per `request_id`: a retry after the phone slept is
+  answered from the server's ledger (`GET api/actions/recent`, and an `action`
+  frame).
 - **Reads by project.** `api/board`, `api/tasks`, `api/memory` and
   `api/explainability/<agent>` take `?project=` as `api/fleet` does, each cached
   per project; `api/transcript/<agent>` takes `?width=`; pane subscriptions name

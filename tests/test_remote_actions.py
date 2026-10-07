@@ -65,6 +65,7 @@ from aisquare.services.remote_server import (
     write_endpoint_names,
 )
 from aisquare.services.team import TeamDisabledError
+from aisquare.services.transcript import PendingTool, TranscriptTail
 from tests.remote_kit_helpers import base, make_client, make_runtime, receive_within, unlock
 
 
@@ -624,7 +625,11 @@ class FakeNeeds:
     ``limited`` item on a row that reads ``limited``, say, not on one that reads
     ``working``. ``at_prompt`` stands for the rest of what §4.5 reads for the prompt, a
     quiet pane and a transcript whose newest record is an interruption or the agent's own
-    words, which the fake does not write out."""
+    words, which the fake does not write out.
+
+    ``tail`` and ``pane_quiet`` are handed over as they are, for the predicates that read
+    them: an Escape that closes the dialog answers the tail's pending tools too, as Claude
+    Code records a rejected or interrupted tool use."""
 
     def __init__(self, pane: FakePane) -> None:
         self.pane = pane
@@ -640,6 +645,8 @@ class FakeNeeds:
         self.escape_stops_agent = True
         self.lag = 1
         self.items: tuple[NeedsItem, ...] = ()
+        self.tail: TranscriptTail | None = None
+        self.pane_quiet: bool | None = True
         self.before_read: Callable[[], None] | None = None
         self.reads = 0
         self._escapes = 0
@@ -661,9 +668,9 @@ class FakeNeeds:
         snap = AgentNow(
             project=project,
             status=status,
-            tail=None,
+            tail=self.tail,
             pane_is_agent=self.pane_is_agent and status is not None,
-            pane_quiet=True,
+            pane_quiet=self.pane_quiet,
             items=self.items,
         )
         self._views.append((snap, self.dialog, self.at_prompt, self.interrupted))
@@ -682,6 +689,8 @@ class FakeNeeds:
         self.interrupted = True
         if self.escape_closes_dialog:
             self.dialog = False
+            if self.tail is not None:
+                self.tail = dataclasses.replace(self.tail, pending=(), newest="interrupted")
         if self.escape_stops_agent and not self.dialog:
             self.at_prompt = True
 
@@ -1925,6 +1934,94 @@ def test_a_current_permission_item_is_an_open_dialog_to_the_guard(
     assert response.status_code == 409, response.text
     assert response.json()["error"] == "dialog_open"
     assert fleet.calls == [] and pane.sent == []
+
+
+def _a_prompt_just_drawn() -> TranscriptTail:
+    """A Bash permission prompt Claude Code drew a moment ago: a tool use with no result."""
+    drawn = T0 + timedelta(minutes=5)
+    push = PendingTool(
+        tool_use_id="toolu_push",
+        name="Bash",
+        summary="Bash(git push --force)",
+        input={"command": "git push --force"},
+        at=drawn,
+    )
+    return TranscriptTail(
+        pending=(push,),
+        newest="assistant_tool",
+        newest_at=drawn,
+        last_text=None,
+        last_text_at=None,
+        marker_key="rec-push",
+    )
+
+
+@pytest.mark.parametrize("name", PINNED_ACTIONS)
+def test_a_prompt_too_new_for_needs_you_to_see_still_refuses_the_action(
+    phone: Phone,
+    fleet: FleetCalls,
+    own_predicates: FakeNeeds,
+    pane: FakePane,
+    project: ProjectInfo,
+    name: str,
+) -> None:
+    """A prompt's first seconds: its pane printed within the last 5 s and the notification
+    that makes the row ``attention`` comes at 6 s, so needs-you reads a tool at work, and
+    the stop's ``/exit`` and Enter answered "1. Yes" to ``git push --force``."""
+    _row(project)
+    own_predicates.tail = _a_prompt_just_drawn()
+    own_predicates.pane_quiet = False
+    response = phone.post(name, **PINNED)
+    assert response.status_code == 409, response.text
+    assert response.json() == {
+        "error": "dialog_open",
+        "message": "coder-1 has a tool pending, and a prompt for it may have just opened; "
+        f"{DOING[name]} could answer it — send dismiss_dialog: true to press Esc (No) "
+        "first, which also stops a running tool",
+    }
+    assert fleet.calls == [] and pane.sent == []
+
+
+@pytest.mark.parametrize("name", PINNED_ACTIONS)
+def test_dismiss_dialog_answers_a_pending_tool_with_esc_then_acts(
+    phone: Phone,
+    fleet: FleetCalls,
+    own_predicates: FakeNeeds,
+    pane: FakePane,
+    project: ProjectInfo,
+    log: list[str],
+    name: str,
+) -> None:
+    """The Escape answers the prompt "No", or stops the tool if it was one at work; the
+    action goes on once the transcript holds the tool use's result."""
+    _row(project)
+    own_predicates.tail = _a_prompt_just_drawn()
+    own_predicates.pane_quiet = False
+    response = phone.post(name, **PINNED, dismiss_dialog=True)
+    assert response.status_code == 200, response.text
+    assert log == ["key Escape", f"fleet {name.removeprefix('agent/')}"]
+    assert "dismissed=yes" in phone.audit()[0][1]
+
+
+def test_a_tool_still_pending_after_the_escape_is_409_and_nothing_else_is_done(
+    phone: Phone,
+    fleet: FleetCalls,
+    own_predicates: FakeNeeds,
+    pane: FakePane,
+    project: ProjectInfo,
+) -> None:
+    _row(project)
+    own_predicates.tail = _a_prompt_just_drawn()
+    own_predicates.pane_quiet = False
+    own_predicates.escape_closes_dialog = False
+    response = phone.post("agent/stop", **PINNED, dismiss_dialog=True)
+    assert response.status_code == 409
+    assert response.json() == {
+        "error": "dialog_open",
+        "message": "Escape was sent, but coder-1 still has its tool pending — "
+        "nothing else was done",
+    }
+    assert pane.keys() == ["Escape"] and fleet.calls == []
 
 
 def test_prompt_types_into_a_quiet_waiting_agent_that_has_no_transcript(

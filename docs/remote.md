@@ -243,8 +243,11 @@ phone slept meanwhile.
 dialog would answer it: approve a command, pick an option, accept a plan. So
 when the agent shows a prompt, stop, restart and switch are refused with
 `dialog_open`, and the sheet offers **Press Esc (No) first**, which dismisses the
-prompt and then goes on. A card's Tell and Interrupt & tell refuse a dialog the
-same way; the menu's plain Tell types only into an agent waiting at its prompt.
+prompt and then goes on. For its first few seconds a permission prompt cannot be
+told from a tool at work, so they are refused the same way while any tool the
+agent called has no result yet; there the Esc also stops a running tool. A
+card's Tell and Interrupt & tell refuse a dialog the same way; the menu's plain
+Tell types only into an agent waiting at its prompt.
 
 Every action is pinned to the agent you looked at: if a manager restarted or
 switched it in the meantime, the action is refused as `stale` rather than

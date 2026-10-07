@@ -57,6 +57,7 @@ from aisquare.services.remote_needs import (
     needs_item_current,
     needs_item_id,
     needs_push_safe,
+    needs_tool_pending,
     record_needs_dismissal,
     scan_needs_you,
 )
@@ -1194,6 +1195,33 @@ def test_a_pending_tool_in_a_busy_pane_is_a_tool_at_work(monkeypatch: pytest.Mon
     snap = _now_of(_working(_tail(_tool("toolu_a"))), tmux, monkeypatch)
     assert snap.pane_quiet is False
     assert not needs_dialog_open(snap) and not needs_at_input_prompt(snap)
+
+
+@pytest.mark.parametrize("seconds", [0, 1, 3, 5])
+def test_a_prompt_too_new_to_see_is_still_a_pending_tool(
+    seconds: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A Bash prompt Claude Code drew ``seconds`` ago: the pane is not quiet yet (5 s without
+    output) and its notification comes at 6 s, so needs-you reads a tool at work. The tool is
+    pending all the same, and that is what a stop's ``/exit`` and Enter would answer "Yes"."""
+    drawn = NOW - timedelta(seconds=seconds)
+    pending = _working(_tail(_tool("toolu_a", at=drawn, command="git push --force"), at=drawn))
+    snap = _now_of(pending, FakeTmux(reference=NOW, quiet_for=seconds), monkeypatch)
+    assert snap.items == () and not needs_dialog_open(snap)
+    assert needs_tool_pending(snap)
+
+
+def test_a_tool_older_than_the_row_or_in_no_agents_pane_is_not_pending(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A resumed session's old tool belongs to the process before it, and a pane that is no
+    longer the agent's (a crash mid-tool) answers nothing typed into it."""
+    leftover = _tail(_tool("toolu_old", at=BORN - timedelta(minutes=1)))
+    assert not needs_tool_pending(_now_of(_working(leftover), FakeTmux(reference=NOW), monkeypatch))
+    crashed = FakeTmux(reference=NOW, command="zsh")
+    snap = _now_of(_working(_tail(_tool("toolu_a"))), crashed, monkeypatch)
+    assert not snap.pane_is_agent and not needs_tool_pending(snap)
+    assert not needs_tool_pending(_now_of(_working(_tail()), FakeTmux(reference=NOW), monkeypatch))
 
 
 def test_a_current_question_is_a_dialog_however_busy_the_pane(

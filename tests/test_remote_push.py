@@ -339,6 +339,17 @@ def every_device(title: str) -> list[tuple[str, str]]:
     return [(device, title) for device in DEVICES]
 
 
+def push_item(world: World, n: int) -> Any:
+    """Item ``n`` through two scans and its window, then the throttle's 20 s: the link its
+    notification carried, or ``None``."""
+    world.scan(needs_item(n))
+    world.scan(needs_item(n))
+    world.later(5)
+    link = world.pushes()[-1][1]["url"]
+    world.later(20)
+    return link
+
+
 # --- the crypto (SPEC §5.5, §5.10 items 1-3) --------------------------------------------------
 
 
@@ -677,6 +688,27 @@ def test_the_request_carries_the_headers_the_push_services_require(world: World)
     assert headers["Topic"] == "asq-needs"
     assert headers["Authorization"].startswith("vapid t=")
     assert endpoint == world.browsers[DEVICES[0]].endpoint
+
+
+def test_a_key_made_again_while_the_server_runs_signs_the_next_push(world: World) -> None:
+    """``remote-push.json`` lost while the server runs: the next ``GET api/push`` makes a new
+    key, and the phones subscribe again against it. A sender that kept the old key signed
+    with it, and every push service refused the phones until it had dropped them all."""
+
+    def signed_with() -> str:
+        return world.transport.sent[-1][1]["Authorization"].rsplit("k=", 1)[1]
+
+    first = load_push_state().vapid
+    assert first is not None
+    push_item(world, 1)
+    assert signed_with() == first.public_key
+    remote_push_path().unlink()
+    second = load_or_create_vapid_keys()
+    for device, browser in world.browsers.items():
+        push_subscribe_device(device, browser.record(), world.roster)
+    push_item(world, 2)
+    assert second.public_key != first.public_key
+    assert signed_with() == second.public_key
 
 
 # --- when a needs item is pushed (SPEC §5.6, §5.10 items 6, 7, 11) ----------------------------

@@ -1041,7 +1041,6 @@ class RemotePushSender:
         """Per device id, when its last needs notification went out."""
         self._pushed: dict[str, str] | None = None
         """``remote-push.json``'s ``pushed``, read once, then kept current by :meth:`_push_mark`."""
-        self._keys: VapidKeys | None = None
         self._next_system_check: datetime | None = None
         self._discovered_at: datetime | None = None
         self._failing = False
@@ -1121,8 +1120,15 @@ class RemotePushSender:
     def deliver_one_push(
         self, device_id: str, record: PushSubscriptionRecord, message: PushMessage
     ) -> int | None:
-        """One notification to one device, through this sender's transport and clock."""
-        keys = self._push_keys()
+        """One notification to one device, through this sender's transport and clock.
+
+        The key is read for every send, never kept: a ``remote-push.json`` lost
+        while the server runs gets a new key at the next ``GET api/push``, and the
+        phones subscribe again against it. A sender still signing with the old
+        one is refused (401/403), and drops each new subscription at its third
+        refusal.
+        """
+        keys = load_push_state().vapid
         if keys is None:  # no key: no subscription can have been made against one
             return None
         return push_send_one(
@@ -1269,11 +1275,6 @@ class RemotePushSender:
                 remote_push_path(),
                 exc,
             )
-
-    def _push_keys(self) -> VapidKeys | None:
-        if self._keys is None:
-            self._keys = load_push_state().vapid
-        return self._keys
 
     def _push_public_base(self, now: datetime) -> str | None:
         """Where a link in a push leads, from authoritative sources only (SPEC §5.8).

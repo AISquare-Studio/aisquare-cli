@@ -105,10 +105,6 @@ NEEDS_BOARD_EVENTS = 300
 CRASH_WINDOW = timedelta(hours=1)
 """How long after its end a crashed agent stays an item."""
 
-NEEDS_ANSWER_TEXT_MAX = 2_048
-"""The longest ``text`` a quick answer types: ``send-keys``' own cap (SPEC §2.6), at most
-16 tmux spawns of a hex-chunked paste even for 4-byte UTF-8."""
-
 NEEDS_ID_MAX = 64
 """The longest item id a body may carry (``ny_`` and 16 hex digits fit with room)."""
 
@@ -1779,6 +1775,7 @@ def _needs_answer_body(body: Mapping[str, object]) -> tuple[str, list[str], str,
     would be a Ctrl-C that no key allowlist saw and the audit line could not show.
     """
     from aisquare.services.remote_server import (
+        SEND_KEYS_TEXT_MAX,
         RequestError,
         check_remote_key_names,
         check_remote_text,
@@ -1803,10 +1800,8 @@ def _needs_answer_body(body: Mapping[str, object]) -> tuple[str, list[str], str,
     text = raw_text or ""
     if not keys and not text:
         raise RequestError(400, "invalid", "give 'keys' or 'text' to answer with")
-    if len(text) > NEEDS_ANSWER_TEXT_MAX:
-        raise RequestError(
-            413, "too_large", f"'text' is at most {NEEDS_ANSWER_TEXT_MAX} characters"
-        )
+    if len(text) > SEND_KEYS_TEXT_MAX:
+        raise RequestError(413, "too_large", f"'text' is at most {SEND_KEYS_TEXT_MAX} characters")
     check_remote_text(text)
     return item_id, keys, text, bool(body.get("enter", False))
 

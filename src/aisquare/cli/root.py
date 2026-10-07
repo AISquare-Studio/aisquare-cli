@@ -9,6 +9,7 @@ from typing import Annotated
 import typer
 
 from aisquare.cli import auth as auth_cli
+from aisquare.cli import install as install_cli
 from aisquare.cli.common import (
     emit_block,
     emit_doctor,
@@ -223,11 +224,6 @@ def open_() -> None:
     diagnostics_service.open_home()
 
 
-def upgrade() -> None:
-    """Upgrade aisquare and refresh agent hooks."""
-    lifecycle_service.upgrade()
-
-
 def uninstall() -> None:
     """Remove agent hooks and optionally local data."""
     lifecycle_service.uninstall()
@@ -253,5 +249,5 @@ def register(app: typer.Typer) -> None:
     app.command("login")(auth_cli.login)
     app.command("logout")(auth_cli.logout)
     app.command("whoami")(auth_cli.whoami)
-    app.command("upgrade", hidden=True)(upgrade)
+    app.command("upgrade")(install_cli.upgrade)
     app.command("uninstall", hidden=True)(uninstall)

@@ -340,8 +340,9 @@ comment.
   the MCP route; add the override to the assumptions table if B landed.
 - `docs/ci-integration-handoff.md` §1 server table: `/v1/hook` built; MCP built as an HTTP route;
   tokens in Secrets Manager; descriptor still `direct_api` (or fixed, if A landed).
-- README test-bed section: replace `https://…` in the example with the real base URL? **No** — the
-  README is public; keep the placeholder and point to this doc for staging.
+- The test-bed section (the README's then, `docs/platform.md` since the README became a front
+  page): replace `https://…` in the example with the real base URL? **No** — the page is public;
+  keep the placeholder and point to this doc for staging.
 - CHANGELOG `[Unreleased]`: one bullet for live wiring, one for the MCP route, one for B if it exists.
 - PR #72 body: tick "Joint smoke" once Step 8 has both pairs; add the override as a follow-up if B
   is meant to be removed. Post a comment with the Step 8 evidence and the Step 4 rows. **Do not
@@ -371,8 +372,8 @@ with commands meant to be typed joins `DOCUMENTED` with a `CENSUS` entry (this f
 `tests/test_every_test_can_fail.py` wants an `assert` in every test body (a helper's assert does not
 count). `tests/test_spawn_seams.py` wants a `core.spawn.SEAMS` ruling for every `subprocess` call site.
 `tests/test_store.py` holds the SQL CHECK vocabularies equal to the Python enums — a new
-`delivery_source` column gets the same test. `tests/test_stubs.py::IMPLEMENTED` and the README
-command tree change only if you add a CLI command; you should not need to.
+`delivery_source` column gets the same test. `tests/test_stubs.py::IMPLEMENTED` and the command
+tree in `docs/reference.md` change only if you add a CLI command; you should not need to.
 
 ## 6. People and places
 

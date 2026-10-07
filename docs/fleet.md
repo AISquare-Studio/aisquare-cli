@@ -592,8 +592,8 @@ form and `add` refuses outside an interactive terminal. `aisquare doctor` gains 
 and a `claude-account-bindings` line when a role or project names an account the
 machine no longer has. Accounts laid
 out some other way — a wrapper, a proxy, a directory of your own — still bind
-to a role as a launch profile (`aisquare team bind coder1 --env …`, README
-"Several accounts, one team").
+to a role as a launch profile (`aisquare team bind coder1 --env …`, see
+[Several accounts, one team](orchestration.md#several-accounts-one-team)).
 
 ---
 

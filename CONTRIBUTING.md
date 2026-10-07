@@ -117,7 +117,7 @@ signatures already exist. The flow is:
 3. **Move the command off the stub skip-list** in `tests/test_stubs.py`
    (`IMPLEMENTED`) and add real tests for the new behaviour.
 
-See the README's [Architecture](README.md#architecture) section for the full
+See [Architecture](docs/reference.md#architecture) in the reference for the full
 layout and the thin-CLI / service / core split.
 
 ## Writing a guard that still guards

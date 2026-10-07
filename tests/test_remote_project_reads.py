@@ -130,6 +130,45 @@ def test_project_b_right_after_project_a_in_one_tick_is_b(
     assert reads.calls == [(kind, "prj_a"), (kind, "prj_b"), (kind, None)], "A was cached"
 
 
+class Ticks:
+    """The cache's monotonic clock, moved by hand."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def test_the_cache_keeps_only_what_was_read_within_the_last_tick() -> None:
+    """Every ``?project=`` spelling that resolves is a kind of its own (``<id>*``, ``<id>**``
+    and so on, which the store's glob reads as ``<id>``), and a snapshot stayed until its
+    spelling was read again: 300 spellings of one project held 300 memory payloads."""
+    ticks = Ticks()
+    cache = remote_server._Cache(ttl=0.9, clock=ticks)
+    for n in range(300):
+        assert cache.cached_snapshot(f"memory:prj_7b68{'*' * n}", lambda: "x" * 1_000)
+        ticks.now += 1.0
+    assert list(cache._values) == [f"memory:prj_7b68{'*' * 299}"]
+
+
+def test_however_many_kinds_one_tick_reads_the_cache_keeps_the_newest_few() -> None:
+    ticks = Ticks()
+    cache = remote_server._Cache(ttl=0.9, clock=ticks)
+    spellings = [f"memory:prj_7b68{'*' * n}" for n in range(300)]
+    for spelling in spellings:
+        cache.cached_snapshot(spelling, lambda: "x" * 1_000)
+    assert list(cache._values) == spellings[-remote_server.CACHE_KINDS_MAX :]
+    computed: list[str] = []
+
+    def again() -> str:
+        computed.append("again")
+        return "y"
+
+    assert cache.cached_snapshot(spellings[-1], again) == "x" * 1_000
+    assert computed == [], "within the tick, what was read is still answered from the cache"
+
+
 @pytest.mark.parametrize("kind", ["board", "tasks", "memory"])
 def test_an_unknown_project_is_a_404_shaped_like_an_unknown_agent(
     runtime: Runtime, reads: Reads, tmp_path: Path, kind: str

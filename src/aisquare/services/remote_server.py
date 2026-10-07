@@ -166,6 +166,9 @@ PANE_CAPTURE_WORKERS = 4
 HEARTBEAT_SECONDS = 10.0
 """How often a socket gets a ``heartbeat`` frame, changed or not, so the page can tell a quiet
 fleet from a dead link (the default of ``build_app(heartbeat=)``)."""
+CACHE_KINDS_MAX = 64
+"""Snapshots the read cache keeps at once, however many ``?project=`` spellings are asked for
+within one tick (:class:`_Cache`); a phone reads a handful."""
 
 MAX_BODY_BYTES = 65_536
 """The largest body any request may carry, refused with 413 before a route sees it.
@@ -2206,20 +2209,37 @@ class _RateLimiter:
 
 
 class _Cache:
-    """One snapshot per kind per tick, however many sockets are open."""
+    """One snapshot per kind per tick, however many sockets are open.
 
-    def __init__(self, ttl: float) -> None:
+    It holds only what was asked for within the last tick. A kind carries the
+    ``?project=`` ref as it was written, and every spelling that resolves is a
+    kind of its own (an id prefix of any length, a name, a codename, and the id
+    with any run of ``*``, ``?`` or ``[``, which the store's glob drops). Kept
+    until they were asked for again, they grew the heap by a full payload per
+    spelling for anyone unlocked, read-only included, until the process died.
+    So each store first drops what has expired, and at most
+    :data:`CACHE_KINDS_MAX` kinds are kept, the oldest going first.
+    """
+
+    def __init__(self, ttl: float, *, clock: Callable[[], float] = time.monotonic) -> None:
         self._ttl = ttl
+        self._clock = clock
         self._lock = threading.Lock()
         self._values: dict[str, tuple[float, object]] = {}
 
     def cached_snapshot(self, kind: str, compute: Snapshot) -> object:
         with self._lock:
             hit = self._values.get(kind)
-            if hit is not None and time.monotonic() - hit[0] < self._ttl:
+            if hit is not None and self._clock() - hit[0] < self._ttl:
                 return hit[1]
             value = compute()
-            self._values[kind] = (time.monotonic(), value)
+            now = self._clock()
+            for stale in [k for k, (at, _value) in self._values.items() if now - at >= self._ttl]:
+                del self._values[stale]
+            self._values.pop(kind, None)  # stored anew, so the dict stays oldest first
+            self._values[kind] = (now, value)
+            while len(self._values) > CACHE_KINDS_MAX:
+                del self._values[next(iter(self._values))]
             return value
 
 

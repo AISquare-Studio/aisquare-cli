@@ -26,7 +26,9 @@ import os
 import shutil
 import time
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -72,6 +74,12 @@ def test_a_lone_space_is_no_longer_nothing_to_do() -> None:
     sent: list[tuple[str, str]] = []
 
     class _Tmux:
+        def pane_facts(self, pane_id: str) -> SimpleNamespace:
+            return SimpleNamespace(dead=False, current_command="claude")
+
+        def started_at(self) -> datetime:
+            return _Agent.created_at - timedelta(hours=1)
+
         def send_literal(self, pane_id: str, text: str) -> None:
             sent.append(("literal", text))
 
@@ -81,6 +89,7 @@ def test_a_lone_space_is_no_longer_nothing_to_do() -> None:
     class _Agent:
         pane_id = "%1"
         tmux_socket = "asq"
+        created_at = datetime(2026, 10, 7, 9, 0, tzinfo=UTC)
 
     class _Store:
         def fleet_agent_by_label(self, *args: object, **kwargs: object) -> _Agent:

@@ -102,7 +102,7 @@ if TYPE_CHECKING:
     from starlette.routing import Route
     from starlette.websockets import WebSocket
 
-    from aisquare.core.tmux import Capture
+    from aisquare.core.tmux import Capture, TmuxServer
     from aisquare.services.remote_actions import ActionLedger
     from aisquare.services.remote_needs import NeedsItem
 
@@ -1473,7 +1473,8 @@ PaneSource = Callable[[str, str | None, int], dict[str, object]]
 """Agent label, optional project, scrollback lines → one pane capture.
 
 ``history`` of 0 is today's live-screen-only frame, byte for byte (§4-L).
-Raises :class:`NoSuchAgent` / :class:`NoSuchProject`."""
+Raises :class:`NoSuchAgent` / :class:`NoSuchProject`, and :class:`RequestError` 409
+``not_agent`` for a row whose pane id is another agent's now."""
 TranscriptSource = Callable[[str, str | None, int, str | None, int | None], dict[str, object]]
 """Agent, optional project, limit, ``before`` cursor, width → one page of conversation (§4-M).
 
@@ -1652,26 +1653,72 @@ def _pane_payload(capture: Capture) -> dict[str, object]:
     }
 
 
+PANE_OUTLIVED = (
+    "{label}'s pane is gone: tmux restarted after {label} started, "
+    "and its pane id is another agent's now"
+)
+"""409 ``not_agent`` for a row that outlived its tmux server (:func:`_remote_pane_outlived`)."""
+
+
+def _remote_live_row(target: ProjectInfo, label: str) -> FleetAgent:
+    """The newest live row holding ``label`` in ``target``; :class:`NoSuchAgent` when none does."""
+    from aisquare.core.store import store_session
+
+    with store_session() as store:
+        agent = store.fleet_agent_by_label(target.id, label, live_only=True)
+    if agent is None:
+        raise NoSuchAgent(f"no live agent {label!r} in {target.root.name or target.id}")
+    return agent
+
+
+def _remote_pane_outlived(server: TmuxServer, agent: FleetAgent) -> bool:
+    """Whether the pane under the row's id is ANOTHER agent's: the server on its socket
+    started after the row was written (``fleet._outlived``, FLEET-1).
+
+    A reboot or a hand-run ``tmux -L asq kill-server`` leaves live rows behind (the
+    listing reads them ``lost`` and ends none of them), and the next server, started by
+    a spawn in any project, numbers its panes from ``%0`` again. Asked about by id, that
+    agent's pane answered for the row: the phone showed its screen under the row's label,
+    and a key from the pad answered its prompt. The listing, the TUI
+    (``views.agent.shown_pane``) and the agent actions (``remote_needs``) each refuse
+    that pane already. A start tmux will not give judges nothing, as in
+    ``fleet._pane_alive``.
+    """
+    from aisquare.core.tmux import TmuxError
+    from aisquare.services import fleet as fleet_service
+
+    try:
+        started = server.started_at()
+    except TmuxError:
+        started = None
+    return fleet_service._outlived(agent, started)
+
+
 def _live_panes(label: str, project: str | None = None, history: int = 0) -> dict[str, object]:
     """One pane frame: the live screen, or scrollback and the screen together (§4-L).
 
     ``history`` of 0 takes the SAME call today took and returns the live keys
     alone (:func:`_pane_payload`), so the live stream and every existing client
     are untouched — the history keys appear only when history was asked for.
+
+    Never another agent's screen: a row whose pane id the next tmux server gave
+    away is 409 ``not_agent`` (:func:`_remote_pane_outlived`). The server is asked
+    when it started AFTER the capture, so one that restarted in between refuses
+    the frame instead of passing it.
     """
-    from aisquare.core.store import store_session
     from aisquare.services import fleet as fleet_service
 
-    target = _resolve_project(project)
-    with store_session() as store:
-        agent = store.fleet_agent_by_label(target.id, label, live_only=True)
-    if agent is None:
-        raise NoSuchAgent(f"no live agent {label!r} in {target.root.name or target.id}")
+    agent = _remote_live_row(_resolve_project(project), label)
     server = fleet_service.server_for(agent.tmux_socket)
     if history <= 0:
-        return _pane_payload(server.capture(agent.pane_id))
-    capture = server.capture_history(agent.pane_id, history=min(history, HISTORY_CAP))
+        capture = server.capture(agent.pane_id)
+    else:
+        capture = server.capture_history(agent.pane_id, history=min(history, HISTORY_CAP))
+    if _remote_pane_outlived(server, agent):
+        raise RequestError(409, "not_agent", PANE_OUTLIVED.format(label=label))
     payload = _pane_payload(capture)
+    if history <= 0:
+        return payload
     payload["history_size"] = capture.facts.history_size
     payload["history"] = capture.scrollback
     if history > HISTORY_CAP:
@@ -1719,12 +1766,15 @@ def _pane_width(agent: FleetAgent) -> int:
 
     Best effort by design: a dead pane, or a tmux that will not answer, costs a
     sensible 80 columns and never the page itself — the conversation is on disk
-    and does not depend on the pane still being there.
+    and does not depend on the pane still being there. So does a pane id another
+    agent's pane holds now (:func:`_remote_pane_outlived`): its width is that agent's.
     """
     from aisquare.services import fleet as fleet_service
 
     try:
-        return fleet_service.server_for(agent.tmux_socket).capture(agent.pane_id).facts.width
+        server = fleet_service.server_for(agent.tmux_socket)
+        width = server.capture(agent.pane_id).facts.width
+        return 80 if _remote_pane_outlived(server, agent) else width
     except Exception:
         return 80
 
@@ -2150,12 +2200,13 @@ def live_writes() -> Writes:
 
         Everything is checked before anything is sent: the keys against the
         allowlist, the caps, no control character in the text, one input per body
-        (``text`` went first, so "Esc, then type" arrived as "type, then Esc"), and
-        the double Ctrl-C. Once a byte may have reached the pane, a failure is
-        still audited: the trail exists for what a device did to a live agent,
-        finished or not.
+        (``text`` went first, so "Esc, then type" arrived as "type, then Esc"), the
+        pane, and the double Ctrl-C. The pane must be running the agent, and be the
+        row's own: after a tmux restart the row's pane id names another agent's pane
+        (409 ``not_agent``, as the actions and quick answers refuse it). Once a byte
+        may have reached the pane, a failure is still audited: the trail exists for
+        what a device did to a live agent, finished or not.
         """
-        from aisquare.core.store import store_session
         from aisquare.services import fleet as fleet_service
 
         label = _required(body, "agent")
@@ -2177,10 +2228,15 @@ def live_writes() -> Writes:
         if not text and not keys and not enter:
             raise RequestError(400, "invalid", "give 'text', 'keys' or 'enter'")
         target = _resolve_project(_optional_ref(body, "project"))
-        with store_session() as store:
-            agent = store.fleet_agent_by_label(target.id, label, live_only=True)
-        if agent is None:
-            raise NoSuchAgent(f"no live agent {label!r} in {target.root.name or target.id}")
+        agent = _remote_live_row(target, label)
+        server = fleet_service.server_for(agent.tmux_socket)
+        if not fleet_service._pane_is_the_agent(server, agent.pane_id):
+            raise RequestError(
+                409, "not_agent", f"{label}'s pane is not running the agent — nothing was sent"
+            )
+        if _remote_pane_outlived(server, agent):
+            gone = PANE_OUTLIVED.format(label=label)
+            raise RequestError(409, "not_agent", f"{gone} — nothing was sent")
         exits = sum(key in EXIT_KEYS for key in keys)
         confirmed = body.get("confirm_exit") is True
         if exits and not exit_keys.exit_keys_allowed(
@@ -2190,7 +2246,6 @@ def live_writes() -> Writes:
         summary = (
             f"{label}@{target.id} text={len(text or '')}ch keys={_audit_keys(keys)} enter={enter}"
         )
-        server = fleet_service.server_for(agent.tmux_socket)
         try:
             if text:
                 server.send_literal(agent.pane_id, text)
@@ -3178,6 +3233,8 @@ def build_remote_app(
             return _json_error(400, "invalid", str(exc))
         try:
             payload = await asyncio.to_thread(reads.panes, agent, project, history)
+        except RequestError as exc:  # its pane id is another agent's now: 409 not_agent
+            return JSONResponse(exc.request_error_body(), status_code=exc.status)
         except NoSuchAgent as exc:  # gone: the page says so and goes back to the fleet
             return _json_error(404, "no_such_agent", str(exc))
         except LookupError as exc:

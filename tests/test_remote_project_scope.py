@@ -11,8 +11,9 @@ counts on ``GET /api/projects``, and the ``{subscribe_fleet}`` WS option.
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -168,10 +169,19 @@ class _FakeCapture:
 
 
 class _FakeTmux:
-    """Enough tmux for ``panes`` and ``send-keys``; the real one needs a live server."""
+    """Enough tmux for ``panes`` and ``send-keys``; the real one needs a live server.
+
+    Every pane runs the agent, on the server the rows were recorded on: it started
+    before they were written (``T0``)."""
 
     def __init__(self) -> None:
         self.sent: list[tuple[str, tuple[str, ...]]] = []
+
+    def pane_facts(self, pane_id: str) -> SimpleNamespace:
+        return SimpleNamespace(dead=False, current_command="claude")
+
+    def started_at(self) -> datetime:
+        return T0 - timedelta(hours=1)
 
     def capture(self, pane_id: str, **kwargs: Any) -> _FakeCapture:
         return _FakeCapture(pane_id)

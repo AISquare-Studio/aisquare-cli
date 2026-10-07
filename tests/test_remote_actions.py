@@ -45,7 +45,13 @@ from aisquare.services.remote_actions import (
     fleet_refusal,
     new_action_ledger,
 )
-from aisquare.services.remote_needs import AgentNow, NeedsItem
+from aisquare.services.remote_needs import (
+    AgentNow,
+    NeedsItem,
+    needs_at_input_prompt,
+    needs_dialog_open,
+    needs_item_current,
+)
 from aisquare.services.remote_server import (
     COOKIE,
     Device,
@@ -1630,3 +1636,64 @@ def test_a_refused_auto_tell_answers_as_the_cli_maps_it(
         status,
         {"error": code, "message": str(error)},
     )
+
+
+# --- with needs-you's own predicates (lane C) ------------------------------------------------
+#
+# Above, needs-you is faked whole. Here only the agent's snapshot is: the predicates are
+# the module's own, held to what SPEC §4.5 says they answer for that snapshot. Until lane C
+# lands they are the foundation's stubs, which answer False to everything, so these fail;
+# strict, so the merge that makes them pass also makes the run fail until the marker goes.
+
+NEEDS_C = "needs lane c-needs-you: the needs-you predicates (the foundation's stubs answer False)"
+
+
+@pytest.fixture
+def own_predicates(needs: FakeNeeds, monkeypatch: pytest.MonkeyPatch) -> FakeNeeds:
+    monkeypatch.setattr(remote_needs, "needs_dialog_open", needs_dialog_open)
+    monkeypatch.setattr(remote_needs, "needs_at_input_prompt", needs_at_input_prompt)
+    monkeypatch.setattr(remote_needs, "needs_item_current", needs_item_current)
+    return needs
+
+
+@pytest.mark.xfail(strict=True, reason=NEEDS_C)
+def test_a_card_whose_item_needs_you_still_lists_goes_through(
+    phone: Phone, fleet: FleetCalls, own_predicates: FakeNeeds, project: ProjectInfo
+) -> None:
+    """``needs_item_current`` is true for an id among the snapshot's items."""
+    _row(project)
+    own_predicates.items = (_item(project, "ny_limit"),)
+    response = phone.post("agent/switch", **PINNED, needs_id="ny_limit")
+    assert response.status_code == 200, response.text
+    assert fleet.names() == ["switch"]
+
+
+@pytest.mark.xfail(strict=True, reason=NEEDS_C)
+def test_a_current_permission_item_is_an_open_dialog_to_the_guard(
+    phone: Phone,
+    fleet: FleetCalls,
+    own_predicates: FakeNeeds,
+    pane: FakePane,
+    project: ProjectInfo,
+) -> None:
+    """``needs_dialog_open`` is true while a ``permission`` item is current, whatever the
+    row reads: the stop's Enter would approve the command."""
+    _row(project)
+    own_predicates.items = (_item(project, "ny_perm", kind="permission"),)
+    response = phone.post("agent/stop", **PINNED)
+    assert response.status_code == 409, response.text
+    assert response.json()["error"] == "dialog_open"
+    assert fleet.calls == [] and pane.sent == []
+
+
+@pytest.mark.xfail(strict=True, reason=NEEDS_C)
+def test_prompt_types_into_a_quiet_waiting_agent_that_has_no_transcript(
+    phone: Phone, own_predicates: FakeNeeds, pane: FakePane, project: ProjectInfo
+) -> None:
+    """``needs_at_input_prompt``: with no readable tail, a quiet pane running the agent and
+    a row that reads ``waiting`` is at its prompt."""
+    _row(project)
+    own_predicates.state = "waiting"
+    response = phone.post("agent/tell", agent=LABEL, text="hi", mode="prompt")
+    assert response.status_code == 200, response.text
+    assert [kind for _pane, kind, _what in pane.sent] == ["paste", "key"]

@@ -576,6 +576,17 @@ _HOOK_BINARY_SEVERITY = {
 _VERSION_TOKEN = re.compile(r"\d+(?:\.\d+)+[0-9A-Za-z.+!-]*")
 
 
+def version_in(output: str) -> str | None:
+    """The version an ``aisquare --version`` printed, or ``None`` when it printed none.
+
+    Public because ``aisquare upgrade`` reads the new install's answer the same
+    way this module reads a hook binary's: one parse, so a change to what
+    ``--version`` prints has one place to land.
+    """
+    match = _VERSION_TOKEN.search(output)
+    return match.group(0) if match else None
+
+
 @dataclass(frozen=True)
 class HookBinary:
     """The program one hook command would start, as the hook's shell would resolve it.
@@ -734,8 +745,7 @@ def hook_binary_version(argv: Sequence[str], *, timeout: float = 10.0) -> str | 
         return None
     if completed.returncode != 0:
         return None
-    match = _VERSION_TOKEN.search(completed.stdout)
-    return match.group(0) if match else None
+    return version_in(completed.stdout)
 
 
 def classify_hook_binary(binary: HookBinary) -> tuple[str, str | None]:
@@ -835,6 +845,15 @@ def _dir_key(path: Path) -> Path:
         return path.expanduser().resolve()
     except OSError:
         return path.expanduser().absolute()
+
+
+def dir_identity(path: Path) -> Path:
+    """:func:`_dir_key` for callers outside this module (``services.lifecycle``).
+
+    One notion of "the same directory" for every dedupe of hook sites, rather
+    than a copy that could drift from this one.
+    """
+    return _dir_key(path)
 
 
 def claude_config_dirs() -> list[Path]:

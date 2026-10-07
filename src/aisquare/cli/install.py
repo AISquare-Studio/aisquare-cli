@@ -86,7 +86,8 @@ def _emit_check(plan: lifecycle_service.UpgradePlan) -> None:
     _say(f"aisquare {plan.current} — {plan.route.describe()}")
     _say(_latest_line(plan))
     if plan.runnable:
-        _say("upgrade with: aisquare upgrade")
+        pin = f" --version {plan.target}" if plan.target else ""
+        _say(f"upgrade with: aisquare upgrade{pin}")
     else:
         _say(f"upgrade with: {plan.command}")
         _say(f"(`aisquare upgrade` does not run it: {plan.reason})")
@@ -103,8 +104,7 @@ def _emit_plan(plan: lifecycle_service.UpgradePlan) -> None:
     )
     _say(f"aisquare {plan.current} → {where}")
     if plan.target is None and plan.latest is not None and plan.latest.version is None:
-        _say(f"  PyPI was not reachable ({plan.latest.error}); uv will install the newest")
-        _say("  release your package index serves")
+        _say(f"  {plan.latest.error}; uv will install the newest release its index serves")
     _say(f"  install: {plan.route.describe()}")
     _say(f"  runs:    {plan.command}")
     for site in plan.refresh:
@@ -144,10 +144,11 @@ def _emit_report(report: lifecycle_service.UpgradeReport) -> None:
         if hook.ok:
             _say(f"✓ hooks re-connected in {hook.config_dir}")
         else:
+            remedy = install_route.command_line(
+                ["aisquare", *lifecycle_service.REFRESH_HOOKS, "--config-dir", str(hook.config_dir)]
+            )
             _say(
-                f"✗ hooks in {hook.config_dir} were not re-connected ({hook.error}) — run: "
-                f"aisquare agents connect {lifecycle_service.HOOK_AGENT} "
-                f"--config-dir {hook.config_dir}"
+                f"✗ hooks in {hook.config_dir} were not re-connected ({hook.error}) — run: {remedy}"
             )
     for site in plan.left:
         _say(f"· {site.config_dir} left as it is: {site.reason}")

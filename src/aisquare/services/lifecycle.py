@@ -376,7 +376,16 @@ def upgrade_plan(target: str | None = None, *, check: bool = False) -> UpgradePl
         target = pinned
     route = install_route.detect()
     reason = install_route.not_automated(route)
-    latest = install_route.fetch_latest() if check or (reason is None and target is None) else None
+    latest: install_route.LatestRelease | None = None
+    if check or (reason is None and target is None):
+        own = install_route.own_index(route)
+        latest = (
+            install_route.LatestRelease(
+                None, f"PyPI was not asked: this install resolves from its own index ({own})"
+            )
+            if own is not None
+            else install_route.fetch_latest()
+        )
     refresh: tuple[HookSite, ...] = ()
     left: tuple[HookSite, ...] = ()
     if reason is None:
@@ -394,14 +403,6 @@ def upgrade_plan(target: str | None = None, *, check: bool = False) -> UpgradePl
     )
 
 
-def _identity(path: Path) -> Path:
-    """One spelling for the several a directory can have (``~``, symlinks)."""
-    try:
-        return path.expanduser().resolve()
-    except OSError:
-        return path.expanduser().absolute()
-
-
 def runs_this_install(binary: agent_core.HookBinary, found: install_route.Facts) -> bool:
     """Whether a hook's program is THIS install — the one being upgraded.
 
@@ -413,9 +414,11 @@ def runs_this_install(binary: agent_core.HookBinary, found: install_route.Facts)
     interpreter.
     """
     if binary.module_form:
-        return _identity(binary.program.parent) == _identity(found.executable.parent)
-    program = _identity(binary.program)
-    prefix = _identity(found.prefix)
+        return agent_core.dir_identity(binary.program.parent) == agent_core.dir_identity(
+            found.executable.parent
+        )
+    program = agent_core.dir_identity(binary.program)
+    prefix = agent_core.dir_identity(found.prefix)
     return program == prefix or prefix in program.parents
 
 
@@ -435,13 +438,16 @@ def refresh_sites(found: install_route.Facts) -> tuple[tuple[HookSite, ...], tup
     left: list[HookSite] = []
     seen: set[Path] = set()
     for directory in agent_core.connected_dirs(HOOK_AGENT):
-        key = _identity(directory)
+        key = agent_core.dir_identity(directory)
         if key in seen:
             continue
         seen.add(key)
         try:
             commands = agent_core.hook_commands(HOOK_AGENT, directory)
-        except OSError as exc:
+        except (OSError, ValueError, TypeError) as exc:
+            # Unreadable, not UTF-8 (a ValueError), or a hooks table that is not
+            # the shape Claude Code writes (`{"Stop": 1}` is a TypeError): left and
+            # named, so one bad file cannot stop the upgrade of everything else.
             left.append(HookSite(directory, reason=f"its settings.json could not be read ({exc})"))
             continue
         binaries: list[agent_core.HookBinary] = []
@@ -494,12 +500,21 @@ def upgrade(plan: UpgradePlan, *, to_stderr: bool = False) -> UpgradeReport:
         f"asq and `aisquare serve` processes that were already running keep {plan.current} "
         "until they are restarted"
     )
+    if version is not None and install_route.is_newer(plan.current, version):
+        # A move BACK lands on a release that may predate `agents refresh-hooks`
+        # (0.8 and earlier do), and the hooks the newer version wrote still run it.
+        notes.append(
+            f"{version} is older than {plan.current}, so the hooks were left as they were; "
+            f"`aisquare agents connect {HOOK_AGENT}` rewrites them for {version}"
+        )
+        return UpgradeReport(plan, exit_code=code, version=version, notes=tuple(notes))
     hooks = tuple(_refresh(site, plan.route.facts) for site in plan.refresh)
     return UpgradeReport(plan, exit_code=code, version=version, hooks=hooks, notes=tuple(notes))
 
 
-def _first_line(*texts: str) -> str:
-    """The last non-empty line of the first text that has one — where a CLI says why."""
+def _reason_line(*texts: str) -> str:
+    """Why a command failed: the LAST non-empty line of the first text that has one,
+    where this CLI's ``✗ …`` and a traceback's exception both land."""
     for text in texts:
         lines = [line.strip() for line in text.splitlines() if line.strip()]
         if lines:
@@ -516,14 +531,14 @@ def _verify(plan: UpgradePlan) -> tuple[str | None, str | None]:
     unchanged version is a failure exactly when PyPI said there is something
     newer; when PyPI could not be asked it means the index had nothing newer.
     """
-    argv = [str(plan.route.facts.executable), "-P", "-m", "aisquare", "--version"]
-    answer = install_route.run_captured(argv, timeout=VERSION_CHECK_TIMEOUT_SECONDS)
+    probe = agent_core.HookBinary(plan.route.facts.executable, module_form=True)
+    answer = install_route.run_captured(probe.version_argv(), timeout=VERSION_CHECK_TIMEOUT_SECONDS)
     if answer.error is not None:
         return None, f"the new install could not be started ({answer.error})"
     if answer.returncode != 0:
-        said = _first_line(answer.stderr, answer.stdout) or f"exit {answer.returncode}"
+        said = _reason_line(answer.stderr, answer.stdout) or f"exit {answer.returncode}"
         return None, f"the new install could not be started ({said})"
-    found = install_route.version_in(answer.stdout)
+    found = agent_core.version_in(answer.stdout)
     if found is None:
         return None, "the new install did not report a version"
     if plan.target is not None:
@@ -539,22 +554,28 @@ def _verify(plan: UpgradePlan) -> tuple[str | None, str | None]:
     )
 
 
+#: What the new install runs per site: ``agents refresh-hooks``, never ``agents
+#: connect``, which also re-imports the agent's ``CLAUDE.md`` into memory — on every
+#: upgrade it brought back sections the user had removed (review of #251).
+REFRESH_HOOKS = ("agents", "refresh-hooks", HOOK_AGENT)
+
+
 def _refresh(site: HookSite, found: install_route.Facts) -> HookRefresh:
-    """Re-connect one site BY the new install, so its hooks name the new install.
+    """Rewrite one site's hooks BY the new install, so they name the new install.
 
     The console script beside the interpreter, not ``python -m aisquare``: hooks
-    are written for whatever program ``agents connect`` ran as, and the module
-    form would fall back to whichever ``aisquare`` comes first on PATH.
+    are written for whatever program the refresh ran as, and the module form
+    would fall back to whichever ``aisquare`` comes first on PATH.
     """
     script = found.executable.with_name("aisquare.exe" if found.platform == "win32" else "aisquare")
     if not script.exists():
         return HookRefresh(site.config_dir, False, f"the new install has no {script}")
-    argv = [str(script), "agents", "connect", HOOK_AGENT, "--config-dir", str(site.config_dir)]
+    argv = [str(script), *REFRESH_HOOKS, "--config-dir", str(site.config_dir)]
     answer = install_route.run_captured(argv, timeout=HOOK_REFRESH_TIMEOUT_SECONDS)
     if answer.error is not None:
         return HookRefresh(site.config_dir, False, answer.error)
     if answer.returncode != 0:
-        said = _first_line(answer.stderr, answer.stdout) or f"exit {answer.returncode}"
+        said = _reason_line(answer.stderr, answer.stdout) or f"exit {answer.returncode}"
         return HookRefresh(site.config_dir, False, said)
     return HookRefresh(site.config_dir, True)
 
@@ -753,8 +774,8 @@ def purge_refusal(home: Path, *, custom: bool) -> str | None:
         return None
     if not home.is_dir():
         return f"{home} is not a directory"
-    resolved = _identity(home)
-    user_home = _identity(_user_home())
+    resolved = agent_core.dir_identity(home)
+    user_home = agent_core.dir_identity(_user_home())
     if resolved == user_home:
         return f"{home} is your home directory"
     if resolved == Path(resolved.anchor):
@@ -895,7 +916,7 @@ def uninstall_plan(*, purge: bool = False) -> UninstallPlan:
     unreadable: list[HookSite] = []
     seen: set[Path] = set()
     for directory in candidates:
-        key = _identity(directory)
+        key = agent_core.dir_identity(directory)
         if key in seen:
             continue
         seen.add(key)

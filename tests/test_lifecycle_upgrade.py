@@ -32,7 +32,9 @@ from typer.testing import CliRunner
 
 from aisquare.cli import install as install_cli
 from aisquare.cli.app import app
+from aisquare.core import agents as agent_core
 from aisquare.core import paths, spawn
+from aisquare.services import agents as agents_service
 from aisquare.services import install_route, lifecycle
 from aisquare.services.install_route import Captured, Facts, LatestRelease
 from tests import installer_seams
@@ -146,6 +148,28 @@ def test_a_cellar_prefix_is_homebrew_and_names_its_formula(tmp_path: Path) -> No
     assert install_route.upgrade_argv(route) == ["brew", "upgrade", "aisquare"]
 
 
+def test_homebrews_own_python_is_not_a_formula_install(tmp_path: Path) -> None:
+    """A pip install into Homebrew's Python sits under a Cellar too, but it is no
+    formula's venv: its prefix IS its base (review of #251, finding 4)."""
+    prefix = (
+        tmp_path
+        / "opt"
+        / "Cellar"
+        / "python@3.13"
+        / "3.13.5"
+        / "Frameworks"
+        / "Python.framework"
+        / "Versions"
+        / "3.13"
+    )
+    prefix.mkdir(parents=True)
+
+    route = install_route.classify(_facts(prefix, base_prefix=prefix, user_install=True))
+
+    assert route.kind == install_route.SYSTEM
+    assert install_route.upgrade_argv(route)[:2] != ["brew", "upgrade"]
+
+
 def test_a_directory_merely_named_like_a_cellar_is_not_homebrew(tmp_path: Path) -> None:
     prefix = tmp_path / "Cellars" / "aisquare" / "libexec"
     prefix.mkdir(parents=True)
@@ -161,7 +185,30 @@ def test_an_editable_direct_url_is_the_editable_route(tmp_path: Path) -> None:
 
     assert route.kind == install_route.EDITABLE
     assert Path(route.source or "") == checkout
-    assert install_route.upgrade_argv(route) == ["git", "-C", str(checkout), "pull"]
+    # The reinstall, not only a pull: the version and dependencies live in the
+    # install's metadata (review of #251, finding 7).
+    assert install_route.upgrade_argv(route) == [
+        str(route.facts.executable),
+        "-m",
+        "pip",
+        "install",
+        "-e",
+        str(checkout),
+    ]
+    reason = install_route.not_automated(route)
+    assert reason is not None
+    assert install_route.command_line(["git", "-C", str(checkout), "pull"]) in reason
+
+
+def test_an_editable_install_in_a_uv_made_venv_reinstalls_with_uv_pip(tmp_path: Path) -> None:
+    checkout = tmp_path / "checkout"
+    url = json.dumps({"url": checkout.as_uri(), "dir_info": {"editable": True}})
+
+    route = install_route.classify(_facts(_prefix(tmp_path), direct_url=url, installer="uv"))
+
+    argv = install_route.upgrade_argv(route)
+    assert argv[:3] == ["uv", "pip", "install"]
+    assert argv[-2:] == ["-e", str(checkout)]
 
 
 def test_the_same_url_without_editable_is_a_local_source(tmp_path: Path) -> None:
@@ -172,6 +219,42 @@ def test_the_same_url_without_editable_is_a_local_source(tmp_path: Path) -> None
 
     assert route.kind == install_route.LOCAL_SOURCE
     assert install_route.upgrade_argv(route)[-1] == str(checkout)
+
+
+@pytest.mark.parametrize(
+    ("vcs_info", "subdirectory", "source"),
+    [
+        (
+            {"vcs": "git", "commit_id": "0123abcd", "requested_revision": "main"},
+            None,
+            "aisquare-cli @ git+https://github.com/AISquare-Studio/aisquare-cli.git@main",
+        ),
+        (
+            {"vcs": "git", "commit_id": "0123abcd"},
+            "cli",
+            "aisquare-cli @ git+https://github.com/AISquare-Studio/aisquare-cli.git"
+            "#subdirectory=cli",
+        ),
+    ],
+    ids=["branch", "subdirectory"],
+)
+def test_a_vcs_install_is_reinstalled_from_a_reference_pip_can_read(
+    tmp_path: Path, vcs_info: dict[str, str], subdirectory: str | None, source: str
+) -> None:
+    """PEP 610 records the URL without ``git+``; pip reads a bare https URL as an
+    archive to download, so the reference is rebuilt (review of #251, finding 5)."""
+    record: dict[str, Any] = {
+        "url": "https://github.com/AISquare-Studio/aisquare-cli.git",
+        "vcs_info": vcs_info,
+    }
+    if subdirectory:
+        record["subdirectory"] = subdirectory
+
+    route = install_route.classify(_facts(_prefix(tmp_path), direct_url=json.dumps(record)))
+
+    assert route.kind == install_route.LOCAL_SOURCE
+    assert route.source == source
+    assert install_route.upgrade_argv(route)[-1] == source
 
 
 def test_a_venv_with_no_source_record_is_the_venv_route(tmp_path: Path) -> None:
@@ -425,25 +508,46 @@ def test_an_unreadable_receipt_is_still_a_uv_tool_but_is_not_run(
 
 
 @pytest.mark.parametrize(
-    ("requirement", "kind", "spec"),
+    ("requirement", "kind", "tail"),
     [
-        ('{ name = "aisquare-cli", editable = "/src/aisquare-cli" }', install_route.EDITABLE, None),
+        (
+            '{ name = "aisquare-cli", editable = "/src/aisquare-cli" }',
+            install_route.EDITABLE,
+            ["-e", "/src/aisquare-cli"],
+        ),
         (
             '{ name = "aisquare-cli", extras = ["serve"], directory = "/src/aisquare-cli" }',
             install_route.LOCAL_SOURCE,
-            "/src/aisquare-cli[serve]",
+            ["/src/aisquare-cli[serve]"],
         ),
         (
             '{ name = "aisquare-cli", git = "https://github.com/o/r?rev=v0.7.0" }',
             install_route.LOCAL_SOURCE,
-            "aisquare-cli @ git+https://github.com/o/r",
+            ["aisquare-cli @ git+https://github.com/o/r"],
+        ),
+        (
+            '{ name = "aisquare-cli", git = "https://github.com/o/r?branch=dev#0123abcd" }',
+            install_route.LOCAL_SOURCE,
+            ["aisquare-cli @ git+https://github.com/o/r@dev"],
+        ),
+        (
+            '{ name = "aisquare-cli", git = "https://g.example/r?subdirectory=cli&rev=v1#01" }',
+            install_route.LOCAL_SOURCE,
+            ["aisquare-cli @ git+https://g.example/r#subdirectory=cli"],
+        ),
+        (
+            '{ name = "aisquare-cli", url = "https://x.example/a.tar.gz", subdirectory = "cli" }',
+            install_route.LOCAL_SOURCE,
+            ["aisquare-cli @ https://x.example/a.tar.gz#subdirectory=cli"],
         ),
     ],
-    ids=["editable", "directory", "git"],
+    ids=["editable", "directory", "git-rev", "git-branch", "git-subdirectory", "url-subdirectory"],
 )
 def test_a_receipt_from_a_source_is_reported_with_its_reinstall(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, requirement: str, kind: str, spec: str | None
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, requirement: str, kind: str, tail: list[str]
 ) -> None:
+    """A branch is kept (its head is the upgrade); a rev, a tag and a commit pin are
+    dropped; a subdirectory survives (review of #251, finding 6)."""
     monkeypatch.setattr(install_route, "find_uv", lambda: "/usr/bin/uv")
     route = _uv_route(tmp_path, _receipt(requirement))
 
@@ -451,11 +555,8 @@ def test_a_receipt_from_a_source_is_reported_with_its_reinstall(
 
     assert route.kind == kind
     assert install_route.not_automated(route) is not None, "a source install is never run"
-    if spec is None:
-        assert argv == ["git", "-C", "/src/aisquare-cli", "pull"]
-    else:
-        assert argv[:4] == ["uv", "tool", "install", "--force"]
-        assert argv[-1] == spec
+    assert argv[:4] == ["uv", "tool", "install", "--force"]
+    assert argv[-len(tail) :] == tail
 
 
 def test_windows_is_never_run_and_still_gets_the_command(
@@ -653,8 +754,8 @@ def test_a_non_version_is_not_compared() -> None:
 
 
 def test_the_version_is_read_out_of_the_version_line() -> None:
-    assert install_route.version_in("aisquare 0.9.1\n") == "0.9.1"
-    assert install_route.version_in("Traceback (most recent call last):\n") is None
+    assert agent_core.version_in("aisquare 0.9.1\n") == "0.9.1"
+    assert agent_core.version_in("Traceback (most recent call last):\n") is None
 
 
 # --- the PyPI lookup -------------------------------------------------------------------
@@ -848,7 +949,8 @@ def test_a_refused_route_exits_1_with_the_command_in_the_message(
     result = runner.invoke(app, ["upgrade", "--yes"])
 
     assert result.exit_code == 1
-    assert "Upgrade it with: git -C " in result.stderr and " pull" in result.stderr
+    assert "git -C " in result.stderr and " pull" in result.stderr, "pull the checkout first"
+    assert "Upgrade it with: " in result.stderr and " -e " in result.stderr, "then reinstall"
     assert machine.installs == [] and machine.lookups == 0, "refused before PyPI or uv"
 
 
@@ -860,7 +962,7 @@ def test_a_refused_route_under_json_is_one_error_object(
     assert result.exit_code == 1
     error = _one_object(result.stdout)
     assert error["error"] == "upgrade_unsupported_route"
-    assert error["hint"].startswith("git -C ")
+    assert " install " in error["hint"] and " -e " in error["hint"]
     assert "editable install" in error["detail"]
 
 
@@ -980,8 +1082,8 @@ def test_yes_runs_the_restated_command_checks_the_version_and_refreshes_the_hook
     assert to_stderr is False, "a human sees uv's own output as it happens"
     assert machine.captured[0] == [str(tool.facts.executable), "-P", "-m", "aisquare", "--version"]
     assert machine.connects() == [
-        [str(tool.script), "agents", "connect", "claude-code", "--config-dir", str(site)]
-    ], "re-connected BY the new install's own script, so the hooks name it"
+        [str(tool.script), "agents", "refresh-hooks", "claude-code", "--config-dir", str(site)]
+    ], "hooks only, BY the new install's own script, so the hooks name it"
     assert "✓ aisquare 0.9.1 (was 0.9.0)" in result.stdout
     assert f"✓ hooks re-connected in {site}" in result.stdout
 
@@ -1163,7 +1265,10 @@ def test_a_site_that_fails_to_reconnect_is_named_with_its_command_and_exits_1(
     assert result.exit_code == 1
     assert "✓ aisquare 0.9.1 (was 0.9.0)" in result.stdout, "the upgrade itself succeeded"
     assert "claude-code is not installed on this machine" in result.stdout
-    assert f"aisquare agents connect claude-code --config-dir {site}" in result.stdout
+    remedy = install_route.command_line(
+        ["aisquare", "agents", "refresh-hooks", "claude-code", "--config-dir", str(site)]
+    )
+    assert remedy in result.stdout
 
 
 @pytest.fixture
@@ -1189,3 +1294,138 @@ def test_a_site_whose_settings_cannot_be_read_is_left_with_the_reason(
     assert refresh == ()
     assert [site.config_dir for site in left] == [unreadable_settings]
     assert left[0].reason is not None and "could not be read" in left[0].reason
+
+
+# --- review of #251, round 1 -------------------------------------------------------------
+
+
+def _claude_with_memory(home: Path) -> Path:
+    """A Claude Code directory whose CLAUDE.md `agents connect` would import."""
+    directory = home / ".claude"
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "CLAUDE.md").write_text("# Style\nuse tabs\n", encoding="utf-8")
+    return directory
+
+
+def test_connect_imports_claude_md_which_is_why_the_refresh_must_not(
+    isolated_agent_home: Path,
+) -> None:
+    """Positive control for the one below: `agents connect` does import CLAUDE.md, so
+    running it on every upgrade re-adds sections the user removed (finding 1)."""
+    directory = _claude_with_memory(isolated_agent_home)
+
+    connection = agents_service.connect("claude-code", directory)
+
+    assert connection.imported == 1
+    assert paths.db_path().exists()
+
+
+def test_refresh_hooks_writes_the_hooks_and_imports_nothing(
+    isolated_agent_home: Path, runner: CliRunner
+) -> None:
+    directory = _claude_with_memory(isolated_agent_home)
+
+    result = runner.invoke(
+        app, ["--json", "agents", "refresh-hooks", "claude-code", "--config-dir", str(directory)]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout) == {"name": "claude-code", "hooks_installed": True}
+    assert agent_core.hooks_installed("claude-code", directory)
+    assert not paths.db_path().exists(), "a refresh imports nothing, so it never opens the store"
+
+
+def test_the_refresh_the_upgrade_runs_is_a_command_this_cli_has(runner: CliRunner) -> None:
+    """The NEW install runs ``lifecycle.REFRESH_HOOKS``. A release that dropped or
+    renamed it would break the upgrade from every earlier one."""
+    result = runner.invoke(app, [*lifecycle.REFRESH_HOOKS, "--help"])
+
+    assert result.exit_code == 0, result.output
+    assert lifecycle.REFRESH_HOOKS[1] == "refresh-hooks"
+
+
+def test_a_move_back_leaves_the_hooks_and_says_how_to_rewrite_them(
+    runner: CliRunner, tool: Tool, machine: Machine, tmp_path: Path
+) -> None:
+    """An older release may predate `agents refresh-hooks` (0.8 and earlier do)."""
+    _record(_hooked(tmp_path / "claude", tool.script))
+    machine.new_version = "0.7.0"
+
+    result = runner.invoke(app, ["upgrade", "--version", "0.7.0", "--yes"])
+
+    assert result.exit_code == 0, result.output
+    assert machine.connects() == [], "no refresh on a downgrade"
+    assert "0.7.0 is older than 0.9.0, so the hooks were left as they were" in result.stdout
+
+
+@pytest.mark.parametrize(
+    "content",
+    [b'{"hooks": {}, "note": "caf\xe9"}', b'{"hooks": {"Stop": 1}}'],
+    ids=["not-utf-8", "hooks-of-the-wrong-shape"],
+)
+def test_a_settings_file_that_cannot_be_read_as_hooks_is_left_not_raised(
+    tool: Tool, tmp_path: Path, runner: CliRunner, machine: Machine, content: bytes
+) -> None:
+    """Finding 2: a ValueError or TypeError from one recorded settings.json used to
+    end `upgrade` and `upgrade --check` in a traceback."""
+    bad = tmp_path / "c-bad"
+    bad.mkdir()
+    (bad / "settings.json").write_bytes(content)
+    _record(bad)
+
+    refresh, left = lifecycle.refresh_sites(tool.facts)
+    result = runner.invoke(app, ["--json", "upgrade", "--check"])
+
+    assert refresh == ()
+    assert [site.config_dir for site in left] == [bad]
+    assert result.exit_code == 0, result.output
+    assert _one_object(result.stdout)["hooks_left"][0]["config_dir"] == str(bad)
+
+
+def test_an_install_on_its_own_index_does_not_take_pypis_word_for_latest(
+    runner: CliRunner, tool: Tool, machine: Machine
+) -> None:
+    """Finding 3: uv resolves @latest against the restated index, so PyPI's number is
+    neither "nothing to do" nor proof of a silent no-op there."""
+    (tool.prefix / install_route.RECEIPT_NAME).write_text(
+        _receipt(
+            _OURS_PINNED, tail='\n[tool.options]\nindex-url = "https://mirror.example/simple"\n'
+        ),
+        encoding="utf-8",
+    )
+    machine.new_version = "0.9.0"  # the mirror has nothing newer
+
+    check = runner.invoke(app, ["--json", "upgrade", "--check"])
+    run = runner.invoke(app, ["upgrade", "--yes"])
+
+    assert machine.lookups == 0, "PyPI is not asked for an install that resolves elsewhere"
+    report = _one_object(check.stdout)
+    assert report["latest"] is None and "--index-url" in report["latest_error"]
+    assert run.exit_code == 0, run.output
+    assert "is the newest release your package index serves" in run.stdout
+
+
+def test_check_with_a_pin_advises_the_pin(runner: CliRunner, tool: Tool, machine: Machine) -> None:
+    """Finding 8: the advice must name the version the check was asked about."""
+    result = runner.invoke(app, ["upgrade", "--check", "--version", "0.7.0"])
+
+    assert result.exit_code == 0, result.output
+    assert "upgrade with: aisquare upgrade --version 0.7.0" in result.stdout
+
+
+def test_a_failing_sites_remedy_survives_a_space_in_its_path(
+    runner: CliRunner, tool: Tool, machine: Machine, tmp_path: Path
+) -> None:
+    """Finding 9: the printed remedy is shell-quoted like every other command printed."""
+    site = _hooked(tmp_path / "Jane Doe" / ".claude", tool.script)
+    _record(site)
+    machine.connect_exit = 1
+
+    result = runner.invoke(app, ["upgrade", "--yes"])
+
+    quoted = install_route.command_line(
+        ["aisquare", "agents", "refresh-hooks", "claude-code", "--config-dir", str(site)]
+    )
+    assert result.exit_code == 1
+    assert quoted in result.stdout
+    assert f"--config-dir {site}" not in result.stdout, "an unquoted path would split there"

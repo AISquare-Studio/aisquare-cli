@@ -82,6 +82,7 @@ from typing import TYPE_CHECKING, Any
 from aisquare.core.atomic import write_replacing
 from aisquare.core.locking import lock_exclusive, unlock
 from aisquare.core.paths import (
+    despite_windows_contention,
     ensure_home,
     remote_audit_path,
     remote_dist_dir,
@@ -827,7 +828,9 @@ class Runtime:
         R modal), the running server adopting it on its next request.
         """
         try:
-            data = self._state_path.read_bytes()
+            # On NTFS a read inside another process's rename over the file is refused
+            # for the rename's width, an "Access is denied" that is no permission problem.
+            data = despite_windows_contention(self._state_path.read_bytes)
         except FileNotFoundError:
             return None
         except OSError as exc:

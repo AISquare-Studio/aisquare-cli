@@ -11,6 +11,7 @@ network, no real tmux, a wall clock moved by hand where time matters.
 from __future__ import annotations
 
 import contextlib
+import errno
 import hashlib
 import json
 import os
@@ -1316,6 +1317,28 @@ def test_a_file_that_cannot_be_read_is_never_replaced(runtime: Runtime) -> None:
     finally:
         path.chmod(0o600)
     assert path.read_bytes() == before
+
+
+def test_a_read_inside_another_processs_rename_on_windows_is_tried_again(
+    runtime: Runtime, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """On NTFS, opening a file while another process renames over it is refused for the
+    rename's width (``paths.despite_windows_contention``). Read once, that refusal failed a
+    CLI command, or the TUI's first read, with a sentence about permissions."""
+    path = remote_state_path()
+    read_bytes = Path.read_bytes
+    refused: list[Path] = []
+
+    def busy_once(self: Path) -> bytes:
+        if self == path and not refused:
+            refused.append(self)
+            raise PermissionError(errno.EACCES, "Access is denied", str(self))
+        return read_bytes(self)
+
+    monkeypatch.setattr(Path, "read_bytes", busy_once)
+    monkeypatch.setattr(sys, "platform", "win32")
+    assert Runtime(path, remote_audit_path()).token == runtime.token
+    assert refused == [path]
 
 
 def test_a_hand_edit_that_breaks_the_json_costs_no_phone_its_link(

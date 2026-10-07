@@ -7,7 +7,9 @@ assignees: ""
 ---
 
 <!-- A security problem? Please don't file it here: report it privately, as
-https://github.com/AISquare-Studio/aisquare-cli/security/policy says. -->
+https://github.com/AISquare-Studio/aisquare-cli/security/policy says.
+The doctor output below names your added Claude accounts by email and your
+projects by folder: edit out what you would not post publicly. -->
 
 **What happened**
 A clear description of the bug.

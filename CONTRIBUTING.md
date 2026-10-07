@@ -474,6 +474,9 @@ ignore rather than remembered.** Put the check in the probe, not in your head.
 
 ## Reporting bugs / proposing features
 
-Open an issue describing what you expected and what happened. For larger
+A security problem goes privately, as SECURITY.md says, never in an issue.
+Questions, and ideas that are not yet a feature, go to Discussions.
+
+For a bug, open an issue describing what you expected and what happened. For larger
 changes, it's worth opening an issue to discuss the approach before writing
 code.

@@ -19,13 +19,21 @@ from __future__ import annotations
 import inspect
 import subprocess
 import sys
+from pathlib import Path
 
 from aisquare.cli import remote as remote_cli
 from aisquare.services import remote_server
 
-#: What ``import aisquare.cli.app`` must not load: the server, and the event loop
-#: behind it. ``starlette``/``uvicorn``/``websockets`` are already lazy inside it.
-_OFF_THE_HOOK_PATH = ("asyncio", "aisquare.services.remote_server")
+SERVICES = Path(remote_server.__file__).parent
+
+#: What ``import aisquare.cli.app`` must not load: the event loop, the crypto push
+#: needs, and every remote service module, computed so a new lane module is covered
+#: the day it lands. ``starlette``/``uvicorn``/``websockets`` are lazy inside them.
+_OFF_THE_HOOK_PATH = (
+    "asyncio",
+    "cryptography",
+    *(f"aisquare.services.{module.stem}" for module in sorted(SERVICES.glob("remote_*.py"))),
+)
 
 
 def _loaded_after(code: str) -> set[str]:
@@ -57,9 +65,13 @@ def test_the_server_module_leaves_asyncio_to_the_app_it_builds() -> None:
 
 
 def test_the_walk_reports_each_name_once_something_imports_it() -> None:
-    """The control: the same walk sees both names when they ARE imported."""
-    loaded = _loaded_after("import aisquare.cli.app, aisquare.services.remote_server, asyncio")
-    assert set(_OFF_THE_HOOK_PATH) <= loaded
+    """The control: the same walk sees every name when they ARE imported."""
+    assert {"aisquare.services.remote_server", "aisquare.services.remote_needs"} <= set(
+        _OFF_THE_HOOK_PATH
+    ), "the glob found the lane modules"
+    imports = ", ".join(name for name in _OFF_THE_HOOK_PATH if name != "cryptography")
+    loaded = _loaded_after(f"import aisquare.cli.app, {imports}")
+    assert set(_OFF_THE_HOOK_PATH) - {"cryptography"} <= loaded
 
 
 def test_the_cli_port_default_is_still_the_servers() -> None:

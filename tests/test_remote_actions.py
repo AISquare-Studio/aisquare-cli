@@ -1387,16 +1387,22 @@ def test_a_tell_that_types_refuses_a_dialog_and_a_pane_without_the_agent(
     assert pane.sent == [] and fleet.calls == [] and phone.audit() == []
 
 
+NOT_YET = (
+    "coder-1 is not idle at its prompt yet — try again in a few seconds, or use Interrupt & tell"
+)
+
+
 @pytest.mark.parametrize(
-    ("state", "message"),
+    ("setup", "message"),
     [
-        ("working", "coder-1 is working — use Interrupt & tell"),
-        ("attention", "coder-1 is attention — use Interrupt & tell"),
+        ({"state": "working"}, "coder-1 is working — use Interrupt & tell"),
         (
-            "waiting",
-            "coder-1 is not idle at its prompt yet — try again in a few seconds, "
-            "or use Interrupt & tell",
+            {"state": "limited"},
+            "coder-1 hit its usage limit, and a message will not get past it — use Switch account",
         ),
+        ({"state": "waiting"}, NOT_YET),
+        ({"state": "attention", "interrupted": True}, NOT_YET),
+        ({"state": "unknown"}, NOT_YET),
     ],
 )
 def test_prompt_will_not_type_into_an_agent_that_is_not_at_its_prompt(
@@ -1404,15 +1410,19 @@ def test_prompt_will_not_type_into_an_agent_that_is_not_at_its_prompt(
     needs: FakeNeeds,
     pane: FakePane,
     project: ProjectInfo,
-    state: FleetAgentState,
+    setup: dict[str, object],
     message: str,
 ) -> None:
+    """The refusal says what the agent is doing in words, and what would work instead. An
+    interrupt cannot help an agent parked on its usage limit: the message would fail on the
+    same limit. An ``attention`` an Escape already answered is a pane still redrawing."""
     _row(project)
-    needs.state, needs.at_prompt = state, False
+    for attribute, value in setup.items():
+        setattr(needs, attribute, value)
     response = phone.post("agent/tell", agent=LABEL, text="hi", mode="prompt")
     assert response.status_code == 409
     assert response.json() == {"error": "agent_busy", "message": message}
-    assert pane.sent == []
+    assert pane.sent == [] and phone.audit() == []
 
 
 def test_interrupt_sends_one_escape_then_types_once_at_the_prompt(

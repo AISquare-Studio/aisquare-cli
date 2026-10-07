@@ -17,7 +17,9 @@ the rest is here:
   stop the agent the same way. With a dialog up, that Enter answers it: it can
   approve a Bash command or take a question's first option. So an open dialog
   refuses the action (409 ``dialog_open``), unless ``dismiss_dialog`` asks for one
-  Escape (No) first. A tell that types does not type into a dialog either.
+  Escape (No) first. A ``prompt`` or ``interrupt`` tell does not type into a
+  dialog either. ``auto`` is ``fleet tell`` unchanged, which types into any row
+  that reads waiting, a stale dialog's included (SPEC §10 leaves that to main).
 * **One action per agent at a time.** ``remote_server.remote_agent_lock`` is
   taken without waiting, and the needs card's quick answers take it too (409
   ``busy``).
@@ -585,14 +587,25 @@ def action_interrupt_wait() -> float:
 
 
 def action_busy_sentence(snap: AgentNow, label: str) -> str:
-    """Why ``prompt`` will not type: what the agent is doing, and what to do instead."""
+    """Why ``prompt`` will not type: what the agent is doing, and what to do instead.
+
+    A working agent can be interrupted. One parked on its usage limit cannot be
+    told anything: a message fails on the same limit until the reset, and a
+    switch to another account is what moves it. Any other row (waiting, or
+    attention that an Escape already answered, with a pane still redrawing) is
+    a moment early.
+    """
     state = action_state(snap)
-    if state == "waiting":
+    if state == "working":
+        return f"{label} is working — use Interrupt & tell"
+    if state == "limited":
         return (
-            f"{label} is not idle at its prompt yet — try again in a few seconds, "
-            "or use Interrupt & tell"
+            f"{label} hit its usage limit, and a message will not get past it — use Switch account"
         )
-    return f"{label} is {state} — use Interrupt & tell"
+    return (
+        f"{label} is not idle at its prompt yet — try again in a few seconds, "
+        "or use Interrupt & tell"
+    )
 
 
 def action_paste(snap: AgentNow, label: str, text: str, *, interrupted: bool) -> tuple[bool, str]:

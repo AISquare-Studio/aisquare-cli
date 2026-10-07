@@ -114,9 +114,9 @@ def no_push_service(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[str]]:
 def roster(monkeypatch: pytest.MonkeyPatch) -> set[str]:
     """The devices the runtime still has (signed in or signed out), as the test says.
 
-    ``Runtime.device_ids`` is lane b-security's; this is the seam push reads it through,
-    so the rules here are tested against a roster the test controls. The tests marked
-    ``needs lane b-security`` read the real one.
+    ``push_device_ids`` is the seam push reads ``Runtime.device_ids`` through, so the
+    rules here are tested against a roster the test controls. The tests under "with the
+    real device model" read the real one.
     """
     live: set[str] = set()
     monkeypatch.setattr(remote_push, "push_device_ids", lambda kit: frozenset(live))

@@ -1519,12 +1519,21 @@ def test_with_the_real_device_rows_the_expiring_phone_is_warned(app: Any, runtim
 
 class StubTunnel(NgrokTunnel):
     """A tunnel that comes up at once with ``url`` (or never announces one), and dies when
-    the test says so. Its own fake, so ``test_remote_control.py`` stays its lanes'."""
+    the test says so. ``exit_error``: it starts, then exits at once with that error before
+    it announces anything, as ngrok does when its static domain is still held elsewhere.
+    Its own fake, so ``test_remote_control.py`` stays its lanes'."""
 
-    def __init__(self, port: int, url: str | None, failure: str | None = None) -> None:
+    def __init__(
+        self,
+        port: int,
+        url: str | None,
+        failure: str | None = None,
+        exit_error: str | None = None,
+    ) -> None:
         super().__init__(port, which=lambda _name: None)
         self._stub_url = url
         self._stub_failure = failure
+        self._stub_exit_error = exit_error
         self.alive = False
         self.stopped = False
 
@@ -1532,6 +1541,10 @@ class StubTunnel(NgrokTunnel):
         if self._stub_failure is not None:
             self.error = self._stub_failure
             return self._stub_failure
+        if self._stub_exit_error is not None:  # what the log reader leaves of such an exit
+            self.error = self._stub_exit_error
+            self._url_ready.set()
+            return None
         self.alive = True
         self.public_url = self._stub_url
         if self._stub_url is not None:
@@ -1548,17 +1561,25 @@ class StubTunnel(NgrokTunnel):
 
 
 class TunnelShop:
-    """Hands out one :class:`StubTunnel` per start, with the next of ``urls``."""
+    """Hands out one :class:`StubTunnel` per start, with the next of ``urls`` (and of
+    ``failures`` and ``exits``)."""
 
-    def __init__(self, *urls: str | None, failures: tuple[str | None, ...] = ()) -> None:
+    def __init__(
+        self,
+        *urls: str | None,
+        failures: tuple[str | None, ...] = (),
+        exits: tuple[str | None, ...] = (),
+    ) -> None:
         self.urls = list(urls)
         self.failures = list(failures)
+        self.exits = list(exits)
         self.made: list[StubTunnel] = []
 
     def __call__(self, port: int) -> NgrokTunnel:
         url = self.urls.pop(0) if self.urls else None
         failure = self.failures.pop(0) if self.failures else None
-        tunnel = StubTunnel(port, url, failure)
+        exit_error = self.exits.pop(0) if self.exits else None
+        tunnel = StubTunnel(port, url, failure, exit_error)
         self.made.append(tunnel)
         return tunnel
 
@@ -1577,9 +1598,14 @@ def controller_with(shop: TunnelShop, clock: LocalClock) -> tuple[RemoteControll
     server = FakeServer()
     controller = RemoteController(server=server, tunnel_factory=shop, now=clock, url_timeout=0.2)
     controller.turn_on()
+    waited(controller)
+    return controller, server
+
+
+def waited(controller: RemoteController) -> None:
+    """Join the thread that waits for ngrok's URL, so what it sets is there to assert."""
     assert controller._waiter is not None
     controller._waiter.join(5)
-    return controller, server
 
 
 def test_the_tui_tells_the_server_where_phones_reach_it(isolated_home: Path) -> None:
@@ -1596,8 +1622,7 @@ def test_a_dead_tunnel_is_started_again_at_most_once_a_minute(isolated_home: Pat
     assert controller.revive_tunnel_if_dead() is False, "alive: nothing to do"
     shop.made[0].alive = False
     assert controller.revive_tunnel_if_dead() is True
-    assert controller._waiter is not None
-    controller._waiter.join(5)
+    waited(controller)
     second = f"https://second.ngrok-free.app/r/{server.token}/"
     assert controller.tunnel is shop.made[1] and shop.made[0].stopped
     assert controller.link_url() == second and server.public_urls[-1] == second
@@ -1617,8 +1642,7 @@ def test_a_static_domain_comes_back_on_the_same_link(isolated_home: Path) -> Non
     controller, server = controller_with(shop, clock)
     shop.made[0].alive = False
     assert controller.revive_tunnel_if_dead() is True
-    assert controller._waiter is not None
-    controller._waiter.join(5)
+    waited(controller)
     assert controller.message == "ngrok stopped — restarted it"
     assert controller.link_url() == f"{same}/r/{server.token}/"
 
@@ -1643,6 +1667,53 @@ def test_a_restart_that_fails_is_tried_again_the_next_minute(isolated_home: Path
     assert controller.tunnel is shop.made[0], "the dead one stays, to be revived later"
     clock.now += timedelta(seconds=60)
     assert controller.revive_tunnel_if_dead() is True
+
+
+def test_a_restart_that_exits_before_it_announces_is_restarted_a_minute_later(
+    isolated_home: Path,
+) -> None:
+    """The static domain is still held by the session that just died, or the network is
+    down for a while: the restart exits before it announces a URL. The watchdog stopped
+    for good there, and left the night's phone on a dead link. It keeps trying, once a
+    minute, and says nothing changed once the same link is back."""
+    same = "https://remote-anmol.ngrok-free.app"
+    held = "failed to start tunnel: The endpoint is already online. ERR_NGROK_334"
+    shop, clock = TunnelShop(same, None, same, exits=(None, held)), LocalClock()
+    controller, server = controller_with(shop, clock)
+    shop.made[0].alive = False
+    assert controller.revive_tunnel_if_dead() is True
+    waited(controller)
+    assert controller.message == held
+    assert controller.info is not None and controller.link_url() == controller.info.url_local
+    clock.now += timedelta(seconds=59)
+    assert controller.revive_tunnel_if_dead() is False, "a minute has not passed"
+    clock.now += timedelta(seconds=1)
+    assert controller.revive_tunnel_if_dead() is True
+    waited(controller)
+    assert len(shop.made) == 3 and shop.made[1].stopped
+    assert controller.link_url() == f"{same}/r/{server.token}/"
+    assert server.public_urls[-1] == f"{same}/r/{server.token}/"
+    assert controller.message == "ngrok stopped — restarted it"
+
+
+def test_a_new_remote_whose_first_tunnel_never_came_up_is_left_alone(
+    isolated_home: Path,
+) -> None:
+    """Restarts in an earlier Remote do not make this one's first tunnel a restart: it never
+    came up, for a reason a restart would hit again."""
+    shop = TunnelShop("https://first.ngrok-free.app", "https://second.ngrok-free.app", None)
+    clock = LocalClock()
+    controller, _server = controller_with(shop, clock)
+    shop.made[0].alive = False
+    assert controller.revive_tunnel_if_dead() is True
+    waited(controller)
+    controller.turn_off()
+    controller.turn_on()
+    waited(controller)
+    shop.made[2].alive = False
+    clock.now += timedelta(minutes=5)
+    assert controller.revive_tunnel_if_dead() is False
+    assert len(shop.made) == 3
 
 
 def test_remote_off_revives_nothing(isolated_home: Path) -> None:
@@ -1671,12 +1742,11 @@ def test_a_link_that_is_no_origin_is_not_noted_and_does_not_end_the_waiter(
     shop, clock = TunnelShop("https://x.example:4443", "https://y.example:4443"), LocalClock()
     controller = RemoteController(server=server, tunnel_factory=shop, now=clock, url_timeout=0.2)
     controller.turn_on()
-    assert controller._waiter is not None
-    controller._waiter.join(5)
+    waited(controller)
     assert controller.link_url() == f"https://x.example:4443/r/{server.token}/"
     shop.made[0].alive = False
     assert controller.revive_tunnel_if_dead() is True
-    controller._waiter.join(5)
+    waited(controller)
     assert controller.message == "ngrok stopped — restarted it; the link changed"
 
 

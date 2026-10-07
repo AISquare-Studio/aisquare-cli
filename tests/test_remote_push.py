@@ -1,4 +1,4 @@
-"""Web Push (SPEC §5): the crypto, the allowlist, the file, the sender's rules, the routes, ngrok.
+"""Web Push (SPEC §5): the crypto, the allowlist, the file, the sender's rules, the routes, the TUI.
 
 No test here reaches the network. The sender and the one-shot pushes take an
 injected transport, and an autouse guard stands in for the real one and for
@@ -39,6 +39,7 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from starlette.testclient import TestClient
 
+from aisquare.cli.ui.remote_control import RemoteController
 from aisquare.core.paths import remote_audit_path, remote_push_path
 from aisquare.services import ngrok_tunnel, remote_needs, remote_push
 from aisquare.services.ngrok_tunnel import (
@@ -75,6 +76,7 @@ from aisquare.services.remote_push import (
 )
 from aisquare.services.remote_server import RemoteKit, Runtime, Sources, build_app
 from tests.remote_kit_helpers import base, make_client, make_runtime, unlock
+from tests.test_remote_control import FakeServer
 
 REAL_TRANSPORT = remote_push.push_https_transport
 """Kept before the guard below replaces it, for the one test of the real transport."""
@@ -1498,7 +1500,170 @@ def test_with_the_real_device_rows_the_expiring_phone_is_warned(app: Any, runtim
     assert phone.read(body)["title"] == EXPIRY_TITLE
 
 
-# --- ngrok: the static domain and the old-ngrok hint (SPEC §5.8, §5.10 item 12) ---------------
+# --- the TUI: the static domain and the tunnel watchdog (SPEC §5.8, §5.10 item 12) ------------
+
+
+class StubTunnel(NgrokTunnel):
+    """A tunnel that comes up at once with ``url`` (or never announces one), and dies when
+    the test says so. Its own fake, so ``test_remote_control.py`` stays its lanes'."""
+
+    def __init__(self, port: int, url: str | None, failure: str | None = None) -> None:
+        super().__init__(port, which=lambda _name: None)
+        self._stub_url = url
+        self._stub_failure = failure
+        self.alive = False
+        self.stopped = False
+
+    def start_tunnel(self) -> str | None:
+        if self._stub_failure is not None:
+            self.error = self._stub_failure
+            return self._stub_failure
+        self.alive = True
+        self.public_url = self._stub_url
+        if self._stub_url is not None:
+            self._url_ready.set()
+        return None
+
+    @property
+    def running(self) -> bool:
+        return self.alive
+
+    def stop_tunnel(self) -> None:
+        self.stopped = True
+        self.alive = False
+
+
+class TunnelShop:
+    """Hands out one :class:`StubTunnel` per start, with the next of ``urls``."""
+
+    def __init__(self, *urls: str | None, failures: tuple[str | None, ...] = ()) -> None:
+        self.urls = list(urls)
+        self.failures = list(failures)
+        self.made: list[StubTunnel] = []
+
+    def __call__(self, port: int) -> NgrokTunnel:
+        url = self.urls.pop(0) if self.urls else None
+        failure = self.failures.pop(0) if self.failures else None
+        tunnel = StubTunnel(port, url, failure)
+        self.made.append(tunnel)
+        return tunnel
+
+
+class LocalClock:
+    """The controller's clock: naive local time, as ``datetime.now`` gives it."""
+
+    def __init__(self) -> None:
+        self.now = datetime(2026, 10, 7, 10, 0)
+
+    def __call__(self) -> datetime:
+        return self.now
+
+
+def controller_with(shop: TunnelShop, clock: LocalClock) -> tuple[RemoteController, FakeServer]:
+    server = FakeServer()
+    controller = RemoteController(server=server, tunnel_factory=shop, now=clock, url_timeout=0.2)
+    controller.turn_on()
+    assert controller._waiter is not None
+    controller._waiter.join(5)
+    return controller, server
+
+
+def test_the_tui_tells_the_server_where_phones_reach_it(isolated_home: Path) -> None:
+    controller, server = controller_with(TunnelShop("https://first.ngrok-free.app"), LocalClock())
+    link = f"https://first.ngrok-free.app/r/{server.token}/"
+    assert controller.link_url() == link
+    assert server.public_urls == [link]
+
+
+def test_a_dead_tunnel_is_started_again_at_most_once_a_minute(isolated_home: Path) -> None:
+    shop, clock = TunnelShop("https://first.ngrok-free.app", "https://second.ngrok-free.app",
+                             "https://third.ngrok-free.app"), LocalClock()  # fmt: skip
+    controller, server = controller_with(shop, clock)
+    assert controller.revive_tunnel_if_dead() is False, "alive: nothing to do"
+    shop.made[0].alive = False
+    assert controller.revive_tunnel_if_dead() is True
+    assert controller._waiter is not None
+    controller._waiter.join(5)
+    second = f"https://second.ngrok-free.app/r/{server.token}/"
+    assert controller.tunnel is shop.made[1] and shop.made[0].stopped
+    assert controller.link_url() == second and server.public_urls[-1] == second
+    assert controller.message == "ngrok stopped — restarted it; the link changed"
+    shop.made[1].alive = False
+    clock.now += timedelta(seconds=59)
+    assert controller.revive_tunnel_if_dead() is False, "a minute has not passed"
+    assert len(shop.made) == 2
+    clock.now += timedelta(seconds=1)
+    assert controller.revive_tunnel_if_dead() is True
+    assert len(shop.made) == 3
+
+
+def test_a_static_domain_comes_back_on_the_same_link(isolated_home: Path) -> None:
+    same = "https://remote-anmol.ngrok-free.app"
+    shop, clock = TunnelShop(same, same), LocalClock()
+    controller, server = controller_with(shop, clock)
+    shop.made[0].alive = False
+    assert controller.revive_tunnel_if_dead() is True
+    assert controller._waiter is not None
+    controller._waiter.join(5)
+    assert controller.message == "ngrok stopped — restarted it"
+    assert controller.link_url() == f"{same}/r/{server.token}/"
+
+
+def test_a_tunnel_that_never_came_up_is_left_to_its_error(isolated_home: Path) -> None:
+    """It failed for a reason the status line already says; a restart would fail the same."""
+    shop, clock = TunnelShop(None), LocalClock()
+    controller, _server = controller_with(shop, clock)
+    shop.made[0].alive = False
+    assert controller.revive_tunnel_if_dead() is False
+    assert len(shop.made) == 1
+
+
+def test_a_restart_that_fails_is_tried_again_the_next_minute(isolated_home: Path) -> None:
+    shop = TunnelShop("https://first.ngrok-free.app", None, "https://third.ngrok-free.app",
+                      failures=(None, "could not start ngrok: gone"))  # fmt: skip
+    clock = LocalClock()
+    controller, _server = controller_with(shop, clock)
+    shop.made[0].alive = False
+    assert controller.revive_tunnel_if_dead() is False
+    assert controller.message == "could not start ngrok: gone"
+    assert controller.tunnel is shop.made[0], "the dead one stays, to be revived later"
+    clock.now += timedelta(seconds=60)
+    assert controller.revive_tunnel_if_dead() is True
+
+
+def test_remote_off_revives_nothing(isolated_home: Path) -> None:
+    shop, clock = (
+        TunnelShop("https://first.ngrok-free.app", "https://2.ngrok-free.app"),
+        LocalClock(),
+    )
+    controller, _server = controller_with(shop, clock)
+    shop.made[0].alive = False
+    controller.turn_off()
+    assert controller.revive_tunnel_if_dead() is False
+    assert len(shop.made) == 1
+
+
+def test_a_link_that_is_no_origin_is_not_noted_and_does_not_end_the_waiter(
+    isolated_home: Path,
+) -> None:
+    """The server refuses a URL that is no public origin (a port, an IP). The thread that
+    waited for it must carry on: after a revive, it is what says ngrok was restarted."""
+
+    class Strict(FakeServer):
+        def note_public_url(self, url: str | None) -> None:
+            raise ValueError(f"{url!r} is on port 4443, not 443")
+
+    server = Strict()
+    shop, clock = TunnelShop("https://x.example:4443", "https://y.example:4443"), LocalClock()
+    controller = RemoteController(server=server, tunnel_factory=shop, now=clock, url_timeout=0.2)
+    controller.turn_on()
+    assert controller._waiter is not None
+    controller._waiter.join(5)
+    assert controller.link_url() == f"https://x.example:4443/r/{server.token}/"
+    shop.made[0].alive = False
+    assert controller.revive_tunnel_if_dead() is True
+    controller._waiter.join(5)
+    assert controller.message == "ngrok stopped — restarted it; the link changed"
 
 
 def _recording_popen(spawned: list[list[str]]) -> Callable[..., subprocess.Popen[str]]:

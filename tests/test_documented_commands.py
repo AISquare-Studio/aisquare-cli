@@ -113,6 +113,10 @@ DOCUMENTED = (
     ".github/ISSUE_TEMPLATE/bug_report.md",
     "docs/runbooks/MORNING-HANDOFF.md",
     "docs/signing-in.md",
+    # The Claude Code plugin route: `remember`, `doctor` and the `agents
+    # disconnect` that keeps one route are steps the reader types. The `/plugin`
+    # lines are Claude Code input, fenced `text`, which this guard does not read.
+    "docs/claude-code-plugin.md",
     # The README's long form, moved out when the README became a front page
     # (roadmap 9.5). Its fenced commands moved with it and are still steps a
     # reader types, so each page is listed in its own right; the command tree
@@ -888,6 +892,10 @@ CENSUS = {
     # line and the installer URL as the two classified mentions. The 82 commands
     # it carried before moved, unchanged, into the five pages below.
     "README.md": (5, 2),
+    # Measured 2026-10-07 on the day the page was written: three fenced commands
+    # and three classified mentions (`aisquare-cli` and `aisquare@aisquare-cli`
+    # in the `claude plugin` and `uv tool install` lines).
+    "docs/claude-code-plugin.md": (3, 3),
     # Measured 2026-10-07 on the day they were split out of the README; their
     # commands summed to the README's 82 before the split. Re-measured the same
     # day at (3, 3) for install.md, when it stopped repeating the first-run

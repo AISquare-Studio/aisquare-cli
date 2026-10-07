@@ -816,9 +816,6 @@ def _check_claude_code() -> DoctorCheck:
         return _ok("claude-code", "Claude Code not detected on this machine")
     version = claude_code_version()
     product = f"Claude Code {version}" if version else "Claude Code"
-    if not sites:
-        return _warn("claude-code", f"{product} {_STALE_HOOKS}", _RECONNECT)
-
     # Hooks switched off ("disableAllHooks": true) run none of ours however complete
     # they are, and `agents connect` cannot change that. The shared check answers
     # False there, so such a directory must not reach `unhooked` below and be
@@ -837,6 +834,8 @@ def _check_claude_code() -> DoctorCheck:
             "Claude Code runs none of them, so no context is injected and no prompt is captured",
             f'Turn hooks back on: remove "disableAllHooks" from {listed}',
         )
+    if not sites:
+        return _warn("claude-code", f"{product} {_STALE_HOOKS}", _RECONNECT)
 
     unhooked = [site for site in sites if not agents_service.claude_code_connected(site.config_dir)]
     wrong_binary = [

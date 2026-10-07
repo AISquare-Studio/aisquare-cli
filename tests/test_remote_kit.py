@@ -802,3 +802,23 @@ def test_serve_hands_its_port_to_the_kit(
     remote_server.run_foreground(tmp_path, 9123)
     ((app, kwargs),) = served
     assert app.kit.port == kwargs["port"] == 9123
+
+
+def test_a_socket_that_cannot_be_closed_does_not_cost_the_new_one_its_place(
+    runtime: Runtime,
+) -> None:
+    """An evicted socket whose loop is already gone raises from its closer; the new
+    socket is still counted and the eviction still happens."""
+    kit = RemoteKit(runtime)
+    closed: list[int] = []
+
+    def gone(code: int) -> None:
+        raise RuntimeError("Event loop is closed")
+
+    kit.kit_socket_opened("dev_1", gone)
+    live = [closed.append for _ in range(remote_server.WS_SOCKETS_PER_DEVICE)]
+    for closer in live:
+        kit.kit_socket_opened("dev_1", closer)
+    assert kit.sockets["dev_1"] == live, "the dead one was evicted, the four newest kept"
+    kit.kit_socket_opened("dev_1", closed.append)
+    assert closed == [remote_server.WS_CLOSE_REPLACED]

@@ -135,8 +135,10 @@ MAX_BODY_BYTES = 65_536
 """The largest body any request may carry, refused with 413 before a route sees it.
 
 ``unlock`` is covered too: it is the one body anyone holding only the URL can send.
-Every legitimate body is a few hundred bytes; the longest text a phone may type
-(``agent/tell``, 8 000 characters of 4-byte UTF-8, JSON-escaped) still fits."""
+Every legitimate body is a few hundred bytes, and the longest text a phone may type
+still fits: ``agent/tell``'s 8 000 characters are at most 32 000 bytes of UTF-8 as
+``JSON.stringify`` writes them, 48 000 if every one were a control character it
+escapes as ``\\u00XX``."""
 
 REQUEST_ID = re.compile(r"[A-Za-z0-9_-]{1,64}\Z")
 """A write's optional ``request_id``, used ONLY with ``fullmatch`` (``\\Z`` also guards a
@@ -1836,7 +1838,10 @@ class RemoteKit:
             evicted = live[: max(0, len(live) - WS_SOCKETS_PER_DEVICE)]
             del live[: len(evicted)]
         for close in evicted:
-            close(WS_CLOSE_REPLACED)
+            try:
+                close(WS_CLOSE_REPLACED)
+            except Exception:  # a socket already gone must not cost the new one its handshake
+                log.debug("remote: closing an evicted websocket failed", exc_info=True)
 
     def kit_socket_closed(self, device_id: str, closer: Callable[[int], None]) -> None:
         """Forget a socket that ended, evicted or not."""
@@ -1931,7 +1936,8 @@ async def remote_lifespan(kit: RemoteKit) -> AsyncIterator[None]:
         try:
             stopper = starter(kit)
         except Exception:
-            log.warning("remote: %s failed; serving without it", starter.__name__, exc_info=True)
+            name = getattr(starter, "__name__", repr(starter))
+            log.warning("remote: %s failed; serving without it", name, exc_info=True)
             continue
         if stopper is not None:
             stoppers.append(stopper)

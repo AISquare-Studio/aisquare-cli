@@ -32,7 +32,7 @@ from aisquare.core.paths import remote_audit_path, remote_needs_path
 from aisquare.models import FleetAgent, FleetAgentStatus, ProjectInfo, TeamEvent, TeamSession
 from aisquare.services import fleet as fleet_service
 from aisquare.services import remote_needs
-from aisquare.services.remote_actions import ActionLedger, LedgerEntry
+from aisquare.services.remote_actions import LedgerEntry
 from aisquare.services.remote_needs import (
     AgentNow,
     NeedsItem,
@@ -1505,7 +1505,8 @@ def test_a_dismissal_of_nothing_is_refused(
 ) -> None:
     response = live.client.post(live.url("needs/dismiss"), json=body)
     assert (response.status_code, response.json()["error"]) == (status, error)
-    assert live.audit() == []
+    # The trail may hold other lines (the unlock is audited, SPEC §1.3); not a dismissal.
+    assert not any(" needs/dismiss " in line for line in live.audit())
 
 
 def test_an_answer_is_refused_while_writes_are_off(live: Live) -> None:
@@ -1660,8 +1661,12 @@ def test_tmux_failing_mid_answer_is_said_and_still_on_the_trail(live: Live) -> N
     assert live.audit()[-1].endswith("enter=False failed"), "part of it may have reached the pane"
 
 
-class _KeepingLedger(ActionLedger):
-    """A ledger that keeps finished requests, the way the real one must."""
+class _KeepingLedger:
+    """A ledger that keeps finished requests, the way the real one must.
+
+    Whole on its own, not a subclass: the real ``ActionLedger`` (lane E) keeps
+    state its own ``__init__`` makes, which a subclass skipping it would lack.
+    """
 
     def __init__(self) -> None:
         self.finished: dict[tuple[str, str], tuple[int, dict[str, object]]] = {}
@@ -1670,6 +1675,9 @@ class _KeepingLedger(ActionLedger):
         self, device_id: str, request_id: str
     ) -> tuple[int, dict[str, object]] | None:
         return self.finished.get((device_id, request_id))
+
+    def ledger_begin(self, device_id: str, request_id: str, endpoint: str) -> bool:
+        return True
 
     def ledger_finish(
         self, device_id: str, request_id: str, status: int, body: dict[str, object]
@@ -1690,8 +1698,10 @@ def _answer_twice(live: Live) -> tuple[Any, Any]:
     )
 
 
-def test_a_retried_answer_is_answered_from_the_ledger_not_typed_twice(live: Live) -> None:
-    live.app.kit.ledger = _KeepingLedger()
+def test_a_retried_answer_is_answered_from_the_ledger_not_typed_twice(
+    live: Live, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(live.app.kit, "ledger", _KeepingLedger())
     first, again = _answer_twice(live)
     assert first.status_code == again.status_code == 200
     assert first.json() == again.json()

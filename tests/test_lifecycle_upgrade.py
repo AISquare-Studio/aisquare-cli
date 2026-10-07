@@ -1374,7 +1374,14 @@ def test_a_move_back_leaves_the_hooks_and_says_how_to_rewrite_them(
 
 @pytest.mark.parametrize(
     ("content", "left"),
-    [(b'{"hooks": {}, "note": "caf\xe9"}', True), (b'{"hooks": {"Stop": 1}}', False)],
+    [
+        (
+            b'{"note": "caf\xe9", "hooks": {"Stop": [{"hooks": [{"type": "command", '
+            b'"command": "/x/aisquare hook stop"}]}]}}',
+            True,
+        ),
+        (b'{"hooks": {"Stop": 1}}', False),
+    ],
     ids=["not-utf-8", "hooks-of-the-wrong-shape"],
 )
 def test_a_settings_file_that_cannot_be_read_as_hooks_is_left_not_raised(

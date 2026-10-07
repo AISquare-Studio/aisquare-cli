@@ -60,6 +60,16 @@ def _hooked(directory: Path, program: Path | str, *, foreign: bool = True) -> Pa
     return directory
 
 
+def _hooks_text(program: Path | str, *, trailing_comma: bool = False) -> str:
+    """settings.json text holding aisquare's six hook groups; optionally not valid JSON."""
+    hooks = {
+        event: [{"hooks": [{"type": "command", "command": f"{program} hook {verb}"}]}]
+        for event, verb in _EVENTS
+    }
+    text = json.dumps({"hooks": hooks}, indent=2)
+    return text[: text.rindex("\n}")] + ",\n}" if trailing_comma else text
+
+
 def _settings(directory: Path) -> dict[str, Any]:
     loaded: dict[str, Any] = json.loads((directory / "settings.json").read_text("utf-8"))
     return loaded
@@ -951,10 +961,10 @@ def test_a_settings_file_that_is_not_utf8_is_reported_not_raised(
     Latin-1 in a ~/.claude* sibling, crashed the plan — --dry-run included."""
     recorded = tmp_path / "recorded"
     recorded.mkdir()
-    (recorded / "settings.json").write_bytes('{"hooks": {}}'.encode("utf-16"))
+    (recorded / "settings.json").write_bytes(_hooks_text(tool.script).encode("utf-16"))
     sibling = isolated_agent_home / ".claude-old"
     sibling.mkdir(parents=True)
-    (sibling / "settings.json").write_bytes(b'{"note": "caf\xe9"}')
+    (sibling / "settings.json").write_bytes(b'{"note": "caf\xe9"}')  # nothing of ours
     _record(recorded)
 
     result = runner.invoke(app, ["--json", "uninstall", "--dry-run"])
@@ -1254,3 +1264,92 @@ def test_upgrade_and_uninstall_agree_on_which_uv_tools_they_touch(
 
     assert upgrade is not None and upgrade == uninstall
     assert "aisquare-cli-old" in upgrade
+
+
+# --- review of #254, on this branch's code ------------------------------------------------
+
+
+@pytest.mark.parametrize("ours", [True, False], ids=["our-hooks", "only-theirs"])
+def test_hooks_in_a_file_that_is_not_valid_json_keep_the_package(
+    tool: Tool,
+    world: World,
+    runner: CliRunner,
+    isolated_agent_home: Path,
+    ours: bool,
+) -> None:
+    """#254's review, finding 1: a trailing comma made the file read as "no hooks",
+    and the package went while Claude Code might still run them. A broken file with
+    nothing of ours in it is not this command's business (negative control)."""
+    site = isolated_agent_home / ".claude"
+    site.mkdir(parents=True)
+    program = tool.script if ours else "/usr/local/bin/notify-send"
+    text = _hooks_text(program, trailing_comma=True).replace(" hook ", " hook " if ours else " ")
+    (site / "settings.json").write_text(text, encoding="utf-8")
+    _record(site)
+
+    result = runner.invoke(app, ["uninstall", "--yes"])
+
+    if ours:
+        assert result.exit_code == 1
+        assert "cannot be removed safely" in result.stdout
+        assert world.execs == [], "the package stays while hooks may still call it"
+    else:
+        assert result.exit_code == 0, result.output
+        assert world.events[-1][0] == "package"
+
+
+def test_a_sibling_whose_hooks_only_show_leniently_keeps_the_package(
+    tool: Tool, world: World, runner: CliRunner, isolated_agent_home: Path
+) -> None:
+    """#254's review, finding 2: an unrecorded ~/.claude* whose Latin-1 settings.json
+    holds our hooks read as having none, so the package went under live hooks."""
+    sibling = isolated_agent_home / ".claude-latin"
+    sibling.mkdir(parents=True)
+    text = _hooks_text(tool.script).replace('"hooks": {', '"note": "caf\u00e9", "hooks": {', 1)
+    assert "\u00e9" in text, "the fixture must hold a byte that is not UTF-8 once encoded"
+    (sibling / "settings.json").write_bytes(text.encode("latin-1"))
+
+    plan = runner.invoke(app, ["--json", "uninstall"])
+    run = runner.invoke(app, ["uninstall", "--yes"])
+
+    assert [entry["config_dir"] for entry in _one_object(plan.stdout)["unreadable"]] == [
+        str(sibling)
+    ]
+    assert run.exit_code == 1 and world.execs == []
+
+
+def test_the_question_never_offers_what_an_unreadable_site_rules_out(
+    tool: Tool,
+    world: World,
+    runner: CliRunner,
+    isolated_agent_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#254's review, finding 3: asq's Uninstall button asks this question, and it said
+    "nothing for aisquare to remove here" — or offered to remove the package — while
+    the run would keep the package for a site it could not check."""
+    monkeypatch.setattr("aisquare.cli.install._stdin_is_a_terminal", lambda: True)
+    asked: list[str] = []
+
+    def confirm(text: str, **_: object) -> bool:
+        asked.append(text)
+        return False
+
+    monkeypatch.setattr("aisquare.cli.install.typer.confirm", confirm)
+    broken = isolated_agent_home / ".claude"
+    broken.mkdir(parents=True)
+    (broken / "settings.json").write_text(_hooks_text(tool.script, trailing_comma=True), "utf-8")
+    _record(broken)
+
+    only_unreadable = runner.invoke(app, ["uninstall"])
+    _hooked(isolated_agent_home / ".claude-c2", tool.script)
+    with_a_readable_site = runner.invoke(app, ["uninstall"])
+
+    assert only_unreadable.exit_code == 1
+    assert "nothing can be removed until" in only_unreadable.stdout
+    assert "nothing for aisquare to remove here" not in only_unreadable.stdout
+    assert with_a_readable_site.exit_code == 0, with_a_readable_site.output
+    assert asked == [
+        "Remove aisquare's hooks from 1 directory "
+        "(the package stays: 1 other directory could not be checked)?"
+    ]

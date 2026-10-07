@@ -420,18 +420,29 @@ def _emit_uninstall_report(report: lifecycle_service.UninstallReport) -> None:
 
 
 def _uninstall_question(plan: lifecycle_service.UninstallPlan) -> str | None:
-    """The y/N question, naming every step that will happen — ``None`` when none will."""
+    """The y/N question, naming every step that will happen — ``None`` when none will.
+
+    A site that could not be checked fails the run, which then keeps the package
+    and the home (``UninstallReport.package_runs``), so the question does not
+    offer them: it asks only what the run will really do (review of #254).
+    """
+    blocked = len(plan.unreadable)
     steps: list[str] = []
     if plan.hooks:
         count = len(plan.hooks)
         steps.append(f"remove aisquare's hooks from {count} director{'ies' if count != 1 else 'y'}")
-    if plan.purge and plan.home_exists:
+    if plan.purge and plan.home_exists and not blocked:
         steps.append(f"DELETE {plan.home}")
-    if plan.package_reason is None:
+    if plan.package_reason is None and not blocked:
         steps.append("remove the package")
     if not steps:
         return None
     text = steps[0] if len(steps) == 1 else ", ".join(steps[:-1]) + " and " + steps[-1]
+    if blocked:
+        text += (
+            f" (the package stays: {blocked} other director{'ies' if blocked != 1 else 'y'} "
+            "could not be checked)"
+        )
     return text[0].upper() + text[1:] + "?"
 
 
@@ -477,6 +488,10 @@ def uninstall(
             return
         question = _uninstall_question(plan)
         if question is None:
+            if plan.unreadable:
+                checked = ", ".join(str(site.config_dir) for site in plan.unreadable)
+                _say(f"✗ nothing can be removed until {checked} can be checked (see above)")
+                raise typer.Exit(1)
             _say(
                 f"nothing for aisquare to remove here — remove the package: {plan.package_command}"
             )

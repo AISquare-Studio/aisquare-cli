@@ -822,3 +822,21 @@ def test_a_socket_that_cannot_be_closed_does_not_cost_the_new_one_its_place(
     assert kit.sockets["dev_1"] == live, "the dead one was evicted, the four newest kept"
     kit.kit_socket_opened("dev_1", closed.append)
     assert closed == [remote_server.WS_CLOSE_REPLACED]
+
+
+def test_a_gated_route_still_answers_its_reads_while_writes_are_off(
+    runtime: Runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The write gate and the ledger are for what changes something; a GET never does."""
+
+    async def subscription(request: Request, device: Device, body: dict[str, Any]) -> Response:
+        return JSONResponse({"method": request.method})
+
+    app = _lane_app(
+        runtime, tmp_path, monkeypatch, subscription, methods=("GET", "POST"), write_gated=True
+    )
+    client = _unlocked(app, runtime)
+    url = f"{base(runtime)}/api/needs/answer"
+    assert client.get(url, params={"request_id": "r1"}).json() == {"method": "GET"}
+    assert client.post(url, json={}).status_code == 403
+    assert app.kit.ledger.calls == []

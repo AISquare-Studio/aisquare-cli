@@ -1889,14 +1889,14 @@ class RemoteKit:
                 return self.kit_refuse(404, "not_found", str(exc))
 
         async def kit_endpoint(request: Request) -> Response:
+            reading = request.method in ("GET", "HEAD")
+            gated = write_gated and not reading  # a read never waits on the write gate
             try:
                 device = self.kit_device(request)
-                if write_gated and not self.kit_write_allowed():
+                if gated and not self.kit_write_allowed():
                     raise RequestError(403, "read_only", READ_ONLY_REASON)
-                body: dict[str, Any] = {}
-                if request.method not in ("GET", "HEAD"):
-                    body = await self.kit_json_object(request)
-                request_id = _ledger_request_id(body) if write_gated else None
+                body = {} if reading else await self.kit_json_object(request)
+                request_id = _ledger_request_id(body) if gated else None
             except RequestError as exc:
                 return self.kit_refuse(exc.status, exc.error, exc.message)
             if request_id is None:

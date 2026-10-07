@@ -1116,6 +1116,75 @@ def test_a_discovered_url_that_is_no_public_origin_is_not_used(world: World, fou
     assert world.kit.kit_public_url() is None
 
 
+def _sender_asking(world: World, *answers: str | None) -> list[int]:
+    """The world's sender, with ngrok's API answering ``answers`` in turn; the ports asked."""
+    asked: list[int] = []
+    pending = list(answers)
+
+    def ngrok(port: int, timeout: float) -> str | None:
+        asked.append(port)
+        return pending.pop(0)
+
+    world.kit.port = 8750
+    world.sender = RemotePushSender(
+        world.kit, transport=world.transport, clock=world.clock, discover=ngrok
+    )
+    return asked
+
+
+def test_an_origin_found_through_ngrok_is_asked_about_again_a_minute_later(
+    world: World,
+) -> None:
+    """``asq remote serve`` beside a hand-started ngrok without a static domain: ngrok comes
+    back on a new URL, and the links follow it instead of leading to the dead one until the
+    server restarts."""
+    asked = _sender_asking(world, "https://first.ngrok-free.app", "https://again.ngrok-free.app")
+    token = world.kit.runtime.token
+    assert push_item(world, 1).startswith(f"https://first.ngrok-free.app/r/{token}/#/n/")
+    assert push_item(world, 2).startswith("https://first.ngrok-free.app/")
+    assert asked == [8750], "inside the minute, the origin found is used as it is"
+    world.later(60)
+    assert push_item(world, 3).startswith(f"https://again.ngrok-free.app/r/{token}/#/n/")
+    assert asked == [8750, 8750]
+
+
+def test_an_origin_ngrok_no_longer_names_is_forgotten(world: World) -> None:
+    asked = _sender_asking(world, PUBLIC_ORIGIN, None)
+    assert push_item(world, 1).startswith(f"{PUBLIC_ORIGIN}/r/")
+    world.later(60)
+    assert push_item(world, 2) is None, "a link to a tunnel that is gone leads nowhere"
+    assert world.kit.kit_public_url() is None and asked == [8750, 8750]
+
+
+def test_an_origin_the_tui_or_serve_announced_is_never_asked_about(world: World) -> None:
+    asked = _sender_asking(world, "https://other.ngrok-free.app")
+    world.kit.runtime.note_public_origin(PUBLIC_ORIGIN)
+    for n in (1, 2, 3):
+        assert push_item(world, n).startswith(f"{PUBLIC_ORIGIN}/r/")
+        world.later(60)
+    assert asked == []
+
+
+def test_an_origin_announced_while_ngrok_is_asked_is_kept(world: World) -> None:
+    """The TUI's tunnel announces itself while the sender waits on ngrok's API: the TUI's
+    word stands, and ngrok's answer, already stale, is dropped."""
+    announced = "https://tui.ngrok-free.app"
+
+    def ngrok_while_the_tui_announces(port: int, timeout: float) -> str | None:
+        world.kit.runtime.note_public_origin(announced)
+        return PUBLIC_ORIGIN
+
+    world.kit.port = 8750
+    world.sender = RemotePushSender(
+        world.kit,
+        transport=world.transport,
+        clock=world.clock,
+        discover=ngrok_while_the_tui_announces,
+    )
+    assert push_item(world, 1).startswith(f"{announced}/r/")
+    assert world.kit.runtime.remote_public_origin() == announced
+
+
 # --- system pushes (SPEC §5.6, §5.10 item 8) --------------------------------------------------
 
 

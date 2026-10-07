@@ -106,7 +106,8 @@ PUSH_TEST_INTERVAL_SECONDS = 10.0
 PUSH_SYSTEM_CHECK_SECONDS = 30.0
 """How often the sender looks at the auto-off deadline and the devices' expiry."""
 PUSH_DISCOVERY_SECONDS = 60.0
-"""How often, at most, the sender asks ngrok's local API for a public URL it was not told."""
+"""How often, at most, the sender asks ngrok's local API for a public URL it was not told,
+or asks again about the one the API named last time."""
 PUSH_STOP_SECONDS = 2.0
 """How long stopping the server waits for a send in flight."""
 PUSH_DRAIN_SECONDS = PUSH_TIMEOUT_SECONDS
@@ -1043,6 +1044,8 @@ class RemotePushSender:
         """``remote-push.json``'s ``pushed``, read once, then kept current by :meth:`_push_mark`."""
         self._next_system_check: datetime | None = None
         self._discovered_at: datetime | None = None
+        self._discovered_origin: str | None = None
+        """The origin this sender found through ngrok's API and noted, so it can ask again."""
         self._failing = False
 
     # --- the thread ---
@@ -1279,18 +1282,22 @@ class RemotePushSender:
     def _push_public_base(self, now: datetime) -> str | None:
         """Where a link in a push leads, from authoritative sources only (SPEC §5.8).
 
-        What the TUI or ``serve`` announced; else, at most once a minute and only
-        when the server knows its port, the tunnel to that port ngrok's local API
-        names. Never a request's ``Host``: anyone who reaches the server writes
-        that, and a push link is where the human types the passphrase.
+        What the TUI or ``serve`` announced, as long as it stands; else, when the
+        server knows its port, the tunnel to that port ngrok's local API names,
+        asked at most once a minute. An origin found that way is asked about again
+        a minute later, as though none were known: a hand-started ngrok without a
+        static domain comes back on a new URL, and every link would lead to the
+        dead one until the server restarted. Never a request's ``Host``: anyone
+        who reaches the server writes that, and a push link is where the human
+        types the passphrase.
         """
-        base = self._kit.kit_public_url()
+        origin = self._kit.runtime.remote_public_origin()
         port = self._kit.port
-        if base is not None or port is None:
-            return base
+        if port is None or (origin is not None and origin != self._discovered_origin):
+            return self._kit.kit_public_url()
         quiet = timedelta(seconds=PUSH_DISCOVERY_SECONDS)
         if self._discovered_at is not None and now - self._discovered_at < quiet:
-            return None
+            return self._kit.kit_public_url()
         self._discovered_at = now
         if self._discover is not None:
             found = self._discover(port, 1.0)
@@ -1298,13 +1305,16 @@ class RemotePushSender:
             from aisquare.services.ngrok_tunnel import discover_ngrok_public_url
 
             found = discover_ngrok_public_url(port, 1.0)
-        if found is None:
-            return None
         try:
-            self._kit.runtime.note_public_origin(check_public_origin(found))
+            checked = None if found is None else check_public_origin(found)
         except ValueError as exc:
             log.debug("remote: ngrok's API named %r, which is no public origin: %s", found, exc)
-            return None
+            checked = None
+        # What ngrok says now replaces only what it said before: an origin the TUI or
+        # serve announced while it was being asked is theirs, and stays.
+        if self._kit.runtime.remote_public_origin() == origin:
+            self._kit.runtime.note_public_origin(checked)
+            self._discovered_origin = checked
         return self._kit.kit_public_url()
 
 

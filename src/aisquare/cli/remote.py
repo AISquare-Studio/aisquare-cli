@@ -32,6 +32,18 @@ DEFAULT_PORT = 8750
 #: anyone holding it can keep reaching; ``0`` (never) is a choice the banner names.
 DEFAULT_AUTO_OFF_MINUTES = 60
 
+#: The port in the link ``status`` and ``regenerate-password --new-link`` print: serve's,
+#: from the same option and variable. Built for the default port, the link of a serve on
+#: ``--port 18750`` or an exported ``AISQUARE_REMOTE_PORT`` refused every connection.
+LinkPort = Annotated[
+    int,
+    typer.Option(
+        "--port",
+        help="The port serve runs on, for the link (serve's --port).",
+        envvar="AISQUARE_REMOTE_PORT",
+    ),
+]
+
 app = typer.Typer(
     help="Remote Control: show the fleet to a phone over one local port (ngrok exposes it).",
     no_args_is_help=True,
@@ -206,12 +218,12 @@ def install_page(
 
 
 @app.command("status")
-def status_command() -> None:
+def status_command(port: LinkPort = DEFAULT_PORT) -> None:
     """The link, the password, the devices and failed unlocks, from ~/.aisquare/remote.json."""
     from aisquare.services import remote_server
 
     state = _remote_runtime()
-    payload = _describe_remote(state.connection_info(), allow_write=state.allow_write)
+    payload = _describe_remote(state.connection_info(port), allow_write=state.allow_write)
     status = remote_server.remote_server_status()
     rows = status["devices"]
     devices = [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
@@ -274,6 +286,7 @@ def regenerate_password(
             help="Also mint a new link: the old one stops working everywhere (it leaked).",
         ),
     ] = False,
+    port: LinkPort = DEFAULT_PORT,
 ) -> None:
     """Mint a new password; every unlocked device has to unlock again."""
     from aisquare.services import remote_server
@@ -282,7 +295,7 @@ def regenerate_password(
     password = remote_server.regenerate_password(new_link=new_link)
     payload: dict[str, object] = {"password": password}
     if new_link:
-        info = state.connection_info()
+        info = state.connection_info(port)
         payload |= {"token": info.token, "url_local": info.url_local}
     if get_state().json_output:
         typer.echo(json.dumps(payload))

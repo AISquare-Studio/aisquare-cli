@@ -762,6 +762,30 @@ def test_cli_status_allow_write_and_regenerate(
     assert missing.exit_code == 1 and json.loads(missing.stdout)["error"] == "not_found"
 
 
+def test_status_and_a_new_link_are_for_the_port_serve_was_given(
+    isolated_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both built the link for 8750 whatever port serve ran on: with ``serve --port 18750``,
+    or ``AISQUARE_REMOTE_PORT=18750`` exported, ``status`` printed a link that refused
+    every connection, and so did ``regenerate-password --new-link`` for its new one."""
+    monkeypatch.setattr(remote_server, "_runtime", None)
+    runner = CliRunner()
+
+    given = _json_of(runner, "remote", "status", "--port", "18750")
+    assert given["url_local"] == f"http://127.0.0.1:18750/r/{given['token']}/"
+    human = runner.invoke(cli, ["remote", "status", "--port", "18750"])
+    assert f"http://127.0.0.1:18750/r/{given['token']}/" in human.stdout
+
+    monkeypatch.setenv("AISQUARE_REMOTE_PORT", "18751")
+    exported = _json_of(runner, "remote", "status")
+    assert exported["url_local"] == f"http://127.0.0.1:18751/r/{exported['token']}/"
+    fresh = _json_of(runner, "remote", "regenerate-password", "--new-link")
+    assert fresh["token"] != given["token"]
+    assert fresh["url_local"] == f"http://127.0.0.1:18751/r/{fresh['token']}/"
+    stated = _json_of(runner, "remote", "regenerate-password", "--new-link", "--port", "18752")
+    assert stated["url_local"] == f"http://127.0.0.1:18752/r/{stated['token']}/"
+
+
 def test_cli_serve_without_the_extra_fails_with_the_hint(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         remote_server,

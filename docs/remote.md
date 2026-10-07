@@ -368,7 +368,9 @@ aisquare remote regenerate-password --new-link
 every device out but keeps Remote on. `regenerate-password` makes a new
 passphrase and signs every device out; with `--new-link` it also makes a new
 token, so a leaked link stops working everywhere. The TUI shows the new link
-after Remote is turned off and on.
+after Remote is turned off and on. The link `status` and `--new-link` print is
+for port 8750: when `serve` runs on another, give them its `--port` too (an
+exported `AISQUARE_REMOTE_PORT` sets all three).
 
 ---
 
@@ -432,7 +434,7 @@ Start ngrok without it (the R panel never uses it).
 
 **`serve` says the port is in use.** Another Remote is running (the fleet UI's,
 perhaps), or something else took 8750. Turn the other one off, or pass `--port`
-and give ngrok the same port.
+and give ngrok (and `status`) the same port.
 
 **ngrok says `--url` is an unknown flag.** That ngrok is too old for static
 domains; run `ngrok update`.

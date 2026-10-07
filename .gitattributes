@@ -1,0 +1,3 @@
+# Claude Code runs the plugin's hook launcher with `sh`, which reads a CR as part of
+# the line it ends: LF in every checkout, whatever core.autocrlf says.
+plugins/claude-code/scripts/aisquare-hook text eol=lf

@@ -1,0 +1,25 @@
+{
+  "name": "aisquare-cli",
+  "owner": {
+    "name": "AISquare",
+    "email": "anmol@aisquare.studio"
+  },
+  "metadata": {
+    "description": "The aisquare CLI's Claude Code plugin: portable memory for coding agents."
+  },
+  "plugins": [
+    {
+      "name": "aisquare",
+      "source": "./plugins/claude-code",
+      "description": "Portable memory for Claude Code: aisquare's lifecycle hooks, run by the aisquare CLI, or by uvx when the CLI is not installed.",
+      "author": {
+        "name": "AISquare",
+        "email": "anmol@aisquare.studio"
+      },
+      "homepage": "https://github.com/AISquare-Studio/aisquare-cli",
+      "repository": "https://github.com/AISquare-Studio/aisquare-cli",
+      "license": "MIT",
+      "keywords": ["memory", "context", "hooks"]
+    }
+  ]
+}

@@ -113,6 +113,10 @@ DOCUMENTED = (
     ".github/ISSUE_TEMPLATE/bug_report.md",
     "docs/runbooks/MORNING-HANDOFF.md",
     "docs/signing-in.md",
+    # The Claude Code plugin route: `remember`, `doctor` and the `agents
+    # disconnect` that keeps one route are steps the reader types. The `/plugin`
+    # lines are Claude Code input, fenced `text`, which this guard does not read.
+    "docs/claude-code-plugin.md",
     # The fleet's user guide. Its command reference is fenced `sh` on purpose:
     # every `aisquare fleet …` line there is a step the reader types, so a flag
     # that leaves the CLI must fail here (docs/plans/fleet-tui.md §5, §10).
@@ -872,6 +876,10 @@ CENSUS = {
     # Re-measured 2026-09-05 when `project forget` / `project prune` (#83) added a
     # fenced example to the memory section.
     "README.md": (58, 5),
+    # Measured 2026-10-07 on the day the page was written: three fenced commands
+    # and three classified mentions (`aisquare-cli` and `aisquare@aisquare-cli`
+    # in the `claude plugin` and `uv tool install` lines).
+    "docs/claude-code-plugin.md": (3, 3),
     # Re-measured 2026-09-13 when "Choose where traces land with your sign-in"
     # (#142) added its fence: 20 commands, the same four classified mentions.
     # Re-measured 2026-09-24 at 21 when #142 took in #141's review (its key

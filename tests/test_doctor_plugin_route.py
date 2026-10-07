@@ -146,13 +146,15 @@ def test_a_partial_install_beside_the_plugin_is_two_routes_too(
 
 
 @pytest.mark.parametrize(
-    "how",
-    [{"enabled": False}, {"recorded": False}],
+    ("enabled", "recorded"),
+    [(False, True), (True, False)],
     ids=["disabled", "enabled-but-not-installed"],
 )
-def test_a_plugin_that_does_not_run_is_not_a_route(claude: Path, how: dict[str, bool]) -> None:
+def test_a_plugin_that_does_not_run_is_not_a_route(
+    claude: Path, enabled: bool, recorded: bool
+) -> None:
     """``/plugin disable`` writes false; an enabled key with nothing installed runs nothing."""
-    _install_plugin(claude, **how)
+    _install_plugin(claude, enabled=enabled, recorded=recorded)
 
     check = diagnostics._check_claude_code()
 
@@ -168,7 +170,7 @@ def test_a_plugin_that_does_not_run_is_not_a_route(claude: Path, how: dict[str, 
         ("settings.json", '{"enabledPlugins": ["aisquare@aisquare-cli"]}'),
         ("plugins/installed_plugins.json", "{not json"),
         ("plugins/installed_plugins.json", '{"version": 2, "plugins": ["aisquare@aisquare-cli"]}'),
-        ("plugins/installed_plugins.json", '{"version": 2, "plugins": {"aisquare@aisquare-cli": 7}}'),
+        ("plugins/installed_plugins.json", '{"plugins": {"aisquare@aisquare-cli": 7}}'),
     ],
     ids=["settings-invalid", "settings-list", "installed-invalid", "installed-list", "record-int"],
 )
@@ -220,9 +222,7 @@ def test_reading_the_plugin_creates_no_aisquare_state(claude: Path) -> None:
     assert not home.exists(), "doctor created the aisquare home"
 
 
-def test_disconnect_says_the_plugin_keeps_aisquare_running(
-    runner: CliRunner, claude: Path
-) -> None:
+def test_disconnect_says_the_plugin_keeps_aisquare_running(runner: CliRunner, claude: Path) -> None:
     _connect(runner)
     _install_plugin(claude)
 

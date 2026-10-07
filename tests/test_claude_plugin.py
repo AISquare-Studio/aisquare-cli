@@ -117,9 +117,7 @@ def test_a_version_out_of_step_is_named() -> None:
     )
     assert stale_manifest == ["plugin.json's version is '0.8.0', pyproject.toml says '0.9.0'"]
     no_pin = version_disagreements(pyproject=pyproject, plugin_json=plugin, launcher="# none\n")
-    assert no_pin == [
-        "the launcher's AISQUARE_PLUGIN_VERSION is None, pyproject.toml says '0.9.0'"
-    ]
+    assert no_pin == ["the launcher's AISQUARE_PLUGIN_VERSION is None, pyproject.toml says '0.9.0'"]
 
 
 # --------------------------------------------------------------------------- the manifests
@@ -135,7 +133,7 @@ def test_the_marketplace_lists_this_plugin_under_the_names_doctor_reads() -> Non
     assert market["name"] == agent_core.CLAUDE_PLUGIN_MARKETPLACE
     assert market["owner"]["name"]
     assert entry["name"] == plugin["name"] == agent_core.CLAUDE_PLUGIN
-    assert agent_core.CLAUDE_PLUGIN_ID == f"{plugin['name']}@{market['name']}"
+    assert f"{plugin['name']}@{market['name']}" == agent_core.CLAUDE_PLUGIN_ID
     assert entry["source"].startswith("./") and ".." not in source.parts
     assert (REPO / source).resolve() == PLUGIN.resolve()
     assert "version" not in entry, "plugin.json holds the version: one fewer number to bump"
@@ -177,8 +175,7 @@ def hook_problems(hooks_json: Mapping[str, Any]) -> list[str]:
             isinstance(timeout, int) and timeout >= agent_core.CONTEXT_HOOK_TIMEOUT_SECONDS
         ):
             problems.append(
-                f"{event}: timeout {timeout!r} is under "
-                f"{agent_core.CONTEXT_HOOK_TIMEOUT_SECONDS}"
+                f"{event}: timeout {timeout!r} is under {agent_core.CONTEXT_HOOK_TIMEOUT_SECONDS}"
             )
     return problems
 
@@ -295,13 +292,13 @@ class Machine:
     def stdin_of(self, name: str) -> bytes:
         return (self.log / f"{name}.stdin").read_bytes()
 
-    def settings(self, config_dir: Path, *commands: tuple[str, str], indent: int | None = 2) -> None:
+    def settings(
+        self, config_dir: Path, *commands: tuple[str, str], indent: int | None = 2
+    ) -> None:
         """A settings.json whose hooks are ``(event, command)`` pairs."""
         hooks: dict[str, list[dict[str, Any]]] = {}
         for event, command in commands:
-            hooks.setdefault(event, []).append(
-                {"hooks": [{"type": "command", "command": command}]}
-            )
+            hooks.setdefault(event, []).append({"hooks": [{"type": "command", "command": command}]})
         config_dir.mkdir(parents=True, exist_ok=True)
         separators = None if indent else (",", ":")
         (config_dir / "settings.json").write_text(
@@ -462,7 +459,7 @@ def test_it_reads_the_settings_json_the_session_reads(machine: Machine) -> None:
 
 @posix_only
 def test_without_the_cli_on_path_it_finds_local_bin(machine: Machine) -> None:
-    """Where ``uv tool install`` puts it, which a session from a desktop app may not have on PATH."""
+    """Where ``uv tool install`` puts it: a session from a desktop app may lack it on PATH."""
     machine.fake("aisquare", where=machine.home / ".local" / "bin")
     machine.fake("uvx")
 

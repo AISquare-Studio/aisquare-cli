@@ -329,7 +329,8 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         Binding("q", "quit", "quit"),
         Binding("ctrl+q", "quit", "quit", show=False),
         Binding("t", "pick_theme", "theme"),
-        Binding("R", "remote_panel", "remote"),
+        # Off the footer, which must fit 80 columns; the ? screen and the palette list it.
+        Binding("R", "remote_panel", "remote", show=False),
         Binding("r", "refresh_now", "refresh"),
         Binding("a", "toggle_captured", "captured", show=False),
         Binding("question_mark", "help", "help", key_display="?"),
@@ -359,7 +360,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
     ) -> None:
         super().__init__()
         self.remote = remote if remote is not None else RemoteController()
-        """The Remote (``m``) model — one per app, so the tunnel outlives the dialog."""
+        """The Remote (``R``) model — one per app, so the tunnel outlives the dialog."""
         self.refresh_seconds = refresh_seconds
         self._doctor = doctor
         self._accounts = accounts

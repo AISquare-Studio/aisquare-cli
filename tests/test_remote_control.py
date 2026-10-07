@@ -95,7 +95,7 @@ def test_parse_log_line_turns_an_authtoken_error_into_the_authtoken_hint() -> No
 
 
 def test_ngrok_command_is_the_documented_one() -> None:
-    assert ngrok_command(8748) == ["ngrok", "http", "8748", "--log=stdout", "--log-format=json"]
+    assert ngrok_command(8750) == ["ngrok", "http", "8750", "--log=stdout", "--log-format=json"]
 
 
 # --- the missing binary -------------------------------------------------------------------
@@ -110,7 +110,7 @@ def test_missing_binary_message_names_the_install_and_the_authtoken() -> None:
 
 
 def test_a_tunnel_without_the_binary_reports_instead_of_raising() -> None:
-    tunnel = NgrokTunnel(8748, which=lambda _name: None)
+    tunnel = NgrokTunnel(8750, which=lambda _name: None)
     assert tunnel.start_tunnel() == INSTALL_HINT
     assert tunnel.error == INSTALL_HINT
     assert not tunnel.running
@@ -133,7 +133,7 @@ def fake_ngrok(tmp_path: Path, *lines: dict[str, Any], linger: bool = True) -> l
 def test_the_tunnel_learns_its_url_from_the_log_and_stop_ends_the_process(
     tmp_path: Path,
 ) -> None:
-    tunnel = NgrokTunnel(8748, command=fake_ngrok(tmp_path, {"lvl": "info", "msg": "hi"}, STARTED))
+    tunnel = NgrokTunnel(8750, command=fake_ngrok(tmp_path, {"lvl": "info", "msg": "hi"}, STARTED))
     assert tunnel.start_tunnel() is None
     assert tunnel.wait_for_url(timeout=10) == STARTED["url"]
     assert tunnel.running
@@ -144,7 +144,7 @@ def test_the_tunnel_learns_its_url_from_the_log_and_stop_ends_the_process(
 
 def test_a_tunnel_that_exits_without_a_url_says_so_instead_of_hanging(tmp_path: Path) -> None:
     error = {"lvl": "eror", "err": "authentication failed: ERR_NGROK_4018"}
-    tunnel = NgrokTunnel(8748, command=fake_ngrok(tmp_path, error, linger=False))
+    tunnel = NgrokTunnel(8750, command=fake_ngrok(tmp_path, error, linger=False))
     assert tunnel.start_tunnel() is None
     assert tunnel.wait_for_url(timeout=10) is None
     assert tunnel.error == AUTHTOKEN_HINT
@@ -167,10 +167,12 @@ class FakeServer(types.ModuleType):
         self.revoked: list[str] = []
         self.fail_start: Exception | None = None
         self.sessions: list[dict[str, Any]] = []
-        self.DEFAULT_PORT = 8748
+        self.DEFAULT_PORT = 8750
         self.RemoteInfo = remote_server.RemoteInfo
 
-    def start_remote_server(self, dist_dir: Path | None, port: int = 8748) -> remote_server.RemoteInfo:
+    def start_remote_server(
+        self, dist_dir: Path | None, port: int = 8750
+    ) -> remote_server.RemoteInfo:
         if self.fail_start is not None:
             raise self.fail_start
         self.running = True
@@ -262,7 +264,7 @@ def test_without_ngrok_remote_is_on_locally_and_the_status_line_says_how_to_inst
     assert controller.running and server.running
     assert controller.tunnel is None
     assert controller.message == INSTALL_HINT
-    assert controller.link_url() == f"http://127.0.0.1:8748/r/{server.token}/"  # §6 fallback
+    assert controller.link_url() == f"http://127.0.0.1:8750/r/{server.token}/"  # §6 fallback
 
 
 def test_a_server_that_cannot_start_is_a_sentence_in_the_modal_not_a_crash() -> None:

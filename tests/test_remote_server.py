@@ -667,7 +667,7 @@ def test_cli_status_allow_write_and_regenerate(
     runner = CliRunner()
     status = _json_of(runner, "remote", "status")
     assert status["allow_write"] is False
-    assert status["url_local"] == f"http://127.0.0.1:8748/r/{status['token']}/"
+    assert status["url_local"] == f"http://127.0.0.1:8750/r/{status['token']}/"
     assert status["sessions"] == []
     assert _json_of(runner, "remote", "allow-write", "on") == {"allow_write": True}
     assert _json_of(runner, "remote", "status")["allow_write"] is True

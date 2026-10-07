@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 
 #: ``remote_server.DEFAULT_PORT``, spelled out so ``--port`` needs no import (the
 #: ``cli/serve.py`` shape); the hook-path test pins the two equal.
-DEFAULT_PORT = 8748
+DEFAULT_PORT = 8750
 
 app = typer.Typer(
     help="Remote Control: show the fleet to a phone over one local port (ngrok exposes it).",
@@ -107,9 +107,8 @@ def install_page(
 ) -> None:
     """Copy a built ``aisquare-remote`` page into ``~/.aisquare/remote-dist`` (atomic replace).
 
-    ``R`` (the Remote modal) on a fresh machine has nowhere to serve from until this runs once —
-    it is not something a fresh clone can do for itself (the built page lives
-    in the FE repo's dist/, not in this package).
+    A page installed here overrides the one bundled with aisquare-cli, for the
+    Remote modal (``R``) and ``asq remote serve`` alike.
     """
     from aisquare.services import remote_server
 

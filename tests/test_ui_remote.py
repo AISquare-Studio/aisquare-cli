@@ -1,4 +1,4 @@
-"""The ``m`` modal: opens from the sidebar, toggles Remote, shows the ngrok hint, survives restarts.
+"""The ``R`` modal: opens from the sidebar, toggles Remote, shows the ngrok hint, survives restarts.
 
 Driven headless with ``App.run_test`` at 140x40 as ``test_ui_shell.py`` drives the
 shell. The server is the REAL ``services.remote_server`` on a free port (its
@@ -369,7 +369,7 @@ def test_m_is_refused_while_focus_is_in_a_view_and_the_palette_lists_remote_cont
         await pilot.pause()
         await pilot.press("R")
         await pilot.pause()
-        assert not isinstance(app.screen, RemotePanel), "m must not open the modal from a view"
+        assert not isinstance(app.screen, RemotePanel), "R must not open the modal from a view"
         await pilot.press("question_mark")
         await pilot.pause()
         assert not isinstance(app.screen, HelpScreen)
@@ -385,6 +385,25 @@ def test_m_is_refused_while_focus_is_in_a_view_and_the_palette_lists_remote_cont
         await open_panel(pilot)
 
     drive(go, tunnel=missing_ngrok)
+
+
+def test_r_is_off_the_footer_so_the_footer_fits_80_columns() -> None:
+    """The footer is the one row every screen of the shell shares, and at 80 columns
+    "R remote" pushed the keys after it off the edge. ``R`` still opens the panel, and
+    the help screen and the palette list it (the test above)."""
+
+    async def go(pilot: Pilot[None]) -> str:
+        app = pilot.app
+        assert isinstance(app, FleetApp)
+        app.sidebar.focus()
+        await pilot.pause()
+        footer = painted(app)[-1]
+        await open_panel(pilot)
+        return footer
+
+    footer = drive(go, tunnel=missing_ngrok, size=(80, 24))
+    assert "help" in footer, f"the last row is the footer: {footer!r}"
+    assert "remote" not in footer
 
 
 # --- state survives a restart of the TUI ---------------------------------------------------------

@@ -94,7 +94,9 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 BIND = "127.0.0.1"
-DEFAULT_PORT = 8748
+DEFAULT_PORT = 8750
+"""Free on every branch in flight: ``serve`` holds 8747, cliXR (#178) 8748, the captain's
+voice (#240) 8749. Two of them on one port would mean whichever starts second cannot."""
 COOKIE = "asq_remote"
 TICK_SECONDS = 1.0
 UNLOCK_LIMIT = 5

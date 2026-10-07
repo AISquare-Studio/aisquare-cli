@@ -1670,7 +1670,7 @@ class RemoteNeedsWatcher:
     def _needs_devices(self) -> bool:
         """Whether any device is on record, signed in or not: nobody to show it to, no scan."""
         try:
-            return bool(self._kit.runtime.device_rows())
+            return bool(self._kit.runtime.device_ids())
         except Exception:
             return False
 

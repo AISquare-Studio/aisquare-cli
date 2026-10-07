@@ -446,7 +446,7 @@ def test_an_unknown_agent_is_404(runtime: Runtime, tmp_path: Path) -> None:
     client = _client(runtime, missing, tmp_path)
     response = client.get(f"/r/{runtime.token}/api/transcript/ghost")
     assert response.status_code == 404
-    assert response.json()["error"] == "not_found"
+    assert response.json()["error"] == "no_such_agent", "the page says the agent is gone"
 
 
 def test_the_transcript_is_behind_the_same_gates(runtime: Runtime, tmp_path: Path) -> None:

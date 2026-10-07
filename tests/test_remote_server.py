@@ -25,6 +25,7 @@ from aisquare.services.remote_server import (
     READ_ONLY_REASON,
     WRITE_ENDPOINTS,
     NoSuchAgent,
+    NoSuchProject,
     RequestError,
     Runtime,
     Sources,
@@ -80,6 +81,10 @@ class Fake:
                 self.written.append((name, body))
                 if body.get("boom"):
                     raise RequestError(422, "refused", "the fake said no")
+                if body.get("agent") == "ghost":
+                    raise NoSuchAgent("no live agent 'ghost'")
+                if body.get("project") == "nope":
+                    raise NoSuchProject("no project matches 'nope'")
                 return {"ok": True, "endpoint": name}, f"summary of {name}"
 
             return run
@@ -426,6 +431,24 @@ def test_a_refused_write_keeps_its_status_and_is_not_audited(
     assert response.status_code == 422
     assert response.json() == {"error": "refused", "message": "the fake said no"}
     assert _audited() == ["unlock"]
+
+
+def test_a_gone_agent_is_no_such_agent_and_an_unknown_project_not_found(
+    client: TestClient, runtime: Runtime
+) -> None:
+    """The page answers ``no_such_agent`` with "That agent is gone" and goes back to the
+    fleet (SPEC §6.4). Only the agent actions said it: an agent's pane, transcript and card,
+    and send-keys, answered ``not_found``, and the page showed the bare sentence and stayed."""
+    unlock(client, runtime)
+    runtime.set_allow_write(True)
+    b = base(runtime)
+    pane = client.get(f"{b}/api/panes/ghost")
+    assert pane.status_code == 404 and pane.json()["error"] == "no_such_agent"
+    gone = client.post(f"{b}/api/send-keys", json={"agent": "ghost", "keys": ["Enter"]})
+    assert gone.status_code == 404
+    assert gone.json() == {"error": "no_such_agent", "message": "no live agent 'ghost'"}
+    elsewhere = client.post(f"{b}/api/send-keys", json={"agent": "coder-1", "project": "nope"})
+    assert elsewhere.status_code == 404 and elsewhere.json()["error"] == "not_found"
 
 
 def _audited() -> list[str]:

@@ -361,7 +361,12 @@ class RequestError(Exception):
 
 
 class NoSuchAgent(LookupError):
-    """``panes/<agent>`` or ``send-keys`` named an agent the project does not have."""
+    """``panes/<agent>`` or ``send-keys`` named an agent the project does not have.
+
+    Answered 404 ``no_such_agent``, as the agent actions answer the fleet's own
+    ``NoSuchAgent``: the page reads it as "that agent is gone" and goes back to
+    the fleet. Every other lookup that finds nothing is a 404 ``not_found``.
+    """
 
 
 class NoSuchProject(LookupError):
@@ -3172,6 +3177,8 @@ def build_remote_app(
             return _json_error(400, "invalid", str(exc))
         try:
             payload = await asyncio.to_thread(reads.panes, agent, project, history)
+        except NoSuchAgent as exc:  # gone: the page says so and goes back to the fleet
+            return _json_error(404, "no_such_agent", str(exc))
         except LookupError as exc:
             return _json_error(404, "not_found", str(exc))
         except Exception as exc:
@@ -3192,6 +3199,8 @@ def build_remote_app(
             payload = await asyncio.to_thread(
                 reads.transcript, agent, project, limit, before, width
             )
+        except NoSuchAgent as exc:
+            return _json_error(404, "no_such_agent", str(exc))
         except LookupError as exc:
             return _json_error(404, "not_found", str(exc))
         except Exception as exc:
@@ -3204,6 +3213,8 @@ def build_remote_app(
         project = request.query_params.get("project") or None
         try:
             payload = await asyncio.to_thread(reads.explainability, agent, project)
+        except NoSuchAgent as exc:
+            return _json_error(404, "no_such_agent", str(exc))
         except LookupError as exc:
             return _json_error(404, "not_found", str(exc))
         except Exception as exc:  # §4-I: never raises, never blocks the other endpoints
@@ -3245,6 +3256,8 @@ def build_remote_app(
         except RequestError as exc:
             status, payload = exc.status, exc.request_error_body()
             summary = exc.audit  # a refusal that still did something is on the trail too
+        except NoSuchAgent as exc:
+            status, payload = 404, _error_body("no_such_agent", str(exc))
         except LookupError as exc:
             status, payload = 404, _error_body("not_found", str(exc))
         except Exception as exc:

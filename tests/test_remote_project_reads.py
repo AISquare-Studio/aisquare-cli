@@ -198,13 +198,17 @@ def test_explainability_reads_the_named_projects_agent(
 def test_explainability_for_an_unknown_project_or_agent_is_404_not_a_card(
     runtime: Runtime, reads: Reads, tmp_path: Path
 ) -> None:
-    """A lookup failure is a 404; only a failure of the card itself is an unavailable card."""
+    """A lookup failure is a 404; only a failure of the card itself is an unavailable card.
+    An agent that is gone says so, which the page reads as "go back to the fleet"."""
     client = _client(runtime, reads, tmp_path)
     url = f"{base(runtime)}/api/explainability"
-    for path, params in (("coder-1", {"project": "nope"}), ("ghost", {})):
+    for path, params, error in (
+        ("coder-1", {"project": "nope"}, "not_found"),
+        ("ghost", {}, "no_such_agent"),
+    ):
         response = client.get(f"{url}/{path}", params=params)
         assert response.status_code == 404, path
-        assert response.json()["error"] == "not_found"
+        assert response.json()["error"] == error, path
 
 
 # --- ?width on transcripts ------------------------------------------------------------------

@@ -61,9 +61,10 @@ Then `asq` opens on Welcome, three steps to a running fleet:
 1. **Project:** use the folder you are in, or choose another.
 2. **Claude Code:** connect it. If it is missing, Welcome names the install
    command; if it is signed out, it offers the sign-in.
-3. **Fleet:** press *Start manager*, then *Start the coders*: a manager and two
-   coders, each a real Claude Code session. **Type your goal to the manager in
-   prose.**
+3. **Fleet:** press *Start manager*, then *Open the manager* and answer Claude
+   Code's one-time question about trusting the folder, then *Start the coders*:
+   a manager and two coders, each a real Claude Code session. **Type your goal
+   to the manager in prose.**
 
 Click any agent to see and drive its session. **Press `F12`** to hand focus
 back to the sidebar, where `w` returns to Welcome and `q` quits. **The agents

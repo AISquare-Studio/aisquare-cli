@@ -889,8 +889,11 @@ CENSUS = {
     # it carried before moved, unchanged, into the five pages below.
     "README.md": (5, 2),
     # Measured 2026-10-07 on the day they were split out of the README; their
-    # commands sum to the README's 82 before the split. Re-measure when they grow.
-    "docs/install.md": (6, 3),
+    # commands summed to the README's 82 before the split. Re-measured the same
+    # day at (3, 3) for install.md, when it stopped repeating the first-run
+    # walkthrough and the README's plain-command block (review of #245); those
+    # three commands are the README's now. Re-measure when they grow.
+    "docs/install.md": (3, 3),
     "docs/memory.md": (23, 0),
     "docs/orchestration.md": (50, 2),
     # One resolved line, and it is the command tree's root (`aisquare` alone in

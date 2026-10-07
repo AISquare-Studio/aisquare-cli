@@ -23,10 +23,12 @@ instead of cold. The memory also works on its own, without the UI.
 ## Quickstart 1: memory only
 
 Needs [uv](https://docs.astral.sh/uv/) and
-[Claude Code](https://claude.com/claude-code); no installer, no tmux:
+[Claude Code](https://claude.com/claude-code); no installer, no tmux. Node 22+
+is optional and adds the codebase snapshot. Run `init` inside your repo:
 
 ```sh
 uv tool install --python 3.13 aisquare-cli
+cd path/to/your/repo
 aisquare init --agent claude-code
 aisquare remember --user "prefer pytest over unittest"
 ```
@@ -91,6 +93,7 @@ backed by one SQLite file: no daemon, no cloud dependency. Sign in with
 - Python 3.11+ if you install by hand (the one-liner brings its own 3.13).
 - [Claude Code](https://claude.com/claude-code) for the agents, and tmux 3.2+
   for the fleet.
+- Node 22+, optional, for the codebase snapshot each session starts from.
 
 The package is `aisquare-cli`; the command is `aisquare`, with `asq` as the
 short alias.
@@ -103,7 +106,7 @@ short alias.
 | [Memory](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/memory.md) | Your agent remembers preferences and project conventions, and starts every session oriented. For everyone; nothing to run after setup |
 | [The fleet](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/fleet.md) | The UI, the roles, `aisquare fleet …`, Claude accounts, and every default you can change |
 | [Orchestration](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/orchestration.md) | Several agent sessions work one problem as a team, with a shared task board. Opt-in, per repo |
-| [Reference](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/reference.md) | The hooks, the `~/.aisquare` layout, every command and global flag |
+| [Reference](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/reference.md) | The hooks, the `~/.aisquare` layout, the main command tree and the global flags |
 | [The AISquare platform](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/platform.md) | Optional: signing in, Explainability, the Collective Intelligence test bed |
 
 ## Community

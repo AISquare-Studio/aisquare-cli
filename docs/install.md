@@ -98,31 +98,11 @@ aisquare agents connect claude-code
 asq
 ```
 
-That's the whole setup. From inside the UI:
-
-1. **Click `+` beside Fleet** and point it at a directory. It registers the
-   project and runs a health check in the background, streaming the log — you
-   never leave the UI. The project appears in the navigator on the left.
-2. **Click the project**, then press *Start manager*. Its live Claude Code
-   session fills the pane. **Type your goal in prose**, exactly as you would to
-   any Claude session.
-3. **Watch the agents appear** under the project, each with a role icon
-   (🧭 manager · 🔨 coder · 🧪 tester · 🌐 ui-tester · 👀 reviewer · 🛡 validator) and a live
-   state chip — **▶ working**, **⏸ waiting**, **🔔 NEEDS YOU**, **💤 exited**.
-   Click one to see and drive its session.
-4. **Press `F12`** to hand focus back to the sidebar — the pane swallows only it
-   and the scroll keys (shift/alt+PgUp/PgDn, shift+Home/End). There, `t` picks a theme and `q` quits. **The agents keep
-   running**; reopen `asq` and it re-attaches to what it finds.
-
-The manager never writes code and never merges — a human does that.
-
-Everything the UI does is also a plain command, and every one takes `--json`:
-
-```sh
-aisquare fleet ls                      # this project's agents and their live state
-aisquare fleet attach                  # the same session in raw tmux, full fidelity
-aisquare doctor                        # is everything wired? (and how to fix anything)
-```
+The README's [second quickstart](../README.md#quickstart-2-the-full-fleet)
+walks the first run: add a project, start its manager, watch the agents
+appear. The fleet guide's [first five minutes](fleet.md#the-first-five-minutes)
+has every key and state chip, and the README lists the plain commands behind
+the UI.
 
 Scripts never meet a full-screen app: bare `aisquare` in a pipe, or under
 `TERM=dumb`, prints usage and exits 2 exactly as before, and under `--json` it

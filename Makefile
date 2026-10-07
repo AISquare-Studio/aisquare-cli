@@ -1,4 +1,4 @@
-.PHONY: install test lint typecheck fmt check
+.PHONY: install test lint typecheck fmt check demo
 
 # Every tool runs through the project venv's interpreter when .venv exists —
 # a bare tool name resolves through PATH and can land in a sibling env whose
@@ -31,3 +31,7 @@ fmt:
 
 ## check: everything CI would run
 check: lint typecheck test
+
+## demo: render docs/demo.tape into out/ (demo.gif, demo.txt, welcome.png); needs docker
+demo:
+	sh docs/demo/render.sh

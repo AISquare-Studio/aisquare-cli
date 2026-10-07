@@ -1,0 +1,80 @@
+name: demo
+
+# WHY THIS IS ITS OWN WORKFLOW rather than a job in ci.yml.
+#
+# docs/demo.tape is the README's GIF and a test of the walkthrough it records:
+# vhs exits 1 when a Wait does not see its text in time, so a step of the
+# walkthrough that stops working stops the GIF. Rendering needs docker,
+# Chromium and a few minutes, unlike ci.yml's Python matrix, and only a handful
+# of paths can change what it shows. So it runs on the pull requests that touch
+# those paths, on every published release (the artifact holds the GIF and the
+# still for the release notes), and by hand. The static half of the test,
+# tests/test_demo_tape.py, is part of the suite and runs on every leg of ci.yml.
+
+on:
+  pull_request:
+    branches: [main, "rc/**"]
+    paths:
+      - docs/demo.tape
+      - docs/demo/**
+      - tests/demo_tape.py
+      - .github/workflows/demo.yml
+      # What the walkthrough drives: the UI; onboarding, which runs init and
+      # doctor; the manager's spawn, and the tmux window it runs in.
+      - src/aisquare/cli/ui/**
+      - src/aisquare/cli/launch.py
+      - src/aisquare/services/onboarding.py
+      - src/aisquare/services/diagnostics.py
+      - src/aisquare/services/fleet.py
+      - src/aisquare/core/tmux.py
+      # A dependency bump, textual's above all, changes what is drawn.
+      - pyproject.toml
+  release:
+    types: [published]
+  workflow_dispatch:
+
+concurrency:
+  group: demo-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  render:
+    name: render docs/demo.tape
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      # The same script `make demo` runs, so CI renders exactly what a laptop
+      # does: the pinned image from docs/demo/Dockerfile with aisquare built
+      # from this tree, the tape run as the runner's uid with a scratch HOME,
+      # then gifsicle, the frame check and the size check. It exits non-zero
+      # when a Wait times out (vhs prints the last screen), when a frame shows
+      # a traceback, when the last frame is not where the walkthrough ends, or
+      # when the GIF is over 4 MiB.
+      - name: Render
+        run: sh docs/demo/render.sh
+
+      - name: Summary
+        run: |
+          {
+            echo "### docs/demo.tape"
+            echo "Rendered: demo.gif ($(wc -c < out/demo.gif) bytes) and welcome.png, in the \`demo\` artifact."
+            echo "To refresh the committed copies, replace docs/demo.gif and docs/demo/welcome.png with them."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Always, so a failed render still leaves its frames: out/demo.txt holds
+      # the text of every frame up to the Wait that timed out (measured).
+      - name: Upload the render
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: demo
+          path: |
+            out/demo.gif
+            out/demo.txt
+            out/welcome.png
+          if-no-files-found: warn

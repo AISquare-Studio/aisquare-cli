@@ -209,6 +209,7 @@ class HelpScreen(ModalScreen[None]):
             ("t", "themes (applied live, autosaved)"),
             ("r", "refresh now"),
             ("a", "show or hide the captured directories (never added)"),
+            ("+  w", "onboard a project · back to the Welcome page"),
             ("F1", "command palette"),
             ("q", "quit — from the sidebar; inside a pane every key goes to the agent"),
         ):
@@ -328,6 +329,8 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         Binding("t", "pick_theme", "theme"),
         Binding("r", "refresh_now", "refresh"),
         Binding("a", "toggle_captured", "captured", show=False),
+        Binding("plus", "add_project", "add project", show=False, key_display="+"),
+        Binding("w", "welcome", "welcome", show=False),
         Binding("question_mark", "help", "help", key_display="?"),
     ]
     SIDEBAR_ACTIONS: ClassVar[frozenset[str]] = frozenset(
@@ -339,6 +342,8 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             "command_palette",
             "change_theme",
             "toggle_captured",
+            "add_project",
+            "welcome",
         }
     )
     """Actions that are live only while focus is in the sidebar (§4.3)."""
@@ -1057,6 +1062,20 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         # parses markup by default — ``/home/me/[archive]/repo`` would reach the
         # screen as ``/home/me//repo`` and name a directory that did not fail.
         self.notify(f"{event.path}: {event.reason}", severity="error", timeout=8, markup=False)
+
+    def action_add_project(self) -> None:
+        """``+`` from the sidebar: what a click on the ``+`` beside Fleet does."""
+        self.post_message(AddProject())
+
+    async def action_welcome(self) -> None:
+        """``w`` from the sidebar: back to the Welcome page, with nothing selected."""
+        await self._show("welcome")
+        self.sidebar.select(None)
+        self._remember_selection(None)
+
+    def on_welcome_view_progress(self, event: WelcomeView.Progress) -> None:
+        """Welcome added a project or started an agent: the sidebar shows it now."""
+        self.refresh_data()
 
     def on_doctor_refreshed(self, event: DoctorRefreshed) -> None:
         """A view re-ran the doctor after a one-click fix — follow it.

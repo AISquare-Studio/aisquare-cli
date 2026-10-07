@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import socket
 import sys
 import types
 from datetime import UTC, datetime, timedelta
@@ -511,3 +512,60 @@ def test_a_revoke_that_cannot_be_written_still_turns_remote_off_and_says_so() ->
     controller.turn_off()
     assert not server.running and not controller.running
     assert controller.message is not None and "could not be revoked" in controller.message
+
+
+def _free_port() -> int:
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return int(probe.getsockname()[1])
+
+
+def test_auto_off_with_a_remote_json_that_will_not_write_still_stops_everything(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The real server module, serving on a loopback port. A ``remote.json`` that would not
+    write raised out of ``turn_off`` at the server's last flush: ngrok stayed up, the
+    controller still read on, and auto-off, a Textual timer, ended the fleet UI with it."""
+    monkeypatch.setattr(remote_server, "_runtime", None)
+    monkeypatch.setattr(remote_server, "_server", None)
+    page = tmp_path / "page"
+    page.mkdir()
+    (page / "index.html").write_text("<!doctype html>", encoding="utf-8")
+    tunnels: list[FakeTunnel] = []
+
+    def tunnel_factory(port: int) -> FakeTunnel:
+        tunnels.append(FakeTunnel(port, url=STARTED["url"], failure=None))
+        return tunnels[-1]
+
+    clock = [datetime.now(UTC)]
+    controller = RemoteController(
+        tunnel_factory=tunnel_factory,
+        dist_dir=page,
+        port=_free_port(),
+        now=lambda: clock[0],
+        state=RemoteState(auto_off_minutes=30),
+    )
+    controller.turn_on()
+    assert controller._waiter is not None
+    controller._waiter.join(5)
+    served = remote_server._server
+    assert controller.running and served is not None and served.running
+    state = remote_server.runtime()
+    assert state.unlock_device(state.password, "Pixel") is not None
+
+    def unwritable(path: Path, data: object, **kwargs: object) -> bool:
+        raise PermissionError(13, "Permission denied", str(path))
+
+    monkeypatch.setattr(remote_server, "write_replacing", unwritable)
+    clock[0] += timedelta(minutes=30)
+    with caplog.at_level("WARNING", logger=remote_server.__name__):
+        assert controller.enforce_auto_off() is True
+    assert not controller.running and controller.link_url() is None
+    assert tunnels[0].stopped, "ngrok was left up"
+    assert remote_server._server is None and not served.running
+    message = controller.message or ""
+    assert message.startswith("Remote turned off — the auto-off timer ran out")
+    assert "devices could not be revoked" in message and "Permission denied" in message
+    assert "flushing remote.json as the server stopped failed" in caplog.text
+    assert read_state()["remote_enabled"] is False
+    controller.shutdown_for_exit()  # the TUI's exit after it: nothing left to stop or raise

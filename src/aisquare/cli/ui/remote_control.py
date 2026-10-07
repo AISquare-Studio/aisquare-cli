@@ -193,26 +193,40 @@ class RemoteController:
         tunnel goes last so those closes can still reach them. Leaving the TUI
         revokes nothing: ``restore()`` brings Remote back at the next start, and
         the devices' own expiry bounds them meanwhile.
+
+        Nothing the server raises keeps Remote on. Each step runs whatever the one
+        before it raised, the first failure is the status line's sentence, and
+        ngrok stops and the controller reads off in any case: auto-off calls this
+        from a Textual timer, where an exception ends the whole fleet UI, and a
+        ``remote.json`` that would not write once left ngrok up and the switch on.
         """
         tunnel, self.tunnel = self.tunnel, None
-        failure = None
-        if self.info is not None:
-            try:
+        failure: str | None = None
+        try:
+            if self.info is not None:
                 if persist:
-                    self._server.revoke_every_remote_device(reason)
-                self._server.note_public_url(None)
-                self._server.set_auto_off(None)
-            except Exception as exc:  # remote.json unwritable: Remote still goes off
-                failure = f"Remote is off, but its devices could not be revoked — {exc}"
-            self._server.stop_remote_server()
-        if tunnel is not None:
-            tunnel.stop_tunnel()
-        self.info = None
-        self.public_url = None
-        self.auto_off_at = None
-        self.message = failure
-        if persist:
-            self._set_state(remote_enabled=False)
+                    try:
+                        self._server.revoke_every_remote_device(reason)
+                    except Exception as exc:  # remote.json unwritable: Remote still goes off
+                        failure = f"Remote is off, but its devices could not be revoked — {exc}"
+                try:
+                    self._server.note_public_url(None)
+                    self._server.set_auto_off(None)
+                except Exception as exc:  # a deadline left in the file ends nothing
+                    failure = failure or f"Remote is off, but remote.json was not updated — {exc}"
+                try:
+                    self._server.stop_remote_server()
+                except Exception as exc:
+                    failure = failure or f"Remote is off, but stopping its server failed — {exc}"
+        finally:
+            if tunnel is not None:
+                tunnel.stop_tunnel()
+            self.info = None
+            self.public_url = None
+            self.auto_off_at = None
+            self.message = failure
+            if persist:
+                self._set_state(remote_enabled=False)
 
     def restore(self) -> None:
         """At TUI start: a Remote that was on when the TUI last exited comes back on."""
@@ -333,7 +347,10 @@ class RemoteController:
         deadline = self.adopt_server_deadline()
         if self.running and deadline is not None and _aware(self._now()) >= deadline:
             self.turn_off(reason="auto-off")
-            self.message = "Remote turned off — the auto-off timer ran out"
+            ran_out = "Remote turned off — the auto-off timer ran out"
+            # What turning off could not do still shows: a revoke that failed leaves phones
+            # holding cookies the next Remote accepts.
+            self.message = ran_out if self.message is None else f"{ran_out}. {self.message}"
             return True
         return False
 

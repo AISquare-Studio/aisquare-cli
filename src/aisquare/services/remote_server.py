@@ -3488,7 +3488,14 @@ def start_remote_server(dist_dir: Path | None = None, port: int = DEFAULT_PORT) 
 
 
 def stop_remote_server() -> None:
-    """Stop the background server (no-op when it is not running)."""
+    """Stop the background server (no-op when it is not running).
+
+    The server stops first and ``remote.json`` is flushed last, best effort, as the
+    flusher's every-30-s write is: a file that will not write is logged, never
+    raised. The TUI turns Remote off from a Textual timer (auto-off), where an
+    exception ends the whole fleet UI, and the stop comes after everything else
+    turning off does, the tunnel included.
+    """
     global _server, _flusher
     with _lock:
         server, _server = _server, None
@@ -3498,7 +3505,10 @@ def stop_remote_server() -> None:
     if server is not None:
         server.stop_serving()
     if _runtime is not None:
-        _runtime.flush_last_seen()
+        try:
+            _runtime.flush_last_seen()
+        except Exception:  # the server is already down; only last_seen is lost
+            log.warning("remote: flushing remote.json as the server stopped failed", exc_info=True)
 
 
 def remote_server_status() -> dict[str, object]:

@@ -6,6 +6,9 @@ labels: bug
 assignees: ""
 ---
 
+<!-- A security problem? Please don't file it here: report it privately, as
+https://github.com/AISquare-Studio/aisquare-cli/security/policy says. -->
+
 **What happened**
 A clear description of the bug.
 
@@ -27,6 +30,3 @@ $ aisquare doctor
 - Claude Code version: `claude --version`
 - OS (on Windows, say whether this is inside WSL2):
 - Install method: one-line installer / `uv tool install` / pipx / pip / from source
-
-<!-- A security problem? Please don't file it here: SECURITY.md says how to
-report it privately. -->

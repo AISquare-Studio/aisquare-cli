@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import itertools
 import json
 import logging
 import threading
@@ -553,13 +554,25 @@ def _lane_bug(*args: object) -> Any:
     raise RuntimeError("a bug in a lane")
 
 
-def test_the_heartbeat_is_never_on_the_first_tick(runtime: Runtime, tmp_path: Path) -> None:
-    """``heartbeat=0`` would send one every tick: the first still carries none."""
+def test_the_heartbeat_is_never_on_the_first_tick(
+    runtime: Runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``heartbeat=0`` makes a beat due on every tick, the first one included, so only the
+    first-tick rule holds it back. A needs frame that changes on every tick marks where
+    each tick begins: a beat on the first tick would come before the second one."""
+    ticks = itertools.count(1)
+    monkeypatch.setattr(
+        remote_needs, "needs_ws_frames", lambda kit: [("needs_you", {"tick": next(ticks)})]
+    )
     _app, client = _stream_app(runtime, tmp_path, heartbeat=0)
     with client.websocket_connect(f"{base(runtime)}/ws") as ws:
-        first = _frames(ws, 4)
-    assert [frame["type"] for frame in first] == ["board", "fleet", "remote", "heartbeat"]
-    assert first[3]["payload"] == {"needs_scanned_at": None}
+        first = _frames(ws, 6)
+    assert [frame["type"] for frame in first] == [
+        *("board", "fleet", "remote", "needs_you"),  # the first tick
+        *("needs_you", "heartbeat"),  # the second
+    ]
+    assert [frame["payload"] for frame in first[3:5]] == [{"tick": 1}, {"tick": 2}]
+    assert first[5]["payload"] == {"needs_scanned_at": None}
 
 
 def test_the_heartbeat_arrives_unchanged_or_not_and_carries_the_last_scan(

@@ -453,9 +453,11 @@ def check_public_origin(url: str) -> str:
     as one), with no userinfo and no port but 443. A push link opens this
     origin, and the page there is where the human types the passphrase, so it
     is the most trusted string the server emits: it is taken only from the
-    TUI's ngrok announcement, ``serve --public-url`` or ngrok's own agent API,
-    and NEVER from a request header, which anyone who reaches the server
-    writes (SPEC §5.8). The path is dropped: ``/r/<token>/`` is the server's.
+    TUI's ngrok announcement or ``serve --public-url``, NEVER from a request
+    header, which anyone who reaches the server writes (SPEC §5.8), and never
+    from ngrok's local agent API, which any user of the machine can answer
+    before the human's ngrok does. The path is dropped: ``/r/<token>/`` is the
+    server's.
     """
     import ipaddress
     from urllib.parse import urlsplit
@@ -2749,7 +2751,8 @@ class RemoteKit:
         """``https://<host>/r/<token>/`` for a push link, or ``None`` when no origin is known.
 
         Never learned from a request: ``Host``, ``X-Forwarded-Host`` and
-        ``X-Forwarded-Proto`` are whatever the sender wrote (SPEC §5.8).
+        ``X-Forwarded-Proto`` are whatever the sender wrote (SPEC §5.8). Only
+        what :func:`check_public_origin` names as its sources noted it.
         """
         origin = self.runtime.remote_public_origin()
         return None if origin is None else f"{origin}/r/{self.runtime.token}/"

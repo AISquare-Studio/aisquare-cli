@@ -20,9 +20,13 @@ tests; the real tunnel is Rabia's QA.
 
 A free ngrok URL changes every time ngrok starts, and with it the link, the
 cookie's origin and a home-screen app. ``AISQUARE_REMOTE_NGROK_URL`` names a
-static domain instead (``--url``), which survives restarts (SPEC §5.8). A server
-that was never told its URL, ``asq remote serve`` beside a hand-started ngrok,
-can ask ngrok's local agent API (:func:`discover_ngrok_public_url`).
+static domain instead (``--url``), which survives restarts (SPEC §5.8).
+
+Where phones reach the server is learned from this process's own ngrok, by its
+log, never from ngrok's local agent API on ``127.0.0.1:4040``: any user of the
+machine can listen there before the human's ngrok does (which then moves to
+4041) and name any https host, and a push link is where the human types the
+passphrase. A hand-started ngrok is told about with ``serve --public-url``.
 """
 
 from __future__ import annotations
@@ -54,9 +58,6 @@ TOO_OLD_HINT = (
 )
 NGROK_URL_ENV = "AISQUARE_REMOTE_NGROK_URL"
 """A static ngrok domain (``name.ngrok-free.app``, with or without ``https://``) to serve on."""
-NGROK_AGENT_API = "http://127.0.0.1:4040/api/tunnels"
-"""The running ngrok agent's own API, on loopback: its tunnels and their public URLs."""
-NGROK_AGENT_API_MAX = 1 << 20
 
 _TOO_OLD_FOR_URL = re.compile(r"(?:unknown flag|flag provided but not defined):\s*-{1,2}url\b")
 """What ngrok v3 (``unknown flag: --url``) and v2 (``flag provided but not defined: -url``)
@@ -141,59 +142,6 @@ def ngrok_command(port: int, binary: str = "ngrok", *, url: str | None = None) -
     static domain ``url`` if one."""
     command = [binary, "http", str(port), "--log=stdout", "--log-format=json", "--inspect=false"]
     return [*command, f"--url={url}"] if url else command
-
-
-def _ngrok_agent_api_get(url: str, timeout: float) -> bytes:
-    """``GET url`` on loopback: no proxy, no redirect followed, at most 1 MiB of answer."""
-    import http.client
-
-    parts = urlsplit(url)
-    connection = http.client.HTTPConnection(
-        parts.hostname or "127.0.0.1", parts.port or 80, timeout=timeout
-    )
-    try:
-        connection.request("GET", parts.path or "/")
-        response = connection.getresponse()
-        if response.status != 200:
-            raise OSError(f"ngrok's agent API answered {response.status}")
-        return response.read(NGROK_AGENT_API_MAX)
-    finally:
-        connection.close()
-
-
-def discover_ngrok_public_url(
-    port: int,
-    timeout: float = 1.0,
-    *,
-    fetch: Callable[[str, float], bytes] | None = None,
-) -> str | None:
-    """The ``https`` public URL ngrok tunnels to ``port``, from its local agent API.
-
-    For a server that was never told where phones reach it: ``asq remote serve``
-    beside a hand-started ``ngrok http 8750``. Only ngrok's own loopback API is
-    asked, never anything a request carried, and only an ``https`` tunnel whose
-    ``config.addr`` ends in ``:<port>`` counts: another tunnel of the same agent
-    serves something else. ``None`` for anything else, no ngrok running
-    included; this never raises. ``fetch`` (URL, timeout → body) is the tests'.
-    """
-    try:
-        listing: Any = json.loads((fetch or _ngrok_agent_api_get)(NGROK_AGENT_API, timeout))
-    except Exception:  # refused, timed out, not ngrok, not JSON: all "no tunnel known"
-        return None
-    tunnels = listing.get("tunnels") if isinstance(listing, dict) else None
-    for tunnel in tunnels if isinstance(tunnels, list) else []:
-        if not isinstance(tunnel, dict):
-            continue
-        public_url, config = tunnel.get("public_url"), tunnel.get("config")
-        addr = config.get("addr") if isinstance(config, dict) else None
-        if (
-            isinstance(public_url, str)
-            and public_url.startswith("https://")
-            and isinstance(addr, str)
-            and addr.rstrip("/").endswith(f":{port}")
-        ):
-            return public_url
-    return None
 
 
 class NgrokTunnel:

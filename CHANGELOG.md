@@ -110,6 +110,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   drops the sessions it held.
 - **`project/add`** accepts only a git checkout (or a folder of them) under the
   home directory, never a hidden one.
+- **Where a notification leads** comes only from the panel's own ngrok or
+  `serve --public-url` (`AISQUARE_REMOTE_NGROK_URL`), never from a request's
+  `Host` or from ngrok's local API, which any user of the machine can answer
+  before the human's ngrok does. Without one a notification opens the page.
 - **ngrok without its inspector.** The panel starts ngrok with
   `--inspect=false`, and the docs and `serve` give that command: left on,
   ngrok keeps every request and answer, the passphrase and every cookie

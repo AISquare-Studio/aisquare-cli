@@ -785,6 +785,13 @@ def test_cli_serve_prints_link_and_password_then_serves(
     assert human.exit_code == 0
     assert "password:" in human.output and "read-only" in human.output
     assert "ngrok http 9002 --inspect=false" in human.output
+    assert "--public-url <the ngrok URL>" in human.output, "no origin: links open the page"
+    public = CliRunner().invoke(
+        cli, ["remote", "serve", "--port", "9003", "--public-url", "remote-anmol.ngrok-free.app"]
+    )
+    assert public.exit_code == 0
+    assert "public link: https://remote-anmol.ngrok-free.app/r/" in public.output
+    assert "--public-url <the ngrok URL>" not in public.output
 
 
 def test_the_write_list_is_the_plan_verbatim() -> None:

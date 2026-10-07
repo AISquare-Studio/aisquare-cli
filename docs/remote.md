@@ -77,7 +77,7 @@ auto-off. Its options:
 | --- | --- | --- |
 | `--port N` | 8750 (`AISQUARE_REMOTE_PORT`) | the local port |
 | `--auto-off MINUTES` | 60 (`AISQUARE_REMOTE_AUTO_OFF`) | Remote turns itself off after this long; `0` means never, and the banner says so |
-| `--public-url URL` | `AISQUARE_REMOTE_NGROK_URL` | the https address phones use, for the links in notifications |
+| `--public-url URL` | `AISQUARE_REMOTE_NGROK_URL` | the https address phones use, for the links in notifications; without it a notification opens the page, not its card |
 | `--dist DIR` | the page aisquare-cli carries | serve another build of the page |
 
 The page is part of aisquare-cli, so a fresh machine needs no other step.
@@ -274,7 +274,9 @@ item has been there for two scans in a row, with a delay for kinds that often
 clear by themselves (a crash: 30 seconds; a lost pane or a stopped manager: a
 minute, since they flash during a restart). Several at once come as one
 notification, at most one every 20 seconds per phone; a new one takes the place
-of the one still shown and sounds all the same. Tapping it opens the card.
+of the one still shown and sounds all the same. Tapping it opens the card, at
+the address the panel's ngrok announced or `serve --public-url` named; a
+`serve` told neither opens the page the phone subscribed from.
 
 The machine also sends: a warning 10 minutes before auto-off ("open to extend
 it"), a goodbye when Remote is turned off, an alert when someone is guessing the
@@ -334,6 +336,9 @@ browser's own key (RFC 8291), so the push service sees only that a message went.
   is a 404. A phone can extend it an hour at a time, up to 8 hours ahead.
 - **Origin**: every write and every live connection must come from the page's own
   origin, so another site cannot use your cookie.
+- **Where a notification leads** is only the address the panel's ngrok announced,
+  or `--public-url` named: never what a request or ngrok's local API says, since
+  anyone on the machine can answer on that API's port before your ngrok does.
 - **ngrok's inspector is off.** Left on, ngrok keeps every request and answer on
   its local web interface (`127.0.0.1:4040`), which asks for no password: the
   passphrase you unlock with, every device's cookie, the token and the

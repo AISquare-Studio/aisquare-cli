@@ -153,6 +153,12 @@ def serve_remote(
         if public_url is not None:
             origin = remote_server.check_public_origin(public_url)
             console.print(f"public link: {origin}/r/{info.token}/", markup=False)
+        else:  # never learned from ngrok's local API, which anyone here can answer first
+            console.print(
+                "notifications open the page, not their card: --public-url <the ngrok URL> "
+                "fixes that",
+                markup=False,
+            )
         # The inspector off: it keeps every request (the passphrase, the cookies) on a local
         # web interface that any user of this machine can read (ngrok_tunnel says more).
         console.print(

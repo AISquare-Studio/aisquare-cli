@@ -540,10 +540,14 @@ ngrok tunnel, and the page it serves ships inside aisquare-cli.
 
 ```sh
 pipx install 'aisquare-cli[remote]'
-aisquare remote serve             # or press R in `aisquare ui`
-ngrok http 8750 --inspect=false   # in another terminal; a static domain is better
-aisquare remote allow-write on    # read-only until you say so
+export AISQUARE_REMOTE_NGROK_URL=https://your-name.ngrok-free.app   # your static domain
+aisquare remote serve                # or press R in `aisquare ui`
+ngrok http --url=your-name.ngrok-free.app --inspect=false 8750      # in another terminal
+aisquare remote allow-write on       # read-only until you say so
 ```
+
+Every ngrok account has one free static domain: with it the link survives a
+restart, and a notification opens its card rather than the feed.
 
 **[The phone control guide](docs/remote.md)** covers unlocking, the needs-you
 cards and quick answers, notifications on iPhone, the security model, and a

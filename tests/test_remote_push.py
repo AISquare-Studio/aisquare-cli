@@ -1,9 +1,9 @@
 """Web Push (SPEC §5): the crypto, the allowlist, the file, the sender's rules, the routes, the TUI.
 
 No test here reaches the network. The sender and the one-shot pushes take an
-injected transport, and an autouse guard stands in for the real one and for
-ngrok's agent API, so a test that forgot to inject fails instead of POSTing to a
-push service. Wherever a rule is about time (the coalescing window, the
+injected transport, and an autouse guard stands in for the real one and for any
+plain HTTP connection, so a test that forgot to inject fails instead of POSTing
+to a push service. Wherever a rule is about time (the coalescing window, the
 per-device throttle, the system pushes), the clock is a fake one and the
 sender's state machine is driven directly, one scan and one tick at a time.
 
@@ -15,6 +15,7 @@ test reads exactly what a phone would.
 from __future__ import annotations
 
 import base64
+import http.client
 import json
 import os
 import stat
@@ -41,11 +42,10 @@ from starlette.testclient import TestClient
 
 from aisquare.cli.ui.remote_control import RemoteController
 from aisquare.core.paths import remote_audit_path, remote_push_path
-from aisquare.services import ngrok_tunnel, remote_push
+from aisquare.services import remote_push
 from aisquare.services.ngrok_tunnel import (
     TOO_OLD_HINT,
     NgrokTunnel,
-    discover_ngrok_public_url,
     ngrok_command,
     ngrok_static_host,
     parse_log_line,
@@ -92,20 +92,22 @@ PUBLIC_ORIGIN = "https://abcd-12.ngrok-free.app"
 
 @pytest.fixture(autouse=True)
 def no_push_service(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[str]]:
-    """The real transport and ngrok's agent API, replaced by refusals the test fails on:
-    a test that forgot to hand in its own transport is red, never a request on the wire."""
+    """The real transport and any plain HTTP connection (ngrok's local API once was one),
+    replaced by refusals the test fails on: a test that forgot to hand in its own transport
+    is red, never a request on the wire."""
     reached: list[str] = []
 
     def refuse_push(endpoint: str, headers: dict[str, str], body: bytes) -> int:
         reached.append(endpoint)
         raise OSError("a test reached the real push transport")
 
-    def refuse_agent_api(url: str, timeout: float) -> bytes:
-        reached.append(url)
-        raise OSError("a test reached ngrok's real agent API")
+    class RefusedConnection:
+        def __init__(self, host: str, port: int | None = None, **_options: object) -> None:
+            reached.append(f"http://{host}:{port}")
+            raise OSError("a test opened an HTTP connection")
 
     monkeypatch.setattr(remote_push, "push_https_transport", refuse_push)
-    monkeypatch.setattr(ngrok_tunnel, "_ngrok_agent_api_get", refuse_agent_api)
+    monkeypatch.setattr(http.client, "HTTPConnection", RefusedConnection)
     yield reached
     assert reached == [], f"a test reached the network: {reached}"
 
@@ -266,7 +268,6 @@ class World:
     clock: Clock
     roster: set[str]
     browsers: dict[str, Browser]
-    discovered: list[int] = field(default_factory=list)
 
     def scan(self, *items: NeedsItem) -> None:
         """One needs scan: the watcher's feed becomes ``items``, the sender hears of it."""
@@ -301,15 +302,9 @@ def world(runtime: Runtime, roster: set[str]) -> World:
     browsers = {device: Browser(f"{FCM}{device}") for device in DEVICES}
     for device, browser in browsers.items():
         push_subscribe_device(device, browser.record(), roster)
-    discovered: list[int] = []
-
-    def no_ngrok(port: int, timeout: float) -> str | None:
-        discovered.append(port)
-        return None
-
-    sender = RemotePushSender(kit, transport=transport, clock=clock, discover=no_ngrok)
+    sender = RemotePushSender(kit, transport=transport, clock=clock)
     sender.push_run_due()  # the first tick: the system checks, with nothing to say
-    return World(kit, sender, watcher, transport, clock, roster, browsers, discovered)
+    return World(kit, sender, watcher, transport, clock, roster, browsers)
 
 
 def every_device(title: str) -> list[tuple[str, str]]:
@@ -940,7 +935,6 @@ def test_without_an_authoritative_origin_the_link_is_null(world: World) -> None:
     world.scan(item)
     world.later(5)
     assert [payload["url"] for _device, payload in world.pushes()] == [None, None]
-    assert world.discovered == [], "no port known: nobody to ask"
 
 
 def test_a_restart_with_what_was_pushed_on_file_pushes_none_of_it(world: World) -> None:
@@ -1011,159 +1005,29 @@ def test_with_nobody_subscribed_the_item_counts_as_pushed(world: World) -> None:
 # --- the public URL (SPEC §5.8, §5.10 item 9) -------------------------------------------------
 
 
-TUNNELS = {
-    "tunnels": [
-        {"public_url": "http://abcd-12.ngrok-free.app", "proto": "http",
-         "config": {"addr": "http://localhost:8750"}},
-        {"public_url": "https://other.ngrok-free.app", "proto": "https",
-         "config": {"addr": "http://localhost:18750"}},
-        {"public_url": "https://abcd-12.ngrok-free.app", "proto": "https",
-         "config": {"addr": "http://localhost:8750"}},
-    ]
-}  # fmt: skip
-
-
-def test_discovery_picks_ngroks_https_tunnel_to_this_port() -> None:
-    asked: list[tuple[str, float]] = []
-
-    def agent_api(url: str, timeout: float) -> bytes:
-        asked.append((url, timeout))
-        return json.dumps(TUNNELS).encode()
-
-    assert discover_ngrok_public_url(8750, fetch=agent_api) == "https://abcd-12.ngrok-free.app"
-    assert asked == [("http://127.0.0.1:4040/api/tunnels", 1.0)], "loopback, one second"
-    assert discover_ngrok_public_url(18750, fetch=agent_api) == "https://other.ngrok-free.app"
-    assert discover_ngrok_public_url(750, fetch=agent_api) is None, "':750' is not ':8750'"
-
-
-@pytest.mark.parametrize(
-    "answer",
-    [b"<html>ngrok is not running</html>", b"[]", b'{"tunnels": "none"}', b'{"tunnels": [1]}'],
-)
-def test_discovery_says_none_for_anything_but_a_tunnel_list(answer: bytes) -> None:
-    assert discover_ngrok_public_url(8750, fetch=lambda url, timeout: answer) is None
-
-
-def test_discovery_without_ngrok_running_says_none() -> None:
-    def refused(url: str, timeout: float) -> bytes:
-        raise ConnectionRefusedError("nothing listens on 4040")
-
-    assert discover_ngrok_public_url(8750, fetch=refused) is None
-
-
-def test_the_sender_asks_ngrok_at_most_once_a_minute_then_uses_what_it_says(
-    world: World,
+def test_with_no_origin_announced_a_link_is_null_and_ngroks_api_is_never_asked(
+    world: World, no_push_service: list[str]
 ) -> None:
-    answers: list[str | None] = [None, PUBLIC_ORIGIN]
-    asked: list[int] = []
-
-    def ngrok(port: int, timeout: float) -> str | None:
-        asked.append(port)
-        return answers.pop(0)
-
+    """``asq remote serve`` without ``--public-url`` asked ngrok's local API on
+    127.0.0.1:4040 for its links' origin. Anyone on the machine can listen there before the
+    human's ngrok does (which then moves to 4041) and name any https host: links led to
+    ``https://<theirs>/r/<the real token>/``, the service worker opened them, and one tap
+    handed over the token. Nothing is asked now, and the link is null: the notification
+    opens the page the phone subscribed from."""
     world.kit.port = 8750
-    sender = RemotePushSender(
-        world.kit, transport=world.transport, clock=world.clock, discover=ngrok
-    )
-    world.sender = sender
-    for n in (1, 2):  # two pushes inside one minute: one question to ngrok
-        world.scan(needs_item(n))
-        world.scan(needs_item(n))
-        world.later(25)
-    assert asked == [8750]
-    assert all(payload["url"] is None for _device, payload in world.pushes())
-    world.later(60)
-    world.scan(needs_item(3))
-    world.scan(needs_item(3))
-    world.later(5)
-    assert asked == [8750, 8750]
-    link = f"{PUBLIC_ORIGIN}/r/{world.kit.runtime.token}/"
-    assert world.pushes()[-1][1]["url"].startswith(f"{link}#/n/")
-    assert world.kit.kit_public_url() == link
-
-
-@pytest.mark.parametrize(
-    "found", ["http://abcd-12.ngrok-free.app", "https://127.0.0.1", "https://x.example:4443"]
-)
-def test_a_discovered_url_that_is_no_public_origin_is_not_used(world: World, found: str) -> None:
-    world.kit.port = 8750
-    world.sender = RemotePushSender(
-        world.kit, transport=world.transport, clock=world.clock, discover=lambda p, t: found
-    )
-    world.scan(needs_item(1))
-    world.scan(needs_item(1))
-    world.later(5)
-    assert world.pushes()[0][1]["url"] is None
+    for n in (1, 2):
+        assert push_item(world, n) is None
+        world.later(60)
+    assert no_push_service == [], "no connection to anything, ngrok's API included"
     assert world.kit.kit_public_url() is None
 
 
-def _sender_asking(world: World, *answers: str | None) -> list[int]:
-    """The world's sender, with ngrok's API answering ``answers`` in turn; the ports asked."""
-    asked: list[int] = []
-    pending = list(answers)
-
-    def ngrok(port: int, timeout: float) -> str | None:
-        asked.append(port)
-        return pending.pop(0)
-
+def test_an_origin_the_tui_or_serve_announced_leads_every_link(world: World) -> None:
     world.kit.port = 8750
-    world.sender = RemotePushSender(
-        world.kit, transport=world.transport, clock=world.clock, discover=ngrok
-    )
-    return asked
-
-
-def test_an_origin_found_through_ngrok_is_asked_about_again_a_minute_later(
-    world: World,
-) -> None:
-    """``asq remote serve`` beside a hand-started ngrok without a static domain: ngrok comes
-    back on a new URL, and the links follow it instead of leading to the dead one until the
-    server restarts."""
-    asked = _sender_asking(world, "https://first.ngrok-free.app", "https://again.ngrok-free.app")
-    token = world.kit.runtime.token
-    assert push_item(world, 1).startswith(f"https://first.ngrok-free.app/r/{token}/#/n/")
-    assert push_item(world, 2).startswith("https://first.ngrok-free.app/")
-    assert asked == [8750], "inside the minute, the origin found is used as it is"
-    world.later(60)
-    assert push_item(world, 3).startswith(f"https://again.ngrok-free.app/r/{token}/#/n/")
-    assert asked == [8750, 8750]
-
-
-def test_an_origin_ngrok_no_longer_names_is_forgotten(world: World) -> None:
-    asked = _sender_asking(world, PUBLIC_ORIGIN, None)
-    assert push_item(world, 1).startswith(f"{PUBLIC_ORIGIN}/r/")
-    world.later(60)
-    assert push_item(world, 2) is None, "a link to a tunnel that is gone leads nowhere"
-    assert world.kit.kit_public_url() is None and asked == [8750, 8750]
-
-
-def test_an_origin_the_tui_or_serve_announced_is_never_asked_about(world: World) -> None:
-    asked = _sender_asking(world, "https://other.ngrok-free.app")
     world.kit.runtime.note_public_origin(PUBLIC_ORIGIN)
     for n in (1, 2, 3):
-        assert push_item(world, n).startswith(f"{PUBLIC_ORIGIN}/r/")
+        assert push_item(world, n).startswith(f"{PUBLIC_ORIGIN}/r/{world.kit.runtime.token}/")
         world.later(60)
-    assert asked == []
-
-
-def test_an_origin_announced_while_ngrok_is_asked_is_kept(world: World) -> None:
-    """The TUI's tunnel announces itself while the sender waits on ngrok's API: the TUI's
-    word stands, and ngrok's answer, already stale, is dropped."""
-    announced = "https://tui.ngrok-free.app"
-
-    def ngrok_while_the_tui_announces(port: int, timeout: float) -> str | None:
-        world.kit.runtime.note_public_origin(announced)
-        return PUBLIC_ORIGIN
-
-    world.kit.port = 8750
-    world.sender = RemotePushSender(
-        world.kit,
-        transport=world.transport,
-        clock=world.clock,
-        discover=ngrok_while_the_tui_announces,
-    )
-    assert push_item(world, 1).startswith(f"{announced}/r/")
-    assert world.kit.runtime.remote_public_origin() == announced
 
 
 # --- system pushes (SPEC §5.6, §5.10 item 8) --------------------------------------------------

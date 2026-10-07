@@ -570,10 +570,10 @@ def test_auto_off_with_a_remote_json_that_will_not_write_still_stops_everything(
     state = remote_server.runtime()
     assert state.unlock_device(state.password, "Pixel") is not None
 
-    def unwritable(path: Path, data: object, **kwargs: object) -> bool:
+    def unwritable(path: Path, **kwargs: object) -> object:
         raise PermissionError(13, "Permission denied", str(path))
 
-    monkeypatch.setattr(remote_server, "write_replacing", unwritable)
+    monkeypatch.setattr(remote_server, "replacement", unwritable)
     clock[0] += timedelta(minutes=30)
     with caplog.at_level("WARNING", logger=remote_server.__name__):
         assert controller.enforce_auto_off() is True

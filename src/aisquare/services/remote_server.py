@@ -79,7 +79,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 
-from aisquare.core.atomic import write_replacing
+from aisquare.core.atomic import Replacement, replacement
 from aisquare.core.locking import lock_exclusive, unlock
 from aisquare.core.paths import (
     despite_windows_contention,
@@ -754,6 +754,9 @@ class Runtime:
         self._closers: dict[str, set[Callable[[int], None]]] = {}
         """Each device's live sockets, by device id, as closers that take the close code."""
         self._file_lock_depth = 0
+        self._unpublished: bytes | None = None
+        """What the read-modify-write in hand decided to write (:meth:`_write_state`), until
+        its outermost :meth:`_state_file_lock` publishes it."""
         self._disk: bytes | None = None
         """Digest of the file's bytes as this process last wrote or read them.
 
@@ -797,6 +800,18 @@ class Runtime:
         :attr:`_lock` through it, a write that waited on another process (up to
         :data:`STATE_LOCK_WAIT_SECONDS`) held up every request the event loop
         served meanwhile, since the gate reads the state under ``_lock``.
+
+        The write itself is not done under either. Its owner-only temp is made,
+        and restricted while still empty, before the file lock is asked for
+        (``core.atomic.replacement``): on Windows the restriction is ``icacls``
+        (and ``whoami`` the first time), seconds under an antivirus scan, and
+        inside the lock it outlasted another process's wait, which then wrote
+        without the lock and was undone by this write: a CLI ``revoke`` lost. A
+        temp of this write's own needs no lock. What the read-modify-write
+        decided (:meth:`_write_state`) is published once ``_lock`` is let go,
+        still under the file lock, so its fsyncs and rename hold up no request
+        and no socket tick. Until the rename this process's digest of the file
+        stays the old one, so a reload meanwhile finds nothing new to adopt.
         """
         with self._writing:
             if self._file_lock_depth:
@@ -807,17 +822,30 @@ class Runtime:
                 finally:
                     self._file_lock_depth -= 1
                 return
-            fd = _lock_state_file(self._state_path)
-            self._file_lock_depth = 1
-            try:
-                with self._lock:
-                    yield
-            finally:
-                self._file_lock_depth = 0
-                if fd is not None:
-                    with contextlib.suppress(OSError):
-                        unlock(fd)
-                    os.close(fd)
+            with contextlib.ExitStack() as made:
+                pending: Replacement | None = None
+                unmade: OSError | None = None
+                try:
+                    self._state_path.parent.mkdir(parents=True, exist_ok=True)
+                    pending = made.enter_context(replacement(self._state_path, owner_only=True))
+                except OSError as exc:  # a home it cannot write: raised if there is a write
+                    unmade = exc
+                fd = _lock_state_file(self._state_path)
+                self._file_lock_depth = 1
+                try:
+                    try:
+                        with self._lock:
+                            yield
+                    finally:
+                        body, self._unpublished = self._unpublished, None
+                        if body is not None:
+                            self._publish_state(pending, unmade, body)
+                finally:
+                    self._file_lock_depth = 0
+                    if fd is not None:
+                        with contextlib.suppress(OSError):
+                            unlock(fd)
+                        os.close(fd)
 
     def reload_if_changed(self) -> bool:
         """Re-read ``remote.json`` if ANOTHER process changed it; ``True`` when it had.
@@ -930,24 +958,39 @@ class Runtime:
             return state
 
     def _write_state(self, state: _State) -> None:
-        """Replace ``remote.json`` with ``state``. Callers hold :meth:`_state_file_lock`."""
-        self._state_path.parent.mkdir(parents=True, exist_ok=True)
-        encoded = _encoded_state(state)
-        # The token, the passphrase and the devices' digests, so written as
-        # core.credentials writes secrets: a temp of this write's own, created 0600
-        # and restricted to this account while still EMPTY (on NTFS, the DACL the
-        # rename carries over), then renamed over the target with the Windows
-        # contention retry. A shared `remote.json.tmp` written under the umask and
-        # chmodded afterwards held them 0644 until the chmod, and two writers
-        # collided on its name. Bytes, so the digest below is of what is on disk.
-        restricted = write_replacing(self._state_path, encoded, owner_only=True)
-        if not restricted and not self._said_unrestricted:
+        """Have ``remote.json`` replaced with ``state`` when the outermost
+        :meth:`_state_file_lock` ends; callers hold it. The last state handed over in
+        one read-modify-write is the one written, once."""
+        if not self._file_lock_depth:
+            raise RuntimeError("remote.json is written only under _state_file_lock")
+        self._unpublished = _encoded_state(state)
+
+    def _publish_state(
+        self, pending: Replacement | None, unmade: OSError | None, body: bytes
+    ) -> None:
+        """Rename ``body`` over ``remote.json``, then know those bytes as this process's own.
+
+        The token, the passphrase and the devices' digests, so written as
+        core.credentials writes secrets: a temp of this write's own, created 0600
+        and restricted to this account while still EMPTY (on NTFS, the DACL the
+        rename carries over), then renamed over the target with the Windows
+        contention retry. A shared ``remote.json.tmp`` written under the umask and
+        chmodded afterwards held them 0644 until the chmod, and two writers
+        collided on its name. Bytes, so the digest is of what is on disk: the next
+        check finds these exact bytes and skips the parse, and a sibling process
+        writing the same size in the same mtime tick is still seen, because its
+        bytes differ. ``unmade`` is why there is no temp, raised now that there
+        is something to write.
+        """
+        if pending is None:
+            assert unmade is not None
+            raise unmade
+        pending.publish(body)
+        with self._lock:
+            self._disk = self._state_digest(body)
+        if not pending.restricted and not self._said_unrestricted:
             self._said_unrestricted = True  # once: the flush rewrites the file every 30 s
             log.warning(_UNRESTRICTED, self._state_path, "the password and the link token")
-        # Our own write, by content: the next check finds these exact bytes and
-        # skips the parse; a sibling process writing the same size in the same
-        # mtime tick is still seen, because its bytes differ.
-        self._disk = self._state_digest(encoded)
 
     def _save_state(self) -> None:
         """Write the state in hand as it is (tests set fields, then save)."""

@@ -1069,10 +1069,10 @@ def test_a_remote_json_that_will_not_write_is_not_called_a_taken_port(
     127.0.0.1:<port>``, the deadline it could not write into ``remote.json`` included."""
     remote_server.runtime()  # the file is there: only serve's own write fails
 
-    def unwritable(path: Path, data: object, **kwargs: object) -> bool:
+    def unwritable(path: Path, **kwargs: object) -> object:
         raise PermissionError(errno.EACCES, "Permission denied", str(path))
 
-    monkeypatch.setattr(remote_server, "write_replacing", unwritable)
+    monkeypatch.setattr(remote_server, "replacement", unwritable)
     port = _free_port()
     result = CliRunner().invoke(cli, ["--json", "remote", "serve", "--port", str(port)])
     assert result.exit_code == 1
@@ -1470,15 +1470,15 @@ def test_reading_remote_json_does_not_rewrite_it(
 ) -> None:
     """``asq remote status`` rewrote the file from its own snapshot and could drop a device
     that had just unlocked; a v2 file that parses is now only read (review of #243)."""
-    from aisquare.core.atomic import write_replacing
+    from aisquare.core.atomic import replacement
 
     written: list[Path] = []
 
-    def spy(path: Path, data: Any, **kwargs: Any) -> bool:
+    def spy(path: Path, **kwargs: Any) -> Any:
         written.append(path)
-        return write_replacing(path, data, **kwargs)
+        return replacement(path, **kwargs)
 
-    monkeypatch.setattr(remote_server, "write_replacing", spy)
+    monkeypatch.setattr(remote_server, "replacement", spy)
     before = remote_state_path().read_bytes()
     for _ in range(3):
         Runtime(remote_state_path(), remote_audit_path())
@@ -1597,6 +1597,78 @@ def test_a_write_waits_for_another_process_holding_the_lock(runtime: Runtime) ->
         os.close(fd)
     toggler.join(5)
     assert done.is_set() and runtime.allow_write is True
+
+
+def test_a_slow_restriction_of_the_temp_holds_no_lock_and_loses_no_revoke(
+    runtime: Runtime, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The flush made and restricted its owner-only temp inside ``remote.json.lock``. On
+    Windows that is ``icacls``, seconds under an antivirus scan: a CLI ``revoke`` gave up
+    waiting after 2 s and wrote without the lock, then the flush's rename landed after it
+    and brought the device back."""
+    from aisquare.core import paths
+
+    unlocked = runtime.unlock_device(PASSWORD, "Pixel")
+    assert unlocked is not None
+    device_id = unlocked[1].id
+    restricting, done = threading.Event(), threading.Event()
+    real = paths.restrict_to_owner
+
+    def icacls_under_a_scan(path: Path) -> bool:
+        if threading.current_thread().name == "asq-test-flush":
+            restricting.set()
+            assert done.wait(10), "the test never let the restriction finish"
+        return real(path)
+
+    monkeypatch.setattr(paths, "restrict_to_owner", icacls_under_a_scan)
+    flush = threading.Thread(target=runtime.flush_last_seen, name="asq-test-flush")
+    flush.start()
+    try:
+        assert restricting.wait(5)
+        shell = Runtime(remote_state_path(), remote_audit_path())  # the CLI: a lock of its own
+        with caplog.at_level("WARNING", logger=remote_server.__name__):
+            assert shell.revoke_device(device_id)
+        assert "not taken" not in caplog.text, "the revoke had to write without the lock"
+    finally:
+        done.set()
+        flush.join(10)
+    devices = json.loads(remote_state_path().read_bytes())["devices"]
+    assert device_id not in [device["id"] for device in devices]
+    assert not runtime.device_is_live(device_id)
+
+
+def test_a_slow_write_of_remote_json_holds_up_no_read(
+    runtime: Runtime, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every request takes the runtime's lock (the gate reads the state under it), and the
+    write's fsyncs and rename ran inside it: a write on a busy disk held up every request
+    and every socket tick for as long as the disk took."""
+    from aisquare.core.atomic import Replacement
+
+    publishing, done = threading.Event(), threading.Event()
+    real = Replacement.publish
+
+    def busy_disk(self: Replacement, body: str | bytes) -> None:
+        publishing.set()
+        assert done.wait(10), "the test never let the write finish"
+        real(self, body)
+
+    monkeypatch.setattr(Replacement, "publish", busy_disk)
+    writer = threading.Thread(target=runtime.set_allow_write, args=(True,))
+    writer.start()
+    try:
+        assert publishing.wait(5)
+        read: list[dict[str, object]] = []
+        reader = threading.Thread(target=lambda: read.append(runtime.remote_json()))
+        reader.start()
+        reader.join(2)
+        assert read, "the read waited for the disk"
+        assert read[0]["allow_write"] is True, "what was decided, ahead of the rename"
+    finally:
+        done.set()
+        writer.join(10)
+    assert json.loads(remote_state_path().read_bytes())["allow_write"] is True
+    assert runtime.reads == 0, "its own write is never read back as another process's"
 
 
 def test_a_v1_file_written_under_a_running_server_is_not_adopted(runtime: Runtime) -> None:

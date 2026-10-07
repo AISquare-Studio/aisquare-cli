@@ -23,6 +23,7 @@ from textual.app import ComposeResult
 from textual.containers import Horizontal, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Button, DataTable, Label, Select, Static, Switch
+from textual.widgets.data_table import ColumnKey
 
 from aisquare.cli.ui.remote_control import (
     AUTO_OFF_CHOICES,
@@ -71,7 +72,11 @@ class RemotePanel(ModalScreen[None]):
     def __init__(self, controller: RemoteController) -> None:
         super().__init__()
         self.controller = controller
-        self._device_ids: list[str] = []
+        self._device_rows: list[tuple[str, ...]] = []
+        """The devices table's cells as last painted, a row per device, its id first."""
+        self._device_columns: list[ColumnKey] = []
+        self._qr_url: str | None = ""
+        """The link the QR was last drawn for; ``""`` before the first paint."""
 
     # --- layout ---------------------------------------------------------------------------
 
@@ -121,7 +126,7 @@ class RemotePanel(ModalScreen[None]):
 
     def on_mount(self) -> None:
         table = self.query_one("#remote-devices", DataTable)
-        table.add_columns("id", "device", "last seen", "expires", "")
+        self._device_columns = table.add_columns("id", "device", "last seen", "expires", "")
         self.repaint()
         self.set_interval(1.0, self.repaint)
         self.query_one("#remote-on", Switch).focus()
@@ -129,9 +134,17 @@ class RemotePanel(ModalScreen[None]):
     # --- paint from the controller -------------------------------------------------------------
 
     def repaint(self) -> None:
+        """Paint everything from the controller; the one-second tick runs it too.
+
+        On Textual's own thread, so a tick reads ``remote_server_status()`` once, for
+        the devices and the failed unlocks both, and draws the link and its QR only when
+        the link changed: every tick used to encode the QR anew (about 4 ms of segno)
+        and read the status twice, each read three digests of ``remote.json``.
+        """
         controller = self.controller
         running = controller.running
         writes = controller.write_actions_allowed()
+        status = controller.remote_status()
         # The echoes these two writes produce are filtered in on_switch_changed,
         # by value rather than by a flag — see the note there.
         self.query_one("#remote-on", Switch).value = running
@@ -144,13 +157,15 @@ class RemotePanel(ModalScreen[None]):
         self.query_one("#remote-write-hint", Static).update(
             "writes reach the fleet" if writes else READ_ONLY_REASON
         )
-        self.query_one("#remote-unlocks", Static).update(self._unlocks_text())
+        self.query_one("#remote-unlocks", Static).update(self._unlocks_text(status))
         url = controller.link_url()
-        self.query_one("#remote-link", Static).update(Text(url or "turn Remote on for a link"))
-        self.query_one("#remote-qr", Static).update(qr_text(url) if url else "")
+        if url != self._qr_url:
+            self._qr_url = url
+            self.query_one("#remote-link", Static).update(Text(url or "turn Remote on for a link"))
+            self.query_one("#remote-qr", Static).update(qr_text(url) if url else "")
         self.query_one("#remote-regen", Button).disabled = not running
         self.query_one("#remote-copy", Button).disabled = url is None
-        self._paint_devices()
+        self._paint_devices(controller.devices(status))
 
     def _state_text(self) -> Text:
         controller = self.controller
@@ -168,9 +183,9 @@ class RemotePanel(ModalScreen[None]):
             text.append("  · no auto-off", style="dim")
         return text
 
-    def _unlocks_text(self) -> Text:
+    def _unlocks_text(self, status: dict[str, Any]) -> Text:
         """Wrong passphrases lately, and, once they paused new unlocks, what to do about it."""
-        failed, until = self.controller.unlock_failures()
+        failed, until = self.controller.unlock_failures(status)
         if not failed:
             return Text("")
         if until is None:
@@ -180,26 +195,33 @@ class RemotePanel(ModalScreen[None]):
             "aisquare remote regenerate-password --new-link"
         )
 
-    def _paint_devices(self) -> None:
+    def _paint_devices(self, devices: list[dict[str, Any]]) -> None:
+        """The devices table, kept to ``devices``. The same devices get their changed cells
+        replaced in place, so the cursor and the scroll stay where the user put them; it
+        was left alone instead, and a phone signed out by a day idle still read "signed
+        in", one back on its old "last seen": the columns a revoke is decided from. Other
+        devices rebuild it, the cursor kept on the device it was on, or the row it was."""
         table = self.query_one("#remote-devices", DataTable)
-        devices = self.controller.devices()
-        ids = [str(d["id"]) for d in devices]
-        if ids == self._device_ids and table.row_count == len(ids):
-            return  # same rows: keep the cursor where the user put it
-        self._device_ids = ids
+        rows = [_device_cells(device) for device in devices]
+        ids = [row[0] for row in rows]
+        self.query_one("#remote-revoke", Button).disabled = not ids
+        if ids == [row[0] for row in self._device_rows] and table.row_count == len(rows):
+            for row, painted in zip(rows, self._device_rows, strict=True):
+                for column, cell, was in zip(self._device_columns, row, painted, strict=True):
+                    if cell != was:  # "signed out" is wider than "signed in"
+                        table.update_cell(row[0], column, Text(cell), update_width=True)
+            self._device_rows = rows
+            return
+        at = table.cursor_row
+        on = self._device_rows[at][0] if 0 <= at < len(self._device_rows) else None
+        self._device_rows = rows
         table.clear()
-        for device in devices:
+        for row in rows:
             # Text cells, never str: a str cell is parsed as Rich markup, and a User-Agent
             # is the phone's own text — `x [/b]` raised MarkupError and took the TUI down.
-            table.add_row(
-                Text(str(device["id"])),
-                Text(_short_cell(device.get("ua"), 40) or "unknown device"),
-                Text(_short_cell(device.get("last_seen"), 19) or "—"),
-                Text(_short_cell(device.get("expires_at"), 19) or "—"),
-                Text("signed in" if device.get("signed_in") else "signed out"),
-                key=str(device["id"]),
-            )
-        self.query_one("#remote-revoke", Button).disabled = not ids
+            table.add_row(*(Text(cell) for cell in row), key=row[0])
+        if rows:
+            table.move_cursor(row=ids.index(on) if on in ids else min(max(at, 0), len(rows) - 1))
 
     # --- the controls ---------------------------------------------------------------------------
 
@@ -254,12 +276,10 @@ class RemotePanel(ModalScreen[None]):
     def _revoke_selected(self) -> None:
         table = self.query_one("#remote-devices", DataTable)
         row = table.cursor_row
-        if not self._device_ids or row < 0 or row >= len(self._device_ids):
+        if not 0 <= row < len(self._device_rows):
             return
-        device_id = self._device_ids[row]
-        revoked = self.controller.revoke_device(device_id)
-        self._device_ids = []  # force the table to be rebuilt on the next paint
-        if revoked:  # else the status line says why not
+        device_id = self._device_rows[row][0]
+        if self.controller.revoke_device(device_id):  # else the status line says why not
             self.notify(f"Revoked {device_id}")
 
     def action_close_panel(self) -> None:
@@ -269,6 +289,17 @@ class RemotePanel(ModalScreen[None]):
 def _auto_off_label(minutes: int | None) -> str:
     """What the Auto-off picker shows for a choice; ``None`` is Never."""
     return "Never" if minutes is None else f"{minutes} min"
+
+
+def _device_cells(device: dict[str, Any]) -> tuple[str, ...]:
+    """One device as the table shows it: id, browser, last seen, sign-in end, state."""
+    return (
+        str(device["id"]),
+        _short_cell(device.get("ua"), 40) or "unknown device",
+        _short_cell(device.get("last_seen"), 19) or "—",
+        _short_cell(device.get("expires_at"), 19) or "—",
+        "signed in" if device.get("signed_in") else "signed out",
+    )
 
 
 def _short_cell(value: Any, width: int) -> str:

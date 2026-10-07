@@ -15,16 +15,17 @@ import json
 import shutil
 import socket
 from collections.abc import Awaitable, Callable, Iterator, Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TypeVar
 
 import pytest
 from textual.pilot import Pilot
-from textual.widgets import Button, Select, Static, Switch
+from textual.widgets import Button, DataTable, Select, Static, Switch
 
 from aisquare.cli.ui.app import FleetApp, HelpScreen
 from aisquare.cli.ui.remote_control import READ_ONLY_REASON, RemoteController
+from aisquare.cli.ui.views import remote as remote_view
 from aisquare.cli.ui.views.remote import RemotePanel, qr_text
 from aisquare.core import paths
 from aisquare.core import tmux as tmux_core
@@ -490,6 +491,100 @@ def test_devices_list_shows_devices_from_remote_json_and_revoke_drops_one() -> N
         left = devices()
         assert len(left) == 1 and left[0]["ua"] == "Firefox"  # the cursor was on the first row
         assert table.row_count == 1  # type: ignore[attr-defined]
+
+    drive(go, tunnel=missing_ngrok)
+
+
+def test_the_devices_table_follows_last_seen_and_sign_in_while_the_devices_stay_the_same(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The table was built again only when a device came or went: a phone back on kept its
+    old "last seen", and one signed out after a day idle still read "signed in", the very
+    columns a revoke is decided from (r2 review of #243). The cells change in place, and
+    the cursor stays on the row the user put it on."""
+
+    async def go(pilot: Pilot[None]) -> None:
+        modal = await open_panel(pilot)
+        modal.query_one("#remote-on", Switch).toggle()
+        await pilot.pause()
+        runtime = remote_server.runtime()
+        iphone = runtime.unlock_device(runtime.password, "iPhone Safari")
+        assert iphone is not None and runtime.unlock_device(runtime.password, "Firefox")
+        modal.repaint()
+        await pilot.pause()
+        table = modal.query_one("#remote-devices", DataTable)
+
+        def rows() -> list[list[str]]:
+            return [[str(cell) for cell in table.get_row_at(row)] for row in range(table.row_count)]
+
+        first = rows()
+        assert [row[1] for row in first] == ["iPhone Safari", "Firefox"]
+        assert [row[4] for row in first] == ["signed in", "signed in"]
+        table.move_cursor(row=1)
+        await pilot.pause()
+
+        clock = [datetime.now(UTC) + timedelta(hours=2)]
+        monkeypatch.setattr(remote_server, "_remote_now", lambda: clock[0])
+        assert runtime.device_for_cookie(iphone[0]) is not None  # the iPhone is back on
+        modal.repaint()
+        await pilot.pause()
+        back = rows()
+        seen = remote_view._short_cell(clock[0].isoformat(timespec="seconds"), 19)
+        assert back[0][2] == seen != first[0][2]
+        assert back[1] == first[1]
+
+        clock[0] += timedelta(hours=23)  # Firefox is a day idle now, the iPhone 23 h
+        modal.repaint()
+        await pilot.pause()
+        idle = rows()
+        assert [row[4] for row in idle] == ["signed in", "signed out"]
+        assert [row[0] for row in idle] == [row[0] for row in first]
+        assert table.cursor_row == 1, "the cursor stays on the row the user put it on"
+
+    drive(go, tunnel=missing_ngrok)
+
+
+def test_a_repaint_reads_the_status_once_and_draws_the_qr_only_for_a_new_link(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every one-second repaint encoded the QR anew, about 4 ms of segno on Textual's own
+    thread, and read ``remote_server_status()`` twice, each read three digests of
+    ``remote.json`` (r2 review of #243). The QR is drawn again when the link changes."""
+    drawn: list[str] = []
+    reads: list[None] = []
+    status = remote_server.remote_server_status
+
+    def drawing(url: str) -> str:
+        drawn.append(url)
+        return qr_text(url)
+
+    def reading() -> dict[str, object]:
+        reads.append(None)
+        return status()
+
+    monkeypatch.setattr(remote_view, "qr_text", drawing)
+    monkeypatch.setattr(remote_server, "remote_server_status", reading)
+
+    async def go(pilot: Pilot[None]) -> None:
+        app = pilot.app
+        assert isinstance(app, FleetApp)
+        modal = await open_panel(pilot)
+        modal.query_one("#remote-on", Switch).toggle()
+        await pilot.pause()
+        info = app.remote.info
+        assert info is not None and drawn[-1:] == [info.url_local]
+        qrs, statuses = len(drawn), len(reads)
+        modal.repaint()
+        modal.repaint()
+        assert len(drawn) == qrs, "the same link: no QR drawn again"
+        assert len(reads) == statuses + 2, "one status read a repaint"
+
+        app.remote.public_url = build_public_url(PUBLIC, info.token)  # ngrok announced it
+        modal.repaint()
+        assert drawn[qrs:] == [app.remote.public_url]
+        await pilot.pause()
+        assert shown(modal.query_one("#remote-qr", Static)) == qr_text(app.remote.public_url)
+        assert shown(modal.query_one("#remote-link", Static)) == app.remote.public_url
 
     drive(go, tunnel=missing_ngrok)
 

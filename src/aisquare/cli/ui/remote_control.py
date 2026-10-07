@@ -300,16 +300,19 @@ class RemoteController:
             self.message = f"the new password could not be saved to remote.json — {exc}"
             return None
 
-    def _server_status(self) -> dict[str, Any]:
+    def remote_status(self) -> dict[str, Any]:
+        """``remote_server_status()``; ``{}`` while ``remote.json`` cannot be read. A paint
+        reads it once and hands it to :meth:`devices` and :meth:`unlock_failures`."""
         try:
             status = self._server.remote_server_status()
         except Exception:  # a half-written remote.json costs the list, not the modal
             return {}
         return status if isinstance(status, dict) else {}
 
-    def devices(self) -> list[dict[str, Any]]:
-        """The devices ``[{id, ua, first_seen, last_seen, expires_at, signed_in}]``, by id."""
-        rows = self._server_status().get("devices", [])
+    def devices(self, status: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+        """The devices ``[{id, ua, first_seen, last_seen, expires_at, signed_in}]``, by id,
+        from ``status`` (:meth:`remote_status`), read now when none is given."""
+        rows = (self.remote_status() if status is None else status).get("devices", [])
         rows = rows if isinstance(rows, list) else []
         return [row for row in rows if isinstance(row, dict) and isinstance(row.get("id"), str)]
 
@@ -323,9 +326,10 @@ class RemoteController:
             return False
         return True
 
-    def unlock_failures(self) -> tuple[int, str | None]:
-        """Wrong passphrases in the last 30 min, and until when new unlocks are paused."""
-        status = self._server_status()
+    def unlock_failures(self, status: dict[str, Any] | None = None) -> tuple[int, str | None]:
+        """Wrong passphrases in the last 30 min, and until when new unlocks are paused, from
+        ``status`` (:meth:`remote_status`), read now when none is given."""
+        status = self.remote_status() if status is None else status
         failed, until = status.get("failed_unlocks"), status.get("locked_out_until")
         return (
             failed if isinstance(failed, int) else 0,

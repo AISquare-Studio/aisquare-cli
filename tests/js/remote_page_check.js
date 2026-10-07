@@ -151,6 +151,22 @@ report.control = control.log;
 report.clamped = page.ansiToRuns("\x1b[38;2;999;-1;300mX");
 report.cursor = page.markCursor(page.ansiToRuns("ab\x1b[31mcd"), 2);
 
+// The excerpts a card shows over a detail text, cut from it as the server cuts them.
+const cards = recorder();
+const QUESTION = "Should I cut the 0.8.0 release branch now, or wait until the remote-control PR lands?";
+const LONG = Array.from({ length: 12 }, (unused, n) => "Paragraph " + n + " of what was done, and why it took this long.").join("\n\n");
+const excerptsOver = (kind, excerpt, text) => {
+  const card = page.renderNeedsCard(Object.assign({}, ITEM, { kind, excerpt, detail: { text } }), cards.doc, { now });
+  return card.children.filter((node) => node.className === "excerpt").map((node) => node.textContent);
+};
+report.excerpts = {
+  whole: excerptsOver("interrupted", "I'll run the cache tests first.", "I'll run the cache tests first."),
+  head: excerptsOver("board_question", LONG.replace(/\s+/g, " ").slice(0, 279).trimEnd() + "…", LONG),
+  shortTail: excerptsOver("asked", QUESTION, "The board is quiet: the cache work is merged.\n\n" + QUESTION),
+  longTail: excerptsOver("asked", QUESTION, LONG + "\n\n" + QUESTION),
+  elsewhere: excerptsOver("asked", "Which store?", "The board is quiet."),
+};
+
 for (const hash of [
   "", "#/", "#/unlock", "#/projects", "#/n/ny_0123456789abcdef", "#/n/ny_0123456789abcdef/p/prj_x/a/coder-1",
   "#/p/prj_x/a/coder-1/transcript", "#/p/prj_x/board", "#/n/javascript:alert(1)", "#/p/../fleet",

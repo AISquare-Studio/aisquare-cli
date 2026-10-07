@@ -730,6 +730,18 @@ def test_colours_are_clamped_integers_and_the_cursor_cell_is_marked(
     ]
 
 
+def test_a_card_says_once_what_its_detail_shows_in_full(node_report: dict[str, Any]) -> None:
+    """Asked-you, interrupted and board cards said their text twice, as the excerpt and in
+    the detail, and on a phone that doubled the card. An excerpt from the end of a long
+    text stays, as the text's box may hold it below the fold; so does one the text lacks."""
+    shown = node_report["excerpts"]
+    assert shown["whole"] == shown["head"] == shown["shortTail"] == []
+    assert shown["longTail"] == [
+        "Should I cut the 0.8.0 release branch now, or wait until the remote-control PR lands?"
+    ]
+    assert shown["elsewhere"] == ["Which store?"]
+
+
 def test_routes_are_built_only_from_ids_that_validate(node_report: dict[str, Any]) -> None:
     routes = node_report["routes"]
     assert routes["#/n/ny_0123456789abcdef/p/prj_x/a/coder-1"] == {

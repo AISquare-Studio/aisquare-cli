@@ -57,6 +57,8 @@ const STRIP_ROWS = 10;
 /* A socket watches at most 8 panes; the agent view keeps one for itself. */
 const STRIPS_MAX = 6;
 const PLAN_LINES = 20;
+/* A card's detail text this short shows whole in its box, on any phone. */
+const SHORT_TEXT = 280;
 const TEXT_MAX = { keys: 2048, tell: 8000, note: 8000 };
 const READ_ONLY = "writes are off — on the machine run `aisquare remote allow-write on`, " +
   "or switch Allow write actions in the R panel";
@@ -394,11 +396,13 @@ function planBlock(box, plan, doc) {
   }
 }
 
-/* What the human must read before answering, by kind; null when there is nothing. */
+/* What the human must read before answering, by kind, as {box, text}: box is null when
+ * there is nothing, and text is the full text the box shows, when that is what it shows. */
 function renderDetail(kind, detail, doc) {
   const d = detail && typeof detail === "object" && !Array.isArray(detail) ? detail : {};
   const box = mk(doc, "div", "detail");
   let shown = 0;
+  let text = "";
   const add = (node) => {
     box.appendChild(node);
     shown++;
@@ -437,8 +441,20 @@ function renderDetail(kind, detail, doc) {
   } else if (isText(d.text)) {
     if (isText(d.author)) add(mk(doc, "p", "muted", "from " + plainText(d.author)));
     add(mk(doc, "pre", "text", d.text));
+    text = d.text;
   }
-  return shown ? box : null;
+  return { box: shown ? box : null, text };
+}
+
+/* Whether an excerpt only says again what the detail's text shows in full. The server
+ * cuts it from that text (all of it, its first 280 characters, its last paragraph, the
+ * question it ends on), and said twice it doubled a card's height on a phone. A long
+ * text keeps an excerpt from its end, which its box may hold below the fold. */
+function excerptRepeats(excerpt, text) {
+  const flat = (value) => plainText(value).replace(/\s+/g, " ").trim();
+  const part = flat(excerpt).replace(/…$/, "").trim();
+  const whole = flat(text);
+  return part !== "" && (whole.startsWith(part) || (whole.length <= SHORT_TEXT && whole.includes(part)));
 }
 
 /* One needs item as a card. Pure: the page passes its handlers in opts, and
@@ -459,9 +475,9 @@ function renderNeedsCard(item, doc, opts) {
   if (o.onSince) o.onSince(since, it.since);
   card.appendChild(head);
   card.appendChild(mk(doc, "p", "reason", it.reason));
-  if (isText(it.excerpt)) card.appendChild(mk(doc, "p", "excerpt", it.excerpt));
   const detail = renderDetail(kind, it.detail, doc);
-  if (detail) card.appendChild(detail);
+  if (isText(it.excerpt) && !excerptRepeats(it.excerpt, detail.text)) card.appendChild(mk(doc, "p", "excerpt", it.excerpt));
+  if (detail.box) card.appendChild(detail.box);
   if (kind && STRIP_KINDS.has(kind)) {
     const strip = mk(doc, "pre", "strip", "the agent's screen shows here");
     card.appendChild(strip);

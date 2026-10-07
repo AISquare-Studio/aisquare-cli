@@ -588,14 +588,18 @@ def _direct_url(text: str | None) -> tuple[str, bool] | None:
 
 
 def _path_of(url: str) -> str:
-    """A ``file://`` URL as the path a person types; any other URL unchanged."""
+    """A ``file://`` URL as the path a person types HERE; any other URL unchanged.
+
+    Rebuilt through ``Path`` so it reads the way this platform writes paths: on
+    Windows ``file:///C:/src/x`` is ``C:\\src\\x``, not ``C:/src/x``.
+    """
     if not url.startswith("file://"):
         return url
     parsed = urlparse(url)
     path = unquote(parsed.path)
     if re.match(r"^/[A-Za-z]:", path):  # file:///C:/x on Windows
         path = path[1:]
-    return path
+    return str(Path(path))
 
 
 def classify(found: Facts) -> InstallRoute:

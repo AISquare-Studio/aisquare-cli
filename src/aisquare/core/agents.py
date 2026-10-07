@@ -255,6 +255,34 @@ def _is_aisquare_group(group: Any) -> bool:
     )
 
 
+def _without_aisquare(groups: list[Any]) -> list[Any]:
+    """``groups`` with aisquare's hook ENTRIES taken out, and only emptied groups dropped.
+
+    A group can hold a user's command beside ours, from a hand edit or another
+    tool that appends to the group it finds. Dropping every group that held one
+    of ours took the user's command with it (review of #253). So each group
+    keeps its other entries and its other keys (``matcher``); a group goes only
+    when nothing of the user's is left in it.
+    """
+    kept: list[Any] = []
+    for group in groups:
+        if not _is_aisquare_group(group):
+            kept.append(group)
+            continue
+        others = [
+            item
+            for item in group["hooks"]
+            if not (
+                isinstance(item, dict)
+                and isinstance(item.get("command"), str)
+                and _is_aisquare_hook_command(item["command"])
+            )
+        ]
+        if others:
+            kept.append({**group, "hooks": others})
+    return kept
+
+
 def install_hooks(name: str, config_dir: Path | None = None) -> bool:
     """Install aisquare's lifecycle hooks. False if the agent is unsupported."""
     spec = _spec(name, config_dir)
@@ -267,7 +295,7 @@ def install_hooks(name: str, config_dir: Path | None = None) -> bool:
     command = _aisquare_command()  # already shell-quoted where needed
     for event, subcommand in _HOOKS:
         groups = hooks.get(event)
-        kept = [g for g in groups if not _is_aisquare_group(g)] if isinstance(groups, list) else []
+        kept = _without_aisquare(groups) if isinstance(groups, list) else []
         entry: dict[str, Any] = {"type": "command", "command": f"{command} hook {subcommand}"}
         if event in _CONTEXT_HOOKS:
             # Never below the ceiling the CI hook may wait for; never *reducing*
@@ -296,8 +324,8 @@ def remove_hooks(name: str, config_dir: Path | None = None) -> bool:
         groups = hooks.get(event)
         if not isinstance(groups, list):
             continue
-        kept = [g for g in groups if not _is_aisquare_group(g)]
-        if len(kept) != len(groups):
+        kept = _without_aisquare(groups)
+        if kept != groups:
             removed = True
         if kept:
             hooks[event] = kept
@@ -662,6 +690,17 @@ _HOOK_BINARY_SEVERITY = {
 _VERSION_TOKEN = re.compile(r"\d+(?:\.\d+)+[0-9A-Za-z.+!-]*")
 
 
+def version_in(output: str) -> str | None:
+    """The version an ``aisquare --version`` printed, or ``None`` when it printed none.
+
+    Public because ``aisquare upgrade`` reads the new install's answer the same
+    way this module reads a hook binary's: one parse, so a change to what
+    ``--version`` prints has one place to land.
+    """
+    match = _VERSION_TOKEN.search(output)
+    return match.group(0) if match else None
+
+
 @dataclass(frozen=True)
 class HookBinary:
     """The program one hook command would start, as the hook's shell would resolve it.
@@ -821,8 +860,7 @@ def hook_binary_version(argv: Sequence[str], *, timeout: float = 10.0) -> str | 
         return None
     if completed.returncode != 0:
         return None
-    match = _VERSION_TOKEN.search(completed.stdout)
-    return match.group(0) if match else None
+    return version_in(completed.stdout)
 
 
 def classify_hook_binary(binary: HookBinary) -> tuple[str, str | None]:
@@ -909,8 +947,10 @@ def _claude_dirs_on_disk() -> list[Path]:
         seen.add(key)
         try:
             ours = bool(hook_commands("claude-code", candidate))
-        except OSError:
-            continue  # unreadable settings.json — see the docstring
+        except (OSError, ValueError, TypeError):
+            # Unreadable, not UTF-8, or hooks of a shape Claude Code does not
+            # write — see the docstring; one sibling must not cost the rest.
+            continue
         if ours:
             found.append(candidate)
     return found
@@ -922,6 +962,15 @@ def _dir_key(path: Path) -> Path:
         return path.expanduser().resolve()
     except OSError:
         return path.expanduser().absolute()
+
+
+def dir_identity(path: Path) -> Path:
+    """:func:`_dir_key` for callers outside this module (``services.lifecycle``).
+
+    One notion of "the same directory" for every dedupe of hook sites, rather
+    than a copy that could drift from this one.
+    """
+    return _dir_key(path)
 
 
 def claude_config_dirs() -> list[Path]:
@@ -972,7 +1021,19 @@ def hook_sites(name: str) -> list[HookSiteHealth]:
     ``AISQUARE_HOME`` opens (#84). Each directory appears once however many
     lists name it.
     """
-    registry = _registry()
+    cache: dict[HookBinary, tuple[str, str | None]] = {}
+    return [
+        hook_site_health(name, path, recorded=recorded, cache=cache)
+        for path, recorded in _hook_dir_candidates(name)
+    ]
+
+
+def _hook_dir_candidates(name: str) -> list[tuple[Path, bool]]:
+    """``(directory, recorded)`` for every place ``name``'s hooks may live, each once.
+
+    The one list :func:`hook_sites` grades and :func:`hook_dirs` returns as it
+    is, so doctor and uninstall cannot disagree about which directories exist.
+    """
     sites: list[tuple[Path, bool]] = []
     seen: set[Path] = set()
 
@@ -982,7 +1043,7 @@ def hook_sites(name: str) -> list[HookSiteHealth]:
             seen.add(key)
             sites.append((path, recorded))
 
-    for path in connected_dirs(name, registry):
+    for path in connected_dirs(name, _registry()):
         add(path, recorded=True)
     ambient = ambient_hook_dir(name)
     if ambient is not None and ambient.is_dir():
@@ -990,8 +1051,15 @@ def hook_sites(name: str) -> list[HookSiteHealth]:
     if name == "claude-code":
         for path in _claude_dirs_on_disk():
             add(path, recorded=False)
+    return sites
 
-    cache: dict[HookBinary, tuple[str, str | None]] = {}
-    return [
-        hook_site_health(name, path, recorded=recorded, cache=cache) for path, recorded in sites
-    ]
+
+def hook_dirs(name: str) -> list[Path]:
+    """Every config directory that may carry ``name``'s hooks — found, never graded.
+
+    The directories :func:`hook_sites` grades, without the grading:
+    ``hook_sites`` asks each hook's program its version, which is the wrong
+    thing to do while removing that program, so ``uninstall`` asks this
+    instead. Reads only; each directory appears once.
+    """
+    return [path for path, _recorded in _hook_dir_candidates(name)]

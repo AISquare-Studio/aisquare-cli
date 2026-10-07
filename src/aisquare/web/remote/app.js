@@ -396,13 +396,15 @@ function planBlock(box, plan, doc) {
   }
 }
 
-/* What the human must read before answering, by kind, as {box, text}: box is null when
- * there is nothing, and text is the full text the box shows, when that is what it shows. */
+/* What the human must read before answering, by kind, as {box, text, lead}: box is null
+ * when there is nothing, text is the full text the box shows, when that is what it shows,
+ * and lead is what the box opens with, when the server builds the excerpt from it. */
 function renderDetail(kind, detail, doc) {
   const d = detail && typeof detail === "object" && !Array.isArray(detail) ? detail : {};
   const box = mk(doc, "div", "detail");
   let shown = 0;
   let text = "";
+  let lead = "";
   const add = (node) => {
     box.appendChild(node);
     shown++;
@@ -412,6 +414,7 @@ function renderDetail(kind, detail, doc) {
       if (!q || typeof q !== "object") continue;
       if (isText(q.header)) add(mk(doc, "h3", null, q.header));
       add(mk(doc, "p", "q", q.question));
+      if (!lead && isText(q.question)) lead = q.question;
       if (q.multiSelect === true) add(mk(doc, "span", "flag", "multi-select"));
       const list = mk(doc, "ul", "options");
       const options = Array.isArray(q.options) ? q.options.slice(0, 20) : [];
@@ -425,8 +428,10 @@ function renderDetail(kind, detail, doc) {
   } else if (kind === "plan" && isText(d.plan)) {
     planBlock(box, d.plan, doc);
     shown++;
+    lead = (plainText(d.plan).split("\n").map((line) => line.trim()).find((line) => line) || "").replace(/^#+/, "");
   } else if (kind === "permission" && isText(d.tool)) {
     const lines = ["tool: " + plainText(d.tool)];
+    lead = d.tool;
     const input = d.input && typeof d.input === "object" && !Array.isArray(d.input) ? d.input : {};
     for (const key of Object.keys(input).slice(0, 20)) {
       const value = input[key];
@@ -443,18 +448,24 @@ function renderDetail(kind, detail, doc) {
     add(mk(doc, "pre", "text", d.text));
     text = d.text;
   }
-  return { box: shown ? box : null, text };
+  return { box: shown ? box : null, text, lead };
 }
 
-/* Whether an excerpt only says again what the detail's text shows in full. The server
- * cuts it from that text (all of it, its first 280 characters, its last paragraph, the
- * question it ends on), and said twice it doubled a card's height on a phone. A long
- * text keeps an excerpt from its end, which its box may hold below the fold. */
-function excerptRepeats(excerpt, text) {
+/* Whether an excerpt only says again what the card's detail shows in full: said twice it
+ * doubled a card's height on a phone, and a question, with the pane strip, said its own
+ * three times. The server cuts a text's excerpt from the text (all of it, its first 280
+ * characters, its last paragraph, the question it ends on); a long text keeps one from
+ * its end, which its box may hold below the fold. The others it builds from what their
+ * box leads with: a question's from its first question and options, a permission's from
+ * the tool and its command or path, a plan's from its first line. */
+function excerptRepeats(excerpt, detail) {
   const flat = (value) => plainText(value).replace(/\s+/g, " ").trim();
   const part = flat(excerpt).replace(/…$/, "").trim();
-  const whole = flat(text);
-  return part !== "" && (whole.startsWith(part) || (whole.length <= SHORT_TEXT && whole.includes(part)));
+  if (part === "") return false;
+  const lead = flat(detail.lead);
+  if (lead !== "" && (part.startsWith(lead) || lead.startsWith(part))) return true;
+  const whole = flat(detail.text);
+  return whole.startsWith(part) || (whole.length <= SHORT_TEXT && whole.includes(part));
 }
 
 /* One needs item as a card. Pure: the page passes its handlers in opts, and
@@ -476,7 +487,7 @@ function renderNeedsCard(item, doc, opts) {
   card.appendChild(head);
   card.appendChild(mk(doc, "p", "reason", it.reason));
   const detail = renderDetail(kind, it.detail, doc);
-  if (isText(it.excerpt) && !excerptRepeats(it.excerpt, detail.text)) card.appendChild(mk(doc, "p", "excerpt", it.excerpt));
+  if (isText(it.excerpt) && !excerptRepeats(it.excerpt, detail)) card.appendChild(mk(doc, "p", "excerpt", it.excerpt));
   if (detail.box) card.appendChild(detail.box);
   if (kind && STRIP_KINDS.has(kind)) {
     const strip = mk(doc, "pre", "strip", "the agent's screen shows here");

@@ -742,6 +742,21 @@ def test_a_card_says_once_what_its_detail_shows_in_full(node_report: dict[str, A
     assert shown["elsewhere"] == ["Which store?"]
 
 
+def test_a_question_permission_or_plan_card_says_once_what_its_detail_leads_with(
+    node_report: dict[str, Any],
+) -> None:
+    """The question card showed its question three times (the excerpt, the detail, the pane
+    strip), the permission card's ``Bash(pytest -q …)`` repeated the tool and command below
+    it, and a plan's excerpt was its first line: the server builds each excerpt from what
+    the detail shows whole. An excerpt the detail does not lead with stays, and so does one
+    with no detail to say it."""
+    shown = node_report["builtExcerpts"]
+    repeats = ("question", "questions", "cutQuestion", "permission", "plan", "dialog")
+    assert {name: shown[name] for name in repeats} == {name: [] for name in repeats}
+    assert shown["otherQuestion"] == ["Pick one before the release"]
+    assert shown["bareTool"] == ["Bash(pytest -q tests/test_cache.py)"]
+
+
 def test_routes_are_built_only_from_ids_that_validate(node_report: dict[str, Any]) -> None:
     routes = node_report["routes"]
     assert routes["#/n/ny_0123456789abcdef/p/prj_x/a/coder-1"] == {

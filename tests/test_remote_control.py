@@ -458,11 +458,12 @@ def test_the_password_is_read_from_the_server_every_time() -> None:
 
 
 def tunnel_announced(controller: RemoteController, server: FakeServer) -> None:
-    """Wait for the tunnel's URL and forget the calls announcing it made: noted for push
+    """Wait for the tunnel's URL and forget the call announcing it made: noted for push
     links (SPEC §5.8), it lands between turning on and off, from the ``ngrok-url`` thread,
     and what turning off calls, in order, is what is asserted."""
     assert controller._waiter is not None
     controller._waiter.join(5)
+    assert server.calls == ["note_public_url"] and server.public_urls == [controller.public_url]
     server.calls.clear()
     server.public_urls.clear()
 

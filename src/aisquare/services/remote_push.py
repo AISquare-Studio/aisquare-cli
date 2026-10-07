@@ -591,7 +591,7 @@ def push_device_ids(kit: RemoteKit) -> frozenset[str]:
     whole of how their subscriptions end: every send and every subscription
     write drops the entries of devices missing from this set.
     """
-    return frozenset(kit.runtime.device_ids())  # type: ignore[attr-defined]
+    return frozenset(kit.runtime.device_ids())
 
 
 def push_subscription_from_body(
@@ -830,7 +830,7 @@ def push_needs_message(
     """
     from aisquare.services import remote_needs
 
-    safe: Callable[[str, int], str] = remote_needs.needs_push_safe  # type: ignore[attr-defined]
+    safe = remote_needs.needs_push_safe
     first = items[0]
     if len(items) == 1:
         project = safe(first.project_name, 40)

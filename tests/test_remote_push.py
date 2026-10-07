@@ -41,7 +41,7 @@ from starlette.testclient import TestClient
 
 from aisquare.cli.ui.remote_control import RemoteController
 from aisquare.core.paths import remote_audit_path, remote_push_path
-from aisquare.services import ngrok_tunnel, remote_needs, remote_push
+from aisquare.services import ngrok_tunnel, remote_push
 from aisquare.services.ngrok_tunnel import (
     TOO_OLD_HINT,
     NgrokTunnel,
@@ -87,30 +87,7 @@ FCM = "https://fcm.googleapis.com/fcm/send/"
 PUBLIC_ORIGIN = "https://abcd-12.ngrok-free.app"
 
 
-# --- stand-ins and guards ---------------------------------------------------------------------
-
-
-def _stand_in_push_safe(text: str, limit: int = 40) -> str:
-    """SPEC §4.2's ``needs_push_safe``: controls and format characters out, whitespace
-    collapsed, cut to ``limit`` with ``…``."""
-    kept = "".join(ch for ch in text if unicodedata.category(ch) not in {"Cc", "Cf", "Zl", "Zp"})
-    collapsed = " ".join(kept.split())
-    return collapsed if len(collapsed) <= limit else collapsed[: limit - 1] + "…"
-
-
-@pytest.fixture(autouse=True)
-def needs_push_safe_until_lane_c(monkeypatch: pytest.MonkeyPatch) -> None:
-    """``remote_needs.needs_push_safe`` is lane c-needs-you's (SPEC §4.5), and every push title
-    goes through it. Until that lane merges, this stands in for it with the rule SPEC §4.2
-    states, so the payload tests run on this branch. Once it has merged, this fails every
-    test in the file on purpose: delete this fixture and ``_stand_in_push_safe``, and every
-    test below runs against the real one."""
-    if hasattr(remote_needs, "needs_push_safe"):
-        pytest.fail(
-            "lane c-needs-you has merged: delete needs_push_safe_until_lane_c and "
-            "_stand_in_push_safe from tests/test_remote_push.py"
-        )
-    monkeypatch.setattr(remote_needs, "needs_push_safe", _stand_in_push_safe, raising=False)
+# --- guards -----------------------------------------------------------------------------------
 
 
 @pytest.fixture(autouse=True)
@@ -1653,7 +1630,6 @@ def test_two_scans_through_the_listener_push_each_new_id_once(
 # --- with the real device model (lane b-security) ---------------------------------------------
 
 
-@pytest.mark.xfail(strict=True, reason="needs lane b-security: Runtime.device_ids")
 def test_with_the_real_roster_a_revoked_devices_subscription_is_dropped(
     app: Any, runtime: Runtime
 ) -> None:
@@ -1671,7 +1647,6 @@ def test_with_the_real_roster_a_revoked_devices_subscription_is_dropped(
     assert set(load_push_state().subscriptions) == {mine}
 
 
-@pytest.mark.xfail(strict=True, reason="needs lane b-security: device ids and expires_at rows")
 def test_with_the_real_device_rows_the_expiring_phone_is_warned(app: Any, runtime: Runtime) -> None:
     client = make_client(app)
     assert unlock(client, runtime).status_code == 200

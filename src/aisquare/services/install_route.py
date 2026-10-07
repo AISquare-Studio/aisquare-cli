@@ -63,7 +63,7 @@ from dataclasses import dataclass
 from importlib import metadata
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qsl, unquote, urlparse, urlsplit, urlunsplit
 
 from aisquare.core.version import DISTRIBUTION, __version__
 
@@ -153,9 +153,6 @@ _VERSION = re.compile(
 )
 _PRE_RANK = {"a": 0, "alpha": 0, "b": 1, "beta": 1, "c": 2, "rc": 2, "pre": 2, "preview": 2}
 
-#: The first thing in ``aisquare --version`` output that reads as a version.
-_VERSION_TOKEN = re.compile(r"\d+(?:\.\d+)+[0-9A-Za-z.+!-]*")
-
 
 def version_key(text: str) -> tuple[Any, ...] | None:
     """A sort key for a PEP 440 version, or ``None`` when ``text`` is not one.
@@ -221,12 +218,6 @@ def is_newer(candidate: str, than: str) -> bool | None:
     if candidate_key is None or than_key is None:
         return None
     return bool(candidate_key > than_key)
-
-
-def version_in(output: str) -> str | None:
-    """The version ``aisquare --version`` printed, or ``None`` when it printed none."""
-    match = _VERSION_TOKEN.search(output)
-    return match.group(0) if match else None
 
 
 # --- the latest release -----------------------------------------------------------------
@@ -296,6 +287,8 @@ class UvReceipt:
     options: tuple[str, ...] = ()
     source: tuple[str, str] | None = None
     """``(kind, where)`` when the package came from somewhere other than an index."""
+    subdirectory: str | None = None
+    """The project's directory inside a ``url`` or ``git`` source, when uv recorded one."""
     bin_dir: Path | None = None
     """Where uv put the ``aisquare`` executable — so a reinstall puts it there again."""
     unrestatable: tuple[str, ...] = ()
@@ -420,6 +413,7 @@ def read_receipt(prefix: Path) -> UvReceipt | None:
             withs.append(text)
     extras: tuple[str, ...] = ()
     source: tuple[str, str] | None = None
+    subdirectory: str | None = None
     if ours is None:
         refused.append(f"no {DISTRIBUTION} requirement")
     else:
@@ -432,6 +426,8 @@ def read_receipt(prefix: Path) -> UvReceipt | None:
             if key in ours:
                 source = (key, str(ours[key]))
                 break
+        if isinstance(ours.get("subdirectory"), str) and ours["subdirectory"]:
+            subdirectory = ours["subdirectory"]
         unknown = set(ours) - _REQUIREMENT_KEYS - set(_SOURCE_KEYS) - {"subdirectory"}
         if unknown:
             refused.append(f"{DISTRIBUTION} requirement keys {', '.join(sorted(unknown))}")
@@ -450,6 +446,7 @@ def read_receipt(prefix: Path) -> UvReceipt | None:
         python=python if isinstance(python, str) and python else None,
         options=tuple(flags),
         source=source,
+        subdirectory=subdirectory,
         bin_dir=_bin_dir(tool.get("entrypoints")),
         unrestatable=tuple(refused),
     )
@@ -573,7 +570,14 @@ def _homebrew_formula(prefix: Path) -> str | None:
 
 
 def _direct_url(text: str | None) -> tuple[str, bool] | None:
-    """``(url, editable)`` from ``direct_url.json``, or ``None`` for an index install."""
+    """``(source, editable)`` from ``direct_url.json``, or ``None`` for an index install.
+
+    The source is what pip takes back: a path for a ``file://`` URL, and for a
+    VCS install the PEP 508 reference rebuilt from ``vcs_info`` — PEP 610
+    records ``https://…/r.git`` without its ``git+``, and pip reads a bare URL
+    as an archive to download. The requested revision is kept (a branch's head
+    is its upgrade), and so is a subdirectory.
+    """
     if not text:
         return None
     try:
@@ -582,9 +586,20 @@ def _direct_url(text: str | None) -> tuple[str, bool] | None:
         return None
     if not isinstance(parsed, dict) or not isinstance(parsed.get("url"), str):
         return None
+    url: str = parsed["url"]
     dir_info = parsed.get("dir_info")
     editable = isinstance(dir_info, dict) and dir_info.get("editable") is True
-    return parsed["url"], editable
+    vcs_info = parsed.get("vcs_info")
+    if isinstance(vcs_info, dict) and isinstance(vcs_info.get("vcs"), str):
+        revision = vcs_info.get("requested_revision")
+        reference = f"{vcs_info['vcs']}+{url}"
+        if isinstance(revision, str) and revision:
+            reference += f"@{revision}"
+        subdirectory = parsed.get("subdirectory")
+        if isinstance(subdirectory, str) and subdirectory:
+            reference += f"#subdirectory={subdirectory}"
+        return f"{DISTRIBUTION} @ {reference}", editable
+    return _path_of(url), editable
 
 
 def _path_of(url: str) -> str:
@@ -618,13 +633,17 @@ def classify(found: Facts) -> InstallRoute:
         return InstallRoute(UV_TOOL, found, receipt=receipt)
     if (found.prefix / PIPX_METADATA_NAME).is_file():
         return InstallRoute(PIPX, found)
-    formula = _homebrew_formula(found.prefix)
+    # A formula installs its app into a venv under Cellar/<formula>/<version>/libexec,
+    # so only an environment that is not its own base is a formula's. Homebrew's own
+    # Python lives under a Cellar too, and a pip install into it is not a formula:
+    # "brew upgrade python@3.13" would move Python and leave aisquare where it was.
+    formula = _homebrew_formula(found.prefix) if found.prefix != found.base_prefix else None
     if formula is not None:
         return InstallRoute(HOMEBREW, found, formula=formula)
     direct = _direct_url(found.direct_url)
     if direct is not None:
-        url, editable = direct
-        return InstallRoute(EDITABLE if editable else LOCAL_SOURCE, found, source=_path_of(url))
+        source, editable = direct
+        return InstallRoute(EDITABLE if editable else LOCAL_SOURCE, found, source=source)
     if found.prefix != found.base_prefix:
         return InstallRoute(VENV, found)
     return InstallRoute(SYSTEM, found)
@@ -650,11 +669,29 @@ def _uv_spec(route: InstallRoute, target: str | None) -> list[str]:
     if kind in ("directory", "path"):
         return [f"{where}{extras}"]
     if kind == "git":
-        # The recorded revision is left off: reinstalling the commit that is
-        # already installed would not be an upgrade, the branch's head is.
-        url = where.split("?", 1)[0]
-        return [f"{DISTRIBUTION}{extras} @ {url if url.startswith('git+') else 'git+' + url}"]
-    return [f"{DISTRIBUTION}{extras} @ {where}"]
+        return [f"{DISTRIBUTION}{extras} @ {_git_reference(where, receipt.subdirectory)}"]
+    subdirectory = f"#subdirectory={receipt.subdirectory}" if receipt.subdirectory else ""
+    return [f"{DISTRIBUTION}{extras} @ {where}{subdirectory}"]
+
+
+def _git_reference(recorded: str, subdirectory: str | None) -> str:
+    """uv's recorded git source as a PEP 508 ``git+`` URL that moves forward.
+
+    uv writes ``https://…/r?branch=dev#<commit>`` or ``?rev=…`` / ``?tag=…``,
+    with ``subdirectory=`` in the same query. A branch is kept — its head is the
+    upgrade. A ``rev``, a ``tag`` and the ``#<commit>`` pin the commit already
+    installed, so they go. The subdirectory moves to PEP 508's fragment.
+    """
+    parts = urlsplit(recorded)
+    query = dict(parse_qsl(parts.query))
+    base = urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
+    if not base.startswith("git+"):
+        base = "git+" + base
+    branch = query.get("branch")
+    if branch:
+        base += f"@{branch}"
+    inner = query.get("subdirectory") or subdirectory
+    return base + (f"#subdirectory={inner}" if inner else "")
 
 
 def _uv_install_argv(route: InstallRoute, target: str | None) -> list[str]:
@@ -684,10 +721,13 @@ def _pip_argv(route: InstallRoute, verb: str, *arguments: str) -> list[str]:
 def upgrade_argv(route: InstallRoute, target: str | None = None) -> list[str]:
     """The command that moves this install to ``target`` (``None`` = the latest release)."""
     pinned = f"{DISTRIBUTION}=={target}" if target else DISTRIBUTION
-    if route.receipt is not None and route.kind != EDITABLE:
+    if route.receipt is not None:
         return _uv_install_argv(route, target)
     if route.kind == EDITABLE:
-        return ["git", "-C", route.source or ".", "pull"]
+        # The reinstall, not only `git pull`: hatchling writes the version and the
+        # dependencies into the install's metadata, so a pulled checkout still
+        # reports its old version and lacks any dependency the release added.
+        return _pip_argv(route, "install", "-e", route.source or ".")
     if route.kind == LOCAL_SOURCE:
         return _pip_argv(route, "install", "--upgrade", "--force-reinstall", route.source or ".")
     if route.kind == PIPX:
@@ -705,7 +745,6 @@ def upgrade_argv(route: InstallRoute, target: str | None = None) -> list[str]:
 #: Why each route is reported rather than run. Short, because it is printed
 #: beside the command that does the job.
 _NOT_AUTOMATED = {
-    EDITABLE: "an editable install follows its checkout — update the checkout instead",
     LOCAL_SOURCE: "it was installed from a local or VCS source, not from PyPI",
     PIPX: "pipx installs are upgraded with pipx",
     HOMEBREW: "Homebrew installs are upgraded with brew",
@@ -726,6 +765,11 @@ def not_automated(route: InstallRoute) -> str | None:
             "Windows locks the files of a running program, so aisquare cannot replace "
             "itself — quit it first"
         )
+    if route.kind == EDITABLE:
+        return (
+            "an editable install follows its checkout — pull it first "
+            f"({command_line(['git', '-C', route.source or '.', 'pull'])}), then reinstall it"
+        )
     if route.kind != UV_TOOL:
         return _NOT_AUTOMATED.get(route.kind, "this install is not one aisquare manages")
     receipt = route.receipt or UvReceipt()
@@ -739,6 +783,23 @@ def not_automated(route: InstallRoute) -> str | None:
     if find_uv() is None:
         return "uv is not on PATH"
     return None
+
+
+#: Receipt flags that put an index other than PyPI in front of ``@latest``. With
+#: any of them, uv resolves "latest" against that index — extra indexes and
+#: find-links are searched BEFORE the default one — so PyPI's newest number says
+#: nothing about what this install would get.
+_INDEX_FLAGS = frozenset(
+    {"--index-url", "--default-index", "--extra-index-url", "--index", "--find-links", "--no-index"}
+)
+
+
+def own_index(route: InstallRoute) -> str | None:
+    """The index options this install resolves through, or ``None`` when that is PyPI."""
+    if route.receipt is None:
+        return None
+    named = [flag for flag in route.receipt.options if flag in _INDEX_FLAGS]
+    return ", ".join(dict.fromkeys(named)) or None
 
 
 def find_uv() -> str | None:

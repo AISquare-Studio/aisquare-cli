@@ -90,3 +90,25 @@ def _split_sections(text: str) -> list[str]:
     if current:
         sections.append("\n".join(current).strip())
     return [section for section in sections if section]
+
+
+def refresh_hooks(name: str, config_dir: Path | None = None) -> bool:
+    """Rewrite aisquare's hooks in one directory for THIS version, and nothing else.
+
+    What ``aisquare upgrade`` asks the new install to do for every directory it
+    re-connects. :func:`connect` also re-reads the agent's context files and adds
+    every section it does not already hold, so running it on each upgrade brought
+    back a ``CLAUDE.md`` section the user had removed and added an edited one
+    beside its old text. A refresh imports nothing and never opens the store.
+    Returns whether hooks were written; raises ``KeyError`` for an unknown agent
+    and ``ValueError`` when the agent is not installed there.
+    """
+    info = agent_core.detect(name, config_dir)
+    if info is None:
+        raise KeyError(name)
+    if not info.detected:
+        raise ValueError(f"{name} is not installed on this machine")
+    written = agent_core.install_hooks(name, config_dir)
+    if written:
+        agent_core.set_connected(name, True, config_dir)
+    return written

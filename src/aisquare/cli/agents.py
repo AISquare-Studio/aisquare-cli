@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Annotated
 
 import typer
 
 from aisquare.cli.common import emit_agents, emit_connected, emit_disconnected, fail
-from aisquare.core.console import stderr_console
+from aisquare.core.console import stderr_console, stdout_console
+from aisquare.core.state import get_state
 from aisquare.services import agents as agents_service
 
 app = typer.Typer(help="Detect and connect coding agents.", no_args_is_help=True)
@@ -75,3 +77,26 @@ def disconnect(name: AgentName, config_dir: ConfigDir = None) -> None:
             "with --config-dir, disconnect with the same one"
         )
     emit_disconnected(name)
+
+
+@app.command("refresh-hooks", hidden=True)
+def refresh_hooks(name: AgentName, config_dir: ConfigDir = None) -> None:
+    """Rewrite aisquare's hooks for this version and import nothing.
+
+    Plumbing for ``aisquare upgrade``, which runs it in the NEW install for each
+    directory it re-connects. Kept hidden: ``agents connect`` is the command a
+    person types. Later releases must keep it, or an upgrade from this one
+    cannot refresh hooks.
+    """
+    try:
+        written = agents_service.refresh_hooks(name, config_dir)
+    except KeyError:
+        fail(f"unknown agent: {name}", error="unknown_agent", ref=name)
+    except ValueError as exc:
+        fail(str(exc), error="not_installed", ref=name)
+    if not written:
+        fail(f"{name} has no hooks for aisquare to write", error="no_hooks", ref=name)
+    if get_state().json_output:
+        typer.echo(json.dumps({"name": name, "hooks_installed": True}))
+    else:
+        stdout_console().print(f"✓ hooks rewritten for {name}")

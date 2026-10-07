@@ -139,7 +139,10 @@ IMPLEMENTED: set[tuple[str, ...]] = {
         )
     ),
     *(("config", command) for command in ("list", "get", "set", "redaction")),
-    *(("agents", command) for command in ("list", "scan", "status", "connect", "disconnect")),
+    *(
+        ("agents", command)
+        for command in ("list", "scan", "status", "connect", "disconnect", "refresh-hooks")
+    ),
     *(
         ("accounts", command)
         for command in (

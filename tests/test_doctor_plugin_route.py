@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import sys
 from pathlib import Path
 
 import pytest
@@ -39,6 +40,14 @@ from aisquare.services import diagnostics
 from aisquare.services.onboarding import fix_commands
 
 _CONNECT = ("agents", "connect", "claude-code")
+
+#: The plugin's hooks run `sh`, so native Windows reads only the settings.json route
+#: (core.agents.plugin_route_supported); what it says there is pinned on every
+#: platform by test_native_windows_reads_only_the_settings_json_route.
+posix_route = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="the plugin route runs sh: native Windows reads only the settings.json route",
+)
 
 
 @pytest.fixture(autouse=True)
@@ -98,6 +107,7 @@ def _buttons(check: DoctorCheck) -> list[tuple[str, ...]]:
     return [fix.argv[:3] for fix in fix_commands([check])]
 
 
+@posix_route
 def test_a_plugin_only_install_reads_connected(claude: Path) -> None:
     _install_plugin(claude)
 
@@ -118,6 +128,7 @@ def test_neither_route_still_offers_the_one_click_connect(claude: Path) -> None:
     assert agents_service.claude_code_connected() is False
 
 
+@posix_route
 def test_both_routes_warn_and_name_both_ways_out_without_a_button(
     runner: CliRunner, claude: Path
 ) -> None:
@@ -136,6 +147,7 @@ def test_both_routes_warn_and_name_both_ways_out_without_a_button(
     assert agents_service.claude_code_connected() is True
 
 
+@posix_route
 def test_a_partial_install_beside_the_plugin_is_two_routes_too(
     runner: CliRunner, claude: Path
 ) -> None:
@@ -194,6 +206,7 @@ def test_unreadable_plugin_records_count_as_absent(claude: Path, relative: str, 
     assert agents_service.claude_code_connected() is False
 
 
+@posix_route
 def test_a_record_without_a_version_still_counts(claude: Path) -> None:
     _install_plugin(claude, version=None)
 
@@ -203,6 +216,7 @@ def test_a_record_without_a_version_still_counts(claude: Path) -> None:
     assert "connected (through the aisquare plugin, which runs this install)" in check.detail
 
 
+@posix_route
 def test_a_plugin_dir_found_on_disk_is_graded_with_the_rest(
     runner: CliRunner, claude: Path, isolated_agent_home: Path
 ) -> None:
@@ -220,6 +234,7 @@ def test_a_plugin_dir_found_on_disk_is_graded_with_the_rest(
     assert agents_service.claude_code_connected(claude) is True
 
 
+@posix_route
 def test_reading_the_plugin_creates_no_aisquare_state(claude: Path) -> None:
     _install_plugin(claude)
     home = paths.aisquare_home()
@@ -277,6 +292,7 @@ def _hooks_name(claude: Path, program: str) -> None:
     settings_path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
 
 
+@posix_route
 def test_hooks_naming_a_gone_aisquare_beside_the_plugin_say_so(
     runner: CliRunner, claude: Path, tmp_path: Path
 ) -> None:
@@ -300,6 +316,7 @@ def test_hooks_naming_a_gone_aisquare_beside_the_plugin_say_so(
     assert _buttons(check) == [], "connecting would keep both routes"
 
 
+@posix_route
 def test_a_stale_aisquare_the_plugin_runs_is_graded(
     claude: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -318,6 +335,7 @@ def test_a_stale_aisquare_the_plugin_runs_is_graded(
     assert "first on PATH" in (check.fix or "")
 
 
+@posix_route
 @pytest.mark.parametrize(("uvx", "status"), [(True, CheckStatus.ok), (False, CheckStatus.warn)])
 def test_with_no_cli_the_plugin_runs_the_pin_through_uvx_or_nothing(
     claude: Path, monkeypatch: pytest.MonkeyPatch, uvx: bool, status: CheckStatus
@@ -360,6 +378,7 @@ def test_the_plugin_commands_name_the_config_dir_they_act_on(
     assert default_from_elsewhere == f"env -u CLAUDE_CONFIG_DIR {command}"
 
 
+@posix_route
 def test_a_settings_json_that_is_not_utf8_costs_its_row_nothing(
     claude: Path, isolated_agent_home: Path
 ) -> None:
@@ -374,3 +393,22 @@ def test_a_settings_json_that_is_not_utf8_costs_its_row_nothing(
     assert rows["claude-code"].status is CheckStatus.ok, rows["claude-code"]
     (claude / "settings.json").write_bytes(b"\xff\xfe{\x00}\x00")
     assert diagnostics._check_claude_code().status is CheckStatus.warn
+
+
+def test_native_windows_reads_only_the_settings_json_route(
+    claude: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """On win32 the plugin's `sh` hooks are not a route doctor counts: Connect is offered.
+
+    The supported route there is the settings.json hooks, and the plugin's launcher
+    stands down beside them if Git Bash ever runs it, so the Connect button is safe.
+    """
+    monkeypatch.setattr(agent_core, "plugin_route_supported", lambda: False)
+    _install_plugin(claude)
+
+    check = diagnostics._check_claude_code()
+
+    assert agent_core.claude_plugin(claude) is not None, "the plugin is still installed"
+    assert agents_service.claude_code_connected() is False
+    assert check.status is CheckStatus.warn
+    assert _buttons(check) == [_CONNECT]

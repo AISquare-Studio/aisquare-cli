@@ -390,7 +390,9 @@ def claude_code_connected(config_dir: Path | None = None) -> bool:
     """
     if hooks_disabled("claude-code", config_dir):
         return False
-    return hooks_installed("claude-code", config_dir) or claude_plugin(config_dir) is not None
+    if hooks_installed("claude-code", config_dir):
+        return True
+    return plugin_route_supported() and claude_plugin(config_dir) is not None
 
 
 def _missing_events(name: str, config_dir: Path | None, *, reconciled: bool) -> list[str]:
@@ -531,6 +533,18 @@ class ClaudePlugin:
     config_dir: Path
     version: str | None
     """What ``plugins/installed_plugins.json`` records; ``None`` when it records none."""
+
+
+def plugin_route_supported() -> bool:
+    """Whether the plugin route runs here: its hooks run ``sh``, so macOS, Linux and WSL.
+
+    Native Windows keeps the settings.json route (docs/claude-code-plugin.md): there
+    Claude Code runs hook commands through ``cmd.exe``, which has no ``sh`` unless Git
+    Bash put one on PATH. So on win32 the connected check and doctor read only the
+    settings.json hooks, and a plugin-only directory is offered Connect, beside which
+    the plugin's launcher stands down if it ever does run.
+    """
+    return sys.platform != "win32"
 
 
 def claude_plugin(config_dir: Path | None = None) -> ClaudePlugin | None:
@@ -953,7 +967,9 @@ def hook_site_health(
 ) -> HookSiteHealth:
     """Grade one config directory: are the hooks all there, and what do they run?"""
     installed = hooks_installed(name, config_dir)
-    plugin = claude_plugin(config_dir) if name == "claude-code" else None
+    plugin = (
+        claude_plugin(config_dir) if name == "claude-code" and plugin_route_supported() else None
+    )
     binaries: list[HookBinary] = []
     for command in hook_commands(name, config_dir):
         binary = hook_binary(command)
@@ -1015,7 +1031,7 @@ def _claude_dirs_on_disk() -> list[Path]:
         seen.add(key)
         try:
             ours = bool(hook_commands("claude-code", candidate)) or (
-                claude_plugin(candidate) is not None
+                plugin_route_supported() and claude_plugin(candidate) is not None
             )
         except (OSError, ValueError):
             continue  # unreadable or undecodable settings.json — see the docstring

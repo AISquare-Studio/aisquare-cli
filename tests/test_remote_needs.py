@@ -1110,21 +1110,31 @@ class FakeTmux:
         command: str = "claude",
         quiet_for: float = 60.0,
         gone: bool = False,
+        started: datetime | None = None,
     ) -> None:
         self.reference = reference
         self.command = command
         self.quiet_for = quiet_for
         self.gone = gone
+        self.started = started
+        """When the server started; ``None`` is a start tmux does not report."""
         self.fail = False
+        self.asked: list[str] = []
+        """Every pane asked about, once per question."""
         self.typed: list[tuple[str, ...]] = []
 
     def pane_facts(self, pane_id: str) -> SimpleNamespace | None:
+        self.asked.append(pane_id)
         if self.gone:
             return None
-        return SimpleNamespace(dead=False, current_command=self.command)
+        return SimpleNamespace(dead=False, dead_status=None, current_command=self.command)
+
+    def started_at(self) -> datetime | None:
+        return self.started
 
     def run(self, *args: str, stdin: bytes | None = None) -> str:
         assert args[:3] == ("display-message", "-p", "-t") and args[-1] == "#{window_activity}"
+        self.asked.append(args[3])
         now = self.reference.timestamp() if self.reference else time.time()
         return str(int(now - self.quiet_for))
 
@@ -1211,6 +1221,38 @@ def test_a_pane_that_is_not_the_agent_shows_no_dialog(
     snap = _now_of(_working(_tail(_tool("toolu_a")), state="attention"), tmux, monkeypatch)
     assert not snap.pane_is_agent
     assert not needs_dialog_open(snap) and not needs_at_input_prompt(snap)
+
+
+@pytest.mark.parametrize("state", ["lost", "exited", "unknown"])
+def test_a_pane_the_listing_did_not_vouch_for_is_never_asked_about(
+    state: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A row that outlived its tmux server reads ``lost``, and the next server, started by a
+    spawn in any project, gave its pane id to another agent. That pane answers as ``claude``
+    and quiet, and an Escape sent on the strength of it would interrupt the other agent's
+    turn, or answer its prompt (FLEET-1, through the remote)."""
+    row = _row()
+    fleet = Fleet(agents=[_status(row, state, _session(row, state="attention"))])
+    tmux = FakeTmux(reference=NOW)
+    snap = _now_of(fleet, tmux, monkeypatch)
+    assert tmux.asked == [], "not one question about the pane under the row's id"
+    assert not snap.pane_is_agent and snap.pane_quiet is None
+    assert not needs_dialog_open(snap) and not needs_at_input_prompt(snap)
+
+
+def test_a_pane_on_a_server_younger_than_the_row_is_another_agents(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A fresh board row derives its state without tmux, so the listing vouches for nothing
+    when tmux would not answer it. The server that answers next is asked when it started:
+    one started after the row was written numbers its panes from ``%0`` again."""
+    pending = _working(_tail(_tool("toolu_a")), state="attention")
+    younger = FakeTmux(reference=NOW, started=BORN + timedelta(minutes=5))
+    snap = _now_of(pending, younger, monkeypatch)
+    assert not snap.pane_is_agent and snap.pane_quiet is None
+    assert not needs_dialog_open(snap) and not needs_at_input_prompt(snap)
+    older = FakeTmux(reference=NOW, started=BORN - timedelta(minutes=5))
+    assert _now_of(pending, older, monkeypatch).pane_is_agent, "the row's own server"
 
 
 def test_at_the_prompt_takes_a_quiet_pane_tmux_vouches_for(monkeypatch: pytest.MonkeyPatch) -> None:

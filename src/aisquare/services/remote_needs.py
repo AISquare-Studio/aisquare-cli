@@ -263,9 +263,11 @@ class AgentNow:
     """``None``: the label's newest row has ended and has no window left."""
     tail: TranscriptTail | None
     pane_is_agent: bool
-    """The pane's foreground is the agent; ``False`` when it is not live."""
+    """The row's own pane runs the agent; ``False`` when it is not live, or when the listing
+    did not vouch for the pane under its id (``lost``, ``exited``, ``unknown``)."""
     pane_quiet: bool | None
-    """``#{window_activity}`` older than ``fleet.ACTIVITY_WINDOW``; ``None``: tmux did not say."""
+    """``#{window_activity}`` older than ``fleet.ACTIVITY_WINDOW``; ``None``: tmux did not say,
+    or the pane is not the agent's, which nothing then asks."""
     items: tuple[NeedsItem, ...]
     """Every current item of this project whose ``agent`` is this label, project-level kinds
     included, and dismissed ones too: a dismissal hides a card, it does not close a dialog."""
@@ -1319,15 +1321,25 @@ def _needs_ranked(items: Sequence[NeedsItem]) -> list[NeedsItem]:
 # --- one agent, now: what an action checks before it types -------------------------------
 
 
+_NEEDS_PANE_UNVOUCHED = frozenset({"lost", "exited", "unknown"})
+"""Derived states whose pane id the listing did not vouch for. ``lost`` is a pane gone, or a
+row that outlived its tmux server, whose pane id the next server gave to ANOTHER agent
+(``fleet._outlived``, FLEET-1); ``exited`` is a dead pane; ``unknown``, a server that could
+not be asked."""
+
+
 def needs_agent_now(project: ProjectInfo, label: str, *, now: datetime | None = None) -> AgentNow:
     """One agent of ``project`` re-derived now, synchronously: never call it on the event loop.
 
     It runs the scan's part for this one project — one listing, its ended rows,
-    its board, the cached tails — plus two tmux questions about the label's
-    pane: is its foreground the agent, and has its window been quiet. The
-    listing is not caught here: a snapshot made without it would claim a pane
-    shows no dialog when nobody asked. Raises ``fleet.NoSuchAgent`` only when the
-    label has had no row at all within ``RECENTLY_ENDED``.
+    its board, the cached tails — plus tmux questions about the label's pane: is
+    its foreground the agent, and has its window been quiet. Only a pane the
+    listing vouched for is asked about: one that reads ``lost`` may be another
+    agent's pane under the row's old id, and an Escape an action sends on the
+    strength of the answer would land in that agent's turn. The listing is not
+    caught here: a snapshot made without it would claim a pane shows no dialog
+    when nobody asked. Raises ``fleet.NoSuchAgent`` only when the label has had
+    no row at all within ``RECENTLY_ENDED``.
     """
     from aisquare.services import fleet as fleet_service
 
@@ -1353,10 +1365,15 @@ def needs_agent_now(project: ProjectInfo, label: str, *, now: datetime | None = 
     newest = max(rows, key=lambda row: row.created_at)
     status = next((s for s in scanned.statuses if s.agent.id == newest.id), None)
     pane_is_agent, pane_quiet = False, None
-    if status is not None and status.agent.ended_at is None:
+    if (
+        status is not None
+        and status.agent.ended_at is None
+        and status.state not in _NEEDS_PANE_UNVOUCHED
+    ):
         server = fleet_service.server_for(status.agent.tmux_socket)
-        pane_is_agent = fleet_service._pane_is_the_agent(server, status.agent.pane_id)
-        pane_quiet = _needs_pane_quiet(server, status.agent.pane_id, when)
+        pane_is_agent = _needs_pane_is_the_agent(server, status.agent)
+        if pane_is_agent:
+            pane_quiet = _needs_pane_quiet(server, status.agent.pane_id, when)
     return AgentNow(
         project=project,
         status=status,
@@ -1365,6 +1382,28 @@ def needs_agent_now(project: ProjectInfo, label: str, *, now: datetime | None = 
         pane_quiet=pane_quiet,
         items=tuple(item for item in scanned.items if item.agent == label),
     )
+
+
+def _needs_pane_is_the_agent(server: TmuxServer, agent: FleetAgent) -> bool:
+    """Whether the row's pane runs the agent now, on the server the row was recorded on.
+
+    The listing vouches for a pane only when it could ask tmux: a fresh board
+    row derives its state without it. And a server that started after the row
+    was written numbers its panes from ``%0`` again, so the pane under the row's
+    id is another agent's (``fleet._outlived``). So once the pane answers as the
+    agent, the server is asked when it started, as ``fleet._pane_alive`` asks; a
+    start tmux will not give judges nothing, there as here.
+    """
+    from aisquare.core.tmux import TmuxError
+    from aisquare.services import fleet as fleet_service
+
+    if not fleet_service._pane_is_the_agent(server, agent.pane_id):
+        return False
+    try:
+        started = server.started_at()
+    except TmuxError:
+        started = None
+    return not fleet_service._outlived(agent, started)
 
 
 def _needs_pane_quiet(server: TmuxServer, pane_id: str, now: datetime) -> bool | None:

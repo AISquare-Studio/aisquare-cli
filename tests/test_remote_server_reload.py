@@ -54,10 +54,12 @@ def client(runtime: Runtime, tmp_path: Path) -> TestClient:
 def other_process_writes(mutate: Any) -> None:
     """What ``aisquare remote …`` in a second shell does: rewrite the file atomically."""
     path = remote_state_path()
-    raw = json.loads(path.read_text())
+    raw = json.loads(path.read_bytes())
     mutate(raw)
     tmp = path.with_name(path.name + ".other")
-    tmp.write_text(json.dumps(raw, indent=2))
+    # Bytes, as Runtime._write writes them: text mode on Windows would add a CR per
+    # line, and the same-size premise below would fail before the server is asked.
+    tmp.write_bytes(json.dumps(raw, indent=2).encode("utf-8"))
     os.replace(tmp, path)
     # No utime nudge on purpose: the fingerprint has to notice a rewrite that
     # lands in the same mtime tick with the same size (measured 195/200 here).

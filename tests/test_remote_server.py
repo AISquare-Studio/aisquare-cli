@@ -600,6 +600,8 @@ def test_start_status_revoke_stop_over_a_real_port(
     monkeypatch.setattr(remote_server, "live_sources", fake.sources)
     port = _free_port()
     info = remote_server.start(dist, port=port)
+    server = remote_server._server
+    assert server is not None
     try:
         assert info.url_local == f"http://127.0.0.1:{port}/r/{info.token}/"
         assert remote_server.status()["running"] is True
@@ -624,7 +626,12 @@ def test_start_status_revoke_stop_over_a_real_port(
     finally:
         remote_server.stop()
     assert remote_server.status()["running"] is False
-    with pytest.raises(httpx.ConnectError):
+    assert not server._thread.is_alive(), "stop() returned with uvicorn's thread still up"
+    # Nothing listens any more. Linux refuses at once (ConnectError); Windows retries a
+    # refused loopback SYN for about two seconds before WSAECONNREFUSED, so a one-second
+    # timeout reports the same fact as ConnectTimeout. A listener that was still open
+    # would complete the handshake from its backlog: a response, or a ReadTimeout.
+    with pytest.raises((httpx.ConnectError, httpx.ConnectTimeout)):
         httpx.get(f"http://127.0.0.1:{port}/r/{info.token}/", timeout=1.0)
 
 

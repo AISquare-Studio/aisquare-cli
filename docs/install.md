@@ -2,7 +2,7 @@
 
 The [README](../README.md) has the two quickstarts. This page has the rest:
 what the one-line installer does and how to read it before you run it,
-installing by hand, Windows, and the first run in the UI.
+installing by hand, Windows, and starting the UI.
 
 ## The one-line installer
 

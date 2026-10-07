@@ -1247,9 +1247,26 @@ class TmuxServer:
     # --- input --------------------------------------------------------------------------
 
     def send_keys(self, pane_id: str, *keys: str) -> None:
-        """Named keys (``Enter``, ``C-c``, ``BTab``…) — tmux's own vocabulary."""
-        if keys:
-            self.run("send-keys", "-t", pane_id, *keys)
+        """Named keys (``Enter``, ``C-c``, ``BTab``…) — tmux's own vocabulary, and only that.
+
+        Every argument after ``-t <pane>`` used to go to tmux as it came, and a
+        key is caller data: measured on 3.7c, ``'Enter;' set -g @x 1`` set the
+        option and ``';' run-shell …`` ran the shell command, because tmux ends
+        a command at any argument whose LAST character is ``;``
+        (:data:`_ARGV_SEPARATOR`), and a key starting with ``-`` parsed as a
+        flag. So ``--`` ends the flags (``-l`` is the KEY ``-l``, sent as the
+        text it spells), :func:`_data_arg` escapes a trailing separator, and a
+        key that is empty or holds whitespace or a control character is
+        refused: no key name has one, and tmux would split or mangle it. This
+        is the floor under every caller; the remote's allowlist
+        (``remote_server.check_remote_key_names``) is the boundary itself.
+        """
+        if not keys:
+            return
+        for key in keys:
+            if not key or any(char.isspace() or ord(char) < 0x20 for char in key):
+                raise TmuxError(f"{key!r} is not a tmux key name")
+        self.run("send-keys", "-t", pane_id, "--", *(_data_arg(key) for key in keys))
 
     def send_literal(self, pane_id: str, text: str) -> None:
         """Literal text, byte for byte, through the hex path — nothing parses it.

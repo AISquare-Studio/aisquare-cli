@@ -13,9 +13,10 @@ from __future__ import annotations
 
 import inspect
 import json
+import socket
 import sys
 import types
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -169,23 +170,29 @@ SERVER_CALLS = (
     "note_public_url",
     "revoke_every_remote_device",
     "remote_auto_off_at",
+    "remote_allow_write",
+    "remote_password",
 )
 
 
 class FakeServer(types.ModuleType):
     """The server module as the controller sees it (:data:`SERVER_CALLS`), recording every
-    call; sessions are a plain list."""
+    call; devices are a plain list, and ``calls`` has every call's name in order."""
 
     def __init__(self) -> None:
         super().__init__("fake_remote_server")
         self.token = "tok_TEST"
         self.password = "amber-birch-cedar-delta"
         self.running = False
+        self.allow_write = False
+        """``remote.json``'s write switch, as the fake keeps it."""
         self.allow_write_calls: list[bool] = []
         self.auto_off_calls: list[datetime | None] = []
         self.revoked: list[str] = []
         self.fail_start: Exception | None = None
-        self.sessions: list[dict[str, Any]] = []
+        self.devices: list[dict[str, Any]] = []
+        self.failed_unlocks = 0
+        self.locked_out_until: str | None = None
         self.revoked_every: list[str] = []
         """``revoke_every_remote_device`` reasons, in order."""
         self.public_urls: list[str | None] = []
@@ -193,6 +200,7 @@ class FakeServer(types.ModuleType):
         self.server_auto_off_at: datetime | None = None
         """What ``remote_auto_off_at()`` answers: the last ``set_auto_off``, or a later
         deadline a test sets to stand for one the phone extended."""
+        self.calls: list[str] = []
         self.DEFAULT_PORT = 8750
         self.RemoteInfo = remote_server.RemoteInfo
 
@@ -207,35 +215,50 @@ class FakeServer(types.ModuleType):
         )
 
     def stop_remote_server(self) -> None:
+        self.calls.append("stop_remote_server")
         self.running = False
 
     def remote_server_status(self) -> dict[str, Any]:
-        return {"running": self.running, "sessions": list(self.sessions)}
+        return {
+            "running": self.running,
+            "devices": list(self.devices),
+            "failed_unlocks": self.failed_unlocks,
+            "locked_out_until": self.locked_out_until,
+        }
 
-    def revoke_remote_device(self, sid: str) -> None:
-        self.revoked.append(sid)
-        self.sessions = [s for s in self.sessions if s.get("sid") != sid]
+    def revoke_remote_device(self, device_id: str) -> None:
+        self.revoked.append(device_id)
+        self.devices = [d for d in self.devices if d.get("id") != device_id]
 
     def set_allow_write(self, enabled: bool) -> None:
         self.allow_write_calls.append(enabled)
+        self.allow_write = enabled
 
     def set_auto_off(self, at: datetime | None) -> None:
         self.auto_off_calls.append(at)
         self.server_auto_off_at = at
 
-    def regenerate_password(self) -> str:
-        self.password = "ember-fjord-glade-harbor"
+    def regenerate_password(self, new_link: bool = False) -> str:
+        self.password = "ember-glade-heron-indigo"
         return self.password
 
     def revoke_every_remote_device(self, reason: str) -> None:
+        self.calls.append("revoke_every_remote_device")
         self.revoked_every.append(reason)
-        self.sessions = []
+        self.devices = []
 
     def note_public_url(self, url: str | None) -> None:
+        self.calls.append("note_public_url")
         self.public_urls.append(url)
 
     def remote_auto_off_at(self) -> datetime | None:
         return self.server_auto_off_at
+
+    def remote_allow_write(self) -> bool:
+        return self.allow_write
+
+    def remote_password(self) -> str:
+        return self.password
 
 
 def _positional(function: Any) -> int:
@@ -291,23 +314,24 @@ def fake_tunnel_factory(
     return lambda port: FakeTunnel(port, url=url, failure=failure)
 
 
-def test_fresh_state_is_off_read_only_and_one_hour() -> None:
-    assert load_remote_state() == RemoteState(
-        remote_enabled=False, allow_write=False, auto_off_minutes=60
-    )
-    assert "allow write actions is off" in READ_ONLY_REASON
+def test_fresh_state_is_off_and_one_hour_and_the_sentence_names_both_switches() -> None:
+    assert load_remote_state() == RemoteState(remote_enabled=False, auto_off_minutes=60)
+    assert READ_ONLY_REASON is remote_server.READ_ONLY_REASON, "one sentence, the server's"
+    assert "aisquare remote allow-write on" in READ_ONLY_REASON
+    assert "Allow write actions in the R panel" in READ_ONLY_REASON
 
 
-def test_turn_on_starts_the_server_hands_it_allow_write_false_and_persists() -> None:
+def test_turn_on_starts_the_server_leaves_the_write_switch_alone_and_persists() -> None:
     server = fake_server()
     controller = RemoteController(server=server, tunnel_factory=fake_tunnel_factory(url="x.app"))
     controller.turn_on()
     assert server.running
-    assert server.allow_write_calls == [False]  # never on by default
+    assert server.allow_write_calls == [], "the write switch is remote.json's, not turn_on's"
+    assert controller.write_actions_allowed() is False  # never on by default
     assert controller.password() == server.password
     assert controller.state.remote_enabled is True
     assert read_state()["remote_enabled"] is True
-    assert read_state()["allow_write"] is False
+    assert "allow_write" not in read_state()
     controller.turn_off()
     assert not server.running
     assert controller.link_url() is None
@@ -340,27 +364,26 @@ def test_a_server_that_cannot_start_is_a_sentence_in_the_modal_not_a_crash() -> 
 
 def test_the_switches_survive_a_restart_of_the_tui_next_to_the_theme_key() -> None:
     update_state("board_theme", "nord")
-    first = RemoteController(server=fake_server(), tunnel_factory=fake_tunnel_factory(url="x"))
+    server = fake_server()
+    first = RemoteController(server=server, tunnel_factory=fake_tunnel_factory(url="x"))
     first.set_allow_write(True)
     first.set_auto_off(120)
     first.turn_on()
     first.shutdown_for_exit()  # the TUI exits: processes end, the saved switches stay
     saved = json.loads(paths.state_path().read_text())
     assert saved["board_theme"] == "nord"  # the theme key is untouched by our merge
-    assert (saved["remote_enabled"], saved["allow_write"], saved["auto_off_minutes"]) == (
-        True,
-        True,
-        120,
-    )
+    assert (saved["remote_enabled"], saved["auto_off_minutes"]) == (True, 120)
+    assert "allow_write" not in saved, "the write switch lives in remote.json alone"
+    assert server.allow_write_calls == [True], "flipped while Remote was off, it still landed"
     assert _load_saved_theme() == "nord"
 
-    server = fake_server()
     second = RemoteController(server=server, tunnel_factory=fake_tunnel_factory(url="x"))
-    assert second.state == RemoteState(remote_enabled=True, allow_write=True, auto_off_minutes=120)
+    assert second.state == RemoteState(remote_enabled=True, auto_off_minutes=120)
     assert not second.running
     second.restore()
     assert second.running
-    assert server.allow_write_calls == [True]  # the user's saved choice, not a default
+    assert server.allow_write_calls == [True], "a restart does not write the switch again"
+    assert second.write_actions_allowed() is True
 
 
 def test_restore_leaves_a_remote_that_was_off_alone() -> None:
@@ -371,21 +394,23 @@ def test_restore_leaves_a_remote_that_was_off_alone() -> None:
 
 
 def test_auto_off_turns_remote_off_when_the_timer_runs_out() -> None:
-    clock = [datetime(2026, 9, 11, 18, 0)]
+    clock = [datetime(2026, 9, 11, 18, 0, tzinfo=UTC)]
     server = fake_server()
     controller = RemoteController(
         server=server, tunnel_factory=fake_tunnel_factory(url="x"), now=lambda: clock[0]
     )
     controller.set_auto_off(30)
     controller.turn_on()
-    assert controller.auto_off_at == datetime(2026, 9, 11, 18, 30)
-    assert server.auto_off_calls == [datetime(2026, 9, 11, 18, 30)]  # shown via GET /api/remote
+    deadline = datetime(2026, 9, 11, 18, 30, tzinfo=UTC)
+    assert controller.auto_off_at == deadline
+    assert server.auto_off_calls == [deadline]  # shown via GET /api/remote
     clock[0] += timedelta(minutes=29)
     assert controller.enforce_auto_off() is False and controller.running
     clock[0] += timedelta(minutes=1)
     assert controller.enforce_auto_off() is True
     assert not controller.running and not server.running
     assert server.auto_off_calls[-1] is None  # cleared on the way off
+    assert server.revoked_every == ["auto-off"], "every device revoked, the farewell first"
     assert controller.message is not None and "auto-off" in controller.message
     with pytest.raises(ValueError):
         controller.set_auto_off(45)
@@ -393,17 +418,166 @@ def test_auto_off_turns_remote_off_when_the_timer_runs_out() -> None:
 
 def test_regenerate_devices_and_revoke_go_through_the_server() -> None:
     server = fake_server()
-    server.sessions = [
-        {"sid": "sid_a", "ua": "iPhone", "first_seen": "t0", "last_seen": "t1"},
-        {"sid": "sid_b", "ua": "Pixel", "first_seen": "t0", "last_seen": "t1"},
+    server.devices = [
+        {"id": "dev_0000000a", "ua": "iPhone", "first_seen": "t0", "last_seen": "t1"},
+        {"id": "dev_0000000b", "ua": "Pixel", "first_seen": "t0", "last_seen": "t1"},
         {"broken": True},
     ]
     controller = RemoteController(server=server, tunnel_factory=fake_tunnel_factory(url="x"))
     assert controller.regenerate_password() is None  # off: nothing to unlock
     controller.turn_on()
-    assert controller.regenerate_password() == "ember-fjord-glade-harbor"
-    assert controller.password() == "ember-fjord-glade-harbor"
-    assert [d["sid"] for d in controller.devices()] == ["sid_a", "sid_b"]
-    controller.revoke_device("sid_a")
-    assert server.revoked == ["sid_a"]
-    assert [d["sid"] for d in controller.devices()] == ["sid_b"]
+    assert controller.regenerate_password() == "ember-glade-heron-indigo"
+    assert controller.password() == "ember-glade-heron-indigo"
+    assert [d["id"] for d in controller.devices()] == ["dev_0000000a", "dev_0000000b"]
+    controller.revoke_device("dev_0000000a")
+    assert server.revoked == ["dev_0000000a"]
+    assert [d["id"] for d in controller.devices()] == ["dev_0000000b"]
+
+
+def test_the_deadline_is_an_instant_with_its_offset_not_naive_local_time() -> None:
+    """Naive local time plus an hour ran an hour long across a DST fall-back, and went out
+    without an offset a phone in another timezone read as its own (review of #243)."""
+    server = fake_server()
+    controller = RemoteController(server=server, tunnel_factory=fake_tunnel_factory(url="x"))
+    before = datetime.now(UTC)
+    controller.turn_on()
+    deadline = server.auto_off_calls[-1]
+    assert deadline is not None and deadline.tzinfo is not None
+    assert before + timedelta(minutes=59) < deadline <= datetime.now(UTC) + timedelta(minutes=60)
+
+
+def test_the_password_is_read_from_the_server_every_time() -> None:
+    """``asq remote regenerate-password`` in another shell made the shown passphrase wrong
+    until Remote was turned off and on (review of #243)."""
+    server = fake_server()
+    controller = RemoteController(server=server, tunnel_factory=fake_tunnel_factory(url="x"))
+    assert controller.password() is None, "off: nothing to unlock"
+    controller.turn_on()
+    server.password = "anchor-badger-cactus-dolphin"  # what the shell's regenerate wrote
+    assert controller.password() == "anchor-badger-cactus-dolphin"
+
+
+def tunnel_announced(controller: RemoteController, server: FakeServer) -> None:
+    """Wait for the tunnel's URL and forget the calls announcing it made: noted for push
+    links (SPEC §5.8), it lands between turning on and off, from the ``ngrok-url`` thread,
+    and what turning off calls, in order, is what is asserted."""
+    assert controller._waiter is not None
+    controller._waiter.join(5)
+    server.calls.clear()
+    server.public_urls.clear()
+
+
+def test_turning_remote_off_revokes_every_device_before_the_server_stops() -> None:
+    """The farewell push goes from inside the revoke, so the order is the contract: revoke
+    (farewell first), forget the public origin, then stop. Leaving the TUI revokes nothing."""
+    server = fake_server()
+    controller = RemoteController(server=server, tunnel_factory=fake_tunnel_factory(url="x"))
+    controller.turn_on()
+    tunnel_announced(controller, server)
+    controller.turn_off()
+    assert server.calls == ["revoke_every_remote_device", "note_public_url", "stop_remote_server"]
+    assert server.revoked_every == ["remote off"] and server.public_urls == [None]
+    exiting = fake_server()
+    leaving = RemoteController(server=exiting, tunnel_factory=fake_tunnel_factory(url="x"))
+    leaving.turn_on()
+    tunnel_announced(leaving, exiting)
+    leaving.shutdown_for_exit()
+    assert exiting.revoked_every == [] and exiting.calls == [
+        "note_public_url",
+        "stop_remote_server",
+    ]
+
+
+def test_enforce_auto_off_adopts_a_later_deadline_the_phone_set() -> None:
+    clock = [datetime(2026, 9, 11, 18, 0, tzinfo=UTC)]
+    server = fake_server()
+    controller = RemoteController(
+        server=server, tunnel_factory=fake_tunnel_factory(url="x"), now=lambda: clock[0]
+    )
+    controller.set_auto_off(30)
+    controller.turn_on()
+    server.server_auto_off_at = datetime(2026, 9, 11, 19, 30, tzinfo=UTC)  # extended twice
+    clock[0] += timedelta(minutes=45)
+    assert controller.enforce_auto_off() is False and controller.running
+    assert controller.auto_off_at == server.server_auto_off_at
+    clock[0] += timedelta(minutes=45)
+    assert controller.enforce_auto_off() is True and not controller.running
+
+
+def test_the_write_switch_reaches_remote_json_while_remote_is_off() -> None:
+    server = fake_server()
+    controller = RemoteController(server=server, tunnel_factory=fake_tunnel_factory(url="x"))
+    assert not controller.running
+    controller.set_allow_write(True)
+    assert server.allow_write_calls == [True] and controller.write_actions_allowed() is True
+
+
+def test_a_revoke_that_cannot_be_written_still_turns_remote_off_and_says_so() -> None:
+    server = fake_server()
+
+    def unwritable(reason: str) -> None:
+        raise OSError("remote.json: read-only file system")
+
+    server.revoke_every_remote_device = unwritable  # type: ignore[method-assign]
+    controller = RemoteController(server=server, tunnel_factory=fake_tunnel_factory(url="x"))
+    controller.turn_on()
+    controller.turn_off()
+    assert not server.running and not controller.running
+    assert controller.message is not None and "could not be revoked" in controller.message
+
+
+def _free_port() -> int:
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return int(probe.getsockname()[1])
+
+
+def test_auto_off_with_a_remote_json_that_will_not_write_still_stops_everything(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The real server module, serving on a loopback port. A ``remote.json`` that would not
+    write raised out of ``turn_off`` at the server's last flush: ngrok stayed up, the
+    controller still read on, and auto-off, a Textual timer, ended the fleet UI with it."""
+    monkeypatch.setattr(remote_server, "_runtime", None)
+    monkeypatch.setattr(remote_server, "_server", None)
+    page = tmp_path / "page"
+    page.mkdir()
+    (page / "index.html").write_text("<!doctype html>", encoding="utf-8")
+    tunnels: list[FakeTunnel] = []
+
+    def tunnel_factory(port: int) -> FakeTunnel:
+        tunnels.append(FakeTunnel(port, url=STARTED["url"], failure=None))
+        return tunnels[-1]
+
+    clock = [datetime.now(UTC)]
+    controller = RemoteController(
+        tunnel_factory=tunnel_factory,
+        dist_dir=page,
+        port=_free_port(),
+        now=lambda: clock[0],
+        state=RemoteState(auto_off_minutes=30),
+    )
+    controller.turn_on()
+    assert controller._waiter is not None
+    controller._waiter.join(5)
+    served = remote_server._server
+    assert controller.running and served is not None and served.running
+    state = remote_server.runtime()
+    assert state.unlock_device(state.password, "Pixel") is not None
+
+    def unwritable(path: Path, data: object, **kwargs: object) -> bool:
+        raise PermissionError(13, "Permission denied", str(path))
+
+    monkeypatch.setattr(remote_server, "write_replacing", unwritable)
+    clock[0] += timedelta(minutes=30)
+    with caplog.at_level("WARNING", logger=remote_server.__name__):
+        assert controller.enforce_auto_off() is True
+    assert not controller.running and controller.link_url() is None
+    assert tunnels[0].stopped, "ngrok was left up"
+    assert remote_server._server is None and not served.running
+    message = controller.message or ""
+    assert message.startswith("Remote turned off — the auto-off timer ran out")
+    assert "devices could not be revoked" in message and "Permission denied" in message
+    assert "flushing remote.json as the server stopped failed" in caplog.text
+    assert read_state()["remote_enabled"] is False
+    controller.shutdown_for_exit()  # the TUI's exit after it: nothing left to stop or raise

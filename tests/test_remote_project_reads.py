@@ -13,6 +13,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import threading
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -354,7 +355,7 @@ def test_claiming_another_projects_task_needs_no_project(
     result, summary = live_writes().handlers["task/claim"]({"ref": task.id})
     claimed = result["task"]
     assert isinstance(claimed, dict) and claimed["project_id"] == other.id
-    assert summary == f"claimed {task.id}"
+    assert summary == f"claimed {task.id} as=-"
     assert "another project's task" in _event_texts(remote_board_payload(other.id))
 
 
@@ -477,6 +478,35 @@ def test_subscribe_board_picks_which_projects_board_frames_arrive(
         assert _until(ws, lambda f: f["type"] == "fleet")["payload"]["project"] == "prj_b"
         ws.send_text(json.dumps({"subscribe_fleet": None}))
         assert _until(ws, lambda f: f["type"] == "fleet")["payload"]["project"] is None
+
+
+def test_a_switch_while_a_snapshot_is_read_never_sends_the_old_projects_frame(
+    runtime: Runtime, tmp_path: Path
+) -> None:
+    """The tick read the current project's fleet, the switch landed meanwhile and dropped
+    the last frame, and the old project's frame went out as if it were the new one's: the
+    page showed it for a tick, and the test above failed about one run in six."""
+    reading, release = threading.Event(), threading.Event()
+    hold = [False]
+
+    def fleet(project: str | None) -> object:
+        if project is None and hold[0]:
+            reading.set()
+            release.wait(5)
+        return {"kind": "fleet", "project": project}
+
+    sources = dataclasses.replace(Reads().sources(), fleet=fleet)
+    client = make_client(build_app(runtime, sources=sources, dist_dir=tmp_path, tick=0.02))
+    assert unlock(client, runtime).status_code == 200
+    is_fleet = lambda f: f["type"] == "fleet"  # noqa: E731
+    with client.websocket_connect(f"{base(runtime)}/ws") as ws:
+        assert _until(ws, is_fleet)["payload"]["project"] is None
+        hold[0] = True
+        assert reading.wait(5), "a tick is reading the current project's fleet"
+        ws.send_text(json.dumps({"subscribe_fleet": "prj_b"}))
+        time.sleep(0.2)  # the reader takes the switch while that read still runs
+        release.set()
+        assert _until(ws, is_fleet)["payload"]["project"] == "prj_b"
 
 
 def test_a_ninth_pane_subscription_is_refused_with_an_error_frame(

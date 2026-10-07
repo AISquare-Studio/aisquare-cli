@@ -61,23 +61,28 @@ base install; :func:`start_remote_server` and the CLI say what to install.
 from __future__ import annotations
 
 import contextlib
+import errno
 import hashlib
+import hmac
 import json
 import logging
+import math
 import os
 import re
 import shutil
 import threading
 import time
 from collections import deque
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 
 from aisquare.core.atomic import write_replacing
+from aisquare.core.locking import lock_exclusive, unlock
 from aisquare.core.paths import (
+    despite_windows_contention,
     ensure_home,
     remote_audit_path,
     remote_dist_dir,
@@ -88,8 +93,10 @@ from aisquare.core.version import __version__
 from aisquare.models import FleetAgent, FleetAgentStatus, ProjectInfo, TeamSession, TurnMetric
 
 if TYPE_CHECKING:
+    import socket
     from concurrent.futures import ThreadPoolExecutor
 
+    import uvicorn
     from starlette.requests import HTTPConnection, Request
     from starlette.responses import Response
     from starlette.routing import Route
@@ -109,6 +116,27 @@ COOKIE = "asq_remote"
 TICK_SECONDS = 1.0
 UNLOCK_LIMIT = 5
 UNLOCK_WINDOW_SECONDS = 60.0
+"""Unlock attempts per client (uvicorn's resolved peer) per window, right or wrong."""
+UNLOCK_GLOBAL_FAILURES = 20
+UNLOCK_GLOBAL_WINDOW_SECONDS = 1_800.0
+"""The global failed-unlock budget (:class:`UnlockBudget`): 20 wrong guesses in 30 min."""
+KNOWN_DEVICE_FAILURES_MAX = 10
+"""Wrong guesses a known device's cookie may send before the device is revoked."""
+DEVICE_IDLE_LIMIT = timedelta(hours=24)
+"""Unused this long, a device is signed out (its cookie refused, its record kept)."""
+DEVICE_LIFETIME = timedelta(days=7)
+"""After this long from its first unlock a device is removed; its cookie's Max-Age."""
+DEVICE_UA_MAX = 200
+DEVICE_ID = re.compile(r"dev_[0-9a-f]{8}\Z")
+"""A device's public id, used ONLY with ``fullmatch``: ``dev_`` and eight hex digits."""
+AUTO_OFF_EXTEND = timedelta(minutes=60)
+AUTO_OFF_CEILING = timedelta(hours=8)
+"""``POST api/remote/extend`` adds an hour, never past 8 h from now (SPEC §2.5)."""
+STATE_VERSION = 2
+"""``remote.json``'s format: 2 holds devices by id and cookie digest (SPEC §2.3)."""
+STATE_LOCK_WAIT_SECONDS = 2.0
+_LOCK_HELD = frozenset({errno.EAGAIN, errno.EWOULDBLOCK, errno.EACCES})
+"""What ``flock`` and Windows' ``locking`` say when another process holds the lock."""
 WS_CLOSE_UNAUTHORIZED = 4401
 """Close code the page keys on: after it the adapter routes to /unlock."""
 WS_CLOSE_BAD_ORIGIN = 4403
@@ -118,6 +146,11 @@ WS_CLOSE_NOT_FOUND = 4404
 WS_CLOSE_REPLACED = 4409
 """The same device opened one socket too many and this, its oldest, made way: the page
 does not reconnect it until its tab is visible again (SPEC §2.10)."""
+WS_CLOSE_REMOTE_OFF = 4410
+"""Remote was turned off on the machine, by its switch or by auto-off: the page says so and
+waits, where 4401 would send it to an unlock that cannot succeed (SPEC §2.4)."""
+WS_MAX_MESSAGE_BYTES = 65_536
+"""The largest WebSocket message uvicorn accepts (``ws_max_size``), down from its 16 MiB."""
 
 WS_CLIENT_MESSAGE_MAX = 4_096
 """The longest text frame a client may send; anything longer is ignored unread."""
@@ -167,7 +200,12 @@ that needs another entry asks for it: :meth:`RemoteKit.kit_route` refuses to bui
 an ungated write that is not listed, and ``tests/test_remote_gates.py`` walks the
 built app for any that slipped past it."""
 
-READ_ONLY_REASON = "read-only build (allow write actions is off in the TUI)"
+READ_ONLY_REASON = (
+    "writes are off — on the machine run `aisquare remote allow-write on`, "
+    "or switch Allow write actions in the R panel"
+)
+"""Every 403 ``read_only`` says this, and so do the page and the modal: the two ways to
+turn writes on, both of which write the one switch in ``remote.json``."""
 WRITE_ENDPOINTS = (
     "task/claim",
     "task/done",
@@ -226,16 +264,53 @@ NO_PAGE_HINT = "no remote page installed — run: aisquare remote install-page <
 ``start_remote_server()`` — one sentence, so a fresh machine never sees a server that
 quietly answers with nothing."""
 
-_PASSPHRASE_WORDS = (
-    "amber", "birch", "cedar", "delta", "ember", "fjord", "glade", "harbor",
-    "indigo", "juniper", "kestrel", "lagoon", "meadow", "nectar", "orchid", "pebble",
-    "quartz", "river", "saffron", "tundra", "umber", "velvet", "willow", "yarrow",
-    "zenith", "anchor", "beacon", "canyon", "dune", "falcon", "garnet", "heron",
-)  # fmt: skip
-"""Phone-typeable, lower-case, no look-alike letters: 4 distinct words of 32 ≈ 19 bits
-on top of the 32-character URL token (the modal task and RABIA-HANDOFF call for a passphrase)."""
 PASSPHRASE_WORDS = 4
-"""Typed on a phone, read off a terminal: no 0/O, 1/l/I."""
+"""Words in a passphrase: four distinct ones of :mod:`remote_words`' 512, about 36 bits."""
+
+SEND_KEYS_TEXT_MAX = 2_048
+"""The longest ``text`` one ``send-keys`` (or quick answer) types: at most 16 tmux calls of
+``_HEX_CHUNK`` bytes even when every character is 4 bytes of UTF-8. Longer goes as a tell."""
+SEND_KEYS_KEYS_MAX = 32
+EXIT_KEY_REPEAT_SECONDS = 3.0
+"""A second Ctrl-C (or Ctrl-D) to one agent this soon exits Claude Code: refused unless meant."""
+EXIT_KEYS = frozenset({"C-c", "C-d"})
+NOTE_TEXT_MAX = 8_000
+NOTE_KINDS = frozenset({"note", "decision", "question", "result"})
+"""The kinds a phone may post. The others (``attention``, ``limited``, ``agent_exited``,
+``switched``…) are the fleet's own reports, which wake the manager or set an agent's state."""
+PROJECT_ADD_PATH_MAX = 4_096
+
+REMOTE_KEY_NAME = re.compile(
+    r"(?:Enter|Escape|Tab|BTab|BSpace|Space|Up|Down|Left|Right|Home|End|PageUp|PageDown|Delete"
+    r"|F(?:[1-9]|1[0-2])|C-[cdloru]|[0-9]|y|n)\Z"
+)
+"""Every key the pad sends and nothing else, used ONLY as ``REMOTE_KEY_NAME.fullmatch(key)``
+(``\\Z`` also guards a later ``.match``). A control key is added by NAME, never as a range:
+``C-z`` suspends Claude Code, and an ``M-`` key is an escape sequence, so neither is here."""
+REMOTE_KEY_VOCABULARY = (
+    "Enter, Escape, Tab, BTab, BSpace, Space, Up, Down, Left, Right, Home, End, PageUp, "
+    "PageDown, Delete, F1-F12, C-c, C-d, C-l, C-o, C-r, C-u, 0-9, y, n"
+)
+_TEXT_CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+"""What typed ``text`` may not hold: a C0 control other than tab, newline and carriage return,
+or DEL (:func:`check_remote_text`)."""
+_TEXT_CONTROL_KEYS = {
+    "\x03": "C-c",
+    "\x04": "C-d",
+    "\x0c": "C-l",
+    "\x0f": "C-o",
+    "\x12": "C-r",
+    "\x15": "C-u",
+    "\x1b": "Escape",
+    "\x08": "BSpace",
+    "\x7f": "BSpace",
+}
+"""The pad's key for what a control character in ``text`` would have typed."""
+
+AUDIT_DEVICE_MAX = 32
+AUDIT_ENDPOINT_MAX = 32
+AUDIT_SUMMARY_MAX = 300
+"""How much of each field an audit line keeps (:func:`_audit_clean`)."""
 
 
 class RemoteError(RuntimeError):
@@ -251,13 +326,19 @@ class NoRemotePage(RemoteError):
 
 
 class RequestError(Exception):
-    """A handler's refusal, carried to the client as ``{error, message}``."""
+    """A handler's refusal, carried to the client as ``{error, message}``.
 
-    def __init__(self, status: int, error: str, message: str) -> None:
+    ``audit`` is for a refusal that still did something: a ``send-keys`` that
+    failed after bytes may have reached the pane. The write dispatcher writes it
+    to the audit log as it writes a success's summary.
+    """
+
+    def __init__(self, status: int, error: str, message: str, *, audit: str | None = None) -> None:
         super().__init__(message)
         self.status = status
         self.error = error
         self.message = message
+        self.audit = audit
 
 
 class NoSuchAgent(LookupError):
@@ -307,10 +388,18 @@ def new_token() -> str:
 
 
 def new_password() -> str:
-    """A 4-word hyphenated passphrase of DISTINCT words from :data:`_PASSPHRASE_WORDS`."""
+    """Four DISTINCT words of :data:`remote_words.REMOTE_PASSPHRASE_WORDS`, joined with ``-``."""
     import secrets
 
-    return "-".join(secrets.SystemRandom().sample(_PASSPHRASE_WORDS, PASSPHRASE_WORDS))
+    from aisquare.services.remote_words import REMOTE_PASSPHRASE_WORDS
+
+    return "-".join(secrets.SystemRandom().sample(REMOTE_PASSPHRASE_WORDS, PASSPHRASE_WORDS))
+
+
+def normalize_passphrase(text: str) -> str:
+    """A passphrase as a phone types it, as it is stored: ``Amber River, cedar`` is
+    ``amber-river-cedar``. Lower case, every run of letters a word, joined with ``-``."""
+    return "-".join(re.findall(r"[a-z]+", text.lower()))
 
 
 def _same(supplied: str, expected: str) -> bool:
@@ -318,6 +407,18 @@ def _same(supplied: str, expected: str) -> bool:
     import secrets
 
     return secrets.compare_digest(supplied.encode("utf-8", "replace"), expected.encode())
+
+
+def _audit_clean(text: str, limit: int) -> str:
+    """``text`` safe for one field of one audit line, at most ``limit`` characters.
+
+    Every character that does not print is a ``?``: a newline or a carriage return
+    would start a line of the sender's choosing, ``\\x1b`` would drive the terminal
+    the log is read in, and NEL, U+2028/U+2029 and the bidi controls (format
+    characters) reorder or break what a reader sees.
+    """
+    cleaned = "".join(ch if ch.isprintable() else "?" for ch in text)
+    return cleaned if len(cleaned) <= limit else cleaned[: limit - 1] + "…"
 
 
 def build_local_url(token: str, port: int = DEFAULT_PORT) -> str:
@@ -374,31 +475,119 @@ def check_public_origin(url: str) -> str:
 # --- state --------------------------------------------------------------------------
 
 
+def _remote_instant(text: object, *, naive_is_local: bool = False) -> datetime | None:
+    """An ISO stamp from ``remote.json`` as an aware datetime; ``None`` for anything else.
+
+    Every stamp this module writes carries its offset. A naive one is a hand edit,
+    or an ``auto_off_at`` an earlier build stored as the TUI's naive local time,
+    which ``naive_is_local`` reads as local (SPEC §2.5); a device stamp reads as UTC.
+    """
+    if not isinstance(text, str) or not text:
+        return None
+    try:
+        at = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if at.tzinfo is None:
+        return at.astimezone() if naive_is_local else at.replace(tzinfo=UTC)
+    return at
+
+
+def _iso_seconds(at: datetime) -> str:
+    """``at`` as the ISO UTC stamp, to the second, that ``remote.json`` and the API carry."""
+    return at.astimezone(UTC).isoformat(timespec="seconds")
+
+
+def _secret_digest(secret: str) -> str:
+    """Hex SHA-256 of a cookie's secret: all ``remote.json`` keeps of it."""
+    return hashlib.sha256(secret.encode("utf-8")).hexdigest()
+
+
 @dataclass
 class Device:
-    """One unlocked browser: the cookie session and what it told us about itself."""
+    """One unlocked browser, named by an id that is NOT its cookie (SPEC §2.3).
 
-    sid: str
+    The cookie is a 43-character secret only the browser holds; ``remote.json``
+    keeps its SHA-256, so a leaked file replays no session. Everything that names a
+    device (the API, the audit log, ``asq remote status``, the modal, the socket
+    registry) names it by :attr:`id`, which is public and unlocks nothing: the
+    sid that used to stand in for both was the cookie itself, listed to every other
+    device by ``GET api/devices`` and printed by ``status``.
+    """
+
+    id: str
+    """``dev_`` and eight hex digits, unique among the current devices."""
+    secret_sha256: str
+    """Hex SHA-256 of the cookie's secret, which a presented cookie is compared against."""
     ua: str
     first_seen: str
     last_seen: str
-    id: str = field(init=False, compare=False, repr=False)
-    """The name every caller uses for this device: routes, the audit log, the socket
-    registry. Until devices get ids of their own that are not their cookies (SPEC §2.3),
-    it is the session id. A field and not a property: on the merge with #240 the hook
-    path calls ``id(...)``, so a remote ``def id`` would be a bare name it reaches, which
-    the naming test (``test_remote_names_stay_off_the_hook_graph.py``) forbids."""
+    """ISO UTC. Touched in memory on every request; the flush writes it every 30 s."""
+    expires_at: str
+    """ISO UTC, :data:`DEVICE_LIFETIME` after the first unlock. A re-unlock never moves it."""
+    failed_unlocks: int = 0
+    """Wrong passphrases sent with this device's cookie since it last unlocked (§2.2 item 4).
+    Never shown anywhere: it is a count toward :data:`KNOWN_DEVICE_FAILURES_MAX`."""
 
-    def __post_init__(self) -> None:
-        self.id = self.sid
+    def device_expired(self, now: datetime) -> bool:
+        """Past its lifetime: removed at the next prune, and refused until then."""
+        expires = _remote_instant(self.expires_at)
+        return expires is None or now >= expires
 
-    def device_json(self) -> dict[str, str]:
+    def device_signed_in(self, now: datetime) -> bool:
+        """Used within :data:`DEVICE_IDLE_LIMIT` and still within its lifetime.
+
+        A device idle longer is SIGNED OUT, not removed: its cookie is refused, but
+        the record stays until it expires, so its push subscription keeps working
+        and the same phone re-unlocks into the same id (SPEC §2.4).
+        """
+        seen = _remote_instant(self.last_seen)
+        return seen is not None and now - seen < DEVICE_IDLE_LIMIT and not self.device_expired(now)
+
+    def device_json(self) -> dict[str, object]:
+        """The record as ``remote.json`` keeps it: the digest, never the secret."""
         return {
-            "sid": self.sid,
+            "id": self.id,
+            "secret_sha256": self.secret_sha256,
             "ua": self.ua,
             "first_seen": self.first_seen,
             "last_seen": self.last_seen,
+            "expires_at": self.expires_at,
+            "failed_unlocks": self.failed_unlocks,
         }
+
+    def device_row(self, now: datetime) -> dict[str, object]:
+        """The device as the API, ``asq remote status`` and the modal show it: no secret, no
+        digest, no failure count."""
+        return {
+            "id": self.id,
+            "ua": self.ua,
+            "first_seen": self.first_seen,
+            "last_seen": self.last_seen,
+            "expires_at": self.expires_at,
+            "signed_in": self.device_signed_in(now),
+        }
+
+    @classmethod
+    def from_json(cls, row: object) -> Device | None:
+        """A record from ``remote.json``, or ``None`` for one that is not a v2 device."""
+        if not isinstance(row, dict):
+            return None
+        device_id, digest = row.get("id"), row.get("secret_sha256")
+        if not isinstance(device_id, str) or not DEVICE_ID.fullmatch(device_id):
+            return None
+        if not isinstance(digest, str) or not digest:
+            return None
+        failed = row.get("failed_unlocks")
+        return cls(
+            id=device_id,
+            secret_sha256=digest,
+            ua=str(row.get("ua") or ""),
+            first_seen=str(row.get("first_seen") or ""),
+            last_seen=str(row.get("last_seen") or ""),
+            expires_at=str(row.get("expires_at") or ""),
+            failed_unlocks=failed if isinstance(failed, int) and failed >= 0 else 0,
+        )
 
 
 @dataclass
@@ -412,43 +601,67 @@ class RemoteInfo:
 
 @dataclass
 class _State:
+    """``remote.json``, version 2 (SPEC §2.3): devices by id and digest, never by cookie."""
+
     token: str
     password: str
     allow_write: bool = False
     auto_off_at: str | None = None
-    sessions: list[Device] = field(default_factory=list)
+    devices: list[Device] = field(default_factory=list)
+    unlock_failures: list[str] = field(default_factory=list)
+    """When each wrong passphrase that counts against the global budget arrived (ISO UTC,
+    oldest first, only those still inside its window): :class:`UnlockBudget` reads and
+    writes them here, so every process sees one budget and a restart does not reset it."""
 
     def state_json(self) -> dict[str, object]:
         return {
+            "version": STATE_VERSION,
             "token": self.token,
             "password": self.password,
             "allow_write": self.allow_write,
             "auto_off_at": self.auto_off_at,
-            "sessions": [device.device_json() for device in self.sessions],
+            "devices": [device.device_json() for device in self.devices],
+            "unlock_failures": list(self.unlock_failures),
         }
 
     @classmethod
     def from_json(cls, raw: dict[str, Any]) -> _State:
+        """A version-2 file; a missing token or password is made anew (and then written)."""
         token = raw.get("token")
         password = raw.get("password")
-        devices: list[Device] = []
-        for row in raw.get("sessions") or []:
-            if isinstance(row, dict) and isinstance(row.get("sid"), str):
-                devices.append(
-                    Device(
-                        sid=row["sid"],
-                        ua=str(row.get("ua") or ""),
-                        first_seen=str(row.get("first_seen") or ""),
-                        last_seen=str(row.get("last_seen") or ""),
-                    )
-                )
+        rows = raw.get("devices")
+        stamps = raw.get("unlock_failures")
         auto_off = raw.get("auto_off_at")
         return cls(
             token=token if isinstance(token, str) and token else new_token(),
             password=password if isinstance(password, str) and password else new_password(),
             allow_write=bool(raw.get("allow_write", False)),
             auto_off_at=auto_off if isinstance(auto_off, str) else None,
-            sessions=devices,
+            devices=[d for d in map(Device.from_json, rows if isinstance(rows, list) else []) if d],
+            unlock_failures=[
+                stamp
+                for stamp in (stamps if isinstance(stamps, list) else [])
+                if isinstance(stamp, str)
+            ],
+        )
+
+    @classmethod
+    def migrated(cls, raw: dict[str, Any]) -> _State:
+        """A version-1 file, once (SPEC §2.2 item 10): the link and the switches carry over,
+        the password does not, and neither does any session.
+
+        A v1 password is four words of 32, about 19.7 bits, so a new one comes from
+        the 512-word list. Every v1 session was stored as its raw cookie, so the file
+        (and every audit line) held replayable sessions: all of them go, and each
+        phone unlocks once more.
+        """
+        token = raw.get("token")
+        auto_off = raw.get("auto_off_at")
+        return cls(
+            token=token if isinstance(token, str) and token else new_token(),
+            password=new_password(),
+            allow_write=bool(raw.get("allow_write", False)),
+            auto_off_at=auto_off if isinstance(auto_off, str) else None,
         )
 
 
@@ -456,13 +669,54 @@ _UNRESTRICTED = (
     "remote: could not restrict %s to your account — other users on this machine "
     "may be able to read %s"
 )
+_BLANK_STATE = b" \t\r\n\x00"
+"""All an empty ``remote.json`` holds: whitespace, or the NULs a crash leaves when the size
+reached the disk and the data did not (``core.state_file`` reads its file the same way)."""
+
+
+def _encoded_state(state: _State) -> bytes:
+    """The exact bytes of ``remote.json`` for ``state``: what is written, and what a file
+    already written this way compares equal to."""
+    return json.dumps(state.state_json(), indent=2).encode("utf-8")
+
+
+def _lock_state_file(path: Path) -> int | None:
+    """``<path>.lock`` held exclusively, as a descriptor; ``None`` when it could not be had.
+
+    Waits at most :data:`STATE_LOCK_WAIT_SECONDS`, polling, as ``core.state_file`` does.
+    Past that, or when the lock file cannot be opened at all (a read-only home), the
+    write goes ahead without it, logged: a write is an atomic rename, so the file is
+    never torn, and what the lock prevents is one healthy writer undoing another; a
+    holder stalled that long is not one, and refusing would turn its stall into a
+    failed unlock or a crashed TUI.
+    """
+    lock_path = path.with_name(f"{path.name}.lock")
+    try:
+        fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    except OSError as exc:
+        log.debug("remote: %s could not be opened (%s); writing without it", lock_path, exc)
+        return None
+    deadline = time.monotonic() + STATE_LOCK_WAIT_SECONDS
+    while True:
+        try:
+            lock_exclusive(fd)
+            return fd
+        except OSError as exc:
+            if exc.errno not in _LOCK_HELD or time.monotonic() >= deadline:
+                os.close(fd)
+                log.warning("remote: %s not taken (%s); writing without it", lock_path, exc)
+                return None
+            time.sleep(0.01)
 
 
 class Runtime:
     """The server's mutable state: ``remote.json``, the live sockets, the audit log.
 
     Shared between the uvicorn thread and whoever called :func:`start_remote_server` (the
-    TUI's thread), so every mutation takes the lock. ``allow_write`` is never
+    TUI's thread), so every mutation takes the lock; and with every other process that
+    writes ``remote.json`` (``asq remote revoke``, ``allow-write``,
+    ``regenerate-password``), so every read-modify-write of the file also holds
+    ``remote.json.lock`` and starts from what is on disk. ``allow_write`` is never
     flipped on here — only :meth:`set_allow_write` does, on an explicit call.
     """
 
@@ -470,7 +724,15 @@ class Runtime:
         self._state_path = state_path
         self._audit_path = audit_path
         self._lock = threading.RLock()
-        self._closers: dict[str, set[Callable[[], None]]] = {}
+        """Every read and change of the state in memory; the event loop takes it on every
+        request, so it is never held while waiting on another process."""
+        self._writing = threading.RLock()
+        """One read-modify-write of ``remote.json`` at a time in this process, held while
+        ``remote.json.lock`` is waited for (:meth:`_state_file_lock`). Taken before
+        :attr:`_lock`, never while holding it."""
+        self._closers: dict[str, set[Callable[[int], None]]] = {}
+        """Each device's live sockets, by device id, as closers that take the close code."""
+        self._file_lock_depth = 0
         self._disk: bytes | None = None
         """Digest of the file's bytes as this process last wrote or read them.
 
@@ -500,6 +762,42 @@ class Runtime:
             return None
         return (self._state_digest(data), data)
 
+    @contextlib.contextmanager
+    def _state_file_lock(self) -> Iterator[None]:
+        """``remote.json.lock``, then this runtime's lock, around one read-modify-write.
+
+        The per-process lock alone never covered the CLI: a ``revoke`` or a
+        ``regenerate-password`` that landed inside a server's flush was undone by
+        it, and a ``status`` rewrote the file from its own snapshot over a device
+        that had just unlocked. Re-entrant within this runtime, since a file lock
+        taken twice by one process would wait on itself.
+
+        The wait for the file lock holds :attr:`_writing` alone. Holding
+        :attr:`_lock` through it, a write that waited on another process (up to
+        :data:`STATE_LOCK_WAIT_SECONDS`) held up every request the event loop
+        served meanwhile, since the gate reads the state under ``_lock``.
+        """
+        with self._writing:
+            if self._file_lock_depth:
+                self._file_lock_depth += 1
+                try:
+                    with self._lock:
+                        yield
+                finally:
+                    self._file_lock_depth -= 1
+                return
+            fd = _lock_state_file(self._state_path)
+            self._file_lock_depth = 1
+            try:
+                with self._lock:
+                    yield
+            finally:
+                self._file_lock_depth = 0
+                if fd is not None:
+                    with contextlib.suppress(OSError):
+                        unlock(fd)
+                    os.close(fd)
+
     def reload_if_changed(self) -> bool:
         """Re-read ``remote.json`` if ANOTHER process changed it; ``True`` when it had.
 
@@ -511,11 +809,14 @@ class Runtime:
         BYTES differ from what this process last wrote or read. Not mtime: on
         this filesystem 195 of 200 same-size rewrites shared an mtime tick, which
         hid a regenerated passphrase of equal length. An unreadable or
-        half-written file keeps the state in hand and is retried on the next change.
+        half-written file keeps the state in hand and is retried on the next change,
+        and so does a version-1 file an older build wrote: this process's next
+        write makes it version 2 again, with everything it holds.
 
-        What applying the file means: switches and password replace; sessions
-        the file no longer lists are revoked here too (cookie gone, websockets
-        closed with 4401); ``last_seen`` keeps the newer of memory and disk.
+        What applying the file means: switches, token and password replace (a new
+        password also resets the failed-unlock budget); devices the file no longer
+        lists are revoked here too (sockets closed with 4401); ``last_seen`` keeps
+        the newer of memory and disk.
         """
         signature = self._signature()
         with self._lock:
@@ -523,40 +824,95 @@ class Runtime:
                 return False
             digest, data = signature
             try:
-                raw = json.loads(data.decode("utf-8"))
-            except ValueError:
+                raw = json.loads(data.decode("utf-8-sig"))
+            except (ValueError, RecursionError):
                 return False
-            if not isinstance(raw, dict):
+            if not isinstance(raw, dict) or raw.get("version") != STATE_VERSION:
                 return False
             self.reads += 1
             self._disk = digest
             incoming = _State.from_json(raw)
-            known = {device.sid: device for device in self._state.sessions}
-            for device in incoming.sessions:
-                previous = known.get(device.sid)
+            known = {device.id: device for device in self._state.devices}
+            for device in incoming.devices:
+                previous = known.get(device.id)
                 if previous is not None and previous.last_seen > device.last_seen:
                     device.last_seen = previous.last_seen
-            kept = {device.sid for device in incoming.sessions}
+            if incoming.password != self._state.password:
+                incoming.unlock_failures = []
+            kept = {device.id for device in incoming.devices}
             self._state = incoming
-            for sid in [sid for sid in known if sid not in kept]:
-                self._close_sockets(sid)
+            for device_id in [device_id for device_id in known if device_id not in kept]:
+                self._close_sockets(device_id, WS_CLOSE_UNAUTHORIZED)
             return True
 
-    def _load_state(self) -> _State:
+    def _read_state_file(self) -> tuple[bytes, dict[str, Any]] | None:
+        """The file's bytes and its JSON object; ``None`` when there is nothing to keep.
+
+        Nothing to keep is no file, or one holding only blanks or a crash's NULs.
+        Anything else that is not a JSON object is a :class:`RemoteError`, and so is
+        a file that cannot be read: what replaces a file is a new link and a new
+        passphrase, so every phone loses Remote, and a hand edit's typo did exactly
+        that for any process that merely read the file (``asq remote status``, the
+        R modal), the running server adopting it on its next request.
+        """
         try:
-            raw = json.loads(self._state_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+            # On NTFS a read inside another process's rename over the file is refused
+            # for the rename's width, an "Access is denied" that is no permission problem.
+            data = despite_windows_contention(self._state_path.read_bytes)
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise RemoteError(
+                f"{self._state_path} could not be read ({exc}) — nothing was changed; "
+                "fix its permissions and try again"
+            ) from exc
+        if not data.strip(_BLANK_STATE):
+            return None
+        try:
+            raw = json.loads(data.decode("utf-8-sig"))
+        except (ValueError, RecursionError):
             raw = None
-        state = (
-            _State.from_json(raw) if isinstance(raw, dict) else _State(new_token(), new_password())
-        )
-        self._write_state(state)
-        return state
+        if not isinstance(raw, dict):
+            raise RemoteError(
+                f"{self._state_path} is not a JSON object — nothing was changed; fix it, "
+                "or move it aside to start over with a new link and password"
+            )
+        return data, raw
+
+    def _load_state(self) -> _State:
+        """``remote.json`` as it is; written only when there is something to write.
+
+        A version-2 file that parses is taken as it is, with no write: every process
+        that reads the file (``asq remote status``, every CLI toggle) used to rewrite
+        it from its own snapshot, and one landing inside a server's unlock dropped
+        the device that had just unlocked. A missing or empty file is made and a
+        version-1 one migrated, each under the file lock and re-read there first, so
+        two processes starting at once settle on one file; any other file is refused
+        (:meth:`_read_state_file`), never replaced.
+        """
+        found = self._read_state_file()
+        if found is not None and found[1].get("version") == STATE_VERSION:
+            data, raw = found
+            state = _State.from_json(raw)
+            if _encoded_state(state) == data:
+                self._disk = self._state_digest(data)
+                return state
+        with self._state_file_lock():
+            found = self._read_state_file()
+            if found is None:
+                state = _State(new_token(), new_password())
+            elif found[1].get("version") == STATE_VERSION:
+                state = _State.from_json(found[1])
+            else:
+                state = _State.migrated(found[1])
+            self._write_state(state)
+            return state
 
     def _write_state(self, state: _State) -> None:
+        """Replace ``remote.json`` with ``state``. Callers hold :meth:`_state_file_lock`."""
         self._state_path.parent.mkdir(parents=True, exist_ok=True)
-        encoded = json.dumps(state.state_json(), indent=2).encode("utf-8")
-        # The token, the passphrase and every device's cookie, so written as
+        encoded = _encoded_state(state)
+        # The token, the passphrase and the devices' digests, so written as
         # core.credentials writes secrets: a temp of this write's own, created 0600
         # and restricted to this account while still EMPTY (on NTFS, the DACL the
         # rename carries over), then renamed over the target with the Windows
@@ -566,14 +922,15 @@ class Runtime:
         restricted = write_replacing(self._state_path, encoded, owner_only=True)
         if not restricted and not self._said_unrestricted:
             self._said_unrestricted = True  # once: the flush rewrites the file every 30 s
-            log.warning(_UNRESTRICTED, self._state_path, "the password and device cookies")
+            log.warning(_UNRESTRICTED, self._state_path, "the password and the link token")
         # Our own write, by content: the next check finds these exact bytes and
         # skips the parse; a sibling process writing the same size in the same
         # mtime tick is still seen, because its bytes differ.
         self._disk = self._state_digest(encoded)
 
     def _save_state(self) -> None:
-        with self._lock:
+        """Write the state in hand as it is (tests set fields, then save)."""
+        with self._state_file_lock():
             self._write_state(self._state)
 
     # -- identity --
@@ -597,7 +954,24 @@ class Runtime:
             return RemoteInfo(self.token, self.password, build_local_url(self.token, port))
 
     def token_matches(self, supplied: str) -> bool:
+        """Whether ``supplied`` is the whole link token, read fresh from the file first:
+        ``regenerate-password --new-link`` in another shell retires the old link on the
+        running server's very next request."""
+        self.reload_if_changed()
         return _same(supplied, self.token)
+
+    def password_matches(self, supplied: str) -> bool:
+        """Whether ``supplied`` is the passphrase, as typed or as a phone types it.
+
+        ``Amber River, cedar  DELTA`` matches ``amber-river-cedar-delta``: the
+        normalized form is compared too (:func:`normalize_passphrase`). Both
+        comparisons always run (a bitwise or, not ``or``), so the time taken says
+        nothing about which one matched. Only the SUPPLIED side is normalized: a
+        stored password that is not a word phrase (``Test1234``) still matches only
+        itself, where normalizing both would let ``Test1235`` match it.
+        """
+        stored = self.password
+        return _same(supplied, stored) | _same(normalize_passphrase(supplied), stored)
 
     def note_public_origin(self, origin: str | None) -> None:
         """Remember the public origin an authoritative source announced; ``None`` forgets it.
@@ -626,116 +1000,310 @@ class Runtime:
     # -- switches --
 
     def set_allow_write(self, enabled: bool) -> None:
-        with self._lock:
+        with self._state_file_lock():
             self.reload_if_changed()
             self._state.allow_write = bool(enabled)
-            self._save_state()
+            self._write_state(self._state)
 
     def set_auto_off(self, at: datetime | None) -> None:
-        with self._lock:
-            self.reload_if_changed()
-            self._state.auto_off_at = at.isoformat(timespec="seconds") if at else None
-            self._save_state()
+        """Record when Remote turns itself off, as ISO UTC with its offset.
 
-    def regenerate_password(self) -> str:
-        """A new password; every unlocked device is dropped with the old one."""
-        with self._lock:
+        The TUI hands over its local time; a naive one is read as local
+        (``astimezone``), so a phone in another timezone and a DST change both read
+        the same instant (review of #243, auto-off published without an offset).
+        """
+        with self._state_file_lock():
             self.reload_if_changed()
+            self._state.auto_off_at = None if at is None else _iso_seconds(at)
+            self._write_state(self._state)
+
+    def auto_off_deadline(self) -> datetime | None:
+        """When Remote turns itself off, fresh from the file; ``None`` is never."""
+        self.reload_if_changed()
+        with self._lock:
+            return _remote_instant(self._state.auto_off_at, naive_is_local=True)
+
+    def auto_off_passed(self, now: datetime) -> bool:
+        """Whether Remote's deadline is behind ``now``: then every request is a 404."""
+        deadline = self.auto_off_deadline()
+        return deadline is not None and now >= deadline
+
+    def extend_auto_off(self, now: datetime) -> datetime | None:
+        """Move the deadline :data:`AUTO_OFF_EXTEND` later; ``None`` when there is none.
+
+        Never more than :data:`AUTO_OFF_CEILING` ahead of ``now``, and never EARLIER
+        than it already was: a ``serve --auto-off 600`` deadline is already past the
+        ceiling, and capping it there would turn "another hour" into nine fewer.
+        """
+        with self._state_file_lock():
+            self.reload_if_changed()
+            deadline = _remote_instant(self._state.auto_off_at, naive_is_local=True)
+            if deadline is None:
+                return None
+            extended = max(
+                deadline, min(max(deadline, now) + AUTO_OFF_EXTEND, now + AUTO_OFF_CEILING)
+            )
+            self._state.auto_off_at = _iso_seconds(extended)
+            self._write_state(self._state)
+            return extended
+
+    def regenerate_password(self, *, new_link: bool = False) -> str:
+        """A new password; every device is dropped with the old one (sockets close 4401).
+
+        ``new_link`` also mints a new link token, so a link that leaked stops
+        working everywhere: a running server reads it on its next request
+        (:meth:`token_matches`). A new password also resets the failed-unlock budget.
+        """
+        with self._state_file_lock():
+            UnlockBudget(self).clear_failed_unlocks()
             self._state.password = new_password()
-            for device in list(self._state.sessions):
-                self._drop(device.sid)
-            self._save_state()
+            if new_link:
+                self._state.token = new_token()
+            for device in list(self._state.devices):
+                self._drop(device.id, WS_CLOSE_UNAUTHORIZED)
+            self._write_state(self._state)
             return self._state.password
 
-    # -- sessions --
+    # -- devices --
 
-    def unlock_device(self, password: str, ua: str) -> str | None:
-        """A new session id when ``password`` is right, else ``None``."""
-        with self._lock:
-            self.reload_if_changed()
-            if not _same(password, self._state.password):
-                return None
-            sid = new_token()
-            stamp = _stamp()
-            self._state.sessions.append(Device(sid, ua[:200], stamp, stamp))
-            self._save_state()
-            return sid
+    def _find_device(self, device_id: str) -> Device | None:
+        return next((d for d in self._state.devices if d.id == device_id), None)
 
-    def device_for_cookie(self, sid: str | None) -> Device | None:
-        """The device behind a cookie, its ``last_seen`` refreshed; ``None`` when invalid."""
-        if not sid:
+    def _device_by_secret(self, secret: str | None) -> Device | None:
+        """The device whose cookie this is, by digest, whatever its state; compared in
+        constant time against every device."""
+        if not secret:
             return None
         self.reload_if_changed()
+        digest = _secret_digest(secret).encode("ascii")
+        found: Device | None = None
         with self._lock:
-            for device in self._state.sessions:
-                if _same(sid, device.sid):
-                    device.last_seen = _stamp()
-                    return device
-        return None
+            for device in self._state.devices:
+                if hmac.compare_digest(digest, device.secret_sha256.encode("utf-8", "replace")):
+                    found = device
+        return found
 
-    def device_rows(self) -> list[dict[str, str]]:
-        """Every unlocked device as ``{sid, ua, first_seen, last_seen}`` (§4-F)."""
+    def unlock_device(self, password: str, ua: str) -> tuple[str, Device] | None:
+        """A new device and its cookie's secret when ``password`` is right, else ``None``.
+
+        Compared before ``remote.json.lock`` is taken, so a wrong guess, the common
+        case while someone is guessing, waits on no other process here; and compared
+        again under the lock, since a ``regenerate-password`` may land in between.
+        """
+        import secrets
+
+        if not self.password_matches(password):
+            return None
+        with self._state_file_lock():
+            if not self.password_matches(password):
+                return None
+            now = _remote_now()
+            secret = secrets.token_urlsafe(32)
+            taken = {device.id for device in self._state.devices}
+            device_id = f"dev_{secrets.token_hex(4)}"
+            while device_id in taken:
+                device_id = f"dev_{secrets.token_hex(4)}"
+            device = Device(
+                id=device_id,
+                secret_sha256=_secret_digest(secret),
+                ua=ua[:DEVICE_UA_MAX],
+                first_seen=_iso_seconds(now),
+                last_seen=_iso_seconds(now),
+                expires_at=_iso_seconds(now + DEVICE_LIFETIME),
+            )
+            self._state.devices.append(device)
+            self._write_state(self._state)
+            return secret, device
+
+    def device_for_cookie(self, secret: str | None) -> Device | None:
+        """The SIGNED-IN device behind a cookie, its ``last_seen`` refreshed; ``None`` otherwise.
+
+        Unknown, revoked, expired and signed out by idle (§2.4) are all ``None``, so
+        the gate answers 401 and the page goes to unlock. ``last_seen`` is touched in
+        memory; the flush writes it.
+        """
+        device = self._device_by_secret(secret)
+        if device is None:
+            return None
+        now = _remote_now()
+        with self._lock:
+            if not device.device_signed_in(now):
+                return None
+            device.last_seen = _iso_seconds(now)
+            return device
+
+    def known_device_for_cookie(self, secret: str | None) -> Device | None:
+        """The device a cookie belongs to while its lifetime lasts, signed in or signed out.
+
+        What ``unlock`` asks first (SPEC §2.2 item 4): a phone that unlocked here
+        before, idle past a day, re-unlocks into the same device, outside the
+        global budget, with a 10-guess cap of its own.
+        """
+        device = self._device_by_secret(secret)
+        if device is None or device.device_expired(_remote_now()):
+            return None
+        return device
+
+    def reactivate_device(self, device_id: str, ua: str) -> tuple[str, Device] | None:
+        """A known device's new cookie secret, after its owner typed the right passphrase.
+
+        The id stays, so its push subscription carries on. The secret is new, the
+        idle timer restarts and the wrong-guess count resets; ``expires_at`` does
+        not move, so a cookie never outlives its device. ``None`` when the device is
+        gone or expired.
+        """
+        import secrets
+
+        now = _remote_now()
+        with self._state_file_lock():
+            self.reload_if_changed()
+            device = self._find_device(device_id)
+            if device is None or device.device_expired(now):
+                return None
+            secret = secrets.token_urlsafe(32)
+            device.secret_sha256 = _secret_digest(secret)
+            device.last_seen = _iso_seconds(now)
+            device.failed_unlocks = 0
+            if ua:
+                device.ua = ua[:DEVICE_UA_MAX]
+            self._write_state(self._state)
+            return secret, device
+
+    def known_device_failed(self, device_id: str) -> bool:
+        """Count a wrong passphrase sent with this device's cookie; ``True`` when that
+        was the :data:`KNOWN_DEVICE_FAILURES_MAX`-th and the device is revoked: a stolen
+        cookie buys at most that many guesses outside the global budget."""
+        with self._state_file_lock():
+            self.reload_if_changed()
+            device = self._find_device(device_id)
+            if device is None:
+                return False
+            device.failed_unlocks += 1
+            revoked = device.failed_unlocks >= KNOWN_DEVICE_FAILURES_MAX
+            if revoked:
+                self._drop(device_id, WS_CLOSE_UNAUTHORIZED)
+            self._write_state(self._state)
+            return revoked
+
+    def device_is_live(self, device_id: str) -> bool:
+        """Whether a socket's device may keep it open: there, signed in, not expired.
+
+        An open socket is a device in use, so this touches ``last_seen`` as a request
+        does; the stream asks every tick, by id, never by cookie.
+        """
         self.reload_if_changed()
+        now = _remote_now()
         with self._lock:
-            return [device.device_json() for device in self._state.sessions]
+            device = self._find_device(device_id)
+            if device is None or not device.device_signed_in(now):
+                return False
+            device.last_seen = _iso_seconds(now)
+            return True
 
-    def _close_sockets(self, sid: str) -> None:
-        for close in self._closers.pop(sid, set()):
+    def device_ids(self) -> list[str]:
+        """Every current device's id, signed in or signed out; an expired one is not current."""
+        self.reload_if_changed()
+        now = _remote_now()
+        with self._lock:
+            return [d.id for d in self._state.devices if not d.device_expired(now)]
+
+    def device_rows(self) -> list[dict[str, object]]:
+        """Every current device as ``{id, ua, first_seen, last_seen, expires_at, signed_in}``."""
+        self.reload_if_changed()
+        now = _remote_now()
+        with self._lock:
+            return [d.device_row(now) for d in self._state.devices if not d.device_expired(now)]
+
+    def _close_sockets(self, device_id: str, code: int) -> None:
+        for close in self._closers.pop(device_id, set()):
             try:
-                close()
+                close(code)
             except Exception:  # a socket already gone must not stop the revoke
                 log.debug("remote: closing a websocket on revoke failed", exc_info=True)
 
-    def _drop(self, sid: str) -> bool:
-        before = len(self._state.sessions)
-        self._state.sessions = [d for d in self._state.sessions if d.sid != sid]
-        self._close_sockets(sid)
-        return len(self._state.sessions) != before
+    def _drop(self, device_id: str, code: int) -> bool:
+        before = len(self._state.devices)
+        self._state.devices = [d for d in self._state.devices if d.id != device_id]
+        self._close_sockets(device_id, code)
+        return len(self._state.devices) != before
 
-    def revoke_device(self, sid: str) -> bool:
-        """Drop the cookie session and close its websockets; ``True`` if it existed."""
-        with self._lock:
+    def revoke_device(self, device_id: str) -> bool:
+        """Remove one device and close its sockets with 4401; ``True`` if it existed."""
+        with self._state_file_lock():
             self.reload_if_changed()
-            dropped = self._drop(sid)
+            dropped = self._drop(device_id, WS_CLOSE_UNAUTHORIZED)
             if dropped:
-                self._save_state()
+                self._write_state(self._state)
             return dropped
 
+    def revoke_every_device(self, reason: str, close_code: int) -> int:
+        """Remove every device, closing their sockets with ``close_code``; how many there were.
+
+        4410 when Remote goes off (the switch, auto-off: the page says so and waits),
+        4401 for ``asq remote revoke --all`` (the page goes to unlock).
+        """
+        with self._state_file_lock():
+            self.reload_if_changed()
+            revoked = [device.id for device in self._state.devices]
+            for device_id in revoked:
+                self._drop(device_id, close_code)
+            self._write_state(self._state)
+        log.info("remote: every device revoked (%s): %d", reason, len(revoked))
+        return len(revoked)
+
+    def prune_expired_devices(self, now: datetime) -> int:
+        """Remove the devices past their lifetime (sockets close 4401); how many there were."""
+        with self._state_file_lock():
+            self.reload_if_changed()
+            expired = [d.id for d in self._state.devices if d.device_expired(now)]
+            for device_id in expired:
+                self._drop(device_id, WS_CLOSE_UNAUTHORIZED)
+            if expired:
+                self._write_state(self._state)
+            return len(expired)
+
     def flush_last_seen(self) -> None:
-        """Persist ``last_seen`` (called on a timer, not per request).
+        """Persist ``last_seen`` and prune expired devices (called on a timer, not per request).
 
         Another process's change lands first: a flush that wrote memory over a
         fresher file would undo the very ``allow-write on`` this is about.
         """
-        with self._lock:
+        with self._state_file_lock():
             self.reload_if_changed()
-            self._save_state()
+            self.prune_expired_devices(_remote_now())
+            self._write_state(self._state)
 
-    def register_socket(self, sid: str, close: Callable[[], None]) -> None:
+    def register_socket(self, device_id: str, close: Callable[[int], None]) -> None:
         with self._lock:
-            self._closers.setdefault(sid, set()).add(close)
+            self._closers.setdefault(device_id, set()).add(close)
 
-    def unregister_socket(self, sid: str, close: Callable[[], None]) -> None:
+    def unregister_socket(self, device_id: str, close: Callable[[int], None]) -> None:
         with self._lock:
-            sockets = self._closers.get(sid)
+            sockets = self._closers.get(device_id)
             if sockets:
                 sockets.discard(close)
                 if not sockets:
-                    del self._closers[sid]
+                    del self._closers[device_id]
 
     # -- audit --
 
-    def audit(self, sid: str, endpoint: str, summary: str) -> None:
-        """``ts sid endpoint summary`` — one line per write that went through (§4-E).
+    def audit(self, device_id: str, endpoint: str, summary: str) -> None:
+        """``ts device_id endpoint summary`` — one line per write that went through (§4-E).
 
-        A line names its device by ``sid``, which IS that device's cookie, so the
-        log is owner-only before it holds one: created empty at 0600, then
+        Every field is passed through :func:`_audit_clean`: the log is
+        line-oriented, and a caller-controlled newline (a note's ``kind`` once was
+        one) let an unlocked device write a whole line of its choosing, attributed
+        to another device. The log names devices by id, never by cookie, and is
+        still owner-only before it holds a line: created empty at 0600, then
         restricted to this account (on NTFS, where the bits protect nothing, the
-        DACL), the order ``core.atomic`` restricts a temp in. Appended to in text
-        mode and chmodded afterwards, the first line sat under the umask until the
-        chmod, and Windows never got anything but the DACL its directory hands down.
+        DACL), the order ``core.atomic`` restricts a temp in.
         """
-        line = f"{_stamp()} {sid} {endpoint} {summary}\n".encode()
+        fields = (
+            _audit_clean(device_id, AUDIT_DEVICE_MAX),
+            _audit_clean(endpoint, AUDIT_ENDPOINT_MAX),
+            _audit_clean(summary, AUDIT_SUMMARY_MAX),
+        )
+        line = f"{_stamp()} {' '.join(fields)}\n".encode()
         with self._lock:
             self._audit_path.parent.mkdir(parents=True, exist_ok=True)
             try:
@@ -744,10 +1312,80 @@ class Runtime:
                 pass
             else:
                 if not restrict_to_owner(self._audit_path):
-                    log.warning(_UNRESTRICTED, self._audit_path, "the device cookies it records")
+                    log.warning(_UNRESTRICTED, self._audit_path, "what each device wrote")
             # Binary, so a line ends in "\n" on Windows too.
             with self._audit_path.open("ab") as handle:
                 handle.write(line)
+
+
+class UnlockBudget:
+    """The failed-unlock budget across EVERY client (SPEC §2.2 item 3).
+
+    The per-client limiter bounds one address; addresses are cheap. After
+    :data:`UNLOCK_GLOBAL_FAILURES` wrong guesses inside
+    :data:`UNLOCK_GLOBAL_WINDOW_SECONDS`, an unlock that is neither from the machine
+    itself (:func:`is_direct_loopback`) nor carrying a known device's cookie is
+    refused with 429 ``locked_out`` WITHOUT its passphrase being evaluated: at most
+    960 guesses a day for anyone holding only the link. A right guess does not get
+    through either (SPEC §9.1): if it did, a wrong one would still say "wrong" and
+    the budget would bound nothing.
+
+    The guesses are kept in ``remote.json`` (:attr:`_State.unlock_failures`), so
+    ``asq remote status`` in another shell sees the same budget the server
+    enforces, and a restart does not hand out another twenty. No header and no
+    success resets it; a new password does.
+    """
+
+    def __init__(self, runtime: Runtime) -> None:
+        self._runtime = runtime
+
+    def _recent(self, now: datetime) -> list[datetime]:
+        """The counted guesses inside the window, oldest first. Callers hold the lock."""
+        start = now - timedelta(seconds=UNLOCK_GLOBAL_WINDOW_SECONDS)
+        stamps = (_remote_instant(stamp) for stamp in self._runtime._state.unlock_failures)
+        return sorted(stamp for stamp in stamps if stamp is not None and stamp > start)
+
+    def unlock_budget_allows(self, direct: bool) -> bool:
+        """Whether this unlock may be evaluated: always from the machine, else within budget."""
+        return direct or self.budget_exhausted_until() is None
+
+    def record_failed_unlock(self) -> bool:
+        """Count one wrong guess; ``True`` when it is the one that trips the budget."""
+        runtime = self._runtime
+        now = _remote_now()
+        with runtime._state_file_lock():
+            runtime.reload_if_changed()
+            recent = [*self._recent(now), now]
+            runtime._state.unlock_failures = [_iso_seconds(stamp) for stamp in recent]
+            runtime._write_state(runtime._state)
+        return len(recent) == UNLOCK_GLOBAL_FAILURES
+
+    def clear_failed_unlocks(self) -> None:
+        """Forget every counted guess (a new password does this)."""
+        runtime = self._runtime
+        with runtime._state_file_lock():
+            runtime.reload_if_changed()
+            runtime._state.unlock_failures = []
+            runtime._write_state(runtime._state)
+
+    def budget_failures(self) -> int:
+        """How many wrong guesses count against the budget right now."""
+        self._runtime.reload_if_changed()
+        with self._runtime._lock:
+            return len(self._recent(_remote_now()))
+
+    def budget_exhausted_until(self) -> datetime | None:
+        """When unlocks open again, while the budget is spent; ``None`` while it is not.
+
+        That is when the guess that keeps the count at the limit ages out: the
+        oldest one, when exactly the limit was reached.
+        """
+        self._runtime.reload_if_changed()
+        with self._runtime._lock:
+            recent = self._recent(_remote_now())
+        if len(recent) < UNLOCK_GLOBAL_FAILURES:
+            return None
+        return recent[-UNLOCK_GLOBAL_FAILURES] + timedelta(seconds=UNLOCK_GLOBAL_WINDOW_SECONDS)
 
 
 # --- what the server reads and writes: the seams -----------------------------------
@@ -802,15 +1440,103 @@ def remote_agent_lock(project_id: str, label: str) -> threading.Lock:
 
 
 def check_remote_key_names(keys: object) -> list[str]:
-    """``keys`` as tmux key names, or :class:`RequestError` 400 ``invalid_key``.
+    """``keys`` when every one is a key the pad sends; else 400 ``invalid_key`` (SPEC §2.1).
 
-    Today: a list of strings, the check ``send-keys`` always made. The allowlist
-    of names the pad actually sends replaces this body (SPEC §2.1); every caller
-    already goes through here, so none has to change when it does.
+    The boundary for every key a phone sends, ``send-keys`` and quick answers
+    alike. Keys used to go to tmux as they came, and tmux ends a command at any
+    argument whose last character is ``;``: ``[";", "run-shell", "…"]`` ran a shell
+    command and ``["Enter;", "kill-server"]`` killed every agent on the server. Each
+    key must match :data:`REMOTE_KEY_NAME` in full; typed text never travels as keys
+    (it is ``text``, sent as hex). More than :data:`SEND_KEYS_KEYS_MAX` keys is 413.
+    The refusal names the key, scrubbed and cut to 32 characters, and the vocabulary.
     """
     if not isinstance(keys, list) or not all(isinstance(key, str) for key in keys):
-        raise RequestError(400, "invalid_key", "'keys' must be a list of tmux key names")
+        raise RequestError(400, "invalid_key", "'keys' must be a list of key names")
+    if len(keys) > SEND_KEYS_KEYS_MAX:
+        raise RequestError(
+            413, "too_large", f"at most {SEND_KEYS_KEYS_MAX} keys at a time, not {len(keys)}"
+        )
+    for key in keys:
+        if REMOTE_KEY_NAME.fullmatch(key) is None:
+            raise RequestError(
+                400,
+                "invalid_key",
+                f"'{_audit_clean(key, 32)}' is not a key the remote sends — "
+                f"one of: {REMOTE_KEY_VOCABULARY}",
+            )
     return list(keys)
+
+
+def check_remote_text(text: str) -> None:
+    """Refuse typed ``text`` holding a control character other than tab, newline and
+    carriage return: 400 ``invalid``, naming the pad's key for it.
+
+    Text reaches the pane as hex, byte for byte, so a control character in it IS a
+    keystroke: ``"\\x03"`` was a Ctrl-C past the double-press guard, ``"\\x1a"`` the
+    Ctrl-Z :data:`REMOTE_KEY_NAME` refuses as a key, and the audit line said
+    ``text=1ch``, which cannot tell either from a letter. Keys go as ``keys``, where
+    the allowlist, the guard and the trail see them by name.
+    """
+    found = _TEXT_CONTROL.search(text)
+    if found is None:
+        return
+    char = found.group()
+    key = _TEXT_CONTROL_KEYS.get(char)
+    instead = f"send the pad's {key} key instead" if key else "no key of the pad sends it"
+    raise RequestError(
+        400, "invalid", f"'text' holds the control character U+{ord(char):04X} — {instead}"
+    )
+
+
+def check_project_add_root(raw: object) -> Path:
+    """The project root ``project/add`` may register for ``raw``; else 400 ``invalid`` (§2.9).
+
+    A registered project's board, tasks and memory are readable from every
+    unlocked phone, and the write took any directory the machine's user could
+    read: ``~/.ssh`` was one request away. So the path must be absolute (``~``
+    allowed) and exist, and the project root it resolves to must be inside the
+    home directory but not the home itself, below no hidden directory
+    (``~/.ssh``, ``~/.aisquare``, ``~/.claude*``, ``~/.config``), and a project in
+    fact: a git checkout, or a directory holding repos. Symlinks are resolved
+    before any check, so a link into a hidden directory is judged where it points.
+    """
+    from aisquare.core.workspace import find_project_root
+    from aisquare.services import fleet as fleet_service
+
+    if not isinstance(raw, str) or not raw.strip():
+        raise RequestError(400, "invalid", "'path' is required")
+    if len(raw) > PROJECT_ADD_PATH_MAX:
+        raise RequestError(413, "too_large", f"'path' is over {PROJECT_ADD_PATH_MAX} characters")
+    path = Path(raw.strip()).expanduser()
+    if not path.is_absolute():
+        raise RequestError(400, "invalid", f"{path} is not an absolute path (start with / or ~)")
+    try:
+        resolved = path.resolve(strict=True)
+    except (OSError, RuntimeError):
+        raise RequestError(400, "invalid", f"{path} does not exist") from None
+    if not resolved.is_dir():
+        raise RequestError(400, "invalid", f"{resolved} is not a directory")
+    root = find_project_root(resolved)
+    home = Path.home().resolve()
+    if root == home or not root.is_relative_to(home):
+        where = "is your home directory" if root == home else "is outside your home directory"
+        raise RequestError(400, "invalid", f"{root} {where}: add a project inside it")
+    hidden = next((part for part in root.relative_to(home).parts if part.startswith(".")), None)
+    if hidden is not None:
+        raise RequestError(400, "invalid", f"{root} is inside the hidden directory {hidden}")
+    if not (fleet_service.is_git_project(root) or _holds_repositories(root)):
+        raise RequestError(
+            400, "invalid", f"{root} is neither a git checkout nor a directory of repositories"
+        )
+    return root
+
+
+def _holds_repositories(root: Path) -> bool:
+    """Whether a direct child of ``root`` is a repository: the multi-repo project shape."""
+    try:
+        return any((child / ".git").exists() for child in root.iterdir() if child.is_dir())
+    except OSError:
+        return False
 
 
 @dataclass(frozen=True)
@@ -1179,10 +1905,11 @@ def _audit_keys(keys: list[str] | None) -> str:
     user content — counted, never captured (PLAN §4-E).
 
     Each name is scrubbed to the characters a tmux key name can actually hold.
-    ``remote-audit.log`` is line-oriented (``ts sid endpoint summary``) and this
-    is the first caller-controlled string to reach it, so a name carrying a
-    newline would let an authenticated device forge an audit line — and an
-    authenticated device is precisely who the trail exists to hold to account.
+    ``remote-audit.log`` is line-oriented (``ts device endpoint summary``), so a
+    name carrying a newline would let an authenticated device forge an audit line —
+    and an authenticated device is precisely who the trail exists to hold to
+    account. Defence in depth now: :func:`check_remote_key_names` refuses any such
+    name before a key is sent, and :meth:`Runtime.audit` scrubs every field.
     """
     if not keys:
         return "0"
@@ -1216,49 +1943,92 @@ def _literal(body: dict[str, Any], key: str) -> str | None:
     return value if isinstance(value, str) else None
 
 
+DOUBLE_PRESS = (
+    "a second Ctrl-C or Ctrl-D within 3 s exits Claude Code — send confirm_exit: true to mean it"
+)
+
+
+class _ExitKeyGuard:
+    """When each agent was last sent Ctrl-C or Ctrl-D (SPEC §2.1, part 2).
+
+    Claude Code exits on a second Ctrl-C ("Press Ctrl-C again to exit") and on
+    Ctrl-D at an empty prompt, and an exit ends the row, releases its claims and
+    wakes the manager: two taps on a phone that lagged, or two in one body, are
+    refused unless the body says ``confirm_exit: true``. Per ``(project id,
+    label)``, whichever phone sent the first.
+    """
+
+    def __init__(self) -> None:
+        self._sent: dict[tuple[str, str], datetime] = {}
+        self._lock = threading.Lock()
+
+    def exit_keys_allowed(self, agent: tuple[str, str], exits: int, *, confirmed: bool) -> bool:
+        """Note ``exits`` exit keys about to go to ``agent``; ``False``, noting nothing, when
+        they would be a second press and are not ``confirmed``."""
+        now = _remote_now()
+        with self._lock:
+            last = self._sent.get(agent)
+            recent = last is not None and (now - last).total_seconds() < EXIT_KEY_REPEAT_SECONDS
+            if not confirmed and (exits > 1 or recent):
+                return False
+            self._sent[agent] = now
+            return True
+
+
 def live_writes() -> Writes:
     """The write endpoints over the services the CLI commands call, then the agent actions."""
     from aisquare.services import remote_actions
 
+    exit_keys = _ExitKeyGuard()
+
     def task_claim(body: dict[str, Any]) -> tuple[dict[str, object], str]:
         from aisquare.services import team as team_service
 
-        task = team_service.claim_task(
-            _required(body, "ref"), session_ref=_optional_ref(body, "as")
-        )
-        return {"task": task.model_dump(mode="json")}, f"claimed {task.id}"
+        author = _optional_ref(body, "as")
+        task = team_service.claim_task(_required(body, "ref"), session_ref=author)
+        return {"task": task.model_dump(mode="json")}, f"claimed {task.id} as={author or '-'}"
 
     def task_done(body: dict[str, Any]) -> tuple[dict[str, object], str]:
         from aisquare.services import team as team_service
 
+        author = _optional_ref(body, "as")
         task = team_service.finish_task(
-            _required(body, "ref"),
-            note=_optional_ref(body, "note"),
-            session_ref=_optional_ref(body, "as"),
+            _required(body, "ref"), note=_optional_ref(body, "note"), session_ref=author
         )
-        return {"task": task.model_dump(mode="json")}, f"done {task.id}"
+        return {"task": task.model_dump(mode="json")}, f"done {task.id} as={author or '-'}"
 
     def write_note(body: dict[str, Any]) -> tuple[dict[str, object], str]:
         """A note on a project's board: ``project``'s, or the current one's without it.
 
         The board resolves from the project's root exactly as ``asq note`` run
         there would; with ``as``, the session's own board still wins (the CLI's
-        rule), so a note posted as an agent lands where that agent reads.
+        rule), so a note posted as an agent lands where that agent reads. Only
+        the human's kinds (:data:`NOTE_KINDS`): ``kind`` went to the board and the
+        audit line as it came, so a phone could forge the fleet's own reports and,
+        with a newline in it, a line of the audit trail. The summary records who
+        the note claims to be from (``as=``) and who it is for (``to=``).
         """
         from aisquare.services import team as team_service
 
         project = _optional_ref(body, "project")
+        text = _required(body, "text")
+        if len(text) > NOTE_TEXT_MAX:
+            raise RequestError(413, "too_large", f"a note is at most {NOTE_TEXT_MAX} characters")
+        kind = _optional_ref(body, "kind") or "note"
+        if kind not in NOTE_KINDS:
+            kinds = ", ".join(sorted(NOTE_KINDS))
+            raise RequestError(400, "invalid", f"'kind' must be one of {kinds}")
+        author, to = _optional_ref(body, "as"), _optional_ref(body, "to")
         event = team_service.add_note(
-            _required(body, "text"),
-            session_ref=_optional_ref(body, "as"),
+            text,
+            session_ref=author,
             task_ref=_optional_ref(body, "task"),
-            to_role=_optional_ref(body, "to"),
-            kind=_optional_ref(body, "kind") or "note",
+            to_role=to,
+            kind=kind,
             cwd=None if project is None else _resolve_project(project).root,
         )
-        return {
-            "event": event.as_envelope().model_dump(mode="json")
-        }, f"{event.kind} seq={event.seq}"
+        summary = f"{event.kind} seq={event.seq} to={to or '-'} as={author or '-'}"
+        return {"event": event.as_envelope().model_dump(mode="json")}, summary
 
     def project_switch(body: dict[str, Any]) -> tuple[dict[str, object], str]:
         from aisquare.services import project as project_service
@@ -1273,18 +2043,19 @@ def live_writes() -> Writes:
         return {"project": project.model_dump(mode="json")}, f"switched to {project.id}"
 
     def project_add(body: dict[str, Any]) -> tuple[dict[str, object], str]:
+        """Register a project the phone names, within :func:`check_project_add_root`'s limits;
+        ``added`` is false when it was registered already."""
         from aisquare.core.store import store_session
-        from aisquare.core.workspace import find_project_root, project_id_for
+        from aisquare.core.workspace import project_id_for
         from aisquare.models import ProjectInfo
 
-        path = Path(_required(body, "path")).expanduser()
-        if not path.is_dir():
-            raise RequestError(400, "invalid", f"{path} is not a directory")
-        root = find_project_root(path)
+        root = check_project_add_root(body.get("path"))
         project = ProjectInfo(id=project_id_for(root), root=root, linked_repos=[])
         with store_session() as store:
+            added = store.get_project(project.id) is None
             store.ensure_project(project)
-        return {"project": project.model_dump(mode="json")}, f"added {project.id} {root}"
+        payload = {"project": project.model_dump(mode="json"), "added": added}
+        return payload, f"added {project.id} {root}"
 
     def project_remove(body: dict[str, Any]) -> tuple[dict[str, object], str]:
         from aisquare.services import project as project_service
@@ -1299,13 +2070,34 @@ def live_writes() -> Writes:
         return {"report": _as_json(report)}, f"removed {ref}"
 
     def write_send_keys(body: dict[str, Any]) -> tuple[dict[str, object], str]:
+        """Type into one agent's pane: ``text`` (as hex, nothing parses it), or pad ``keys``.
+
+        Everything is checked before anything is sent: the keys against the
+        allowlist, the caps, no control character in the text, one input per body
+        (``text`` went first, so "Esc, then type" arrived as "type, then Esc"), and
+        the double Ctrl-C. Once a byte may have reached the pane, a failure is
+        still audited: the trail exists for what a device did to a live agent,
+        finished or not.
+        """
         from aisquare.core.store import store_session
         from aisquare.services import fleet as fleet_service
 
         label = _required(body, "agent")
         text = _literal(body, "text")
-        keys = None if body.get("keys") is None else check_remote_key_names(body["keys"])
+        keys = [] if body.get("keys") is None else check_remote_key_names(body["keys"])
         enter = bool(body.get("enter", False))
+        if text and len(text) > SEND_KEYS_TEXT_MAX:
+            raise RequestError(
+                413,
+                "too_large",
+                f"'text' is at most {SEND_KEYS_TEXT_MAX} characters — longer goes as a tell",
+            )
+        if text:
+            check_remote_text(text)
+        if text and keys:
+            raise RequestError(
+                400, "text_and_keys", "send 'text' or 'keys', not both: they would arrive in turn"
+            )
         if not text and not keys and not enter:
             raise RequestError(400, "invalid", "give 'text', 'keys' or 'enter'")
         target = _resolve_project(_optional_ref(body, "project"))
@@ -1313,16 +2105,28 @@ def live_writes() -> Writes:
             agent = store.fleet_agent_by_label(target.id, label, live_only=True)
         if agent is None:
             raise NoSuchAgent(f"no live agent {label!r} in {target.root.name or target.id}")
-        server = fleet_service.server_for(agent.tmux_socket)
-        if text:
-            server.send_literal(agent.pane_id, text)
-        if keys:
-            server.send_keys(agent.pane_id, *keys)
-        if enter:
-            server.send_keys(agent.pane_id, "Enter")
+        exits = sum(key in EXIT_KEYS for key in keys)
+        confirmed = body.get("confirm_exit") is True
+        if exits and not exit_keys.exit_keys_allowed(
+            (target.id, label), exits, confirmed=confirmed
+        ):
+            raise RequestError(409, "double_press", DOUBLE_PRESS)
         summary = (
             f"{label}@{target.id} text={len(text or '')}ch keys={_audit_keys(keys)} enter={enter}"
         )
+        server = fleet_service.server_for(agent.tmux_socket)
+        try:
+            if text:
+                server.send_literal(agent.pane_id, text)
+            if keys:
+                server.send_keys(agent.pane_id, *keys)
+            if enter:
+                server.send_keys(agent.pane_id, "Enter")
+        except Exception as exc:
+            log.warning("remote: send-keys to %s failed: %s", label, exc)
+            raise RequestError(
+                400, "write_failed", f"{label}: {exc}", audit=f"{summary} failed"
+            ) from exc
         return {"agent": label, "project": target.id, "sent": True}, summary
 
     return Writes(
@@ -1357,21 +2161,32 @@ def _as_json(value: object) -> object:
 
 
 class _RateLimiter:
-    """``UNLOCK_LIMIT`` attempts per ``UNLOCK_WINDOW_SECONDS`` per client, then 429."""
+    """``UNLOCK_LIMIT`` attempts per ``UNLOCK_WINDOW_SECONDS`` per client, then 429.
+
+    The client is uvicorn's resolved peer (:func:`_client_of`), never a header the
+    sender writes. A client whose window has emptied is forgotten on the next
+    attempt by anyone, so the table holds the addresses of the last minute and no
+    more: keyed on a header, a fresh invented address per request grew it forever.
+    """
 
     def __init__(self, clock: Callable[[], float] = time.monotonic) -> None:
         self._clock = clock
         self._attempts: dict[str, deque[float]] = {}
 
-    def allow(self, client: str) -> bool:
+    def limiter_retry_after(self, client: str) -> float | None:
+        """Count an attempt by ``client``: ``None`` when it may go ahead, else the seconds
+        until it may (and nothing is counted)."""
         now = self._clock()
+        for known, window in list(self._attempts.items()):
+            while window and now - window[0] >= UNLOCK_WINDOW_SECONDS:
+                window.popleft()
+            if not window:
+                del self._attempts[known]
         window = self._attempts.setdefault(client, deque())
-        while window and now - window[0] >= UNLOCK_WINDOW_SECONDS:
-            window.popleft()
         if len(window) >= UNLOCK_LIMIT:
-            return False
+            return UNLOCK_WINDOW_SECONDS - (now - window[0])
         window.append(now)
-        return True
+        return None
 
 
 class _Cache:
@@ -1393,20 +2208,66 @@ class _Cache:
 
 
 def _client_of(scope: Any) -> str:
-    """The client's address — ngrok's ``X-Forwarded-For`` first, the socket peer otherwise."""
-    for name, value in scope.get("headers") or []:
-        if name == b"x-forwarded-for":
-            first = str(bytes(value).decode("latin-1").split(",")[0].strip())
-            if first:
-                return first
+    """The client's address as uvicorn resolved it; never a header the sender writes.
+
+    ``_Server`` and ``run_foreground`` run uvicorn with ``proxy_headers`` trusting
+    ``127.0.0.1`` alone, so behind ngrok (which connects from there) the peer is the
+    rightmost ``X-Forwarded-For`` entry that is not ours: the address ngrok appended.
+    Read here, the LEFTMOST entry gave a client a fresh identity per request.
+    """
     client = scope.get("client")
     return str(client[0]) if client else "unknown"
 
 
 def _forwarded_https(request: Request) -> bool:
-    """Whether the browser reached us over TLS — ngrok's ``X-Forwarded-Proto`` says."""
-    proto = request.headers.get("x-forwarded-proto", "")
-    return proto.split(",")[0].strip().lower() == "https"
+    """Whether the hop to the browser is TLS: the scheme uvicorn resolved, which applies
+    ngrok's ``X-Forwarded-Proto`` from the trusted 127.0.0.1 hop and from no one else."""
+    return request.scope.get("scheme") in ("https", "wss")
+
+
+_FORWARDING_HEADERS = frozenset(
+    {b"x-forwarded-for", b"x-forwarded-proto", b"x-forwarded-host", b"forwarded"}
+)
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "[::1]"})
+
+
+def _scope_header(scope: Any, wanted: bytes) -> str | None:
+    """The first value of one request header, lower-cased; ``None`` when absent."""
+    for name, value in scope.get("headers") or []:
+        if name == wanted:
+            return bytes(value).decode("latin-1").lower()
+    return None
+
+
+def is_direct_loopback(scope: Any) -> bool:
+    """Whether a request comes from this machine's own browser, not through a tunnel.
+
+    The peer is ``127.0.0.1`` or ``::1``, no forwarding header is present (ngrok
+    always adds ``X-Forwarded-For``) and ``Host`` names the loopback. Such an unlock
+    skips the global failed-unlock budget and its failures do not count toward it,
+    so the owner at the machine can always unlock; the per-client limiter still
+    applies. A request forwarded by ngrok is never direct.
+    """
+    client = scope.get("client")
+    if not client or client[0] not in ("127.0.0.1", "::1"):
+        return False
+    if any(name in _FORWARDING_HEADERS for name, _value in scope.get("headers") or []):
+        return False
+    host = _scope_header(scope, b"host") or ""
+    name = host[: host.find("]") + 1] if host.startswith("[") else host.partition(":")[0]
+    return name in _LOOPBACK_HOSTS
+
+
+def allowed_origin(scope: Any) -> str:
+    """The one ``Origin`` a write or a socket may carry: the request's own ``scheme://host``.
+
+    ``host`` is the ``Host`` header as sent, port included; ``X-Forwarded-Host`` is
+    never read (ngrok preserves ``Host``, and that header only widens the set behind
+    some other hop). ``scheme`` is the one uvicorn resolved: ngrok's
+    ``X-Forwarded-Proto`` applied from the trusted 127.0.0.1 hop alone.
+    """
+    scheme = "https" if scope.get("scheme") in ("https", "wss") else "http"
+    return f"{scheme}://{_scope_header(scope, b'host') or ''}"
 
 
 def _history_param(raw: str | None) -> int:
@@ -1525,21 +2386,26 @@ def remote_gate_token(runtime: Runtime, scope: Any) -> bool:
 
 
 def remote_gate_auto_off(runtime: Runtime, scope: Any) -> bool:
-    """Gate 2: Remote's auto-off deadline has not passed.
+    """Gate 2: Remote's auto-off deadline has not passed (SPEC §2.5).
 
-    Once it has, every request is answered exactly as a wrong token is. The
-    deadline itself is not checked here yet (SPEC §2.5), so nothing is refused.
+    Once it has, every request is answered exactly as a wrong token is, for the
+    TUI's Remote and ``asq remote serve`` alike, whether or not whatever turns the
+    server off has run yet: the deadline is the server's to keep.
     """
-    return True
+    return not runtime.auto_off_passed(_remote_now())
 
 
 def remote_gate_origin(scope: Any) -> bool:
-    """Gate 3: a write or a socket comes from the remote page's own origin.
+    """Gate 3: a write or a socket comes from the remote page's own origin (SPEC §2.8).
 
-    Asked for every method but GET and HEAD, and for every handshake. The
-    ``Origin`` rule is not applied here yet (SPEC §2.8), so nothing is refused.
+    Asked for every method but GET and HEAD, and for every handshake. ``Origin``
+    must be there, once, and equal :func:`allowed_origin`; ``null`` (an opaque
+    origin) never does. ``SameSite=Lax`` already keeps the cookie off a sibling
+    tunnel's POST, ngrok's domains being on the Public Suffix List; this holds
+    for a browser whose list is stale, and for anything that sends the cookie anyway.
     """
-    return True
+    origins = [value for name, value in scope.get("headers") or [] if name == b"origin"]
+    return len(origins) == 1 and _scope_header(scope, b"origin") == allowed_origin(scope)
 
 
 def remote_gate_device(runtime: Runtime, scope: Any) -> Device | None:
@@ -1589,6 +2455,39 @@ async def remote_gate_body(scope: Any, receive: Any) -> Any | None:
         return first
 
     return receive_replayed
+
+
+LOCKED_OUT = (
+    "too many wrong passwords in the last 30 min — new unlocks are paused; a phone that was "
+    "unlocked here before can still unlock. On the machine: "
+    "aisquare remote regenerate-password --new-link"
+)
+LOCKOUT_ALERT = (
+    "New unlocks are paused for 30 min. If that is not you, run "
+    "`aisquare remote regenerate-password --new-link` at the machine."
+)
+
+
+def _unlock_lockout_alert(runtime: Runtime) -> None:
+    """Say, once per trip, that the failed-unlock budget is spent (SPEC §2.2 item 8).
+
+    A warning in the server's log, and a push to every phone that has notifications
+    on: someone holding the link is guessing, and the owner can rotate it. The
+    status line of ``asq remote status`` and the modal read the budget themselves.
+    """
+    from aisquare.services import remote_push
+
+    until = UnlockBudget(runtime).budget_exhausted_until()
+    log.warning(
+        "remote: %d wrong passwords in 30 min — new unlocks are paused until %s; if that is "
+        "not you, rotate the link: aisquare remote regenerate-password --new-link",
+        UNLOCK_GLOBAL_FAILURES,
+        "?" if until is None else _iso_seconds(until),
+    )
+    try:
+        remote_push.push_security_alert(runtime.device_ids(), LOCKOUT_ALERT)
+    except Exception:  # the alert is a courtesy: the lockout itself already holds
+        log.warning("remote: the lockout alert could not be queued", exc_info=True)
 
 
 def _route_path(scope: Any) -> str:
@@ -1992,6 +2891,7 @@ def build_remote_app(
     handlers = (writes or live_writes()).handlers
     dist = (dist_dir or remote_dist_dir()).resolve()
     limiter = _RateLimiter(clock)
+    budget = UnlockBudget(runtime)
     cache = _Cache(ttl=tick * 0.9)
     kit = RemoteKit(runtime, tick=tick, port=port)
 
@@ -2021,9 +2921,74 @@ def build_remote_app(
 
         return guarded_read
 
+    unlock_turn = threading.Lock()
+    """Unlocks are decided one at a time: the budget's check and its record are then one
+    step, so guesses that arrive together cannot all get past a budget with one left."""
+
+    def unlock_decision(
+        password: str, ua: str, cookie: str | None, direct: bool
+    ) -> tuple[str, Device, bool] | datetime | None:
+        """What an unlock comes to, decided in a worker thread: ``(secret, device,
+        reactivated)`` for a right passphrase, ``None`` for a wrong one, and, while the
+        budget is spent, when it opens again (the guess is not evaluated).
+
+        Off the event loop because each step may write ``remote.json`` and so wait on
+        another process's ``remote.json.lock``: run on the loop, one wrong guess while
+        a CLI command held it stalled every socket and every read for seconds. A known
+        device's last allowed wrong guess revokes it, and says so in the log and on
+        the audit trail: that is most likely a stolen cookie, and its owner would
+        otherwise find only a device gone.
+        """
+        with unlock_turn:
+            known = runtime.known_device_for_cookie(cookie)
+            if known is None and not budget.unlock_budget_allows(direct):
+                return budget.budget_exhausted_until() or _remote_now()
+            if known is None:
+                unlocked = runtime.unlock_device(password, ua)
+            elif runtime.password_matches(password):
+                # Its own device again; one revoked or expired since the lookup is a new one.
+                unlocked = runtime.reactivate_device(known.id, ua) or runtime.unlock_device(
+                    password, ua
+                )
+            else:
+                unlocked = None
+            if unlocked is None:
+                if known is None:
+                    if not direct and budget.record_failed_unlock():
+                        _unlock_lockout_alert(runtime)
+                elif runtime.known_device_failed(known.id):
+                    revoked = (
+                        f"device {known.id} revoked after "
+                        f"{KNOWN_DEVICE_FAILURES_MAX} wrong passwords sent with its cookie"
+                    )
+                    log.warning("remote: %s", revoked)
+                    runtime.audit(known.id, "unlock", revoked)
+                return None
+            secret, device = unlocked
+            reactivated = known is not None and device.id == known.id
+            summary = f"device {device.id} " + ("reactivated" if reactivated else f"ua={ua[:60]}")
+            runtime.audit(device.id, "unlock", summary)
+            return secret, device, reactivated
+
     async def unlock_endpoint(request: Request) -> Response:
-        if not limiter.allow(_client_of(request.scope)):
-            return _json_error(429, "too_many_attempts", "5 attempts a minute — wait")
+        """``POST api/unlock``: the passphrase for a cookie (SPEC §2.2).
+
+        In order: the per-client limiter (every unlock); then, unless this is a
+        phone that unlocked here before (its cookie names a known device) or the
+        machine itself, the global failed-unlock budget, which refuses a spent
+        budget WITHOUT evaluating the guess; then the passphrase. A wrong one counts
+        against the known device's own cap, or against the budget (the machine's
+        never does). A right one reactivates the known device under its old id, or
+        makes a new one. Everything after the body is :func:`unlock_decision`'s.
+        """
+        retry = limiter.limiter_retry_after(_client_of(request.scope))
+        if retry is not None:
+            return kit.kit_refuse(
+                429,
+                "too_many_attempts",
+                f"{UNLOCK_LIMIT} attempts a minute — wait",
+                headers={"Retry-After": str(max(1, math.ceil(retry)))},
+            )
         try:
             body = await kit.kit_json_object(request)
         except RequestError:
@@ -2031,13 +2996,30 @@ def build_remote_app(
         password = body.get("password")
         if not isinstance(password, str):
             return _json_error(400, "invalid", 'send {"password": "..."}')
-        sid = runtime.unlock_device(password, request.headers.get("user-agent", ""))
-        if sid is None:
+        decided = await asyncio.to_thread(
+            unlock_decision,
+            password,
+            request.headers.get("user-agent", ""),
+            request.cookies.get(COOKIE),
+            is_direct_loopback(request.scope),
+        )
+        if isinstance(decided, datetime):
+            wait = max(1, math.ceil((decided - _remote_now()).total_seconds()))
+            return kit.kit_refuse(429, "locked_out", LOCKED_OUT, headers={"Retry-After": str(wait)})
+        if decided is None:
             return _json_error(401, "wrong_password")
-        response = JSONResponse({"ok": True})
+        secret, device, reactivated = decided
+        # A reactivated device keeps its expiry, so its cookie gets what is left of it: a
+        # cookie never outlives its device.
+        expires = _remote_instant(device.expires_at) or _remote_now()
+        left = (expires - _remote_now()).total_seconds() if reactivated else None
+        response = JSONResponse(
+            {"ok": True, "device": {"id": device.id, "expires_at": device.expires_at}}
+        )
         response.set_cookie(
             COOKIE,
-            sid,
+            secret,
+            max_age=int(DEVICE_LIFETIME.total_seconds()) if left is None else max(0, int(left)),
             httponly=True,
             samesite="lax",
             path=cookie_path(request),
@@ -2055,33 +3037,46 @@ def build_remote_app(
     ) -> Response:
         """``POST api/remote/extend``: another hour before auto-off (SPEC §2.5).
 
-        Not built yet: the answer is the one for a Remote with no deadline.
+        Never more than :data:`AUTO_OFF_CEILING` ahead; a Remote with no deadline
+        (Never) has nothing to extend, 409 ``no_auto_off``. The TUI adopts the later
+        deadline (``RemoteController.enforce_auto_off``) and ``serve``'s timer re-arms.
         """
-        return kit.kit_refuse(409, "no_auto_off", "Remote has no auto-off deadline to extend")
+        extended = await asyncio.to_thread(runtime.extend_auto_off, _remote_now())
+        if extended is None:
+            return kit.kit_refuse(409, "no_auto_off", "Remote has no auto-off deadline to extend")
+        stamp = _iso_seconds(extended)
+        kit.kit_audit(device, "remote/extend", f"extend auto_off_at={stamp}")
+        return JSONResponse({"auto_off_at": stamp})
 
     async def devices_list_endpoint(request: Request) -> Response:
+        """Every device by id, with ``current`` for the caller's own: never a secret."""
         device = kit.kit_device(request)
-        rows: list[dict[str, object]] = [
-            {"id": row["sid"], **row, "current": row["sid"] == device.id}
-            for row in runtime.device_rows()
-        ]
+        rows = [{**row, "current": row["id"] == device.id} for row in runtime.device_rows()]
         return JSONResponse(rows)
 
     async def devices_delete_endpoint(request: Request) -> Response:
         """Sign this device out, always; revoke ANOTHER device only while writes are on.
 
-        A read-only phone could otherwise sign every other phone out, the
-        owner's included, which is a change to who can reach the fleet.
+        Signing out removes the caller's device and clears its cookie, whatever
+        the write switch says. Another id is a change to who can reach the fleet,
+        so a read-only phone cannot sign every other phone out, the owner's
+        included. An id that is not a device's shape, or no device's, is a 404.
+        The revoke writes ``remote.json`` in a worker thread, as an unlock does.
         """
         device = kit.kit_device(request)
         device_id = request.path_params["device_id"]
         own = device_id == device.id
+        if not own and not DEVICE_ID.fullmatch(device_id):
+            return kit.kit_refuse(404, "not_found", "no such device")
         if not own and not kit.kit_write_allowed():
             return kit.kit_refuse(403, "read_only", READ_ONLY_REASON)
-        if not runtime.revoke_device(device_id):
+        if not await asyncio.to_thread(runtime.revoke_device, device_id):
             return kit.kit_refuse(404, "not_found", "no such device")
         kit.kit_audit(device, "devices/revoke", "self" if own else device_id)
-        return JSONResponse({"ok": True, "id": device_id})
+        response = JSONResponse({"ok": True, "id": device_id, "signed_out": own})
+        if own:
+            response.delete_cookie(COOKIE, path=cookie_path(request))
+        return response
 
     async def panes(request: Request) -> Response:
         agent = request.path_params["agent"]
@@ -2164,6 +3159,7 @@ def build_remote_app(
             status, payload = 200, result
         except RequestError as exc:
             status, payload = exc.status, _error_body(exc.error, exc.message)
+            summary = exc.audit  # a refusal that still did something is on the trail too
         except LookupError as exc:
             status, payload = 404, _error_body("not_found", str(exc))
         except Exception as exc:
@@ -2212,7 +3208,6 @@ def build_remote_app(
         """
         device = kit.kit_device(websocket)  # the gate refused a socket without one
         await websocket.accept()
-        sid = device.sid
         loop = asyncio.get_running_loop()
         panes_wanted: dict[tuple[str, str], str | None] = {}
         """``(project ref, label)`` per pane subscription, oldest first (``""`` is the CURRENT
@@ -2244,9 +3239,6 @@ def build_remote_app(
         def closer(code: int) -> None:
             loop.call_soon_threadsafe(lambda: loop.create_task(close_with(code)))
 
-        def revoked() -> None:
-            closer(WS_CLOSE_UNAUTHORIZED)
-
         async def send_frame(
             kind: str, payload: object, *, agent: str | None = None, project: str | None = None
         ) -> None:
@@ -2271,16 +3263,20 @@ def build_remote_app(
 
         async def tick_once() -> None:
             nonlocal next_heartbeat, first_tick
+            # A switch that lands while a snapshot is read must not let the old project's
+            # frame out after it: the page would show it as the new one's until next tick.
             board_ref = board_project
             try:
                 payload = await snapshot(f"board:{board_ref or ''}", lambda: reads.board(board_ref))
-                await push_if_changed("board", payload)
+                if board_ref == board_project:
+                    await push_if_changed("board", payload)
             except Exception as exc:
                 log.debug("remote: board frame skipped: %s", exc)
             fleet_ref = fleet_project
             try:
                 payload = await snapshot(f"fleet:{fleet_ref or ''}", lambda: reads.fleet(fleet_ref))
-                await push_if_changed("fleet", payload)
+                if fleet_ref == fleet_project:
+                    await push_if_changed("fleet", payload)
             except Exception as exc:
                 log.debug("remote: fleet frame skipped: %s", exc)
             await push_if_changed("remote", runtime.remote_json())
@@ -2367,12 +3363,17 @@ def build_remote_app(
                     board_project = target or None
                     last.pop("board", None)
 
-        runtime.register_socket(sid, revoked)
+        runtime.register_socket(device.id, closer)
         kit.kit_socket_opened(device.id, closer)
         reading = asyncio.ensure_future(reader())
         try:
             while not reading.done():
-                if runtime.device_for_cookie(sid) is None:
+                # By id, every tick: Remote off (auto-off included) is 4410, a device that is
+                # gone, expired or idle past the limit is 4401, whatever the cookie said.
+                if runtime.auto_off_passed(_remote_now()):
+                    await close_with(WS_CLOSE_REMOTE_OFF)
+                    break
+                if not runtime.device_is_live(device.id):
                     await close_with(WS_CLOSE_UNAUTHORIZED)
                     break
                 await tick_once()
@@ -2386,7 +3387,7 @@ def build_remote_app(
             await close_with(WS_1011_INTERNAL_ERROR)
         finally:
             kit.kit_socket_closed(device.id, closer)
-            runtime.unregister_socket(sid, revoked)
+            runtime.unregister_socket(device.id, closer)
             reading.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await reading
@@ -2461,6 +3462,30 @@ def runtime() -> Runtime:
         return _runtime
 
 
+def _remote_uvicorn_config(app: Any, port: int) -> uvicorn.Config:
+    """uvicorn's settings for this server, in the TUI's thread and under ``serve`` alike.
+
+    ``proxy_headers`` with ``forwarded_allow_ips`` spelled out: only the hop from
+    127.0.0.1 (ngrok's agent) may say who the client is and that it came over
+    https, and the ``FORWARDED_ALLOW_IPS`` environment variable cannot widen that.
+    uvicorn then takes the rightmost ``X-Forwarded-For`` entry that is not trusted,
+    the one ngrok appended (:func:`_client_of`). A WebSocket message is capped at
+    :data:`WS_MAX_MESSAGE_BYTES`, where uvicorn's own default is 16 MiB.
+    """
+    import uvicorn
+
+    return uvicorn.Config(
+        app,
+        host=BIND,
+        port=port,
+        log_level="warning",
+        ws="auto",
+        proxy_headers=True,
+        forwarded_allow_ips="127.0.0.1",
+        ws_max_size=WS_MAX_MESSAGE_BYTES,
+    )
+
+
 class _Server:
     """uvicorn in a daemon thread, stopped by flipping ``should_exit``."""
 
@@ -2468,8 +3493,7 @@ class _Server:
         import uvicorn
 
         self.port = port
-        config = uvicorn.Config(app, host=BIND, port=port, log_level="warning", ws="auto")
-        self._server = uvicorn.Server(config)
+        self._server = uvicorn.Server(_remote_uvicorn_config(app, port))
         self._thread = threading.Thread(
             target=self._serve_in_thread, name="asq-remote", daemon=True
         )
@@ -2506,6 +3530,8 @@ class _Server:
 _lock = threading.Lock()
 _runtime: Runtime | None = None
 _server: _Server | None = None
+_foreground: uvicorn.Server | None = None
+"""The server :func:`run_foreground` runs (``asq remote serve``), while it runs."""
 _flusher: threading.Timer | None = None
 
 
@@ -2579,7 +3605,13 @@ def start_remote_server(dist_dir: Path | None = None, port: int = DEFAULT_PORT) 
 
 
 def stop_remote_server() -> None:
-    """Stop the background server (no-op when it is not running)."""
+    """Stop the background server (no-op when it is not running).
+
+    The server stops first and ``remote.json`` is flushed last, best effort, as the
+    flusher's every-30-s write is: a file that will not write is logged, never
+    raised. The TUI turns Remote off from a Textual timer (auto-off), where an
+    exception ends the whole fleet UI, and stops ngrok only once this returns.
+    """
     global _server, _flusher
     with _lock:
         server, _server = _server, None
@@ -2589,19 +3621,53 @@ def stop_remote_server() -> None:
     if server is not None:
         server.stop_serving()
     if _runtime is not None:
-        _runtime.flush_last_seen()
+        try:
+            _runtime.flush_last_seen()
+        except Exception:  # the server is already down; only last_seen is lost
+            log.warning("remote: flushing remote.json as the server stopped failed", exc_info=True)
 
 
 def remote_server_status() -> dict[str, object]:
-    """``{running, sessions:[{sid, ua, first_seen, last_seen}]}`` (PLAN §4-F)."""
+    """``{running, devices, failed_unlocks, locked_out_until}`` (PLAN §4-F, SPEC §2.2, §2.3).
+
+    ``devices`` are :meth:`Runtime.device_rows`, by id, with no secret. The
+    failed-unlock budget is read from ``remote.json``, where the server keeps it,
+    so a ``status`` in another shell sees what the server enforces.
+    """
     with _lock:
         running = _server is not None and _server.running
-    return {"running": running, "sessions": runtime().device_rows()}
+    state = runtime()
+    budget = UnlockBudget(state)
+    until = budget.budget_exhausted_until()
+    return {
+        "running": running,
+        "devices": state.device_rows(),
+        "failed_unlocks": budget.budget_failures(),
+        "locked_out_until": None if until is None else _iso_seconds(until),
+    }
 
 
-def revoke_remote_device(sid: str) -> bool:
-    """Drop a device's cookie session and close its websockets."""
-    return runtime().revoke_device(sid)
+def revoke_remote_device(device_id: str) -> bool:
+    """Remove one device by id and close its sockets with 4401; ``True`` if it existed."""
+    return runtime().revoke_device(device_id)
+
+
+def revoke_every_remote_device(reason: str) -> None:
+    """Remote is going off: tell the phones, then revoke every device with 4410 (SPEC §2.4).
+
+    The farewell push goes first, to the devices about to be revoked, since a
+    revoked device's subscription is dropped; it is sent from a daemon thread and
+    never waits on the network here. The TUI's switch and both auto-offs come
+    here; ``asq remote revoke --all`` does not (Remote stays on, phones unlock again).
+    """
+    from aisquare.services import remote_push
+
+    state = runtime()
+    try:
+        remote_push.push_farewell(state.device_ids(), reason)
+    except Exception:  # a push that cannot be queued must not keep Remote on
+        log.warning("remote: the farewell push could not be queued", exc_info=True)
+    state.revoke_every_device(reason, close_code=WS_CLOSE_REMOTE_OFF)
 
 
 def set_allow_write(enabled: bool) -> None:
@@ -2609,9 +3675,9 @@ def set_allow_write(enabled: bool) -> None:
     runtime().set_allow_write(enabled)
 
 
-def regenerate_password() -> str:
-    """A fresh password; every unlocked device has to unlock again."""
-    return runtime().regenerate_password()
+def regenerate_password(new_link: bool = False) -> str:
+    """A fresh password; every device has to unlock again. ``new_link``: a new link too."""
+    return runtime().regenerate_password(new_link=new_link)
 
 
 def note_public_url(url: str | None) -> None:
@@ -2629,15 +3695,37 @@ def set_auto_off(at: datetime | None) -> None:
     runtime().set_auto_off(at)
 
 
+def remote_auto_off_at() -> datetime | None:
+    """When Remote turns itself off, as ``remote.json`` says now: a phone may have extended it."""
+    return runtime().auto_off_deadline()
+
+
+def remote_allow_write() -> bool:
+    """Whether writes are on: ``remote.json``'s switch, the ONLY one (the modal reads it here)."""
+    return runtime().allow_write
+
+
+def remote_password() -> str:
+    """The passphrase as ``remote.json`` says now, ``regenerate-password`` from a shell included."""
+    return runtime().password
+
+
 def _schedule_flush() -> None:
-    """Persist ``last_seen`` every 30 s while serving, instead of once per request."""
+    """Persist ``last_seen`` and prune expired devices every 30 s while serving.
+
+    For the TUI's server and for ``asq remote serve`` alike: the flusher used to
+    re-arm only while the TUI's ran, so ``serve`` never wrote ``last_seen`` at all.
+    """
     global _flusher
 
     def flush_and_rearm() -> None:
         with _lock:
-            serving = _server is not None and _server.running
+            serving = (_server is not None and _server.running) or _foreground is not None
         if _runtime is not None:
-            _runtime.flush_last_seen()
+            try:
+                _runtime.flush_last_seen()
+            except Exception:  # one failed write must not end the flushing for good
+                log.warning("remote: flushing remote.json failed", exc_info=True)
         if serving:
             _schedule_flush()
 
@@ -2649,8 +3737,119 @@ def _schedule_flush() -> None:
         _flusher.start()
 
 
-def run_foreground(dist_dir: Path | None = None, port: int = DEFAULT_PORT) -> None:
-    """``asq remote serve``: block in this thread until Ctrl-C."""
+class _AutoOffTimer:
+    """``serve``'s auto-off: at the deadline, Remote turns off, unless a phone moved it later.
+
+    Armed for the deadline ``remote.json`` holds; when it fires it reads the
+    deadline again, and one a phone extended (``POST api/remote/extend``) is
+    waited for anew. Only a deadline really past calls ``turn_off``.
+    """
+
+    def __init__(
+        self,
+        state: Runtime,
+        turn_off: Callable[[], None],
+        *,
+        timer: Callable[[float, Callable[[], None]], Any] = threading.Timer,
+    ) -> None:
+        self._state = state
+        self._turn_off = turn_off
+        self._timer_factory = timer
+        self._timer: Any = None
+        self._lock = threading.Lock()
+        self.fired = False
+        """Whether the deadline passed and Remote was turned off."""
+
+    def auto_off_arm(self) -> None:
+        """Wait for the deadline ``remote.json`` holds now; none at all is never."""
+        deadline = self._state.auto_off_deadline()
+        if deadline is None:
+            return
+        delay = max(0.0, (deadline - _remote_now()).total_seconds())
+        with self._lock:
+            if self._timer is not None:
+                self._timer.cancel()
+            self._timer = self._timer_factory(delay, self.auto_off_fire)
+            self._timer.daemon = True
+            self._timer.start()
+
+    def auto_off_fire(self) -> None:
+        deadline = self._state.auto_off_deadline()
+        if deadline is None:
+            return
+        if deadline > _remote_now():
+            self.auto_off_arm()  # extended from a phone meanwhile
+            return
+        self.fired = True
+        self._turn_off()
+
+    def auto_off_cancel(self) -> None:
+        with self._lock:
+            if self._timer is not None:
+                self._timer.cancel()
+                self._timer = None
+
+
+def _remote_serve_off(state: Runtime, server: Any) -> None:
+    """``serve``'s auto-off firing: the farewell, every device revoked (4410), the deadline
+    cleared, and the server told to stop, even when ``remote.json`` cannot be written."""
+    try:
+        revoke_every_remote_device("auto-off")
+        state.set_auto_off(None)
+    finally:
+        server.should_exit = True
+
+
+class RemoteBindError(RemoteError):
+    """``serve``'s port could not be bound: another process holds it, or it is not ours.
+
+    Its own class, so the CLI calls only THIS a bind failure: it caught every
+    ``OSError`` out of :func:`run_foreground`, and a ``remote.json`` that would not
+    write was reported as "cannot bind 127.0.0.1:8750"."""
+
+
+def _bind_remote_socket(port: int) -> socket.socket:
+    """A socket bound to ``127.0.0.1:port`` for uvicorn to serve on; :class:`RemoteBindError`
+    when that port cannot be had.
+
+    Bound here, before anything is printed: uvicorn binding for itself turned a
+    taken port into ``sys.exit(3)`` AFTER ``serve`` had printed its banner and the
+    ``--json`` success payload. Address reuse only on POSIX, where it means "past
+    TIME_WAIT"; on Windows it would mean sharing a port another process holds.
+    """
+    import socket
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        if os.name == "posix":
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind((BIND, port))
+    except OSError as exc:
+        sock.close()
+        raise RemoteBindError(f"cannot bind {BIND}:{port} — {exc}") from exc
+    return sock
+
+
+def run_foreground(
+    dist_dir: Path | None = None,
+    port: int = DEFAULT_PORT,
+    auto_off_minutes: int = 0,
+    public_url: str | None = None,
+    *,
+    ready: Callable[[], None] | None = None,
+) -> bool:
+    """``asq remote serve``: serve in this thread until Ctrl-C or auto-off.
+
+    ``True`` when auto-off ended it. In order: the port is bound (:class:`RemoteBindError`
+    when another process holds it, before ``ready`` prints anything); the deadline is set
+    ``auto_off_minutes`` from now (0 is never) and ``public_url`` noted as the origin
+    of push links; ``ready`` runs (the CLI's banner); uvicorn serves on the bound
+    socket. A timer turns Remote off at the deadline, re-armed while a phone keeps
+    extending it, with the farewell push and every device revoked (4410); the
+    flusher writes ``last_seen`` and prunes devices every 30 s. Ctrl-C revokes
+    nothing (SPEC §2.4): the devices' own expiry bounds them.
+    """
+    global _foreground, _flusher
     problem = _remote_dependency_error()
     if problem is not None:
         raise RemoteUnavailable(problem)
@@ -2659,8 +3858,45 @@ def run_foreground(dist_dir: Path | None = None, port: int = DEFAULT_PORT) -> No
         raise NoRemotePage(page_problem)
     import uvicorn
 
-    app = build_remote_app(runtime(), dist_dir=dist_dir, port=port)
-    uvicorn.run(app, host=BIND, port=port, log_level="warning", ws="auto")
+    origin = None if public_url is None else check_public_origin(public_url)
+    state = runtime()
+    sock = _bind_remote_socket(port)
+    try:
+        app = build_remote_app(state, dist_dir=dist_dir, port=port)
+        server = uvicorn.Server(_remote_uvicorn_config(app, port))
+
+        timer = _AutoOffTimer(state, lambda: _remote_serve_off(state, server))
+        minutes = max(0, auto_off_minutes)
+        state.set_auto_off(_remote_now() + timedelta(minutes=minutes) if minutes else None)
+        state.note_public_origin(origin)
+        with _lock:
+            _foreground = server
+        timer.auto_off_arm()
+        _schedule_flush()
+        try:
+            if ready is not None:
+                ready()
+            server.run(sockets=[sock])
+        except KeyboardInterrupt:  # uvicorn re-raises the Ctrl-C it caught, once it stopped
+            pass
+        except SystemExit as exc:  # uvicorn's way to say it could not start
+            raise RemoteError(f"the remote server stopped (exit {exc.code})") from None
+        finally:
+            timer.auto_off_cancel()
+            with _lock:
+                _foreground = None
+                flusher, _flusher = _flusher, None
+            if flusher is not None:
+                flusher.cancel()
+            try:
+                if minutes and not timer.fired:
+                    state.set_auto_off(None)  # no server, no deadline: nothing stays on to end
+                state.flush_last_seen()
+            except Exception:  # the way out reports what ended the server, not this
+                log.warning("remote: writing remote.json on the way out failed", exc_info=True)
+        return timer.fired
+    finally:
+        sock.close()
 
 
 __all__ = [
@@ -2679,6 +3915,7 @@ __all__ = [
     "NoRemotePage",
     "NoSuchAgent",
     "NoSuchProject",
+    "RemoteBindError",
     "RemoteError",
     "RemoteInfo",
     "RemoteUnavailable",

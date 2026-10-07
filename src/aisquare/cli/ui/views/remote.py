@@ -58,6 +58,7 @@ class RemotePanel(ModalScreen[None]):
     #remotebox .row Switch { margin-right: 1; }
     #remotebox .row Button { margin-top: 1; margin-left: 2; }
     #remote-status { height: auto; min-height: 1; color: $warning; }
+    #remote-unlocks { height: auto; color: $error; }
     #remote-link { width: 100%; height: auto; }
     #remote-auto-off { width: 16; }
     #remote-auto-off-label { padding-top: 2; }
@@ -70,12 +71,13 @@ class RemotePanel(ModalScreen[None]):
     def __init__(self, controller: RemoteController) -> None:
         super().__init__()
         self.controller = controller
-        self._device_sids: list[str] = []
+        self._device_ids: list[str] = []
 
     # --- layout ---------------------------------------------------------------------------
 
     def compose(self) -> ComposeResult:
         state = self.controller.state
+        writes = self.controller.write_actions_allowed()
         with VerticalScroll(id="remotebox"):
             yield Static("Remote control — the fleet on your phone · Esc closes", id="remotehint")
             with Horizontal(classes="row"):
@@ -101,7 +103,7 @@ class RemotePanel(ModalScreen[None]):
                 yield Button("Regenerate", id="remote-regen", compact=True)
             with Horizontal(classes="row"):
                 yield Label("Allow write actions")
-                yield Switch(state.allow_write, id="remote-allow-write")
+                yield Switch(writes, id="remote-allow-write")
                 yield Static("", id="remote-write-hint")
             with Horizontal(classes="row"):
                 yield Label("Auto-off", id="remote-auto-off-label")
@@ -112,13 +114,14 @@ class RemotePanel(ModalScreen[None]):
                     id="remote-auto-off",
                 )
             yield Label("Connected devices")
+            yield Static("", id="remote-unlocks")
             yield DataTable(id="remote-devices", cursor_type="row", zebra_stripes=True)
             with Horizontal(classes="row"):
                 yield Button("Revoke selected", id="remote-revoke", compact=True)
 
     def on_mount(self) -> None:
         table = self.query_one("#remote-devices", DataTable)
-        table.add_columns("device", "first seen", "last seen")
+        table.add_columns("id", "device", "last seen", "expires", "")
         self.repaint()
         self.set_interval(1.0, self.repaint)
         self.query_one("#remote-on", Switch).focus()
@@ -128,18 +131,20 @@ class RemotePanel(ModalScreen[None]):
     def repaint(self) -> None:
         controller = self.controller
         running = controller.running
+        writes = controller.write_actions_allowed()
         # The echoes these two writes produce are filtered in on_switch_changed,
         # by value rather than by a flag — see the note there.
         self.query_one("#remote-on", Switch).value = running
-        self.query_one("#remote-allow-write", Switch).value = controller.state.allow_write
+        self.query_one("#remote-allow-write", Switch).value = writes
         self.query_one("#remote-state", Static).update(self._state_text())
         self.query_one("#remote-status", Static).update(controller.message or "")
         self.query_one("#remote-password", Static).update(
             Text(controller.password() or "—", style="bold")
         )
         self.query_one("#remote-write-hint", Static).update(
-            "writes reach the fleet" if controller.state.allow_write else READ_ONLY_REASON
+            "writes reach the fleet" if writes else READ_ONLY_REASON
         )
+        self.query_one("#remote-unlocks", Static).update(self._unlocks_text())
         url = controller.link_url()
         self.query_one("#remote-link", Static).update(Text(url or "turn Remote on for a link"))
         self.query_one("#remote-qr", Static).update(qr_text(url) if url else "")
@@ -154,30 +159,47 @@ class RemotePanel(ModalScreen[None]):
         text = Text("on", style="bold green")
         if controller.public_url is None:
             text.append("  · local only — no tunnel yet", style="dim")
-        if controller.auto_off_at is not None:
-            text.append(f"  · auto-off at {controller.auto_off_at:%H:%M}", style="dim")
+        deadline = controller.adopt_server_deadline()  # a phone's extension shows here too
+        if deadline is not None:
+            text.append(f"  · auto-off at {deadline.astimezone():%H:%M}", style="dim")
         elif controller.state.auto_off_minutes is None:
             # Never: say so, rather than leave the slot the timer usually fills empty —
             # "on" with nothing after it reads like the timer simply has not armed yet.
             text.append("  · no auto-off", style="dim")
         return text
 
+    def _unlocks_text(self) -> Text:
+        """Wrong passphrases lately, and, once they paused new unlocks, what to do about it."""
+        failed, until = self.controller.unlock_failures()
+        if not failed:
+            return Text("")
+        if until is None:
+            return Text(f"{failed} failed unlocks in 30 min", style="dim")
+        return Text(
+            f"{failed} failed unlocks in 30 min — new unlocks paused; rotate the link: "
+            "aisquare remote regenerate-password --new-link"
+        )
+
     def _paint_devices(self) -> None:
         table = self.query_one("#remote-devices", DataTable)
         devices = self.controller.devices()
-        sids = [str(d["sid"]) for d in devices]
-        if sids == self._device_sids and table.row_count == len(sids):
+        ids = [str(d["id"]) for d in devices]
+        if ids == self._device_ids and table.row_count == len(ids):
             return  # same rows: keep the cursor where the user put it
-        self._device_sids = sids
+        self._device_ids = ids
         table.clear()
         for device in devices:
+            # Text cells, never str: a str cell is parsed as Rich markup, and a User-Agent
+            # is the phone's own text — `x [/b]` raised MarkupError and took the TUI down.
             table.add_row(
-                _short_cell(device.get("ua"), 40) or "unknown device",
-                _short_cell(device.get("first_seen"), 19) or "—",
-                _short_cell(device.get("last_seen"), 19) or "—",
-                key=str(device["sid"]),
+                Text(str(device["id"])),
+                Text(_short_cell(device.get("ua"), 40) or "unknown device"),
+                Text(_short_cell(device.get("last_seen"), 19) or "—"),
+                Text(_short_cell(device.get("expires_at"), 19) or "—"),
+                Text("signed in" if device.get("signed_in") else "signed out"),
+                key=str(device["id"]),
             )
-        self.query_one("#remote-revoke", Button).disabled = not sids
+        self.query_one("#remote-revoke", Button).disabled = not ids
 
     # --- the controls ---------------------------------------------------------------------------
 
@@ -201,7 +223,7 @@ class RemotePanel(ModalScreen[None]):
             else:
                 self.controller.turn_off()
         elif event.switch.id == "remote-allow-write":
-            if event.value == self.controller.state.allow_write:
+            if event.value == self.controller.write_actions_allowed():
                 return
             self.controller.set_allow_write(event.value)
             if event.value:
@@ -232,12 +254,12 @@ class RemotePanel(ModalScreen[None]):
     def _revoke_selected(self) -> None:
         table = self.query_one("#remote-devices", DataTable)
         row = table.cursor_row
-        if not self._device_sids or row < 0 or row >= len(self._device_sids):
+        if not self._device_ids or row < 0 or row >= len(self._device_ids):
             return
-        sid = self._device_sids[row]
-        self.controller.revoke_device(sid)
-        self._device_sids = []  # force the table to be rebuilt on the next paint
-        self.notify(f"Revoked {sid[:8]}…")
+        device_id = self._device_ids[row]
+        self.controller.revoke_device(device_id)
+        self._device_ids = []  # force the table to be rebuilt on the next paint
+        self.notify(f"Revoked {device_id}")
 
     def action_close_panel(self) -> None:
         self.dismiss(None)

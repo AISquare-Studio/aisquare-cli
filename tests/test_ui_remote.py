@@ -15,6 +15,7 @@ import json
 import shutil
 import socket
 from collections.abc import Awaitable, Callable, Iterator, Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TypeVar
 
@@ -27,11 +28,13 @@ from aisquare.cli.ui.remote_control import READ_ONLY_REASON, RemoteController
 from aisquare.cli.ui.views.remote import RemotePanel, qr_text
 from aisquare.core import paths
 from aisquare.core import tmux as tmux_core
+from aisquare.core.state_file import update_state
 from aisquare.core.tmux import Completed
 from aisquare.models import FleetAgentStatus, ProjectInfo
 from aisquare.services import fleet as fleet_service
 from aisquare.services import remote_server
 from aisquare.services.ngrok_tunnel import INSTALL_HINT, NgrokTunnel, build_public_url
+from aisquare.services.remote_server import UNLOCK_GLOBAL_FAILURES, Runtime, UnlockBudget
 from tests.test_remote_control import FakeTunnel, fake_tunnel_factory
 
 T = TypeVar("T")
@@ -143,8 +146,8 @@ async def open_panel(pilot: Pilot[None]) -> RemotePanel:
     return panel(pilot)
 
 
-def sessions() -> list[dict[str, str]]:
-    listed = remote_server.remote_server_status()["sessions"]
+def devices() -> list[dict[str, str]]:
+    listed = remote_server.remote_server_status()["devices"]
     assert isinstance(listed, list)
     return listed
 
@@ -420,16 +423,14 @@ def test_the_modal_state_survives_a_restart_of_the_tui() -> None:
         await pilot.pause()
         app = pilot.app
         assert isinstance(app, FleetApp)
-        assert app.remote.state.allow_write is True
+        assert app.remote.write_actions_allowed() is True
         assert app.remote.state.auto_off_minutes == 120
 
     drive(first, tunnel=missing_ngrok)
     saved = json.loads(paths.state_path().read_text())
-    assert (saved["remote_enabled"], saved["allow_write"], saved["auto_off_minutes"]) == (
-        True,
-        True,
-        120,
-    )
+    assert (saved["remote_enabled"], saved["auto_off_minutes"]) == (True, 120)
+    # The write switch is remote.json's alone: flipped before Remote was on, it landed there.
+    assert json.loads(paths.remote_state_path().read_text())["allow_write"] is True
 
     async def second(pilot: Pilot[None]) -> None:
         app = pilot.app
@@ -444,7 +445,7 @@ def test_the_modal_state_survives_a_restart_of_the_tui() -> None:
         assert remote_server.runtime().token in shown(modal.query_one("#remote-link", Static))
         modal.query_one("#remote-allow-write", Switch).toggle()
         await pilot.pause()
-        assert json.loads(paths.state_path().read_text())["allow_write"] is False
+        assert json.loads(paths.remote_state_path().read_text())["allow_write"] is False
 
     drive(second, tunnel=missing_ngrok)
     # Leaving the TUI ends the processes but keeps the switch for the next restore.
@@ -468,7 +469,7 @@ def test_a_fresh_home_opens_with_write_actions_off() -> None:
 # --- devices -----------------------------------------------------------------------------------
 
 
-def test_devices_list_shows_sessions_from_remote_json_and_revoke_drops_one() -> None:
+def test_devices_list_shows_devices_from_remote_json_and_revoke_drops_one() -> None:
     async def go(pilot: Pilot[None]) -> None:
         modal = await open_panel(pilot)
         modal.query_one("#remote-on", Switch).toggle()
@@ -477,7 +478,7 @@ def test_devices_list_shows_sessions_from_remote_json_and_revoke_drops_one() -> 
         assert runtime.unlock_device(runtime.password, "iPhone Safari") is not None
         assert runtime.unlock_device(runtime.password, "Firefox") is not None
         assert runtime.unlock_device("wrong", "Burglar") is None
-        assert len(sessions()) == 2
+        assert len(devices()) == 2
         assert json.loads(paths.remote_state_path().read_text())["allow_write"] is False
         modal.repaint()
         await pilot.pause()
@@ -485,7 +486,7 @@ def test_devices_list_shows_sessions_from_remote_json_and_revoke_drops_one() -> 
         assert table.row_count == 2  # type: ignore[attr-defined]
         modal.query_one("#remote-revoke").press()  # type: ignore[attr-defined]
         await pilot.pause()
-        left = sessions()
+        left = devices()
         assert len(left) == 1 and left[0]["ua"] == "Firefox"  # the cursor was on the first row
         assert table.row_count == 1  # type: ignore[attr-defined]
 
@@ -497,3 +498,90 @@ def test_qr_text_is_compact_half_block_art_of_the_url() -> None:
     rows = art.splitlines()
     assert 15 <= len(rows) <= 22, len(rows)
     assert all(set(row) <= set("█▀▄ ") for row in rows)
+
+
+def test_a_user_agent_that_is_rich_markup_is_painted_as_text() -> None:
+    """A str cell is parsed as Rich markup: a User-Agent of ``x [/b]`` raised MarkupError
+    when the devices table painted, which took the whole TUI down (review of #243)."""
+
+    async def go(pilot: Pilot[None]) -> None:
+        app = pilot.app
+        assert isinstance(app, FleetApp)
+        modal = await open_panel(pilot)
+        modal.query_one("#remote-on", Switch).toggle()
+        await pilot.pause()
+        runtime = remote_server.runtime()
+        assert runtime.unlock_device(runtime.password, "x [/b] [bold]phone") is not None
+        modal.repaint()
+        await pilot.pause()
+        assert any("x [/b] [bold]phone" in row for row in painted(app))
+
+    drive(go, tunnel=missing_ngrok, size=(160, 100))  # tall enough that the table is painted
+
+
+def test_the_password_shown_follows_a_regenerate_from_another_shell() -> None:
+    """The modal showed the passphrase Remote started with, which a ``regenerate-password``
+    from a shell had already made wrong (review of #243)."""
+
+    async def go(pilot: Pilot[None]) -> None:
+        modal = await open_panel(pilot)
+        modal.query_one("#remote-on", Switch).toggle()
+        await pilot.pause()
+        shell = Runtime(paths.remote_state_path(), paths.remote_audit_path())
+        fresh = shell.regenerate_password()
+        modal.repaint()
+        await pilot.pause()
+        assert shown(modal.query_one("#remote-password", Static)) == fresh
+
+    drive(go, tunnel=missing_ngrok)
+
+
+def test_the_write_switch_is_remote_jsons_whatever_an_older_state_json_says() -> None:
+    """``turn_on`` pushed the TUI's saved copy into the server: a TUI start undid an
+    ``aisquare remote allow-write off`` from a shell, and the modal showed read-only while
+    the server took writes after an ``allow-write on`` (review of #243)."""
+    update_state("remote_enabled", True)
+    update_state("allow_write", True)  # what an earlier build saved beside the theme
+    shell = Runtime(paths.remote_state_path(), paths.remote_audit_path())
+    shell.set_allow_write(False)
+
+    async def go(pilot: Pilot[None]) -> None:
+        app = pilot.app
+        assert isinstance(app, FleetApp)
+        assert app.remote.running, "restored"
+        assert json.loads(paths.remote_state_path().read_text())["allow_write"] is False
+        modal = await open_panel(pilot)
+        assert modal.query_one("#remote-allow-write", Switch).value is False
+        shell.set_allow_write(True)  # `aisquare remote allow-write on` in another shell
+        modal.repaint()
+        await pilot.pause()
+        assert modal.query_one("#remote-allow-write", Switch).value is True
+        assert shown(modal.query_one("#remote-write-hint", Static)) == "writes reach the fleet"
+
+    drive(go, tunnel=missing_ngrok)
+
+
+def test_the_modal_shows_failed_unlocks_and_a_deadline_a_phone_extended() -> None:
+    async def go(pilot: Pilot[None]) -> None:
+        app = pilot.app
+        assert isinstance(app, FleetApp)
+        modal = await open_panel(pilot)
+        modal.query_one("#remote-on", Switch).toggle()
+        await pilot.pause()
+        assert shown(modal.query_one("#remote-unlocks", Static)) == ""
+        runtime = remote_server.runtime()
+        budget = UnlockBudget(runtime)
+        for _ in range(UNLOCK_GLOBAL_FAILURES):
+            budget.record_failed_unlock()
+        extended = runtime.extend_auto_off(datetime.now(UTC))
+        assert extended is not None
+        modal.repaint()
+        await pilot.pause()
+        line = shown(modal.query_one("#remote-unlocks", Static))
+        assert line.startswith(f"{UNLOCK_GLOBAL_FAILURES} failed unlocks in 30 min")
+        assert "new unlocks paused" in line and "regenerate-password --new-link" in line
+        state_line = shown(modal.query_one("#remote-state", Static))
+        assert f"auto-off at {extended.astimezone():%H:%M}" in state_line
+        assert app.remote.auto_off_at == extended, "the extension holds in the TUI too"
+
+    drive(go, tunnel=missing_ngrok)

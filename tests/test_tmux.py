@@ -967,10 +967,36 @@ def test_send_keys_and_send_literal_build_their_argv(fake_bin: Path, conf: Path)
     server.send_keys("%3")
     server.send_literal("%3", "")
     assert fake.commands() == [
-        ["send-keys", "-t", "%3", "C-c", "Enter"],
+        ["send-keys", "-t", "%3", "--", "C-c", "Enter"],
         ["send-keys", "-t", "%3", "-H", *_hex("-dash text; not a command")],
         ["send-keys", "-t", "%3", "-H", *_hex("a;")],
     ], "nothing to send is not a tmux call"
+
+
+def test_a_key_that_would_end_the_command_or_read_as_a_flag_stays_data(
+    fake_bin: Path, conf: Path
+) -> None:
+    """Keys are caller data: before ``--`` and :func:`_data_arg`, ``['Enter;', 'kill-server']``
+    killed the private server and ``[';', 'run-shell', …]`` ran a shell command (measured on
+    3.7c). ``--`` ends the flags, so ``-l`` is a key; a trailing ``;`` is escaped, so the next
+    argument is never a command of its own."""
+    fake = FakeTmux()
+    server = _server(fake, fake_bin, conf)
+    server.send_keys("%3", "-l", "Enter;", "kill-server", ";", "M-;")
+    assert fake.commands() == [
+        ["send-keys", "-t", "%3", "--", "-l", "Enter\\;", "kill-server", "\\;", "M-\\;"]
+    ]
+
+
+@pytest.mark.parametrize("key", ["", " ", "Enter\n", "C-c\r", "a\tb", "\x1b", "Up\x00"])
+def test_a_key_no_tmux_name_could_be_is_refused_before_tmux_runs(
+    fake_bin: Path, conf: Path, key: str
+) -> None:
+    fake = FakeTmux()
+    server = _server(fake, fake_bin, conf)
+    with pytest.raises(TmuxError, match="not a tmux key name"):
+        server.send_keys("%3", "Enter", key)
+    assert fake.commands() == [], "nothing at all was sent, not even the valid key before it"
 
 
 #: The most arguments tmux 3.7 takes in one command ("Limit MSG_COMMAND argument to
@@ -1404,6 +1430,26 @@ def test_live_send_literal_delivers_a_trailing_semicolon(live: TmuxServer) -> No
     live.send_literal(window.pane_id, "RAW")
     live.send_keys(window.pane_id, "Enter")
     assert _wait(lambda: "run makeRAW" in _screen(live, window.pane_id))
+
+
+@requires_tmux
+def test_live_send_keys_sends_keys_and_never_tmux_syntax(live: TmuxServer) -> None:
+    """``--`` and the escaped separator, measured on the pane the keys go to.
+
+    ``-l`` is no key name, so it arrives as the text it spells instead of being read as
+    the flag that turns every other key into text. ``;`` arrives as itself, and what
+    follows it is typed, not run: the option it would have set stays unset. Enter and
+    C-c still do what they name.
+    """
+    window = _spawn(live, "asq-test-fox", "w0", CAT)
+    assert _wait(lambda: "plain" in _screen(live, window.pane_id))
+
+    live.send_keys(window.pane_id, "-l", ";", "set-option", "-g", "@asq_injected", "yes", "Enter")
+    assert _wait(lambda: "-l;set-option-g@asq_injectedyes" in _screen(live, window.pane_id))
+    assert live.run("show-options", "-gqv", "@asq_injected").strip() == "", "nothing ran"
+
+    live.send_keys(window.pane_id, "C-c")
+    assert _wait(lambda: (facts := live.pane_facts(window.pane_id)) is not None and facts.dead)
 
 
 @requires_tmux

@@ -29,9 +29,11 @@ from aisquare.services.remote_server import (
     COOKIE,
     NoSuchAgent,
     NoSuchProject,
+    RequestError,
     Runtime,
     Sources,
     _agent_state_counts,
+    _audit_keys,
     _resolve_project,
     build_app,
     live_sources,
@@ -398,15 +400,20 @@ def test_the_typed_text_is_counted_never_captured(
 def test_a_key_name_cannot_forge_an_audit_line(
     two_projects: tuple[str, str], fake_tmux: _FakeTmux
 ) -> None:
-    """The log is one line per write, and this is the first caller-controlled
-    string to reach it — a newline in a key name must not buy a second line."""
+    """The log is one line per write, and a key name is caller-controlled — a newline in
+    one must not buy a second line. The allowlist refuses such a key before anything is
+    sent, and the refusal itself carries no newline; the summary's own scrub stays as
+    defence in depth (SPEC §2.7)."""
     current, _other = two_projects
     _seed_agent(current, "coder-1", "%1")
     forged = "Up\n2026-01-01T00:00:00+00:00 someone-else note nothing-to-see"
-    summary = _summary_for({"keys": [forged]})
-    assert "\n" not in summary and "\r" not in summary
-    assert "someone-else" not in summary
-    assert summary.startswith(f"coder-1@{current} text=0ch keys=[Up?")
+    with pytest.raises(RequestError) as refused:
+        _summary_for({"keys": [forged]})
+    assert refused.value.error == "invalid_key"
+    assert "\n" not in refused.value.message and "\r" not in refused.value.message
+    assert fake_tmux.sent == [], "nothing reached the pane"
+    scrubbed = _audit_keys([forged])
+    assert "\n" not in scrubbed and scrubbed.startswith("[Up?")
 
 
 def test_the_audit_line_written_to_disk_carries_the_key_name(
@@ -428,9 +435,10 @@ def test_the_audit_line_written_to_disk_carries_the_key_name(
     )
     assert sent.status_code == 200
     line = remote_audit_path().read_text().splitlines()[-1]
-    _ts, sid, endpoint, summary = line.split(" ", 3)
+    _ts, device_id, endpoint, summary = line.split(" ", 3)
     assert endpoint == "send-keys"
-    assert sid == client.cookies[COOKIE]
+    assert device_id == client.get(f"/r/{runtime.token}/api/devices").json()[0]["id"]
+    assert device_id != client.cookies[COOKIE], "the trail names the device, never its cookie"
     assert summary == f"coder-1@{current} text=0ch keys=[C-c] enter=False"
 
 
@@ -633,7 +641,8 @@ def test_send_keys_over_http_is_still_403_until_allow_write(
     )
     assert response.status_code == 403
     assert response.json()["error"] == "read_only"
-    assert not remote_audit_path().exists()
+    endpoints = [line.split(" ")[2] for line in remote_audit_path().read_text().splitlines()]
+    assert endpoints == ["unlock"], "the unlock is on the trail; the refused write is not"
 
 
 def test_devices_and_unlock_are_untouched_by_the_query_param(
@@ -642,4 +651,4 @@ def test_devices_and_unlock_are_untouched_by_the_query_param(
     client = _client(runtime, _sources(FLEETS), tmp_path)
     rows = client.get(f"/r/{runtime.token}/api/devices").json()
     assert [row["current"] for row in rows] == [True]
-    assert client.cookies[COOKIE] == rows[0]["sid"]
+    assert client.cookies[COOKIE] not in json.dumps(rows), "a device is listed by id"

@@ -410,7 +410,8 @@ def test_reading_a_transcript_is_not_a_write(runtime: Runtime, tmp_path: Path) -
     client = _client(runtime, _echo, tmp_path)
     assert runtime.allow_write is False
     assert client.get(f"/r/{runtime.token}/api/transcript/coder-1").status_code == 200
-    assert not remote_audit_path().exists()
+    endpoints = [line.split(" ")[2] for line in remote_audit_path().read_text().splitlines()]
+    assert endpoints == ["unlock"], "the unlock is on the trail; the read is not"
 
 
 def test_limit_param_parsing() -> None:

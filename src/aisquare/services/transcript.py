@@ -673,10 +673,11 @@ def _tail_unparsed(
     Its tool results answer their tool uses (``answered`` grows), and make it a
     ``tool_result``. A line with tool uses and no results is ``assistant_tool``,
     and each of its tool uses still without a result is pending, known by id and
-    name alone (its input is far over :data:`TOOL_INPUT_MAX`). Skipped whole, a
-    ``Write`` of a large file waited on its permission prompt unseen, and the
-    text block before it in the same message read as the agent's last words at
-    its prompt, where a typed message's Enter would have approved the write.
+    name alone: its input is not read, as a parsed one over :data:`TOOL_INPUT_MAX`
+    is not kept. Skipped whole, a ``Write`` of a large file waited on its
+    permission prompt unseen, and the text block before it in the same message
+    read as the agent's last words at its prompt, where a typed message's Enter
+    would have approved the write.
     ``None`` for a sub-agent's or an injected record, or one that shows neither.
     """
     results = [match.decode("utf-8", "replace") for match in _TOOL_USE_ID.findall(raw)]

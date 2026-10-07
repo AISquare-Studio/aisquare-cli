@@ -267,7 +267,7 @@ class AgentNow:
     did not vouch for the pane under its id (``lost``, ``exited``, ``unknown``)."""
     pane_quiet: bool | None
     """``#{window_activity}`` older than ``fleet.ACTIVITY_WINDOW``; ``None``: tmux did not say,
-    or the pane is not the agent's, which nothing then asks."""
+    or the pane is not the agent's and was not asked."""
     items: tuple[NeedsItem, ...]
     """Every current item of this project whose ``agent`` is this label, project-level kinds
     included, and dismissed ones too: a dismissal hides a card, it does not close a dialog."""

@@ -607,13 +607,22 @@ def pane(monkeypatch: pytest.MonkeyPatch, log: list[str]) -> FakePane:
 class FakeNeeds:
     """needs-you's view of the agent, changing the way Claude Code's screen does: one Escape
     closes the dialog, or stops a working agent at its prompt. Each change shows from the
-    ``lag``-th read after the Escape, as a pane shows it a moment later."""
+    ``lag``-th read after the Escape, as a pane shows it a moment later.
+
+    Its predicates answer as SPEC §4.5's do for what it shows. A dialog is open while it
+    draws one, while the row reads ``attention`` that no Escape has answered, and while one
+    of the agent's current items is a dialog (:func:`_a_dialog`). A test that wants an
+    agent with no dialog must therefore show one with none: a card's ``limited`` item on a
+    row that reads ``limited``, say, not on one that reads ``working``."""
 
     def __init__(self, pane: FakePane) -> None:
         self.pane = pane
         self.state: FleetAgentState = "working"
         self.dialog = False
         self.at_prompt = False
+        self.interrupted = False
+        """An Escape landed: the transcript's newest record is the interruption, which
+        answers an ``attention``."""
         self.pane_is_agent = True
         self.window_gone = False
         self.escape_closes_dialog = True
@@ -624,7 +633,7 @@ class FakeNeeds:
         self.reads = 0
         self._escapes = 0
         self._since_escape: int | None = None
-        self._views: list[tuple[AgentNow, bool, bool]] = []
+        self._views: list[tuple[AgentNow, bool, bool, bool]] = []
 
     def needs_agent_now(
         self, project: ProjectInfo, label: str, *, now: datetime | None = None
@@ -646,7 +655,7 @@ class FakeNeeds:
             pane_quiet=True,
             items=self.items,
         )
-        self._views.append((snap, self.dialog, self.at_prompt))
+        self._views.append((snap, self.dialog, self.at_prompt, self.interrupted))
         return snap
 
     def _land_escapes(self) -> None:
@@ -659,26 +668,40 @@ class FakeNeeds:
         if self._since_escape < self.lag:
             return
         self._since_escape = None
+        self.interrupted = True
         if self.escape_closes_dialog:
             self.dialog = False
         if self.escape_stops_agent and not self.dialog:
             self.at_prompt = True
 
-    def _view(self, snap: AgentNow) -> tuple[bool, bool]:
-        for seen, dialog, prompt in reversed(self._views):
+    def _view(self, snap: AgentNow) -> tuple[bool, bool, bool]:
+        """What the pane showed when ``snap`` was read: a dialog, the prompt, an interruption."""
+        for seen, dialog, prompt, interrupted in reversed(self._views):
             if seen is snap:
-                return dialog, prompt
+                return dialog, prompt, interrupted
         raise AssertionError("a snapshot needs_agent_now never gave")
 
     def needs_dialog_open(self, snap: AgentNow) -> bool:
-        return snap.pane_is_agent and self._view(snap)[0]
+        if snap.status is None or not snap.pane_is_agent:
+            return False
+        drawn, _prompt, interrupted = self._view(snap)
+        state = snap.status.state
+        unanswered = state == "attention" and not interrupted
+        return drawn or unanswered or any(_a_dialog(item, state) for item in snap.items)
 
     def needs_at_input_prompt(self, snap: AgentNow) -> bool:
-        dialog, prompt = self._view(snap)
-        return snap.pane_is_agent and prompt and not dialog
+        return snap.pane_is_agent and self._view(snap)[1] and not self.needs_dialog_open(snap)
 
     def needs_item_current(self, snap: AgentNow, item_id: str) -> bool:
         return item_id in {item.id for item in snap.items}
+
+
+def _a_dialog(item: NeedsItem, state: str) -> bool:
+    """SPEC §4.5: a current prompt, question or plan is a dialog on the agent's screen, and so
+    is a ``limited`` item of a row that does not read ``limited``: the usage-limit dialog."""
+    return item.kind in ("permission", "question", "plan") or (
+        item.kind == "limited" and state != "limited"
+    )
 
 
 @pytest.fixture
@@ -695,6 +718,8 @@ def needs(monkeypatch: pytest.MonkeyPatch, pane: FakePane) -> FakeNeeds:
 
 
 def _item(project: ProjectInfo, item_id: str, kind: str = "limited") -> NeedsItem:
+    """A card about coder-1, by default its usage limit: on a row that reads ``limited``,
+    the card a Switch is sent from (on any other row, the limit's dialog)."""
     return NeedsItem(
         id=item_id,
         kind=kind,
@@ -993,7 +1018,9 @@ def test_a_card_whose_item_is_gone_is_409_stale_with_the_agents_items_now(
 def test_a_card_whose_item_is_still_current_goes_through_with_one_read(
     phone: Phone, fleet: FleetCalls, needs: FakeNeeds, project: ProjectInfo
 ) -> None:
+    """A parked agent's card: the row reads ``limited``, so its item is no dialog."""
     _row(project)
+    needs.state = "limited"
     needs.items = (_item(project, "ny_limit"),)
     response = phone.post("agent/switch", **PINNED, needs_id="ny_limit")
     assert response.status_code == 200, response.text
@@ -1714,8 +1741,11 @@ def own_predicates(needs: FakeNeeds, monkeypatch: pytest.MonkeyPatch) -> FakeNee
 def test_a_card_whose_item_needs_you_still_lists_goes_through(
     phone: Phone, fleet: FleetCalls, own_predicates: FakeNeeds, project: ProjectInfo
 ) -> None:
-    """``needs_item_current`` is true for an id among the snapshot's items."""
+    """``needs_item_current`` is true for an id among the snapshot's items. The row reads
+    ``limited``: on one that does not, ``needs_dialog_open`` reads the item as the limit's
+    dialog, and the switch is refused."""
     _row(project)
+    own_predicates.state = "limited"
     own_predicates.items = (_item(project, "ny_limit"),)
     response = phone.post("agent/switch", **PINNED, needs_id="ny_limit")
     assert response.status_code == 200, response.text

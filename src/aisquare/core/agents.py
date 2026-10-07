@@ -57,6 +57,15 @@ _HOOKS = (
     ("StopFailure", "stop-failure"),
 )
 
+#: The Claude Code plugin route (``plugins/claude-code`` in this repo): the plugin and
+#: the marketplace that lists it, as ``/plugin install aisquare@aisquare-cli`` names
+#: them and ``enabledPlugins`` keys them. Its hooks run the same ``aisquare hook
+#: <event>`` as :data:`_HOOKS`, and stand down for any event settings.json already
+#: runs. tests/test_claude_plugin.py holds both manifests to these names.
+CLAUDE_PLUGIN = "aisquare"
+CLAUDE_PLUGIN_MARKETPLACE = "aisquare-cli"
+CLAUDE_PLUGIN_ID = f"{CLAUDE_PLUGIN}@{CLAUDE_PLUGIN_MARKETPLACE}"
+
 
 @dataclass(frozen=True)
 class AgentSpec:
@@ -428,6 +437,59 @@ def read_json(path: Path) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
+def enabled_plugins(config_dir: Path) -> list[str]:
+    """The plugins ``config_dir``'s ``settings.json`` enables: its ``enabledPlugins`` keys.
+
+    Each is ``<plugin>@<marketplace>`` (or a bare name). One set to ``false`` is
+    installed but disabled -- ``/plugin disable`` writes that -- so it is left
+    out. The one reader of the key: the doctor's browser-tools row and the
+    plugin route (:func:`claude_plugin`) both ask here. Read-only; a file that
+    cannot be read enables nothing (:func:`read_json`).
+    """
+    plugins = read_json(config_dir / "settings.json").get("enabledPlugins")
+    if not isinstance(plugins, dict):
+        return []
+    return [str(key) for key, enabled in plugins.items() if enabled]
+
+
+@dataclass(frozen=True)
+class ClaudePlugin:
+    """The aisquare plugin, installed and enabled in one Claude Code config directory."""
+
+    config_dir: Path
+    version: str | None
+    """What ``plugins/installed_plugins.json`` records; ``None`` when it records none."""
+
+
+def claude_plugin(config_dir: Path | None = None) -> ClaudePlugin | None:
+    """The aisquare plugin when ``config_dir`` enables AND installed it, else ``None``.
+
+    Enabled is ``settings.json``'s ``enabledPlugins`` holding
+    :data:`CLAUDE_PLUGIN_ID` as true; installed is ``plugins/installed_plugins.json``
+    listing it, which is also where the version is read. Both, because an enabled
+    key with nothing installed runs nothing. ``/plugin disable`` sets the key to
+    false and ``/plugin uninstall`` removes both (measured on Claude Code 2.1.292,
+    which writes ``{"version": 2, "plugins": {id: [records]}}``).
+
+    Per directory, like the hooks: Claude Code keeps plugins under each config
+    dir, so one installed in ``~/.claude`` does not reach ``~/.claude-c2``.
+    ``None`` is the directory a session from this shell reads
+    (``CLAUDE_CONFIG_DIR``, else ``~/.claude``). Read-only; never raises.
+    """
+    directory = _claude_home(config_dir)
+    if CLAUDE_PLUGIN_ID not in enabled_plugins(directory):
+        return None
+    installed = read_json(directory / "plugins" / "installed_plugins.json").get("plugins")
+    records = installed.get(CLAUDE_PLUGIN_ID) if isinstance(installed, dict) else None
+    if isinstance(records, dict):
+        records = [records]
+    if not isinstance(records, list) or not records:
+        return None
+    versions = [record.get("version") for record in records if isinstance(record, dict)]
+    version = next((found for found in versions if isinstance(found, str) and found), None)
+    return ClaudePlugin(config_dir=directory, version=version)
+
+
 def _registry() -> dict[str, Any]:
     """The raw agent registry, or ``{}`` when absent or unreadable."""
     return read_json(paths.agents_registry_path())
@@ -616,6 +678,8 @@ class HookSiteHealth:
     binary: Path | None = None
     binary_version: str | None = None
     binary_state: str | None = None
+    plugin: ClaudePlugin | None = None
+    """The aisquare plugin, when this directory has it enabled (:func:`claude_plugin`)."""
 
 
 def hook_commands(name: str, config_dir: Path | None = None) -> list[str]:
@@ -765,13 +829,16 @@ def hook_site_health(
 ) -> HookSiteHealth:
     """Grade one config directory: are the hooks all there, and what do they run?"""
     installed = hooks_installed(name, config_dir)
+    plugin = claude_plugin(config_dir) if name == "claude-code" else None
     binaries: list[HookBinary] = []
     for command in hook_commands(name, config_dir):
         binary = hook_binary(command)
         if binary is not None and binary not in binaries:
             binaries.append(binary)
     if not binaries:
-        return HookSiteHealth(config_dir=config_dir, hooks_installed=installed, recorded=recorded)
+        return HookSiteHealth(
+            config_dir=config_dir, hooks_installed=installed, recorded=recorded, plugin=plugin
+        )
     verdicts = cache if cache is not None else {}
     graded: list[tuple[HookBinary, str, str | None]] = []
     for binary in binaries:
@@ -787,6 +854,7 @@ def hook_site_health(
         binary=worst.program,
         binary_version=version,
         binary_state=state,
+        plugin=plugin,
     )
 
 
@@ -796,9 +864,10 @@ def _claude_dirs_on_disk() -> list[Path]:
     ``$CLAUDE_CONFIG_DIR``, ``~/.claude`` and every ``~/.claude*`` directory —
     the ``[0-9]`` siblings of a parallel-install setup and the
     ``~/.claude-account1`` naming the README documents. Only directories whose
-    ``settings.json`` holds at least one aisquare hook are returned: a hook that
-    is on disk runs whether or not this home ever heard of the directory, and
-    that is the only thing that makes a directory doctor's business.
+    ``settings.json`` holds at least one aisquare hook, or enables the aisquare
+    plugin (:func:`claude_plugin`), are returned: a hook that is on disk runs
+    whether or not this home ever heard of the directory, and that is the only
+    thing that makes a directory doctor's business.
 
     A candidate whose ``settings.json`` this user cannot read — another
     account's ``~/.claude-archived``, a backup left at mode 000 — is skipped, not
@@ -821,7 +890,9 @@ def _claude_dirs_on_disk() -> list[Path]:
             continue
         seen.add(key)
         try:
-            ours = bool(hook_commands("claude-code", candidate))
+            ours = bool(hook_commands("claude-code", candidate)) or (
+                claude_plugin(candidate) is not None
+            )
         except OSError:
             continue  # unreadable settings.json — see the docstring
         if ours:

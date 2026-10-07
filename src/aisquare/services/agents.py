@@ -43,21 +43,30 @@ def claude_code_connected(config_dir: Path | None = None) -> bool:
     session started from this shell reads (``CLAUDE_CONFIG_DIR``, else
     ``~/.claude``), as ``agents connect`` means it.
 
-    Today that means every lifecycle hook ``agents connect`` installs is in the
-    directory's ``settings.json``. A partial install from an older version
-    answers False, because Connect is what completes it. Which aisquare the
-    hooks run is the doctor's question, not this one: answering it can start a
-    process.
+    Two routes connect it. Every lifecycle hook ``agents connect`` installs is in
+    the directory's ``settings.json`` -- a partial install from an older version
+    answers False, because Connect is what completes it. Or the aisquare Claude
+    Code plugin is installed and enabled there (``agent_core.claude_plugin``):
+    its hooks run the same ``aisquare hook <event>``, so offering Connect to a
+    plugin user would install every hook a second time. Which aisquare the hooks
+    run is the doctor's question, not this one: answering it can start a process.
 
-    Read-only and offline: one file is read and nothing is written, so no
+    Read-only and offline: two files are read and nothing is written, so no
     ``~/.aisquare`` appears. ``agents.json`` is not consulted, because hooks on
     disk run whether or not this home recorded them (#84). A ``settings.json``
     that cannot be read answers False: nothing shows our hooks are there.
     """
     try:
-        return agent_core.hooks_installed("claude-code", config_dir)
+        if agent_core.hooks_installed("claude-code", config_dir):
+            return True
     except (OSError, ValueError):
         return False
+    return agent_core.claude_plugin(config_dir) is not None
+
+
+def claude_plugin(config_dir: Path | None = None) -> agent_core.ClaudePlugin | None:
+    """The aisquare Claude Code plugin in ``config_dir``, when it is installed and enabled."""
+    return agent_core.claude_plugin(config_dir)
 
 
 def connect(name: str, config_dir: Path | None = None) -> AgentConnection:

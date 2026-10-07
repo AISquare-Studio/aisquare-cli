@@ -8,6 +8,7 @@ from typing import Annotated
 import typer
 
 from aisquare.cli.common import emit_agents, emit_connected, emit_disconnected, fail
+from aisquare.core.agents import CLAUDE_PLUGIN_ID
 from aisquare.core.console import stderr_console
 from aisquare.services import agents as agents_service
 
@@ -60,6 +61,12 @@ def connect(name: AgentName, config_dir: ConfigDir = None) -> None:
     except ValueError as exc:
         fail(str(exc), error="not_installed", ref=name)
     emit_connected(connection)
+    plugin = agents_service.claude_plugin(config_dir) if name == "claude-code" else None
+    if plugin is not None:
+        stderr_console().print(
+            f"note: the aisquare plugin is enabled in {plugin.config_dir} too — its hooks "
+            "stand down while these run; keep one route (aisquare doctor says how)"
+        )
 
 
 @app.command("disconnect")
@@ -69,9 +76,17 @@ def disconnect(name: AgentName, config_dir: ConfigDir = None) -> None:
         removed = agents_service.disconnect(name, config_dir)
     except KeyError:
         fail(f"unknown agent: {name}", error="unknown_agent", ref=name)
-    if not removed:
+    plugin = agents_service.claude_plugin(config_dir) if name == "claude-code" else None
+    if not removed and plugin is None:
         stderr_console().print(
             "note: no aisquare hooks found in that config dir — if you connected "
             "with --config-dir, disconnect with the same one"
+        )
+    if plugin is not None:
+        # The plugin's hooks stand down only while settings.json runs them, so
+        # removing these hands every event to the plugin rather than stopping it.
+        stderr_console().print(
+            f"note: the aisquare plugin is still enabled in {plugin.config_dir}, so aisquare "
+            f"keeps running there — to stop it, in Claude Code: /plugin disable {CLAUDE_PLUGIN_ID}"
         )
     emit_disconnected(name)

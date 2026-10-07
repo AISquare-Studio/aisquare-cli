@@ -85,6 +85,8 @@ from aisquare.core.version import __version__
 from aisquare.models import FleetAgent, FleetAgentStatus, ProjectInfo, TeamSession, TurnMetric
 
 if TYPE_CHECKING:
+    from concurrent.futures import ThreadPoolExecutor
+
     from starlette.requests import HTTPConnection, Request
     from starlette.responses import Response
     from starlette.routing import Route
@@ -110,6 +112,24 @@ WS_CLOSE_BAD_ORIGIN = 4403
 """A handshake from another origin, where the server offers no denial response."""
 WS_CLOSE_NOT_FOUND = 4404
 """A wrong token (or Remote off), where the server offers no denial response."""
+WS_CLOSE_REPLACED = 4409
+"""The same device opened one socket too many and this, its oldest, made way: the page
+does not reconnect it until its tab is visible again (SPEC §2.10)."""
+
+WS_CLIENT_MESSAGE_MAX = 4_096
+"""The longest text frame a client may send; anything longer is ignored unread."""
+WS_PANE_SUBSCRIPTIONS_MAX = 8
+"""Panes one socket may watch at once; a 9th ``subscribe`` is refused with an error frame."""
+WS_SOCKETS_PER_DEVICE = 4
+"""Live sockets per device. A 5th closes the device's OLDEST (4409) rather than refusing the
+new one: what a sleeping phone leaves behind is a half-open socket, and evicting it is what
+lets the woken phone back in."""
+PANE_CAPTURE_WORKERS = 4
+"""Threads in the pool every pane capture of the stream runs on
+(:meth:`RemoteKit.kit_pane_pool`)."""
+HEARTBEAT_SECONDS = 10.0
+"""How often a socket gets a ``heartbeat`` frame, changed or not, so the page can tell a quiet
+fleet from a dead link (the default of ``build_app(heartbeat=)``)."""
 
 MAX_BODY_BYTES = 65_536
 """The largest body any request may carry, refused with 413 before a route sees it.
@@ -1655,7 +1675,12 @@ class RemoteKit:
     """Called after every needs scan with ``(all items, scanned_at)``."""
     ledger: ActionLedger = field(default_factory=_new_action_ledger)
     """The request ledger every write-gated request passes (SPEC §1.5)."""
+    pane_pool: ThreadPoolExecutor | None = None
+    """Made on the first pane capture (:meth:`kit_pane_pool`); the lifespan shuts it down."""
+    sockets: dict[str, list[Callable[[int], None]]] = field(default_factory=dict)
+    """Each device's live sockets, oldest first, as closers that take a close code."""
     lane_state: dict[str, Any] = field(default_factory=dict)
+    _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
 
     def kit_device(self, request: HTTPConnection) -> Device:
         """The device gate 4 found for this request; the cookie is never looked up twice."""
@@ -1713,6 +1738,42 @@ class RemoteKit:
     def kit_write_allowed(self) -> bool:
         """Whether writes are on right now (``remote.json``, re-read when it changes)."""
         return self.runtime.allow_write
+
+    def kit_pane_pool(self) -> ThreadPoolExecutor:
+        """The pool every pane capture of the stream runs on, made on first use.
+
+        Never the default thread pool, which serves every HTTP read and write:
+        4 sockets x 8 subscriptions x N devices may queue captures here, but at
+        most :data:`PANE_CAPTURE_WORKERS` run at once, and no request ever waits
+        behind them.
+        """
+        with self._lock:
+            if self.pane_pool is None:
+                from concurrent.futures import ThreadPoolExecutor
+
+                self.pane_pool = ThreadPoolExecutor(
+                    max_workers=PANE_CAPTURE_WORKERS, thread_name_prefix="asq-remote-pane"
+                )
+            return self.pane_pool
+
+    def kit_socket_opened(self, device_id: str, closer: Callable[[int], None]) -> None:
+        """Count a device's new socket; past :data:`WS_SOCKETS_PER_DEVICE`, close its oldest."""
+        with self._lock:
+            live = self.sockets.setdefault(device_id, [])
+            live.append(closer)
+            evicted = live[: max(0, len(live) - WS_SOCKETS_PER_DEVICE)]
+            del live[: len(evicted)]
+        for close in evicted:
+            close(WS_CLOSE_REPLACED)
+
+    def kit_socket_closed(self, device_id: str, closer: Callable[[int], None]) -> None:
+        """Forget a socket that ended, evicted or not."""
+        with self._lock:
+            live = self.sockets.get(device_id, [])
+            if closer in live:
+                live.remove(closer)
+            if not live:
+                self.sockets.pop(device_id, None)
 
     def kit_route(
         self, path: str, endpoint: KitEndpoint, *, methods: list[str], write_gated: bool
@@ -1785,8 +1846,9 @@ async def remote_lifespan(kit: RemoteKit) -> AsyncIterator[None]:
     """The lanes' background work starts with the server and stops with it.
 
     The needs watcher first, then the push sender, which listens to it; at
-    shutdown their stoppers run in reverse. A lane that fails to start costs
-    its own feature and never the server: it is logged, and the rest carries on.
+    shutdown their stoppers run in reverse, and then the pane pool is shut
+    down. A lane that fails to start costs its own feature and never the
+    server: it is logged, and the rest carries on.
     """
     import asyncio
 
@@ -1809,6 +1871,9 @@ async def remote_lifespan(kit: RemoteKit) -> AsyncIterator[None]:
                 await asyncio.to_thread(stopper)
             except Exception:
                 log.warning("remote: a lane did not stop cleanly", exc_info=True)
+        pool, kit.pane_pool = kit.pane_pool, None
+        if pool is not None:
+            pool.shutdown(wait=False, cancel_futures=True)
 
 
 def build_app(
@@ -1820,6 +1885,7 @@ def build_app(
     tick: float = TICK_SECONDS,
     clock: Callable[[], float] = time.monotonic,
     port: int | None = None,
+    heartbeat: float = HEARTBEAT_SECONDS,
 ) -> _TokenGate:
     """The ASGI app. Everything real is behind ``sources``/``writes``; tests pass fakes."""
     # Here, not at module scope: `asq remote status`, `allow-write`, `revoke` and
@@ -2049,99 +2115,165 @@ def build_app(
         )
 
     async def stream(websocket: WebSocket) -> None:
+        """``/ws``: every tick, each frame that changed (SPEC §1.6).
+
+        In order: ``board``, ``fleet``, ``remote``, then ``needs_you`` and
+        ``action``, then the ``heartbeat`` (every ``heartbeat`` seconds, changed
+        or not, never on the first tick), then one ``pane`` frame per
+        subscription. Pane subscriptions are ``(project, label)``: the same
+        label in two projects is two agents, and a frame names the project its
+        subscription named.
+        """
         device = kit.kit_device(websocket)  # the gate refused a socket without one
         await websocket.accept()
         sid = device.sid
         loop = asyncio.get_running_loop()
-        subscribed: set[str] = set()
+        panes_wanted: dict[tuple[str, str], None] = {}
+        """``(project ref, label)`` per pane subscription, oldest first; ``""`` is the CURRENT
+        project. A dict for its order: frames follow the order subscriptions came in."""
         fleet_project: str | None = None
-        """``None`` = the CURRENT project (today's behaviour, unchanged); set by
-        a ``{subscribe_fleet: "<project>"}`` text frame to receive that project's
-        fleet frames instead — one active target per socket, like ``subscribe``
-        for panes. §4-D: the frame shape is unchanged, ``{type:"fleet", payload,
-        ts}``; only WHICH project's ``fleet ls`` payload fills it moves."""
-        last: dict[str, str] = {}
+        """``None`` = the CURRENT project; a ``{subscribe_fleet: "<project>"}`` text frame
+        picks another one's ``fleet`` frames (``""``/``null`` returns). The frame shape
+        does not change, only WHICH project's ``fleet ls`` payload fills it."""
+        board_project: str | None = None
+        """The same, for ``board`` frames and ``{subscribe_board: "<project>"}``."""
+        last: dict[tuple[str, ...], str] = {}
+        next_heartbeat = time.monotonic() + heartbeat
+        first_tick = True
 
-        async def close_unauthorized() -> None:
+        async def close_with(code: int) -> None:
             with contextlib.suppress(Exception):
-                await websocket.close(code=WS_CLOSE_UNAUTHORIZED)
+                await websocket.close(code=code)
 
-        def closer() -> None:
-            loop.call_soon_threadsafe(lambda: loop.create_task(close_unauthorized()))
+        def closer(code: int) -> None:
+            loop.call_soon_threadsafe(lambda: loop.create_task(close_with(code)))
 
-        async def send_frame(kind: str, payload: object, agent: str | None = None) -> None:
+        def revoked() -> None:
+            closer(WS_CLOSE_UNAUTHORIZED)
+
+        async def send_frame(
+            kind: str, payload: object, *, agent: str | None = None, project: str | None = None
+        ) -> None:
             frame: dict[str, object] = {"type": kind, "payload": payload, "ts": _stamp()}
             if agent is not None:
                 frame["agent"] = agent
+            if project is not None:
+                frame["project"] = project
             await websocket.send_text(json.dumps(frame))
 
-        async def push_if_changed(key: str, kind: str, payload: object, agent: str | None) -> None:
+        async def push_if_changed(
+            key: tuple[str, ...],
+            kind: str,
+            payload: object,
+            *,
+            agent: str | None = None,
+            project: str | None = None,
+        ) -> None:
             encoded = json.dumps(payload, sort_keys=True)
             if last.get(key) != encoded:
                 last[key] = encoded
-                await send_frame(kind, payload, agent)
+                await send_frame(kind, payload, agent=agent, project=project)
 
         async def tick_once() -> None:
+            nonlocal next_heartbeat, first_tick
+            board_ref = board_project
             try:
-                payload = await snapshot("board:", lambda: reads.board(None))
-                await push_if_changed("board", "board", payload, None)
+                payload = await snapshot(f"board:{board_ref or ''}", lambda: reads.board(board_ref))
+                await push_if_changed(("board", board_ref or ""), "board", payload)
             except Exception as exc:
                 log.debug("remote: board frame skipped: %s", exc)
-            fleet_key = f"fleet:{fleet_project or ''}"
+            fleet_ref = fleet_project
             try:
-                fleet_payload = await asyncio.to_thread(
-                    cache.cached_snapshot, fleet_key, lambda: reads.fleet(fleet_project)
-                )
-                await push_if_changed(fleet_key, "fleet", fleet_payload, None)
+                payload = await snapshot(f"fleet:{fleet_ref or ''}", lambda: reads.fleet(fleet_ref))
+                await push_if_changed(("fleet", fleet_ref or ""), "fleet", payload)
             except Exception as exc:
                 log.debug("remote: fleet frame skipped: %s", exc)
-            await push_if_changed("remote", "remote", runtime.remote_json(), None)
-            for agent in sorted(subscribed):
+            await push_if_changed(("remote",), "remote", runtime.remote_json())
+            for kind, payload in remote_needs.needs_ws_frames(kit):
+                await push_if_changed((kind,), kind, payload)
+            actions = kit.ledger.ledger_recent(device.id)
+            if actions:
+                await push_if_changed(("action",), "action", {"actions": actions})
+            now = time.monotonic()
+            if first_tick:
+                first_tick = False
+            elif now >= next_heartbeat:
+                next_heartbeat = now + heartbeat
+                scanned = remote_needs.needs_scanned_iso(kit)
+                await send_frame("heartbeat", {"needs_scanned_at": scanned})
+            for project, label in list(panes_wanted):
                 try:
                     # §4-L: history is a FETCH, live stays a stream — 0 keeps
                     # this frame exactly the §4-D shape it has always had.
-                    payload = await asyncio.to_thread(reads.panes, agent, None, 0)
+                    payload = await loop.run_in_executor(
+                        kit.kit_pane_pool(), reads.panes, label, project or None, 0
+                    )
                 except Exception as exc:
                     payload = {"rows": [], "width": 0, "height": 0, "error": str(exc)}
-                await push_if_changed(f"pane:{agent}", "pane", payload, agent)
+                await push_if_changed(
+                    ("pane", project, label), "pane", payload, agent=label, project=project or None
+                )
 
         async def reader() -> None:
+            nonlocal fleet_project, board_project
             while True:
-                text = await websocket.receive_text()
+                received = await websocket.receive()
+                if received["type"] == "websocket.disconnect":
+                    raise WebSocketDisconnect(received.get("code", 1000))
+                text = received.get("text")
+                if not isinstance(text, str) or len(text) > WS_CLIENT_MESSAGE_MAX:
+                    continue  # bytes, or longer than any message a client sends: ignored
                 try:
                     message = json.loads(text)
                 except ValueError:
                     continue
                 if not isinstance(message, dict):
                     continue
-                target = message.get("subscribe")
-                if isinstance(target, str) and target:
-                    subscribed.add(target)
-                    last.pop(f"pane:{target}", None)
-                target = message.get("unsubscribe")
-                if isinstance(target, str):
-                    subscribed.discard(target)
-                target = message.get("subscribe_fleet")
-                if isinstance(target, str):
-                    nonlocal fleet_project
+                ref = message.get("project")
+                project = ref if isinstance(ref, str) else ""
+                label = message.get("subscribe")
+                if isinstance(label, str) and label:
+                    if (project, label) in panes_wanted or len(
+                        panes_wanted
+                    ) < WS_PANE_SUBSCRIPTIONS_MAX:
+                        panes_wanted[(project, label)] = None
+                        last.pop(("pane", project, label), None)
+                    else:
+                        refusal = _error_body(
+                            "too_many_subscriptions",
+                            f"one socket watches at most {WS_PANE_SUBSCRIPTIONS_MAX} panes "
+                            "— unsubscribe one first",
+                        )
+                        await send_frame("error", refusal)
+                label = message.get("unsubscribe")
+                if isinstance(label, str):
+                    panes_wanted.pop((project, label), None)
+                target = message.get("subscribe_fleet", False)
+                if target is None or isinstance(target, str):
                     fleet_project = target or None
-                    last.pop(f"fleet:{fleet_project or ''}", None)
+                    last.pop(("fleet", fleet_project or ""), None)
+                target = message.get("subscribe_board", False)
+                if target is None or isinstance(target, str):
+                    board_project = target or None
+                    last.pop(("board", board_project or ""), None)
 
-        runtime.register_socket(sid, closer)
+        runtime.register_socket(sid, revoked)
+        kit.kit_socket_opened(device.id, closer)
         reading = asyncio.ensure_future(reader())
         try:
             while not reading.done():
                 if runtime.device_for_cookie(sid) is None:
-                    await close_unauthorized()
+                    await close_with(WS_CLOSE_UNAUTHORIZED)
                     break
                 await tick_once()
                 await asyncio.wait([reading], timeout=tick)
         except WebSocketDisconnect:
             pass
         except Exception as exc:
-            log.debug("remote: stream for %s ended: %s", sid, exc)
+            log.debug("remote: stream for %s ended: %s", device.id, exc)
         finally:
-            runtime.unregister_socket(sid, closer)
+            kit.kit_socket_closed(device.id, closer)
+            runtime.unregister_socket(sid, revoked)
             reading.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await reading

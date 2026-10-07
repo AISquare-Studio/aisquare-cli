@@ -7,6 +7,10 @@ a lane that lands later plugs into exactly these calls.
 
 from __future__ import annotations
 
+import contextlib
+import dataclasses
+import json
+import threading
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -508,3 +512,152 @@ def test_a_needs_item_serializes_to_the_wire_shape_without_push_after() -> None:
         "since": "2026-10-07T10:12:03+00:00",
         "actions": ["answer", "open", "dismiss"],
     }
+
+
+# --- the stream's seams: needs, actions, heartbeat ----------------------------------------
+
+
+def _frames(ws: Any, count: int) -> list[dict[str, Any]]:
+    return [json.loads(ws.receive_text()) for _ in range(count)]
+
+
+def _until(ws: Any, kind: str, *, limit: int = 60) -> dict[str, Any]:
+    for _ in range(limit):
+        frame: dict[str, Any] = json.loads(ws.receive_text())
+        if frame["type"] == kind:
+            return frame
+    raise AssertionError(f"no {kind} frame in {limit}")
+
+
+def _stream_app(runtime: Runtime, tmp_path: Path, **kw: Any) -> tuple[Any, Any]:
+    app = build_app(runtime, sources=_sources(), dist_dir=tmp_path, tick=kw.pop("tick", 0.02), **kw)
+    return app, _unlocked(app, runtime)
+
+
+def test_the_heartbeat_is_never_on_the_first_tick(runtime: Runtime, tmp_path: Path) -> None:
+    """``heartbeat=0`` would send one every tick: the first still carries none."""
+    _app, client = _stream_app(runtime, tmp_path, heartbeat=0)
+    with client.websocket_connect(f"{base(runtime)}/ws") as ws:
+        first = _frames(ws, 4)
+    assert [frame["type"] for frame in first] == ["board", "fleet", "remote", "heartbeat"]
+    assert first[3]["payload"] == {"needs_scanned_at": None}
+
+
+def test_the_heartbeat_arrives_unchanged_or_not_and_carries_the_last_scan(
+    runtime: Runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(remote_needs, "needs_scanned_iso", lambda kit: "2026-10-07T10:12:05+00:00")
+    _app, client = _stream_app(runtime, tmp_path, heartbeat=0.05)
+    with client.websocket_connect(f"{base(runtime)}/ws") as ws:
+        assert [frame["type"] for frame in _frames(ws, 3)] == ["board", "fleet", "remote"]
+        beats = [_until(ws, "heartbeat"), _until(ws, "heartbeat")]
+    assert all(
+        beat["payload"] == {"needs_scanned_at": "2026-10-07T10:12:05+00:00"} for beat in beats
+    )
+
+
+def test_needs_frames_come_after_board_fleet_and_remote(
+    runtime: Runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        remote_needs, "needs_ws_frames", lambda kit: [("needs_you", {"items": [{"id": "ny_1"}]})]
+    )
+    _app, client = _stream_app(runtime, tmp_path)
+    with client.websocket_connect(f"{base(runtime)}/ws") as ws:
+        first = _frames(ws, 4)
+    assert [frame["type"] for frame in first] == ["board", "fleet", "remote", "needs_you"]
+    assert first[3]["payload"] == {"items": [{"id": "ny_1"}]}
+
+
+def test_the_action_frame_shows_this_devices_ledger_only_when_it_has_entries(
+    runtime: Runtime, tmp_path: Path
+) -> None:
+    app, client = _stream_app(runtime, tmp_path, heartbeat=0)
+    ledger = RecordingLedger()
+    app.kit.ledger = ledger
+    device_id = client.cookies[remote_server.COOKIE]
+    entry: LedgerEntry = {
+        "request_id": "c0ffee",
+        "endpoint": "agent/restart",
+        "status": 200,
+        "body": {"started": "agt_2"},
+        "at": "2026-10-07T10:12:05+00:00",
+    }
+    with client.websocket_connect(f"{base(runtime)}/ws") as ws:
+        quiet = _frames(ws, 4)
+        assert "action" not in [frame["type"] for frame in quiet], "an empty ledger sends nothing"
+        ledger.recent[device_id] = [entry]
+        assert _until(ws, "action")["payload"] == {"actions": [entry]}
+        ledger.recent["dev_someone_else"] = [{**entry, "request_id": "theirs"}]
+        ledger.recent[device_id] = [{**entry, "request_id": "next"}, entry]
+        actions = _until(ws, "action")["payload"]["actions"]
+    assert [action["request_id"] for action in actions] == ["next", "c0ffee"]
+
+
+# --- sockets per device, and the pane pool ------------------------------------------------
+
+
+def test_a_fifth_socket_from_one_device_closes_its_oldest_with_4409(
+    runtime: Runtime, tmp_path: Path
+) -> None:
+    """A phone that slept left a half-open socket behind; the woken phone must get in.
+
+    ``heartbeat=0``: a live socket gets a frame every tick, so "still open" is observable.
+    """
+    app, client = _stream_app(runtime, tmp_path, heartbeat=0)
+    device_id = client.cookies[remote_server.COOKIE]
+    with contextlib.ExitStack() as stack:
+        sockets = []
+        for _ in range(remote_server.WS_SOCKETS_PER_DEVICE + 1):
+            ws = stack.enter_context(client.websocket_connect(f"{base(runtime)}/ws"))
+            _until(ws, "remote")  # registered: it has ticked
+            sockets.append(ws)
+        closed = None
+        for _ in range(1000):
+            message = sockets[0].receive()
+            if message["type"] == "websocket.close":
+                closed = message
+                break
+        assert closed is not None and closed["code"] == remote_server.WS_CLOSE_REPLACED
+        assert len(app.kit.sockets[device_id]) == remote_server.WS_SOCKETS_PER_DEVICE
+        for live in sockets[1:]:
+            _until(live, "heartbeat")  # the four newest are untouched
+    assert device_id not in app.kit.sockets, "every socket that ended was forgotten"
+
+
+def test_another_devices_sockets_are_not_counted_against_this_one(
+    runtime: Runtime, tmp_path: Path
+) -> None:
+    app, client = _stream_app(runtime, tmp_path)
+    other = make_client(app)
+    unlock(other, runtime)
+    with contextlib.ExitStack() as stack:
+        for _ in range(remote_server.WS_SOCKETS_PER_DEVICE):
+            _until(stack.enter_context(client.websocket_connect(f"{base(runtime)}/ws")), "remote")
+        theirs = stack.enter_context(other.websocket_connect(f"{base(runtime)}/ws"))
+        _until(theirs, "remote")
+        assert sorted(len(live) for live in app.kit.sockets.values()) == [1, 4]
+
+
+def test_pane_captures_run_on_the_pane_pool_and_the_lifespan_shuts_it(
+    runtime: Runtime, tmp_path: Path
+) -> None:
+    threads: list[str] = []
+
+    def panes(agent: str, project: str | None, history: int) -> dict[str, object]:
+        threads.append(threading.current_thread().name)
+        return {"rows": [agent], "width": 1, "height": 1}
+
+    sources = dataclasses.replace(_sources(), panes=panes)
+    app = build_app(runtime, sources=sources, dist_dir=tmp_path, tick=0.02)
+    with make_client(app) as client:
+        unlock(client, runtime)
+        with client.websocket_connect(f"{base(runtime)}/ws") as ws:
+            ws.send_text(json.dumps({"subscribe": "coder-1"}))
+            assert _until(ws, "pane")["payload"]["rows"] == ["coder-1"]
+        pool = app.kit.pane_pool
+        assert pool is not None
+    assert threads and all(name.startswith("asq-remote-pane") for name in threads), threads
+    assert app.kit.pane_pool is None
+    with pytest.raises(RuntimeError):
+        pool.submit(print)  # shut down with the server

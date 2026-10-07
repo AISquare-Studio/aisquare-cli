@@ -10,6 +10,8 @@ the other project's snapshot within the same tick.
 
 from __future__ import annotations
 
+import dataclasses
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -353,3 +355,129 @@ def test_claiming_another_projects_task_needs_no_project(
     assert isinstance(claimed, dict) and claimed["project_id"] == other.id
     assert summary == f"claimed {task.id}"
     assert "another project's task" in _event_texts(remote_board_payload(other.id))
+
+
+# --- the socket: project panes, subscribe_board, caps ---------------------------------------
+
+
+class Panes:
+    """Fake captures that say whose pane they are, and remember who asked."""
+
+    def __init__(self) -> None:
+        self.asked: list[tuple[str, str | None]] = []
+
+    def __call__(self, agent: str, project: str | None, history: int) -> dict[str, object]:
+        self.asked.append((agent, project))
+        return {"rows": [f"{project}:{agent}"], "width": 1, "height": 1}
+
+
+def _socket_client(runtime: Runtime, tmp_path: Path, reads: Reads, panes: Panes) -> Any:
+    sources = dataclasses.replace(reads.sources(), panes=panes)
+    app = build_app(runtime, sources=sources, dist_dir=tmp_path, tick=0.02)
+    client = make_client(app)
+    assert unlock(client, runtime).status_code == 200
+    return client
+
+
+def _until(ws: Any, match: Any, *, limit: int = 100) -> dict[str, Any]:
+    for _ in range(limit):
+        frame: dict[str, Any] = json.loads(ws.receive_text())
+        if match(frame):
+            return frame
+    raise AssertionError(f"no matching frame in {limit}")
+
+
+def _pane(agent: str, project: str | None = None) -> Any:
+    return lambda f: f["type"] == "pane" and f["agent"] == agent and f.get("project") == project
+
+
+def test_a_pane_subscription_reads_the_pane_of_the_project_it_names(
+    runtime: Runtime, reads: Reads, tmp_path: Path
+) -> None:
+    """The finding: a phone watching project B's coder-1 was streamed project A's coder-1."""
+    panes = Panes()
+    client = _socket_client(runtime, tmp_path, reads, panes)
+    with client.websocket_connect(f"{base(runtime)}/ws") as ws:
+        ws.send_text(json.dumps({"subscribe": "coder-1", "project": "prj_b"}))
+        theirs = _until(ws, _pane("coder-1", "prj_b"))
+        ws.send_text(json.dumps({"subscribe": "coder-1"}))
+        ours = _until(ws, _pane("coder-1"))
+    assert theirs["payload"]["rows"] == ["prj_b:coder-1"]
+    assert set(theirs) == {"type", "agent", "project", "payload", "ts"}
+    assert ours["payload"]["rows"] == ["None:coder-1"]
+    assert set(ours) == {"type", "agent", "payload", "ts"}, "no project named, no project key"
+    assert {("coder-1", "prj_b"), ("coder-1", None)} <= set(panes.asked)
+
+
+def test_unsubscribing_one_project_leaves_the_same_label_in_another(
+    runtime: Runtime, reads: Reads, tmp_path: Path
+) -> None:
+    panes = Panes()
+    client = _socket_client(runtime, tmp_path, reads, panes)
+    with client.websocket_connect(f"{base(runtime)}/ws") as ws:
+        ws.send_text(json.dumps({"subscribe": "coder-1", "project": "prj_a"}))
+        ws.send_text(json.dumps({"subscribe": "coder-1", "project": "prj_b"}))
+        _until(ws, _pane("coder-1", "prj_b"))
+        ws.send_text(json.dumps({"unsubscribe": "coder-1", "project": "prj_a"}))
+        ws.send_text(json.dumps({"subscribe": "coder-2", "project": "prj_a"}))
+        _until(ws, _pane("coder-2", "prj_a"))
+        panes.asked.clear()
+        ws.send_text(json.dumps({"subscribe": "coder-3"}))
+        _until(ws, _pane("coder-3"))
+    assert ("coder-1", "prj_a") not in panes.asked, "unsubscribed: no longer captured"
+    assert ("coder-1", "prj_b") in panes.asked
+
+
+def test_subscribe_board_picks_which_projects_board_frames_arrive(
+    runtime: Runtime, reads: Reads, tmp_path: Path
+) -> None:
+    client = _socket_client(runtime, tmp_path, reads, Panes())
+    is_board = lambda f: f["type"] == "board"  # noqa: E731
+    with client.websocket_connect(f"{base(runtime)}/ws") as ws:
+        assert _until(ws, is_board)["payload"] == {"kind": "board", "project": None}
+        ws.send_text(json.dumps({"subscribe_board": "prj_b"}))
+        assert _until(ws, is_board)["payload"] == {"kind": "board", "project": "prj_b"}
+        ws.send_text(json.dumps({"subscribe_board": None}))
+        assert _until(ws, is_board)["payload"] == {"kind": "board", "project": None}, (
+            "back to the current board, re-sent although it did not change"
+        )
+        ws.send_text(json.dumps({"subscribe_fleet": "prj_b"}))
+        assert _until(ws, lambda f: f["type"] == "fleet")["payload"]["project"] == "prj_b"
+        ws.send_text(json.dumps({"subscribe_fleet": None}))
+        assert _until(ws, lambda f: f["type"] == "fleet")["payload"]["project"] is None
+
+
+def test_a_ninth_pane_subscription_is_refused_with_an_error_frame(
+    runtime: Runtime, reads: Reads, tmp_path: Path
+) -> None:
+    panes = Panes()
+    client = _socket_client(runtime, tmp_path, reads, panes)
+    cap = remote_server.WS_PANE_SUBSCRIPTIONS_MAX
+    with client.websocket_connect(f"{base(runtime)}/ws") as ws:
+        for n in range(cap):
+            ws.send_text(json.dumps({"subscribe": f"coder-{n}"}))
+        ws.send_text(json.dumps({"subscribe": "coder-0"}))  # already one: no new slot
+        ws.send_text(json.dumps({"subscribe": f"coder-{cap}"}))
+        refused = _until(ws, lambda f: f["type"] == "error")
+        ws.send_text(json.dumps({"unsubscribe": "coder-0"}))
+        ws.send_text(json.dumps({"subscribe": f"coder-{cap}"}))
+        _until(ws, _pane(f"coder-{cap}"))
+    assert refused["payload"]["error"] == "too_many_subscriptions"
+    assert str(cap) in refused["payload"]["message"]
+
+
+def test_a_client_message_over_4096_characters_is_ignored(
+    runtime: Runtime, reads: Reads, tmp_path: Path
+) -> None:
+    panes = Panes()
+    client = _socket_client(runtime, tmp_path, reads, panes)
+    edge = json.dumps({"subscribe": "edge"})
+    edge = edge[:-1] + " " * (remote_server.WS_CLIENT_MESSAGE_MAX - len(edge)) + "}"
+    assert len(edge) == remote_server.WS_CLIENT_MESSAGE_MAX
+    with client.websocket_connect(f"{base(runtime)}/ws") as ws:
+        ws.send_text(json.dumps({"subscribe": "x" * remote_server.WS_CLIENT_MESSAGE_MAX}))
+        ws.send_bytes(json.dumps({"subscribe": "bytes"}).encode())
+        ws.send_text(edge)
+        first = _until(ws, lambda f: f["type"] == "pane")
+    assert first["agent"] == "edge", "the long message and the binary one were never read"
+    assert all(agent == "edge" for agent, _project in panes.asked)

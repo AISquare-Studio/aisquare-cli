@@ -281,6 +281,12 @@ SEND_KEYS_KEYS_MAX = 32
 EXIT_KEY_REPEAT_SECONDS = 3.0
 """A second Ctrl-C (or Ctrl-D) to one agent this soon exits Claude Code: refused unless meant."""
 EXIT_KEYS = frozenset({"C-c", "C-d"})
+SEND_KEYS_LOCK_WAIT_SECONDS = 2.0
+"""How long a send-keys waits for its agent's action lock (:func:`remote_agent_lock`). Keys
+tapped in a burst, or sent again together after a reconnect, wait out the milliseconds each
+other's tmux calls take; an action holds the lock for seconds (an interrupt's wait for the
+prompt, a stop's grace, a restart), and keys that would land in the middle of it are 409
+``busy`` instead."""
 NOTE_TEXT_MAX = 8_000
 NOTE_KINDS = frozenset({"note", "decision", "question", "result"})
 """The kinds a phone may post. The others (``attention``, ``limited``, ``agent_exited``,
@@ -1505,9 +1511,12 @@ _agent_locks_guard = threading.Lock()
 def remote_agent_lock(project_id: str, label: str) -> threading.Lock:
     """The one lock for every action on one agent, process-wide.
 
-    Callers take it without blocking and answer 409 ``busy`` when it is held: a
-    second stop, restart or quick answer arriving while the first still runs
-    would otherwise act on the state the first is in the middle of changing.
+    The actions and the quick answers take it without blocking and answer 409
+    ``busy`` when it is held: a second stop, restart or quick answer arriving
+    while the first still runs would otherwise act on the state the first is in
+    the middle of changing. Keys wait for it a moment first
+    (:data:`SEND_KEYS_LOCK_WAIT_SECONDS`), since the pad sends taps without
+    waiting for each other's answers.
     """
     with _agent_locks_guard:
         return _agent_locks.setdefault((project_id, label), threading.Lock())
@@ -1692,6 +1701,30 @@ def _remote_pane_outlived(server: TmuxServer, agent: FleetAgent) -> bool:
     except TmuxError:
         started = None
     return fleet_service._outlived(agent, started)
+
+
+@contextlib.contextmanager
+def _remote_keys_turn(target: ProjectInfo, label: str) -> Iterator[FleetAgent]:
+    """Hold the agent's action lock while keys go to its pane; the row, read under it.
+
+    :func:`remote_agent_lock` is the one lock for every action on one agent, and keys
+    typed while an action is half done land in the middle of it: in an Interrupt &
+    tell between its Escape and its paste, which then submits them and the tell as one
+    message, or between a stop's ``/exit`` and its Enter. So keys wait for their turn,
+    up to :data:`SEND_KEYS_LOCK_WAIT_SECONDS`, and are 409 ``busy`` after that, as a
+    second action is. A label no row holds makes no lock: the registry is process-wide
+    and never shrinks, and a label is whatever a body says.
+    """
+    _remote_live_row(target, label)
+    lock = remote_agent_lock(target.id, label)
+    if not lock.acquire(timeout=SEND_KEYS_LOCK_WAIT_SECONDS):
+        raise RequestError(
+            409, "busy", f"another action on {label} is still running — nothing was sent"
+        )
+    try:
+        yield _remote_live_row(target, label)
+    finally:
+        lock.release()
 
 
 def _live_panes(label: str, project: str | None = None, history: int = 0) -> dict[str, object]:
@@ -2203,9 +2236,10 @@ def live_writes() -> Writes:
         (``text`` went first, so "Esc, then type" arrived as "type, then Esc"), the
         pane, and the double Ctrl-C. The pane must be running the agent, and be the
         row's own: after a tmux restart the row's pane id names another agent's pane
-        (409 ``not_agent``, as the actions and quick answers refuse it). Once a byte
-        may have reached the pane, a failure is still audited: the trail exists for
-        what a device did to a live agent, finished or not.
+        (409 ``not_agent``, as the actions and quick answers refuse it). The pane is
+        judged and typed into under the agent's action lock (:func:`_remote_keys_turn`).
+        Once a byte may have reached the pane, a failure is still audited: the trail
+        exists for what a device did to a live agent, finished or not.
         """
         from aisquare.services import fleet as fleet_service
 
@@ -2228,36 +2262,36 @@ def live_writes() -> Writes:
         if not text and not keys and not enter:
             raise RequestError(400, "invalid", "give 'text', 'keys' or 'enter'")
         target = _resolve_project(_optional_ref(body, "project"))
-        agent = _remote_live_row(target, label)
-        server = fleet_service.server_for(agent.tmux_socket)
-        if not fleet_service._pane_is_the_agent(server, agent.pane_id):
-            raise RequestError(
-                409, "not_agent", f"{label}'s pane is not running the agent — nothing was sent"
-            )
-        if _remote_pane_outlived(server, agent):
-            gone = PANE_OUTLIVED.format(label=label)
-            raise RequestError(409, "not_agent", f"{gone} — nothing was sent")
-        exits = sum(key in EXIT_KEYS for key in keys)
-        confirmed = body.get("confirm_exit") is True
-        if exits and not exit_keys.exit_keys_allowed(
-            (target.id, label), exits, confirmed=confirmed
-        ):
-            raise RequestError(409, "double_press", DOUBLE_PRESS)
         summary = (
             f"{label}@{target.id} text={len(text or '')}ch keys={_audit_keys(keys)} enter={enter}"
         )
-        try:
-            if text:
-                server.send_literal(agent.pane_id, text)
-            if keys:
-                server.send_keys(agent.pane_id, *keys)
-            if enter:
-                server.send_keys(agent.pane_id, "Enter")
-        except Exception as exc:
-            log.warning("remote: send-keys to %s failed: %s", label, exc)
-            raise RequestError(
-                400, "write_failed", f"{label}: {exc}", audit=f"{summary} failed"
-            ) from exc
+        with _remote_keys_turn(target, label) as agent:
+            server = fleet_service.server_for(agent.tmux_socket)
+            if not fleet_service._pane_is_the_agent(server, agent.pane_id):
+                raise RequestError(
+                    409, "not_agent", f"{label}'s pane is not running the agent — nothing was sent"
+                )
+            if _remote_pane_outlived(server, agent):
+                gone = PANE_OUTLIVED.format(label=label)
+                raise RequestError(409, "not_agent", f"{gone} — nothing was sent")
+            exits = sum(key in EXIT_KEYS for key in keys)
+            confirmed = body.get("confirm_exit") is True
+            if exits and not exit_keys.exit_keys_allowed(
+                (target.id, label), exits, confirmed=confirmed
+            ):
+                raise RequestError(409, "double_press", DOUBLE_PRESS)
+            try:
+                if text:
+                    server.send_literal(agent.pane_id, text)
+                if keys:
+                    server.send_keys(agent.pane_id, *keys)
+                if enter:
+                    server.send_keys(agent.pane_id, "Enter")
+            except Exception as exc:
+                log.warning("remote: send-keys to %s failed: %s", label, exc)
+                raise RequestError(
+                    400, "write_failed", f"{label}: {exc}", audit=f"{summary} failed"
+                ) from exc
         return {"agent": label, "project": target.id, "sent": True}, summary
 
     return Writes(

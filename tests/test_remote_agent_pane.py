@@ -1,4 +1,5 @@
-"""send-keys and the live pane reach only the row's own pane, and type only into the agent.
+"""send-keys and the live pane reach only the row's own pane, and type only into the agent,
+never in the middle of another action on it.
 
 A row that outlived its tmux server (a reboot, a hand-run ``tmux -L asq
 kill-server``) stays live, and the next server numbers its panes from ``%0``
@@ -7,6 +8,9 @@ The listing reads such a row ``lost``, the TUI shows and types into no pane for
 it, and the agent actions and quick answers refuse it (FLEET-1). The phone's live
 view streamed that agent's screen under the row's label, and a key from the pad
 answered its prompt (review of #243, round 2).
+
+And keys take the agent's action lock, as every action and quick answer does: typed
+while an Interrupt & tell waited for the prompt, they were submitted with the tell.
 """
 
 from __future__ import annotations
@@ -16,6 +20,7 @@ import itertools
 import json
 import os
 import shutil
+import threading
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -32,11 +37,13 @@ from aisquare.models import FleetAgent, ProjectInfo
 from aisquare.services import fleet as fleet_service
 from aisquare.services import remote_server
 from aisquare.services.remote_server import (
+    NoSuchAgent,
     RequestError,
     Sources,
     _live_panes,
     build_app,
     live_writes,
+    remote_agent_lock,
 )
 from tests.remote_kit_helpers import base, frame_within, make_client, make_runtime, unlock
 
@@ -299,3 +306,73 @@ def test_a_real_tmux_server_started_after_the_row_never_answers_for_it(
                 TmuxServer(name).kill_server()
             with contextlib.suppress(OSError):
                 TmuxServer(name).socket_path().unlink()
+
+
+# --- one action at a time on one agent: keys too -------------------------------------------
+
+
+def test_keys_are_refused_busy_while_an_action_on_the_agent_runs(
+    project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An Interrupt & tell holds the agent's lock for seconds after its Escape, waiting for
+    the prompt to come back. Keys typed meanwhile went into the pane, and the tell's paste
+    and Enter then submitted them and the tell as one message; text between a stop's
+    ``/exit`` and its Enter made ``/exitfoo``."""
+    tmux = _serving(monkeypatch, Tmux(OLDER))
+    monkeypatch.setattr(remote_server, "SEND_KEYS_LOCK_WAIT_SECONDS", 0.05, raising=False)
+    action = remote_agent_lock(project.id, "coder-1")
+    assert action.acquire(blocking=False)
+    try:
+        with pytest.raises(RequestError) as refused:
+            live_writes().handlers["send-keys"]({"agent": "coder-1", "text": "yes"})
+    finally:
+        action.release()
+    assert (refused.value.status, refused.value.error) == (409, "busy")
+    assert refused.value.message == "another action on coder-1 is still running — nothing was sent"
+    assert tmux.sent == []
+
+
+def test_keys_hold_the_agents_lock_while_they_are_typed(
+    project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """So an action that arrives meanwhile is 409 ``busy``, as behind any other action."""
+    held: list[bool] = []
+
+    class Watched(Tmux):
+        def send_literal(self, pane_id: str, text: str) -> None:
+            held.append(remote_agent_lock(project.id, "coder-1").locked())
+            super().send_literal(pane_id, text)
+
+        def send_keys(self, pane_id: str, *keys: str) -> None:
+            held.append(remote_agent_lock(project.id, "coder-1").locked())
+            super().send_keys(pane_id, *keys)
+
+    _serving(monkeypatch, Watched(OLDER))
+    live_writes().handlers["send-keys"]({"agent": "coder-1", "text": "yes", "enter": True})
+    assert held == [True, True]
+    assert not remote_agent_lock(project.id, "coder-1").locked(), "and let go of after"
+
+
+def test_keys_sent_together_take_turns_instead_of_refusing_each_other(
+    project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The pad posts each tap without waiting for the last answer, and a reconnect sends
+    every write it lost again at once: a key waits out the few milliseconds another key
+    holds the lock, and is never refused for it."""
+    tmux = _serving(monkeypatch, Tmux(OLDER))
+    other_key = remote_agent_lock(project.id, "coder-1")
+    assert other_key.acquire(blocking=False)
+    threading.Timer(0.2, other_key.release).start()
+    result, _summary = live_writes().handlers["send-keys"]({"agent": "coder-1", "keys": ["Up"]})
+    assert result["sent"] is True and tmux.sent == [("keys", "%2", "Up")]
+
+
+def test_a_label_no_row_holds_makes_no_lock(
+    project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The lock registry is process-wide and never shrinks, and a label is whatever a body
+    says: only a label that names a row gets a lock."""
+    _serving(monkeypatch, Tmux(OLDER))
+    with pytest.raises(NoSuchAgent):
+        live_writes().handlers["send-keys"]({"agent": "ghost", "keys": ["Up"]})
+    assert (project.id, "ghost") not in remote_server._agent_locks

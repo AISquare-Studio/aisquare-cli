@@ -49,7 +49,7 @@ To keep the `settings.json` hooks instead, run `/plugin uninstall aisquare@aisqu
 
 - macOS, Linux and WSL. On native Windows the hooks need Git Bash's `sh`; without it, keep the `settings.json` route (`aisquare agents connect claude-code`).
 - Plugins belong to one Claude Code config directory. One installed in `~/.claude` does not reach the fleet's account directories (`~/.claude-c1` and so on), which keep their `settings.json` hooks.
-- Claude Code does not update third-party marketplaces on its own by default. After an aisquare release, run `/plugin marketplace update aisquare-cli`, then `/plugin update aisquare@aisquare-cli`. You can also turn on auto-update for the marketplace under `/plugin`.
+- Claude Code does not update third-party marketplaces on its own by default. After an aisquare release, run `claude plugin marketplace update aisquare-cli` and then `claude plugin update aisquare@aisquare-cli` from a shell, and restart Claude Code. To have it update on its own instead, open `/plugin`, go to the Marketplaces tab, select `aisquare-cli` and choose Enable auto-update.
 - The marketplace is this repository, so adding it clones the repository.
 
 ## Removing it

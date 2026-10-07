@@ -847,6 +847,21 @@ def test_an_unlock_the_browser_did_not_keep_says_so_and_keeps_the_route(
     assert boot_report["unlockKept"] == {"hash": "#/p/prj_x/board", "form": False}
 
 
+def test_an_unlock_at_a_link_that_moved_says_so_instead_of_not_found(
+    boot_report: dict[str, Any],
+) -> None:
+    """After ``regenerate-password --new-link``, or past auto-off, the machine answers the old
+    link's unlock 404, and the page put the bare code ``not_found`` under the button: nothing
+    said the link changed, or to open the new one. A wrong passphrase is the control."""
+    moved = boot_report["unlockMoved"]
+    assert not moved["form"]
+    assert moved["heading"] == "Remote is off on the machine, or the link changed"
+    assert "open the link the machine shows now" in moved["main"]
+    assert "not_found" not in moved["main"]
+    wrong = boot_report["unlockWrong"]
+    assert wrong["form"] and wrong["said"] == "That is not the passphrase."
+
+
 def test_a_write_whose_request_was_lost_goes_out_again_once_on_a_new_socket(
     boot_report: dict[str, Any],
 ) -> None:

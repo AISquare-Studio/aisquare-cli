@@ -1337,7 +1337,8 @@ function offScreen(kind) {
 
 const OFF_SCREENS = {
   off: ["Remote is off on the machine", "Turn it on again in the R panel of aisquare ui, or with aisquare remote serve, then retry."],
-  gone: [OFF_OR_MOVED, "If ngrok restarted without a static domain, open the new link the machine shows."],
+  gone: [OFF_OR_MOVED, "Turn it on again, or open the link the machine shows now: the link changes when ngrok " +
+    "restarts without a static domain, and with regenerate-password --new-link."],
   link: ["This link is no longer valid", "Open the link the machine shows now."],
   origin: ["Open this page from the link the machine shows", "This copy of the page came from somewhere else."],
 };
@@ -1453,6 +1454,9 @@ VIEWS.unlock = (route, main) => {
     }
     if (res.status === 401) said.textContent = "That is not the passphrase.";
     else if (res.status === 429) wait(res.retryAfter || 60, plainText(res.message) || "Too many tries");
+    // The token is wrong (a new link was made) or auto-off passed: no passphrase helps,
+    // and the bare "not_found" under the button never said to open the link anew.
+    else if (res.status === 404) offScreen("gone");
     else said.textContent = failText(res);
     return undefined;
   });

@@ -425,6 +425,26 @@ async function unlockKept() {
   return { hash: page.location.hash, form: !!unlockForm(page) };
 }
 
+/* The passphrase typed at a link the machine answers `status` for unlocking: 404 once a
+ * new link was made (regenerate-password --new-link) or auto-off passed, as everything
+ * under a token it no longer has is; 401 for a wrong passphrase, the control. */
+async function unlockAnswered(status, json) {
+  const page = bootPage("#/", signedOut(() => ({ status, json })));
+  await settle();
+  const { input, form } = unlockForm(page);
+  input.value = PASSPHRASE;
+  form.dispatch("submit");
+  await settle();
+  const after = unlockForm(page);
+  const heading = find(page.main(), (node) => node.tagName === "H2");
+  return {
+    form: !!after,
+    said: after ? find(after.form, (node) => node.className === "status").textContent : null,
+    heading: heading ? heading.textContent : null,
+    main: page.main().textContent,
+  };
+}
+
 /* The agent view, live, with its socket open: where Send is. */
 async function agentView(extra) {
   const page = bootPage("#/p/" + PROJECT + "/a/coder-1/live", signedIn(extra));
@@ -754,6 +774,8 @@ async function main() {
     reloadAtUnlock: await openedSignedOut("#/unlock"),
     unlockNotKept: await unlockNotKept(),
     unlockKept: await unlockKept(),
+    unlockMoved: await unlockAnswered(404, { error: "not_found" }),
+    unlockWrong: await unlockAnswered(401, { error: "wrong_password", message: "wrong password" }),
     lostWrite: await lostWrite(),
     lostTwice: await lostTwice(),
     lostKeyLongAgo: await lostKeyLongAgo(),

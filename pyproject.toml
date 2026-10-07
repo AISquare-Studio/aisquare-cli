@@ -13,12 +13,20 @@ license = "MIT"
 license-files = ["LICENSE"]
 keywords = ["cli", "ai", "agents", "memory", "context"]
 classifiers = [
-  "Development Status :: 2 - Pre-Alpha",
+  "Development Status :: 4 - Beta",
   "Environment :: Console",
+  "Intended Audience :: Developers",
+  "Operating System :: MacOS",
+  "Operating System :: POSIX :: Linux",
+  # The CLI and memory run natively, and CI tests windows-latest. The fleet UI
+  # needs tmux, so on Windows it runs inside WSL2.
+  "Operating System :: Microsoft :: Windows",
   "Programming Language :: Python :: 3 :: Only",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+  "Topic :: Software Development",
   "Typing :: Typed",
 ]
 dependencies = [
@@ -132,6 +140,7 @@ asq = "aisquare.cli.app:main"
 Homepage = "https://aisquare.studio"
 Repository = "https://github.com/AISquare-Studio/aisquare-cli"
 Issues = "https://github.com/AISquare-Studio/aisquare-cli/issues"
+Changelog = "https://github.com/AISquare-Studio/aisquare-cli/blob/main/CHANGELOG.md"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/aisquare"]

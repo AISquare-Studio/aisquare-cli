@@ -35,6 +35,7 @@ from aisquare.core.tmux import TmuxError
 from aisquare.services import fleet as fleet_service
 from aisquare.services import remote_push, remote_server
 from aisquare.services.remote_server import (
+    AUTO_OFF_CHECK_SECONDS,
     COOKIE,
     DEVICE_ID,
     EXIT_KEY_REPEAT_SECONDS,
@@ -981,18 +982,40 @@ def test_serves_auto_off_fires_at_the_deadline_and_rearms_after_an_extend(
     FakeTimer.made = []
     off: list[str] = []
     timer = _AutoOffTimer(runtime, lambda: off.append("off"), timer=FakeTimer)
-    runtime.set_auto_off(clock.now + timedelta(minutes=5))
+    runtime.set_auto_off(clock.now + timedelta(seconds=20))
     timer.auto_off_arm()
     (first,) = FakeTimer.made
-    assert first.started and first.daemon and first.delay == 300
-    runtime.extend_auto_off(clock.now)  # a phone: now 65 minutes away
-    clock.advance(minutes=5)
+    assert first.started and first.daemon and first.delay == 20
+    runtime.extend_auto_off(clock.now)  # a phone: now an hour and 20 s away
+    clock.advance(seconds=20)
     first.fire()
     assert off == [] and not timer.fired, "the deadline moved: wait for the new one"
     second = FakeTimer.made[-1]
-    assert second is not first and second.delay == 60 * 60
+    assert second is not first and second.delay == AUTO_OFF_CHECK_SECONDS
     clock.advance(hours=1)
     second.fire()
+    assert off == ["off"] and timer.fired
+
+
+def test_serves_auto_off_reads_the_wall_clock_every_30_s_so_a_sleep_cannot_hide_it(
+    runtime: Runtime, clock: Clock
+) -> None:
+    """A timer counts the monotonic clock, which stands still while a laptop sleeps. Armed
+    once for the whole hour, serve slept past its deadline and then sat half off for the
+    hour it still owed: every request a 404, but no device revoked, no farewell, and the
+    process up and pushing. It now waits 30 s at a time and reads the wall clock."""
+    FakeTimer.made = []
+    off: list[str] = []
+    timer = _AutoOffTimer(runtime, lambda: off.append("off"), timer=FakeTimer)
+    runtime.set_auto_off(clock.now + timedelta(hours=1))
+    timer.auto_off_arm()
+    (first,) = FakeTimer.made
+    assert first.delay == AUTO_OFF_CHECK_SECONDS, "never the whole hour in one wait"
+    clock.advance(seconds=30)
+    first.fire()
+    assert off == [] and FakeTimer.made[-1].delay == AUTO_OFF_CHECK_SECONDS
+    clock.advance(hours=3)  # the lid was shut: the next 30 s of monotonic time come after it
+    FakeTimer.made[-1].fire()
     assert off == ["off"] and timer.fired
 
 

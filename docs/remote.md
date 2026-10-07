@@ -333,7 +333,9 @@ browser's own key (RFC 8291), so the push service sees only that a message went.
   signs every phone out (after a goodbye notification). Closing the UI or
   stopping `serve` with Ctrl-C does not; expiry bounds them.
 - **Auto-off** is enforced by the server itself: past the deadline every request
-  is a 404. A phone can extend it an hour at a time, up to 8 hours ahead.
+  is a 404, and within half a minute Remote turns off, phones signed out, even
+  on a machine that slept through the deadline. A phone can extend it an hour
+  at a time, up to 8 hours ahead.
 - **Origin**: every write and every live connection must come from the page's own
   origin, so another site cannot use your cookie.
 - **Where a notification leads** is only the address the panel's ngrok announced,

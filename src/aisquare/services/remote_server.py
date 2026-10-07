@@ -132,6 +132,9 @@ DEVICE_ID = re.compile(r"dev_[0-9a-f]{8}\Z")
 AUTO_OFF_EXTEND = timedelta(minutes=60)
 AUTO_OFF_CEILING = timedelta(hours=8)
 """``POST api/remote/extend`` adds an hour, never past 8 h from now (SPEC §2.5)."""
+AUTO_OFF_CHECK_SECONDS = 30.0
+"""The longest ``serve``'s auto-off timer waits before it reads the wall clock again: what the
+TUI's ``enforce_auto_off`` does every 30 s (:class:`_AutoOffTimer`)."""
 STATE_VERSION = 2
 """``remote.json``'s format: 2 holds devices by id and cookie digest (SPEC §2.3)."""
 STATE_LOCK_WAIT_SECONDS = 2.0
@@ -3843,9 +3846,18 @@ def _schedule_flush() -> None:
 class _AutoOffTimer:
     """``serve``'s auto-off: at the deadline, Remote turns off, unless a phone moved it later.
 
-    Armed for the deadline ``remote.json`` holds; when it fires it reads the
-    deadline again, and one a phone extended (``POST api/remote/extend``) is
-    waited for anew. Only a deadline really past calls ``turn_off``.
+    Armed for the deadline ``remote.json`` holds, but never for more than
+    :data:`AUTO_OFF_CHECK_SECONDS` at a time; when it fires it reads the
+    deadline and the wall clock again, and waits on for a deadline a phone
+    extended (``POST api/remote/extend``) or one not reached yet. Only a
+    deadline really past calls ``turn_off``.
+
+    In slices because a timer counts the monotonic clock, which stands still
+    while the machine sleeps, and the deadline is wall-clock time, which the
+    gate and the stream read. Armed once for the whole delay, a laptop that
+    slept past the deadline left ``serve`` half off for up to the time still
+    owed when it woke: every request a 404 and every socket closed, but no
+    device revoked, no farewell, the process still up and pushing.
     """
 
     def __init__(
@@ -3864,11 +3876,11 @@ class _AutoOffTimer:
         """Whether the deadline passed and Remote was turned off."""
 
     def auto_off_arm(self) -> None:
-        """Wait for the deadline ``remote.json`` holds now; none at all is never."""
+        """Wait toward the deadline ``remote.json`` holds now; none at all is never."""
         deadline = self._state.auto_off_deadline()
         if deadline is None:
             return
-        delay = max(0.0, (deadline - _remote_now()).total_seconds())
+        delay = min(max(0.0, (deadline - _remote_now()).total_seconds()), AUTO_OFF_CHECK_SECONDS)
         with self._lock:
             if self._timer is not None:
                 self._timer.cancel()
@@ -3881,7 +3893,7 @@ class _AutoOffTimer:
         if deadline is None:
             return
         if deadline > _remote_now():
-            self.auto_off_arm()  # extended from a phone meanwhile
+            self.auto_off_arm()  # not yet, or extended from a phone meanwhile
             return
         self.fired = True
         self._turn_off()
@@ -3953,10 +3965,11 @@ def run_foreground(
     when another process holds it, before ``ready`` prints anything); the deadline is set
     ``auto_off_minutes`` from now (0 is never) and ``public_url`` noted as the origin
     of push links; ``ready`` runs (the CLI's banner); uvicorn serves on the bound
-    socket. A timer turns Remote off at the deadline, re-armed while a phone keeps
-    extending it, with the farewell push and every device revoked (4410); the
-    flusher writes ``last_seen`` and prunes devices every 30 s. Ctrl-C revokes
-    nothing (SPEC §2.4): the devices' own expiry bounds them.
+    socket. A timer that reads the wall clock every 30 s turns Remote off at the
+    deadline, or at the first check after the machine slept past it, and waits
+    on while a phone keeps extending it, with the farewell push and every device
+    revoked (4410); the flusher writes ``last_seen`` and prunes devices every
+    30 s. Ctrl-C revokes nothing (SPEC §2.4): the devices' own expiry bounds them.
     """
     global _foreground, _flusher
     problem = _remote_dependency_error()

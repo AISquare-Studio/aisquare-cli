@@ -714,20 +714,34 @@ def test_an_item_gone_inside_the_window_is_not_pushed(world: World) -> None:
     assert world.transport.sent == []
 
 
-def test_an_item_the_feed_dropped_before_its_window_closed_is_not_counted_as_pushed(
-    world: World,
-) -> None:
-    """Dismissed on the page, or cleared, between two scans: the watcher's feed is what
-    the window's close reads (SPEC §5.6 step 4). It is not recorded as pushed either, so
-    when the same thing happens again (the same agent's pane lost twice is one id), that
-    time is pushed."""
+def test_an_item_the_feed_dropped_before_its_window_closed_is_not_pushed(world: World) -> None:
+    """Dismissed on the page, or cleared, between two scans: the watcher's feed, not the
+    last scan the sender heard of, is what the window's close reads (SPEC §5.6 step 4)."""
     item = needs_item(1, kind="lost")
     world.scan(item)
     world.scan(item)
     world.watcher.items = []  # the feed lost it; no scan has told the sender yet
     world.later(5)
     assert world.transport.sent == []
+
+
+def test_with_nobody_subscribed_an_item_the_feed_dropped_is_not_counted_as_pushed(
+    world: World,
+) -> None:
+    """With nobody subscribed, the window's close is where its items are recorded as
+    pushed, so one the feed had already dropped must not be: when the same thing happens
+    again (the same agent's pane lost twice is one id) and a phone has subscribed since,
+    that time is pushed."""
+    for device in DEVICES:
+        push_unsubscribe_device(device, world.roster)
+    item = needs_item(1, kind="lost")
+    world.scan(item)
+    world.scan(item)
+    world.watcher.items = []  # the feed lost it; no scan has told the sender yet
+    world.later(5)
     assert item.id not in load_push_state().pushed
+    for device, browser in world.browsers.items():
+        push_subscribe_device(device, browser.record(), world.roster)
     world.scan()
     world.scan(item)
     world.scan(item)

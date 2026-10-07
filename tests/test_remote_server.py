@@ -406,7 +406,8 @@ def test_devices_lists_sessions_and_delete_revokes(client: TestClient, runtime: 
     second = unlock(other, runtime).cookies[COOKIE]
     rows = client.get(f"{base(runtime)}/api/devices").json()
     assert [row["sid"] for row in rows] == [first, second]
-    assert set(rows[0]) == {"sid", "ua", "first_seen", "last_seen", "current"}
+    assert set(rows[0]) == {"id", "sid", "ua", "first_seen", "last_seen", "current"}
+    assert [row["id"] for row in rows] == [first, second]  # the name routes take (SPEC §2.3)
     assert [row["current"] for row in rows] == [True, False]
     assert [row["current"] for row in other.get(f"{base(runtime)}/api/devices").json()] == [
         False,
@@ -418,8 +419,13 @@ def test_devices_lists_sessions_and_delete_revokes(client: TestClient, runtime: 
         "first_seen",
         "last_seen",
     }  # §4-F status()
+    # Revoking ANOTHER device changes who can reach the fleet: a write (SPEC §2.3).
+    refused = client.delete(f"{base(runtime)}/api/devices/{second}")
+    assert refused.status_code == 403 and refused.json()["error"] == "read_only"
+    assert other.get(f"{base(runtime)}/api/board").status_code == 200
+    runtime.set_allow_write(True)
     gone = client.delete(f"{base(runtime)}/api/devices/{second}")
-    assert gone.status_code == 200
+    assert gone.status_code == 200 and gone.json() == {"ok": True, "id": second}
     assert other.get(f"{base(runtime)}/api/board").status_code == 401
     assert client.get(f"{base(runtime)}/api/board").status_code == 200
     assert client.delete(f"{base(runtime)}/api/devices/{second}").status_code == 404

@@ -67,7 +67,7 @@ import shutil
 import threading
 import time
 from collections import deque
-from collections.abc import Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
@@ -85,11 +85,14 @@ from aisquare.core.version import __version__
 from aisquare.models import FleetAgent, FleetAgentStatus, ProjectInfo, TeamSession, TurnMetric
 
 if TYPE_CHECKING:
-    from starlette.requests import Request
+    from starlette.requests import HTTPConnection, Request
     from starlette.responses import Response
+    from starlette.routing import Route
     from starlette.websockets import WebSocket
 
     from aisquare.core.tmux import Capture
+    from aisquare.services.remote_actions import ActionLedger
+    from aisquare.services.remote_needs import NeedsItem
 
 log = logging.getLogger(__name__)
 
@@ -103,6 +106,41 @@ UNLOCK_LIMIT = 5
 UNLOCK_WINDOW_SECONDS = 60.0
 WS_CLOSE_UNAUTHORIZED = 4401
 """Close code the page keys on: after it the adapter routes to /unlock."""
+WS_CLOSE_BAD_ORIGIN = 4403
+"""A handshake from another origin, where the server offers no denial response."""
+WS_CLOSE_NOT_FOUND = 4404
+"""A wrong token (or Remote off), where the server offers no denial response."""
+
+MAX_BODY_BYTES = 65_536
+"""The largest body any request may carry, refused with 413 before a route sees it.
+
+``unlock`` is covered too: it is the one body anyone holding only the URL can send.
+Every legitimate body is a few hundred bytes; the longest text a phone may type
+(``agent/tell``, 8 000 characters of 4-byte UTF-8, JSON-escaped) still fits."""
+
+REQUEST_ID = re.compile(r"[A-Za-z0-9_-]{1,64}\Z")
+"""A write's optional ``request_id``, used ONLY with ``fullmatch`` (``\\Z`` also guards a
+later ``.match`` refactor): it keys the ledger and is shown back to the page."""
+
+DEVICE_SCOPE = "asq_remote.device"
+"""Where the gate leaves the request's :class:`Device`; :meth:`RemoteKit.kit_device` reads it."""
+
+NOT_WRITE_GATED: frozenset[tuple[str, str]] = frozenset(
+    {
+        ("POST", "/api/unlock"),
+        ("DELETE", "/api/devices/{device_id}"),  # own id = sign out; another id is gated inside
+        ("POST", "/api/needs/dismiss"),
+        ("POST", "/api/push/subscribe"),
+        ("DELETE", "/api/push/subscription"),
+        ("POST", "/api/push/test"),
+    }
+)
+"""The ONLY routes that change something without the write gate (SPEC §1.2), frozen.
+
+Each changes what the human is shown or who is signed in, never the fleet. A lane
+that needs another entry asks for it: :meth:`RemoteKit.kit_route` refuses to build
+an ungated write that is not listed, and ``tests/test_remote_gates.py`` walks the
+built app for any that slipped past it."""
 
 READ_ONLY_REASON = "read-only build (allow write actions is off in the TUI)"
 WRITE_ENDPOINTS = (
@@ -272,6 +310,15 @@ class Device:
     ua: str
     first_seen: str
     last_seen: str
+    id: str = field(init=False, compare=False, repr=False)
+    """The name every caller uses for this device: routes, the audit log, the socket
+    registry. Until devices get ids of their own that are not their cookies (SPEC §2.3),
+    it is the session id. A field and not a property: on the merge with #240 the hook
+    path calls ``id(...)``, so a remote ``def id`` would be a bare name it reaches, which
+    the naming test (``test_remote_names_stay_off_the_hook_graph.py``) forbids."""
+
+    def __post_init__(self) -> None:
+        self.id = self.sid
 
     def device_json(self) -> dict[str, str]:
         return {
@@ -636,6 +683,43 @@ ExplainabilitySource = Callable[[str], dict[str, object]]
 """Agent label → the §4-I card payload. Raises :class:`NoSuchAgent` only; never anything else."""
 WriteHandler = Callable[[dict[str, Any]], tuple[dict[str, object], str]]
 """Body in → ``(result, audit summary)``; raise :class:`RequestError` to refuse."""
+KitEndpoint = Callable[["Request", Device, dict[str, Any]], Awaitable["Response"]]
+"""A lane route's endpoint (:meth:`RemoteKit.kit_route`): the request, the device the gate
+found, and the parsed body (``{}`` for a GET)."""
+
+
+def write_endpoint_names() -> tuple[str, ...]:
+    """Every name ``POST api/{name}`` answers: the plan's seven, then the agent actions."""
+    from aisquare.services import remote_actions
+
+    return WRITE_ENDPOINTS + remote_actions.ACTION_ENDPOINTS
+
+
+_agent_locks: dict[tuple[str, str], threading.Lock] = {}
+_agent_locks_guard = threading.Lock()
+
+
+def remote_agent_lock(project_id: str, label: str) -> threading.Lock:
+    """The one lock for every action on one agent, process-wide.
+
+    Callers take it without blocking and answer 409 ``busy`` when it is held: a
+    second stop, restart or quick answer arriving while the first still runs
+    would otherwise act on the state the first is in the middle of changing.
+    """
+    with _agent_locks_guard:
+        return _agent_locks.setdefault((project_id, label), threading.Lock())
+
+
+def check_remote_key_names(keys: object) -> list[str]:
+    """``keys`` as tmux key names, or :class:`RequestError` 400 ``invalid_key``.
+
+    Today: a list of strings, the check ``send-keys`` always made. The allowlist
+    of names the pad actually sends replaces this body (SPEC §2.1); every caller
+    already goes through here, so none has to change when it does.
+    """
+    if not isinstance(keys, list) or not all(isinstance(key, str) for key in keys):
+        raise RequestError(400, "invalid_key", "'keys' must be a list of tmux key names")
+    return list(keys)
 
 
 @dataclass(frozen=True)
@@ -1024,7 +1108,8 @@ def _literal(body: dict[str, Any], key: str) -> str | None:
 
 
 def live_writes() -> Writes:
-    """The write endpoints over the services the CLI commands call."""
+    """The write endpoints over the services the CLI commands call, then the agent actions."""
+    from aisquare.services import remote_actions
 
     def task_claim(body: dict[str, Any]) -> tuple[dict[str, object], str]:
         from aisquare.services import team as team_service
@@ -1102,11 +1187,7 @@ def live_writes() -> Writes:
 
         label = _required(body, "agent")
         text = _literal(body, "text")
-        keys = body.get("keys")
-        if keys is not None and not (
-            isinstance(keys, list) and all(isinstance(key, str) for key in keys)
-        ):
-            raise RequestError(400, "invalid", "'keys' must be a list of tmux key names")
+        keys = None if body.get("keys") is None else check_remote_key_names(body["keys"])
         enter = bool(body.get("enter", False))
         if not text and not keys and not enter:
             raise RequestError(400, "invalid", "give 'text', 'keys' or 'enter'")
@@ -1136,6 +1217,7 @@ def live_writes() -> Writes:
             "project/add": project_add,
             "project/remove": project_remove,
             "send-keys": write_send_keys,
+            **remote_actions.action_handlers(),
         }
     )
 
@@ -1276,13 +1358,21 @@ def _cache_control(rel: str) -> str:
     return ASSET_CACHE_CONTROL if _HASHED_ASSET.search(stem) else MUTABLE_CACHE_CONTROL
 
 
-def _json_error(status: int, error: str, message: str | None = None) -> Response:
-    from starlette.responses import JSONResponse
-
+def _error_body(error: str, message: str | None = None) -> dict[str, object]:
+    """``{error, message}``, the one shape of every refusal (SPEC §0.5)."""
     body: dict[str, object] = {"error": error}
     if message:
         body["message"] = message
-    return JSONResponse(body, status_code=status)
+    return body
+
+
+def _json_error(status: int, error: str, message: str | None = None) -> Response:
+    from starlette.responses import JSONResponse
+
+    return JSONResponse(_error_body(error, message), status_code=status)
+
+
+# --- the choke point: five gates in front of every route (SPEC §1.2) --------------------
 
 
 def remote_gate_token(runtime: Runtime, scope: Any) -> bool:
@@ -1294,32 +1384,379 @@ def remote_gate_token(runtime: Runtime, scope: Any) -> bool:
     return bool(supplied) and runtime.token_matches(supplied)
 
 
-class _TokenGate:
-    """Pure ASGI: anything not under ``/r/<the token>/`` is a 404, HTTP and WS alike."""
+def remote_gate_auto_off(runtime: Runtime, scope: Any) -> bool:
+    """Gate 2: Remote's auto-off deadline has not passed.
 
-    def __init__(self, app: Any, runtime: Runtime) -> None:
+    Once it has, every request is answered exactly as a wrong token is. The
+    deadline itself is not checked here yet (SPEC §2.5), so nothing is refused.
+    """
+    return True
+
+
+def remote_gate_origin(scope: Any) -> bool:
+    """Gate 3: a write or a socket comes from the remote page's own origin.
+
+    Asked for every method but GET and HEAD, and for every handshake. The
+    ``Origin`` rule is not applied here yet (SPEC §2.8), so nothing is refused.
+    """
+    return True
+
+
+def remote_gate_device(runtime: Runtime, scope: Any) -> Device | None:
+    """Gate 4: the unlocked device behind the request's ``asq_remote`` cookie, or ``None``."""
+    from starlette.requests import HTTPConnection
+
+    secret = HTTPConnection(scope).cookies.get(COOKIE)
+    return runtime.device_for_cookie(secret) if secret else None
+
+
+async def remote_gate_body(scope: Any, receive: Any) -> Any | None:
+    """Gate 5: the whole body, read once against :data:`MAX_BODY_BYTES`, then replayed.
+
+    ``None`` means too large, and the caller answers 413: a declared
+    ``Content-Length`` over the cap before a byte is read, a chunked body as soon
+    as the read passes it (the read is cut at cap + 1). Otherwise the ``receive``
+    returned hands the app the body as one ``http.request`` message and then
+    defers to the server's own, so a disconnect still arrives as a disconnect.
+    """
+    for name, value in scope.get("headers") or []:
+        if name == b"content-length":
+            with contextlib.suppress(ValueError):  # malformed: the capped read still bounds it
+                if int(value) > MAX_BODY_BYTES:
+                    return None
+    chunks: list[bytes] = []
+    size = 0
+    while True:
+        message = await receive()
+        if message.get("type") != "http.request":
+            first = message  # the client left mid-body: the app sees exactly that
+            break
+        chunk = bytes(message.get("body", b""))
+        size += len(chunk)
+        if size > MAX_BODY_BYTES:
+            return None
+        chunks.append(chunk)
+        if not message.get("more_body", False):
+            first = {"type": "http.request", "body": b"".join(chunks), "more_body": False}
+            break
+    replayed = False
+
+    async def receive_replayed() -> Any:
+        nonlocal replayed
+        if replayed:
+            return await receive()
+        replayed = True
+        return first
+
+    return receive_replayed
+
+
+def _route_path(scope: Any) -> str:
+    """The path inside ``/r/<token>``, which is what the routes are written against."""
+    return "/" + str(scope.get("path", "")).removeprefix("/r/").partition("/")[2]
+
+
+def _needs_a_device(scope: Any) -> bool:
+    """Gate 4's reach: every socket, and every ``/api/*`` path but ``POST /api/unlock``.
+
+    The page needs no device, or the unlock screen could not load. Unlock reads
+    the cookie itself, to tell a phone that unlocked here before from a stranger.
+    """
+    if scope["type"] == "websocket":
+        return True
+    path = _route_path(scope)
+    return path.startswith("/api/") and not (
+        scope.get("method") == "POST" and path == "/api/unlock"
+    )
+
+
+async def _refuse_at_the_gate(
+    scope: Any,
+    receive: Any,
+    send: Any,
+    status: int,
+    error: str,
+    message: str | None,
+    close_code: int,
+) -> None:
+    """JSON over HTTP; on a handshake, a denial response where the server can send one
+    and otherwise the close code the page maps (SPEC §1.6)."""
+    if scope["type"] == "websocket" and "websocket.http.response" not in scope.get(
+        "extensions", {}
+    ):
+        await send({"type": "websocket.close", "code": close_code})
+        return
+    await _json_error(status, error, message)(scope, receive, send)
+
+
+class _TokenGate:
+    """Pure ASGI in front of every route: the five gates of SPEC §1.2, in order.
+
+    Every HTTP request and every WebSocket handshake passes all five before any
+    route sees it, built-in and lane routes alike, so no route can forget one:
+    the token (404, or close 4404), auto-off (the same 404), the origin of a
+    write or a socket (403 ``bad_origin``, or 4403), the device behind the
+    cookie for every ``/api`` path but unlock and for every socket (401, or
+    4401), and the body cap for anything that may carry a body (413). The
+    device lands in the scope; no route reads the cookie again.
+    """
+
+    def __init__(self, app: Any, runtime: Runtime, kit: RemoteKit) -> None:
         self._app = app
         self._runtime = runtime
+        self.kit = kit
+        """The app's :class:`RemoteKit`, which tests reach through here."""
 
     async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
         kind = scope.get("type")
-        if kind not in ("http", "websocket") or remote_gate_token(self._runtime, scope):
+        if kind not in ("http", "websocket"):  # lifespan: the lanes start and stop with the app
             await self._app(scope, receive, send)
             return
-        if kind == "http":
-            await _json_error(404, "not_found")(scope, receive, send)
-            return
-        if "websocket.http.response" in scope.get("extensions", {}):
-            await send(
-                {
-                    "type": "websocket.http.response.start",
-                    "status": 404,
-                    "headers": [(b"content-type", b"application/json")],
-                }
+        runtime = self._runtime
+        if not (remote_gate_token(runtime, scope) and remote_gate_auto_off(runtime, scope)):
+            await _refuse_at_the_gate(
+                scope, receive, send, 404, "not_found", None, WS_CLOSE_NOT_FOUND
             )
-            await send({"type": "websocket.http.response.body", "body": b'{"error": "not_found"}'})
             return
-        await send({"type": "websocket.close", "code": 4404})
+        method = scope.get("method")  # a handshake has none, and is always asked
+        if method not in ("GET", "HEAD") and not remote_gate_origin(scope):
+            await _refuse_at_the_gate(
+                scope,
+                receive,
+                send,
+                403,
+                "bad_origin",
+                "this request did not come from the remote page",
+                WS_CLOSE_BAD_ORIGIN,
+            )
+            return
+        if _needs_a_device(scope):
+            device = remote_gate_device(runtime, scope)
+            if device is None:
+                await _refuse_at_the_gate(
+                    scope, receive, send, 401, "unauthorized", None, WS_CLOSE_UNAUTHORIZED
+                )
+                return
+            scope[DEVICE_SCOPE] = device
+        if kind == "http" and method not in ("GET", "HEAD", "OPTIONS"):
+            replayed = await remote_gate_body(scope, receive)
+            if replayed is None:
+                too_large = f"the body is over {MAX_BODY_BYTES} bytes"
+                await _json_error(413, "too_large", too_large)(scope, receive, send)
+                return
+            receive = replayed
+        await self._app(scope, receive, send)
+
+
+# --- the kit: what every route of one app shares ---------------------------------------
+
+
+IN_PROGRESS = "a request with this request_id is still running — its answer will follow"
+"""409 ``in_progress``: a retry that arrived while the first try was still running."""
+
+
+def _new_action_ledger() -> ActionLedger:
+    from aisquare.services import remote_actions
+
+    return remote_actions.new_action_ledger()
+
+
+def _ledger_request_id(body: dict[str, Any]) -> str | None:
+    """Take a write's optional ``request_id`` out of its body; 400 when it is malformed."""
+    request_id = body.pop("request_id", None)
+    if request_id is None:
+        return None
+    if not isinstance(request_id, str) or REQUEST_ID.fullmatch(request_id) is None:
+        raise RequestError(
+            400, "invalid", "'request_id' must be 1 to 64 letters, digits, '_' or '-'"
+        )
+    return request_id
+
+
+def _ledger_body(response: Response) -> dict[str, object]:
+    """What the ledger keeps of a response: its JSON object, else ``{}``."""
+    try:
+        payload = json.loads(bytes(response.body))
+    except (AttributeError, ValueError):  # a streamed response has no body to keep
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+@dataclass(eq=False)
+class RemoteKit:
+    """What every route of one app shares (SPEC §1): the runtime, the seams, the lanes' state.
+
+    One per :func:`build_app`. Lane modules get it from their route factories
+    (``needs_routes(kit)``, ``push_routes(kit)``, ``action_routes(kit)``) and the
+    lifespan (``start_needs_watch(kit)``, ``start_push_sender(kit)``), and keep
+    their live objects in :attr:`lane_state`: ``"needs"`` is the needs watcher,
+    ``"push"`` the push sender. Everything a route needs to answer the way every
+    other route answers is a ``kit_`` method here: the device the gate found,
+    the one body parser, the refusal shape, the audit line, the write gate.
+    """
+
+    runtime: Runtime
+    tick: float = TICK_SECONDS
+    port: int | None = None
+    """The port the app serves on, when its caller said (``build_app(port=)``)."""
+    needs_listeners: list[Callable[[list[NeedsItem], datetime], None]] = field(default_factory=list)
+    """Called after every needs scan with ``(all items, scanned_at)``."""
+    ledger: ActionLedger = field(default_factory=_new_action_ledger)
+    """The request ledger every write-gated request passes (SPEC §1.5)."""
+    lane_state: dict[str, Any] = field(default_factory=dict)
+
+    def kit_device(self, request: HTTPConnection) -> Device:
+        """The device gate 4 found for this request; the cookie is never looked up twice."""
+        device = request.scope.get(DEVICE_SCOPE)
+        if not isinstance(device, Device):
+            # Only a route outside the gate's reach can get here: refuse, never guess.
+            raise RequestError(401, "unauthorized", "no unlocked device for this request")
+        return device
+
+    async def kit_json_object(self, request: Request) -> dict[str, Any]:
+        """THE body parser: the JSON object the request carries, ``{}`` for none at all.
+
+        No other code in a remote module reads a body (``tests/test_remote_gates.py``
+        pins it), so every route refuses a malformed one the same way: 400 ``invalid``.
+        """
+        from starlette.requests import ClientDisconnect
+
+        try:
+            raw = await request.body()
+        except ClientDisconnect:
+            raise RequestError(400, "invalid", "the request ended before its body") from None
+        if not raw.strip():
+            return {}
+        try:
+            body = json.loads(raw)
+        except ValueError:
+            raise RequestError(400, "invalid", "the body must be a JSON object") from None
+        if not isinstance(body, dict):
+            raise RequestError(400, "invalid", "the body must be a JSON object")
+        return body
+
+    def kit_refuse(
+        self,
+        status: int,
+        error: str,
+        message: str | None = None,
+        *,
+        headers: Mapping[str, str] | None = None,
+        **extra: object,
+    ) -> Response:
+        """A refusal in the one shape every route answers with: ``{error, message}``.
+
+        ``extra`` adds keys (a 409 ``stale`` carries ``current``) and ``headers``
+        adds headers (a 429 carries ``Retry-After``).
+        """
+        from starlette.responses import JSONResponse
+
+        body = {**_error_body(error, message), **extra}
+        return JSONResponse(body, status_code=status, headers=dict(headers or {}))
+
+    def kit_audit(self, device: Device, endpoint: str, summary: str) -> None:
+        """One line in ``remote-audit.log`` for a write that went through."""
+        self.runtime.audit(device.id, endpoint, summary)
+
+    def kit_write_allowed(self) -> bool:
+        """Whether writes are on right now (``remote.json``, re-read when it changes)."""
+        return self.runtime.allow_write
+
+    def kit_route(
+        self, path: str, endpoint: KitEndpoint, *, methods: list[str], write_gated: bool
+    ) -> Route:
+        """A lane's route: the endpoint gets the device and the parsed body (``{}`` for GET).
+
+        With ``write_gated``, the route answers 403 ``read_only`` until writes are
+        on, takes the optional ``request_id`` out of the body, answers a retried
+        id from the ledger instead of running it again, refuses one still running
+        (409 ``in_progress``), and stores how every request ended, refusals
+        included, so a retry gets the answer the first try got.
+
+        A route that changes something without the gate must be in
+        :data:`NOT_WRITE_GATED`: anything else is refused here, when the app is
+        built, rather than found in review.
+        """
+        from starlette.responses import JSONResponse
+        from starlette.routing import Route
+
+        ungated = [
+            m for m in methods if m not in ("GET", "HEAD") and (m, path) not in NOT_WRITE_GATED
+        ]
+        if ungated and not write_gated:
+            raise ValueError(
+                f"{ungated[0]} {path} changes something without the write gate "
+                "and is not in NOT_WRITE_GATED"
+            )
+        name = path.removeprefix("/api/")
+
+        async def kit_respond(request: Request, device: Device, body: dict[str, Any]) -> Response:
+            try:
+                return await endpoint(request, device, body)
+            except RequestError as exc:
+                return self.kit_refuse(exc.status, exc.error, exc.message)
+            except LookupError as exc:
+                return self.kit_refuse(404, "not_found", str(exc))
+
+        async def kit_endpoint(request: Request) -> Response:
+            try:
+                device = self.kit_device(request)
+                if write_gated and not self.kit_write_allowed():
+                    raise RequestError(403, "read_only", READ_ONLY_REASON)
+                body: dict[str, Any] = {}
+                if request.method not in ("GET", "HEAD"):
+                    body = await self.kit_json_object(request)
+                request_id = _ledger_request_id(body) if write_gated else None
+            except RequestError as exc:
+                return self.kit_refuse(exc.status, exc.error, exc.message)
+            if request_id is None:
+                return await kit_respond(request, device, body)
+            replayed = self.ledger.ledger_replay(device.id, request_id)
+            if replayed is not None:
+                status, payload = replayed
+                return JSONResponse(payload, status_code=status)
+            if not self.ledger.ledger_begin(device.id, request_id, name):
+                return self.kit_refuse(409, "in_progress", IN_PROGRESS)
+            status, payload = 500, {"error": "internal_error"}
+            try:
+                response = await kit_respond(request, device, body)
+                status, payload = response.status_code, _ledger_body(response)
+                return response
+            finally:  # even a crash is an ending: the id must never stay "running"
+                self.ledger.ledger_finish(device.id, request_id, status, payload)
+
+        return Route(path, kit_endpoint, methods=methods)
+
+
+@contextlib.asynccontextmanager
+async def remote_lifespan(kit: RemoteKit) -> AsyncIterator[None]:
+    """The lanes' background work starts with the server and stops with it.
+
+    The needs watcher first, then the push sender, which listens to it; at
+    shutdown their stoppers run in reverse. A lane that fails to start costs
+    its own feature and never the server: it is logged, and the rest carries on.
+    """
+    import asyncio
+
+    from aisquare.services import remote_needs, remote_push
+
+    stoppers: list[Callable[[], None]] = []
+    for starter in (remote_needs.start_needs_watch, remote_push.start_push_sender):
+        try:
+            stopper = starter(kit)
+        except Exception:
+            log.warning("remote: %s failed; serving without it", starter.__name__, exc_info=True)
+            continue
+        if stopper is not None:
+            stoppers.append(stopper)
+    try:
+        yield
+    finally:
+        for stopper in reversed(stoppers):
+            try:
+                await asyncio.to_thread(stopper)
+            except Exception:
+                log.warning("remote: a lane did not stop cleanly", exc_info=True)
 
 
 def build_app(
@@ -1330,6 +1767,7 @@ def build_app(
     dist_dir: Path | None = None,
     tick: float = TICK_SECONDS,
     clock: Callable[[], float] = time.monotonic,
+    port: int | None = None,
 ) -> _TokenGate:
     """The ASGI app. Everything real is behind ``sources``/``writes``; tests pass fakes."""
     # Here, not at module scope: `asq remote status`, `allow-write`, `revoke` and
@@ -1345,25 +1783,23 @@ def build_app(
     except ImportError as exc:  # pragma: no cover - exercised only in a base install
         raise RemoteUnavailable(f"the remote extra is not installed — {INSTALL_HINT}") from exc
 
+    from aisquare.services import remote_actions, remote_needs, remote_push
+
     reads = sources or live_sources()
     handlers = (writes or live_writes()).handlers
     dist = (dist_dir or remote_dist_dir()).resolve()
     limiter = _RateLimiter(clock)
     cache = _Cache(ttl=tick * 0.9)
+    kit = RemoteKit(runtime, tick=tick, port=port)
 
     def cookie_path(request: Request) -> str:
         return f"/r/{request.path_params['token']}"
-
-    def device_of(request: Request) -> Device | None:
-        return runtime.device_for_cookie(request.cookies.get(COOKIE))
 
     async def snapshot(kind: str, compute: Snapshot) -> object:
         return await asyncio.to_thread(cache.cached_snapshot, kind, compute)
 
     def guarded(compute: Snapshot, kind: str) -> Callable[[Request], Any]:
         async def guarded_read(request: Request) -> Response:
-            if device_of(request) is None:
-                return _json_error(401, "unauthorized")
             try:
                 payload = await snapshot(kind, compute)
             except LookupError as exc:
@@ -1379,10 +1815,10 @@ def build_app(
         if not limiter.allow(_client_of(request.scope)):
             return _json_error(429, "too_many_attempts", "5 attempts a minute — wait")
         try:
-            body = await request.json()
-        except ValueError:
-            body = None
-        password = body.get("password") if isinstance(body, dict) else None
+            body = await kit.kit_json_object(request)
+        except RequestError:
+            body = {}
+        password = body.get("password")
         if not isinstance(password, str):
             return _json_error(400, "invalid", 'send {"password": "..."}')
         sid = runtime.unlock_device(password, request.headers.get("user-agent", ""))
@@ -1402,32 +1838,42 @@ def build_app(
         return response
 
     async def remote(request: Request) -> Response:
-        if device_of(request) is None:
-            return _json_error(401, "unauthorized")
         return JSONResponse(runtime.remote_json())
 
+    async def remote_extend_endpoint(
+        request: Request, device: Device, body: dict[str, Any]
+    ) -> Response:
+        """``POST api/remote/extend``: another hour before auto-off (SPEC §2.5).
+
+        Not built yet: the answer is the one for a Remote with no deadline.
+        """
+        return kit.kit_refuse(409, "no_auto_off", "Remote has no auto-off deadline to extend")
+
     async def devices_list_endpoint(request: Request) -> Response:
-        device = device_of(request)
-        if device is None:
-            return _json_error(401, "unauthorized")
+        device = kit.kit_device(request)
         rows: list[dict[str, object]] = [
-            {**row, "current": row["sid"] == device.sid} for row in runtime.device_rows()
+            {"id": row["sid"], **row, "current": row["sid"] == device.id}
+            for row in runtime.device_rows()
         ]
         return JSONResponse(rows)
 
     async def devices_delete_endpoint(request: Request) -> Response:
-        device = device_of(request)
-        if device is None:
-            return _json_error(401, "unauthorized")
-        sid = request.path_params["sid"]
-        if not runtime.revoke_device(sid):
-            return _json_error(404, "not_found", "no such device")
-        runtime.audit(device.sid, "devices/revoke", sid)
-        return JSONResponse({"ok": True, "sid": sid})
+        """Sign this device out, always; revoke ANOTHER device only while writes are on.
+
+        A read-only phone could otherwise sign every other phone out, the
+        owner's included, which is a change to who can reach the fleet.
+        """
+        device = kit.kit_device(request)
+        device_id = request.path_params["device_id"]
+        own = device_id == device.id
+        if not own and not kit.kit_write_allowed():
+            return kit.kit_refuse(403, "read_only", READ_ONLY_REASON)
+        if not runtime.revoke_device(device_id):
+            return kit.kit_refuse(404, "not_found", "no such device")
+        kit.kit_audit(device, "devices/revoke", "self" if own else device_id)
+        return JSONResponse({"ok": True, "id": device_id})
 
     async def fleet_endpoint(request: Request) -> Response:
-        if device_of(request) is None:
-            return _json_error(401, "unauthorized")
         project = request.query_params.get("project") or None
         try:
             payload = await asyncio.to_thread(
@@ -1441,8 +1887,6 @@ def build_app(
         return JSONResponse(payload)
 
     async def panes(request: Request) -> Response:
-        if device_of(request) is None:
-            return _json_error(401, "unauthorized")
         agent = request.path_params["agent"]
         project = request.query_params.get("project") or None
         try:
@@ -1459,8 +1903,6 @@ def build_app(
         return JSONResponse(payload)
 
     async def transcript(request: Request) -> Response:
-        if device_of(request) is None:
-            return _json_error(401, "unauthorized")
         agent = request.path_params["agent"]
         project = request.query_params.get("project") or None
         before = request.query_params.get("before") or None
@@ -1478,8 +1920,6 @@ def build_app(
         return JSONResponse(payload)
 
     async def explainability(request: Request) -> Response:
-        if device_of(request) is None:
-            return _json_error(401, "unauthorized")
         agent = request.path_params["agent"]
         try:
             payload = await asyncio.to_thread(reads.explainability, agent)
@@ -1491,32 +1931,48 @@ def build_app(
         return JSONResponse(payload)
 
     async def write_endpoint(request: Request) -> Response:
-        device = device_of(request)
-        if device is None:
-            return _json_error(401, "unauthorized")
+        """``POST api/{name}``: the plan's writes and the agent actions (SPEC §1.5).
+
+        In order: the name, the write gate, the body, the optional
+        ``request_id`` and the ledger, the handler in a worker thread, the
+        ledger again (refusals too, so a retry gets the same refusal), and the
+        audit line for a write that went through.
+        """
+        device = kit.kit_device(request)
         name = request.path_params["name"]
-        handler = handlers.get(name) if name in WRITE_ENDPOINTS else None
+        handler = handlers.get(name) if name in write_endpoint_names() else None
         if handler is None:
             return _json_error(404, "not_found")
-        if not runtime.allow_write:
-            return _json_error(403, "read_only", READ_ONLY_REASON)
+        if not kit.kit_write_allowed():
+            return kit.kit_refuse(403, "read_only", READ_ONLY_REASON)
         try:
-            body = await request.json()
-        except ValueError:
-            body = {}
-        if not isinstance(body, dict):
-            return _json_error(400, "invalid", "the body must be a JSON object")
+            body = await kit.kit_json_object(request)
+            request_id = _ledger_request_id(body)
+        except RequestError as exc:
+            return kit.kit_refuse(exc.status, exc.error, exc.message)
+        if request_id is not None:
+            replayed = kit.ledger.ledger_replay(device.id, request_id)
+            if replayed is not None:
+                status, payload = replayed
+                return JSONResponse(payload, status_code=status)
+            if not kit.ledger.ledger_begin(device.id, request_id, name):
+                return kit.kit_refuse(409, "in_progress", IN_PROGRESS)
+        summary: str | None = None
         try:
             result, summary = await asyncio.to_thread(handler, body)
+            status, payload = 200, result
         except RequestError as exc:
-            return _json_error(exc.status, exc.error, exc.message)
+            status, payload = exc.status, _error_body(exc.error, exc.message)
         except LookupError as exc:
-            return _json_error(404, "not_found", str(exc))
+            status, payload = 404, _error_body("not_found", str(exc))
         except Exception as exc:
             log.warning("remote: write %s failed: %s", name, exc)
-            return _json_error(400, "write_failed", str(exc))
-        runtime.audit(device.sid, name, summary)
-        return JSONResponse(result)
+            status, payload = 400, _error_body("write_failed", str(exc))
+        if request_id is not None:
+            kit.ledger.ledger_finish(device.id, request_id, status, payload)
+        if summary is not None:
+            kit.kit_audit(device, name, summary)
+        return JSONResponse(payload, status_code=status)
 
     async def api_missing(request: Request) -> Response:
         return _json_error(404, "not_found")
@@ -1543,13 +1999,7 @@ def build_app(
         )
 
     async def stream(websocket: WebSocket) -> None:
-        device = runtime.device_for_cookie(websocket.cookies.get(COOKIE))
-        if device is None:
-            if "websocket.http.response" in websocket.scope.get("extensions", {}):
-                await websocket.send_denial_response(_json_error(401, "unauthorized"))
-            else:
-                await websocket.close(code=WS_CLOSE_UNAUTHORIZED)
-            return
+        device = kit.kit_device(websocket)  # the gate refused a socket without one
         await websocket.accept()
         sid = device.sid
         loop = asyncio.get_running_loop()
@@ -1655,18 +2105,27 @@ def build_app(
         Route("/api/tasks", guarded(reads.tasks, "tasks"), methods=["GET"]),
         Route("/api/memory", guarded(reads.memory, "memory"), methods=["GET"]),
         Route("/api/devices", devices_list_endpoint, methods=["GET"]),
-        Route("/api/devices/{sid}", devices_delete_endpoint, methods=["DELETE"]),
+        Route("/api/devices/{device_id}", devices_delete_endpoint, methods=["DELETE"]),
         Route("/api/panes/{agent}", panes, methods=["GET"]),
         Route("/api/transcript/{agent}", transcript, methods=["GET"]),
         Route("/api/explainability/{agent}", explainability, methods=["GET"]),
+        # The lanes' routes: after the built-in reads, before the write catch-all.
+        kit.kit_route(
+            "/api/remote/extend", remote_extend_endpoint, methods=["POST"], write_gated=True
+        ),
+        *remote_needs.needs_routes(kit),
+        *remote_push.push_routes(kit),
+        *remote_actions.action_routes(kit),
         Route("/api/{name:path}", write_endpoint, methods=["POST"]),
         Route("/api/{rest:path}", api_missing),
         WebSocketRoute("/ws", stream),
         Route("/", static, methods=["GET"]),
         Route("/{path:path}", static, methods=["GET"]),
     ]
-    inner = Starlette(routes=[Mount("/r/{token}", routes=api_routes)])
-    return _TokenGate(inner, runtime)
+    inner = Starlette(
+        routes=[Mount("/r/{token}", routes=api_routes)], lifespan=lambda app: remote_lifespan(kit)
+    )
+    return _TokenGate(inner, runtime, kit)
 
 
 # --- process lifecycle: the module API the TUI modal calls (PLAN §4-F) ----------------

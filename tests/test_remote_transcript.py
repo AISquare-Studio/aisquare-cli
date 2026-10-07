@@ -276,6 +276,60 @@ def test_the_scan_budget_stops_a_wall_of_paste_and_says_more(huge: Path) -> None
     assert len(page.lines) > 0
 
 
+def _page_to_the_start(path: Path) -> list[Page]:
+    """Every page from the newest back, failing on a page that cannot be followed."""
+    pages: list[Page] = []
+    cursor: str | None = None
+    for _ in range(50):
+        page = read_page(path, limit=200, before=cursor)
+        assert not (page.more and page.cursor is None), f"more, and nowhere to go: {page}"
+        pages.append(page)
+        if not page.more:
+            return pages
+        assert page.cursor is not None
+        assert cursor is None or int(page.cursor) < int(cursor), "each page reads further back"
+        cursor = page.cursor
+    raise AssertionError("paging never reached the start of the file")
+
+
+def test_paging_reaches_the_start_past_a_paste_longer_than_the_scan_budget(
+    tmp_path: Path,
+) -> None:
+    """A page whose budget runs out inside one line still hands back a cursor that moves.
+
+    Review of #243, round 1: a user line, a 3 MB image, an assistant line. The
+    cursor was the oldest RENDERED turn, so the second page read the same 2 MB
+    of image again, rendered nothing, and answered ``more`` with no cursor at
+    all: the first message could never be reached.
+    """
+    image = {
+        "type": "user",
+        "uuid": "img",
+        "message": {"role": "user", "content": [{"type": "image", "data": "i" * 3_000_000}]},
+    }
+    path = _write(
+        tmp_path / "image.jsonl",
+        [
+            _user("the first question", uuid="u"),
+            image,
+            _assistant({"type": "text", "text": "the last answer"}, uuid="a"),
+        ],
+    )
+    pages = _page_to_the_start(path)
+    text = "\n".join(plain([line for page in reversed(pages) for line in page.lines]))
+    assert text.index("the first question") < text.index("the last answer")
+
+
+def test_paging_reaches_the_start_past_more_unrendered_lines_than_the_budget(
+    huge: Path,
+) -> None:
+    """The same dead end, made of many lines that render nothing (18 MB of attachments)."""
+    pages = _page_to_the_start(huge)
+    text = "\n".join(plain([line for page in reversed(pages) for line in page.lines]))
+    assert "question 0" in text and "answer 29" in text
+    assert all(not page.lines for page in pages[1:]), "the turns were all on the first page"
+
+
 def test_an_enormous_single_line_is_skipped_without_parsing_it(tmp_path: Path) -> None:
     path = tmp_path / "paste.jsonl"
     monster = {"type": "user", "uuid": "m", "message": {"role": "user", "content": "y" * 500_000}}

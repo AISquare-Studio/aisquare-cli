@@ -125,9 +125,11 @@ def read_page(
         return EMPTY
 
     collected: list[tuple[int, list[str]]] = []
+    oldest = end
     reached_start = False
     try:
         for offset, raw in _lines_backwards(file, end):
+            oldest = offset
             if offset == 0:
                 reached_start = True
             rendered = _render_transcript_record(_parse_transcript_line(raw), width)
@@ -141,18 +143,25 @@ def read_page(
     except OSError:
         return EMPTY
 
-    if not collected:
-        return Page(lines=[], cursor=None, more=not reached_start)
-    collected.reverse()
-    lines = [line for _offset, rendered in collected for line in rendered]
-    first = collected[0][0]
     # "Is there more" is whether the READ reached the start of the file, not
     # whether the first RENDERED turn sits at offset 0 — a transcript opens with
     # metadata records (custom-title, mode, agent-name), so the oldest thing a
     # person said is never at byte 0 and keying on that reported more=True
     # forever on a fully-served file.
     more = not reached_start
-    return Page(lines=lines, cursor=str(first) if more else None, more=more)
+    # The cursor is the oldest line this read EXAMINED, rendered or not. Keyed on
+    # the oldest rendered turn, a budget spent inside a stretch that renders
+    # nothing (a pasted image longer than the budget) handed back the cursor it
+    # was given, and the next page re-read the same bytes, found nothing again,
+    # and answered `more` with no cursor at all: the start of the conversation
+    # could never be reached. The reader yields a line cut by the budget once it
+    # is too long to parse anyway, so this always moves (``_lines_backwards``).
+    cursor = str(oldest) if more else None
+    if not collected:
+        return Page(lines=[], cursor=cursor, more=more)
+    collected.reverse()
+    lines = [line for _offset, rendered in collected for line in rendered]
+    return Page(lines=lines, cursor=cursor, more=more)
 
 
 def _offset(before: str | int | None) -> int | None:
@@ -166,18 +175,31 @@ def _offset(before: str | int | None) -> int | None:
     return value if value > 0 else None
 
 
-def _lines_backwards(file: Path, end: int) -> Iterator[tuple[int, bytes]]:
+def _lines_backwards(
+    file: Path, end: int, *, budget: int = SCAN_BUDGET
+) -> Iterator[tuple[int, bytes]]:
     """``(offset, line)`` newest first, reading only the tail that is needed.
 
     ``offset`` is where the line starts, which is exactly what a later ``before``
     needs in order to continue from here without re-reading or skipping a turn.
+
+    At most ``budget`` bytes are read. When that runs out inside a line already
+    longer than :data:`MAX_LINE`, the part read so far is yielded too, at the
+    offset the read reached: every caller skips such a line unparsed, so one that
+    resumes from the oldest offset it was handed moves past the line instead of
+    reading the same budget of it again. A shorter line the budget cut is not
+    yielded, and resuming from the last whole line reads it whole. With a budget
+    over :data:`MAX_LINE`, a read that does not reach the start of the file
+    therefore always yields an offset before ``end``.
     """
     with file.open("rb") as handle:
         position = end
         pending = b""
         scanned = 0
         while position > 0:
-            if scanned >= SCAN_BUDGET:
+            if scanned >= budget:
+                if len(pending) > MAX_LINE:
+                    yield position, pending
                 return
             size = min(_CHUNK, position)
             position -= size

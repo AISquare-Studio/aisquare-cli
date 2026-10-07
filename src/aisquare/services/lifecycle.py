@@ -161,8 +161,8 @@ def initialize(
                 f"{report.snapshot.token_count} tokens packed for fast agent context."
             )
         elif report.snapshot is None:
-            # Off (no Node: optional, not a fault) or failed (repomix ran) -- the
-            # same sentence `project onboard` prints, from the same predicate.
+            # Off (no Node, or no packer: optional, not a fault) or a pack that
+            # failed -- the same sentence `project onboard` prints, from one place.
             notes.append(f"Snapshot: {snapshot_core.skipped_detail()}.")
 
     for agent in agents:

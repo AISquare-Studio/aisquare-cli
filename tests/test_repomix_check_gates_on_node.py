@@ -281,11 +281,18 @@ class TestNoNodeAtAllIsOffNotBroken:
         assert "optional" in detail
 
     def test_a_node_without_repomix_or_npx_still_warns(self, tools: Tools) -> None:
-        """The control: a readable, new-enough Node is not the memory-only route."""
+        """The control: a readable, new-enough Node is not the memory-only route.
+
+        And the advice names what is missing. No npx almost always means no npm
+        (Arch, Alpine and Debian package it apart from Node), so "Install Node.js
+        22+" told a Node 26 user to install what they have, then run an `npm`
+        they lack (review of #244, finding 4).
+        """
         tools(repomix=False, npx=False, node=_NEWER, node_on_path=True)
         check = diagnostics._check_repomix()
         assert check.status is CheckStatus.warn
-        assert check.fix and "npm install -g repomix" in check.fix
+        assert check.fix and check.fix.startswith("Install npm")
+        assert "npm install -g repomix" in check.fix
 
     @pytest.mark.parametrize("present", ["repomix", "npx"])
     def test_a_packer_without_node_still_warns(self, tools: Tools, present: str) -> None:

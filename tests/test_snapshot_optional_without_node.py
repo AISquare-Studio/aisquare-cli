@@ -75,6 +75,19 @@ def no_node(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture
+def node_without_npm(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Node 26 on PATH and nothing to pack with: Arch, Alpine or Debian's own nodejs."""
+
+    def which(cmd: str, mode: int = os.F_OK | os.X_OK, path: str | None = None) -> str | None:
+        if cmd == "node":
+            return "/opt/node/bin/node"
+        return None if cmd in _NODE_TOOLS else _REAL_WHICH(cmd, mode, path)
+
+    monkeypatch.setattr(shutil, "which", which)
+    monkeypatch.setattr(snapshot_core, "node_version", lambda: (26, 7, 0))
+
+
+@pytest.fixture
 def with_node(monkeypatch: pytest.MonkeyPatch) -> None:
     """Node 26 with repomix and npx on PATH, without running any of them."""
     monkeypatch.setattr(shutil, "which", _which("/opt/node/bin"))
@@ -170,3 +183,19 @@ def test_a_repomix_that_ran_and_failed_is_not_called_off(
     assert "Node.js" not in onboard.stdout
     assert init.exit_code == 0, init.output
     assert f"Snapshot: {snapshot_core.FAILED_DETAIL}." in json.loads(init.stdout)["notes"]
+
+
+@pytest.mark.usefixtures("node_without_npm")
+def test_a_node_with_nothing_to_pack_with_is_told_what_is_missing(runner: CliRunner) -> None:
+    """Not "need Node.js 22+": that Node 26 user needs npm (review of #244, finding 3)."""
+    init = runner.invoke(app, ["--json", "init", "--local"])
+    onboard = runner.invoke(app, ["project", "onboard"])
+    rows = _rows(diagnostics.doctor())
+
+    assert init.exit_code == 0, init.output
+    assert f"Snapshot: {snapshot_core.NO_PACKER_DETAIL}." in json.loads(init.stdout)["notes"]
+    assert f"snapshot: {snapshot_core.NO_PACKER_DETAIL}" in onboard.stdout
+    assert rows["snapshot"].status is CheckStatus.ok and rows["snapshot"].fix is None
+    assert rows["snapshot"].detail == snapshot_core.NO_PACKER_DETAIL
+    assert "Node.js 22+ (optional" not in onboard.stdout + rows["snapshot"].detail
+    assert rows["repomix"].status is CheckStatus.warn, "the row with the fix still warns"
